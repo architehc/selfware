@@ -693,6 +693,9 @@ impl Agent {
                 .record(captured_completion_tokens.unwrap_or(0) as f64 / stream_elapsed_secs);
         }
 
+        // Recorded before the meta block consumes it below.
+        let provider_explained_itself = captured_finish_reason.is_some();
+
         if let Some(slot) = meta_out {
             *slot = crate::api::types::ChatMetadata {
                 request_body: request_meta.request_body,
@@ -704,6 +707,25 @@ impl Agent {
                 cost: captured_cost,
                 accounted_usage: None,
             };
+        }
+
+        // A stream that produced nothing AND never declared a finish_reason did
+        // not complete — the provider closed it. Returning Ok here hands the
+        // agent an empty turn, which execution.rs answers by nudging the model
+        // to respond, pushing more tokens at a backend that is already failing.
+        //
+        // Deliberately narrow, so the honest empty cases stay Ok:
+        //   - cancelled by the caller      -> the loop broke on the cancel token
+        //   - finish_reason present        -> the provider explained itself
+        //                                     (`length` is ReasoningBudgetExhausted)
+        //   - reasoning-only or tool-only  -> tokens were produced
+        if content.is_empty()
+            && reasoning.is_empty()
+            && tool_calls.is_empty()
+            && !provider_explained_itself
+            && !cancel.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Err(crate::errors::ApiError::EmptyStream.into());
         }
 
         Ok((

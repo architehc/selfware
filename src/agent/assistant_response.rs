@@ -736,3 +736,32 @@ mod sanitize_tool_calls_tests;
 #[cfg(test)]
 #[path = "../../tests/unit/agent/assistant_response/assistant_response_terminal_error_test.rs"]
 mod terminal_error_tests;
+
+#[cfg(test)]
+mod empty_stream_contract_tests {
+    use super::is_terminal_api_client_error;
+    use crate::errors::ApiError;
+
+    /// An unexplained empty stream must reach the non-streaming fallback rather
+    /// than terminating the step. The fallback either succeeds or surfaces the
+    /// provider's real diagnostic — measured on SGLang, the same request that
+    /// streams empty returns a clean HTTP 400 non-streamed.
+    #[test]
+    fn empty_stream_falls_back_instead_of_terminating() {
+        let err: anyhow::Error = ApiError::EmptyStream.into();
+        assert!(
+            !is_terminal_api_client_error(&err),
+            "EmptyStream must fall back to non-streaming"
+        );
+    }
+
+    #[test]
+    fn a_4xx_is_still_terminal() {
+        let err: anyhow::Error = ApiError::HttpStatus {
+            status: 401,
+            message: "unauthorized".into(),
+        }
+        .into();
+        assert!(is_terminal_api_client_error(&err));
+    }
+}

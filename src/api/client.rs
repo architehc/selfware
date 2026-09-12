@@ -561,14 +561,26 @@ impl ApiClient {
         secs
     }
 
-    /// True when the user's `extra_body` already pins reasoning behavior
-    /// (`reasoning_effort` / `reasoning`) — the bounded-reasoning retry must
-    /// not override an explicit choice.
+    /// True when the user's `extra_body` already pins reasoning behavior — the
+    /// bounded-reasoning retry must not override an explicit choice.
+    ///
+    /// Checks both placements. Top-level `reasoning_effort` / `reasoning` is
+    /// the OpenAI-style spelling; Qwen/SGLang templates take the same setting
+    /// nested under `chat_template_kwargs`, and looking only at the top level
+    /// left a nested pin invisible — the retry would then add a conflicting
+    /// top-level key alongside the user's own.
     fn user_pinned_reasoning(&self) -> bool {
-        self.config
-            .extra_body
-            .as_ref()
-            .is_some_and(|m| m.contains_key("reasoning_effort") || m.contains_key("reasoning"))
+        fn pins(map: &serde_json::Map<String, serde_json::Value>) -> bool {
+            map.contains_key("reasoning_effort")
+                || map.contains_key("reasoning")
+                || map.contains_key("enable_thinking")
+        }
+        self.config.extra_body.as_ref().is_some_and(|m| {
+            pins(m)
+                || m.get("chat_template_kwargs")
+                    .and_then(|v| v.as_object())
+                    .is_some_and(pins)
+        })
     }
 
     pub async fn completion(

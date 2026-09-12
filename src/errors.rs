@@ -144,6 +144,22 @@ pub enum ApiError {
     #[error("completion budget exhausted by hidden reasoning ({reasoning_chars} reasoning chars, empty answer, finish_reason=length) — lower reasoning effort or raise max_tokens")]
     ReasoningBudgetExhausted { reasoning_chars: usize },
 
+    /// The stream terminated having produced nothing at all: no content, no
+    /// reasoning, no tool calls, and no `finish_reason` — and the caller did
+    /// not cancel. Distinct from `ReasoningBudgetExhausted`, which produces a
+    /// full reasoning trace and an explicit `finish_reason=length`.
+    ///
+    /// Measured against SGLang/qwen38-flash-next (2026-09-12): a prompt the
+    /// server rejects with a clean HTTP 400 when non-streamed instead yields
+    /// an empty SSE stream with no error. Sixteen concurrent requests all
+    /// "succeeded" and returned nothing. Treating this as a valid completion
+    /// hands the agent an empty turn, which it answers by nudging the model to
+    /// try again — pushing more tokens at a backend that is already refusing.
+    #[error(
+        "stream produced no content, reasoning, tool calls or finish_reason —          the provider closed it without completing (not a cancellation)"
+    )]
+    EmptyStream,
+
     #[error("Invalid token usage from API: {0}")]
     InvalidUsage(String),
 }
