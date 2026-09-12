@@ -186,16 +186,29 @@ both sides.
 2. Where is the real depth limit? Needs bisection between 247k and the first
    failure, reporting measured `prompt_tokens` on both sides.
 3. Which component owns the 61.2s cut-off?
-4. Does a full agentic round trip work against this endpoint?
-5. Which template revision is deployed?
+4. Which template revision is deployed?
+
+**Closed:** whether a full agentic round trip works against this endpoint —
+yes, see the update in O1. Established by container validation of 8de5f796,
+not inferred from the parser.
 
 ## Actions supported by the above
 
-1. **Treat an empty stream as a failure in every client.** Absence of an
-   exception is not success. (Supported by O3.)
-2. **Send `chat_template_kwargs` explicitly, and budget for reasoning.** Defaults
-   return ~no content at modest `max_tokens`. (O4.)
-3. **Never forward OpenAI's `reasoning_effort` vocabulary.** Hard 400. (O4.)
-4. **Size context from measured `prompt_tokens`, never estimates.** (O2.)
-5. **Teach `user_pinned_reasoning()` about `chat_template_kwargs`** before
-   wiring kwargs through config. (Integration notes.)
+1. ~~**Treat an empty stream as a failure in every client.**~~ Done in
+   32883340 and swept across both `chat_streaming` callers in 8de5f796.
+   Verified in container: 4 streamed / 4 non-streamed requests recorded where
+   the previous build issued 3 / 0. (O3.)
+2. ~~**Teach the reasoning-pin check about `chat_template_kwargs`.**~~ Done —
+   and the check existed twice; both call sites now share one definition.
+   (Integration notes.)
+3. **Send `chat_template_kwargs` explicitly, and budget for reasoning** when
+   wiring them through config. Defaults return ~no content at modest
+   `max_tokens`. (O4.)
+4. **Never forward OpenAI's `reasoning_effort` vocabulary.** Hard 400. (O4.)
+5. **Size context from measured `prompt_tokens`, never estimates.** (O2.)
+6. **Enable a tool-call parser on the SGLang deployment** for conformance. It
+   does not block Selfware — the XML fallback works and the round trip is
+   verified — but every other client has to reinvent the same recovery. (O1.)
+7. **Doctor rejects this working endpoint** for having no API key
+   (`src/doctor.rs:750`). It answers requests without one; `api_key = "none"`
+   is the current workaround. Pre-existing, unrelated to the above.
