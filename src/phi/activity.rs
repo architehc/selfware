@@ -259,16 +259,14 @@ fn prune_retention(directory: &std::fs::File) {
         if name_bytes == b"." || name_bytes == b".." {
             continue;
         }
+        let cname = match std::ffi::CString::new(name_bytes) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
         let name_str = String::from_utf8_lossy(name_bytes);
 
         if name_str.starts_with(".tmp-") {
-            temporary_entries.push(name_str.into_owned());
-        } else if name_str.ends_with(".json") {
             let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-            let cname = match std::ffi::CString::new(name_bytes) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
             let res = unsafe {
                 libc::fstatat(
                     directory.as_raw_fd(),
@@ -278,8 +276,20 @@ fn prune_retention(directory: &std::fs::File) {
                 )
             };
             if res == 0 {
-                let mtime_sec = stat.st_mtime;
-                json_files.push((mtime_sec, cname));
+                temporary_entries.push((stat.st_mtime, stat.st_ino, cname));
+            }
+        } else if name_str.ends_with(".json") {
+            let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+            let res = unsafe {
+                libc::fstatat(
+                    directory.as_raw_fd(),
+                    cname.as_ptr(),
+                    &mut stat,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if res == 0 {
+                json_files.push((stat.st_mtime, stat.st_ino, cname));
             }
         }
     }
@@ -293,33 +303,8 @@ fn prune_retention(directory: &std::fs::File) {
     const MAX_SCAN: usize = 256;
 
     // Clean up orphaned temporary files older than 5 minutes
-    for tmp_name in temporary_entries {
-        let Ok(cname) = std::ffi::CString::new(tmp_name) else {
-            continue;
-        };
-        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-        let res = unsafe {
-            libc::fstatat(
-                directory.as_raw_fd(),
-                cname.as_ptr(),
-                &mut stat,
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        };
-        if res == 0 {
-            let mtime_sec = stat.st_mtime;
-            if now_sec.saturating_sub(mtime_sec) > 300 {
-                unsafe { libc::unlinkat(directory.as_raw_fd(), cname.as_ptr(), 0) };
-            }
-        }
-    }
-
-    // Sort json files descending by mtime
-    json_files.sort_by_key(|b| std::cmp::Reverse(b.0));
-
-    // Bounded receipt GC: prune excess oldest files past MAX_SCAN
-    if json_files.len() > MAX_SCAN {
-        for (scanned_mtime, cname) in json_files.iter().skip(MAX_SCAN) {
+    for (tmp_mtime, tmp_ino, cname) in temporary_entries {
+        if now_sec.saturating_sub(tmp_mtime) > 300 {
             let mut stat: libc::stat = unsafe { std::mem::zeroed() };
             let res = unsafe {
                 libc::fstatat(
@@ -329,15 +314,48 @@ fn prune_retention(directory: &std::fs::File) {
                     libc::AT_SYMLINK_NOFOLLOW,
                 )
             };
-            if res == 0 && stat.st_mtime == *scanned_mtime {
-                unsafe { libc::unlinkat(directory.as_raw_fd(), cname.as_ptr(), 0) };
+            if res == 0 && stat.st_mtime == tmp_mtime && stat.st_ino == tmp_ino {
+                let unlinked = unsafe { libc::unlinkat(directory.as_raw_fd(), cname.as_ptr(), 0) };
+                if unlinked != 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.raw_os_error() != Some(libc::ENOENT) {
+                        tracing::warn!("unlinkat failed for temporary file {:?}: {}", cname, err);
+                    }
+                }
+            }
+        }
+    }
+
+    // Sort json files descending by mtime
+    json_files.sort_by_key(|b| std::cmp::Reverse(b.0));
+
+    // Bounded receipt GC: prune excess oldest files past MAX_SCAN
+    if json_files.len() > MAX_SCAN {
+        for (scanned_mtime, scanned_ino, cname) in json_files.iter().skip(MAX_SCAN) {
+            let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+            let res = unsafe {
+                libc::fstatat(
+                    directory.as_raw_fd(),
+                    cname.as_ptr(),
+                    &mut stat,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if res == 0 && stat.st_mtime == *scanned_mtime && stat.st_ino == *scanned_ino {
+                let unlinked = unsafe { libc::unlinkat(directory.as_raw_fd(), cname.as_ptr(), 0) };
+                if unlinked != 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.raw_os_error() != Some(libc::ENOENT) {
+                        tracing::warn!("unlinkat failed for excess receipt {:?}: {}", cname, err);
+                    }
+                }
             }
         }
         json_files.truncate(MAX_SCAN);
     }
 
     // Retention policy: prune expired receipts older than 24 hours
-    for (scanned_mtime, cname) in json_files {
+    for (scanned_mtime, scanned_ino, cname) in json_files {
         if now_sec.saturating_sub(scanned_mtime) > RETENTION_SECS {
             let mut stat: libc::stat = unsafe { std::mem::zeroed() };
             let res = unsafe {
@@ -348,8 +366,14 @@ fn prune_retention(directory: &std::fs::File) {
                     libc::AT_SYMLINK_NOFOLLOW,
                 )
             };
-            if res == 0 && stat.st_mtime == scanned_mtime {
-                unsafe { libc::unlinkat(directory.as_raw_fd(), cname.as_ptr(), 0) };
+            if res == 0 && stat.st_mtime == scanned_mtime && stat.st_ino == scanned_ino {
+                let unlinked = unsafe { libc::unlinkat(directory.as_raw_fd(), cname.as_ptr(), 0) };
+                if unlinked != 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.raw_os_error() != Some(libc::ENOENT) {
+                        tracing::warn!("unlinkat failed for expired receipt {:?}: {}", cname, err);
+                    }
+                }
             }
         }
     }
@@ -608,6 +632,30 @@ mod tests {
             .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
             .count();
         assert_eq!(dir_count, 256, "pinned activity dir must be pruned to 256");
+    }
+
+    #[test]
+    fn atomically_replaced_receipt_is_preserved_during_prune() {
+        let root = tempfile::tempdir().unwrap();
+        let capture = ActivityCapture::new(root.path(), "session-race", "agent-race").unwrap();
+        let dir = capture.activity_directory().unwrap();
+
+        // Create 260 files so pruning triggers
+        for i in 0..260 {
+            write_atomic(&dir, &format!("receipt-{i:03}.json"), b"initial").unwrap();
+        }
+
+        // Atomically replace one of the oldest receipts
+        write_atomic(&dir, "receipt-000.json", b"replacement").unwrap();
+
+        prune_retention(&dir);
+
+        let act_dir = root.path().join(".selfware/phi/activity");
+        assert!(act_dir.join("receipt-000.json").exists());
+        assert_eq!(
+            std::fs::read(act_dir.join("receipt-000.json")).unwrap(),
+            b"replacement"
+        );
     }
 }
 
