@@ -196,9 +196,13 @@ fn read_activity(root: &Path, now: u64) -> Value {
 
     let mut candidates = Vec::new();
     for (_, file_name) in json_files.into_iter().take(MAX_SCAN) {
-        let Ok(file) = open_child(&directory, &file_name, false) else {
-            rejected = true;
-            continue;
+        let file = match open_child(&directory, &file_name, false) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                rejected = true;
+                continue;
+            }
         };
         let Ok(metadata) = file.metadata() else {
             rejected = true;
@@ -298,11 +302,15 @@ fn summarize(capture: Capture, now: u64) -> Value {
             status = "incomplete";
             reason = Some("uncertain_evidence");
         }
-        let latest_run = runs.last().and_then(|r| match r.outcome.as_deref() {
-            Some("Passed") => Some("passed"),
-            Some("Failed") => Some("failed"),
-            _ => None,
-        });
+        let latest_run = if capture.observation_truncated {
+            None
+        } else {
+            runs.last().and_then(|r| match r.outcome.as_deref() {
+                Some("Passed") => Some("passed"),
+                Some("Failed") => Some("failed"),
+                _ => None,
+            })
+        };
         json!({"outstanding":e.outstanding,"unreviewed_lines":e.unreviewed_lines,
             "untested_lines":e.untested_lines,"unknown_size_obligations":e.unknown_size_obligations,
             "unattributed_mutations":e.unattributed.len(),
@@ -438,9 +446,11 @@ mod tests {
             .all(|row| row["status"] == "stale"));
         let mut truncated = capture(root.path(), 2, 1000);
         truncated["observation_truncated"] = json!(true);
+        let truncated_summary = summarize(serde_json::from_value(truncated).unwrap(), 1100);
+        assert_eq!(truncated_summary["status"], "incomplete");
         assert_eq!(
-            summarize(serde_json::from_value(truncated).unwrap(), 1100)["status"],
-            "incomplete"
+            truncated_summary["evidence"]["latest_run"],
+            serde_json::Value::Null
         );
     }
 

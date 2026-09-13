@@ -115,7 +115,7 @@ impl ActivityCapture {
     fn write_receipt(&self, destination: &str, bytes: &[u8]) -> io::Result<()> {
         let dir = self.activity_directory()?;
         write_atomic(&dir, destination, bytes)?;
-        prune_retention(&self.workspace_root.join(".selfware/phi/activity"));
+        prune_retention(&dir);
         Ok(())
     }
 
@@ -233,61 +233,102 @@ fn write_atomic(directory: &std::fs::File, destination: &str, bytes: &[u8]) -> i
 }
 
 #[cfg(unix)]
-fn prune_retention(activity_path: &Path) {
-    let Ok(entries) = std::fs::read_dir(activity_path) else {
+fn prune_retention(directory: &std::fs::File) {
+    use nix::libc;
+    use std::os::fd::AsRawFd;
+
+    let dir_fd = unsafe { libc::dup(directory.as_raw_fd()) };
+    if dir_fd < 0 {
         return;
-    };
-    let now_time = std::time::SystemTime::now();
-    const RETENTION_SECS: u64 = 24 * 60 * 60;
-    const MAX_SCAN: usize = 256;
-
-    let mut json_files = Vec::new();
-
-    for entry in entries.flatten() {
-        let file_name = entry.file_name();
-        let name_str = file_name.to_string_lossy();
-
-        // Clean up orphaned temporary files older than 5 minutes
-        if name_str.starts_with(".tmp-") {
-            if let Ok(meta) = entry.metadata() {
-                if let Ok(mtime) = meta.modified() {
-                    if let Ok(age) = now_time.duration_since(mtime) {
-                        if age.as_secs() > 300 {
-                            let _ = std::fs::remove_file(entry.path());
-                        }
-                    }
-                }
-            }
-            continue;
-        }
-
-        if entry.path().extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-
-        let mtime = entry.metadata().ok().and_then(|m| m.modified().ok());
-        json_files.push((mtime, entry.path()));
+    }
+    let dir_ptr = unsafe { libc::fdopendir(dir_fd) };
+    if dir_ptr.is_null() {
+        unsafe { libc::close(dir_fd) };
+        return;
     }
 
-    // Two-pass: sort all json receipts descending by modified time
+    let mut temporary_entries = Vec::new();
+    let mut json_files = Vec::new();
+
+    loop {
+        let entry = unsafe { libc::readdir(dir_ptr) };
+        if entry.is_null() {
+            break;
+        }
+        let name_bytes = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if name_bytes == b"." || name_bytes == b".." {
+            continue;
+        }
+        let name_str = String::from_utf8_lossy(name_bytes);
+
+        if name_str.starts_with(".tmp-") {
+            temporary_entries.push(name_str.into_owned());
+        } else if name_str.ends_with(".json") {
+            let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+            let cname = match std::ffi::CString::new(name_bytes) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let res = unsafe {
+                libc::fstatat(
+                    directory.as_raw_fd(),
+                    cname.as_ptr(),
+                    &mut stat,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if res == 0 {
+                let mtime_sec = stat.st_mtime;
+                json_files.push((mtime_sec, cname));
+            }
+        }
+    }
+    unsafe { libc::closedir(dir_ptr) };
+
+    let now_sec = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    const RETENTION_SECS: i64 = 24 * 60 * 60;
+    const MAX_SCAN: usize = 256;
+
+    // Clean up orphaned temporary files older than 5 minutes
+    for tmp_name in temporary_entries {
+        let Ok(cname) = std::ffi::CString::new(tmp_name) else {
+            continue;
+        };
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        let res = unsafe {
+            libc::fstatat(
+                directory.as_raw_fd(),
+                cname.as_ptr(),
+                &mut stat,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if res == 0 {
+            let mtime_sec = stat.st_mtime;
+            if now_sec.saturating_sub(mtime_sec) > 300 {
+                unsafe { libc::unlinkat(directory.as_raw_fd(), cname.as_ptr(), 0) };
+            }
+        }
+    }
+
+    // Sort json files descending by mtime
     json_files.sort_by_key(|b| std::cmp::Reverse(b.0));
 
     // Bounded receipt GC: prune excess oldest files past MAX_SCAN
     if json_files.len() > MAX_SCAN {
-        for (_, old_file) in json_files.iter().skip(MAX_SCAN) {
-            let _ = std::fs::remove_file(old_file);
+        for (_, cname) in json_files.iter().skip(MAX_SCAN) {
+            unsafe { libc::unlinkat(directory.as_raw_fd(), cname.as_ptr(), 0) };
         }
         json_files.truncate(MAX_SCAN);
     }
 
     // Retention policy: prune expired receipts older than 24 hours
-    for (mtime, file_path) in json_files {
-        if let Some(mt) = mtime {
-            if let Ok(age) = now_time.duration_since(mt) {
-                if age.as_secs() > RETENTION_SECS {
-                    let _ = std::fs::remove_file(file_path);
-                }
-            }
+    for (mtime_sec, cname) in json_files {
+        if now_sec.saturating_sub(mtime_sec) > RETENTION_SECS {
+            unsafe { libc::unlinkat(directory.as_raw_fd(), cname.as_ptr(), 0) };
         }
     }
 }
@@ -501,6 +542,27 @@ mod tests {
             .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
             .count();
         assert_eq!(count, 256);
+    }
+
+    #[test]
+    fn symlink_swap_of_activity_dir_cannot_redirect_retention_prune() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let sensitive_file = outside.path().join("sensitive.json");
+        std::fs::write(&sensitive_file, b"keep safe").unwrap();
+
+        let capture = ActivityCapture::new(root.path(), "session-prune", "agent-prune").unwrap();
+        let dir = capture.activity_directory().unwrap();
+        write_atomic(&dir, "receipt-1.json", b"{}").unwrap();
+
+        let act_dir = root.path().join(".selfware/phi/activity");
+        let moved = root.path().join("moved_activity");
+        std::fs::rename(&act_dir, &moved).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &act_dir).unwrap();
+
+        prune_retention(&dir);
+
+        assert_eq!(std::fs::read(&sensitive_file).unwrap(), b"keep safe");
     }
 }
 
