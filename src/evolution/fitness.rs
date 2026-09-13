@@ -260,6 +260,67 @@ fn parse_sab_output(
     })
 }
 
+/// DarwinX Non-Regression Invariant Violation
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DarwinXViolation {
+    pub regressed_scenarios: Vec<String>,
+}
+
+impl std::fmt::Display for DarwinXViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "DarwinX Non-Regression invariant violated: {} baseline-passed scenario(s) failed in candidate: {:?}",
+            self.regressed_scenarios.len(),
+            self.regressed_scenarios
+        )
+    }
+}
+
+impl std::error::Error for DarwinXViolation {}
+
+impl SabResult {
+    /// DarwinX non-regression invariant:
+    /// Passed(baseline) ∩ Failed(candidate) = ∅
+    ///
+    /// Any scenario that passed in the baseline MUST NOT fail in the candidate.
+    pub fn check_darwinx_non_regression(
+        &self,
+        candidate: &SabResult,
+    ) -> Result<(), DarwinXViolation> {
+        let candidate_scenarios: std::collections::HashMap<&str, bool> = candidate
+            .scenario_scores
+            .iter()
+            .map(|s| (s.name.as_str(), s.tests_passed))
+            .collect();
+
+        let mut regressed = Vec::new();
+        for baseline_scenario in &self.scenario_scores {
+            if baseline_scenario.tests_passed {
+                match candidate_scenarios.get(baseline_scenario.name.as_str()) {
+                    Some(&cand_passed) => {
+                        if !cand_passed {
+                            regressed.push(baseline_scenario.name.clone());
+                        }
+                    }
+                    None => {
+                        // Fail-closed: missing scenario that passed in baseline is a regression
+                        regressed.push(baseline_scenario.name.clone());
+                    }
+                }
+            }
+        }
+
+        if regressed.is_empty() {
+            Ok(())
+        } else {
+            Err(DarwinXViolation {
+                regressed_scenarios: regressed,
+            })
+        }
+    }
+}
+
 /// Build a complete FitnessMetrics from SAB result + system measurements
 pub fn build_fitness_metrics(
     sab: &SabResult,

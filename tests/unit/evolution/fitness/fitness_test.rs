@@ -373,3 +373,123 @@ fn unobserved_tokens_stay_unknown_and_do_not_score_as_perfect_efficiency() {
     );
     assert!(!unmeasured.is_complete());
 }
+
+#[test]
+fn test_darwinx_non_regression_passes_when_all_baseline_passed_scenarios_pass() {
+    let make_scenario = |name: &str, passed: bool| ScenarioScore {
+        name: name.to_string(),
+        difficulty: Difficulty::Medium,
+        score: if passed { 100.0 } else { 0.0 },
+        tests_passed: passed,
+        broken_tests_fixed: passed,
+        clean_exit: true,
+        tokens_used: Some(1000),
+        duration: Duration::from_secs(1),
+    };
+
+    let baseline = SabResult {
+        aggregate_score: 50.0,
+        scenario_scores: vec![make_scenario("sc1", true), make_scenario("sc2", false)],
+        total_tokens_used: Some(2000),
+        wall_clock: Duration::from_secs(2),
+        rating: GenerationRating::Wilt,
+        binary_sha256: "hash".to_string(),
+        run_id: "r1".to_string(),
+    };
+
+    // Candidate solves sc2 as well, keeps sc1 passing
+    let candidate_better = SabResult {
+        aggregate_score: 100.0,
+        scenario_scores: vec![make_scenario("sc1", true), make_scenario("sc2", true)],
+        total_tokens_used: Some(2000),
+        wall_clock: Duration::from_secs(2),
+        rating: GenerationRating::Bloom,
+        binary_sha256: "hash".to_string(),
+        run_id: "r2".to_string(),
+    };
+
+    assert!(baseline
+        .check_darwinx_non_regression(&candidate_better)
+        .is_ok());
+}
+
+#[test]
+fn test_darwinx_non_regression_rejects_candidate_when_previously_passing_scenario_regresses() {
+    let make_scenario = |name: &str, passed: bool| ScenarioScore {
+        name: name.to_string(),
+        difficulty: Difficulty::Medium,
+        score: if passed { 100.0 } else { 0.0 },
+        tests_passed: passed,
+        broken_tests_fixed: passed,
+        clean_exit: true,
+        tokens_used: Some(1000),
+        duration: Duration::from_secs(1),
+    };
+
+    let baseline = SabResult {
+        aggregate_score: 50.0,
+        scenario_scores: vec![make_scenario("sc1", true), make_scenario("sc2", false)],
+        total_tokens_used: Some(2000),
+        wall_clock: Duration::from_secs(2),
+        rating: GenerationRating::Wilt,
+        binary_sha256: "hash".to_string(),
+        run_id: "r1".to_string(),
+    };
+
+    // Candidate has higher score on sc2, but broke sc1! Even if aggregate score was identical or higher!
+    let candidate_regressed = SabResult {
+        aggregate_score: 50.0,
+        scenario_scores: vec![make_scenario("sc1", false), make_scenario("sc2", true)],
+        total_tokens_used: Some(2000),
+        wall_clock: Duration::from_secs(2),
+        rating: GenerationRating::Wilt,
+        binary_sha256: "hash".to_string(),
+        run_id: "r2".to_string(),
+    };
+
+    let err = baseline
+        .check_darwinx_non_regression(&candidate_regressed)
+        .expect_err("regression on sc1 must fail DarwinX check");
+    assert_eq!(err.regressed_scenarios, vec!["sc1".to_string()]);
+}
+
+#[test]
+fn test_darwinx_non_regression_rejects_candidate_when_baseline_passed_scenario_missing_from_candidate(
+) {
+    let make_scenario = |name: &str, passed: bool| ScenarioScore {
+        name: name.to_string(),
+        difficulty: Difficulty::Medium,
+        score: if passed { 100.0 } else { 0.0 },
+        tests_passed: passed,
+        broken_tests_fixed: passed,
+        clean_exit: true,
+        tokens_used: Some(1000),
+        duration: Duration::from_secs(1),
+    };
+
+    let baseline = SabResult {
+        aggregate_score: 100.0,
+        scenario_scores: vec![make_scenario("sc1", true), make_scenario("sc2", true)],
+        total_tokens_used: Some(2000),
+        wall_clock: Duration::from_secs(2),
+        rating: GenerationRating::Bloom,
+        binary_sha256: "hash".to_string(),
+        run_id: "r1".to_string(),
+    };
+
+    // Candidate omits sc2 entirely (e.g. silently dropped test)
+    let candidate_missing = SabResult {
+        aggregate_score: 100.0,
+        scenario_scores: vec![make_scenario("sc1", true)],
+        total_tokens_used: Some(1000),
+        wall_clock: Duration::from_secs(1),
+        rating: GenerationRating::Bloom,
+        binary_sha256: "hash".to_string(),
+        run_id: "r2".to_string(),
+    };
+
+    let err = baseline
+        .check_darwinx_non_regression(&candidate_missing)
+        .expect_err("missing baseline-passed scenario must fail DarwinX check");
+    assert_eq!(err.regressed_scenarios, vec!["sc2".to_string()]);
+}
