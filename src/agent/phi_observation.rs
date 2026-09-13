@@ -49,6 +49,7 @@ impl Agent {
         };
         let events = classify(&record);
         if events.is_empty() {
+            self.publish_phi_activity(crate::phi::activity::ActivityPhase::Running);
             return;
         }
         let unattributed = unattributed_count(&events);
@@ -136,6 +137,60 @@ impl Agent {
                 .outstanding_lines(crate::phi::ledger::ObligationKind::UnconfirmedCoverage),
             "phi ledger: recorded"
         );
+        self.publish_phi_activity(crate::phi::activity::ActivityPhase::Running);
+    }
+
+    /// Publish bounded, content-free evidence to Phi. Commands, source paths,
+    /// prompts, and diagnostic messages stay out of this cross-process receipt.
+    pub(super) fn publish_phi_activity(&mut self, phase: crate::phi::activity::ActivityPhase) {
+        if self.config.agent.disable_turn_artifacts {
+            return;
+        }
+        let (Some(capture), Some(checkpoint)) = (&self.phi_activity, &self.current_checkpoint)
+        else {
+            return;
+        };
+        let mut evidence = self.evidence_snapshot();
+        let truncated = evidence.observations.len() > 256 || evidence.unattributed.len() > 256;
+        // Keep the earliest evidence too: a later success must not erase an
+        // earlier failed run. The explicit truncation flag makes this a floor.
+        evidence.observations.truncate(256);
+        evidence.unattributed.truncate(256);
+        evidence.citations.clear();
+        for record in &mut evidence.observations {
+            record.command = None;
+            record.reason = None;
+            record.call_id = None;
+        }
+        for record in &mut evidence.unattributed {
+            record.reason.clear();
+            record.call_id = None;
+        }
+        match serde_json::to_value(evidence)
+            .map_err(std::io::Error::other)
+            .and_then(|evidence| capture.write(&checkpoint.task_id, phase, evidence, truncated))
+        {
+            Ok(()) => {
+                self.phi_activity_terminal_task =
+                    if matches!(phase, crate::phi::activity::ActivityPhase::Running) {
+                        None
+                    } else {
+                        Some(checkpoint.task_id.clone())
+                    };
+            }
+            Err(error) => tracing::warn!(%error, "Phi activity receipt could not be written"),
+        }
+    }
+
+    /// Deep errors can bypass record_task_outcome. Close their running receipt
+    /// without replacing an already published Partial/Abandoned/Failed outcome.
+    pub(super) fn publish_phi_failure_if_unfinished(&mut self) {
+        let needs_terminal = self.current_checkpoint.as_ref().is_some_and(|checkpoint| {
+            self.phi_activity_terminal_task.as_deref() != Some(checkpoint.task_id.as_str())
+        });
+        if needs_terminal {
+            self.publish_phi_activity(crate::phi::activity::ActivityPhase::Failed);
+        }
     }
 
     /// Append a post-execution evidence record for this turn.
@@ -217,6 +272,76 @@ mod phi_observation_tests {
     //! adding a third execution path, or deleting one of these calls.
 
     const DISPATCH: &str = include_str!("tool_dispatch/mod.rs");
+
+    #[cfg(unix)]
+    async fn activity_agent(root: &std::path::Path) -> super::Agent {
+        let config = crate::config::Config {
+            endpoint: "http://127.0.0.1:1/v1".into(),
+            model: "offline-test".into(),
+            max_tokens: 1024,
+            context_length: 32768,
+            ..Default::default()
+        };
+        let mut agent = super::Agent::new(config).await.unwrap();
+        agent.config.agent.disable_turn_artifacts = false;
+        agent.phi_activity = Some(
+            crate::phi::activity::ActivityCapture::new(root, "audit-session", "agent").unwrap(),
+        );
+        agent.current_checkpoint = Some(crate::checkpoint::TaskCheckpoint::new(
+            "task-one".into(),
+            "offline task".into(),
+        ));
+        agent
+    }
+
+    #[cfg(unix)]
+    fn receipt_phase(root: &std::path::Path, task_id: &str) -> String {
+        std::fs::read_dir(root.join(".selfware/phi/activity"))
+            .unwrap()
+            .filter_map(|entry| {
+                let value: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap();
+                (value["task_id"] == task_id).then(|| value["phase"].as_str().unwrap().to_owned())
+            })
+            .next()
+            .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unrecorded_loop_error_closes_running_phi_receipt() {
+        let root = tempfile::tempdir().unwrap();
+        let mut agent = activity_agent(root.path()).await;
+        agent.publish_phi_activity(crate::phi::activity::ActivityPhase::Running);
+        assert_eq!(receipt_phase(root.path(), "task-one"), "running");
+        agent.publish_phi_failure_if_unfinished();
+        assert_eq!(receipt_phase(root.path(), "task-one"), "failed");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn loop_error_preserves_partial_phi_receipt_and_does_not_leak_across_tasks() {
+        let root = tempfile::tempdir().unwrap();
+        let mut agent = activity_agent(root.path()).await;
+        agent.publish_phi_activity(crate::phi::activity::ActivityPhase::Partial);
+        agent.publish_phi_failure_if_unfinished();
+        assert_eq!(receipt_phase(root.path(), "task-one"), "partial");
+        agent.current_checkpoint.as_mut().unwrap().task_id = "task-two".into();
+        agent.publish_phi_failure_if_unfinished();
+        assert_eq!(receipt_phase(root.path(), "task-one"), "partial");
+        assert_eq!(receipt_phase(root.path(), "task-two"), "failed");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resumed_same_task_can_publish_a_new_failed_phi_attempt() {
+        let root = tempfile::tempdir().unwrap();
+        let mut agent = activity_agent(root.path()).await;
+        agent.publish_phi_activity(crate::phi::activity::ActivityPhase::Partial);
+        agent.publish_phi_activity(crate::phi::activity::ActivityPhase::Running);
+        agent.publish_phi_failure_if_unfinished();
+        assert_eq!(receipt_phase(root.path(), "task-one"), "failed");
+    }
 
     #[test]
     fn every_post_tool_hook_site_also_observes() {

@@ -847,6 +847,7 @@ impl Agent {
                         Err(e2) => warn!("best snapshot restore failed: {e2}"),
                     }
                 }
+                self.publish_phi_failure_if_unfinished();
                 self.emit_terminal_event_once(AgentEvent::Error {
                     message: e.to_string(),
                 });

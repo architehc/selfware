@@ -90,6 +90,7 @@ impl Agent {
         // guard/gate consults the same stored decision.
         self.classify_task_policy();
         self.self_improvement.start_session(session_id);
+        self.publish_phi_activity(crate::phi::activity::ActivityPhase::Running);
     }
 
     pub(super) fn record_task_outcome(
@@ -100,6 +101,12 @@ impl Agent {
     ) {
         self.sync_api_usage();
         self.log_task_outcome_event(task_prompt, outcome, error);
+        self.publish_phi_activity(match outcome {
+            Outcome::Success => crate::phi::activity::ActivityPhase::Completed,
+            Outcome::Partial => crate::phi::activity::ActivityPhase::Partial,
+            Outcome::Failure => crate::phi::activity::ActivityPhase::Failed,
+            Outcome::Abandoned => crate::phi::activity::ActivityPhase::Abandoned,
+        });
 
         let task_type = Self::infer_task_type(task_prompt);
         self.self_improvement.record_prompt(

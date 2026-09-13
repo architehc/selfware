@@ -114,7 +114,7 @@ pub mod planning;
 pub mod progress;
 pub mod prompt_builder;
 mod recovery;
-mod session_log;
+pub mod session_log;
 mod streaming;
 mod task_policy;
 mod task_runner;
@@ -574,6 +574,10 @@ pub(crate) const ESCALATED_EDIT_ARGS_WINDOW_SIZE: usize = 64;
 /// checker, supports checkpointing for task resumption, and implements an
 /// observe-orient-decide-act cognitive loop.
 pub struct Agent {
+    /// Opt-in, workspace-scoped activity receipts consumed by the Phi UI.
+    phi_activity: Option<crate::phi::activity::ActivityCapture>,
+    /// Task whose typed terminal Phi receipt has already been published.
+    phi_activity_terminal_task: Option<String>,
     /// Shadow-mode record of what has been changed and what has verified it.
     ///
     /// Observe-only: nothing reads this to make a decision. It exists so
@@ -1342,6 +1346,17 @@ To call a tool, use this EXACT XML structure:
         let session_id = uuid::Uuid::new_v4().to_string();
         let audit_logger = crate::safety::audit::AuditLogger::new(&session_id);
         let session_logger = session_log::SessionLogger::new(&session_id).await;
+        let phi_activity = if config.agent.disable_turn_artifacts {
+            None
+        } else {
+            match crate::phi::activity::ActivityCapture::from_environment(&session_id) {
+                Ok(capture) => Some(capture),
+                Err(error) => {
+                    tracing::warn!(%error, "Phi activity capture unavailable");
+                    None
+                }
+            }
+        };
         if let Some(ref logger) = audit_logger {
             logger.log_session_start();
         }
@@ -1410,6 +1425,8 @@ To call a tool, use this EXACT XML structure:
         #[cfg(feature = "resilience")]
         let credential_origin_endpoint = config.endpoint.clone();
         let agent = Self {
+            phi_activity,
+            phi_activity_terminal_task: None,
             evidence_ledger: crate::phi::ledger::Ledger::new(),
             ledger_unattributed: Vec::new(),
             ledger_journal: Vec::new(),
