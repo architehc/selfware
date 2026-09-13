@@ -102,8 +102,10 @@ def classify_batch(endpoint: str, model: str, batch: list, seed: int) -> dict:
         ],
         "temperature": 0.2,
         "seed": seed,
-        # Ceiling, not a reservation — never truncate a verdict batch early.
-        "max_tokens": 65536,
+        # Verdicts need ~15 tokens/case; a huge ceiling lets a degraded
+        # generation trickle for hours (observed: a lane wedged 20h on a
+        # 65k ceiling). 2048 is generous for 15 short verdicts.
+        "max_tokens": 2048,
         "chat_template_kwargs": {"enable_thinking": False},
         "stream": True,
         "stream_options": {"include_usage": True},
@@ -114,8 +116,12 @@ def classify_batch(endpoint: str, model: str, batch: list, seed: int) -> dict:
         headers={"Content-Type": "application/json"},
     )
     parts, usage = [], {}
-    with urllib.request.urlopen(req, timeout=600) as resp:
-        for raw in resp:
+    import time as _time
+    deadline = _time.monotonic() + 900  # per-batch wall clock; the 600s
+    with urllib.request.urlopen(req, timeout=600) as resp:  # per-read timeout
+        for raw in resp:  # alone cannot stop a slow trickle
+            if _time.monotonic() > deadline:
+                raise TimeoutError("batch exceeded 900s wall clock")
             line = raw.decode("utf-8", "replace").strip()
             if not line.startswith("data:"):
                 continue
