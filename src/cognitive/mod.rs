@@ -25,6 +25,8 @@ pub mod state;
 // New modules for 1M context support
 pub mod cognitive_system;
 pub mod compilation_manager;
+#[cfg(feature = "self-improvement")]
+pub mod deco_evo_audit;
 pub mod dream;
 pub mod dream_subprocess;
 pub mod memory_hierarchy;
