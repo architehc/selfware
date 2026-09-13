@@ -143,8 +143,8 @@ async fn in_scope_change_produces_staged_diff_with_stable_digest() {
     // What the agent would write: new files inside src/ and docs/.
     std::fs::create_dir_all(staged.shadow_path.join("src")).unwrap();
     std::fs::write(
-        staged.shadow_path.join("src/main.rs"),
-        "fn main() { println!(\"hi\"); }\n",
+        staged.shadow_path.join("src/feature.rs"),
+        "fn feature() { println!(\"hi\"); }\n",
     )
     .unwrap();
     std::fs::create_dir_all(staged.shadow_path.join("docs")).unwrap();
@@ -156,7 +156,7 @@ async fn in_scope_change_produces_staged_diff_with_stable_digest() {
     assert_eq!(first.files_changed, 2);
     assert_eq!(first.insertions, 2);
     assert_eq!(first.deletions, 0);
-    assert!(first.preview.contains("src/main.rs"));
+    assert!(first.preview.contains("src/feature.rs"));
     assert!(first.preview.contains("docs/notes.md"));
     assert!(first.preview.len() <= 8 * 1024);
     assert_eq!(first.digest.len(), 64, "sha256 hex digest");
@@ -167,6 +167,33 @@ async fn in_scope_change_produces_staged_diff_with_stable_digest() {
         .expect("in-scope diff must be accepted");
     assert_eq!(first.digest, second.digest);
     assert_eq!(first.preview, second.preview);
+
+    cleanup_worktree(project.path(), &staged.shadow_path).unwrap();
+    drop(staged.guard);
+}
+
+#[tokio::test]
+async fn protected_path_change_is_rejected_as_out_of_scope() {
+    let (project, _head) = committed_repository();
+    let registry = apply::new_registry();
+    let staged = apply::stage_run(
+        "touch src/main.rs".to_string(),
+        project.path().to_path_buf(),
+        registry.clone(),
+    )
+    .await
+    .expect("staging must succeed");
+
+    std::fs::create_dir_all(staged.shadow_path.join("src")).unwrap();
+    std::fs::write(staged.shadow_path.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+    let rejection = apply::verify_staged_diff(&staged.shadow_path, &staged.base_revision)
+        .expect("git2 diff computation must not fail")
+        .expect_err("protected path diff must be rejected");
+    assert_eq!(
+        rejection,
+        RejectReason::OutOfScope("src/main.rs (protected path)".to_string())
+    );
 
     cleanup_worktree(project.path(), &staged.shadow_path).unwrap();
     drop(staged.guard);
@@ -491,6 +518,55 @@ async fn compiling_shadow_diff_is_staged() {
         }
         other => panic!("expected Staged, got {other:?}"),
     }
+
+    cleanup_worktree(project.path(), &staged.shadow_path).unwrap();
+    drop(staged.guard);
+}
+
+#[tokio::test]
+async fn stage_run_scaffolds_theseus_artifacts_and_verify_staged_diff_ignores_them() {
+    let (project, _head) = cargo_repository();
+    let registry = apply::new_registry();
+    let staged = apply::stage_run(
+        "grounding test with Theseus".to_string(),
+        project.path().to_path_buf(),
+        registry.clone(),
+    )
+    .await
+    .expect("staging must succeed");
+
+    // Scaffolding artifacts exist in the shadow worktree
+    assert!(staged.shadow_path.join(".theseus.md").exists());
+    assert!(staged
+        .shadow_path
+        .join(".selfware/theseus/collection_map.md")
+        .exists());
+    assert!(staged
+        .shadow_path
+        .join(".selfware/theseus/event_log.md")
+        .exists());
+
+    // Without user edits, verify_staged_diff ignores scaffolding and reports Empty diff
+    let empty_diff = apply::verify_staged_diff(&staged.shadow_path, &staged.base_revision)
+        .expect("verify_staged_diff must succeed")
+        .expect_err("untouched shadow must be rejected as Empty diff");
+    assert_eq!(empty_diff, RejectReason::Empty);
+
+    // Agent makes an in-scope edit
+    std::fs::write(
+        staged.shadow_path.join("src/lib.rs"),
+        "pub fn answer() -> u32 { 100 }\n",
+    )
+    .unwrap();
+
+    // Staged diff covers only src/lib.rs; scaffolding files are completely absent
+    let staged_diff = apply::verify_staged_diff(&staged.shadow_path, &staged.base_revision)
+        .expect("verify_staged_diff must succeed")
+        .expect("in-scope edit must be staged");
+    assert_eq!(staged_diff.files_changed, 1);
+    assert!(staged_diff.preview.contains("src/lib.rs"));
+    assert!(!staged_diff.preview.contains(".theseus.md"));
+    assert!(!staged_diff.preview.contains("collection_map.md"));
 
     cleanup_worktree(project.path(), &staged.shadow_path).unwrap();
     drop(staged.guard);

@@ -41,17 +41,31 @@ pub mod tournament;
 
 use std::path::PathBuf;
 
-/// Files that the evolution engine is NEVER allowed to modify.
-/// This is the cardinal safety invariant — the fitness landscape
-/// must be externally defined and immutable from the agent's perspective.
+/// Files and directories that must NEVER be modified by any self-improvement or evolution loop.
+///
+/// This is the cardinal safety invariant — judges, verifiers, test suites, and
+/// safety mechanisms must be externally defined and immutable from the agent's
+/// perspective. A mutation cannot edit the auditor to return Ok or the orchestrator
+/// to skip verification.
 pub const PROTECTED_PATHS: &[&str] = &[
     "src/evolution/",
     "src/safety/",
+    "src/evolve/",
+    "src/agent/verification.rs",
+    "src/agent/verification_scope.rs",
+    "src/agent/checkpointing.rs",
+    "src/agent/tool_dispatch/",
+    "src/cognitive/rsi_orchestrator.rs",
+    "src/cognitive/deco_evo_audit.rs",
+    "src/cognitive/self_edit.rs",
+    "src/cognitive/compilation_manager.rs",
     "system_tests/",
-    "benches/sab_",
-    // The fitness signal lives here: a mutation that can edit tests can
-    // weaken the very gate that judges it. Immutable from the agent.
     "tests/",
+    "benches/",
+    "Cargo.toml",
+    "Cargo.lock",
+    ".github/",
+    "src/main.rs",
 ];
 
 /// LLM endpoint configuration for hypothesis generation
@@ -309,11 +323,21 @@ pub fn is_protected(path: &std::path::Path) -> bool {
     // contains/starts_with checks work on Windows too.
     let path_str = canonical_path.to_string_lossy().replace('\\', "/");
 
-    PROTECTED_PATHS.iter().any(|protected_prefix| {
-        // Check if the path starts with the protected prefix (for relative paths)
-        // or contains the protected prefix (for canonical/absolute paths)
-        // This handles both cases: "src/evolution/daemon.rs" and "/home/user/project/src/evolution/daemon.rs"
-        path_str.starts_with(protected_prefix) || path_str.contains(protected_prefix)
+    PROTECTED_PATHS.iter().any(|protected| {
+        let protected_norm = protected.trim_end_matches('/');
+        let is_dir = protected.ends_with('/');
+
+        if is_dir {
+            path_str == protected_norm
+                || path_str.starts_with(protected)
+                || path_str.contains(&format!("/{protected}"))
+                || path_str.ends_with(&format!("/{protected_norm}"))
+        } else {
+            path_str == *protected
+                || path_str.starts_with(&format!("{protected}/"))
+                || path_str.ends_with(&format!("/{protected}"))
+                || path_str.contains(&format!("/{protected}/"))
+        }
     })
 }
 

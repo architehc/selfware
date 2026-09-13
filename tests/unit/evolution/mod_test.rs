@@ -9,6 +9,38 @@ fn test_protected_paths() {
     assert!(is_protected(std::path::Path::new(
         "system_tests/projecte2e/easy_calculator/"
     )));
+    assert!(is_protected(std::path::Path::new(
+        "src/agent/verification.rs"
+    )));
+    assert!(is_protected(std::path::Path::new(
+        "src/agent/verification_scope.rs"
+    )));
+    assert!(is_protected(std::path::Path::new(
+        "src/agent/checkpointing.rs"
+    )));
+    assert!(is_protected(std::path::Path::new(
+        "src/agent/tool_dispatch/mod.rs"
+    )));
+    assert!(is_protected(std::path::Path::new(
+        "src/cognitive/rsi_orchestrator.rs"
+    )));
+    assert!(is_protected(std::path::Path::new(
+        "src/cognitive/deco_evo_audit.rs"
+    )));
+    assert!(is_protected(std::path::Path::new(
+        "src/cognitive/self_edit.rs"
+    )));
+    assert!(is_protected(std::path::Path::new(
+        "src/cognitive/compilation_manager.rs"
+    )));
+    assert!(is_protected(std::path::Path::new("Cargo.toml")));
+    assert!(is_protected(std::path::Path::new("Cargo.lock")));
+    assert!(is_protected(std::path::Path::new(
+        ".github/workflows/ci.yml"
+    )));
+    assert!(is_protected(std::path::Path::new("src/main.rs")));
+    assert!(is_protected(std::path::Path::new("tests/unit/mod.rs")));
+
     assert!(!is_protected(std::path::Path::new("src/agent/agent.rs")));
     assert!(!is_protected(std::path::Path::new(
         "src/tools/file_edit.rs"
