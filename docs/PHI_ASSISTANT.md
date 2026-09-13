@@ -55,6 +55,15 @@ by the browser page.
   mascot to its reserved perch. **God Mode** changes the artwork and tail
   animation and remains selected through reading and summoning. It is a visual
   mode, not a claim of AGI or successful verification.
+- **Sounds** separately enables the mascot's expression signatures. It starts
+  off and requires an explicit click; it does not change narration settings.
+- Click Phi to ask what needs attention. Its suggestions use the actual agent
+  captures, including incomplete verification and stale observations.
+  **Inspect activity** focuses the exact agent/session/task without contacting
+  the model. **Prepare reading** uses the proposal's named saved file and
+  retains the suggestion if no job could be accepted. Neither action executes
+  a repair or a test. Unsolicited suggestions pause while agents are observed
+  running or narration is active.
 
 The three example missions are preserved as explicitly illustrative source.
 They neither inspect a Docker runtime nor establish security or cache isolation.

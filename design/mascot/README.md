@@ -180,6 +180,18 @@ lives in `src/evolve/web/phi/phi_fox.js` and the mood vocabulary is shared and
 enforced by `scripts/tests/test_phi_expression.py`. See `docs/PHI_ASSISTANT.md`
 for the rationale.
 
+The shipped Phi workspace also has a live agent activity panel backed by
+task-scoped Rust evidence receipts. Its poses distinguish running, failed,
+partial, stale, and completed activity without equating task completion with
+verified correctness. The command bridge in this authoring studio remains an
+explicit simulator. See `docs/PHI_INTEGRATION.md` for capture configuration and
+the sixteen-agent endpoint validation harness.
+
+Clicking the shipped fox also explains the real captured evidence through its
+steward proposals. Inspection stays attached to the exact task, and incomplete
+or stale evidence never becomes a clean-workspace claim. Expression signatures
+are available through the separate, default-off **Sounds** control.
+
 ## Files and reuse
 
 - `mascot.js`: geometry, procedural audio, 6D state engine, and command simulator.

@@ -1,3 +1,12 @@
+.phi-activity-status { margin: 8px 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.phi-activity-agents { list-style: none; max-height: 340px; overflow-y: auto; margin: 8px 0; }
+.phi-activity-agent { border: 1px solid var(--border-color); border-radius: 8px; padding: 10px; margin-bottom: 8px; overflow-wrap: anywhere; }
+.phi-activity-agent-heading { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; font-size: 12px; }
+.phi-activity-phase { color: var(--accent-cyan); }
+.phi-activity-agent[data-phase="failed"] .phi-activity-phase { color: #fda4af; }
+.phi-activity-agent[data-freshness="stale"] .phi-activity-phase { color: var(--text-secondary); }
+.phi-activity-evidence { font-size: 11px; line-height: 1.5; margin-top: 5px; color: var(--text-secondary); }
+
 /* Selfware Mascot Assistant: "Phi the Fox" (Φ)
    Super Facts God-Mode Interface Stylesheet
 */
@@ -674,9 +683,13 @@ button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,
 /* Phi's next-step proposals, shown when Selfware finishes and waits. Ranked by
    what is unpaid: repair, then verify, then repay. The evidence line is not
    decoration - a suggestion you cannot argue with is just an instruction. */
-.phi-proposals { position: fixed; right: 18px; bottom: 74px; z-index: 9997;
-  width: min(360px, calc(100vw - 36px)); display: flex; flex-direction: column; gap: 8px; }
+.phi-proposals { position: fixed; right: 18px; bottom: 74px; z-index: 10001;
+  width: min(360px, calc(100vw - 36px)); display: flex; flex-direction: column; gap: 8px;
+  max-height: min(70vh, calc(100vh - 100px)); max-height: min(70vh, calc(100dvh - 100px));
+  overflow: auto; overscroll-behavior: contain; }
+.phi-proposals[hidden] { display: none; }
 .phi-proposal { background: rgba(15, 23, 42, .94); border: 1px solid #1e2b47;
+  flex: 0 0 auto;
   border-left: 3px solid #64748b; border-radius: 10px; padding: 10px 12px;
   backdrop-filter: blur(6px); box-shadow: 0 10px 30px rgba(0, 0, 0, .45); }
 .phi-proposal-kind { font-size: 10px; text-transform: uppercase; letter-spacing: .1em;

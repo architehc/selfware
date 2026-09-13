@@ -10,6 +10,7 @@ import { PhiState } from './phi_state.js';
 import { PhiExpressionVoice } from './phi_sound.js';
 import { PhiSteward, IdleWatcher } from './phi_steward.js';
 import { PhiPresence, CHANNEL, ambientPosture } from './phi_presence.js';
+import { PhiActivity } from './phi_activity.js';
 
 const $ = id => document.getElementById(id);
 const make = (tag, text, className) => { const el = document.createElement(tag); if (text != null) el.textContent = text; if (className) el.className = className; return el; };
@@ -49,7 +50,7 @@ export class PhiApp {
     this.workspaceSignals = { gates: [], failingTests: [], deadCode: [], duplicates: [], recentFiles: [] };
     this.state = new PhiState({ storage: store, onChange: snapshot => {
       const posture = ambientPosture(snapshot);
-      this.rig.setEmotion(posture.emotion);
+      if (!this.narrationOwnsPose()) this.rig.setEmotion(this.activityEmotion || posture.emotion);
       this.rig.setVitality(snapshot.vector.vitality);
     } });
     this.state.record('session_start');
@@ -68,6 +69,8 @@ export class PhiApp {
     this.focus = new PhiFocusCoordinator(this.rig, this.viseme, document.querySelector('.editor-viewport'));
     this.orchestrator = new PhiAgentOrchestrator(this.rig, this.viseme, this.focus);
     this.companion = new PhiFrictionUI({ container: $('phi-friction-panel'), editor: $('code-buffer'), getToken: () => this.examples ? null : this.workspace.token });
+    this.activity = new PhiActivity({ container: $('phi-activity-panel'), getToken: () => this.examples ? null : this.workspace.token,
+      onChange: (_snapshot, emotion) => { this.activityEmotion = emotion; this.restoreAmbientPose(); } });
     this.viseme.onStateChange = state => this.speechState(state);
     this.bindUI(); this.startLoop(); this.connect(); this.dock();
   }
@@ -85,12 +88,19 @@ export class PhiApp {
     this.rig.flyTo(rect.left + (size?.leftInset || 0), rect.top + (size?.topInset || 95) + 10);
   }
   status(text, error = false) { $('workspace-status').textContent = text; $('workspace-status').classList.toggle('error', error); }
+  narrationOwnsPose() { return Boolean(this.orchestrator?.isRunning || this.focus?.active || this.viseme?.session); }
+  restoreAmbientPose() {
+    if (this.destroyed || this.narrationOwnsPose()) return;
+    this.rig.setEmotion(this.activityEmotion || ambientPosture(this.state.snapshot()).emotion);
+  }
   async connect() {
     if (this.dirty) { this.status('Save your edits before reconnecting.', true); return; }
     this.companion.disconnect();
+    this.activity.disconnect();
     try {
       const info = await this.workspace.connect(); this.files = await this.workspace.files(); this.examples = false;
       this.companion.connect();
+      this.activity.connect();
       this.refreshSpeechCapabilities();
       $('workspace-name').textContent = info.name;
       $('model-info').textContent = `${info.model} · ${info.endpoint_host}`;
@@ -113,6 +123,7 @@ export class PhiApp {
   async showExamples() {
     if (this.dirty) { this.status('Save your edits before changing files.', true); return; }
     this.companion.disconnect(); this.examples = true; $('workspace-name').textContent = 'Example files'; this.renderFiles();
+    this.activity.disconnect('example_mode');
     await this.openFile(Object.keys(SAMPLE_FILES)[0]);
   }
   renderFiles() {
@@ -307,17 +318,28 @@ export class PhiApp {
     };
   }
 
+  buildStewardSignals() {
+    const snapshot = this.state.snapshot();
+    return {
+      state: snapshot,
+      // The shipped friction monitor has no unread-diff ledger. Keep absent
+      // counts unknown; the separate runtime evidence is not heuristic debt.
+      friction: { capitulations: snapshot.reversals },
+      workspace: this.workspaceSignals,
+      activity: this.activity?.snapshot
+    };
+  }
+  observedAgentsRunning() {
+    return this.activity?.snapshot.agents.some(agent => agent.status !== 'stale' && agent.phase === 'running') || false;
+  }
+
   /* Called on a slow tick. Speaks at most once per idle period. */
   async considerNextSteps() {
-    if (!this.idle.shouldSpeak()) return null;
+    if (this.destroyed || this.narrationOwnsPose() || this.observedAgentsRunning() || !this.idle.shouldSpeak()) return null;
     await this.refreshWorkspaceSignals();
-    const snapshot = this.state.snapshot();
-    const signals = {
-      state: snapshot,
-      friction: { unreviewed: this.companion?.classifier?.history?.unreviewed || { count: 0, lines: 0 },
-                  capitulations: snapshot.reversals },
-      workspace: this.workspaceSignals
-    };
+    // Captures and narration can change while the workspace request is pending.
+    if (this.destroyed || this.narrationOwnsPose() || this.observedAgentsRunning()) return null;
+    const signals = this.buildStewardSignals();
     const proposals = this.steward.propose(signals);
     // With nothing to point at, Phi stays quiet rather than manufacturing a task.
     if (!proposals.length) return null;
@@ -344,15 +366,10 @@ export class PhiApp {
   async askPhi() {
     this.presence.invited();
     await this.refreshWorkspaceSignals();
-    const snapshot = this.state.snapshot();
-    const signals = {
-      state: snapshot,
-      friction: { unreviewed: this.companion?.classifier?.history?.unreviewed || { count: 0, lines: 0 },
-                  capitulations: snapshot.reversals },
-      workspace: this.workspaceSignals
-    };
+    if (this.destroyed) return [];
+    const signals = this.buildStewardSignals();
     const proposals = this.steward.propose(signals);
-    this.rig.setSpeechText(this.steward.summarise(proposals, signals), 'Phi · Asked');
+    if (!this.narrationOwnsPose()) this.rig.setSpeechText(this.steward.summarise(proposals, signals), 'Phi · Asked');
     this.renderProposals(proposals);
     return proposals;
   }
@@ -367,11 +384,12 @@ export class PhiApp {
       const card = make('div');
       card.className = 'phi-proposal';
       card.dataset.kind = proposal.kind;
+      card.dataset.proposalId = proposal.id;
       const title = make('div', proposal.title); title.className = 'phi-proposal-title';
       const kind = make('span', proposal.kind); kind.className = 'phi-proposal-kind';
       const why = make('div', proposal.rationale); why.className = 'phi-proposal-why';
       const evidence = make('div', proposal.evidence.join('  ·  ')); evidence.className = 'phi-proposal-ev';
-      const accept = make('button', 'Do this next'); accept.className = 'btn-cyber';
+      const accept = make('button', proposal.task.kind === 'inspect_activity' ? 'Inspect activity' : 'Prepare reading'); accept.className = 'btn-cyber';
       accept.onclick = () => this.acceptProposal(proposal);
       const skip = make('button', 'Not now'); skip.className = 'btn-cyber';
       skip.onclick = () => {
@@ -385,14 +403,43 @@ export class PhiApp {
     }));
   }
 
-  /* Accepting a proposal submits it to Selfware as the next task. */
+  /* Inspect a captured agent locally, or prepare an existing reading proposal. */
   async acceptProposal(proposal) {
-    this.presence.acknowledge(proposal.id);   // worth taking: refund the interrupt
-    this.steward.dismiss(proposal.id);
+    if (proposal.task.kind === 'inspect_activity') {
+      const panel = $('phi-activity-panel');
+      const row = proposal.task.target ? [...panel.querySelectorAll('.phi-activity-agent')]
+        .find(element => element.dataset.agentId === proposal.task.target &&
+          element.dataset.sessionId === proposal.task.session_id && element.dataset.taskId === proposal.task.task_id) : null;
+      if (proposal.task.target && !row) { this.status('This agent capture is no longer visible. Ask Phi again for current observations.', true); return false; }
+      const target = row || panel.querySelector('.phi-activity-agents') || panel;
+      this.presence.acknowledge(proposal.id); this.steward.dismiss(proposal.id);
+      if (row || target === panel) target.tabIndex = -1;
+      target.scrollIntoView({ block: 'nearest', behavior: 'instant' }); target.focus({ preventScroll: true });
+      this.status(row ? 'Showing this agent’s captured activity.' : 'Showing available activity observations and their limits.');
+      const host = $('phi-proposals');
+      // Inspection reveals the evidence, including on narrow screens where
+      // proposal cards otherwise cover it. Other proposals stay undismissed.
+      host.replaceChildren(); host.hidden = true;
+      return true;
+    }
+    const cannotPrepare = () => this.destroyed || this.examples || this.dirty || this.polling || this.workspace.pending() || !this.document;
+    if (cannotPrepare()) { this.status('A proposal reading needs a saved workspace file and no pending reading. Save edits or finish the current reading first.', true); return false; }
+    const target = proposal.task.target;
+    if (target != null && typeof target !== 'string') { this.status('This proposal does not identify a readable file.', true); return false; }
+    if (target && target !== this.document.path && !await this.openFile(target)) return false;
+    if (cannotPrepare() || (target && this.document.path !== target)) return false;
     this.state.record('planning');
     $('reading-question').value = proposal.task.question;
     this.idle.setBusy(true);
-    try { await this.prepareReading(); }
+    try {
+      return await this.prepareReading({ onAccepted: () => {
+        this.presence.acknowledge(proposal.id); // Refund only a request the server actually accepted.
+        this.steward.dismiss(proposal.id);
+        const host = $('phi-proposals');
+        [...host.querySelectorAll('.phi-proposal')].find(card => card.dataset.proposalId === proposal.id)?.remove();
+        host.hidden = !host.children.length;
+      } });
+    }
     finally { this.idle.setBusy(false); }
   }
 
@@ -422,6 +469,7 @@ export class PhiApp {
     this.idle?.setBusy(false);
     $('btn-pause').textContent = 'Pause reading'; $('btn-pause').setAttribute('aria-pressed', 'false');
     for (const card of document.querySelectorAll('.super-fact.active')) card.classList.remove('active');
+    this.restoreAmbientPose();
   }
   async play(steps, { paused = false } = {}) {
     this.stopReading(); this.paused = paused; const version = this.playVersion;
@@ -443,6 +491,7 @@ export class PhiApp {
         if (result.status === 'error') this.status('Reading stopped: ' + (result.reason || result.speech?.reason || 'speech or source unavailable'), true);
       }
     } catch (error) { if (version === this.playVersion) this.status(error.message, true); }
+    finally { if (version === this.playVersion) { this.idle?.setBusy(false); this.restoreAmbientPose(); } }
   }
   readLines(first, last, selection = null) {
     if (!this.document) return;
@@ -469,15 +518,22 @@ export class PhiApp {
     const offset = (code, node, index) => { const prefix = document.createRange(); prefix.selectNodeContents(code); prefix.setEnd(node, index); return prefix.toString().length; };
     this.readLines(Number(firstCode.parentElement.dataset.line), Number(lastCode.parentElement.dataset.line), { start: offset(firstCode, range.startContainer, range.startOffset), end: offset(lastCode, range.endContainer, range.endOffset) });
   }
-  async prepareReading() {
-    if (!this.document || this.dirty || this.examples || this.polling) return;
+  async prepareReading({ onAccepted = null } = {}) {
+    if (!this.document || this.dirty || this.examples || this.polling) return { status: 'not_started' };
     this.polling = true; this.updateControls(); $('agent-state').textContent = 'PREPARING';
     this.state.record('tool_call'); this.rig.setEmotion('analytical'); $('generation-status').textContent = 'Sending the saved source to your reading agent…';
+    let acceptedJob = null;
     try {
       const question = $('reading-question').value.trim() || 'Explain the important flow and suggest useful improvements.';
       const job = await this.workspace.startReading(this.document, question);
+      acceptedJob = job;
+      onAccepted?.(job);
       this.polling = false; await this.observeJob(job);
-    } catch (error) { this.polling = false; $('generation-status').textContent = error.message; $('agent-state').textContent = 'UNAVAILABLE'; this.updateControls(); }
+      return { status: 'accepted', job };
+    } catch (error) {
+      this.polling = false; $('generation-status').textContent = error.message; $('agent-state').textContent = 'UNAVAILABLE'; this.updateControls();
+      return acceptedJob ? { status: 'accepted', job: acceptedJob } : { status: 'failed', reason: error.message };
+    }
   }
   async observeJob(job) {
     if (this.polling || !job) return;
@@ -571,6 +627,7 @@ export class PhiApp {
     if (this.dirty) { this.status('Save your edits before opening an example.', true); return; }
     const paths = { container_security: 'container_tools.rs', volume_sanitizer: 'validation.rs', radix_attention: 'radix_cache.py' };
     if (!paths[id]) return; this.companion.disconnect(); this.examples = true;
+    this.activity.disconnect('example_mode');
     if (!await this.openFile(paths[id])) return;
     $('workspace-name').textContent = 'Example files';
     const mission = this.orchestrator.getPrecompiledMissions()[id];
@@ -601,6 +658,11 @@ export class PhiApp {
     $('btn-toggle-audio').addEventListener('click', () => {
       this.speechEnabled = !this.speechEnabled; this.viseme.setAudioEnabled?.(this.speechEnabled);
       $('btn-toggle-audio').textContent = this.speechEnabled ? 'Voice on' : 'Voice off'; $('btn-toggle-audio').setAttribute('aria-pressed', String(this.speechEnabled));
+    });
+    $('btn-expression-sounds').addEventListener('click', () => {
+      const enabled = this.expressionVoice.setEnabled(!this.expressionVoice.enabled);
+      $('btn-expression-sounds').textContent = enabled ? 'Sounds on' : 'Sounds off';
+      $('btn-expression-sounds').setAttribute('aria-pressed', String(enabled));
     });
     $('btn-summon').addEventListener('click', () => { this.stopReading(); this.state.record('exploring'); this.rig.setSpeechText('Here with you. Choose something to explore.', 'Phi · Ready'); $('phi-perch').scrollIntoView({ block: 'center', behavior: 'instant' }); this.dock(); });
     $('btn-god-mode').addEventListener('click', () => {
@@ -715,6 +777,8 @@ export class PhiApp {
   destroy() {
     if (this.destroyed) return; this.destroyed = true; this.stopReading();
     this.companion.destroy();
+    this.activity.destroy();
+    clearInterval(this.idleTimer);
     clearTimeout(this.speechCapabilityTimer); this.speechCapabilityAbort?.abort();
     if (this.frame != null) cancelAnimationFrame(this.frame);
     this.focus.destroy?.(); this.viseme.destroy?.(); this.rig.destroy?.();

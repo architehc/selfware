@@ -833,6 +833,107 @@ const {PhiSteward, IdleWatcher, PROPOSAL_KINDS} =
   await import('""" + (PHI / 'phi_steward.js').as_uri() + """');
 """ + body)
 
+    def runtime_steward(self, body):
+        self.steward("""
+const evidence = {outstanding:0,unreviewed_lines:0,untested_lines:0,
+  unknown_size_obligations:0,unattributed_mutations:0,possible_unrecorded_mutations:0,
+  observed_runs:1,passed_runs:1,failed_runs:0,unknown_runs:0};
+const row = {agent_id:'agent-a',session_id:'session-a',task_id:'task-a',
+  phase:'completed',status:'available',recorded_at_ms:1700000000000,age_ms:0,evidence};
+const activity = {status:'available',truncated:false,agents:[row],observed_at_ms:1700000000000};
+const base = {state:{vector:{debt:0}},workspace:{gateStatus:'passing',recentFiles:['unrelated.rs']}};
+const s = new PhiSteward();
+""" + body)
+
+    def test_completed_runtime_task_does_not_clear_unknown_verification(self):
+        self.runtime_steward("""
+const captured = {...row,status:'incomplete',evidence:{...evidence,outstanding:2,
+  unreviewed_lines:12,untested_lines:12,unattributed_mutations:1}};
+const signals = {...base,activity:{...activity,agents:[captured]}};
+const p=s.propose(signals);
+assert.equal(p[0].kind,'verify');
+assert.equal(p[0].task.kind,'inspect_activity');
+assert.equal(p[0].task.target,'agent-a');
+assert.ok(p[0].evidence.includes('Task task-a'));
+assert.ok(p[0].evidence.includes('12 lines without confirmed coverage'));
+assert.ok(!JSON.stringify(p).includes('unrelated.rs'),'must not attribute another worktree to selected file');
+assert.ok(!p.some(x=>x.kind==='explore'));
+const original=JSON.stringify(signals);
+s.dismiss(p[0].id);
+assert.deepEqual(s.propose(signals),[],'dismissal respected');
+assert.match(s.summarise([],signals),/still.*observations/);
+assert.equal(JSON.stringify(signals),original,'observing/dismissing cannot repay or modify ledger');
+""")
+
+    def test_runtime_evidence_stays_bound_to_each_task_without_summing_lines(self):
+        self.runtime_steward("""
+const a={...row,evidence:{...evidence,outstanding:1,unreviewed_lines:20}};
+const b={...a,agent_id:'agent-b',session_id:'session-b',task_id:'task-b'};
+const p=s.propose({...base,activity:{...activity,agents:[a,b]}});
+assert.equal(p.length,2);
+assert.notEqual(p[0].id,p[1].id);
+assert.deepEqual(p.map(x=>x.task.target),['agent-a','agent-b']);
+for(const item of p) {
+  assert.ok(item.evidence.includes('20 unreviewed lines'));
+  assert.ok(!item.evidence.some(x=>x.includes('40')),'overlapping worktrees cannot become summed debt');
+}
+s.dismiss(p[0].id);
+assert.equal(s.propose({...base,activity:{...activity,agents:[a,b]}})[0].task.target,'agent-b');
+""")
+
+    def test_historical_failure_does_not_claim_current_test_failure(self):
+        self.runtime_steward("""
+const signals={...base,activity:{...activity,agents:[{...row,evidence:{...evidence,
+  observed_runs:2,failed_runs:1,passed_runs:1}}]}};
+const p=s.propose(signals);
+assert.equal(p[0].task.kind,'inspect_activity');
+assert.match(p[0].title,/recorded/);
+assert.match(p[0].rationale,/followed by a passing/);
+assert.ok(p[0].evidence.includes('1 recorded failed runs'));
+assert.ok(p[0].evidence.includes('1 recorded passed runs'));
+assert.ok(!/red\.|currently failing/i.test(s.summarise(p,signals)));
+assert.ok(!p.some(x=>x.kind==='explore'));
+""")
+
+    def test_same_agent_tasks_keep_complete_action_identity(self):
+        self.runtime_steward("""
+const a={...row,evidence:{...evidence,outstanding:1}};
+const b={...a,task_id:'task-b'};
+const p=s.propose({...base,activity:{...activity,agents:[a,b]}});
+assert.equal(p.length,2);
+assert.notEqual(p[0].id,p[1].id);
+assert.deepEqual(p.map(x=>[x.task.target,x.task.session_id,x.task.task_id]),[
+  ['agent-a','session-a','task-a'],['agent-a','session-a','task-b']]);
+""")
+
+    def test_stale_running_and_unavailable_captures_block_clean_conclusions(self):
+        self.runtime_steward("""
+for(const capture of [
+  {...activity,agents:[{...row,status:'stale',phase:'failed'}]},
+  {...activity,agents:[{...row,phase:'running'}]},
+  {...activity,truncated:true},
+  {...activity,status:'unavailable',agents:[]},
+  {...activity,status:'incomplete',agents:[]}
+]) {
+  const p=s.propose({...base,activity:capture});
+  assert.ok(p.length);
+  assert.ok(!p.some(x=>x.kind==='explore'));
+  assert.ok(p.every(x=>x.task.kind==='inspect_activity'));
+}
+const stale=s.propose({...base,activity:{...activity,agents:[{...row,status:'stale',phase:'failed'}]}});
+assert.equal(stale[0].kind,'orient','stale failure must not be treated as current repair');
+assert.match(stale[0].rationale,/historical/);
+""")
+
+    def test_runtime_missing_evidence_and_extreme_time_do_not_crash_or_imply_health(self):
+        self.runtime_steward("""
+const p=s.propose({...base,activity:{...activity,agents:[{...row,status:'incomplete',
+  recorded_at_ms:Number.MAX_SAFE_INTEGER,evidence:null}]}});
+assert.equal(p[0].kind,'verify');
+assert.ok(p[0].evidence.includes('execution evidence unavailable'));
+assert.ok(p[0].evidence.includes('capture time unavailable'));
+""")
+
     def test_verification_always_outranks_new_production(self):
         self.steward("""
 const s=new PhiSteward();

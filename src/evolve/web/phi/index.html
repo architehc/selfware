@@ -8,7 +8,7 @@
   <div class="phi-app-shell">
     <header class="phi-header">
       <a class="phi-brand" href="/" aria-label="Selfware Evolve workspace"><span class="phi-logo-mark">φ</span><span class="phi-brand-titles"><span class="phi-brand-name">selfware <span class="phi-brand-badge">WITH PHI</span></span><span class="phi-brand-sub">A little company for complicated ideas.</span></span></a>
-      <div class="phi-header-controls"><button id="btn-summon" class="btn-cyber" type="button">Summon Phi</button><button id="btn-toggle-audio" class="btn-cyber primary" type="button" aria-pressed="true">Voice on</button><button id="btn-god-mode" class="btn-cyber" type="button" aria-pressed="false">✧ God Mode</button></div>
+      <div class="phi-header-controls"><button id="btn-summon" class="btn-cyber" type="button">Summon Phi</button><button id="btn-toggle-audio" class="btn-cyber primary" type="button" aria-pressed="true">Voice on</button><button id="btn-expression-sounds" class="btn-cyber" type="button" aria-pressed="false" aria-label="Phi expression sounds" title="Short expression sounds. Narration has its own Voice control.">Sounds off</button><button id="btn-god-mode" class="btn-cyber" type="button" aria-pressed="false">✧ God Mode</button></div>
     </header>
     <main class="phi-workspace">
       <aside class="phi-sidebar" aria-label="Workspace files">
@@ -25,6 +25,7 @@
       </section>
       <aside class="phi-deck" aria-label="Super facts and assistant controls">
         <div id="phi-perch" aria-label="Phi’s resting place"></div>
+        <section id="phi-activity-panel" class="deck-card" aria-label="Live agent activity and execution evidence"></section>
         <section id="phi-friction-panel" class="deck-card" aria-label="Quiet companion observations"></section>
         <section class="deck-card reading-request"><div class="card-title"><span>A guided reading</span><span id="agent-state">CONNECTING</span></div><label for="reading-question">What would you like to understand?</label><textarea id="reading-question" rows="3" placeholder="Explain the flow, the surprising parts, and what I could improve."></textarea><button id="btn-read-all" class="btn-cyber primary">✧ Prepare a reading</button><p id="generation-status" role="status">The reading agent uses your configured Selfware model.</p><button id="btn-resume-job" class="btn-cyber" hidden>Resume pending reading</button></section>
         <section class="deck-card"><div class="card-title"><span>Super facts</span><span id="fact-count">0</span></div><p class="deck-hint" id="facts-status">Explanations will appear here with their source references.</p><div id="super-facts"></div><button id="btn-play-facts" class="btn-cyber" hidden>Read all facts</button></section>

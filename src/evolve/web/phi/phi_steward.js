@@ -50,6 +50,70 @@ function proposal({ id, kind, title, rationale, evidence, task, effort = 'short'
                          effort });
 }
 
+// Runtime receipts describe separate tasks, often in separate worktrees. Keep
+// each observation attached to its agent instead of summing overlapping lines
+// into fictitious workspace debt. Inspection never submits an unrelated file
+// to a model or claims to execute the missing verification.
+function runtimeProposals(activity) {
+  if (!activity) return { items: [], blocksExplore: false };
+  const items = [];
+  const unknown = activity.status !== 'available' || activity.truncated;
+  if (unknown) items.push(proposal({
+    id: 'orient:activity-unavailable', kind: PROPOSAL_KINDS.ORIENT,
+    title: activity.truncated ? 'Inspect the limited agent capture set' : 'Check unavailable or incomplete agent observations',
+    rationale: 'The activity feed cannot establish the current state of every agent. Missing observations do not establish a clean workspace.',
+    evidence: [`activity ${activity.status}`, ...(activity.truncated ? ['capture set truncated'] : [])],
+    task: { kind: 'inspect_activity', target: '', question: '' }
+  }));
+  let blocksExplore = !!unknown;
+  for (const row of activity.agents || []) {
+    const e = row.evidence;
+    const captured = new Date(row.recorded_at_ms);
+    const evidence = [`Agent ${row.agent_id}`, `Task ${row.task_id}`,
+      Number.isFinite(captured.getTime()) ? `captured at ${captured.toISOString()}` : 'capture time unavailable'];
+    const task = { kind: 'inspect_activity', target: row.agent_id,
+      session_id: row.session_id, task_id: row.task_id, question: '' };
+    const id = `activity:${row.session_id}:${row.task_id}`;
+    if (row.status === 'stale') {
+      blocksExplore = true;
+      items.push(proposal({ id: `orient:${id}`, kind: PROPOSAL_KINDS.ORIENT,
+        title: 'Check an agent whose capture is stale',
+        rationale: 'This is a historical observation. Its lifecycle and check counts cannot establish what is happening now.',
+        evidence: [...evidence, 'current task status unknown'], task }));
+      continue;
+    }
+    if (row.phase === 'failed' || (e?.failed_runs || 0) > 0) {
+      blocksExplore = true;
+      items.push(proposal({ id: `repair:${id}`, kind: PROPOSAL_KINDS.REPAIR,
+        title: 'Inspect recorded agent failures',
+        rationale: 'The capture includes a failed task or check. A recorded failure may have been followed by a passing run; inspect both before deciding what needs repair.',
+        evidence: [...evidence, `task ${row.phase}`, `${e?.failed_runs ?? 'unknown'} recorded failed runs`,
+          `${e?.passed_runs ?? 'unknown'} recorded passed runs`], task }));
+    } else if (row.status !== 'available' || !e || e.outstanding > 0 ||
+        e.unknown_size_obligations > 0 || e.unattributed_mutations > 0 ||
+        e.possible_unrecorded_mutations > 0 || e.unknown_runs > 0 ||
+        ['partial', 'abandoned'].includes(row.phase)) {
+      blocksExplore = true;
+      items.push(proposal({ id: `verify:${id}`, kind: PROPOSAL_KINDS.VERIFY,
+        title: 'Inspect incomplete agent verification evidence',
+        rationale: 'Task completion and passing commands do not establish that all changes were reviewed or covered. These counts belong to this captured task, not every file in the workspace.',
+        evidence: [...evidence, `task ${row.phase}`, ...(e ? [
+          `${e.unreviewed_lines} unreviewed lines`, `${e.untested_lines} lines without confirmed coverage`,
+          `${e.outstanding} outstanding obligations`, `${e.unknown_size_obligations} obligations of unknown size`,
+          `${e.unattributed_mutations} unattributed mutations`,
+          `${e.possible_unrecorded_mutations} possible unrecorded mutations`,
+          `${e.unknown_runs} unknown check outcomes`] : ['execution evidence unavailable'])], task }));
+    } else if (row.phase === 'running') {
+      blocksExplore = true;
+      items.push(proposal({ id: `orient:${id}`, kind: PROPOSAL_KINDS.ORIENT,
+        title: 'An agent is still running',
+        rationale: 'The captured task has not reached a terminal outcome. Inspect its activity before choosing follow-up work.',
+        evidence: [...evidence, 'task running'], task }));
+    }
+  }
+  return { items, blocksExplore };
+}
+
 export class PhiSteward {
   constructor({ maxProposals = MAX_PROPOSALS } = {}) {
     this.maxProposals = maxProposals;
@@ -66,6 +130,7 @@ export class PhiSteward {
    *   workspace: { gates:[{id,name,passing}], failingTests:[{name,file}],
    *                deadCode:[{file,symbol}], duplicates:[{a,b}],
    *                git:{branch,dirtyFiles,untracked}, recentFiles:[path] }
+   *   activity: parsed /api/phi/activity capture, including freshness and IDs
    * }
    * Anything absent is simply not proposed about. */
   propose(signals = {}) {
@@ -73,7 +138,8 @@ export class PhiSteward {
     const friction = signals.friction || {};
     const workspace = signals.workspace || {};
     const vector = state.vector || {};
-    const out = [];
+    const runtime = runtimeProposals(signals.activity);
+    const out = [...runtime.items];
 
     // --- repair: something is red now ---
     const failingGates = (workspace.gates || []).filter(gate => gate && gate.passing === false);
@@ -186,14 +252,14 @@ export class PhiSteward {
     // observed failures. If the checks could not run, the books are unknown,
     // not clear.
     const checksRan = workspace.gateStatus === CHECK_STATUS.PASSING;
-    const clean = !out.length && checksRan && (vector.debt ?? 0) < .3
+    const clean = !runtime.blocksExplore && !out.length && checksRan && (vector.debt ?? 0) < .3
       && !failing.length && !failingGates.length;
     if (clean && (workspace.recentFiles || []).length) {
       out.push(proposal({
         id: 'explore:next', kind: PROPOSAL_KINDS.EXPLORE,
         title: 'Pick up the next piece of work',
-        rationale: 'Nothing is failing and nothing is unread. This is the moment where new work is actually cheap.',
-        evidence: [`debt ${(vector.debt ?? 0).toFixed(2)}`, 'no failing gates or tests'],
+        rationale: 'The available workspace signals have no outstanding finding. This does not establish that every required code check ran.',
+        evidence: [`debt ${(vector.debt ?? 0).toFixed(2)}`, 'architecture gates passed; no reported failing tests'],
         task: { question: 'Given the current state of the workspace, what is the most valuable next change and why?', kind: 'plan', target: '' }
       }));
     }
@@ -209,12 +275,16 @@ export class PhiSteward {
   summarise(proposals, signals = {}) {
     if (proposals.length) {
       const top = proposals[0];
+      if (top.task.kind === 'inspect_activity') return `${top.title}. ${top.rationale}`;
       const leading = { repair: 'Something is red.', verify: 'Something is unchecked.',
                         repay: 'Something was left behind.', orient: 'Something is unknown.',
-                        explore: 'The books are clear.' }[top.kind] || '';
+                        explore: 'No outstanding finding in the available signals.' }[top.kind] || '';
       return `${leading} ${top.title}.`;
     }
     const debt = signals.state?.vector?.debt ?? 0;
+    if (runtimeProposals(signals.activity).blocksExplore) {
+      return 'There are still agent observations to inspect. Dismissed suggestions do not mean those observations were resolved.';
+    }
     if (signals.workspace?.gateStatus === CHECK_STATUS.UNAVAILABLE) {
       return 'I could not run the checks, so I have nothing to report — which is not the same as nothing being wrong.';
     }
