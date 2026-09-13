@@ -1254,7 +1254,7 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
 
         match input {
             Ok(ref input) if matches!(input.as_str(), "exit" | "quit" | "/exit" | "/quit") => break,
-            Ok(input) => {
+            Ok(mut input) => {
                 // Log helper for the slash handlers below (TUI log panel).
                 let log_line = |message: String| {
                     let _ = bridge_event_tx.send(crate::ui::tui::TuiEvent::Log {
@@ -1477,20 +1477,26 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
                     }
                     continue;
                 }
-                // Other slash commands must NOT be sent to the LLM as prompts.
-                // In TUI dashboard mode the full interactive command
-                // dispatcher is not available, so skip LLM routing and say so
-                // honestly in the TUI log panel instead of dropping silently.
-                if input.starts_with('/') {
-                    warn!("Slash command '{}' not supported in TUI mode", input);
-                    let _ = bridge_event_tx.send(crate::ui::tui::TuiEvent::Log {
-                        level: crate::ui::tui::LogLevel::Warning,
-                        message: format!(
-                            "'{}' is not supported in TUI mode — use interactive CLI mode",
-                            input
-                        ),
-                    });
-                    continue;
+                // Dynamic slash skill invocation or unsupported slash command.
+                if let Some(cmd_rest) = input.strip_prefix('/') {
+                    let mut parts = cmd_rest.splitn(2, ' ');
+                    let skill_name = parts.next().unwrap_or("");
+                    let arguments = parts.next().unwrap_or("").trim();
+                    if let Some(skill) = skill_registry.get(skill_name) {
+                        let unverified_suffix = if skill.verified { "" } else { " (UNVERIFIED)" };
+                        log_line(format!("Activated skill: /{skill_name}{unverified_suffix}"));
+                        input = skill.render_with_trust_gate(arguments);
+                    } else {
+                        warn!("Slash command '{}' not supported in TUI mode", input);
+                        let _ = bridge_event_tx.send(crate::ui::tui::TuiEvent::Log {
+                            level: crate::ui::tui::LogLevel::Warning,
+                            message: format!(
+                                "'{}' is not supported in TUI mode — use interactive CLI mode",
+                                input
+                            ),
+                        });
+                        continue;
+                    }
                 }
                 // A stale latched cancel token (e.g. Esc pressed just as the
                 // previous run finished) must not abort the new task.

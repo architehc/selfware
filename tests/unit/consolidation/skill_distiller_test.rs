@@ -470,3 +470,36 @@ fn test_eviction_deterministic_tie_breaking() {
     // When utility and last_used tie, lowest lexicographical name ("skill_a") is deterministically evicted first
     assert_eq!(report.evicted_skill_names, vec!["skill_a".to_string()]);
 }
+
+#[test]
+fn test_load_and_save_ledger_reject_symlinks() {
+    let tmp = tempdir().unwrap();
+    let real_file = tmp.path().join("real_target.json");
+    fs::write(&real_file, b"{}").unwrap();
+
+    let symlinked_ledger = tmp.path().join("symlinked_ledger.json");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&real_file, &symlinked_ledger).unwrap();
+
+    #[cfg(unix)]
+    {
+        let distiller = SkillDistiller::new(tmp.path().join("skills"), symlinked_ledger);
+        let err = distiller.load_ledger().unwrap_err();
+        assert!(err.to_string().contains("Ledger destination is a symlink"));
+
+        let ledger = HashMap::new();
+        let err = distiller.save_ledger(&ledger).unwrap_err();
+        assert!(err.to_string().contains("Ledger destination is a symlink"));
+
+        // Test tmp_path symlink rejection
+        let direct_ledger = tmp.path().join("direct_ledger.json");
+        let tmp_path = direct_ledger.with_extension("tmp");
+        std::os::unix::fs::symlink(&real_file, &tmp_path).unwrap();
+
+        let distiller_tmp = SkillDistiller::new(tmp.path().join("skills"), direct_ledger);
+        let err = distiller_tmp.save_ledger(&ledger).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Ledger temporary destination is a symlink"));
+    }
+}

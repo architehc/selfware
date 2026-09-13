@@ -183,6 +183,14 @@ impl SkillDistiller {
 
     /// Load the skill drift ledger from disk or initialize an empty one.
     pub fn load_ledger(&self) -> Result<HashMap<String, SkillLedgerEntry>> {
+        if let Ok(meta) = self.ledger_file.symlink_metadata() {
+            if meta.file_type().is_symlink() {
+                return Err(anyhow!(
+                    "Ledger destination is a symlink: {:?}",
+                    self.ledger_file
+                ));
+            }
+        }
         if !self.ledger_file.exists() {
             return Ok(HashMap::new());
         }

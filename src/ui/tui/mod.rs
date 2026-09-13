@@ -1269,9 +1269,10 @@ pub fn run_tui_dashboard_with_events(
                                     if let Some(skill) = skill_opt {
                                         let prompt = skill.render_with_trust_gate(arg);
                                         let skill_name = skill.name.clone();
+                                        let unverified_suffix =
+                                            if skill.verified { "" } else { " (UNVERIFIED)" };
                                         app.add_system_message(&format!(
-                                            "Activated skill: /{}",
-                                            skill_name
+                                            "Activated skill: /{skill_name}{unverified_suffix}",
                                         ));
                                         let user_display = if arg.is_empty() {
                                             format!("/{}", skill_name)
@@ -1283,7 +1284,9 @@ pub fn run_tui_dashboard_with_events(
                                         with_dashboard_state(&shared_state, |state| {
                                             state.log(
                                                 LogLevel::Info,
-                                                &format!("Activated skill: /{}", skill_name),
+                                                &format!(
+                                                    "Activated skill: /{skill_name}{unverified_suffix}"
+                                                ),
                                             );
                                         });
                                     } else {

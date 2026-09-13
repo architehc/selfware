@@ -120,3 +120,35 @@ fn test_empty_event_log_markdown() {
     let md = empty_log.to_markdown();
     assert!(md.contains("No recent historical events recorded."));
 }
+
+#[test]
+fn test_generate_event_log_handles_pipe_character_in_commit_message() {
+    let tmp = tempdir().unwrap();
+    let repo_path = tmp.path();
+
+    let run_git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo_path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    };
+
+    run_git(&["init"]);
+    run_git(&["config", "user.email", "theseus@selfware.ai"]);
+    run_git(&["config", "user.name", "Theseus Agent"]);
+    fs::write(repo_path.join("README.md"), "# Project").unwrap();
+    run_git(&["add", "."]);
+    run_git(&[
+        "commit",
+        "-m",
+        "feat(parser): add pipe | separator support | and another",
+    ]);
+
+    let log = TheseusScaffold::generate_event_log(repo_path, 5).expect("should read git log");
+    assert!(!log.events.is_empty());
+    assert!(log.events.iter().any(|e| e
+        .summary
+        .contains("feat(parser): add pipe | separator support | and another")));
+}
