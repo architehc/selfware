@@ -54,7 +54,13 @@ def main():
                     line = line.strip()
                     if not line:
                         continue
-                    d = json.loads(line)
+                    try:
+                        d = json.loads(line)
+                    except json.JSONDecodeError:
+                        # Wave file mid-append by a generator — the truncated
+                        # tail line is fully readable next cycle; skip it
+                        # rather than aborting the whole consolidation.
+                        continue
                     i = d["id"]
                     cv = chk.get(i)
                     if cv not in ("r", "a"):
