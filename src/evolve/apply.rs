@@ -1099,11 +1099,11 @@ mod tests {
 
         std::fs::write(dir.path().join(".theseus.md"), b"# base guide\n").unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
-        std::fs::write(dir.path().join("src/main.rs"), b"fn main() {}\n").unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), b"pub fn f() {}\n").unwrap();
 
         let mut index = repo.index().unwrap();
         index.add_path(Path::new(".theseus.md")).unwrap();
-        index.add_path(Path::new("src/main.rs")).unwrap();
+        index.add_path(Path::new("src/lib.rs")).unwrap();
         index.write().unwrap();
         let tree_id = index.write_tree().unwrap();
         let tree = repo.find_tree(tree_id).unwrap();
@@ -1113,7 +1113,7 @@ mod tests {
 
         // 1. Modify tracked scaffold in worktree
         std::fs::write(dir.path().join(".theseus.md"), b"# modified guide\n").unwrap();
-        std::fs::write(dir.path().join("src/main.rs"), b"fn main() { 1; }\n").unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), b"pub fn f() { 1; }\n").unwrap();
 
         let staged = stage_workdir_without_scaffolding(&repo, Some(&tree)).unwrap();
         let diff = repo
@@ -1122,7 +1122,7 @@ mod tests {
         assert_eq!(diff.deltas().len(), 1);
         assert_eq!(
             diff.deltas().next().unwrap().new_file().path().unwrap(),
-            Path::new("src/main.rs")
+            Path::new("src/lib.rs")
         );
 
         let verified = verify_staged_diff(dir.path(), &commit_oid.to_string())
@@ -1139,7 +1139,7 @@ mod tests {
         assert_eq!(diff2.deltas().len(), 1);
         assert_eq!(
             diff2.deltas().next().unwrap().new_file().path().unwrap(),
-            Path::new("src/main.rs")
+            Path::new("src/lib.rs")
         );
     }
 
