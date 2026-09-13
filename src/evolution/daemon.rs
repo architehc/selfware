@@ -21,7 +21,9 @@ pub struct GenerationWinner {
     pub description: String,
     pub composite_score: f64,
     pub sab_delta: f64,
-    pub token_delta: f64,
+    /// `None` when either side did not report token usage. It was `f64`, and
+    /// two unmeasured runs produced a confident `0.0` delta.
+    pub token_delta: Option<f64>,
     pub patch: String,
     pub git_tag: Option<String>,
 }
@@ -34,6 +36,12 @@ pub struct EvolutionResult {
     pub final_sab_score: f64,
     pub initial_sab_score: f64,
     pub total_duration: std::time::Duration,
+    /// Why the run stopped early, if it did.
+    ///
+    /// A run abandoned because its baseline could not be measured used to be
+    /// indistinguishable from one that ran fully and found no improvement:
+    /// both returned zero improvements. They mean opposite things.
+    pub aborted: Option<String>,
 }
 
 const DEFAULT_TOKEN_BUDGET: u64 = 500_000;
@@ -108,6 +116,15 @@ fn measure_compile_test_baseline(
         ));
     }
 
+    // Time the TEST PHASE ONLY, because that is what the candidate arm times.
+    //
+    // `start` above covers check + test + fmt + clippy + release build, and
+    // `build_candidate_metrics` recorded only its test duration. Latency is a
+    // weighted fitness term, so the baseline carried four extra phases of
+    // wall-clock that no candidate ever paid: every candidate looked faster
+    // than the baseline by construction, and that bias pushed toward promotion.
+    // Two arms must measure the same boundary or the comparison is not one.
+    let test_start = Instant::now();
     let mut test_cmd = Command::new("cargo");
     test_cmd.arg("test").current_dir(dir);
     if !features.is_empty() {
@@ -116,6 +133,7 @@ fn measure_compile_test_baseline(
     let test = test_cmd
         .output()
         .map_err(|e| format!("cargo test failed to run: {e}"))?;
+    let test_duration = test_start.elapsed();
     let test_stdout = String::from_utf8_lossy(&test.stdout);
     let test_stderr = String::from_utf8_lossy(&test.stderr);
     let full_output = format!("{}\n{}", test_stdout, test_stderr);
@@ -169,10 +187,14 @@ fn measure_compile_test_baseline(
 
     Ok(FitnessMetrics {
         sab_score,
-        tokens_used: 0,
+        // Compile/test mode runs no agent, so no tokens are spent OR observed.
+        // Recording 0 scored this as perfect token efficiency.
+        tokens_used: None,
         token_budget: DEFAULT_TOKEN_BUDGET,
-        wall_clock_secs: start.elapsed().as_secs_f64(),
+        // Same boundary as the candidate arm: the test phase.
+        wall_clock_secs: test_duration.as_secs_f64(),
         timeout_secs,
+        full_evaluation_secs: Some(start.elapsed().as_secs_f64()),
         test_coverage_pct: pass_ratio * 100.0,
         binary_size_mb,
         max_binary_size_mb: 50.0,
@@ -219,10 +241,12 @@ fn build_candidate_metrics(
 
     Some(FitnessMetrics {
         sab_score: pass_ratio * 100.0,
-        tokens_used: 0,
+        tokens_used: None,
         token_budget: DEFAULT_TOKEN_BUDGET,
         wall_clock_secs: test_duration.as_secs_f64(),
         timeout_secs: DEFAULT_TIMEOUT_SECS,
+        // The candidate arm does not time its own build phase separately.
+        full_evaluation_secs: None,
         test_coverage_pct: pass_ratio * 100.0,
         binary_size_mb,
         max_binary_size_mb: config.safety.max_binary_size_mb,
@@ -232,21 +256,14 @@ fn build_candidate_metrics(
     })
 }
 
-fn synthetic_baseline_metrics() -> FitnessMetrics {
-    FitnessMetrics {
-        sab_score: 50.0,
-        tokens_used: 0,
-        token_budget: DEFAULT_TOKEN_BUDGET,
-        wall_clock_secs: 0.0,
-        timeout_secs: DEFAULT_TIMEOUT_SECS,
-        test_coverage_pct: 50.0,
-        binary_size_mb: 15.0,
-        max_binary_size_mb: 50.0,
-        tests_passed: 0,
-        tests_total: 0,
-        visual_score: 0.0,
-    }
-}
+// `synthetic_baseline_metrics` used to live here. It returned sab_score 50.0,
+// coverage 50.0 and a 15 MB binary when real baseline measurement FAILED, and
+// that fiction became the bar every candidate was promoted against. A candidate
+// scoring 55 on a suite the baseline never ran looked like an improvement.
+//
+// There is no honest substitute for a measurement that did not happen: if the
+// baseline cannot be measured, the generation cannot be judged, so it is
+// abandoned rather than scored against an invention.
 
 /// Convert a SAB result into FitnessMetrics, preserving the real SAB score.
 fn metrics_from_sab_result(
@@ -332,10 +349,20 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             }
             Err(e) => {
                 log_warning(&format!(
-                    "SAB baseline failed ({}), using synthetic baseline",
-                    e
+                    "SAB baseline failed ({e}); refusing to evolve against an unmeasured baseline"
                 ));
-                synthetic_baseline_metrics()
+                return EvolutionResult {
+                    generations_run: 0,
+                    improvements: Vec::new(),
+                    final_sab_score: 0.0,
+                    initial_sab_score: 0.0,
+                    total_duration: start.elapsed(),
+                    aborted: Some(format!(
+                        "baseline measurement failed: {e}. Promotion needs a real baseline \
+                         to compare against; scoring candidates against a placeholder \
+                         cannot show improvement."
+                    )),
+                };
             }
         }
     } else {
@@ -347,10 +374,21 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             }
             Err(e) => {
                 log_warning(&format!(
-                    "Compile/test baseline failed ({}), using synthetic baseline",
-                    e
+                    "Compile/test baseline failed ({e}); refusing to evolve against an \
+                     unmeasured baseline"
                 ));
-                synthetic_baseline_metrics()
+                return EvolutionResult {
+                    generations_run: 0,
+                    improvements: Vec::new(),
+                    final_sab_score: 0.0,
+                    initial_sab_score: 0.0,
+                    total_duration: start.elapsed(),
+                    aborted: Some(format!(
+                        "baseline measurement failed: {e}. Promotion needs a real baseline \
+                         to compare against; scoring candidates against a placeholder \
+                         cannot show improvement."
+                    )),
+                };
             }
         }
     };
@@ -713,8 +751,13 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     description: winner.description.clone(),
                     composite_score: winner_composite,
                     sab_delta: winner_metrics.sab_score - current_baseline_metrics.sab_score,
-                    token_delta: winner_metrics.tokens_used as f64
-                        - current_baseline_metrics.tokens_used as f64,
+                    token_delta: match (
+                        winner_metrics.tokens_used,
+                        current_baseline_metrics.tokens_used,
+                    ) {
+                        (Some(w), Some(b)) => Some(w as f64 - b as f64),
+                        _ => None,
+                    },
                     // The tested diff actually committed (incl. fmt fixes),
                     // not the raw LLM patch.
                     patch: tested_diff.clone(),
@@ -773,6 +816,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         final_sab_score: current_baseline_metrics.sab_score,
         initial_sab_score: initial_sab,
         total_duration: start.elapsed(),
+        aborted: None,
     }
 }
 
@@ -1405,7 +1449,12 @@ pub fn format_evolution_history(hall_of_fame: &[GenerationWinner]) -> String {
     for winner in hall_of_fame.iter().rev().take(10) {
         prompt.push_str(&format!(
             "- Gen {}: {} (SAB +{:.1}, tokens {:.0})\n",
-            winner.generation, winner.description, winner.sab_delta, winner.token_delta
+            winner.generation,
+            winner.description,
+            winner.sab_delta,
+            winner
+                .token_delta
+                .map_or_else(|| "unmeasured".to_string(), |d| format!("{d:+.0}"))
         ));
     }
     prompt
@@ -2024,7 +2073,9 @@ fn log_baseline(metrics: &FitnessMetrics, sab_mode: bool) {
         label,
         metrics.sab_score,
         rating_from_score(metrics.sab_score),
-        metrics.tokens_used,
+        metrics
+            .tokens_used
+            .map_or_else(|| "unmeasured".to_string(), |t| t.to_string()),
         metrics.wall_clock_secs
     );
 }

@@ -44,9 +44,14 @@ impl Default for SabConfig {
 pub struct SabResult {
     pub aggregate_score: f64,
     pub scenario_scores: Vec<ScenarioScore>,
-    pub total_tokens_used: u64,
+    /// `None` unless EVERY scenario reported usage. A partial sum is not a
+    /// total, and presenting one as a total understates cost.
+    pub total_tokens_used: Option<u64>,
     pub wall_clock: Duration,
     pub rating: GenerationRating,
+    /// SHA-256 of the executable the runner actually ran.
+    pub binary_sha256: String,
+    pub run_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -57,7 +62,12 @@ pub struct ScenarioScore {
     pub tests_passed: bool,
     pub broken_tests_fixed: bool,
     pub clean_exit: bool,
-    pub tokens_used: u64,
+    /// `None` when the runner did not observe token usage.
+    ///
+    /// This was `u64` defaulting to 0, and zero tokens reads as perfect
+    /// efficiency to the fitness weights — an unmeasured run scored better than
+    /// a measured one.
+    pub tokens_used: Option<u64>,
     pub duration: Duration,
 }
 
@@ -96,32 +106,141 @@ pub fn run_sab(selfware_binary: &Path, config: &SabConfig) -> Result<SabResult, 
 
     // Parse SAB output — the runner produces JSON reports
     let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_sab_output(&stdout, wall_clock)
+    parse_sab_output(&stdout, wall_clock, selfware_binary)
 }
 
-/// Parse SAB runner output into structured results
-fn parse_sab_output(output: &str, wall_clock: Duration) -> Result<SabResult, FitnessError> {
-    // Look for the JSON report path in output
+/// SHA-256 of a file, so a report can be checked against the binary requested.
+fn sha256_of(path: &Path) -> Result<String, FitnessError> {
+    use sha2::{Digest, Sha256};
+    let bytes =
+        std::fs::read(path).map_err(|_| FitnessError::BinaryNotFound(path.to_path_buf()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Parse SAB runner output into structured results.
+///
+/// The runner prints `SAB_REPORT_JSON=<path>`; that file is the only accepted
+/// source. The previous version searched stdout for any line containing
+/// "reports/" and ".json", and when it found none fell back to scraping
+/// `name: NN/100` lines out of the text and INVENTING outcomes from score
+/// thresholds — `tests_passed = score >= 70`, `clean_exit = score >= 10`. Those
+/// flags then fed promotion decisions. A parser that manufactures the facts it
+/// reports cannot establish which scenarios passed, so it is gone: a run that
+/// produces no structured report is an error, not a low score.
+fn parse_sab_output(
+    output: &str,
+    wall_clock: Duration,
+    requested_binary: &Path,
+) -> Result<SabResult, FitnessError> {
     let report_path = output
         .lines()
         .rev()
-        .find(|l| l.contains("reports/") && l.contains(".json"))
-        .map(|l| l.trim().to_string());
+        .find_map(|l| l.trim().strip_prefix("SAB_REPORT_JSON="))
+        .ok_or_else(|| {
+            FitnessError::ReportParseFailed(
+                "runner printed no SAB_REPORT_JSON= line; refusing to guess scores from text"
+                    .into(),
+            )
+        })?;
 
-    let scenario_scores = if let Some(path) = report_path {
-        parse_report_json(&path)?
-    } else {
-        // Fallback: parse structured text output
-        parse_text_output(output)?
-    };
+    let content = std::fs::read_to_string(report_path)
+        .map_err(|e| FitnessError::ReportParseFailed(format!("{report_path}: {e}")))?;
+    let json: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| FitnessError::ReportParseFailed(e.to_string()))?;
+
+    match json["schema"].as_str() {
+        Some("sab-report/1") => {}
+        other => {
+            return Err(FitnessError::ReportParseFailed(format!(
+                "unsupported report schema: {other:?}"
+            )))
+        }
+    }
+
+    // Did the runner score the build we asked it to score?
+    let evaluated = json["binary_sha256"]
+        .as_str()
+        .ok_or_else(|| FitnessError::IncompleteReport("binary_sha256".into()))?;
+    let requested = sha256_of(requested_binary)?;
+    if evaluated != requested {
+        return Err(FitnessError::WrongBinaryEvaluated {
+            requested,
+            evaluated: evaluated.to_string(),
+        });
+    }
+
+    let expected = json["scenarios_expected"]
+        .as_u64()
+        .ok_or_else(|| FitnessError::IncompleteReport("scenarios_expected".into()))?;
+    let scenarios = json["scenarios"]
+        .as_array()
+        .ok_or_else(|| FitnessError::IncompleteReport("scenarios".into()))?;
+    if scenarios.len() as u64 != expected {
+        // A partial run averaged over the scenarios that finished, so a
+        // candidate that crashed most of the suite could outscore one that
+        // completed it.
+        return Err(FitnessError::IncompleteReport(format!(
+            "{} of {expected} scenarios reported; a partial suite is not a score",
+            scenarios.len()
+        )));
+    }
+
+    let scenario_scores = scenarios
+        .iter()
+        .map(|s| {
+            let field = |name: &str| -> Result<&serde_json::Value, FitnessError> {
+                s.get(name)
+                    .ok_or_else(|| FitnessError::IncompleteReport(name.to_string()))
+            };
+            Ok(ScenarioScore {
+                name: field("name")?.as_str().unwrap_or("unknown").to_string(),
+                difficulty: match field("difficulty")?.as_str().unwrap_or("medium") {
+                    "easy" => Difficulty::Easy,
+                    "medium" => Difficulty::Medium,
+                    "hard" => Difficulty::Hard,
+                    "expert" => Difficulty::Expert,
+                    _ => Difficulty::Medium,
+                },
+                score: field("score")?
+                    .as_f64()
+                    .ok_or_else(|| FitnessError::IncompleteReport("score".into()))?,
+                // Measured, not derived from a score threshold.
+                tests_passed: field("tests_passed")?
+                    .as_bool()
+                    .ok_or_else(|| FitnessError::IncompleteReport("tests_passed".into()))?,
+                broken_tests_fixed: field("broken_tests_fixed")?
+                    .as_bool()
+                    .ok_or_else(|| FitnessError::IncompleteReport("broken_tests_fixed".into()))?,
+                clean_exit: field("clean_exit")?
+                    .as_bool()
+                    .ok_or_else(|| FitnessError::IncompleteReport("clean_exit".into()))?,
+                // Explicit null means the runner did not observe it.
+                tokens_used: s.get("tokens_used").and_then(|v| v.as_u64()),
+                duration: Duration::from_secs(
+                    field("duration_secs")?
+                        .as_u64()
+                        .ok_or_else(|| FitnessError::IncompleteReport("duration_secs".into()))?,
+                ),
+            })
+        })
+        .collect::<Result<Vec<_>, FitnessError>>()?;
 
     let aggregate = if scenario_scores.is_empty() {
-        0.0
+        return Err(FitnessError::IncompleteReport(
+            "no scenarios in report".into(),
+        ));
     } else {
         scenario_scores.iter().map(|s| s.score).sum::<f64>() / scenario_scores.len() as f64
     };
 
-    let total_tokens: u64 = scenario_scores.iter().map(|s| s.tokens_used).sum();
+    // A total only exists if every scenario reported. Summing the ones that did
+    // and calling it the total understates cost by however many were missing.
+    let total_tokens_used = scenario_scores
+        .iter()
+        .map(|s| s.tokens_used)
+        .try_fold(0u64, |acc, t| t.map(|t| acc + t));
 
     let rating = match aggregate as u32 {
         85..=100 => GenerationRating::Bloom,
@@ -133,85 +252,12 @@ fn parse_sab_output(output: &str, wall_clock: Duration) -> Result<SabResult, Fit
     Ok(SabResult {
         aggregate_score: aggregate,
         scenario_scores,
-        total_tokens_used: total_tokens,
+        total_tokens_used,
         wall_clock,
         rating,
+        binary_sha256: evaluated.to_string(),
+        run_id: json["run_id"].as_str().unwrap_or("unknown").to_string(),
     })
-}
-
-fn parse_report_json(path: &str) -> Result<Vec<ScenarioScore>, FitnessError> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| FitnessError::ReportParseFailed(e.to_string()))?;
-
-    let json: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| FitnessError::ReportParseFailed(e.to_string()))?;
-
-    let scenarios = json["scenarios"]
-        .as_array()
-        .ok_or_else(|| FitnessError::ReportParseFailed("No scenarios array".into()))?;
-
-    scenarios
-        .iter()
-        .map(|s| {
-            Ok(ScenarioScore {
-                name: s["name"].as_str().unwrap_or("unknown").to_string(),
-                difficulty: match s["difficulty"].as_str().unwrap_or("medium") {
-                    "easy" => Difficulty::Easy,
-                    "medium" => Difficulty::Medium,
-                    "hard" => Difficulty::Hard,
-                    "expert" => Difficulty::Expert,
-                    _ => Difficulty::Medium,
-                },
-                score: s["score"].as_f64().unwrap_or(0.0),
-                tests_passed: s["tests_passed"].as_bool().unwrap_or(false),
-                broken_tests_fixed: s["broken_tests_fixed"].as_bool().unwrap_or(false),
-                clean_exit: s["clean_exit"].as_bool().unwrap_or(false),
-                tokens_used: s["tokens_used"].as_u64().unwrap_or(0),
-                duration: Duration::from_secs(s["duration_secs"].as_u64().unwrap_or(0)),
-            })
-        })
-        .collect()
-}
-
-fn parse_text_output(output: &str) -> Result<Vec<ScenarioScore>, FitnessError> {
-    // Minimal text parser for when JSON isn't available
-    let mut scores = Vec::new();
-    for line in output.lines() {
-        // Look for lines like: "easy_calculator: 100/100 BLOOM"
-        if let Some((name, rest)) = line.split_once(':') {
-            let name = name.trim();
-            if let Some(score_str) = rest.split('/').next() {
-                if let Ok(score) = score_str.trim().parse::<f64>() {
-                    scores.push(ScenarioScore {
-                        name: name.to_string(),
-                        difficulty: infer_difficulty(name),
-                        score,
-                        tests_passed: score >= 70.0,
-                        broken_tests_fixed: score >= 90.0,
-                        clean_exit: score >= 10.0,
-                        tokens_used: 0, // Unknown from text output
-                        duration: Duration::ZERO,
-                    });
-                }
-            }
-        }
-    }
-    Ok(scores)
-}
-
-fn infer_difficulty(name: &str) -> Difficulty {
-    if name.starts_with("easy_") {
-        Difficulty::Easy
-    } else if name.starts_with("medium_")
-        || name.starts_with("testgen_")
-        || name.starts_with("refactor_")
-    {
-        Difficulty::Medium
-    } else if name.starts_with("expert_") {
-        Difficulty::Expert
-    } else {
-        Difficulty::Hard
-    }
 }
 
 /// Build a complete FitnessMetrics from SAB result + system measurements
@@ -240,6 +286,7 @@ pub fn build_fitness_metrics(
         tokens_used: sab.total_tokens_used,
         token_budget,
         wall_clock_secs: sab.wall_clock.as_secs_f64(),
+        full_evaluation_secs: Some(sab.wall_clock.as_secs_f64()),
         timeout_secs,
         test_coverage_pct,
         binary_size_mb,
@@ -264,6 +311,18 @@ pub enum FitnessError {
     SabRunFailed(String),
     ReportParseFailed(String),
     BinaryNotFound(PathBuf),
+    /// The runner scored a different executable than the one requested.
+    ///
+    /// The reason this exists: the runner ignored `SELFWARE_BINARY` and always
+    /// built and ran its OWN repository's release binary, so every candidate
+    /// was evaluated using the baseline build. Fitness could not tell the two
+    /// apart. A mismatch must fail loudly rather than produce a number.
+    WrongBinaryEvaluated {
+        requested: String,
+        evaluated: String,
+    },
+    /// The report omitted a field whose absence cannot be defaulted.
+    IncompleteReport(String),
 }
 
 impl std::fmt::Display for FitnessError {
@@ -272,6 +331,17 @@ impl std::fmt::Display for FitnessError {
             Self::SabRunFailed(msg) => write!(f, "SAB run failed: {}", msg),
             Self::ReportParseFailed(msg) => write!(f, "Failed to parse SAB report: {}", msg),
             Self::BinaryNotFound(p) => write!(f, "Binary not found: {}", p.display()),
+            Self::WrongBinaryEvaluated {
+                requested,
+                evaluated,
+            } => write!(
+                f,
+                "SAB scored the wrong executable: asked for {requested}, runner ran {evaluated}. \
+                 The score describes a different build and must not be used."
+            ),
+            Self::IncompleteReport(msg) => {
+                write!(f, "SAB report is missing required data: {msg}")
+            }
         }
     }
 }

@@ -5,7 +5,7 @@ fn test_rating_thresholds() {
     let make_result = |score: f64| SabResult {
         aggregate_score: score,
         scenario_scores: vec![],
-        total_tokens_used: 0,
+        total_tokens_used: Some(0),
         wall_clock: Duration::ZERO,
         rating: match score as u32 {
             85..=100 => GenerationRating::Bloom,
@@ -13,6 +13,8 @@ fn test_rating_thresholds() {
             30..=59 => GenerationRating::Wilt,
             _ => GenerationRating::Frost,
         },
+        binary_sha256: "test".to_string(),
+        run_id: "test".to_string(),
     };
 
     assert_eq!(make_result(95.0).rating, GenerationRating::Bloom);
@@ -23,22 +25,14 @@ fn test_rating_thresholds() {
 }
 
 #[test]
-fn test_difficulty_inference() {
-    assert_eq!(infer_difficulty("easy_calculator"), Difficulty::Easy);
-    assert_eq!(infer_difficulty("medium_bitset"), Difficulty::Medium);
-    assert_eq!(infer_difficulty("testgen_ringbuf"), Difficulty::Medium);
-    assert_eq!(infer_difficulty("hard_scheduler"), Difficulty::Hard);
-    assert_eq!(infer_difficulty("expert_async_race"), Difficulty::Expert);
-}
-
-#[test]
 fn test_fitness_delta_positive_improvement() {
     let weights = FitnessWeights::default();
     let baseline = FitnessMetrics {
         sab_score: 90.0,
-        tokens_used: 300_000,
+        tokens_used: Some(300_000),
         token_budget: 500_000,
         wall_clock_secs: 1800.0,
+        full_evaluation_secs: None,
         timeout_secs: 3600.0,
         test_coverage_pct: 82.0,
         binary_size_mb: 15.0,
@@ -49,78 +43,38 @@ fn test_fitness_delta_positive_improvement() {
     };
     let better = FitnessMetrics {
         sab_score: 95.0,
-        tokens_used: 200_000,
+        tokens_used: Some(200_000),
         ..baseline.clone()
     };
     assert!(fitness_delta(&baseline, &better, &weights) > 0.0);
 }
 
 #[test]
-fn test_parse_sab_output_json_path() {
-    // Output containing a report path — should try to parse as JSON file
-    // (which won't exist), then fall back
-    let output = "Running SAB...\nreports/sab_2024.json\nDone.";
-    let result = parse_sab_output(output, Duration::from_secs(60));
-    // The report file doesn't exist, so this returns an error
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_parse_text_output_multiple_scenarios() {
-    let output = "\
-easy_calculator: 95/100 BLOOM
-medium_bitset: 72/100 GROW
-hard_scheduler: 45/100 WILT
-expert_async_race: 30/100 FROST";
-    let scores = parse_text_output(output).unwrap();
-    assert_eq!(scores.len(), 4);
-    assert_eq!(scores[0].name, "easy_calculator");
-    assert_eq!(scores[0].score, 95.0);
-    assert_eq!(scores[0].difficulty, Difficulty::Easy);
-    assert_eq!(scores[1].name, "medium_bitset");
-    assert_eq!(scores[1].difficulty, Difficulty::Medium);
-    assert_eq!(scores[2].name, "hard_scheduler");
-    assert_eq!(scores[2].difficulty, Difficulty::Hard);
-    assert_eq!(scores[3].name, "expert_async_race");
-    assert_eq!(scores[3].difficulty, Difficulty::Expert);
-}
-
-#[test]
-fn test_parse_text_output_empty() {
-    let scores = parse_text_output("").unwrap();
-    assert!(scores.is_empty());
-}
-
-#[test]
-fn test_parse_text_output_malformed() {
-    let output = "easy_calculator: not_a_number/100\nrandom line\n: /100";
-    let scores = parse_text_output(output).unwrap();
-    // "not_a_number" can't be parsed as f64, so no score for that line
-    assert!(scores.is_empty());
-}
-
-#[test]
 fn test_rating_boundary_84_is_grow() {
     // 84 is in the Grow range (60..=84)
-    let result = parse_sab_output("test_scenario: 84/100 OK", Duration::from_secs(10)).unwrap();
+    let fx = report_fixture(84.0);
+    let result = parse_sab_output(&fx.stdout(), Duration::from_secs(10), fx.binary()).unwrap();
     assert_eq!(result.rating, GenerationRating::Grow);
 }
 
 #[test]
 fn test_rating_boundary_85_is_bloom() {
-    let result = parse_sab_output("test_scenario: 85/100 OK", Duration::from_secs(10)).unwrap();
+    let fx = report_fixture(85.0);
+    let result = parse_sab_output(&fx.stdout(), Duration::from_secs(10), fx.binary()).unwrap();
     assert_eq!(result.rating, GenerationRating::Bloom);
 }
 
 #[test]
 fn test_rating_boundary_59_is_wilt() {
-    let result = parse_sab_output("test_scenario: 59/100 OK", Duration::from_secs(10)).unwrap();
+    let fx = report_fixture(59.0);
+    let result = parse_sab_output(&fx.stdout(), Duration::from_secs(10), fx.binary()).unwrap();
     assert_eq!(result.rating, GenerationRating::Wilt);
 }
 
 #[test]
 fn test_rating_boundary_29_is_frost() {
-    let result = parse_sab_output("test_scenario: 29/100 OK", Duration::from_secs(10)).unwrap();
+    let fx = report_fixture(29.0);
+    let result = parse_sab_output(&fx.stdout(), Duration::from_secs(10), fx.binary()).unwrap();
     assert_eq!(result.rating, GenerationRating::Frost);
 }
 
@@ -129,9 +83,10 @@ fn test_fitness_delta_negative() {
     let weights = FitnessWeights::default();
     let baseline = FitnessMetrics {
         sab_score: 90.0,
-        tokens_used: 200_000,
+        tokens_used: Some(200_000),
         token_budget: 500_000,
         wall_clock_secs: 1000.0,
+        full_evaluation_secs: None,
         timeout_secs: 3600.0,
         test_coverage_pct: 85.0,
         binary_size_mb: 10.0,
@@ -142,8 +97,9 @@ fn test_fitness_delta_negative() {
     };
     let worse = FitnessMetrics {
         sab_score: 60.0,
-        tokens_used: 450_000,
+        tokens_used: Some(450_000),
         wall_clock_secs: 3500.0,
+        full_evaluation_secs: None,
         test_coverage_pct: 50.0,
         binary_size_mb: 45.0,
         ..baseline.clone()
@@ -157,9 +113,10 @@ fn test_fitness_delta_equal() {
     let weights = FitnessWeights::default();
     let metrics = FitnessMetrics {
         sab_score: 80.0,
-        tokens_used: 200_000,
+        tokens_used: Some(200_000),
         token_budget: 500_000,
         wall_clock_secs: 1800.0,
+        full_evaluation_secs: None,
         timeout_secs: 3600.0,
         test_coverage_pct: 82.0,
         binary_size_mb: 15.0,
@@ -180,9 +137,11 @@ fn test_build_fitness_metrics_missing_binary() {
     let sab = SabResult {
         aggregate_score: 75.0,
         scenario_scores: vec![],
-        total_tokens_used: 100_000,
+        total_tokens_used: Some(100_000),
         wall_clock: Duration::from_secs(600),
         rating: GenerationRating::Grow,
+        binary_sha256: "test".to_string(),
+        run_id: "test".to_string(),
     };
     let metrics = build_fitness_metrics(
         &sab,
@@ -195,7 +154,7 @@ fn test_build_fitness_metrics_missing_binary() {
     );
     assert_eq!(metrics.binary_size_mb, 0.0); // File doesn't exist → 0.0
     assert_eq!(metrics.sab_score, 75.0);
-    assert_eq!(metrics.tokens_used, 100_000);
+    assert_eq!(metrics.tokens_used, Some(100_000));
     assert_eq!(metrics.tests_passed, 5000);
     assert_eq!(metrics.tests_total, 5200);
 }
@@ -211,21 +170,17 @@ fn test_sab_config_default() {
 }
 
 #[test]
-fn test_parse_sab_output_empty_gives_frost() {
-    let result = parse_sab_output("", Duration::from_secs(10)).unwrap();
-    assert_eq!(result.aggregate_score, 0.0);
-    assert_eq!(result.rating, GenerationRating::Frost);
-    assert!(result.scenario_scores.is_empty());
-}
-
-#[test]
-fn test_infer_difficulty_refactor_prefix() {
-    assert_eq!(infer_difficulty("refactor_module"), Difficulty::Medium);
-}
-
-#[test]
-fn test_infer_difficulty_unknown_prefix() {
-    assert_eq!(infer_difficulty("custom_scenario"), Difficulty::Hard);
+fn test_parse_sab_output_empty_is_an_error_not_a_frost_score() {
+    // This used to produce a Frost RATING from empty output, because the text
+    // fallback returned zero scenarios and zero averaged to 0.0. A run that
+    // reported nothing is not a run that scored badly.
+    let fx = report_fixture(50.0);
+    assert!(parse_sab_output("", Duration::from_secs(10), fx.binary()).is_err());
+    // A real report still parses normally.
+    let result = parse_sab_output(&fx.stdout(), Duration::from_secs(10), fx.binary()).unwrap();
+    assert_eq!(result.aggregate_score, 50.0);
+    assert_eq!(result.rating, GenerationRating::Wilt);
+    assert_eq!(result.scenario_scores.len(), 1);
 }
 
 #[test]
@@ -240,22 +195,181 @@ fn test_fitness_error_display() {
     assert!(format!("{}", e3).contains("/tmp/missing"));
 }
 
-#[test]
-fn test_scenario_score_derived_fields() {
-    let output = "easy_calculator: 95/100 BLOOM";
-    let scores = parse_text_output(output).unwrap();
-    assert_eq!(scores.len(), 1);
-    assert!(scores[0].tests_passed); // 95 >= 70
-    assert!(scores[0].broken_tests_fixed); // 95 >= 90
-    assert!(scores[0].clean_exit); // 95 >= 10
+// ── SAB report contract ────────────────────────────────────────────────────
+//
+// The runner ignored `SELFWARE_BINARY` and always built and ran its OWN
+// repository's release binary, so every candidate worktree was scored using the
+// baseline build and fitness could not tell the two apart. These tests use
+// DISTINGUISHABLE fixture executables so scoring the wrong one necessarily
+// fails, rather than silently producing a plausible number.
+
+struct ReportFixture {
+    _dir: tempfile::TempDir,
+    binary: std::path::PathBuf,
+    report: std::path::PathBuf,
+}
+
+impl ReportFixture {
+    fn binary(&self) -> &Path {
+        &self.binary
+    }
+    fn stdout(&self) -> String {
+        format!(
+            "Running SAB...\nSAB_REPORT_JSON={}\n",
+            self.report.display()
+        )
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(bytes);
+    format!("{:x}", h.finalize())
+}
+
+/// A fixture whose report honestly describes the fixture's own binary.
+fn report_fixture(score: f64) -> ReportFixture {
+    report_fixture_for(score, None)
+}
+
+/// `claimed_sha` overrides what the report SAYS it evaluated, to simulate a
+/// runner that scored a different build than the caller asked for.
+fn report_fixture_for(score: f64, claimed_sha: Option<&str>) -> ReportFixture {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let binary = dir.path().join("selfware-candidate");
+    let contents = format!("#!/bin/sh\necho candidate-{score}\n");
+    std::fs::write(&binary, &contents).unwrap();
+    let real_sha = sha256_hex(contents.as_bytes());
+    let report = dir.path().join("report.json");
+    let body = serde_json::json!({
+        "schema": "sab-report/1",
+        "run_id": "fixture-run",
+        "binary": binary.to_string_lossy(),
+        "binary_sha256": claimed_sha.unwrap_or(&real_sha),
+        "binary_source": "SELFWARE_BINARY",
+        "scenarios_expected": 1,
+        "scenarios_completed": 1,
+        "scenarios": [{
+            "name": "test_scenario",
+            "difficulty": "easy",
+            "score": score,
+            "tests_passed": true,
+            "broken_tests_fixed": false,
+            "clean_exit": true,
+            "duration_secs": 10,
+            "tokens_used": serde_json::Value::Null,
+        }],
+    });
+    std::fs::write(&report, serde_json::to_string(&body).unwrap()).unwrap();
+    ReportFixture {
+        _dir: dir,
+        binary,
+        report,
+    }
 }
 
 #[test]
-fn test_scenario_score_low_score_flags() {
-    let output = "bad_scenario: 5/100 FROST";
-    let scores = parse_text_output(output).unwrap();
-    assert_eq!(scores.len(), 1);
-    assert!(!scores[0].tests_passed); // 5 < 70
-    assert!(!scores[0].broken_tests_fixed); // 5 < 90
-    assert!(!scores[0].clean_exit); // 5 < 10
+fn scoring_a_different_binary_than_requested_is_rejected() {
+    // The exact defect: the runner evaluated some other build. A score that
+    // describes a different executable must fail loudly, not be returned.
+    let fx = report_fixture_for(95.0, Some(&sha256_hex(b"a completely different build")));
+    let err = parse_sab_output(&fx.stdout(), Duration::from_secs(10), fx.binary())
+        .expect_err("a report about another binary must not yield a score");
+    assert!(
+        matches!(err, FitnessError::WrongBinaryEvaluated { .. }),
+        "expected WrongBinaryEvaluated, got {err:?}"
+    );
+}
+
+#[test]
+fn a_report_describing_the_requested_binary_is_accepted() {
+    let fx = report_fixture(88.0);
+    let result = parse_sab_output(&fx.stdout(), Duration::from_secs(10), fx.binary())
+        .expect("matching binary should parse");
+    assert_eq!(result.aggregate_score, 88.0);
+    assert_eq!(result.run_id, "fixture-run");
+}
+
+#[test]
+fn output_without_a_structured_report_is_an_error() {
+    // Previously this fell back to scraping `name: NN/100` out of the text and
+    // inventing tests_passed from a threshold.
+    let fx = report_fixture(90.0);
+    let err = parse_sab_output(
+        "easy_calculator: 95/100 BLOOM\nmedium_bitset: 72/100 GROW",
+        Duration::from_secs(10),
+        fx.binary(),
+    )
+    .expect_err("scores must come from the report, never from scraped text");
+    assert!(matches!(err, FitnessError::ReportParseFailed(_)), "{err:?}");
+}
+
+#[test]
+fn a_partial_suite_is_not_a_score() {
+    // Averaging over the scenarios that finished let a candidate that crashed
+    // most of the suite outscore one that completed it.
+    let fx = report_fixture(100.0);
+    let mut body: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&fx.report).unwrap()).unwrap();
+    body["scenarios_expected"] = serde_json::json!(12);
+    std::fs::write(&fx.report, serde_json::to_string(&body).unwrap()).unwrap();
+    let err = parse_sab_output(&fx.stdout(), Duration::from_secs(10), fx.binary())
+        .expect_err("1 of 12 scenarios is not a suite result");
+    assert!(matches!(err, FitnessError::IncompleteReport(_)), "{err:?}");
+}
+
+#[test]
+fn a_missing_outcome_field_is_rejected_rather_than_defaulted() {
+    let fx = report_fixture(90.0);
+    let mut body: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&fx.report).unwrap()).unwrap();
+    body["scenarios"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("tests_passed");
+    std::fs::write(&fx.report, serde_json::to_string(&body).unwrap()).unwrap();
+    let err = parse_sab_output(&fx.stdout(), Duration::from_secs(10), fx.binary())
+        .expect_err("a missing outcome used to default to false");
+    assert!(matches!(err, FitnessError::IncompleteReport(_)), "{err:?}");
+}
+
+#[test]
+fn unobserved_tokens_stay_unknown_and_do_not_score_as_perfect_efficiency() {
+    let fx = report_fixture(80.0);
+    let result = parse_sab_output(&fx.stdout(), Duration::from_secs(10), fx.binary()).unwrap();
+    assert_eq!(
+        result.total_tokens_used, None,
+        "the runner does not observe tokens; absent is not zero"
+    );
+
+    // And the composite must not award full marks for the term it never saw.
+    let weights = FitnessWeights::default();
+    let unmeasured = FitnessMetrics {
+        sab_score: 80.0,
+        tokens_used: None,
+        token_budget: 500_000,
+        wall_clock_secs: 10.0,
+        timeout_secs: 3600.0,
+        full_evaluation_secs: None,
+        test_coverage_pct: 80.0,
+        binary_size_mb: 15.0,
+        max_binary_size_mb: 50.0,
+        tests_passed: 8,
+        tests_total: 10,
+        visual_score: 0.0,
+    };
+    let spent_everything = FitnessMetrics {
+        tokens_used: Some(500_000),
+        ..unmeasured.clone()
+    };
+    assert!(
+        weights.composite(&unmeasured) < 1.0,
+        "an unmeasured run must not score as if it spent nothing"
+    );
+    assert!(
+        weights.composite(&unmeasured) > weights.composite(&spent_everything),
+        "and a run that burned the whole budget should still rank below it"
+    );
+    assert!(!unmeasured.is_complete());
 }

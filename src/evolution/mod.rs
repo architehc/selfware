@@ -139,23 +139,57 @@ pub struct FitnessWeights {
     pub visual_quality: f64,
 }
 
+impl FitnessMetrics {
+    /// Whether every term the weights score was actually measured.
+    ///
+    /// Two candidates are only comparable when this holds for both: a score
+    /// computed over four terms and one computed over five are different
+    /// quantities, whatever the renormalisation.
+    pub fn is_complete(&self) -> bool {
+        self.tokens_used.is_some()
+    }
+}
+
 impl FitnessWeights {
-    /// Compute composite fitness score from raw metrics
+    /// Compute composite fitness score from raw metrics.
+    ///
+    /// A term that was not measured is EXCLUDED and the remaining weights are
+    /// renormalised, rather than being scored as if it were zero. Scoring an
+    /// unobserved token count as 0 awarded full marks for efficiency to a run
+    /// that never reported any.
+    ///
+    /// Exclusion keeps the number meaningful on its own, but it does NOT make
+    /// an incomplete measurement comparable to a complete one — see
+    /// [`FitnessMetrics::is_complete`], which promotion should gate on.
     pub fn composite(&self, metrics: &FitnessMetrics) -> f64 {
-        let normalized_tokens =
-            1.0 - (metrics.tokens_used as f64 / metrics.token_budget as f64).min(1.0);
         let normalized_latency = 1.0 - (metrics.wall_clock_secs / metrics.timeout_secs).min(1.0);
         let normalized_coverage = metrics.test_coverage_pct / 100.0;
         let normalized_size = 1.0 - (metrics.binary_size_mb / metrics.max_binary_size_mb).min(1.0);
-
         let normalized_visual = metrics.visual_score / 100.0;
 
-        self.sab_score * (metrics.sab_score / 100.0)
-            + self.token_efficiency * normalized_tokens
+        let mut score = self.sab_score * (metrics.sab_score / 100.0)
             + self.latency * normalized_latency
             + self.test_coverage * normalized_coverage
             + self.binary_size * normalized_size
-            + self.visual_quality * normalized_visual
+            + self.visual_quality * normalized_visual;
+        let mut weight_total = self.sab_score
+            + self.latency
+            + self.test_coverage
+            + self.binary_size
+            + self.visual_quality;
+
+        if let Some(tokens) = metrics.tokens_used {
+            let normalized_tokens =
+                1.0 - (tokens as f64 / metrics.token_budget.max(1) as f64).min(1.0);
+            score += self.token_efficiency * normalized_tokens;
+            weight_total += self.token_efficiency;
+        }
+
+        if weight_total > 0.0 {
+            score / weight_total
+        } else {
+            0.0
+        }
     }
 }
 
@@ -177,10 +211,21 @@ impl Default for FitnessWeights {
 #[derive(Debug, Clone)]
 pub struct FitnessMetrics {
     pub sab_score: f64,
-    pub tokens_used: u64,
+    /// `None` when token usage was not observed.
+    ///
+    /// This was `u64`, and an unmeasured run recorded 0 — which `composite`
+    /// scores as PERFECT token efficiency (`1.0 - 0/budget`). A candidate
+    /// nobody measured therefore outranked one that was measured honestly.
+    pub tokens_used: Option<u64>,
     pub token_budget: u64,
+    /// Duration of the phase both arms measure, so the two are comparable.
     pub wall_clock_secs: f64,
     pub timeout_secs: f64,
+    /// Total evaluation cost including build and lint phases, where it was
+    /// measured. Recorded separately from `wall_clock_secs` rather than folded
+    /// into it: the baseline used to include four phases the candidate never
+    /// timed, which made every candidate look faster.
+    pub full_evaluation_secs: Option<f64>,
     pub test_coverage_pct: f64,
     pub binary_size_mb: f64,
     pub max_binary_size_mb: f64,

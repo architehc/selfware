@@ -33,7 +33,7 @@ fn test_format_history_with_entries() {
             description: "Optimized token counting".into(),
             composite_score: 0.85,
             sab_delta: 3.0,
-            token_delta: -50000.0,
+            token_delta: Some(-50000.0),
             patch: String::new(),
             git_tag: None,
         },
@@ -42,7 +42,7 @@ fn test_format_history_with_entries() {
             description: "Rewrote XML parser".into(),
             composite_score: 0.91,
             sab_delta: 5.0,
-            token_delta: -30000.0,
+            token_delta: Some(-30000.0),
             patch: String::new(),
             git_tag: Some("evolve-gen-5".into()),
         },
@@ -103,13 +103,15 @@ fn test_metrics_from_sab_result() {
     let sab = SabResult {
         aggregate_score: 88.5,
         scenario_scores: vec![],
-        total_tokens_used: 250_000,
+        total_tokens_used: Some(250_000),
         wall_clock: std::time::Duration::from_secs(1200),
         rating: GenerationRating::Bloom,
+        binary_sha256: "test".to_string(),
+        run_id: "test".to_string(),
     };
     let metrics = metrics_from_sab_result(&sab, Path::new("target/release/selfware"), 50.0);
     assert_eq!(metrics.sab_score, 88.5);
-    assert_eq!(metrics.tokens_used, 250_000);
+    assert_eq!(metrics.tokens_used, Some(250_000));
     assert_eq!(metrics.token_budget, DEFAULT_TOKEN_BUDGET);
     assert!((metrics.wall_clock_secs - 1200.0).abs() < 0.01);
     assert_eq!(metrics.max_binary_size_mb, 50.0);
@@ -123,7 +125,7 @@ fn test_format_history_caps_at_10() {
             description: format!("Mutation {}", i),
             composite_score: 0.80 + i as f64 * 0.01,
             sab_delta: 1.0,
-            token_delta: -1000.0,
+            token_delta: Some(-1000.0),
             patch: String::new(),
             git_tag: None,
         })
@@ -276,19 +278,20 @@ fn test_generation_winner_fields() {
         description: "Cache optimization".to_string(),
         composite_score: 0.92,
         sab_delta: 7.5,
-        token_delta: -25000.0,
+        token_delta: Some(-25000.0),
         patch: "--- a/src/cache.rs\n+++ b/src/cache.rs".to_string(),
         git_tag: Some("evolve-gen-42".to_string()),
     };
     assert_eq!(winner.generation, 42);
     assert!(winner.sab_delta > 0.0);
-    assert!(winner.token_delta < 0.0);
+    assert!(winner.token_delta.is_some_and(|d| d < 0.0));
     assert!(winner.git_tag.as_ref().unwrap().contains("42"));
 }
 
 #[test]
 fn test_evolution_result_fields() {
     let result = EvolutionResult {
+        aborted: None,
         generations_run: 0,
         improvements: vec![],
         final_sab_score: 0.0,
@@ -304,9 +307,10 @@ fn test_evolution_result_fields() {
 fn make_metrics(tests_passed: usize, tests_total: usize) -> FitnessMetrics {
     FitnessMetrics {
         sab_score: 100.0,
-        tokens_used: 0,
+        tokens_used: Some(0),
         token_budget: DEFAULT_TOKEN_BUDGET,
         wall_clock_secs: 1.0,
+        full_evaluation_secs: None,
         timeout_secs: DEFAULT_TIMEOUT_SECS,
         test_coverage_pct: 100.0,
         binary_size_mb: 10.0,
