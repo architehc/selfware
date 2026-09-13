@@ -83,6 +83,82 @@ succeed with a longer-lived connection. The advertised 1,000,000 is ~4x the
 largest demonstrated success; the true capacity is unknown and could be higher
 or lower than the points probed.
 
+### O2b — The depth limit is a ~60s gateway timeout, not a context ceiling
+
+Measured 2026-09-13, same endpoint, `enable_thinking=false`, `max_tokens=8`.
+All figures are ACTUAL `prompt_tokens` from the response, never estimates.
+
+| prompt_tokens | wall | outcome |
+| --- | --- | --- |
+| 235,298 | 33.8s | content returned |
+| 294,118 | 45.9s | content returned |
+| 308,238 | 47.5s | content returned |
+| 317,658 | 49.7s | content returned |
+| 352,958 | 56.9 / 57.1 / 57.6s | content returned, **3 of 3** |
+| 364,718 | 59.2s | content returned |
+| ~376,000 | 61.3s | connection closed, no response |
+| ~470,000 | 61.4s | connection closed, no response |
+| ~588,000 | 61.5s | connection closed, no response |
+| ~706,000 | 61.2s | connection closed, no response |
+| ~880,000 | 62.0s | connection closed, no response |
+
+**What this establishes:** every failure closes at 61.2–62.0s regardless of
+size — from ~376k to ~880k tokens, a 2.3x range, the duration is constant to
+within 0.8s. A capacity limit does not behave that way; a fixed timeout does.
+Success tracks *duration*, not size: the largest success took 59.2s and the
+smallest failure 61.3s. The practical limit is therefore **whatever prefills in
+under ~60 seconds**, which on this deployment is ~365k tokens.
+
+**Working guidance:** size prompts to **≤ 350k tokens**, which completed 3 of 3
+at ~57s with margin. 364,718 works but sits 0.8s from the cliff.
+
+**This closes open question 3** (which component owns the 61.2s cut-off — a
+timeout in front of the model, not the model) and **open question 2** (where the
+real depth limit is — there is no observed *context* limit below ~880k, only a
+time limit).
+
+**What this does NOT establish:** that 1,000,000 tokens works. It is advertised
+in `/v1/models` and was never reached: every attempt past ~365k died on the
+clock before the model could answer. Whether the ceiling would appear at 1M with
+a longer-lived connection is untested.
+
+**Correction to a claim made while probing:** the Qwen3.8-Flash-Next model card
+gives 262,144 native context, extensible to 1M via RoPE scaling, and I inferred
+the deployment was capped at native. That was wrong — 352,958 tokens succeed
+reproducibly, well past 262,144, so scaling is in effect.
+
+### O4b — Template arguments, re-validated against the model card
+
+Measured 2026-09-13. The card
+([Qwen/Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next))
+documents exactly three `chat_template_kwargs`, and the endpoint agrees:
+
+| kwarg | accepted | default | endpoint behaviour on "17+23" |
+| --- | --- | --- | --- |
+| `enable_thinking` | true / false | true | false → 0 reasoning chars, 3 completion tokens; true → 64 chars, 33 tokens |
+| `reasoning_effort` | low / medium / xhigh | xhigh | all three accepted (HTTP 200) |
+| `preserve_thinking` | true / false | true | accepted; single-turn cannot show a difference |
+
+`reasoning_effort="high"` and `"max"` return HTTP 400: *"Unexpected reasoning
+effort high. Supported types are xhigh (default), medium, and low."*
+
+**`enable_thinking=false` is the one with a large, measured effect**: 3
+completion tokens against 33 for the same answer, an 11x reduction on this
+prompt.
+
+**Not established:** any `reasoning_effort` ordering. On this prompt the three
+levels produced 81 / 64 / 68 reasoning characters — the task is too easy to
+discriminate, and the differences are noise. The earlier O4 table used harder
+prompts and remains the better evidence there. `preserve_thinking` governs
+retention of history across turns and cannot be tested with one turn; it was
+not tested here.
+
+**Correction to O4 below:** it states the defaults "produce almost no content"
+(796 reasoning chars, 1 content char, `finish_reason: "length"`). On this
+prompt the defaults returned a complete answer with `finish_reason: "stop"`.
+That observation was prompt-specific and `max_tokens`-specific, not a property
+of the defaults.
+
 ### O3 — Two distinct zero-content failure modes
 
 These have different signatures and must not be conflated.
