@@ -391,7 +391,7 @@ impl RSIOrchestrator {
         }
 
         // 6. Measure Baseline Fitness (PAID suite #1) — deferred until the
-        // mutation is known to be non-trivial, compiling, and passing verifier audit.
+        // mutation is known to be non-trivial and compiling.
         let baseline_report = self.run_benchmark_report(&self.project_root).await?;
         let baseline_score = baseline_report.average_score;
         debug!("Baseline fitness score: {}", baseline_score);
