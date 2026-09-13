@@ -39,15 +39,24 @@ def _read_rows(path):
 
 def load_matching_verdicts(path, cases, verdict_key="v"):
     expected = {}
+    # An ID reused with DIFFERENT content (generator id collision) can never
+    # authorize a promotion for either copy — quarantine it, don't abort the
+    # run. Observed killing a full pipeline cycle on one collision.
+    quarantined = set()
     for case in cases:
         digest = case_fingerprint(case)
         if case["id"] in expected and expected[case["id"]] != digest:
-            raise ValueError(f"conflicting inputs for case ID {case['id']}")
+            quarantined.add(case["id"])
         expected[case["id"]] = digest
+    if quarantined:
+        import sys
+        print(f"quarantined {len(quarantined)} colliding case IDs: "
+              f"{sorted(quarantined)[:5]}", file=sys.stderr)
     verdicts, conflicts = {}, set()
     for row in _read_rows(path):
         case_id, verdict = row.get("id"), row.get(verdict_key)
-        if (not isinstance(case_id, str) or case_id not in expected or verdict not in ("r", "a")
+        if (not isinstance(case_id, str) or case_id not in expected
+                or case_id in quarantined or verdict not in ("r", "a")
                 or row.get("input_sha256") != expected[case_id]):
             continue
         if case_id in verdicts and verdicts[case_id] != verdict:
