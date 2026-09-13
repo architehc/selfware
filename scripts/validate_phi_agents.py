@@ -333,6 +333,7 @@ async def run_agents(args, root: Path, agents: list[dict]) -> dict:
             env.pop("ANTHROPIC_API_KEY", None)
             env.pop("OPENAI_API_KEY", None)
             env.pop("GEMINI_API_KEY", None)
+            env.pop("SELFWARE_LOCAL_API_KEY", None)
             started_ms = time.time_ns() // 1_000_000
             timed_out, returncode, spawn_error = False, None, None
             process = None
@@ -456,9 +457,16 @@ def main() -> int:
     args = parser.parse_args()
     if min(args.agents, args.concurrency, args.timeout, args.token_budget) <= 0 or args.agents > 16 or args.concurrency > 16:
         parser.error("agents/concurrency must be 1..16; timeout and budget must be positive")
-    args.binary = args.binary.resolve(strict=True)
+    if not args.binary.is_file():
+        parser.error(f"binary not found: {args.binary}")
+    args.binary = args.binary.resolve()
     root = args.output.resolve()
-    root.mkdir(parents=True, exist_ok=False)
+    if root.exists():
+        parser.error(f"output directory already exists: {root}")
+    try:
+        root.mkdir(parents=True, exist_ok=False)
+    except OSError as err:
+        parser.error(f"failed to create output directory: {err}")
     (root/"config.toml").write_text(config_text(args.endpoint, args.model, args.token_budget))
     (root/"config.toml").chmod(0o600)
     agents = prepare(root, args.agents)

@@ -7,6 +7,9 @@
 //! - **Metis Pattern Miner**: detects frequent multi-step tool call sequences and compiles them into composite macros.
 //! - **Library Drift Ledger**: tracks invocation frequency and utility, enforcing a capacity cap (default 50 skills)
 //!   via utility-weighted eviction to prevent retrieval dilution.
+//!
+//! Note on dormancy: The skill distillation engine is integrated into the memory consolidation pipeline
+//! but is dormant on the primary agent loop until explicitly invoked or scheduled during sleep consolidation cycles.
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
@@ -205,6 +208,14 @@ impl SkillDistiller {
         }
         let json = serde_json::to_string_pretty(ledger)?;
         let tmp_path = self.ledger_file.with_extension("tmp");
+        if let Ok(meta) = tmp_path.symlink_metadata() {
+            if meta.file_type().is_symlink() {
+                return Err(anyhow!(
+                    "Ledger temporary destination is a symlink: {:?}",
+                    tmp_path
+                ));
+            }
+        }
         fs::write(&tmp_path, json)?;
         fs::rename(tmp_path, &self.ledger_file)?;
         Ok(())

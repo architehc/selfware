@@ -1147,9 +1147,16 @@ pub fn run_tui_dashboard_with_events(
                                         } else {
                                             let mut lines = vec!["Available skills:".to_string()];
                                             for skill in registry.list() {
+                                                let unverified_suffix = if skill.verified {
+                                                    ""
+                                                } else {
+                                                    " (UNVERIFIED)"
+                                                };
                                                 lines.push(format!(
-                                                    "  /{} -- {}",
-                                                    skill.name, skill.description
+                                                    "  /{}{} -- {}",
+                                                    skill.name,
+                                                    unverified_suffix,
+                                                    skill.description
                                                 ));
                                             }
                                             lines.join("\n")

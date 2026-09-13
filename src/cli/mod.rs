@@ -1466,26 +1466,16 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
                     } else {
                         let mut out = format!("{} skill(s) available:", skill_registry.len());
                         for skill in skill_registry.list() {
-                            out.push_str(&format!("\n  /{} — {}", skill.name, skill.description));
+                            let unverified_suffix =
+                                if skill.verified { "" } else { " (UNVERIFIED)" };
+                            out.push_str(&format!(
+                                "\n  /{}{} — {}",
+                                skill.name, unverified_suffix, skill.description
+                            ));
                         }
                         log_line(out);
                     }
                     continue;
-                }
-                // /<skill-name> [args] — inject a discovered user skill
-                // (markdown + YAML frontmatter; $ARGUMENTS substituted).
-                if let Some(invocation) = input.strip_prefix('/') {
-                    let mut parts = invocation.splitn(2, char::is_whitespace);
-                    let name = parts.next().unwrap_or("");
-                    let arguments = parts.next().unwrap_or("").trim();
-                    if let Some(skill) = skill_registry.get(name) {
-                        let task = skill.render_with_trust_gate(arguments);
-                        agent.reset_cancellation();
-                        if let Err(e) = agent.run_task(&task).await {
-                            warn!("Agent failed to run skill task: {}", e);
-                        }
-                        continue;
-                    }
                 }
                 // Other slash commands must NOT be sent to the LLM as prompts.
                 // In TUI dashboard mode the full interactive command
