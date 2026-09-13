@@ -147,3 +147,4 @@ scratchpad/
 
 # Phi ledger scenario fixtures (regenerable; see docs/quant_bench)
 target/phi-session-eval/
+target/install-validation/*/source.tar
