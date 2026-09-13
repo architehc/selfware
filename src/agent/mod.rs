@@ -868,7 +868,12 @@ pub struct Agent {
     /// The bare summary above cannot distinguish a failing test in this task's
     /// project from a compile error in an unrelated crate that encloses it, so
     /// both blocked completion. See `verification_scope`.
-    last_failed_verification_record: Option<verification_scope::VerificationRecord>,
+    /// Outstanding verification failures, one per check identity.
+    ///
+    /// Was a single `Option<VerificationRecord>`: a second failing check
+    /// overwrote the first, and the automatic post-edit path bypassed the
+    /// scoped clearing rule entirely by assigning `None` on any pass.
+    verification_failures: verification_scope::VerificationLedger,
     /// Root the current task is working in; verification relevance is measured
     /// against it.
     task_verification_root: Option<std::path::PathBuf>,
@@ -1512,7 +1517,7 @@ To call a tool, use this EXACT XML structure:
             mutation_sequence: 0,
             last_successful_verification_mutation_sequence: 0,
             last_failed_verification_summary: None,
-            last_failed_verification_record: None,
+            verification_failures: Default::default(),
             // Pinned at construction: reading the process cwd live made verification
             // relevance depend on whatever else the process had chdir'd to.
             task_verification_root: std::env::current_dir().ok(),
@@ -2792,6 +2797,7 @@ To call a tool, use this EXACT XML structure:
         self.mutation_sequence = 0;
         self.last_successful_verification_mutation_sequence = 0;
         self.last_failed_verification_summary = None;
+        self.verification_failures.clear();
         self.last_failed_verification_mutation_sequence = 0;
         self.permanently_blocked_tool_calls.clear();
         self.prefill_400_count = 0;

@@ -31,6 +31,34 @@ impl Agent {
     /// this AFTER the mutating-call accounting, so a command that is both
     /// mutating and verifying (e.g. an inline `python3 -c` check) still ends
     /// the turn credited rather than stale.
+    /// The accounting a completed tool call performs on the agent's lifecycle
+    /// state: advance the mutation sequence if it edited, then enter its
+    /// verification outcome in the ledger.
+    ///
+    /// Both dispatch paths call this, and so do the lifecycle tests. That is
+    /// deliberate: the previous "lifecycle counterexamples" asserted on
+    /// `tool_call_is_mutating` directly, so they passed no matter what the
+    /// dispatcher did with the answer — no `Agent` existed, no counter moved,
+    /// no gate ran. A test that drives this function exercises the real
+    /// sequence and cannot silently diverge from it.
+    pub(crate) fn note_tool_call_lifecycle(
+        &mut self,
+        name: &str,
+        args: &serde_json::Value,
+        args_str: &str,
+        success: bool,
+        result_str: &str,
+    ) {
+        if success && tool_call_is_mutating(name, args) {
+            self.note_mutating_tool_call();
+            if tool_call_writes_file(name) {
+                self.has_written_any_file = true;
+                self.terminal_guard_hits = 0;
+            }
+        }
+        self.note_verification_outcome(name, args_str, success, result_str);
+    }
+
     pub(super) fn note_verification_outcome(
         &mut self,
         name: &str,
@@ -53,6 +81,7 @@ impl Agent {
             .unwrap_or_default();
         let scope = super::verification_scope::scope_for_command(name, &command, &working_dir);
         let record = super::verification_scope::VerificationRecord {
+            check_id: super::verification_scope::check_id_for(name, &command),
             command: name.to_string(),
             scope,
             passed: success,
@@ -71,23 +100,33 @@ impl Agent {
             self.probe_command_counts.clear();
             if self.mutation_sequence > 0 {
                 self.last_successful_verification_mutation_sequence = self.mutation_sequence;
-                // Clear only what this result actually covers. Clearing
-                // unconditionally let an unrelated green check erase a relevant
-                // failure -- the mirror of the foreign-failure blocking bug.
-                let clears = self
-                    .last_failed_verification_record
-                    .as_ref()
-                    .is_some_and(|failed| record.clears(failed));
-                if clears || self.last_failed_verification_record.is_none() {
-                    self.last_failed_verification_summary = None;
-                    self.last_failed_verification_record = None;
-                }
             }
-        } else {
-            self.last_failed_verification_summary = Some(record.summary.clone());
-            self.last_failed_verification_record = Some(record);
+        }
+        self.note_verification_record(record);
+    }
+
+    /// The single point where a verification outcome enters the ledger.
+    ///
+    /// Both the explicit path (a verification tool the model called) and the
+    /// automatic post-edit path route through here. They used to keep their own
+    /// accounting, and the automatic one cleared failures unconditionally.
+    pub(super) fn note_verification_record(
+        &mut self,
+        record: super::verification_scope::VerificationRecord,
+    ) {
+        let passed = record.passed;
+        if !passed {
             self.last_failed_verification_mutation_sequence = self.mutation_sequence;
         }
+        self.verification_failures.record(record);
+        // Kept in step with the ledger so the gate's message and the checkpoint
+        // summary cannot disagree with the records they describe.
+        let task_root = self.verification_task_root();
+        self.last_failed_verification_summary = self
+            .verification_failures
+            .blocking(&task_root, self.mutation_sequence)
+            .or_else(|| self.verification_failures.outstanding().first())
+            .map(|failed| failed.summary.clone());
     }
 
     fn current_task_tool_policy_violation(&self, tool_name: &str) -> Option<String> {
@@ -1796,15 +1835,7 @@ impl Agent {
             self.track_task_state_after_tool(&vt.name, &vt.args, &result_str, success)
                 .await;
 
-            if success && tool_call_is_mutating(&vt.name, &vt.args) {
-                self.note_mutating_tool_call();
-                if tool_call_writes_file(&vt.name) {
-                    self.has_written_any_file = true;
-                    self.terminal_guard_hits = 0;
-                }
-            }
-
-            self.note_verification_outcome(&vt.name, &vt.args_str, success, &result_str);
+            self.note_tool_call_lifecycle(&vt.name, &vt.args, &vt.args_str, success, &result_str);
 
             // Track file operations for context management
             if success {
@@ -3124,11 +3155,7 @@ impl Agent {
                 // `sed -i`, redirects).  Observational shell calls like
                 // `cargo check` / `git status` / `ls` should NOT bump the
                 // mutating counter.
-                if tool_call_is_mutating(name, args) && tool_success {
-                    self.note_mutating_tool_call();
-                }
-
-                self.note_verification_outcome(name, args_str, tool_success, &result_str);
+                self.note_tool_call_lifecycle(name, args, args_str, tool_success, &result_str);
 
                 // Record successful tool usage for learning
                 self.self_improvement.record_tool(

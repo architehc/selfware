@@ -257,7 +257,7 @@ pub struct GitCheckpointInfo {
 /// auto-resumes a crash-looping task would hand it fresh rope forever, turning
 /// crash-loops into amnesiac infinite loops. Persisting them lets the guards
 /// (prefill breaker, mutation-gate abort, no-action abort) fire ACROSS resumes.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct GuardCounters {
     #[serde(default)]
     pub consecutive_no_action_prompts: usize,
@@ -280,6 +280,15 @@ pub struct GuardCounters {
     /// refusal message after resume.
     #[serde(default)]
     pub last_failed_verification_summary: Option<String>,
+    /// Outstanding verification failures with the scope and check identity
+    /// each concerned.
+    ///
+    /// The summary string above survived resume but the structure did not, so
+    /// a resumed run could no longer tell a failure in its OWN project from one
+    /// in an enclosing workspace — every restored failure blocked. Persisting
+    /// the records keeps the scoped gate working across a resume.
+    #[serde(default)]
+    pub verification_failures: crate::agent::verification_scope::VerificationLedger,
 }
 
 /// Represents the delta/diff between two checkpoints

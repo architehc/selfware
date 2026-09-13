@@ -30,7 +30,7 @@ pub enum Relevance {
 }
 
 /// Where a verification command was actually pointed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct VerificationScope {
     /// Directory the command ran in.
     pub working_dir: PathBuf,
@@ -101,8 +101,14 @@ pub fn cargo_applies_to_task(task_root: &Path) -> bool {
 }
 
 /// A recorded verification outcome with the scope it concerned.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VerificationRecord {
+    /// Which CHECK this was, normalised: `cargo test`, `cargo check`, `pytest`.
+    ///
+    /// A single failure slot meant any success cleared any failure, so a green
+    /// `cargo check` erased a red `cargo test` — same project, different
+    /// question. A check answers only for itself.
+    pub check_id: String,
     pub command: String,
     pub scope: VerificationScope,
     pub passed: bool,
@@ -136,15 +142,37 @@ impl VerificationRecord {
 
     /// Whether a passing result may clear `other`.
     ///
-    /// A green check clears only failures in the same scope. Previously any
+    /// A green check clears only the SAME check in the same scope.
+    ///
+    /// Two earlier versions were both wrong in the same direction. First, any
     /// success wiped the single stored failure, so an unrelated passing command
-    /// erased a relevant red one — the mirror image of the blocking bug.
-    /// Two unresolvable scopes count as the same scope. Requiring a known root
-    /// meant a pass could never clear its own failure where no project could be
-    /// resolved, leaving the agent permanently blocked — a worse failure than
-    /// the one being prevented. Only a KNOWN, different scope refuses.
+    /// erased a relevant red one. Then scope was compared but the check was
+    /// not — and `cargo check` and `cargo test` resolve to the same project, so
+    /// a passing compile still cleared a failing test suite.
+    ///
+    /// Scope matching also no longer treats two unresolvable roots as equal.
+    /// It falls back to the working directory, which is always known, so a pass
+    /// can still clear its own failure where no project resolves (the agent is
+    /// never permanently blocked) without two unrelated directories clearing
+    /// each other.
     pub fn clears(&self, other: &VerificationRecord) -> bool {
-        self.passed && !other.passed && self.scope.project_root == other.scope.project_root
+        self.passed && !other.passed && self.same_check_as(other)
+    }
+
+    /// Whether two records answer the same question about the same tree.
+    pub fn same_check_as(&self, other: &VerificationRecord) -> bool {
+        if self.check_id != other.check_id {
+            return false;
+        }
+        match (&self.scope.project_root, &other.scope.project_root) {
+            (Some(a), Some(b)) => normalise(a) == normalise(b),
+            // Neither root resolved. Unknown is not a match: fall back to the
+            // directory the command actually ran in.
+            (None, None) => {
+                normalise(&self.scope.working_dir) == normalise(&other.scope.working_dir)
+            }
+            _ => false,
+        }
     }
 }
 
@@ -189,6 +217,7 @@ mod tests {
         seq: usize,
     ) -> VerificationRecord {
         VerificationRecord {
+            check_id: check_id_for(command, command),
             command: command.to_string(),
             scope: VerificationScope {
                 working_dir: cwd.to_path_buf(),
@@ -316,5 +345,97 @@ mod tests {
         let record = record("cargo_check", Some(&sibling), &py, false, 1);
         assert_eq!(record.relevance_to(&py), Relevance::Unknown);
         assert!(record.blocks_completion(&py, 1));
+    }
+}
+
+/// Normalise a command to the CHECK it performs.
+///
+/// `cargo test --lib -- --nocapture` and `cargo test` are the same check;
+/// `cargo check` is a different one. Flags and paths are dropped, the
+/// subcommand is kept — that is the distinction a single failure slot lost.
+pub fn check_id_for(tool: &str, command: &str) -> String {
+    let text = command.trim();
+    if text.is_empty() {
+        return tool.to_string();
+    }
+    let words: Vec<&str> = text
+        .split_whitespace()
+        .take_while(|w| !matches!(*w, "&&" | "||" | ";" | "|"))
+        .filter(|w| !w.starts_with('-'))
+        .collect();
+    match words.as_slice() {
+        [] => tool.to_string(),
+        // `python3 -m pytest` / `python3 -m unittest`: the module is the check,
+        // and it is behind a flag the filter above dropped.
+        [interp, rest @ ..] if interp.starts_with("python") || *interp == "node" => {
+            let module = text
+                .split_whitespace()
+                .skip_while(|w| *w != "-m")
+                .nth(1)
+                .or_else(|| rest.first().copied())
+                .unwrap_or("script");
+            format!("{interp} {module}")
+        }
+        [single] => (*single).to_string(),
+        // `cargo test`, `npm run`, `go build`.
+        [first, second, ..] => format!("{first} {second}"),
+    }
+}
+
+/// Outstanding verification failures, one per check identity.
+///
+/// Replaces a single `Option<VerificationRecord>` slot. With one slot a second
+/// failure overwrote the first, so a red `cargo test` followed by a red
+/// `pytest` left only one of them, and whichever was dropped could never be
+/// cleared or reported. Both the automatic post-edit path and the explicit
+/// tool-dispatch path write here, so the two cannot drift apart.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct VerificationLedger {
+    outstanding: Vec<VerificationRecord>,
+}
+
+impl VerificationLedger {
+    /// Record an outcome. A failure replaces the prior result for that same
+    /// check; a pass clears only what it actually covers.
+    pub fn record(&mut self, record: VerificationRecord) {
+        if record.passed {
+            self.outstanding.retain(|failed| !record.clears(failed));
+        } else {
+            self.outstanding
+                .retain(|prior| !prior.same_check_as(&record));
+            self.outstanding.push(record);
+        }
+    }
+
+    /// The first outstanding failure that should block a task rooted here.
+    pub fn blocking(
+        &self,
+        task_root: &Path,
+        current_mutation_sequence: usize,
+    ) -> Option<&VerificationRecord> {
+        self.outstanding
+            .iter()
+            .find(|record| record.blocks_completion(task_root, current_mutation_sequence))
+    }
+
+    /// Failures that are real but concern a project outside this task — worth
+    /// reporting, never worth blocking on.
+    pub fn out_of_scope(&self, task_root: &Path) -> Vec<&VerificationRecord> {
+        self.outstanding
+            .iter()
+            .filter(|record| record.relevance_to(task_root) == Relevance::OutOfScope)
+            .collect()
+    }
+
+    pub fn outstanding(&self) -> &[VerificationRecord] {
+        &self.outstanding
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.outstanding.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.outstanding.clear();
     }
 }

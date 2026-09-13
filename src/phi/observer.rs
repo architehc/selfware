@@ -234,26 +234,6 @@ fn diff_line_counts(diff: &str) -> Vec<(PathBuf, usize)> {
     out
 }
 
-/// Commands established as read-only. Deliberately short: anything not on this
-/// list is treated as possibly mutating, because the cost of a false "nothing
-/// changed" is a silently unreviewed edit.
-const READ_ONLY_COMMANDS: &[&str] = &[
-    "ls", "dir", "pwd", "echo", "cat", "head", "tail", "wc", "grep", "rg", "find", "file", "stat",
-    "which", "whoami", "date", "env", "printenv", "diff", "du", "df", "tree", "less", "more",
-    "basename", "dirname", "realpath", "sort", "uniq", "cut", "awk", "sed",
-];
-
-/// Git subcommands that only read.
-const READ_ONLY_GIT: &[&str] = &[
-    "status",
-    "diff",
-    "log",
-    "show",
-    "branch",
-    "ls-files",
-    "rev-parse",
-];
-
 /// Whether one command segment is established as read-only.
 ///
 /// Returns false for anything it cannot establish, including redirects and
@@ -264,30 +244,20 @@ fn segment_is_read_only(segment: &str) -> bool {
     if segment.is_empty() {
         return true;
     }
-    // A redirect or substitution can write regardless of the verb.
-    if segment.contains('>') || segment.contains('`') || segment.contains("$(") {
+    // Command substitution runs a command this classifier never sees, so what
+    // it might write cannot be established. The dispatcher's classifier does
+    // not look inside one either; refusing here is the stricter of the two.
+    if segment.contains('`') || segment.contains("$(") {
         return false;
     }
-    let mut words = segment.split_whitespace();
-    let Some(verb) = words.next() else {
-        return true;
-    };
-    let verb = verb.rsplit('/').next().unwrap_or(verb);
-    if verb == "git" {
-        return words.next().is_some_and(|sub| READ_ONLY_GIT.contains(&sub));
-    }
-    if !READ_ONLY_COMMANDS.contains(&verb) {
-        return false;
-    }
-    // `find -delete` / `-exec` mutate despite a read-only verb.
-    if verb == "find" && segment.contains("-delete") || segment.contains("-exec") {
-        return false;
-    }
-    // In-place editing.
-    if verb == "sed" && (segment.contains("-i") || segment.contains("--in-place")) {
-        return false;
-    }
-    true
+    // One classifier, not two.
+    //
+    // The observer kept its own verb list, and the two drifted: `jq` was
+    // read-only to the dispatcher and unknown here, while `find -delete` was
+    // mutating here and read-only there. The same command meant different
+    // things to the component doing the accounting and the component reporting
+    // on it. Delegating removes the second list rather than syncing it.
+    crate::agent::tool_dispatch::helpers::shell_command_is_observational(segment)
 }
 
 /// Whether a command may have changed files the observer cannot name.
@@ -296,12 +266,11 @@ fn segment_is_read_only(segment: &str) -> bool {
 /// `ls` inflated possible_unrecorded_mutations. It now inspects each segment
 /// and preserves uncertainty only where it genuinely exists.
 pub fn command_may_mutate(command: &str) -> bool {
-    let segments: Vec<&str> = command
-        .split("&&")
-        .flat_map(|s| s.split("||"))
-        .flat_map(|s| s.split(';'))
-        .flat_map(|s| s.split('|'))
-        .collect();
+    // Use the dispatcher's splitter rather than a second, naive one. This
+    // split on every `|`, so `jq '.nodes | length' f` became two fragments —
+    // the exact bug the shared splitter was written to fix, reintroduced here
+    // because the two lived apart.
+    let segments = crate::agent::tool_dispatch::helpers::split_shell_segments(command);
     !segments.iter().all(|segment| {
         segment_is_read_only(segment)
             || crate::agent::tool_dispatch::helpers::shell_command_is_verification(segment.trim())
@@ -525,7 +494,12 @@ pub fn apply(
                 ledger.record_change(path.clone(), *line_count, *turn_index, now_ms);
             }
             ObservedEvent::Deleted { path, turn_index } => {
-                ledger.record_deletion(path.clone(), *turn_index, now_ms);
+                // The observer watches tool calls; it has no call graph, so
+                // what referenced the removed code is unavailable here. `None`
+                // keeps that unknown rather than asserting nothing depended on
+                // it — the regression obligation then stays outstanding until
+                // something that CAN name the callers discharges it.
+                ledger.record_deletion(path.clone(), None, *turn_index, now_ms);
             }
             ObservedEvent::RunFinished {
                 scope,

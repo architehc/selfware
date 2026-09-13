@@ -218,7 +218,7 @@ fn deleting_code_retires_its_content_debt_and_raises_a_regression_obligation() {
     l.record_change("src/gone.rs", Some(80), 1, T);
     assert_eq!(l.outstanding().len(), 2);
 
-    l.record_deletion("src/gone.rs", 2, T);
+    l.record_deletion("src/gone.rs", None, 2, T);
     let kinds: Vec<_> = l.outstanding().iter().map(|o| o.kind).collect();
     assert_eq!(
         kinds.len(),
@@ -242,7 +242,7 @@ fn a_deletion_claims_no_size_it_did_not_measure() {
     // `Some(0)` reported a removal as weightless. The ledger did not measure
     // how much was deleted, so the honest value is unknown.
     let mut l = ledger();
-    let ids = l.record_deletion("src/gone.rs", 1, T);
+    let ids = l.record_deletion("src/gone.rs", None, 1, T);
     for id in ids {
         let o = l.obligations().iter().find(|o| o.id == id).unwrap();
         assert_eq!(o.line_count, None, "size unavailable must not become zero");
@@ -255,9 +255,52 @@ fn a_deletion_claims_no_size_it_did_not_measure() {
 }
 
 #[test]
-fn a_passing_test_discharges_the_removal_regression_but_not_the_read() {
+fn a_passing_test_over_the_callers_discharges_the_removal_regression_not_the_read() {
+    // The evidence must cover what REFERENCED the removed code. An earlier
+    // version of this test supplied coverage of `src/gone.rs` itself, which no
+    // real run can produce: the file is deleted. It asserted the discharge rule
+    // worked by feeding it something that cannot occur.
     let mut l = ledger();
-    l.record_deletion("src/gone.rs", 1, T);
+    l.record_deletion(
+        "src/gone.rs",
+        Some(
+            paths(&["src/caller.rs", "src/other.rs"])
+                .into_iter()
+                .collect(),
+        ),
+        1,
+        T,
+    );
+    let snap = l.snapshot();
+    l.record_test_run(
+        snap,
+        Scope::WorkspaceWithCoverage(paths(&["src/caller.rs", "src/other.rs"])),
+        Outcome::Passed,
+        None,
+        T,
+    );
+    let kinds: Vec<_> = l.outstanding().iter().map(|o| o.kind).collect();
+    assert!(
+        !kinds.contains(&ObligationKind::BrokenByRemoval),
+        "a green run covering every caller answers the regression question: {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&ObligationKind::UnreviewedChange),
+        "but nobody has read the removal"
+    );
+}
+
+#[test]
+fn coverage_of_the_deleted_file_does_not_answer_the_removal_question() {
+    // The deleted path cannot be covered by anything. Evidence claiming to
+    // cover it says nothing about the callers, and must not discharge them.
+    let mut l = ledger();
+    l.record_deletion(
+        "src/gone.rs",
+        Some(paths(&["src/caller.rs"]).into_iter().collect()),
+        1,
+        T,
+    );
     let snap = l.snapshot();
     l.record_test_run(
         snap,
@@ -268,12 +311,89 @@ fn a_passing_test_discharges_the_removal_regression_but_not_the_read() {
     );
     let kinds: Vec<_> = l.outstanding().iter().map(|o| o.kind).collect();
     assert!(
-        !kinds.contains(&ObligationKind::BrokenByRemoval),
-        "a covering green run answers the regression question"
+        kinds.contains(&ObligationKind::BrokenByRemoval),
+        "the caller was never exercised; the removal stays unverified: {kinds:?}"
     );
+}
+
+#[test]
+fn a_partial_run_over_the_callers_leaves_the_removal_outstanding() {
+    let mut l = ledger();
+    l.record_deletion(
+        "src/gone.rs",
+        Some(
+            paths(&["src/caller.rs", "src/other.rs"])
+                .into_iter()
+                .collect(),
+        ),
+        1,
+        T,
+    );
+    let snap = l.snapshot();
+    l.record_test_run(
+        snap,
+        Scope::WorkspaceWithCoverage(paths(&["src/caller.rs"])),
+        Outcome::Passed,
+        None,
+        T,
+    );
+    let kinds: Vec<_> = l.outstanding().iter().map(|o| o.kind).collect();
     assert!(
-        kinds.contains(&ObligationKind::UnreviewedChange),
-        "but nobody has read the removal"
+        kinds.contains(&ObligationKind::BrokenByRemoval),
+        "one of two callers was exercised; that is not the regression answered: {kinds:?}"
+    );
+}
+
+#[test]
+fn without_dependency_information_a_removal_stays_unknown() {
+    // This is the case the observer actually produces: it watches tool calls
+    // and has no call graph. A workspace-wide green run does not establish that
+    // the callers still work, because nothing knows which paths those were.
+    let mut l = ledger();
+    l.record_deletion("src/gone.rs", None, 1, T);
+    let snap = l.snapshot();
+    l.record_test_run(
+        snap,
+        Scope::WorkspaceWithCoverage(paths(&["src/caller.rs", "src/gone.rs"])),
+        Outcome::Passed,
+        None,
+        T,
+    );
+    let removal = l
+        .obligations()
+        .iter()
+        .find(|o| o.kind == ObligationKind::BrokenByRemoval)
+        .expect("the removal obligation exists");
+    assert!(
+        removal.outstanding(),
+        "unknown dependencies are not permission to call the removal verified"
+    );
+    let evidence = l.evidence().last().expect("the run was recorded");
+    assert_eq!(
+        l.assess(evidence, removal),
+        Err(Unsatisfied::DependentsUnknown),
+        "and the reason must say which unknown it is"
+    );
+}
+
+#[test]
+fn a_removal_nothing_depended_on_is_discharged_by_a_green_run() {
+    // The measured claim that nothing referenced the removed code, as distinct
+    // from not knowing. Only this one can be answered without naming callers.
+    let mut l = ledger();
+    l.record_deletion("src/gone.rs", Some(Vec::new()), 1, T);
+    let snap = l.snapshot();
+    l.record_test_run(
+        snap,
+        Scope::WorkspaceWithCoverage(paths(&["src/caller.rs"])),
+        Outcome::Passed,
+        None,
+        T,
+    );
+    let kinds: Vec<_> = l.outstanding().iter().map(|o| o.kind).collect();
+    assert!(
+        !kinds.contains(&ObligationKind::BrokenByRemoval),
+        "nothing referenced it, and a green run confirms the tree still builds: {kinds:?}"
     );
 }
 
@@ -592,7 +712,7 @@ fn deleting_a_file_does_not_discharge_other_paths() {
     let mut l = ledger();
     l.record_change("src/a.rs", Some(10), 1, T);
     l.record_change("src/b.rs", Some(20), 1, T);
-    l.record_deletion("src/a.rs", 2, T);
+    l.record_deletion("src/a.rs", None, 2, T);
 
     let owed: Vec<_> = l.outstanding().iter().map(|o| o.path.clone()).collect();
     assert!(owed.contains(&PathBuf::from("src/b.rs")));

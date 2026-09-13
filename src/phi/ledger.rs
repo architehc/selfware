@@ -197,6 +197,18 @@ pub struct Obligation {
     /// what it touched is evidence of the first two and neither of the last.
     #[serde(default)]
     pub passing_runs_without_coverage: usize,
+    /// For `BrokenByRemoval`: the paths that referenced the removed code.
+    ///
+    /// `None` means the ledger could not determine them — no dependency
+    /// information was available — and is NOT the same as "nothing depended on
+    /// it". An empty list is the measured claim that nothing did.
+    ///
+    /// The regression question a removal raises is about these paths, not about
+    /// the deleted one. Judging it by coverage of the removed file asks whether
+    /// a test run exercised a file that no longer exists, which nothing can
+    /// truthfully answer.
+    #[serde(default)]
+    pub dependents: Option<Vec<PathBuf>>,
 }
 
 impl Obligation {
@@ -250,6 +262,11 @@ pub enum Unsatisfied {
     /// The path's current content was not produced by a recorded change, so the
     /// ledger does not know what is in it.
     RevisionUnknown,
+    /// A removal's regression question is about what referenced the removed
+    /// code, and the ledger has no dependency information. Distinct from
+    /// `CoverageUnknown`: there the run did not say what it touched; here there
+    /// is no list of paths to ask about in the first place.
+    DependentsUnknown,
 }
 
 /// Append-only ledger of obligations and evidence.
@@ -325,6 +342,7 @@ impl Ledger {
                 satisfied_by: None,
                 retired: false,
                 passing_runs_without_coverage: 0,
+                dependents: None,
             });
         }
         ids
@@ -350,9 +368,17 @@ impl Ledger {
     /// Record a file removal. The code is gone, so its outstanding obligations
     /// are retired rather than left forever unsatisfiable — but the removal is
     /// itself a change somebody should read.
+    /// Record a file removal.
+    ///
+    /// `dependents` is what referenced the removed code: `None` when no
+    /// dependency information was available, `Some(vec![])` when it was
+    /// established that nothing referenced it. The distinction decides whether
+    /// the removal's regression obligation can ever be discharged by a test
+    /// run, so it must not be collapsed.
     pub fn record_deletion(
         &mut self,
         path: impl Into<PathBuf>,
+        dependents: Option<Vec<PathBuf>>,
         turn_index: usize,
         recorded_at_ms: u64,
     ) -> [ObligationId; 2] {
@@ -398,6 +424,12 @@ impl Ledger {
                 satisfied_by: None,
                 retired: false,
                 passing_runs_without_coverage: 0,
+                // Only the regression obligation is about the callers.
+                dependents: if kind == ObligationKind::BrokenByRemoval {
+                    dependents.clone()
+                } else {
+                    None
+                },
             });
         }
         ids
@@ -507,6 +539,7 @@ impl Ledger {
             satisfied_by: None,
             retired: false,
             passing_runs_without_coverage: 0,
+            dependents: None,
         });
         id
     }
@@ -540,10 +573,32 @@ impl Ledger {
         if !answerable {
             return Err(Unsatisfied::WrongKind);
         }
-        match evidence.scope.coverage_of(&obligation.path) {
-            Coverage::Covered => {}
-            Coverage::NotCovered => return Err(Unsatisfied::OutOfScope),
-            Coverage::Unknown => return Err(Unsatisfied::CoverageUnknown),
+        // Which paths this evidence must cover to answer this obligation.
+        //
+        // For an ordinary obligation it is the changed file. For a removal it
+        // is what REFERENCED the removed code: the deleted file cannot be
+        // covered by anything, because it is gone. Asking for coverage of it
+        // meant the only evidence that could ever discharge a removal was
+        // evidence describing a run of a file that no longer existed.
+        if obligation.kind == ObligationKind::BrokenByRemoval {
+            let Some(dependents) = obligation.dependents.as_ref() else {
+                // No dependency information. Nothing here establishes that the
+                // callers still work, and unknown is not permission.
+                return Err(Unsatisfied::DependentsUnknown);
+            };
+            for dependent in dependents {
+                match evidence.scope.coverage_of(dependent) {
+                    Coverage::Covered => {}
+                    Coverage::NotCovered => return Err(Unsatisfied::OutOfScope),
+                    Coverage::Unknown => return Err(Unsatisfied::CoverageUnknown),
+                }
+            }
+        } else {
+            match evidence.scope.coverage_of(&obligation.path) {
+                Coverage::Covered => {}
+                Coverage::NotCovered => return Err(Unsatisfied::OutOfScope),
+                Coverage::Unknown => return Err(Unsatisfied::CoverageUnknown),
+            }
         }
         if evidence.outcome != Outcome::Passed {
             return Err(Unsatisfied::Failed);
@@ -557,6 +612,18 @@ impl Ledger {
             evidence.recorded_seq,
         ) {
             return Err(Unsatisfied::RacedAnEdit);
+        }
+        // A caller edited while the regression run was in flight leaves the
+        // same doubt as the removed path being edited.
+        if let Some(dependents) = obligation.dependents.as_ref() {
+            for dependent in dependents {
+                if self.changed_between(dependent, evidence.snapshot_seq, evidence.recorded_seq) {
+                    return Err(Unsatisfied::RacedAnEdit);
+                }
+                if self.externally_changed_since(dependent, obligation.seq) {
+                    return Err(Unsatisfied::RevisionUnknown);
+                }
+            }
         }
         // An edit the ledger did not see means it does not know what is in the
         // file now. Evidence taken over an unknown revision proves nothing

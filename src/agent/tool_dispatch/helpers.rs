@@ -663,7 +663,11 @@ pub(crate) fn has_file_redirect(command: &str) -> bool {
 /// Quote-awareness is not a nicety: `jq '.nodes | length' file` contains a pipe
 /// that is part of an argument, and treating it as a separator turns one
 /// read-only command into two unrecognisable fragments.
-fn split_shell_segments(command: &str) -> Vec<String> {
+///
+/// Shared with Phi's observer so the two cannot disagree about where one
+/// command ends and the next begins — they did, and the observer's naive
+/// `split('|')` reintroduced the very bug this function was written to fix.
+pub(crate) fn split_shell_segments(command: &str) -> Vec<String> {
     let mut segments = Vec::new();
     let mut current = String::new();
     let mut in_single = false;
@@ -692,11 +696,26 @@ fn split_shell_segments(command: &str) -> Vec<String> {
                 in_double = !in_double;
                 current.push(c);
             }
-            // Only a DOUBLED `&` separates. A bare `&` appears in file
-            // descriptor duplication (`cargo test 2>&1`), and splitting there
-            // turns one command into two unrecognisable fragments.
+            // `&` is three different things, and an earlier revision treated
+            // only the first as a separator:
+            //   `&&`   — connector, separates
+            //   `2>&1` — descriptor duplication, does NOT separate
+            //   `cmd &`— background job, DOES separate
+            // Refusing to split on the third let a read-only prefix vouch for
+            // whatever followed it: `ls & python3 fix.py` stayed one segment,
+            // matched the `ls` prefix, and an arbitrary script ran without
+            // advancing the mutation sequence.
             '&' if !in_single && !in_double && chars.get(i + 1) == Some(&'&') => {
                 i += 1;
+                segments.push(std::mem::take(&mut current));
+            }
+            '&' if !in_single
+                && !in_double
+                && !current.trim_end().ends_with('>')
+                && !current.trim_end().ends_with('<')
+                && chars.get(i + 1) != Some(&'>') =>
+            {
+                // Backgrounding. The job still runs; it just runs detached.
                 segments.push(std::mem::take(&mut current));
             }
             '|' if !in_single && !in_double => {
@@ -761,6 +780,15 @@ pub(crate) fn shell_command_is_observational(command: &str) -> bool {
     }
 
     let mutating_markers = [
+        // `find` is a read-only prefix below, but these options make it write.
+        // Phi's observer already knew this; the dispatcher did not, so the two
+        // disagreed about the same command.
+        " -delete",
+        " -exec",
+        " -execdir",
+        " -ok",
+        " -fprint",
+        " -fls",
         "| tee",
         " tee ",
         "touch ",
@@ -804,6 +832,14 @@ pub(crate) fn shell_command_is_observational(command: &str) -> bool {
         "git status",
         "git diff",
         "git log",
+        // Phi's observer listed these as read-only and the dispatcher did not.
+        // They are: none of them write to the working tree.
+        "git show",
+        "git branch",
+        "git ls-files",
+        "git rev-parse",
+        "less",
+        "more",
         "ls",
         "pwd",
         "find",
