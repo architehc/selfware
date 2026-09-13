@@ -138,27 +138,3 @@ fn test_compile_result_debug() {
     assert!(debug_str.contains("CompileResult"));
     assert!(debug_str.contains("true"));
 }
-
-#[test]
-fn test_sweep_stale_sandboxes_prunes_stale_and_preserves_other_dirs() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let stale_dir = temp_dir.path().join(".selfware-sandbox-old");
-    let other_dir = temp_dir.path().join("other_dir");
-    std::fs::create_dir_all(&stale_dir).unwrap();
-    std::fs::create_dir_all(&other_dir).unwrap();
-
-    let two_hours_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
-    let file = std::fs::File::open(&stale_dir).unwrap();
-    let _ = file.set_modified(two_hours_ago);
-
-    CompilationSandbox::sweep_stale_sandboxes(temp_dir.path());
-
-    assert!(
-        !stale_dir.exists(),
-        "stale sandbox directory should be pruned"
-    );
-    assert!(
-        other_dir.exists(),
-        "unrelated directory should be preserved"
-    );
-}

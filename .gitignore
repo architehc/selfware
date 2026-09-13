@@ -107,8 +107,8 @@ new_template_results_*/
 __pycache__/
 /.selfware/turns/
 .selfware/
-.theseus.md
-.selfware-sandbox*
+/.selfware-sandbox*/
+/.selfware-sandbox
 
 # Machine-specific / personal config (untracked 2026-07-12, kept locally)
 .claude/settings.local.json

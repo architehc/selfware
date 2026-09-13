@@ -29,9 +29,6 @@ impl CompilationSandbox {
 
         info!("Setting up compilation sandbox at {:?}", work_dir);
 
-        // Sweep orphaned stale sandboxes from past crashed or killed runs
-        Self::sweep_stale_sandboxes(&original_dir);
-
         let cleanup_on_fail = |err: anyhow::Error| -> anyhow::Error {
             if work_dir.exists() {
                 let _ = std::fs::remove_dir_all(&work_dir);
@@ -94,37 +91,6 @@ impl CompilationSandbox {
             work_dir,
             owns_work_dir: true,
         })
-    }
-
-    /// Sweeps stale sandbox directories left behind by crashed or killed processes.
-    pub fn sweep_stale_sandboxes(project_root: &Path) {
-        let Ok(entries) = std::fs::read_dir(project_root) else {
-            return;
-        };
-        let now = std::time::SystemTime::now();
-        const STALE_AGE_SECS: u64 = 3600; // 1 hour
-
-        for entry in entries.flatten() {
-            let file_name = entry.file_name();
-            let name = file_name.to_string_lossy();
-            if (name.starts_with(".selfware-sandbox-") || name == ".selfware-sandbox")
-                && entry.path().is_dir()
-            {
-                if let Ok(metadata) = entry.metadata() {
-                    if let Ok(mtime) = metadata.modified() {
-                        if let Ok(age) = now.duration_since(mtime) {
-                            if age.as_secs() >= STALE_AGE_SECS {
-                                tracing::debug!(
-                                    "Pruning stale compilation sandbox: {:?}",
-                                    entry.path()
-                                );
-                                let _ = std::fs::remove_dir_all(entry.path());
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 
     pub fn work_dir(&self) -> &Path {
