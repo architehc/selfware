@@ -428,6 +428,88 @@ mod agent_lifecycle {
         );
     }
 
+    /// Caught by the 16-way container matrix, not by a unit test.
+    ///
+    /// t04-py-dict made the correct repair, and completion stayed blocked. The
+    /// model first ran `python -m unittest` on an image with only `python3`;
+    /// the shell returned 127. That was recorded as a FAILING CHECK under the
+    /// identity `python unittest`, and the `python3 -m unittest` run that
+    /// passed moments later is a different identity, so it could never clear
+    /// it. The task burned its iteration budget re-running a suite that was
+    /// already green.
+    ///
+    /// Tracking failures per check is what exposed this: before, any pass
+    /// cleared any failure, so the bogus 127 record was swept away by accident.
+    #[tokio::test]
+    async fn a_command_that_could_not_run_is_not_a_failing_check() {
+        let (mut agent, _dir) = agent().await;
+        dispatch(
+            &mut agent,
+            "file_write",
+            json!({ "path": "lookup.py", "content": "def get_val(d, k, default=None): return d.get(k, default)\n" }),
+            true,
+        );
+
+        // 127: no such interpreter on this image. No check ran.
+        let args = json!({ "command": "python -m unittest test_lookup.py" });
+        agent.note_tool_call_lifecycle(
+            "shell_exec",
+            &args,
+            &args.to_string(),
+            false,
+            r#"{"exit_code":127,"stdout":"","stderr":"python: command not found"}"#,
+        );
+        assert!(
+            agent.verification_failures.is_empty(),
+            "a command the shell could not execute is not evidence that the \
+             suite failed: {:?}",
+            agent.verification_failures.outstanding()
+        );
+
+        // The real interpreter, and it passes.
+        let args = json!({ "command": "python3 -m unittest test_lookup.py" });
+        agent.note_tool_call_lifecycle(
+            "shell_exec",
+            &args,
+            &args.to_string(),
+            true,
+            r#"{"exit_code":0,"stdout":"OK","stderr":""}"#,
+        );
+        let refusal = verification_refusal(&mut agent).await;
+        assert!(
+            refusal.is_none(),
+            "the suite passed at this revision; nothing should block: {refusal:?}"
+        );
+    }
+
+    /// The other half: a check that DID run and failed still blocks. Skipping
+    /// 126/127 must not become a way to launder a red suite.
+    #[tokio::test]
+    async fn a_check_that_ran_and_failed_still_blocks() {
+        let (mut agent, _dir) = agent().await;
+        dispatch(
+            &mut agent,
+            "file_write",
+            json!({ "path": "lookup.py", "content": "broken\n" }),
+            true,
+        );
+        let args = json!({ "command": "python3 -m unittest test_lookup.py" });
+        agent.note_tool_call_lifecycle(
+            "shell_exec",
+            &args,
+            &args.to_string(),
+            false,
+            r#"{"exit_code":1,"stdout":"","stderr":"FAILED (failures=1)"}"#,
+        );
+        let refusal = verification_refusal(&mut agent).await;
+        assert!(
+            refusal
+                .as_deref()
+                .is_some_and(|r| r.contains("FailingTestsAccepted")),
+            "exit 1 means the suite ran and was red: {refusal:?}"
+        );
+    }
+
     /// Finding #4: the terminal save wrote whatever the last periodic save had
     /// stamped, so a failure recorded after it vanished from the final record.
     #[tokio::test]

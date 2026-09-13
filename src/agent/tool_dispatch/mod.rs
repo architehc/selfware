@@ -31,6 +31,17 @@ impl Agent {
     /// this AFTER the mutating-call accounting, so a command that is both
     /// mutating and verifying (e.g. an inline `python3 -c` check) still ends
     /// the turn credited rather than stale.
+    /// The exit status a shell-style tool result reports, when it reports one.
+    ///
+    /// The dispatcher's own success flag says whether the process was spawned
+    /// and reaped, not what it returned.
+    fn shell_exit_code(result_str: &str) -> Option<i64> {
+        serde_json::from_str::<serde_json::Value>(result_str)
+            .ok()?
+            .get("exit_code")?
+            .as_i64()
+    }
+
     /// The accounting a completed tool call performs on the agent's lifecycle
     /// state: advance the mutation sequence if it edited, then enter its
     /// verification outcome in the ledger.
@@ -67,6 +78,24 @@ impl Agent {
         result_str: &str,
     ) {
         if !tool_call_is_verification(name, args_str) {
+            return;
+        }
+        // A command the shell could not execute ran no check.
+        //
+        // 127 is "command not found", 126 "found but not executable". Recording
+        // either as a failing check asserts that the suite ran and was red. It
+        // did not run at all, and the distinction became load-bearing once
+        // failures were tracked per check: a typo'd `python -m unittest`
+        // (127 on an image with only `python3`) parked a permanent failure
+        // under its own check identity, which the passing `python3` run could
+        // never clear because it is a different check. Completion then stayed
+        // blocked by a suite that had never executed.
+        //
+        // Not recording it does not wave the task through: with no successful
+        // verification at this revision the gate still refuses, as
+        // StaleVerification — which is what actually happened.
+        if Self::shell_exit_code(result_str).is_some_and(|code| code == 126 || code == 127) {
+            debug!("{name} could not be executed; no check ran, so nothing is recorded");
             return;
         }
         // Relative to the TASK, not to wherever the process currently is.
