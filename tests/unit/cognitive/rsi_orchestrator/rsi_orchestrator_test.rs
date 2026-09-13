@@ -256,7 +256,7 @@ scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|dura
 sc1|coding|easy|1|0|0|0|10|85.0|1|0|ok
 sc2|coding|medium|1|1|0|0|10|40.0|1|1|failed
 ";
-    let baseline_report = parse_benchmark_report(tsv_content);
+    let baseline_report = parse_benchmark_report(tsv_content).unwrap();
     assert_eq!(baseline_report.scenarios.len(), 2);
     assert_eq!(baseline_report.average_score, 62.5);
     assert!(baseline_report.scenarios["sc1"].passed);
@@ -269,7 +269,8 @@ scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|dura
 sc1|coding|easy|1|0|0|0|10|90.0|1|0|ok
 sc2|coding|medium|1|0|0|0|10|80.0|1|0|ok
 ",
-    );
+    )
+    .unwrap();
     assert!(baseline_report
         .check_darwinx_non_regression(&candidate_ok)
         .is_ok());
@@ -281,7 +282,8 @@ scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|dura
 sc1|coding|easy|1|1|0|0|10|0.0|1|1|broke
 sc2|coding|medium|1|0|0|0|10|100.0|1|0|ok
 ",
-    );
+    )
+    .unwrap();
     let err = baseline_report
         .check_darwinx_non_regression(&candidate_regressed)
         .expect_err("should catch sc1 regression");
@@ -293,21 +295,30 @@ sc2|coding|medium|1|0|0|0|10|100.0|1|0|ok
 scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|duration_secs|score|changed_files|error_hits|notes
 sc1|coding|easy|1|0|0|0|10|95.0|1|0|ok
 ",
-    );
+    )
+    .unwrap();
     let err = baseline_report
         .check_darwinx_non_regression(&candidate_dropped)
         .expect_err("should catch dropped scenario");
     assert!(err[0].contains("Missing scenarios in candidate"));
 
-    // Duplicate rejection test: duplicates do not overwrite or double count
+    // Duplicate rejection test: duplicate scenarios fail closed
     let tsv_with_dups = "\
 scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|duration_secs|score|changed_files|error_hits|notes
 sc1|coding|easy|1|0|0|0|10|80.0|1|0|ok
 sc1|coding|easy|1|0|0|0|10|20.0|1|0|dup
 ";
-    let dup_report = parse_benchmark_report(tsv_with_dups);
-    assert_eq!(dup_report.scenarios.len(), 1);
-    assert_eq!(dup_report.average_score, 80.0);
+    let dup_err = parse_benchmark_report(tsv_with_dups).expect_err("duplicates must fail closed");
+    assert!(dup_err.contains("Duplicate scenario 'sc1'"));
+
+    // Malformed row rejection test
+    let tsv_malformed = "\
+scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|duration_secs|score|changed_files|error_hits|notes
+sc1|coding|easy
+";
+    let malformed_err =
+        parse_benchmark_report(tsv_malformed).expect_err("malformed row must fail closed");
+    assert!(malformed_err.contains("Malformed TSV row"));
 }
 
 #[test]

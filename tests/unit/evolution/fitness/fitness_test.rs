@@ -504,3 +504,21 @@ fn test_darwinx_non_regression_rejects_candidate_when_baseline_passed_scenario_m
         }
     );
 }
+
+#[test]
+fn duplicate_scenario_names_in_sab_report_are_rejected() {
+    let fx = report_fixture(90.0);
+    let mut body: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&fx.report).unwrap()).unwrap();
+    let dup_scenario = body["scenarios"][0].clone();
+    body["scenarios"].as_array_mut().unwrap().push(dup_scenario);
+    body["scenarios_expected"] = serde_json::json!(body["scenarios"].as_array().unwrap().len());
+    std::fs::write(&fx.report, serde_json::to_string(&body).unwrap()).unwrap();
+
+    let err = parse_sab_output(&fx.stdout(), Duration::from_secs(10), fx.binary())
+        .expect_err("duplicate scenario names must be rejected");
+    assert!(
+        matches!(err, FitnessError::ReportParseFailed(ref msg) if msg.contains("duplicate scenario name")),
+        "unexpected error: {err:?}"
+    );
+}

@@ -346,6 +346,56 @@ fn test_winner_gate_allows_equal_or_more_tests() {
 }
 
 #[test]
+fn test_winner_darwinx_gate_enforcement() {
+    use crate::evolution::fitness::{Difficulty, SabResult, ScenarioScore};
+    use std::time::Duration;
+
+    let make_sab = |scores: Vec<(&str, f64, bool)>| SabResult {
+        aggregate_score: 80.0,
+        scenario_scores: scores
+            .into_iter()
+            .map(|(name, score, passed)| ScenarioScore {
+                name: name.to_string(),
+                difficulty: Difficulty::Medium,
+                score,
+                tests_passed: passed,
+                broken_tests_fixed: false,
+                clean_exit: true,
+                tokens_used: None,
+                duration: Duration::from_secs(1),
+            })
+            .collect(),
+        total_tokens_used: None,
+        wall_clock: Duration::from_secs(1),
+        rating: GenerationRating::Grow,
+        binary_sha256: "dummy".to_string(),
+        run_id: "test".to_string(),
+    };
+
+    let base = make_sab(vec![("sc1", 90.0, true), ("sc2", 80.0, true)]);
+
+    // 1. Regressed candidate (score 90 -> 70 on sc1) must be rejected
+    let cand_regressed = make_sab(vec![("sc1", 70.0, true), ("sc2", 85.0, true)]);
+    let err = winner_darwinx_gate(Some(&base), Some(&cand_regressed)).unwrap_err();
+    assert!(err.contains("DarwinX non-regression check failed"));
+    assert!(err.contains("sc1"));
+
+    // 2. Candidate missing a scenario must be rejected
+    let cand_missing = make_sab(vec![("sc1", 95.0, true)]);
+    let err = winner_darwinx_gate(Some(&base), Some(&cand_missing)).unwrap_err();
+    assert!(err.contains("DarwinX non-regression check failed"));
+    assert!(err.contains("sc2"));
+
+    // 3. Candidate with equal or better scores must pass
+    let cand_better = make_sab(vec![("sc1", 90.0, true), ("sc2", 95.0, true)]);
+    assert!(winner_darwinx_gate(Some(&base), Some(&cand_better)).is_ok());
+
+    // 4. None for baseline or candidate allows first gen or non-SAB mode
+    assert!(winner_darwinx_gate(None, Some(&cand_better)).is_ok());
+    assert!(winner_darwinx_gate(Some(&base), None).is_ok());
+}
+
+#[test]
 fn test_parse_hypotheses_valid_json() {
     let json = r#"[
             {

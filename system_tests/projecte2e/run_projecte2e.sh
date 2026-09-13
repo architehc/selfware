@@ -11,7 +11,7 @@ BIN="${REPO_ROOT}/target/release/selfware"
 # Usage: TIMEOUT_MULTIPLIER=4 CONFIG_FILE=... ./run_projecte2e.sh
 TIMEOUT_MULTIPLIER="${TIMEOUT_MULTIPLIER:-1}"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
-OUT_DIR="${THIS_DIR}/reports/${TIMESTAMP}"
+OUT_DIR="${OUT_DIR:-${THIS_DIR}/reports/${TIMESTAMP}}"
 WORK_ROOT="${THIS_DIR}/work"
 LOG_ROOT="${OUT_DIR}/logs"
 SCREENSHOT_DIR="${OUT_DIR}/screenshots"

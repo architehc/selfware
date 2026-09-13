@@ -442,13 +442,14 @@ impl RSIOrchestrator {
         info!("Running E2E benchmark suite in {:?}", work_dir);
         let script_path = work_dir.join("system_tests/projecte2e/run_projecte2e.sh");
 
-        let latest_link = work_dir.join("system_tests/projecte2e/reports/latest");
-        if latest_link.exists() || latest_link.is_symlink() {
-            let _ = std::fs::remove_file(&latest_link);
-        }
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let unique_out_dir = work_dir
+            .join("system_tests/projecte2e/reports")
+            .join(format!("rsi-{}", run_id));
 
         let output = Command::new("bash")
             .arg(&script_path)
+            .env("OUT_DIR", &unique_out_dir)
             .current_dir(work_dir)
             .output()
             .await
@@ -457,25 +458,28 @@ impl RSIOrchestrator {
             })?;
 
         if !output.status.success() {
-            warn!(
-                "Benchmark script returned non-zero exit code: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(SelfwareError::Internal(format!(
+                "Benchmark script failed with exit code {:?}: {}",
+                output.status.code(),
+                stderr
+            )));
         }
 
-        let reports_dir = work_dir.join("system_tests/projecte2e/reports/latest");
-        let results_tsv = reports_dir.join("results.tsv");
-
+        let results_tsv = unique_out_dir.join("results.tsv");
         if !results_tsv.exists() {
-            return Err(SelfwareError::Internal(
-                "Benchmark results.tsv not found".to_string(),
-            ));
+            return Err(SelfwareError::Internal(format!(
+                "Benchmark results.tsv not found in {:?}",
+                unique_out_dir
+            )));
         }
 
         let tsv_content = std::fs::read_to_string(&results_tsv)
             .map_err(|e| SelfwareError::Internal(format!("Failed to read results.tsv: {}", e)))?;
 
-        Ok(parse_benchmark_report(&tsv_content))
+        parse_benchmark_report(&tsv_content).map_err(|e| {
+            SelfwareError::Internal(format!("Failed to parse benchmark report: {}", e))
+        })
     }
 
     async fn merge_sandbox(
@@ -705,73 +709,93 @@ impl BenchmarkReport {
 }
 
 /// Parse TSV benchmark report into a structured `BenchmarkReport`.
-pub fn parse_benchmark_report(tsv_content: &str) -> BenchmarkReport {
+pub fn parse_benchmark_report(tsv_content: &str) -> std::result::Result<BenchmarkReport, String> {
+    let mut lines = tsv_content.lines().filter(|l| !l.trim().is_empty());
+    let header = lines
+        .next()
+        .ok_or_else(|| "Benchmark TSV report is empty".to_string())?;
+    let header_parts: Vec<&str> = header.split('|').map(|s| s.trim()).collect();
+    if header_parts.is_empty() || header_parts[0] != "scenario" {
+        return Err(format!(
+            "Invalid TSV header: expected 'scenario' as first column, got '{}'",
+            header_parts.first().unwrap_or(&"")
+        ));
+    }
+
     let mut total_score = 0.0;
     let mut count = 0;
     let mut scenarios = std::collections::HashMap::new();
 
-    for (i, line) in tsv_content.lines().enumerate() {
-        if i == 0 {
-            continue;
+    for (i, line) in lines.enumerate() {
+        let line_num = i + 2; // 1-based, accounting for header
+        let parts: Vec<&str> = line.trim().split('|').collect();
+        if parts.len() < 9 {
+            return Err(format!(
+                "Malformed TSV row {line_num}: expected at least 9 columns, got {}",
+                parts.len()
+            ));
         }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+        let name = parts[0].trim().to_string();
+        if name.is_empty() {
+            return Err(format!("Empty scenario name on TSV row {line_num}"));
         }
-        let parts: Vec<&str> = trimmed.split('|').collect();
-        if parts.len() > 8 {
-            let name = parts[0].trim().to_string();
-            // Reject duplicate scenario names at parse time
-            if scenarios.contains_key(&name) {
-                tracing::warn!(
-                    "Duplicate scenario '{}' in benchmark TSV, skipping duplicate",
-                    name
-                );
-                continue;
-            }
-            if let Ok(score) = parts[8].trim().parse::<f64>() {
-                let scenario_type = parts.get(1).map(|s| s.trim()).unwrap_or("");
-                let post_status = parts.get(4).map(|s| s.trim()).unwrap_or("");
-                let agent_status = parts.get(5).map(|s| s.trim()).unwrap_or("");
-                let has_error = parts.get(10).is_some_and(|err| {
-                    let e = err.trim();
-                    if let Ok(hits) = e.parse::<u64>() {
-                        hits > 0
-                    } else {
-                        !e.is_empty() && e != "0"
-                    }
-                });
+        if scenarios.contains_key(&name) {
+            return Err(format!(
+                "Duplicate scenario '{}' on TSV row {line_num}",
+                name
+            ));
+        }
 
-                let passed = if scenario_type == "coding" {
-                    post_status == "0" && score >= 70.0
-                } else {
-                    agent_status == "0" && !has_error && score >= 70.0
-                };
-
-                scenarios.insert(
-                    name.clone(),
-                    ScenarioOutcome {
-                        name,
-                        score,
-                        passed,
-                    },
-                );
-                total_score += score;
-                count += 1;
-            }
+        let score = parts[8]
+            .trim()
+            .parse::<f64>()
+            .map_err(|e| format!("Invalid score '{}' on TSV row {line_num}: {e}", parts[8]))?;
+        if !score.is_finite() || !(0.0..=100.0).contains(&score) {
+            return Err(format!(
+                "Out-of-range score {score} on TSV row {line_num} (must be 0..=100)"
+            ));
         }
+
+        let scenario_type = parts.get(1).map(|s| s.trim()).unwrap_or("");
+        let post_status = parts.get(4).map(|s| s.trim()).unwrap_or("");
+        let agent_status = parts.get(5).map(|s| s.trim()).unwrap_or("");
+        let has_error = parts.get(10).is_some_and(|err| {
+            let e = err.trim();
+            if let Ok(hits) = e.parse::<u64>() {
+                hits > 0
+            } else {
+                !e.is_empty() && e != "0"
+            }
+        });
+
+        let passed = if scenario_type == "coding" {
+            post_status == "0" && score >= 70.0
+        } else {
+            agent_status == "0" && !has_error && score >= 70.0
+        };
+
+        scenarios.insert(
+            name.clone(),
+            ScenarioOutcome {
+                name,
+                score,
+                passed,
+            },
+        );
+        total_score += score;
+        count += 1;
     }
 
-    let average_score = if count == 0 {
-        0.0
-    } else {
-        total_score / count as f64
-    };
+    if count == 0 {
+        return Err("Benchmark report contains no scenarios".to_string());
+    }
 
-    BenchmarkReport {
+    let average_score = total_score / count as f64;
+
+    Ok(BenchmarkReport {
         average_score,
         scenarios,
-    }
+    })
 }
 
 /// Whether the mutation applied to the sandbox only rewrites comment or

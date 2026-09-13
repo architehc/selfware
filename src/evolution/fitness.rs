@@ -227,6 +227,27 @@ fn parse_sab_output(
         })
         .collect::<Result<Vec<_>, FitnessError>>()?;
 
+    let mut seen_names = std::collections::HashSet::new();
+    for s in &scenario_scores {
+        if s.name.trim().is_empty() || s.name == "unknown" {
+            return Err(FitnessError::ReportParseFailed(
+                "scenario has missing or invalid name".into(),
+            ));
+        }
+        if !s.score.is_finite() || !(0.0..=100.0).contains(&s.score) {
+            return Err(FitnessError::ReportParseFailed(format!(
+                "scenario {} has invalid score: {}",
+                s.name, s.score
+            )));
+        }
+        if !seen_names.insert(&s.name) {
+            return Err(FitnessError::ReportParseFailed(format!(
+                "duplicate scenario name in report: {}",
+                s.name
+            )));
+        }
+    }
+
     let aggregate = if scenario_scores.is_empty() {
         return Err(FitnessError::IncompleteReport(
             "no scenarios in report".into(),

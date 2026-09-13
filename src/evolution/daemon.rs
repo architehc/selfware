@@ -310,6 +310,22 @@ fn winner_test_count_gate(
     }
 }
 
+/// Enforces DarwinX non-regression: a candidate must pass all baseline-passed scenarios
+/// with equal or better scores, and cannot drop any scenarios from the suite.
+///
+/// Returns `Err(reason)` when the candidate regressed; `Ok(())` otherwise.
+pub(crate) fn winner_darwinx_gate(
+    base_sab: Option<&SabResult>,
+    cand_sab: Option<&SabResult>,
+) -> Result<(), String> {
+    if let (Some(base), Some(cand)) = (base_sab, cand_sab) {
+        if let Err(violation) = base.check_darwinx_non_regression(cand) {
+            return Err(format!("DarwinX non-regression check failed: {violation}"));
+        }
+    }
+    Ok(())
+}
+
 /// Run the evolution daemon
 pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
     let start = Instant::now();
@@ -706,23 +722,22 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
         if winner_composite > baseline_composite {
             // Hard gate: DarwinX non-regression check over SAB results
-            if let (Some(base_sab), Some(cand_sab)) = (&current_baseline_sab, &winner_sab) {
-                if let Err(violation) = base_sab.check_darwinx_non_regression(cand_sab) {
-                    let reason = format!("DarwinX non-regression check failed: {violation}");
-                    log_warning(&reason);
-                    log_event(
-                        repo_root,
-                        &serde_json::json!({
-                            "event": "generation_end",
-                            "timestamp": chrono_now(),
-                            "generation": generation,
-                            "outcome": "frost",
-                            "reason": reason,
-                            "duration_secs": gen_start.elapsed().as_secs_f64(),
-                        }),
-                    );
-                    continue;
-                }
+            if let Err(reason) =
+                winner_darwinx_gate(current_baseline_sab.as_ref(), winner_sab.as_ref())
+            {
+                log_warning(&reason);
+                log_event(
+                    repo_root,
+                    &serde_json::json!({
+                        "event": "generation_end",
+                        "timestamp": chrono_now(),
+                        "generation": generation,
+                        "outcome": "frost",
+                        "reason": reason,
+                        "duration_secs": gen_start.elapsed().as_secs_f64(),
+                    }),
+                );
+                continue;
             }
 
             // Hard gate: a winner that runs FEWER tests than the baseline
