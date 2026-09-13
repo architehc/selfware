@@ -20,6 +20,87 @@ part.
 
 ## The integration point already exists
 
+### Runtime evidence bridge
+
+The CLI agent now publishes task-scoped, atomic receipts through
+`src/phi/activity.rs`, driven by task start, observed tool execution, and typed
+terminal outcomes. The local workspace serves their bounded projection at
+`GET /api/phi/activity`, authenticated with its existing workspace session.
+`phi_activity.js` renders the observed agents and selects the fox's working,
+concerned, guarded, or resting pose while narration is inactive.
+
+Activity capture follows `agent.disable_turn_artifacts`: set it to `false` in
+the agent configuration to opt in. Default-off capture remains off. Receipts
+live under `.selfware/phi/activity/`, one file per agent session and task; they
+contain identities, timestamps, lifecycle, and bounded evidence summaries, with
+commands, prompts, diagnostic messages, and source citations omitted. The API
+also hides raw identities and paths. An absent, old, malformed, truncated, or
+uncertain capture is identified as such. Completion describes lifecycle, not
+proof of correctness; the browser never turns a completed receipt into a green
+verification badge or repays its heuristic debt from it.
+
+On Unix, receipt writes and reads use pinned directory handles so directory or
+symlink replacement cannot redirect them. Other platforms report capture as
+unavailable. Unexpected execution-loop errors close unfinished receipts as
+failed while preserving any previously recorded typed terminal outcome.
+
+An owned supervisor can set `SELFWARE_PHI_WORKSPACE` to an existing absolute
+workspace directory to group isolated child agents, and `SELFWARE_PHI_AGENT_ID`
+to a distinct label for each worker. Without these overrides, each agent uses
+its current working directory and session identity. Browser monitoring remains
+read-only and does not alter agent prompts, tools, or acceptance decisions.
+
+### Activity Capture Retention and Endpoint Semantics
+
+The activity receipt endpoint (`GET /api/phi/activity`) provides a strictly read-only, non-destructive projection of `.selfware/phi/activity`. It obeys HTTP GET idempotence:
+- **Zero Read-Time Deletions**: Multiple concurrent readers or monitoring tools attaching to `/api/phi/activity` will never delete or truncate receipt files on disk.
+- **Write-Time Retention Bounding**: Receipt retention is enforced exclusively during writes (`ActivityCapture::write`). Orphaned temporary files (`.tmp-*`) older than 5 minutes and expired receipts older than 24 hours are pruned. If receipt count exceeds 256 (`MAX_SCAN`), excess oldest receipts are pruned during write operations.
+- **Latest-Run Semantics**: If a task previously failed a check but subsequently passed on a retry or completion, the latest run outcome is preserved in the evidence snapshot, preventing historical failures from falsely categorizing current workspace health as an error.
+
+The real-agent validation harness is:
+
+```sh
+cargo build --bin selfware
+python3 scripts/validate_phi_agents.py \
+  --binary target/debug/selfware \
+  --output target/phi-agents-live \
+  --endpoint https://llm.selfware.design/v1 \
+  --model qwen38-flash-next --agents 16 --concurrency 16
+```
+
+The output directory must be new. This launches sixteen separate agent
+processes on isolated repair tasks, saves their tool/session evidence, and
+checks repairs against supervisor-held assertions. It measures overlapping
+processes, not simultaneous provider requests. `--prepare-only` builds fixtures
+without making model requests. To inspect the actual captures, launch the Phi
+workspace against that output directory using its generated configuration.
+The harness result and the live UI are separate checks: a passing task report
+does not itself prove that the browser displayed the captures.
+
+The hook mapping and remaining tiers below describe proposed integration work.
+The implemented runtime bridge above observes evidence; it does not yet mediate
+requests, generate skills, or promote harness mutations.
+
+### Runtime-aware stewardship
+
+Both **Ask Phi** and idle suggestions consume the same activity snapshots as
+the roster. Proposals retain the captured agent, session, and task identity;
+counts from separate worktrees are never summed into a workspace debt score.
+Failed commands are described as recorded failures, including any recorded
+passing runs, rather than proof that a test is currently failing. Stale,
+partial, truncated, and missing evidence block a clean-workspace conclusion.
+Dismissal suppresses a suggestion without resolving its underlying evidence.
+
+**Inspect activity** opens that exact captured task locally. If the task is no
+longer present, Phi reports that instead of opening another task from the same
+agent. It never sends a different selected source file to the model as a stand-in
+for an agent's missing diagnostics. Unsolicited suggestions pause while fresh
+captures show running agents or narration owns the interface.
+
+Existing file-based proposals prepare a grounded reading of their named file.
+They retain the proposal when the buffer is unsaved, the target is unavailable,
+or no reading job was accepted. A reading does not execute a repair or test.
+
 Selfware's hook system fires `PreToolUse`, `PostToolUse` and `Stop` from
 `src/agent/execution.rs`. Those map onto Phi's three jobs without inventing
 anything:
@@ -37,9 +118,10 @@ mode waiting on user input". No new lifecycle is required.
 
 ### Tier 1 — the loop model in Rust (`src/phi/`)
 
-Port `phi_state`, `phi_friction` and `phi_steward` to Rust and drive them from
-the hook bus. The events originate in the agent loop, not the browser; today the
-browser *estimates* them, which is the weakest part of the current build.
+The Rust ledger and observer already record revision-aware obligations and
+executed checks. The runtime evidence bridge exposes that record independently
+of the browser's mood estimates. Porting friction/steward policy and enabling
+mediation are separate future steps that need measured evidence first.
 
 Where the real signals come from:
 

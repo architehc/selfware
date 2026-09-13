@@ -4,6 +4,7 @@
 //! doing and report it. Nothing here influences agent behaviour, and nothing
 //! should until recorded sessions have been evaluated.
 
+pub mod activity;
 pub mod ledger;
 pub mod observer;
 

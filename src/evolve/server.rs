@@ -37,6 +37,7 @@ use super::{
 use crate::config::Config;
 
 mod friction;
+mod phi_activity;
 mod speech;
 
 const WEB_DIR: &str = "src/evolve/web";
@@ -216,6 +217,7 @@ impl EvolveServer {
         let router = Router::new()
             .merge(speech::routes())
             .merge(friction::routes())
+            .merge(phi_activity::routes())
             .route("/api/workspace", get(workspace_handler))
             .route("/api/graph", get(graph_handler))
             .route("/api/context", get(context_handler))
@@ -3252,6 +3254,10 @@ fn embedded_asset(path: &str) -> Option<(&'static [u8], &'static str)> {
         ),
         "/phi/app.js" => (
             include_str!("web/phi/app.js").as_bytes(),
+            "text/javascript; charset=utf-8",
+        ),
+        "/phi/phi_activity.js" => (
+            include_str!("web/phi/phi_activity.js").as_bytes(),
             "text/javascript; charset=utf-8",
         ),
         "/phi/phi_rig.js" => (
