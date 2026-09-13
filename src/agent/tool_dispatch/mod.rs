@@ -122,10 +122,13 @@ impl Agent {
         // Kept in step with the ledger so the gate's message and the checkpoint
         // summary cannot disagree with the records they describe.
         let task_root = self.verification_task_root();
+        // Only a failure that actually concerns THIS task. Falling back to any
+        // outstanding record would put a foreign workspace's compile error in a
+        // refusal message about the task's own work — the same conflation the
+        // scoped gate exists to prevent, reintroduced through the text.
         self.last_failed_verification_summary = self
             .verification_failures
             .blocking(&task_root, self.mutation_sequence)
-            .or_else(|| self.verification_failures.outstanding().first())
             .map(|failed| failed.summary.clone());
     }
 
