@@ -3,11 +3,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tracing::{error, info};
 
-/// Configuration for the compilation sandbox
-#[derive(Debug, Clone)]
+/// Configuration for the compilation sandbox (RAII guard: cleans up on drop).
+#[derive(Debug)]
 pub struct CompilationSandbox {
     _original_dir: PathBuf,
     work_dir: PathBuf,
+    owns_work_dir: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -30,6 +31,13 @@ impl CompilationSandbox {
             std::fs::remove_dir_all(&work_dir)?;
         }
 
+        let cleanup_on_fail = |err: anyhow::Error| -> anyhow::Error {
+            if work_dir.exists() {
+                let _ = std::fs::remove_dir_all(&work_dir);
+            }
+            err
+        };
+
         // Clone the repo to get a clean working tree without build artifacts.
         // Pin the child's cwd to the source repo. Without this the clone
         // inherits the process-global cwd, which other tests (and the
@@ -42,10 +50,13 @@ impl CompilationSandbox {
             .arg(&original_dir)
             .arg(&work_dir)
             .current_dir(&original_dir)
-            .status()?;
+            .status()
+            .map_err(|e| cleanup_on_fail(anyhow!("Failed to spawn git clone: {e}")))?;
 
         if !status.success() {
-            return Err(anyhow!("Failed to clone repository into sandbox"));
+            return Err(cleanup_on_fail(anyhow!(
+                "Failed to clone repository into sandbox"
+            )));
         }
 
         // Carry over uncommitted changes (staged + unstaged) so the sandbox
@@ -53,21 +64,25 @@ impl CompilationSandbox {
         let diff_output = Command::new("git")
             .args(["diff", "HEAD"])
             .current_dir(&original_dir)
-            .output()?;
+            .output()
+            .map_err(|e| cleanup_on_fail(anyhow!("Failed to run git diff: {e}")))?;
 
         if diff_output.status.success() && !diff_output.stdout.is_empty() {
             let mut apply = Command::new("git")
                 .args(["apply", "--allow-empty"])
                 .current_dir(&work_dir)
                 .stdin(std::process::Stdio::piped())
-                .spawn()?;
+                .spawn()
+                .map_err(|e| cleanup_on_fail(anyhow!("Failed to spawn git apply: {e}")))?;
 
             if let Some(ref mut stdin) = apply.stdin {
                 use std::io::Write;
-                stdin.write_all(&diff_output.stdout)?;
+                let _ = stdin.write_all(&diff_output.stdout);
             }
 
-            let apply_status = apply.wait()?;
+            let apply_status = apply
+                .wait()
+                .map_err(|e| cleanup_on_fail(anyhow!("Failed waiting for git apply: {e}")))?;
             if !apply_status.success() {
                 info!("Some uncommitted changes could not be applied to sandbox (merge conflict); proceeding with committed state");
             }
@@ -76,6 +91,7 @@ impl CompilationSandbox {
         Ok(Self {
             _original_dir: original_dir,
             work_dir,
+            owns_work_dir: true,
         })
     }
 
@@ -130,11 +146,9 @@ impl CompilationSandbox {
         Ok(true)
     }
 
-    /// Cleanup the sandbox
+    /// Cleanup the sandbox manually (also cleaned up automatically on drop via RAII).
     pub fn cleanup(self) -> Result<()> {
-        if self.work_dir.exists() {
-            std::fs::remove_dir_all(&self.work_dir)?;
-        }
+        drop(self);
         Ok(())
     }
 
@@ -144,6 +158,14 @@ impl CompilationSandbox {
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         })
+    }
+}
+
+impl Drop for CompilationSandbox {
+    fn drop(&mut self) {
+        if self.owns_work_dir && self.work_dir.exists() {
+            let _ = std::fs::remove_dir_all(&self.work_dir);
+        }
     }
 }
 

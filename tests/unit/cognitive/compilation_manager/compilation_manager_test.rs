@@ -7,6 +7,7 @@ fn dummy_sandbox() -> CompilationSandbox {
     CompilationSandbox {
         _original_dir: PathBuf::from("/tmp/dummy-original"),
         work_dir: PathBuf::from("/tmp/dummy-sandbox"),
+        owns_work_dir: false,
     }
 }
 
@@ -95,10 +96,32 @@ fn test_cleanup_nonexistent_dir_no_panic() {
     let sandbox = CompilationSandbox {
         _original_dir: PathBuf::from("/tmp/does-not-exist-original"),
         work_dir: PathBuf::from("/tmp/does-not-exist-sandbox-xyz123"),
+        owns_work_dir: false,
     };
     // cleanup checks `self.work_dir.exists()` before removing, so this should be Ok
     let result = sandbox.cleanup();
     assert!(result.is_ok());
+}
+
+#[test]
+fn test_drop_does_not_remove_unowned_dir() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let sub = temp_dir.path().join("preserved_dir");
+    std::fs::create_dir_all(&sub).unwrap();
+    assert!(sub.exists());
+
+    {
+        let _unowned = CompilationSandbox {
+            _original_dir: temp_dir.path().to_path_buf(),
+            work_dir: sub.clone(),
+            owns_work_dir: false,
+        };
+    } // dropped here
+
+    assert!(
+        sub.exists(),
+        "Directory should not be removed when owns_work_dir is false"
+    );
 }
 
 // --- CompileResult fields ---
