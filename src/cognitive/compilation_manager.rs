@@ -22,7 +22,10 @@ impl CompilationSandbox {
     /// Creates a new compilation sandbox by copying the current project root to a temporary location
     pub fn new(project_root: impl AsRef<Path>) -> Result<Self> {
         let original_dir = project_root.as_ref().to_path_buf();
-        let work_dir = original_dir.join(".selfware-sandbox");
+        let work_dir = original_dir.join(format!(
+            ".selfware-sandbox-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
 
         info!("Setting up compilation sandbox at {:?}", work_dir);
 

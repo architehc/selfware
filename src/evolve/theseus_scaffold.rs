@@ -169,7 +169,7 @@ impl TheseusScaffold {
             if out.status.success() {
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 for line in stdout.lines() {
-                    let parts: Vec<&str> = line.split('|').collect();
+                    let parts: Vec<&str> = line.splitn(4, '|').collect();
                     if parts.len() >= 4 {
                         log.events.push(EventEntry {
                             timestamp: parts[2].trim().to_string(),

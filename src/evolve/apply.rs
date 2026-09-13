@@ -167,6 +167,8 @@ impl std::fmt::Display for RejectReason {
 /// (`git add -A` equivalent, no commit — the run branch stays untouched for
 /// the merge step) because libgit2 produces no patch content or line stats for
 /// untracked files in a raw tree→workdir diff; tree→index covers new files,
+/// modifications, and deletions.
+///
 /// Workspace grounding artifacts (Theseus scaffold / internal state) that must
 /// not be staged into the apply diff or committed to the target branch.
 pub fn is_scaffold_artifact(path: &str) -> bool {
@@ -179,8 +181,11 @@ pub fn is_scaffold_artifact(path: &str) -> bool {
 
 /// Stage all working directory changes into the index, pruning any workspace
 /// grounding scaffolding artifacts (.theseus.md, .selfware/theseus/*).
+/// If a scaffolding path was already tracked in `base_tree`, it is preserved in the
+/// index rather than removed (which would stage a deletion).
 pub fn stage_workdir_without_scaffolding(
     repo: &git2::Repository,
+    base_tree: Option<&git2::Tree>,
 ) -> std::result::Result<git2::Index, git2::Error> {
     let mut index = repo.index()?;
     index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)?;
@@ -188,7 +193,12 @@ pub fn stage_workdir_without_scaffolding(
     for entry in index.iter() {
         let p = String::from_utf8_lossy(&entry.path);
         if is_scaffold_artifact(&p) {
-            to_remove.push(p.into_owned());
+            let in_base = base_tree
+                .and_then(|base| base.get_path(Path::new(p.as_ref())).ok())
+                .is_some();
+            if !in_base {
+                to_remove.push(p.into_owned());
+            }
         }
     }
     for p in to_remove {
@@ -216,7 +226,7 @@ pub fn verify_staged_diff(
         .find_commit(git2::Oid::from_str(base_revision)?)?
         .tree()?;
 
-    let index = stage_workdir_without_scaffolding(&repo)?;
+    let index = stage_workdir_without_scaffolding(&repo, Some(&base))?;
     let diff = repo.diff_tree_to_index(Some(&base), Some(&index), None)?;
 
     if diff.deltas().len() == 0 {
@@ -485,29 +495,11 @@ pub async fn stage_run(
     };
 
     /// Exclude workspace scaffolding artifacts (.theseus.md and .selfware/) in git info/exclude
-    /// for both the main repository and the shadow worktree.
-    fn exclude_scaffold_artifacts(project_root: &Path, shadow_path: &Path) {
+    /// for the shadow worktree only (preserving the main repository untouched).
+    fn exclude_scaffold_artifacts(shadow_path: &Path) {
         let entries = "\n.theseus.md\n.selfware/\n";
-        let mut targets = Vec::new();
-
-        let root_git = project_root.join(".git");
-        if root_git.is_dir() {
-            targets.push(root_git.join("info/exclude"));
-        } else if root_git.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&root_git) {
-                if let Some(gitdir) = content.trim().strip_prefix("gitdir:") {
-                    let p = PathBuf::from(gitdir.trim());
-                    let abs = if p.is_absolute() {
-                        p
-                    } else {
-                        project_root.join(p)
-                    };
-                    targets.push(abs.join("info/exclude"));
-                }
-            }
-        }
-
         let shadow_git = shadow_path.join(".git");
+        let mut target = None;
         if shadow_git.is_file() {
             if let Ok(content) = std::fs::read_to_string(&shadow_git) {
                 if let Some(gitdir) = content.trim().strip_prefix("gitdir:") {
@@ -517,12 +509,14 @@ pub async fn stage_run(
                     } else {
                         shadow_path.join(p)
                     };
-                    targets.push(abs.join("info/exclude"));
+                    target = Some(abs.join("info/exclude"));
                 }
             }
+        } else if shadow_git.is_dir() {
+            target = Some(shadow_git.join("info/exclude"));
         }
 
-        for target in targets {
+        if let Some(target) = target {
             if let Some(parent) = target.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
@@ -540,7 +534,7 @@ pub async fn stage_run(
         }
     }
 
-    exclude_scaffold_artifacts(&project_root, &shadow_path);
+    exclude_scaffold_artifacts(&shadow_path);
 
     // Ground shadow worktree with Theseus workspace scaffolding (Collection Map & Event Log)
     if let Err(e) = crate::evolve::theseus_scaffold::TheseusScaffold::scaffold_shadow_worktree(
@@ -905,27 +899,24 @@ fn merge_shadow(
     // Guard against retry-after-failed-checkout: the shadow HEAD must still be
     // the run's base, otherwise a second attempt would stack an empty commit
     // on the previous one (breaking the parent == base invariant).
-    {
-        let shadow_head = shadow_repo
-            .head()
-            .and_then(|h| h.peel_to_commit())
-            .map_err(git_err)?;
-        if shadow_head.id().to_string() != base_revision {
-            return Err(CommitError::BaseMoved {
-                base: base_revision.to_string(),
-                head: format!("shadow at {}", shadow_head.id()),
-            });
-        }
+    let shadow_head = shadow_repo
+        .head()
+        .and_then(|h| h.peel_to_commit())
+        .map_err(git_err)?;
+    if shadow_head.id().to_string() != base_revision {
+        return Err(CommitError::BaseMoved {
+            base: base_revision.to_string(),
+            head: format!("shadow at {}", shadow_head.id()),
+        });
     }
+    let base_tree = shadow_head.tree().map_err(git_err)?;
     // Re-stage the workdir without scaffolding so the commit captures exactly what
     // verify_staged_diff indexed.
-    let mut index = stage_workdir_without_scaffolding(&shadow_repo).map_err(git_err)?;
+    let mut index =
+        stage_workdir_without_scaffolding(&shadow_repo, Some(&base_tree)).map_err(git_err)?;
     let tree_id = index.write_tree().map_err(git_err)?;
     let tree = shadow_repo.find_tree(tree_id).map_err(git_err)?;
-    let base_commit = shadow_repo
-        .head()
-        .and_then(|head| head.peel_to_commit())
-        .map_err(git_err)?;
+    let base_commit = shadow_head;
     let signature = shadow_repo
         .signature()
         .or_else(|_| git2::Signature::now("selfware-evolve", "evolve@selfware.local"))
@@ -1033,5 +1024,51 @@ mod tests {
         let (env, withheld) = shadow_config_env(project.path());
         assert!(env.is_none());
         assert!(withheld.is_none());
+    }
+
+    #[test]
+    fn tracked_scaffold_file_in_base_tree_is_not_staged_as_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        let sig = git2::Signature::now("test", "test@example.com").unwrap();
+
+        std::fs::create_dir_all(dir.path().join(".selfware")).unwrap();
+        std::fs::write(
+            dir.path().join(".selfware/config.json"),
+            b"{\"tracked\": true}",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), b"fn main() {}\n").unwrap();
+
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(".selfware/config.json")).unwrap();
+        index.add_path(Path::new("src/main.rs")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let _commit_oid = repo
+            .commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+
+        std::fs::write(
+            dir.path().join("src/main.rs"),
+            b"fn main() { println!(); }\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join(".theseus.md"), b"# scaffold").unwrap();
+
+        let staged_index = stage_workdir_without_scaffolding(&repo, Some(&tree)).unwrap();
+        let diff = repo
+            .diff_tree_to_index(Some(&tree), Some(&staged_index), None)
+            .unwrap();
+
+        assert_eq!(diff.deltas().len(), 1);
+        let delta = diff.deltas().next().unwrap();
+        assert_eq!(
+            delta.new_file().path().unwrap().to_str().unwrap(),
+            "src/main.rs"
+        );
+        assert_eq!(delta.status(), git2::Delta::Modified);
     }
 }
