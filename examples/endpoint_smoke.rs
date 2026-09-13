@@ -815,13 +815,15 @@ async fn check_tool_call(
         .ok_or_else(|| anyhow::anyhow!("response had no choices"))?;
     let message = &choice.message;
 
-    let tool_calls = match &message.tool_calls {
-        Some(calls) if !calls.is_empty() => calls,
-        _ => anyhow::bail!(
+    let extracted = selfware::api::extract_tool_calls(message, true);
+    let tool_calls = if !extracted.is_empty() {
+        extracted
+    } else {
+        anyhow::bail!(
             "model did not return any tool_calls (finish_reason={:?}, content={})",
             choice.finish_reason,
             truncate(&message.content.text_all(), 200)
-        ),
+        );
     };
 
     let call = &tool_calls[0];
@@ -854,10 +856,16 @@ async fn check_tool_call(
             b
         );
     }
+
+    let mut return_msg = message.clone();
+    if return_msg.tool_calls.as_ref().is_none_or(|c| c.is_empty()) {
+        return_msg.tool_calls = Some(tool_calls.clone());
+    }
+
     Ok((
         elapsed,
         format!("model called calculator(a={}, b={}) [id={}]", a, b, call.id),
-        Some(message.clone()),
+        Some(return_msg),
     ))
 }
 
