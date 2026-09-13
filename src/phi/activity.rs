@@ -319,16 +319,38 @@ fn prune_retention(directory: &std::fs::File) {
 
     // Bounded receipt GC: prune excess oldest files past MAX_SCAN
     if json_files.len() > MAX_SCAN {
-        for (_, cname) in json_files.iter().skip(MAX_SCAN) {
-            unsafe { libc::unlinkat(directory.as_raw_fd(), cname.as_ptr(), 0) };
+        for (scanned_mtime, cname) in json_files.iter().skip(MAX_SCAN) {
+            let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+            let res = unsafe {
+                libc::fstatat(
+                    directory.as_raw_fd(),
+                    cname.as_ptr(),
+                    &mut stat,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if res == 0 && stat.st_mtime == *scanned_mtime {
+                unsafe { libc::unlinkat(directory.as_raw_fd(), cname.as_ptr(), 0) };
+            }
         }
         json_files.truncate(MAX_SCAN);
     }
 
     // Retention policy: prune expired receipts older than 24 hours
-    for (mtime_sec, cname) in json_files {
-        if now_sec.saturating_sub(mtime_sec) > RETENTION_SECS {
-            unsafe { libc::unlinkat(directory.as_raw_fd(), cname.as_ptr(), 0) };
+    for (scanned_mtime, cname) in json_files {
+        if now_sec.saturating_sub(scanned_mtime) > RETENTION_SECS {
+            let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+            let res = unsafe {
+                libc::fstatat(
+                    directory.as_raw_fd(),
+                    cname.as_ptr(),
+                    &mut stat,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if res == 0 && stat.st_mtime == scanned_mtime {
+                unsafe { libc::unlinkat(directory.as_raw_fd(), cname.as_ptr(), 0) };
+            }
         }
     }
 }
@@ -548,21 +570,44 @@ mod tests {
     fn symlink_swap_of_activity_dir_cannot_redirect_retention_prune() {
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        let sensitive_file = outside.path().join("sensitive.json");
-        std::fs::write(&sensitive_file, b"keep safe").unwrap();
+
+        // Populate outside with 260 json files (exceeding MAX_SCAN 256)
+        for i in 0..260 {
+            let file_path = outside.path().join(format!("victim-{i:03}.json"));
+            std::fs::write(&file_path, b"keep safe outside").unwrap();
+        }
 
         let capture = ActivityCapture::new(root.path(), "session-prune", "agent-prune").unwrap();
         let dir = capture.activity_directory().unwrap();
-        write_atomic(&dir, "receipt-1.json", b"{}").unwrap();
+
+        // Populate dir with 260 json files (exceeding MAX_SCAN 256)
+        for i in 0..260 {
+            write_atomic(&dir, &format!("receipt-{i:03}.json"), b"{}").unwrap();
+        }
 
         let act_dir = root.path().join(".selfware/phi/activity");
         let moved = root.path().join("moved_activity");
         std::fs::rename(&act_dir, &moved).unwrap();
         std::os::unix::fs::symlink(outside.path(), &act_dir).unwrap();
 
+        // Prune retention on the pinned descriptor pointing to moved
         prune_retention(&dir);
 
-        assert_eq!(std::fs::read(&sensitive_file).unwrap(), b"keep safe");
+        // Outside directory must not have been touched at all: all 260 files remain
+        let outside_count = std::fs::read_dir(outside.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
+            .count();
+        assert_eq!(outside_count, 260, "outside files must not be pruned");
+
+        // The pinned descriptor was pruned down to MAX_SCAN (256)
+        let dir_count = std::fs::read_dir(&moved)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
+            .count();
+        assert_eq!(dir_count, 256, "pinned activity dir must be pruned to 256");
     }
 }
 

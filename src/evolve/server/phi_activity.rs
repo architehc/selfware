@@ -205,10 +205,13 @@ fn read_activity(root: &Path, now: u64) -> Value {
             }
         };
         let Ok(metadata) = file.metadata() else {
-            rejected = true;
             continue;
         };
         use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() == 0 {
+            // Unlinked concurrently by retention prune; skip cleanly without rejection
+            continue;
+        }
         if !metadata.is_file() || metadata.nlink() != 1 || metadata.len() > MAX_FILE {
             rejected = true;
             continue;
