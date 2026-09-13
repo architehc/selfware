@@ -262,18 +262,36 @@ fn parse_sab_output(
 
 /// DarwinX Non-Regression Invariant Violation
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DarwinXViolation {
-    pub regressed_scenarios: Vec<String>,
+pub enum DarwinXViolation {
+    SuiteMismatch {
+        missing_in_candidate: Vec<String>,
+        unexpected_in_candidate: Vec<String>,
+    },
+    Regression {
+        regressed_scenarios: Vec<String>,
+    },
 }
 
 impl std::fmt::Display for DarwinXViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "DarwinX Non-Regression invariant violated: {} baseline-passed scenario(s) failed in candidate: {:?}",
-            self.regressed_scenarios.len(),
-            self.regressed_scenarios
-        )
+        match self {
+            DarwinXViolation::SuiteMismatch {
+                missing_in_candidate,
+                unexpected_in_candidate,
+            } => write!(
+                f,
+                "DarwinX Suite Identity violated: missing in candidate: {:?}, unexpected: {:?}",
+                missing_in_candidate, unexpected_in_candidate
+            ),
+            DarwinXViolation::Regression {
+                regressed_scenarios,
+            } => write!(
+                f,
+                "DarwinX Non-Regression invariant violated: {} baseline-passed scenario(s) failed in candidate: {:?}",
+                regressed_scenarios.len(),
+                regressed_scenarios
+            ),
+        }
     }
 }
 
@@ -283,11 +301,39 @@ impl SabResult {
     /// DarwinX non-regression invariant:
     /// Passed(baseline) ∩ Failed(candidate) = ∅
     ///
-    /// Any scenario that passed in the baseline MUST NOT fail in the candidate.
+    /// Any scenario that passed in the baseline MUST NOT fail in the candidate,
+    /// and the suite of scenarios evaluated must be identical.
     pub fn check_darwinx_non_regression(
         &self,
         candidate: &SabResult,
     ) -> Result<(), DarwinXViolation> {
+        let baseline_names: std::collections::HashSet<&str> = self
+            .scenario_scores
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        let candidate_names: std::collections::HashSet<&str> = candidate
+            .scenario_scores
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+
+        let missing: Vec<String> = baseline_names
+            .difference(&candidate_names)
+            .map(|s| s.to_string())
+            .collect();
+        let unexpected: Vec<String> = candidate_names
+            .difference(&baseline_names)
+            .map(|s| s.to_string())
+            .collect();
+
+        if !missing.is_empty() || !unexpected.is_empty() {
+            return Err(DarwinXViolation::SuiteMismatch {
+                missing_in_candidate: missing,
+                unexpected_in_candidate: unexpected,
+            });
+        }
+
         let candidate_scenarios: std::collections::HashMap<&str, bool> = candidate
             .scenario_scores
             .iter()
@@ -304,7 +350,6 @@ impl SabResult {
                         }
                     }
                     None => {
-                        // Fail-closed: missing scenario that passed in baseline is a regression
                         regressed.push(baseline_scenario.name.clone());
                     }
                 }
@@ -314,7 +359,7 @@ impl SabResult {
         if regressed.is_empty() {
             Ok(())
         } else {
-            Err(DarwinXViolation {
+            Err(DarwinXViolation::Regression {
                 regressed_scenarios: regressed,
             })
         }

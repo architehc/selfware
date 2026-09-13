@@ -100,6 +100,22 @@ fn test_mutation_is_trivial_rust_attribute_change_not_trivial() {
 }
 
 #[test]
+fn test_mutation_is_trivial_rust_asterisk_dereference_not_trivial() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    let sandbox = dir.path().join("sandbox");
+    write_pair(
+        &root,
+        &sandbox,
+        "src/lib.rs",
+        "fn run(ptr: &mut i32) {\n*ptr = 1;\n}\n",
+        "fn run(ptr: &mut i32) {\n*ptr = 2;\n}\n",
+    );
+    let edited = vec!["src/lib.rs".to_string()];
+    assert!(!mutation_is_trivial(&root, &sandbox, &edited));
+}
+
+#[test]
 fn test_mutation_is_trivial_hash_comment_in_toml() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("root");
@@ -236,9 +252,9 @@ fn test_tsv_score_parsing_short_row() {
 #[test]
 fn test_parse_benchmark_report_and_darwinx_non_regression() {
     let tsv_content = "\
-scenario|type|difficulty|baseline|post|agent|timeout|duration|score|changed|error|notes
-sc1|unit|easy|10|10|10|0|10|85.0|true||ok
-sc2|unit|medium|10|10|10|0|10|40.0|true|timeout|failed
+scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|duration_secs|score|changed_files|error_hits|notes
+sc1|coding|easy|1|0|0|0|10|85.0|1|0|ok
+sc2|coding|medium|1|1|0|0|10|40.0|1|1|failed
 ";
     let baseline_report = parse_benchmark_report(tsv_content);
     assert_eq!(baseline_report.scenarios.len(), 2);
@@ -249,27 +265,49 @@ sc2|unit|medium|10|10|10|0|10|40.0|true|timeout|failed
     // Candidate 1: maintains sc1, passes sc2 -> DarwinX ok
     let candidate_ok = parse_benchmark_report(
         "\
-scenario|type|difficulty|baseline|post|agent|timeout|duration|score|changed|error|notes
-sc1|unit|easy|10|10|10|0|10|90.0|true||ok
-sc2|unit|medium|10|10|10|0|10|80.0|true||ok
+scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|duration_secs|score|changed_files|error_hits|notes
+sc1|coding|easy|1|0|0|0|10|90.0|1|0|ok
+sc2|coding|medium|1|0|0|0|10|80.0|1|0|ok
 ",
     );
     assert!(baseline_report
         .check_darwinx_non_regression(&candidate_ok)
         .is_ok());
 
-    // Candidate 2: improves sc2 to 100, but breaks sc1 (0.0 score) -> DarwinX violation
+    // Candidate 2: improves sc2 to 100, but breaks sc1 -> DarwinX violation
     let candidate_regressed = parse_benchmark_report(
         "\
-scenario|type|difficulty|baseline|post|agent|timeout|duration|score|changed|error|notes
-sc1|unit|easy|10|10|10|0|10|0.0|true|assertion failed|broke
-sc2|unit|medium|10|10|10|0|10|100.0|true||ok
+scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|duration_secs|score|changed_files|error_hits|notes
+sc1|coding|easy|1|1|0|0|10|0.0|1|1|broke
+sc2|coding|medium|1|0|0|0|10|100.0|1|0|ok
 ",
     );
     let err = baseline_report
         .check_darwinx_non_regression(&candidate_regressed)
         .expect_err("should catch sc1 regression");
     assert_eq!(err, vec!["sc1".to_string()]);
+
+    // Candidate 3: drops sc2 -> suite identity mismatch
+    let candidate_dropped = parse_benchmark_report(
+        "\
+scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|duration_secs|score|changed_files|error_hits|notes
+sc1|coding|easy|1|0|0|0|10|95.0|1|0|ok
+",
+    );
+    let err = baseline_report
+        .check_darwinx_non_regression(&candidate_dropped)
+        .expect_err("should catch dropped scenario");
+    assert!(err[0].contains("Missing scenarios in candidate"));
+
+    // Duplicate rejection test: duplicates do not overwrite or double count
+    let tsv_with_dups = "\
+scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|duration_secs|score|changed_files|error_hits|notes
+sc1|coding|easy|1|0|0|0|10|80.0|1|0|ok
+sc1|coding|easy|1|0|0|0|10|20.0|1|0|dup
+";
+    let dup_report = parse_benchmark_report(tsv_with_dups);
+    assert_eq!(dup_report.scenarios.len(), 1);
+    assert_eq!(dup_report.average_score, 80.0);
 }
 
 #[test]

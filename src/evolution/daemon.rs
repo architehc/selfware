@@ -341,11 +341,13 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
     // Only run SAB baseline if explicitly requested via env var
     // (SAB runs all 12 scenarios and takes 30+ minutes). Otherwise use real
     // compile / test / fmt / clippy / binary-size metrics.
-    let baseline_metrics = if sab_mode {
+    let (baseline_metrics, mut current_baseline_sab) = if sab_mode {
         let selfware_binary = repo_root.join("target/release/selfware");
         match fitness::run_sab(&selfware_binary, &sab_config) {
             Ok(r) => {
-                metrics_from_sab_result(&r, &selfware_binary, config.safety.max_binary_size_mb)
+                let m =
+                    metrics_from_sab_result(&r, &selfware_binary, config.safety.max_binary_size_mb);
+                (m, Some(r))
             }
             Err(e) => {
                 log_warning(&format!(
@@ -370,7 +372,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         match measure_compile_test_baseline(repo_root, EVOLVE_FEATURES, DEFAULT_TIMEOUT_SECS) {
             Ok(mut m) => {
                 m.max_binary_size_mb = config.safety.max_binary_size_mb;
-                m
+                (m, None)
             }
             Err(e) => {
                 log_warning(&format!(
@@ -482,7 +484,12 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         // ─── Step 4: Evaluate each hypothesis (apply → check → test) ───
         let sab_available =
             sab_config.runner_script.exists() && std::env::var("SELFWARE_EVOLVE_SAB").is_ok();
-        let mut generation_winner: Option<(Hypothesis, FitnessMetrics, String)> = None;
+        let mut generation_winner: Option<(
+            Hypothesis,
+            FitnessMetrics,
+            Option<fitness::SabResult>,
+            String,
+        )> = None;
 
         for hypothesis in &valid {
             log_phase(&format!(
@@ -522,15 +529,14 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 .output();
 
             if fmt_check.map(|o| !o.status.success()).unwrap_or(true) {
-                log_warning(&format!(
-                    "  {} failed fmt check — auto-formatting before evaluation",
-                    hypothesis.id
-                ));
-                // Auto-fix: run cargo fmt to correct formatting
-                let _ = Command::new("cargo")
-                    .args(["fmt"])
+                let fmt_fix = Command::new("cargo")
+                    .arg("fmt")
                     .current_dir(&worktree)
                     .output();
+                if fmt_fix.map(|o| !o.status.success()).unwrap_or(true) {
+                    log_frost(generation, &format!("cargo fmt failed: {}", hypothesis.id));
+                    continue;
+                }
             }
 
             // Compile check
@@ -598,7 +604,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
             // Compute real fitness metrics. If SAB is available, run the full
             // benchmark; otherwise derive compile/test/binary-size metrics.
-            let winner_metrics = if sab_available {
+            let (winner_metrics, winner_sab) = if sab_available {
                 let build = Command::new("cargo")
                     .args(["build", "--release", "--features", "self-improvement"])
                     .current_dir(&worktree)
@@ -614,10 +620,13 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
                 let mutated_binary = worktree.join("target/release/selfware");
                 match fitness::run_sab(&mutated_binary, &sab_config) {
-                    Ok(r) => metrics_from_sab_result(
-                        &r,
-                        &mutated_binary,
-                        config.safety.max_binary_size_mb,
+                    Ok(r) => (
+                        metrics_from_sab_result(
+                            &r,
+                            &mutated_binary,
+                            config.safety.max_binary_size_mb,
+                        ),
+                        Some(r),
                     ),
                     Err(e) => {
                         log_warning(&format!("  SAB failed: {}", e));
@@ -632,7 +641,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     EVOLVE_FEATURES,
                     &config,
                 ) {
-                    Some(m) => m,
+                    Some(m) => (m, None),
                     None => {
                         log_frost(
                             generation,
@@ -667,12 +676,13 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
             // Keep the first passing hypothesis as winner
             if generation_winner.is_none() {
-                generation_winner = Some((hypothesis.clone(), winner_metrics, tested_diff));
+                generation_winner =
+                    Some((hypothesis.clone(), winner_metrics, winner_sab, tested_diff));
             }
         }
 
         // ─── Step 5: EMERGE OR DIE ───
-        let (winner, winner_metrics, tested_diff) = match generation_winner {
+        let (winner, winner_metrics, winner_sab, tested_diff) = match generation_winner {
             Some(w) => w,
             None => {
                 log_frost(generation, "No hypotheses survived evaluation");
@@ -695,6 +705,26 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         let winner_composite = config.fitness_weights.composite(&winner_metrics);
 
         if winner_composite > baseline_composite {
+            // Hard gate: DarwinX non-regression check over SAB results
+            if let (Some(base_sab), Some(cand_sab)) = (&current_baseline_sab, &winner_sab) {
+                if let Err(violation) = base_sab.check_darwinx_non_regression(cand_sab) {
+                    let reason = format!("DarwinX non-regression check failed: {violation}");
+                    log_warning(&reason);
+                    log_event(
+                        repo_root,
+                        &serde_json::json!({
+                            "event": "generation_end",
+                            "timestamp": chrono_now(),
+                            "generation": generation,
+                            "outcome": "frost",
+                            "reason": reason,
+                            "duration_secs": gen_start.elapsed().as_secs_f64(),
+                        }),
+                    );
+                    continue;
+                }
+            }
+
             // Hard gate: a winner that runs FEWER tests than the baseline
             // must never be committed — it enforces the invariant the dead
             // `SafetyConfig.min_test_count` promised. A regression here
@@ -781,6 +811,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 );
 
                 current_baseline_metrics = winner_metrics;
+                if winner_sab.is_some() {
+                    current_baseline_sab = winner_sab;
+                }
             }
         } else {
             let rating = if winner_composite < baseline_composite * 0.9 {

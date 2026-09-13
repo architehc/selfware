@@ -450,7 +450,12 @@ fn test_darwinx_non_regression_rejects_candidate_when_previously_passing_scenari
     let err = baseline
         .check_darwinx_non_regression(&candidate_regressed)
         .expect_err("regression on sc1 must fail DarwinX check");
-    assert_eq!(err.regressed_scenarios, vec!["sc1".to_string()]);
+    assert_eq!(
+        err,
+        DarwinXViolation::Regression {
+            regressed_scenarios: vec!["sc1".to_string()]
+        }
+    );
 }
 
 #[test]
@@ -491,5 +496,11 @@ fn test_darwinx_non_regression_rejects_candidate_when_baseline_passed_scenario_m
     let err = baseline
         .check_darwinx_non_regression(&candidate_missing)
         .expect_err("missing baseline-passed scenario must fail DarwinX check");
-    assert_eq!(err.regressed_scenarios, vec!["sc2".to_string()]);
+    assert_eq!(
+        err,
+        DarwinXViolation::SuiteMismatch {
+            missing_in_candidate: vec!["sc2".to_string()],
+            unexpected_in_candidate: vec![],
+        }
+    );
 }

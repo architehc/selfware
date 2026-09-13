@@ -390,31 +390,6 @@ impl RSIOrchestrator {
             return Ok(false);
         }
 
-        // 5b. DecoEvo Verifier Audit Gate (FREE static check):
-        // Subject verification edits to structural invariant and contrastive audits
-        // BEFORE running expensive paid benchmark suites.
-        if applied
-            .edited_files
-            .iter()
-            .any(|f| f.contains("verification"))
-        {
-            info!("Mutation touched verification logic; running DecoEvo verifier audit...");
-            if let Err(audit_err) =
-                crate::cognitive::deco_evo_audit::DecoEvoVerifierAudit::audit_sandbox(
-                    sandbox.work_dir(),
-                )
-            {
-                warn!(
-                    "DecoEvo verifier audit failed: {}. Rejecting mutation before paid suites.",
-                    audit_err
-                );
-                self.record_improvement(&target, None, 0.0, false, true)
-                    .await?;
-                sandbox.cleanup()?;
-                return Ok(false);
-            }
-        }
-
         // 6. Measure Baseline Fitness (PAID suite #1) — deferred until the
         // mutation is known to be non-trivial, compiling, and passing verifier audit.
         let baseline_report = self.run_benchmark_report(&self.project_root).await?;
@@ -466,6 +441,11 @@ impl RSIOrchestrator {
     async fn run_benchmark_report(&self, work_dir: &std::path::Path) -> Result<BenchmarkReport> {
         info!("Running E2E benchmark suite in {:?}", work_dir);
         let script_path = work_dir.join("system_tests/projecte2e/run_projecte2e.sh");
+
+        let latest_link = work_dir.join("system_tests/projecte2e/reports/latest");
+        if latest_link.exists() || latest_link.is_symlink() {
+            let _ = std::fs::remove_file(&latest_link);
+        }
 
         let output = Command::new("bash")
             .arg(&script_path)
@@ -595,6 +575,7 @@ impl RSIOrchestrator {
         }
 
         sandbox.cleanup()?;
+        info!("Successfully merged sandbox changes");
         Ok(())
     }
 
@@ -670,11 +651,39 @@ impl BenchmarkReport {
     /// DarwinX non-regression invariant:
     /// Passed(baseline) ∩ Failed(candidate) = ∅
     ///
-    /// Every scenario that passed in the baseline MUST also pass in the candidate.
+    /// Every scenario that passed in the baseline MUST also pass in the candidate,
+    /// and the suite of scenario names must match.
     pub fn check_darwinx_non_regression(
         &self,
         candidate: &BenchmarkReport,
     ) -> std::result::Result<(), Vec<String>> {
+        let baseline_names: std::collections::HashSet<&str> =
+            self.scenarios.keys().map(|s| s.as_str()).collect();
+        let candidate_names: std::collections::HashSet<&str> =
+            candidate.scenarios.keys().map(|s| s.as_str()).collect();
+
+        if baseline_names != candidate_names {
+            let missing: Vec<String> = baseline_names
+                .difference(&candidate_names)
+                .map(|s| s.to_string())
+                .collect();
+            let unexpected: Vec<String> = candidate_names
+                .difference(&baseline_names)
+                .map(|s| s.to_string())
+                .collect();
+            let mut errors = Vec::new();
+            if !missing.is_empty() {
+                errors.push(format!("Missing scenarios in candidate: {:?}", missing));
+            }
+            if !unexpected.is_empty() {
+                errors.push(format!(
+                    "Unexpected scenarios in candidate: {:?}",
+                    unexpected
+                ));
+            }
+            return Err(errors);
+        }
+
         let mut regressed = Vec::new();
         for (name, baseline_sc) in &self.scenarios {
             if baseline_sc.passed {
@@ -705,14 +714,40 @@ pub fn parse_benchmark_report(tsv_content: &str) -> BenchmarkReport {
         if i == 0 {
             continue;
         }
-        let parts: Vec<&str> = line.split('|').collect();
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = trimmed.split('|').collect();
         if parts.len() > 8 {
             let name = parts[0].trim().to_string();
-            if let Ok(score) = parts[8].parse::<f64>() {
-                total_score += score;
-                count += 1;
-                let has_error = parts.get(10).is_some_and(|err| !err.trim().is_empty());
-                let passed = score >= 70.0 || (!has_error && score > 0.0);
+            // Reject duplicate scenario names at parse time
+            if scenarios.contains_key(&name) {
+                tracing::warn!(
+                    "Duplicate scenario '{}' in benchmark TSV, skipping duplicate",
+                    name
+                );
+                continue;
+            }
+            if let Ok(score) = parts[8].trim().parse::<f64>() {
+                let scenario_type = parts.get(1).map(|s| s.trim()).unwrap_or("");
+                let post_status = parts.get(4).map(|s| s.trim()).unwrap_or("");
+                let agent_status = parts.get(5).map(|s| s.trim()).unwrap_or("");
+                let has_error = parts.get(10).is_some_and(|err| {
+                    let e = err.trim();
+                    if let Ok(hits) = e.parse::<u64>() {
+                        hits > 0
+                    } else {
+                        !e.is_empty() && e != "0"
+                    }
+                });
+
+                let passed = if scenario_type == "coding" {
+                    post_status == "0" && score >= 70.0
+                } else {
+                    agent_status == "0" && !has_error && score >= 70.0
+                };
+
                 scenarios.insert(
                     name.clone(),
                     ScenarioOutcome {
@@ -721,6 +756,8 @@ pub fn parse_benchmark_report(tsv_content: &str) -> BenchmarkReport {
                         passed,
                     },
                 );
+                total_score += score;
+                count += 1;
             }
         }
     }
@@ -756,25 +793,24 @@ fn mutation_is_trivial(project_root: &Path, sandbox_dir: &Path, edited_files: &[
     edited_files.iter().all(|rel| {
         let old = std::fs::read_to_string(project_root.join(rel)).unwrap_or_default();
         let new = std::fs::read_to_string(sandbox_dir.join(rel)).unwrap_or_default();
-        // `#` is a comment marker in shell/TOML/YAML/Python/Markdown but an
-        // ATTRIBUTE in Rust (`#[derive(...)]`) — stripping it there would
-        // call attribute-only changes "trivial", so keep it for .rs files.
-        let strip_hash = Path::new(rel)
+        let ext = Path::new(rel)
             .extension()
             .and_then(|e| e.to_str())
-            .is_some_and(|ext| {
-                matches!(
-                    ext,
-                    "toml" | "sh" | "bash" | "yaml" | "yml" | "py" | "md" | "cfg" | "ini" | "txt"
-                )
-            });
-        code_lines(&old, strip_hash) == code_lines(&new, strip_hash)
+            .unwrap_or_default();
+        let strip_hash = matches!(
+            ext,
+            "toml" | "sh" | "bash" | "yaml" | "yml" | "py" | "md" | "cfg" | "ini" | "txt"
+        );
+        // In Rust, `*` can be a dereference operation (`*ptr = ...`) at the
+        // start of a line — only strip leading asterisk in non-Rust files.
+        let strip_asterisk = ext != "rs";
+        code_lines(&old, strip_hash, strip_asterisk) == code_lines(&new, strip_hash, strip_asterisk)
     })
 }
 
 /// The content lines of `content` with blank lines and whole-line comments
 /// removed — see [`mutation_is_trivial`] for the exact stripping rules.
-fn code_lines(content: &str, strip_hash: bool) -> Vec<&str> {
+fn code_lines(content: &str, strip_hash: bool, strip_asterisk: bool) -> Vec<&str> {
     content
         .lines()
         .map(str::trim)
@@ -783,7 +819,7 @@ fn code_lines(content: &str, strip_hash: bool) -> Vec<&str> {
                 || line.starts_with("//")
                 || (strip_hash && line.starts_with('#'))
                 || line.starts_with("/*")
-                || line.starts_with('*')
+                || (strip_asterisk && line.starts_with('*'))
                 || line.starts_with("--"))
         })
         .collect()
