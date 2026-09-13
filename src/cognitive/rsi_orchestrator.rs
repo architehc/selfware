@@ -715,10 +715,26 @@ pub fn parse_benchmark_report(tsv_content: &str) -> std::result::Result<Benchmar
         .next()
         .ok_or_else(|| "Benchmark TSV report is empty".to_string())?;
     let header_parts: Vec<&str> = header.split('|').map(|s| s.trim()).collect();
-    if header_parts.is_empty() || header_parts[0] != "scenario" {
+    const EXPECTED_COLUMNS: [&str; 12] = [
+        "scenario",
+        "type",
+        "difficulty",
+        "baseline_status",
+        "post_status",
+        "agent_status",
+        "timed_out",
+        "duration_secs",
+        "score",
+        "changed_files",
+        "error_hits",
+        "notes",
+    ];
+
+    if header_parts != EXPECTED_COLUMNS {
         return Err(format!(
-            "Invalid TSV header: expected 'scenario' as first column, got '{}'",
-            header_parts.first().unwrap_or(&"")
+            "Invalid TSV header: expected '{}', got '{}'",
+            EXPECTED_COLUMNS.join("|"),
+            header
         ));
     }
 
@@ -729,9 +745,9 @@ pub fn parse_benchmark_report(tsv_content: &str) -> std::result::Result<Benchmar
     for (i, line) in lines.enumerate() {
         let line_num = i + 2; // 1-based, accounting for header
         let parts: Vec<&str> = line.trim().split('|').collect();
-        if parts.len() < 9 {
+        if parts.len() < 11 {
             return Err(format!(
-                "Malformed TSV row {line_num}: expected at least 9 columns, got {}",
+                "Malformed TSV row {line_num}: expected at least 11 columns, got {}",
                 parts.len()
             ));
         }
@@ -756,22 +772,20 @@ pub fn parse_benchmark_report(tsv_content: &str) -> std::result::Result<Benchmar
             ));
         }
 
-        let scenario_type = parts.get(1).map(|s| s.trim()).unwrap_or("");
-        let post_status = parts.get(4).map(|s| s.trim()).unwrap_or("");
-        let agent_status = parts.get(5).map(|s| s.trim()).unwrap_or("");
-        let has_error = parts.get(10).is_some_and(|err| {
-            let e = err.trim();
-            if let Ok(hits) = e.parse::<u64>() {
-                hits > 0
-            } else {
-                !e.is_empty() && e != "0"
-            }
-        });
-
-        let passed = if scenario_type == "coding" {
-            post_status == "0" && score >= 70.0
+        let scenario_type = parts[1].trim();
+        let post_status = parts[4].trim();
+        let agent_status = parts[5].trim();
+        let error_hits = parts[10].trim();
+        let has_error = if let Ok(hits) = error_hits.parse::<u64>() {
+            hits > 0
         } else {
-            agent_status == "0" && !has_error && score >= 70.0
+            !error_hits.is_empty() && error_hits != "0"
+        };
+
+        let passed = match scenario_type {
+            "coding" => post_status == "0" && score >= 70.0,
+            "swarm" => agent_status == "0" && !has_error && score >= 70.0,
+            _ => agent_status == "0" && !has_error && score >= 70.0,
         };
 
         scenarios.insert(

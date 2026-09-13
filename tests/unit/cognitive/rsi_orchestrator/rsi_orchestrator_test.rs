@@ -322,6 +322,46 @@ sc1|coding|easy
 }
 
 #[test]
+fn test_parse_benchmark_report_edge_cases_and_swarm() {
+    // 1. Empty input
+    assert!(parse_benchmark_report("").is_err());
+    assert!(parse_benchmark_report("   \n\n  ").is_err());
+
+    // 2. Header only (no scenarios)
+    let header_only = "scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|duration_secs|score|changed_files|error_hits|notes\n";
+    let err = parse_benchmark_report(header_only).unwrap_err();
+    assert!(err.contains("contains no scenarios"));
+
+    // 3. Invalid header
+    let bad_header = "scenario|type|difficulty\nsc1|coding|easy\n";
+    let err = parse_benchmark_report(bad_header).unwrap_err();
+    assert!(err.contains("Invalid TSV header"));
+
+    // 4. Malformed row (< 11 columns)
+    let bad_row = "\
+scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|duration_secs|score|changed_files|error_hits|notes
+sc1|coding|easy|0|0|0|0|0|80.0|1
+";
+    let err = parse_benchmark_report(bad_row).unwrap_err();
+    assert!(err.contains("Malformed TSV row"));
+
+    // 5. Swarm scenarios (both passing and failing cases)
+    let swarm_tsv = "\
+scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|duration_secs|score|changed_files|error_hits|notes
+swarm_pass|swarm|n/a|n/a|n/a|0|0|10|85.0|2|0|ok
+swarm_err|swarm|n/a|n/a|n/a|0|0|10|85.0|2|1|errors present
+swarm_bad_agent|swarm|n/a|n/a|n/a|1|0|10|90.0|2|0|agent failed
+swarm_low_score|swarm|n/a|n/a|n/a|0|0|10|65.0|2|0|below threshold
+";
+    let report = parse_benchmark_report(swarm_tsv).unwrap();
+    assert_eq!(report.scenarios.len(), 4);
+    assert!(report.scenarios["swarm_pass"].passed);
+    assert!(!report.scenarios["swarm_err"].passed);
+    assert!(!report.scenarios["swarm_bad_agent"].passed);
+    assert!(!report.scenarios["swarm_low_score"].passed);
+}
+
+#[test]
 fn test_consecutive_failures_tracking() {
     let mut orch = RSIOrchestrator::new(PathBuf::from("/tmp/test_project"));
     assert_eq!(orch.consecutive_failures, 0);
@@ -633,16 +673,17 @@ path = "src/lib.rs"
         root.join("system_tests/projecte2e/run_projecte2e.sh"),
         r#"#!/usr/bin/env bash
 set -euo pipefail
-mkdir -p system_tests/projecte2e/reports/latest
+OUT_DIR="${OUT_DIR:-system_tests/projecte2e/reports/latest}"
+mkdir -p "${OUT_DIR}"
 # Detect if running in sandbox (path contains .selfware-sandbox)
 if pwd | grep -q ".selfware-sandbox"; then
-    score="0.95"  # Higher score in sandbox to simulate improvement
+    score="95.0"  # Higher score in sandbox to simulate improvement
 else
-    score="0.90"  # Baseline score
+    score="90.0"  # Baseline score
 fi
-cat > system_tests/projecte2e/reports/latest/results.tsv <<EOF
-scenario|type|difficulty|baseline|post|agent|timeout|duration|score|changed|error|notes
-todo_cleanup|unit|easy|0|0|selfware|0|0|${score}|yes||
+cat > "${OUT_DIR}/results.tsv" <<EOF
+scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|duration_secs|score|changed_files|error_hits|notes
+todo_cleanup|unit|easy|0|0|0|0|0|${score}|yes|0|
 EOF
 "#,
     )
