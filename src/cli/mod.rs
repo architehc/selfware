@@ -1479,11 +1479,7 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
                     let name = parts.next().unwrap_or("");
                     let arguments = parts.next().unwrap_or("").trim();
                     if let Some(skill) = skill_registry.get(name) {
-                        let task = format!(
-                            "[Skill: {}]\n{}",
-                            skill.name,
-                            skill.render_content(arguments)
-                        );
+                        let task = skill.render_with_trust_gate(arguments);
                         agent.reset_cancellation();
                         if let Err(e) = agent.run_task(&task).await {
                             warn!("Agent failed to run skill task: {}", e);

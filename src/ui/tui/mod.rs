@@ -1260,18 +1260,19 @@ pub fn run_tui_dashboard_with_events(
                                         .as_ref()
                                         .and_then(|r| r.get(skill_name).cloned());
                                     if let Some(skill) = skill_opt {
-                                        let prompt = if arg.is_empty() {
-                                            skill.content.clone()
-                                        } else {
-                                            format!("{}\n\nUser request: {}", skill.content, arg)
-                                        };
+                                        let prompt = skill.render_with_trust_gate(arg);
                                         let skill_name = skill.name.clone();
                                         app.add_system_message(&format!(
                                             "Activated skill: /{}",
                                             skill_name
                                         ));
-                                        // Inject skill instructions as a system message
-                                        app.add_system_message(&prompt);
+                                        let user_display = if arg.is_empty() {
+                                            format!("/{}", skill_name)
+                                        } else {
+                                            format!("/{} {}", skill_name, arg)
+                                        };
+                                        app.add_user_message(&user_display);
+                                        let _ = user_input_tx.send(prompt);
                                         with_dashboard_state(&shared_state, |state| {
                                             state.log(
                                                 LogLevel::Info,
