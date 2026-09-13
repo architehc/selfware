@@ -234,6 +234,45 @@ fn test_tsv_score_parsing_short_row() {
 }
 
 #[test]
+fn test_parse_benchmark_report_and_darwinx_non_regression() {
+    let tsv_content = "\
+scenario|type|difficulty|baseline|post|agent|timeout|duration|score|changed|error|notes
+sc1|unit|easy|10|10|10|0|10|85.0|true||ok
+sc2|unit|medium|10|10|10|0|10|40.0|true|timeout|failed
+";
+    let baseline_report = parse_benchmark_report(tsv_content);
+    assert_eq!(baseline_report.scenarios.len(), 2);
+    assert_eq!(baseline_report.average_score, 62.5);
+    assert!(baseline_report.scenarios["sc1"].passed);
+    assert!(!baseline_report.scenarios["sc2"].passed);
+
+    // Candidate 1: maintains sc1, passes sc2 -> DarwinX ok
+    let candidate_ok = parse_benchmark_report(
+        "\
+scenario|type|difficulty|baseline|post|agent|timeout|duration|score|changed|error|notes
+sc1|unit|easy|10|10|10|0|10|90.0|true||ok
+sc2|unit|medium|10|10|10|0|10|80.0|true||ok
+",
+    );
+    assert!(baseline_report
+        .check_darwinx_non_regression(&candidate_ok)
+        .is_ok());
+
+    // Candidate 2: improves sc2 to 100, but breaks sc1 (0.0 score) -> DarwinX violation
+    let candidate_regressed = parse_benchmark_report(
+        "\
+scenario|type|difficulty|baseline|post|agent|timeout|duration|score|changed|error|notes
+sc1|unit|easy|10|10|10|0|10|0.0|true|assertion failed|broke
+sc2|unit|medium|10|10|10|0|10|100.0|true||ok
+",
+    );
+    let err = baseline_report
+        .check_darwinx_non_regression(&candidate_regressed)
+        .expect_err("should catch sc1 regression");
+    assert_eq!(err, vec!["sc1".to_string()]);
+}
+
+#[test]
 fn test_consecutive_failures_tracking() {
     let mut orch = RSIOrchestrator::new(PathBuf::from("/tmp/test_project"));
     assert_eq!(orch.consecutive_failures, 0);

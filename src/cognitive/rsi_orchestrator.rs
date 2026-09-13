@@ -2,7 +2,8 @@ use crate::cognitive::compilation_manager::CompilationSandbox;
 use crate::cognitive::meta_learning::MetaLearner;
 use crate::cognitive::metrics::MetricsStore;
 use crate::cognitive::self_edit::{
-    AppliedMutation, ImprovementRecord, ImprovementTarget, SelfEditOrchestrator,
+    AppliedMutation, ImprovementCategory, ImprovementRecord, ImprovementSource, ImprovementTarget,
+    SelfEditOrchestrator,
 };
 use crate::errors::{Result, SelfwareError};
 use serde::{Deserialize, Serialize};
@@ -389,18 +390,56 @@ impl RSIOrchestrator {
             return Ok(false);
         }
 
+        // 5b. DecoEvo Verifier Audit Gate (FREE static check):
+        // Subject verification edits to structural invariant and contrastive audits
+        // BEFORE running expensive paid benchmark suites.
+        if applied
+            .edited_files
+            .iter()
+            .any(|f| f.contains("verification"))
+        {
+            info!("Mutation touched verification logic; running DecoEvo verifier audit...");
+            if let Err(audit_err) =
+                crate::cognitive::deco_evo_audit::DecoEvoVerifierAudit::audit_sandbox(
+                    sandbox.work_dir(),
+                )
+            {
+                warn!(
+                    "DecoEvo verifier audit failed: {}. Rejecting mutation before paid suites.",
+                    audit_err
+                );
+                self.record_improvement(&target, None, 0.0, false, true)
+                    .await?;
+                sandbox.cleanup()?;
+                return Ok(false);
+            }
+        }
+
         // 6. Measure Baseline Fitness (PAID suite #1) — deferred until the
-        // mutation is known to be non-trivial and compiling.
-        let baseline_score = self.measure_fitness().await?;
+        // mutation is known to be non-trivial, compiling, and passing verifier audit.
+        let baseline_report = self.run_benchmark_report(&self.project_root).await?;
+        let baseline_score = baseline_report.average_score;
         debug!("Baseline fitness score: {}", baseline_score);
 
         // 7. Measure New Fitness in Sandbox (PAID suite #2)
-        // Since we can't easily run the benchmark on the sandbox right now without changing paths,
-        // we assume the sandbox passed tests and check its score.
-        let new_score = self.measure_sandbox_fitness(&sandbox).await?;
+        let new_report = self.run_benchmark_report(sandbox.work_dir()).await?;
+        let new_score = new_report.average_score;
         debug!("New fitness score: {}", new_score);
 
-        // 7. Evaluate
+        // 7a. DarwinX Non-Regression Invariant Gate:
+        // Passed(baseline) ∩ Failed(candidate) = ∅
+        if let Err(regressed) = baseline_report.check_darwinx_non_regression(&new_report) {
+            warn!(
+                "DarwinX Non-Regression violation: candidate broke previously passing scenario(s): {:?}. Rejecting mutation.",
+                regressed
+            );
+            self.record_improvement(&target, Some(new_score), baseline_score, true, true)
+                .await?;
+            sandbox.cleanup()?;
+            return Ok(false);
+        }
+
+        // 7c. Evaluate
         if new_score > baseline_score {
             info!(
                 "Mutation improved fitness ({} > {}). Merging.",
@@ -424,21 +463,10 @@ impl RSIOrchestrator {
         }
     }
 
-    /// Measure fitness score using E2E benchmarks
-    async fn measure_fitness(&self) -> Result<f64> {
-        self.run_benchmark_and_get_score(&self.project_root).await
-    }
-
-    /// Measure fitness in the sandbox environment
-    async fn measure_sandbox_fitness(&self, sandbox: &CompilationSandbox) -> Result<f64> {
-        self.run_benchmark_and_get_score(sandbox.work_dir()).await
-    }
-
-    async fn run_benchmark_and_get_score(&self, work_dir: &std::path::Path) -> Result<f64> {
+    async fn run_benchmark_report(&self, work_dir: &std::path::Path) -> Result<BenchmarkReport> {
         info!("Running E2E benchmark suite in {:?}", work_dir);
         let script_path = work_dir.join("system_tests/projecte2e/run_projecte2e.sh");
 
-        // This might take a long time
         let output = Command::new("bash")
             .arg(&script_path)
             .current_dir(work_dir)
@@ -455,7 +483,6 @@ impl RSIOrchestrator {
             );
         }
 
-        // Parse the TSV
         let reports_dir = work_dir.join("system_tests/projecte2e/reports/latest");
         let results_tsv = reports_dir.join("results.tsv");
 
@@ -468,29 +495,7 @@ impl RSIOrchestrator {
         let tsv_content = std::fs::read_to_string(&results_tsv)
             .map_err(|e| SelfwareError::Internal(format!("Failed to read results.tsv: {}", e)))?;
 
-        // Calculate average score from the TSV
-        // Format: scenario|type|difficulty|baseline|post|agent|timeout|duration|score|changed|error|notes
-        let mut total_score = 0.0;
-        let mut count = 0;
-
-        for (i, line) in tsv_content.lines().enumerate() {
-            if i == 0 {
-                continue;
-            } // Skip header
-            let parts: Vec<&str> = line.split('|').collect();
-            if parts.len() > 8 {
-                if let Ok(score) = parts[8].parse::<f64>() {
-                    total_score += score;
-                    count += 1;
-                }
-            }
-        }
-
-        if count == 0 {
-            return Ok(0.0);
-        }
-
-        Ok(total_score / count as f64)
+        Ok(parse_benchmark_report(&tsv_content))
     }
 
     async fn merge_sandbox(
@@ -500,17 +505,93 @@ impl RSIOrchestrator {
     ) -> Result<()> {
         info!("Merging sandbox changes back to main workspace...");
 
+        let canonical_project_root = self.project_root.canonicalize().map_err(|e| {
+            SelfwareError::Internal(format!("Failed to canonicalize project root: {}", e))
+        })?;
+        let canonical_sandbox_root = sandbox.work_dir().canonicalize().map_err(|e| {
+            SelfwareError::Internal(format!("Failed to canonicalize sandbox root: {}", e))
+        })?;
+
         for rel_path in &applied.edited_files {
-            let source = sandbox.work_dir().join(rel_path);
-            let destination = self.project_root.join(rel_path);
+            let rel = Path::new(rel_path);
+            if rel.is_absolute()
+                || rel
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return Err(SelfwareError::Internal(format!(
+                    "Path traversal detected or absolute path forbidden in merge candidate: {}",
+                    rel_path
+                )));
+            }
+
+            let dummy_target = ImprovementTarget::new(
+                ImprovementCategory::CodeQuality,
+                "merge_check",
+                "merge_check",
+                ImprovementSource::TechDebt,
+            )
+            .with_file(rel_path.clone());
+            if self.edit_orchestrator.is_denied(&dummy_target) {
+                return Err(SelfwareError::Internal(format!(
+                    "Cannot merge denied file: {}",
+                    rel_path
+                )));
+            }
+
+            let source = sandbox.work_dir().join(rel);
+            let canonical_source = source.canonicalize().map_err(|e| {
+                SelfwareError::Internal(format!(
+                    "Failed to canonicalize sandbox source {}: {}",
+                    rel_path, e
+                ))
+            })?;
+            if !canonical_source.starts_with(&canonical_sandbox_root) {
+                return Err(SelfwareError::Internal(format!(
+                    "Sandbox source {} escapes sandbox directory",
+                    rel_path
+                )));
+            }
+
+            let destination = self.project_root.join(rel);
+            if let Ok(meta) = destination.symlink_metadata() {
+                if meta.file_type().is_symlink() {
+                    return Err(SelfwareError::Internal(format!(
+                        "Merge destination {} is a symlink",
+                        rel_path
+                    )));
+                }
+            }
             if let Some(parent) = destination.parent() {
                 tokio::fs::create_dir_all(parent).await.map_err(|e| {
                     SelfwareError::Internal(format!("Failed to create merge dir: {}", e))
                 })?;
             }
-            tokio::fs::copy(&source, &destination).await.map_err(|e| {
-                SelfwareError::Internal(format!("Failed to merge sandbox file {}: {}", rel_path, e))
-            })?;
+            let canonical_dest_parent = destination
+                .parent()
+                .unwrap_or(&self.project_root)
+                .canonicalize()
+                .map_err(|e| {
+                    SelfwareError::Internal(format!(
+                        "Failed to canonicalize destination parent {}: {}",
+                        rel_path, e
+                    ))
+                })?;
+            if !canonical_dest_parent.starts_with(&canonical_project_root) {
+                return Err(SelfwareError::Internal(format!(
+                    "Merge destination {} escapes project root",
+                    rel_path
+                )));
+            }
+
+            tokio::fs::copy(&canonical_source, &destination)
+                .await
+                .map_err(|e| {
+                    SelfwareError::Internal(format!(
+                        "Failed to merge sandbox file {}: {}",
+                        rel_path, e
+                    ))
+                })?;
         }
 
         sandbox.cleanup()?;
@@ -567,6 +648,92 @@ impl RSIOrchestrator {
             max_iterations_per_run: DEFAULT_MAX_ITERATIONS_PER_RUN,
             state_path,
         }
+    }
+}
+
+/// Scenario outcome parsed from benchmark reports.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScenarioOutcome {
+    pub name: String,
+    pub score: f64,
+    pub passed: bool,
+}
+
+/// Structured outcome of a full benchmark evaluation run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BenchmarkReport {
+    pub average_score: f64,
+    pub scenarios: std::collections::HashMap<String, ScenarioOutcome>,
+}
+
+impl BenchmarkReport {
+    /// DarwinX non-regression invariant:
+    /// Passed(baseline) ∩ Failed(candidate) = ∅
+    ///
+    /// Every scenario that passed in the baseline MUST also pass in the candidate.
+    pub fn check_darwinx_non_regression(
+        &self,
+        candidate: &BenchmarkReport,
+    ) -> std::result::Result<(), Vec<String>> {
+        let mut regressed = Vec::new();
+        for (name, baseline_sc) in &self.scenarios {
+            if baseline_sc.passed {
+                if let Some(cand_sc) = candidate.scenarios.get(name) {
+                    if !cand_sc.passed {
+                        regressed.push(name.clone());
+                    }
+                } else {
+                    regressed.push(name.clone());
+                }
+            }
+        }
+        if regressed.is_empty() {
+            Ok(())
+        } else {
+            Err(regressed)
+        }
+    }
+}
+
+/// Parse TSV benchmark report into a structured `BenchmarkReport`.
+pub fn parse_benchmark_report(tsv_content: &str) -> BenchmarkReport {
+    let mut total_score = 0.0;
+    let mut count = 0;
+    let mut scenarios = std::collections::HashMap::new();
+
+    for (i, line) in tsv_content.lines().enumerate() {
+        if i == 0 {
+            continue;
+        }
+        let parts: Vec<&str> = line.split('|').collect();
+        if parts.len() > 8 {
+            let name = parts[0].trim().to_string();
+            if let Ok(score) = parts[8].parse::<f64>() {
+                total_score += score;
+                count += 1;
+                let has_error = parts.get(10).is_some_and(|err| !err.trim().is_empty());
+                let passed = score >= 70.0 || (!has_error && score > 0.0);
+                scenarios.insert(
+                    name.clone(),
+                    ScenarioOutcome {
+                        name,
+                        score,
+                        passed,
+                    },
+                );
+            }
+        }
+    }
+
+    let average_score = if count == 0 {
+        0.0
+    } else {
+        total_score / count as f64
+    };
+
+    BenchmarkReport {
+        average_score,
+        scenarios,
     }
 }
 
