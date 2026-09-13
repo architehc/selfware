@@ -209,20 +209,72 @@ fn one_turn_touching_many_files_owes_for_each() {
 }
 
 #[test]
-fn deleting_a_file_retires_its_debt_but_the_deletion_is_itself_a_change() {
+fn deleting_code_retires_its_content_debt_and_raises_a_regression_obligation() {
+    // Retiring the removed content's obligations is right -- there are no lines
+    // left to read or cover. But a removal is not free: imports, callers and
+    // configuration can break precisely BECAUSE something is now absent.
+    // Reporting a deletion as pure discharge said otherwise.
     let mut l = ledger();
     l.record_change("src/gone.rs", Some(80), 1, T);
     assert_eq!(l.outstanding().len(), 2);
 
     l.record_deletion("src/gone.rs", 2, T);
-    let out = l.outstanding();
+    let kinds: Vec<_> = l.outstanding().iter().map(|o| o.kind).collect();
     assert_eq!(
-        out.len(),
-        1,
-        "nothing left to test, but somebody should read the removal"
+        kinds.len(),
+        2,
+        "the removal owes a read AND a regression check"
     );
-    assert_eq!(out[0].kind, ObligationKind::UnreviewedChange);
-    assert_eq!(l.outstanding_lines(ObligationKind::UnconfirmedCoverage), 0);
+    assert!(kinds.contains(&ObligationKind::UnreviewedChange));
+    assert!(
+        kinds.contains(&ObligationKind::BrokenByRemoval),
+        "what depended on the removed code is unverified: {kinds:?}"
+    );
+    assert_eq!(
+        l.outstanding_lines(ObligationKind::UnconfirmedCoverage),
+        0,
+        "the deleted lines themselves are retired"
+    );
+}
+
+#[test]
+fn a_deletion_claims_no_size_it_did_not_measure() {
+    // `Some(0)` reported a removal as weightless. The ledger did not measure
+    // how much was deleted, so the honest value is unknown.
+    let mut l = ledger();
+    let ids = l.record_deletion("src/gone.rs", 1, T);
+    for id in ids {
+        let o = l.obligations().iter().find(|o| o.id == id).unwrap();
+        assert_eq!(o.line_count, None, "size unavailable must not become zero");
+    }
+    assert_eq!(
+        l.outstanding_unknown_size(ObligationKind::UnreviewedChange),
+        1,
+        "and the unknown must be countable, so the totals read as a floor"
+    );
+}
+
+#[test]
+fn a_passing_test_discharges_the_removal_regression_but_not_the_read() {
+    let mut l = ledger();
+    l.record_deletion("src/gone.rs", 1, T);
+    let snap = l.snapshot();
+    l.record_test_run(
+        snap,
+        Scope::WorkspaceWithCoverage(paths(&["src/gone.rs"])),
+        Outcome::Passed,
+        None,
+        T,
+    );
+    let kinds: Vec<_> = l.outstanding().iter().map(|o| o.kind).collect();
+    assert!(
+        !kinds.contains(&ObligationKind::BrokenByRemoval),
+        "a covering green run answers the regression question"
+    );
+    assert!(
+        kinds.contains(&ObligationKind::UnreviewedChange),
+        "but nobody has read the removal"
+    );
 }
 
 #[test]

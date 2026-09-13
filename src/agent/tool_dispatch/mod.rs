@@ -13,6 +13,8 @@ use crate::cognitive::self_improvement::Outcome;
 use crate::hooks::HookContext;
 
 pub(crate) mod helpers;
+#[cfg(test)]
+mod lifecycle_counterexamples;
 mod spill;
 mod trust_gate;
 

@@ -277,7 +277,9 @@ fn a_patch_is_sized_by_touched_lines_not_context() {
 }
 
 #[test]
-fn a_delete_retires_rather_than_accrues() {
+fn a_delete_retires_the_content_and_raises_a_regression_obligation() {
+    // Through the real classifier: the removed lines are retired, and the
+    // removal itself owes both a read and evidence that its dependants survive.
     let write = json!({"path": "src/gone.rs", "content": "a\nb\nc"});
     let remove = json!({"path": "src/gone.rs"});
     let mut ledger = Ledger::new();
@@ -294,14 +296,17 @@ fn a_delete_retires_rather_than_accrues() {
         snap,
         T,
     );
+
     assert_eq!(
         ledger.outstanding_lines(ObligationKind::UnconfirmedCoverage),
-        0
+        0,
+        "the deleted lines are retired"
     );
-    assert_eq!(
-        ledger.outstanding().len(),
-        1,
-        "the removal still wants reading"
+    let kinds: Vec<_> = ledger.outstanding().iter().map(|o| o.kind).collect();
+    assert!(kinds.contains(&ObligationKind::UnreviewedChange));
+    assert!(
+        kinds.contains(&ObligationKind::BrokenByRemoval),
+        "a removal can break its callers: {kinds:?}"
     );
 }
 

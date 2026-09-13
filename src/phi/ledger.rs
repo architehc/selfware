@@ -68,6 +68,15 @@ pub struct EvidenceId(pub u64);
 pub enum ObligationKind {
     /// Nobody has read this change.
     UnreviewedChange,
+    /// Code was removed, and nothing has shown that its dependants still work.
+    ///
+    /// Deleting a function, a config key or a test discharges the obligation to
+    /// verify the removed lines — there are none left — but it creates a new
+    /// one about everything that referenced them. Imports, callers and
+    /// configuration can break precisely because something is now absent, and
+    /// retiring the old obligation without raising this one reported a removal
+    /// as free.
+    BrokenByRemoval,
     /// No test run has been shown to cover this change.
     ///
     /// Named for what is missing: coverage, not execution. Tests may have run
@@ -93,6 +102,8 @@ impl EvidenceKind {
     /// clearing unread code again.
     pub fn discharges(self) -> ObligationKind {
         match self {
+            // Both coverage and removal-regression are answered by an executed
+            // test; see `discharges_all`.
             EvidenceKind::TestsExecuted => ObligationKind::UnconfirmedCoverage,
             EvidenceKind::HumanReviewed => ObligationKind::UnreviewedChange,
         }
@@ -344,35 +355,52 @@ impl Ledger {
         path: impl Into<PathBuf>,
         turn_index: usize,
         recorded_at_ms: u64,
-    ) -> ObligationId {
+    ) -> [ObligationId; 2] {
         let path = path.into();
         let seq = self.tick();
         self.changes_by_path
             .entry(path.clone())
             .or_default()
             .push(seq);
+        // Obligations about the REMOVED CONTENT are superseded: there is
+        // nothing left to read or cover there. Obligations about what depended
+        // on it are raised below.
         for obligation in self.obligations.iter_mut() {
             if obligation.path == path && obligation.outstanding() {
                 obligation.retired = true;
             }
         }
-        let id = ObligationId(self.next_obligation);
-        self.next_obligation += 1;
-        self.obligations.push(Obligation {
-            id,
-            kind: ObligationKind::UnreviewedChange,
-            path,
-            line_count: Some(0),
-            turn_index,
-            seq,
-            recorded_at_ms,
-            revision: None,
-            checkpoint: None,
-            satisfied_by: None,
-            retired: false,
-            passing_runs_without_coverage: 0,
-        });
-        id
+        let mut ids = [ObligationId(0); 2];
+        for (slot, kind) in [
+            ObligationKind::UnreviewedChange,
+            // The removal itself needs regression evidence: what used to call
+            // this must still work.
+            ObligationKind::BrokenByRemoval,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = ObligationId(self.next_obligation);
+            self.next_obligation += 1;
+            ids[slot] = id;
+            self.obligations.push(Obligation {
+                id,
+                kind,
+                path: path.clone(),
+                // The ledger did not measure how much was removed. Recording 0
+                // would report a deletion as weightless.
+                line_count: None,
+                turn_index,
+                seq,
+                recorded_at_ms,
+                revision: None,
+                checkpoint: None,
+                satisfied_by: None,
+                retired: false,
+                passing_runs_without_coverage: 0,
+            });
+        }
+        ids
     }
 
     /// Record an executed test run.
@@ -502,7 +530,14 @@ impl Ledger {
     /// Split out from [`Self::apply`] so the reasoning can be shown to a human
     /// and tested directly, rather than inferred from a count.
     pub fn assess(&self, evidence: &Evidence, obligation: &Obligation) -> Result<(), Unsatisfied> {
-        if evidence.kind.discharges() != obligation.kind {
+        let answerable = match evidence.kind {
+            EvidenceKind::TestsExecuted => matches!(
+                obligation.kind,
+                ObligationKind::UnconfirmedCoverage | ObligationKind::BrokenByRemoval
+            ),
+            EvidenceKind::HumanReviewed => obligation.kind == ObligationKind::UnreviewedChange,
+        };
+        if !answerable {
             return Err(Unsatisfied::WrongKind);
         }
         match evidence.scope.coverage_of(&obligation.path) {
@@ -612,6 +647,7 @@ impl Ledger {
                 let kind = match o.kind {
                     ObligationKind::UnreviewedChange => "unreviewed",
                     ObligationKind::UnconfirmedCoverage => "coverage unconfirmed",
+                    ObligationKind::BrokenByRemoval => "removal unverified",
                 };
                 let runs = match o.passing_runs_without_coverage {
                     0 => String::new(),

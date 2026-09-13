@@ -658,6 +658,68 @@ pub(crate) fn has_file_redirect(command: &str) -> bool {
     false
 }
 
+/// Split a command on shell operators, ignoring operators inside quotes.
+///
+/// Quote-awareness is not a nicety: `jq '.nodes | length' file` contains a pipe
+/// that is part of an argument, and treating it as a separator turns one
+/// read-only command into two unrecognisable fragments.
+fn split_shell_segments(command: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    let chars: Vec<char> = command.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if escaped {
+            current.push(c);
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        match c {
+            '\\' => {
+                current.push(c);
+                escaped = true;
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+                current.push(c);
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                current.push(c);
+            }
+            // Only a DOUBLED `&` separates. A bare `&` appears in file
+            // descriptor duplication (`cargo test 2>&1`), and splitting there
+            // turns one command into two unrecognisable fragments.
+            '&' if !in_single && !in_double && chars.get(i + 1) == Some(&'&') => {
+                i += 1;
+                segments.push(std::mem::take(&mut current));
+            }
+            '|' if !in_single && !in_double => {
+                if chars.get(i + 1) == Some(&'|') {
+                    i += 1;
+                }
+                segments.push(std::mem::take(&mut current));
+            }
+            ';' if !in_single && !in_double => {
+                segments.push(std::mem::take(&mut current));
+            }
+            _ => current.push(c),
+        }
+        i += 1;
+    }
+    segments.push(current);
+    segments
+        .into_iter()
+        .map(|segment| segment.trim().to_string())
+        .filter(|segment| !segment.is_empty())
+        .collect()
+}
+
 pub(crate) fn shell_command_is_observational(command: &str) -> bool {
     let normalized = command.trim().to_lowercase();
     if normalized.is_empty() {
@@ -666,6 +728,20 @@ pub(crate) fn shell_command_is_observational(command: &str) -> bool {
 
     if has_file_redirect(&normalized) {
         return false;
+    }
+
+    // A compound command is observational only if EVERY segment is.
+    //
+    // `shell_command_runs_test_script` scans all tokens, so a trailing
+    // `python3 -m unittest` vouched for a leading `python3 fix.py` and the
+    // whole thing read as read-only — an arbitrary script could run without
+    // advancing the mutation sequence, and a later edit would not invalidate
+    // the verification that followed it. One segment cannot speak for another.
+    let segments = split_shell_segments(&normalized);
+    if segments.len() > 1 {
+        return segments
+            .iter()
+            .all(|segment| shell_command_is_observational(segment));
     }
 
     // A plain formatter check does not write. Limit this special case to

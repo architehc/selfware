@@ -55,8 +55,17 @@ class LedgerParityTests(unittest.TestCase):
             "TestsExecuted": "UnconfirmedCoverage",
             "HumanReviewed": "UnreviewedChange",
         })
-        # One-to-one: no obligation kind is dischargeable by two evidence kinds.
-        self.assertEqual(len({o for _, o in pairs}), 2)
+        # Human review answers exactly one obligation kind, and never a
+        # coverage or regression question.
+        source = LEDGER.read_text(encoding="utf-8")
+        answerable = source[source.index("let answerable = match evidence.kind"):]
+        answerable = answerable[:answerable.index("};")]
+        human = answerable[answerable.index("EvidenceKind::HumanReviewed"):]
+        self.assertIn("UnreviewedChange", human)
+        self.assertNotIn("UnconfirmedCoverage", human,
+                         "a human reading a diff does not execute it")
+        self.assertNotIn("BrokenByRemoval", human,
+                         "a human reading a removal does not prove its callers still work")
 
     def test_no_unexecuted_event_reduces_debt_in_the_web_model(self):
         """A written test verifies nothing; opening a file is exposure."""
