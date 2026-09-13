@@ -25,7 +25,7 @@ fn test_protected_paths() {
         "src/cognitive/rsi_orchestrator.rs"
     )));
     assert!(is_protected(std::path::Path::new(
-        "src/cognitive/deco_evo_audit.rs"
+        "src/testing/verification.rs"
     )));
     assert!(is_protected(std::path::Path::new(
         "src/cognitive/self_edit.rs"

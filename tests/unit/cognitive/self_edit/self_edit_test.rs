@@ -39,7 +39,7 @@ fn test_deny_list() {
         "src/evolution/fitness.rs",
         "src/evolution/daemon.rs",
         "src/cognitive/rsi_orchestrator.rs",
-        "src/cognitive/deco_evo_audit.rs",
+        "src/testing/verification.rs",
         "src/cognitive/self_edit.rs",
         "src/cognitive/compilation_manager.rs",
         "system_tests/run_projecte2e.sh",
