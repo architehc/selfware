@@ -81,7 +81,7 @@ pub enum ApplyStatus {
 
 /// Summary of the diff an apply run staged in its shadow worktree (base..run).
 /// Populated when the run is verified; `None` while the run is in flight.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StagedDiff {
     pub digest: String,
     pub files_changed: usize,
@@ -175,35 +175,56 @@ pub fn is_scaffold_artifact(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
     normalized == ".theseus.md"
         || normalized.starts_with(".theseus/")
-        || normalized == ".selfware"
-        || normalized.starts_with(".selfware/")
+        || normalized == ".selfware/theseus"
+        || normalized.starts_with(".selfware/theseus/")
+        || normalized == ".selfware/phi/activity"
+        || normalized.starts_with(".selfware/phi/activity/")
 }
 
 /// Stage all working directory changes into the index, pruning any workspace
-/// grounding scaffolding artifacts (.theseus.md, .selfware/theseus/*).
-/// If a scaffolding path was already tracked in `base_tree`, it is preserved in the
-/// index rather than removed (which would stage a deletion).
+/// grounding scaffolding artifacts (.theseus.md, .selfware/theseus/*, .selfware/phi/activity/*).
+/// If a scaffolding path was already tracked in `base_tree`, its exact base tree entry is
+/// restored in the index rather than staging a modification or deletion.
 pub fn stage_workdir_without_scaffolding(
     repo: &git2::Repository,
     base_tree: Option<&git2::Tree>,
 ) -> std::result::Result<git2::Index, git2::Error> {
     let mut index = repo.index()?;
     index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)?;
+    index.update_all(["*"].iter(), None)?;
+
+    let mut base_index = git2::Index::new()?;
+    if let Some(base) = base_tree {
+        base_index.read_tree(base)?;
+    }
+
     let mut to_remove = Vec::new();
+    let mut to_restore = Vec::new();
     for entry in index.iter() {
-        let p = String::from_utf8_lossy(&entry.path);
+        let p = String::from_utf8_lossy(&entry.path).into_owned();
         if is_scaffold_artifact(&p) {
-            let in_base = base_tree
-                .and_then(|base| base.get_path(Path::new(p.as_ref())).ok())
-                .is_some();
-            if !in_base {
-                to_remove.push(p.into_owned());
+            if let Some(base_entry) = base_index.get_path(Path::new(&p), 0) {
+                to_restore.push(base_entry);
+            } else {
+                to_remove.push(p);
             }
         }
     }
     for p in to_remove {
         let _ = index.remove_path(Path::new(&p));
     }
+    for base_entry in to_restore {
+        index.add(&base_entry)?;
+    }
+
+    // If a base-tracked scaffold file was deleted in the workdir, restore it from base
+    for base_entry in base_index.iter() {
+        let p = String::from_utf8_lossy(&base_entry.path);
+        if is_scaffold_artifact(&p) {
+            index.add(&base_entry)?;
+        }
+    }
+
     index.write()?;
     Ok(index)
 }
@@ -245,15 +266,13 @@ pub fn verify_staged_diff(
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
         if is_scaffold_artifact(&path) {
-            continue;
+            return Ok(Err(RejectReason::OutOfScope(path)));
+        }
+        if delta.new_file().mode() == git2::FileMode::Link {
+            return Ok(Err(RejectReason::OutOfScope(format!("{path} (symlink)"))));
         }
         if !(path.starts_with("src/") || path.starts_with("docs/")) {
             return Ok(Err(RejectReason::OutOfScope(path)));
-        }
-        // Symlinks are boundary escape artists: a link inside src/ can point
-        // anywhere on disk, so staged links are rejected regardless of target.
-        if delta.new_file().mode() == git2::FileMode::Link {
-            return Ok(Err(RejectReason::OutOfScope(format!("{path} (symlink)"))));
         }
         if crate::evolution::PROTECTED_PATHS
             .iter()
@@ -1070,5 +1089,109 @@ mod tests {
             "src/main.rs"
         );
         assert_eq!(delta.status(), git2::Delta::Modified);
+    }
+
+    #[test]
+    fn tracked_generated_scaffold_modification_or_deletion_is_restored_to_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        let sig = git2::Signature::now("test", "test@example.com").unwrap();
+
+        std::fs::write(dir.path().join(".theseus.md"), b"# base guide\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), b"fn main() {}\n").unwrap();
+
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(".theseus.md")).unwrap();
+        index.add_path(Path::new("src/main.rs")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let commit_oid = repo
+            .commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+
+        // 1. Modify tracked scaffold in worktree
+        std::fs::write(dir.path().join(".theseus.md"), b"# modified guide\n").unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), b"fn main() { 1; }\n").unwrap();
+
+        let staged = stage_workdir_without_scaffolding(&repo, Some(&tree)).unwrap();
+        let diff = repo
+            .diff_tree_to_index(Some(&tree), Some(&staged), None)
+            .unwrap();
+        assert_eq!(diff.deltas().len(), 1);
+        assert_eq!(
+            diff.deltas().next().unwrap().new_file().path().unwrap(),
+            Path::new("src/main.rs")
+        );
+
+        let verified = verify_staged_diff(dir.path(), &commit_oid.to_string())
+            .unwrap()
+            .unwrap();
+        assert_eq!(verified.files_changed, 1);
+
+        // 2. Delete tracked scaffold in worktree
+        std::fs::remove_file(dir.path().join(".theseus.md")).unwrap();
+        let staged2 = stage_workdir_without_scaffolding(&repo, Some(&tree)).unwrap();
+        let diff2 = repo
+            .diff_tree_to_index(Some(&tree), Some(&staged2), None)
+            .unwrap();
+        assert_eq!(diff2.deltas().len(), 1);
+        assert_eq!(
+            diff2.deltas().next().unwrap().new_file().path().unwrap(),
+            Path::new("src/main.rs")
+        );
+    }
+
+    #[test]
+    fn tracked_skill_modification_deletion_and_symlink_are_rejected_out_of_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        let sig = git2::Signature::now("test", "test@example.com").unwrap();
+
+        std::fs::create_dir_all(dir.path().join(".selfware/skills")).unwrap();
+        let skill_path = dir.path().join(".selfware/skills/sop.md");
+        std::fs::write(&skill_path, b"# Skill SOP\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), b"fn main() {}\n").unwrap();
+
+        let mut index = repo.index().unwrap();
+        index
+            .add_path(Path::new(".selfware/skills/sop.md"))
+            .unwrap();
+        index.add_path(Path::new("src/main.rs")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let commit_oid = repo
+            .commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+
+        // 1. Modification of tracked skill is rejected OutOfScope
+        std::fs::write(&skill_path, b"# Maliciously altered skill\n").unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), b"fn main() { 42; }\n").unwrap();
+        let res_mod = verify_staged_diff(dir.path(), &commit_oid.to_string()).unwrap();
+        assert_eq!(
+            res_mod.unwrap_err(),
+            RejectReason::OutOfScope(".selfware/skills/sop.md".to_string())
+        );
+
+        // 2. Deletion of tracked skill is rejected OutOfScope
+        std::fs::remove_file(&skill_path).unwrap();
+        let res_del = verify_staged_diff(dir.path(), &commit_oid.to_string()).unwrap();
+        assert_eq!(
+            res_del.unwrap_err(),
+            RejectReason::OutOfScope(".selfware/skills/sop.md".to_string())
+        );
+
+        // 3. Symlink replacement of tracked skill is rejected OutOfScope
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/etc/passwd", &skill_path).unwrap();
+            let res_sym = verify_staged_diff(dir.path(), &commit_oid.to_string()).unwrap();
+            assert!(
+                matches!(res_sym, Err(RejectReason::OutOfScope(s)) if s.contains(".selfware/skills/sop.md"))
+            );
+        }
     }
 }
