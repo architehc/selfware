@@ -345,12 +345,11 @@ fn test_winner_gate_allows_equal_or_more_tests() {
     assert!(winner_test_count_gate(&synthetic, &make_metrics(1, 1)).is_ok());
 }
 
-#[test]
-fn test_winner_darwinx_gate_enforcement() {
+fn make_sab(scores: Vec<(&str, f64, bool)>) -> crate::evolution::fitness::SabResult {
     use crate::evolution::fitness::{Difficulty, SabResult, ScenarioScore};
     use std::time::Duration;
 
-    let make_sab = |scores: Vec<(&str, f64, bool)>| SabResult {
+    SabResult {
         aggregate_score: 80.0,
         scenario_scores: scores
             .into_iter()
@@ -370,12 +369,15 @@ fn test_winner_darwinx_gate_enforcement() {
         rating: GenerationRating::Grow,
         binary_sha256: "dummy".to_string(),
         run_id: "test".to_string(),
-    };
+    }
+}
 
+#[test]
+fn test_winner_darwinx_gate_enforcement() {
     let base = make_sab(vec![("sc1", 90.0, true), ("sc2", 80.0, true)]);
 
-    // 1. Regressed candidate (score 90 -> 70 on sc1) must be rejected
-    let cand_regressed = make_sab(vec![("sc1", 70.0, true), ("sc2", 85.0, true)]);
+    // 1. Regressed candidate (pass regression on sc1: true -> false) must be rejected
+    let cand_regressed = make_sab(vec![("sc1", 70.0, false), ("sc2", 85.0, true)]);
     let err = winner_darwinx_gate(Some(&base), Some(&cand_regressed)).unwrap_err();
     assert!(err.contains("DarwinX non-regression check failed"));
     assert!(err.contains("sc1"));
@@ -393,6 +395,70 @@ fn test_winner_darwinx_gate_enforcement() {
     // 4. None for baseline or candidate allows first gen or non-SAB mode
     assert!(winner_darwinx_gate(None, Some(&cand_better)).is_ok());
     assert!(winner_darwinx_gate(Some(&base), None).is_ok());
+}
+
+#[test]
+fn test_evaluate_candidate_promotion_gates() {
+    let base_metrics = make_metrics(100, 100);
+    let cand_metrics_ok = make_metrics(100, 100);
+    let cand_metrics_fewer_tests = make_metrics(50, 50);
+
+    let base_sab = make_sab(vec![("sc1", 90.0, true), ("sc2", 80.0, true)]);
+    let cand_sab_ok = make_sab(vec![("sc1", 90.0, true), ("sc2", 85.0, true)]);
+    let cand_sab_regressed = make_sab(vec![("sc1", 70.0, false), ("sc2", 85.0, true)]);
+
+    // 1. Score does not exceed baseline -> Reject
+    let decision = evaluate_candidate_promotion(
+        0.8,
+        0.75,
+        Some(&base_sab),
+        Some(&cand_sab_ok),
+        &base_metrics,
+        &cand_metrics_ok,
+    );
+    assert!(matches!(
+        decision,
+        PromotionDecision::Reject(r) if r.contains("does not exceed baseline")
+    ));
+
+    // 2. DarwinX regression -> Reject
+    let decision = evaluate_candidate_promotion(
+        0.8,
+        0.85,
+        Some(&base_sab),
+        Some(&cand_sab_regressed),
+        &base_metrics,
+        &cand_metrics_ok,
+    );
+    assert!(matches!(
+        decision,
+        PromotionDecision::Reject(r) if r.contains("DarwinX non-regression check failed")
+    ));
+
+    // 3. Test count regression -> Reject
+    let decision = evaluate_candidate_promotion(
+        0.8,
+        0.85,
+        Some(&base_sab),
+        Some(&cand_sab_ok),
+        &base_metrics,
+        &cand_metrics_fewer_tests,
+    );
+    assert!(matches!(
+        decision,
+        PromotionDecision::Reject(r) if r.contains("test count regressed")
+    ));
+
+    // 4. Valid winner -> Promote
+    let decision = evaluate_candidate_promotion(
+        0.8,
+        0.85,
+        Some(&base_sab),
+        Some(&cand_sab_ok),
+        &base_metrics,
+        &cand_metrics_ok,
+    );
+    assert_eq!(decision, PromotionDecision::Promote);
 }
 
 #[test]

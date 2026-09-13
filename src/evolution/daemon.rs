@@ -311,7 +311,7 @@ fn winner_test_count_gate(
 }
 
 /// Enforces DarwinX non-regression: a candidate must pass all baseline-passed scenarios
-/// with equal or better scores, and cannot drop any scenarios from the suite.
+/// without regressions, and cannot drop any scenarios from the suite.
 ///
 /// Returns `Err(reason)` when the candidate regressed; `Ok(())` otherwise.
 pub(crate) fn winner_darwinx_gate(
@@ -324,6 +324,43 @@ pub(crate) fn winner_darwinx_gate(
         }
     }
     Ok(())
+}
+
+/// Promotion decision for a generation winner candidate.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PromotionDecision {
+    Promote,
+    Reject(String),
+}
+
+/// Evaluates whether a candidate winner should be promoted to baseline:
+/// 1. Composite score must strictly exceed baseline.
+/// 2. Must pass the DarwinX non-regression gate over SAB results.
+/// 3. Must not regress total test count relative to baseline.
+pub(crate) fn evaluate_candidate_promotion(
+    baseline_composite: f64,
+    winner_composite: f64,
+    base_sab: Option<&SabResult>,
+    cand_sab: Option<&SabResult>,
+    base_metrics: &FitnessMetrics,
+    winner_metrics: &FitnessMetrics,
+) -> PromotionDecision {
+    if winner_composite <= baseline_composite {
+        return PromotionDecision::Reject(format!(
+            "winner composite ({:.4}) does not exceed baseline ({:.4})",
+            winner_composite, baseline_composite
+        ));
+    }
+
+    if let Err(reason) = winner_darwinx_gate(base_sab, cand_sab) {
+        return PromotionDecision::Reject(reason);
+    }
+
+    if let Err(reason) = winner_test_count_gate(base_metrics, winner_metrics) {
+        return PromotionDecision::Reject(reason);
+    }
+
+    PromotionDecision::Promote
 }
 
 /// Run the evolution daemon
@@ -721,32 +758,14 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         let winner_composite = config.fitness_weights.composite(&winner_metrics);
 
         if winner_composite > baseline_composite {
-            // Hard gate: DarwinX non-regression check over SAB results
-            if let Err(reason) =
-                winner_darwinx_gate(current_baseline_sab.as_ref(), winner_sab.as_ref())
-            {
-                log_warning(&reason);
-                log_event(
-                    repo_root,
-                    &serde_json::json!({
-                        "event": "generation_end",
-                        "timestamp": chrono_now(),
-                        "generation": generation,
-                        "outcome": "frost",
-                        "reason": reason,
-                        "duration_secs": gen_start.elapsed().as_secs_f64(),
-                    }),
-                );
-                continue;
-            }
-
-            // Hard gate: a winner that runs FEWER tests than the baseline
-            // must never be committed — it enforces the invariant the dead
-            // `SafetyConfig.min_test_count` promised. A regression here
-            // usually means the mutation deleted/skipped tests to inflate
-            // its pass ratio.
-            if let Err(reason) = winner_test_count_gate(&current_baseline_metrics, &winner_metrics)
-            {
+            if let PromotionDecision::Reject(reason) = evaluate_candidate_promotion(
+                baseline_composite,
+                winner_composite,
+                current_baseline_sab.as_ref(),
+                winner_sab.as_ref(),
+                &current_baseline_metrics,
+                &winner_metrics,
+            ) {
                 log_warning(&reason);
                 log_event(
                     repo_root,

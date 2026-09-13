@@ -503,3 +503,42 @@ fn test_load_and_save_ledger_reject_symlinks() {
             .contains("Ledger temporary destination is a symlink"));
     }
 }
+
+#[test]
+fn test_commit_distilled_skills_rejects_destination_symlink() {
+    let tmp = tempdir().unwrap();
+    let skills_dir = tmp.path().join("skills");
+    fs::create_dir_all(&skills_dir).unwrap();
+
+    let outside = tmp.path().join("outside.md");
+    fs::write(&outside, b"outside content").unwrap();
+
+    let symlink_path = skills_dir.join("sym_skill.md");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, &symlink_path).unwrap();
+
+    #[cfg(unix)]
+    {
+        let mut distiller = SkillDistiller::new(skills_dir, tmp.path().join("ledger.json"));
+        let candidate = DistilledSkill {
+            name: "sym_skill".to_string(),
+            skill_type: DistilledSkillType::ErrorMitigation,
+            description: "symlink test".to_string(),
+            tools: vec![],
+            triggers: vec![],
+            content: "payload\n".to_string(),
+        };
+
+        let err = distiller
+            .commit_distilled_skills(vec![candidate])
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Destination skill path is a symlink"));
+        assert_eq!(
+            fs::read(&outside).unwrap(),
+            b"outside content",
+            "outside target must not be overwritten"
+        );
+    }
+}
