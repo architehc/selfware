@@ -223,6 +223,11 @@ pub(crate) fn spawn_esc_listener(
         use std::sync::atomic::Ordering;
         use std::time::Duration;
 
+        #[cfg(unix)]
+        unsafe {
+            nix::libc::signal(nix::libc::SIGTTOU, nix::libc::SIG_IGN);
+        }
+
         let mut input_buf = String::new();
         let mut showing_prompt = false;
 
