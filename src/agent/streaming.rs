@@ -113,6 +113,28 @@ fn extract_display_name(xml: &str) -> Option<String> {
     Agent::extract_tool_name(xml)
 }
 
+/// Whether a finished stream produced nothing AND never explained why.
+///
+/// Extracted as a pure function so the discrimination can be tested
+/// exhaustively. It is the part that silently regresses: every argument here
+/// has a benign case that must stay `Ok`, and widening the condition by one
+/// term turns an honest empty response into a spurious failure.
+///
+/// Note on coverage: this covers the DECISION only. That the decision reaches
+/// the non-streaming fallback at both call sites is behavioural, and is covered
+/// by the container fixture in target/install-validation (a server that answers
+/// `[DONE]` when streamed and a real completion when not), not by this crate's
+/// unit tests.
+pub(crate) fn is_unexplained_empty_stream(
+    no_content: bool,
+    no_reasoning: bool,
+    no_tool_calls: bool,
+    provider_explained_itself: bool,
+    cancelled: bool,
+) -> bool {
+    no_content && no_reasoning && no_tool_calls && !provider_explained_itself && !cancelled
+}
+
 impl Agent {
     /// Extract function name from a tool_call XML block for clean display
     pub(super) fn extract_tool_name(xml: &str) -> Option<String> {
@@ -693,6 +715,9 @@ impl Agent {
                 .record(captured_completion_tokens.unwrap_or(0) as f64 / stream_elapsed_secs);
         }
 
+        // Recorded before the meta block consumes it below.
+        let provider_explained_itself = captured_finish_reason.is_some();
+
         if let Some(slot) = meta_out {
             *slot = crate::api::types::ChatMetadata {
                 request_body: request_meta.request_body,
@@ -704,6 +729,26 @@ impl Agent {
                 cost: captured_cost,
                 accounted_usage: None,
             };
+        }
+
+        // A stream that produced nothing AND never declared a finish_reason did
+        // not complete — the provider closed it. Returning Ok here hands the
+        // agent an empty turn, which execution.rs answers by nudging the model
+        // to respond, pushing more tokens at a backend that is already failing.
+        //
+        // Deliberately narrow, so the honest empty cases stay Ok:
+        //   - cancelled by the caller      -> the loop broke on the cancel token
+        //   - finish_reason present        -> the provider explained itself
+        //                                     (`length` is ReasoningBudgetExhausted)
+        //   - reasoning-only or tool-only  -> tokens were produced
+        if is_unexplained_empty_stream(
+            content.is_empty(),
+            reasoning.is_empty(),
+            tool_calls.is_empty(),
+            provider_explained_itself,
+            cancel.load(std::sync::atomic::Ordering::Relaxed),
+        ) {
+            return Err(crate::errors::ApiError::EmptyStream.into());
         }
 
         Ok((
@@ -725,3 +770,55 @@ impl Agent {
 #[cfg(test)]
 #[path = "../../tests/unit/agent/streaming/streaming_test.rs"]
 mod tests;
+
+#[cfg(test)]
+mod empty_stream_guard_tests {
+    use super::is_unexplained_empty_stream;
+
+    /// The only shape that is an error: nothing produced, nothing explained,
+    /// nobody cancelled.
+    #[test]
+    fn only_an_unexplained_silent_stream_is_an_error() {
+        assert!(is_unexplained_empty_stream(true, true, true, false, false));
+    }
+
+    /// Every benign empty case must stay Ok. Each of these was a real shape a
+    /// provider can legitimately return.
+    #[test]
+    fn honest_empty_cases_are_not_errors() {
+        // Cancelled by the caller — the loop broke on the cancel token.
+        assert!(!is_unexplained_empty_stream(true, true, true, false, true));
+        // The provider explained itself; `length` is ReasoningBudgetExhausted.
+        assert!(!is_unexplained_empty_stream(true, true, true, true, false));
+        // Reasoning arrived, answer did not: tokens were produced.
+        assert!(!is_unexplained_empty_stream(
+            true, false, true, false, false
+        ));
+        // Tool-only completion: a valid turn with no prose.
+        assert!(!is_unexplained_empty_stream(
+            true, true, false, false, false
+        ));
+        // Content arrived.
+        assert!(!is_unexplained_empty_stream(
+            false, true, true, false, false
+        ));
+    }
+
+    /// Exhaustive: exactly one of the 32 combinations may be an error.
+    #[test]
+    fn exactly_one_of_thirty_two_combinations_errors() {
+        let mut errors = 0;
+        for bits in 0..32u8 {
+            if is_unexplained_empty_stream(
+                bits & 1 != 0,
+                bits & 2 != 0,
+                bits & 4 != 0,
+                bits & 8 != 0,
+                bits & 16 != 0,
+            ) {
+                errors += 1;
+            }
+        }
+        assert_eq!(errors, 1, "the guard must stay narrow");
+    }
+}

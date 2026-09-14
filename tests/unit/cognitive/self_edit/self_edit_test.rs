@@ -28,14 +28,42 @@ fn test_improvement_target_with_scores() {
 #[test]
 fn test_deny_list() {
     let orchestrator = SelfEditOrchestrator::new(PathBuf::from("/tmp/selfware_test"));
-    let target = ImprovementTarget::new(
-        ImprovementCategory::CodeQuality,
-        "edit safety",
-        "reason",
-        ImprovementSource::CodeSmell,
-    )
-    .with_file("src/safety/checker.rs");
-    assert!(orchestrator.is_denied(&target));
+
+    // All judges, evaluators, orchestrators, mutators, and test paths must be denied
+    let denied_paths = [
+        "src/safety/checker.rs",
+        "src/agent/verification.rs",
+        "src/agent/verification_scope.rs",
+        "src/agent/checkpointing.rs",
+        "src/agent/tool_dispatch/mod.rs",
+        "src/evolution/fitness.rs",
+        "src/evolution/daemon.rs",
+        "src/cognitive/rsi_orchestrator.rs",
+        "src/testing/verification.rs",
+        "src/cognitive/self_edit.rs",
+        "src/cognitive/compilation_manager.rs",
+        "system_tests/run_projecte2e.sh",
+        "tests/unit/mod.rs",
+        "Cargo.toml",
+        "Cargo.lock",
+        ".github/workflows/ci.yml",
+        "src/main.rs",
+    ];
+
+    for path in denied_paths {
+        let target = ImprovementTarget::new(
+            ImprovementCategory::CodeQuality,
+            format!("edit {}", path),
+            "reason",
+            ImprovementSource::CodeSmell,
+        )
+        .with_file(path);
+        assert!(
+            orchestrator.is_denied(&target),
+            "Path '{}' must be denied by safety gates",
+            path
+        );
+    }
 
     let safe_target = ImprovementTarget::new(
         ImprovementCategory::CodeQuality,
@@ -586,4 +614,187 @@ fn test_deny_list_traversal_denied() {
         orchestrator.is_denied(&target),
         "path traversal to denied file should be caught"
     );
+}
+
+#[test]
+fn test_supports_target_rejects_unsupported_categories() {
+    let orch = SelfEditOrchestrator::new(PathBuf::from("/tmp/test"));
+
+    let t_prompt = ImprovementTarget::new(
+        ImprovementCategory::PromptTemplate,
+        "Refine prompt guidance for reasoning",
+        "Improve reasoning depth",
+        ImprovementSource::MetricsRegression,
+    )
+    .with_file("src/agent/mod.rs");
+    assert!(!orch.supports_target(&t_prompt));
+
+    let t_tool = ImprovementTarget::new(
+        ImprovementCategory::ToolPipeline,
+        "Tune tool batch limit policy",
+        "Reduce tool-call churn",
+        ImprovementSource::MetricsRegression,
+    )
+    .with_file("src/agent/execution.rs");
+    assert!(!orch.supports_target(&t_tool));
+
+    let t_err = ImprovementTarget::new(
+        ImprovementCategory::ErrorHandling,
+        "Configure retry backoff policy",
+        "Handle transient provider rate limits",
+        ImprovementSource::ErrorPattern,
+    )
+    .with_file("src/agent/retry.rs");
+    assert!(!orch.supports_target(&t_err));
+
+    let t_ctx = ImprovementTarget::new(
+        ImprovementCategory::ContextManagement,
+        "Adjust context compaction window budget",
+        "Prevent context exhaustion",
+        ImprovementSource::MetricsRegression,
+    )
+    .with_file("src/agent/context.rs");
+    assert!(!orch.supports_target(&t_ctx));
+
+    let t_verif = ImprovementTarget::new(
+        ImprovementCategory::VerificationLogic,
+        "Harden verification contract assertions",
+        "Detect test regressions earlier",
+        ImprovementSource::MetricsRegression,
+    )
+    .with_file("src/agent/verification.rs");
+    assert!(!orch.supports_target(&t_verif));
+
+    let t_cq_err = ImprovementTarget::new(
+        ImprovementCategory::CodeQuality,
+        "Fix repeated compilation errors",
+        "Compile pass rate drop",
+        ImprovementSource::ErrorPattern,
+    )
+    .with_file("src/cognitive/self_edit.rs");
+    // Without TODO/FIXME in description, code quality cannot be mechanically mutated
+    assert!(!orch.supports_target(&t_cq_err));
+
+    let t_cq_todo = ImprovementTarget::new(
+        ImprovementCategory::CodeQuality,
+        "Address TODO at src/lib.rs:5: // TODO: fix",
+        "Known debt",
+        ImprovementSource::TechDebt,
+    )
+    .with_file("src/lib.rs");
+    assert!(orch.supports_target(&t_cq_todo));
+
+    let t_cap = ImprovementTarget::new(
+        ImprovementCategory::NewCapability,
+        "Implement autonomous planning engine",
+        "Missing capability",
+        ImprovementSource::TechDebt,
+    )
+    .with_file("src/cognitive/planner.rs");
+    assert!(!orch.supports_target(&t_cap));
+
+    let t_no_file = ImprovementTarget::new(
+        ImprovementCategory::PromptTemplate,
+        "Refine prompt guidance without file",
+        "Prompt tuning",
+        ImprovementSource::MetricsRegression,
+    );
+    assert!(!orch.supports_target(&t_no_file));
+}
+
+#[test]
+fn test_apply_target_in_sandbox_containment_and_deny_list() {
+    let _state = crate::test_support::CwdGuard::hold();
+    let tmp = tempfile::tempdir().unwrap();
+    let project_root = tmp.path().to_path_buf();
+    let src_dir = project_root.join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    let file_path = src_dir.join("pipeline.rs");
+    std::fs::write(
+        &file_path,
+        "pub fn run_pipeline() -> bool {\n    // TODO: implement\n    true\n}\n",
+    )
+    .unwrap();
+    let main_path = src_dir.join("main.rs");
+    std::fs::write(&main_path, "fn main() {}\n").unwrap();
+
+    let run_git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&project_root)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {:?} should succeed", args);
+    };
+    run_git(&["init"]);
+    run_git(&["config", "user.email", "codex@openai.com"]);
+    run_git(&["config", "user.name", "Codex"]);
+    run_git(&["add", "."]);
+    run_git(&["commit", "-m", "initial"]);
+
+    let sandbox = CompilationSandbox::new(&project_root).unwrap();
+    let orchestrator = SelfEditOrchestrator::new(project_root);
+
+    // 1. Rejects path traversal attack
+    let traversal_target = ImprovementTarget::new(
+        ImprovementCategory::CodeQuality,
+        "Address TODO in escaped path",
+        "Attacking path containment",
+        ImprovementSource::TechDebt,
+    )
+    .with_file("../src/main.rs");
+    let err = orchestrator
+        .apply_target_in_sandbox(&traversal_target, &sandbox)
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("Path traversal")
+            || err.to_string().contains("No concrete mutation")
+            || err.to_string().contains("deny list")
+    );
+
+    // 2. Rejects denied file even with valid TODO description
+    let denied_target = ImprovementTarget::new(
+        ImprovementCategory::CodeQuality,
+        "Address TODO at src/main.rs:1: // TODO: denied file",
+        "Attacking deny list",
+        ImprovementSource::TechDebt,
+    )
+    .with_file("src/main.rs");
+    let err = orchestrator
+        .apply_target_in_sandbox(&denied_target, &sandbox)
+        .unwrap_err();
+    assert!(err.to_string().contains("deny list"));
+
+    // 3. Rejects absolute path
+    let absolute_target = ImprovementTarget::new(
+        ImprovementCategory::CodeQuality,
+        "Address TODO at /etc/passwd:1: // TODO: absolute path",
+        "Absolute path attack",
+        ImprovementSource::TechDebt,
+    )
+    .with_file("/etc/passwd");
+    let err = orchestrator
+        .apply_target_in_sandbox(&absolute_target, &sandbox)
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("Path traversal") || err.to_string().contains("absolute path")
+    );
+
+    // 4. Valid mutation in sandbox succeeds and stays contained
+    let valid_target = ImprovementTarget::new(
+        ImprovementCategory::CodeQuality,
+        "Address TODO at src/pipeline.rs:2: // TODO: implement",
+        "Resolve TODO",
+        ImprovementSource::TechDebt,
+    )
+    .with_file("src/pipeline.rs");
+    let applied = orchestrator
+        .apply_target_in_sandbox(&valid_target, &sandbox)
+        .unwrap();
+    assert_eq!(applied.edited_files, vec!["src/pipeline.rs".to_string()]);
+    assert!(applied.summary.contains("Rewrote TODO/FIXME marker"));
+
+    let content = std::fs::read_to_string(sandbox.work_dir().join("src/pipeline.rs")).unwrap();
+    assert!(content.contains("Resolved: implement"));
+    assert!(!content.contains("TODO"));
 }

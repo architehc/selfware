@@ -282,6 +282,10 @@ impl Agent {
         agent.checkpoint_manager = Some(checkpoint_manager);
         // Restore the cumulative budget so the wall-clock / token caps continue
         // accumulating across resume instead of restarting from zero.
+        // Outstanding obligations survive a restart. A resume that dropped them
+        // would forgive every unread change in the session, which is precisely
+        // the "waiting clears debt" failure in a different costume.
+        agent.evidence_ledger = checkpoint.evidence_ledger.clone();
         agent.prior_elapsed_secs = checkpoint.elapsed_wall_secs;
         // Only the TOTAL is persisted (the checkpoint format has no
         // input/output split), so `.input`/`.output` restart at 0 while
@@ -319,6 +323,7 @@ impl Agent {
             .guard_counters
             .last_failed_verification_summary
             .clone();
+        agent.verification_failures = checkpoint.guard_counters.verification_failures.clone();
         agent.last_checkpoint_tool_calls = checkpoint_tool_calls;
         agent.last_checkpoint_persisted_at = Instant::now();
         agent.checkpoint_persisted_once = true;
@@ -416,6 +421,10 @@ impl Agent {
         } else {
             TaskCheckpoint::new(task_id.to_string(), task_description.to_string())
         };
+        // Shadow-mode ledger rides with the task. Declaring the field without
+        // copying it here meant every resume silently forgave the session's
+        // outstanding obligations.
+        checkpoint.evidence_ledger = self.evidence_ledger.clone();
 
         checkpoint.set_step(self.loop_control.current_step());
         checkpoint.set_iteration(self.loop_control.current_iteration());
@@ -465,6 +474,7 @@ impl Agent {
             last_failed_verification_mutation_sequence: self
                 .last_failed_verification_mutation_sequence,
             last_failed_verification_summary: self.last_failed_verification_summary.clone(),
+            verification_failures: self.verification_failures.clone(),
         };
 
         // Persist the hard budget caps themselves (CLI-only, `#[serde(skip)]` on
@@ -606,6 +616,7 @@ impl Agent {
         #[cfg(feature = "consolidation")]
         self.consolidate_session_memory();
 
+        self.refresh_persisted_evidence();
         if let Some(ref checkpoint) = self.current_checkpoint {
             if let Some(ref manager) = self.checkpoint_manager {
                 // Full write so the base reflects the terminal Completed/step.
@@ -616,6 +627,42 @@ impl Agent {
             }
         }
         Ok(())
+    }
+
+    /// Stamp the live evidence state onto `current_checkpoint`.
+    ///
+    /// The terminal saves wrote `current_checkpoint` as it stood, and its
+    /// guard counters were last refreshed by `to_checkpoint` — at the previous
+    /// periodic save. Every edit and verification after that point was
+    /// therefore absent from the final record: a run could fail verification,
+    /// complete, and leave a checkpoint claiming the last verification passed.
+    /// Both terminal paths call this first so what is persisted is what was
+    /// true at the end.
+    pub(crate) fn refresh_persisted_evidence(&mut self) {
+        let counters = crate::checkpoint::GuardCounters {
+            consecutive_no_action_prompts: self.consecutive_no_action_prompts,
+            mutation_gate_rejections: self.mutation_gate_rejections,
+            prefill_400_count: self.prefill_400_count,
+            mutation_sequence: self.mutation_sequence,
+            last_successful_verification_mutation_sequence: self
+                .last_successful_verification_mutation_sequence,
+            last_failed_verification_mutation_sequence: self
+                .last_failed_verification_mutation_sequence,
+            last_failed_verification_summary: self.last_failed_verification_summary.clone(),
+            verification_failures: self.verification_failures.clone(),
+        };
+        let tokens = self
+            .cumulative_token_usage
+            .total
+            .saturating_add(self.client.pending_usage().total_tokens);
+        let wall = self.budget_elapsed_secs();
+        let cost = self.cumulative_cost_usd + self.client.pending_usage().cost.unwrap_or(0.0);
+        if let Some(checkpoint) = self.current_checkpoint.as_mut() {
+            checkpoint.guard_counters = counters;
+            checkpoint.cumulative_tokens = tokens;
+            checkpoint.elapsed_wall_secs = wall;
+            checkpoint.cumulative_cost_usd = cost;
+        }
     }
 
     /// Reflect on the task outcome and save global lessons
@@ -870,6 +917,7 @@ impl Agent {
             .fail_operational_step(self.loop_control.current_step() + 1, reason);
         let final_step = self.loop_control.current_step();
         let final_iter = self.loop_control.current_iteration();
+        self.refresh_persisted_evidence();
         if let Some(ref mut checkpoint) = self.current_checkpoint {
             checkpoint.set_status(TaskStatus::Failed);
             checkpoint.set_step(final_step);

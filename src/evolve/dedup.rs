@@ -104,6 +104,7 @@ fn read_content(path: &Path) -> Option<String> {
     if path.is_dir() {
         let mut files: Vec<_> = walkdir::WalkDir::new(path)
             .into_iter()
+            .filter_entry(super::graph::retain_outside_python_environments)
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().is_some_and(|x| x == "rs"))
             .map(|e| e.path().to_path_buf())

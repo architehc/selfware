@@ -230,7 +230,8 @@ fn evaluate_hypothesis(
     let sab_score = if compiled { test_coverage_pct } else { 0.0 };
     let fitness = FitnessMetrics {
         sab_score,
-        tokens_used: 0,
+        tokens_used: None,
+        full_evaluation_secs: None,
         token_budget: 0,
         wall_clock_secs,
         timeout_secs,

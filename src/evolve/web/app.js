@@ -127,6 +127,33 @@ const state = {
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
 
+// Phi observes semantic actions, never source text or raw keyboard events.
+let phiFriction = null;
+const PHI_PREFERENCES = 'selfware.phi.companion.preferences.v1';
+function phiReportingEnabled() {
+    try {
+        const raw = localStorage.getItem(PHI_PREFERENCES);
+        if (raw === null) return true;
+        const value = JSON.parse(raw);
+        return typeof value?.lateNightEnabled === 'boolean' && value.enabled === true;
+    } catch (_) { return false; }
+}
+function initializePhiReporting() {
+    import('/phi_friction_client.js').then(({ PhiIdeFrictionClient }) => {
+        phiFriction?.destroy();
+        phiFriction = new PhiIdeFrictionClient({ getToken: () => state.sessionToken,
+            enabled: phiReportingEnabled(),
+            onStatus: (status) => { document.documentElement.dataset.phiTelemetry = status; } });
+    }).catch(() => { document.documentElement.dataset.phiTelemetry = 'unavailable'; });
+}
+initializePhiReporting();
+window.addEventListener('storage', (event) => {
+    if (event.key === PHI_PREFERENCES || event.key === null) phiFriction?.setEnabled(phiReportingEnabled());
+});
+window.addEventListener('phi-friction-preferences', () => phiFriction?.setEnabled(phiReportingEnabled()));
+window.addEventListener('pagehide', () => phiFriction?.destroy());
+window.addEventListener('pageshow', (event) => { if (event.persisted) initializePhiReporting(); });
+
 class ApiError extends Error {
     constructor(message, status, payload) {
         super(message);
@@ -507,7 +534,9 @@ function wireEvents() {
     $('#branch-confirm')?.addEventListener('change', updateBranchCreateState);
     $('#branch-name')?.addEventListener('input', resetBranchPreview);
 
-    $('#editor-fallback')?.addEventListener('input', () => {
+    $('#editor-fallback')?.addEventListener('input', (event) => {
+        if (event.inputType === 'historyUndo') phiFriction?.undo();
+        else phiFriction?.activity();
         updateFallbackCursorStatus();
         if (state.suppressEditorChange || !state.activePath) return;
         const documentState = state.openDocuments.get(state.activePath);
@@ -608,8 +637,10 @@ async function initializeEditor() {
                     fixedOverflowWidgets: true,
                 });
                 state.editorMode = 'monaco';
-                state.editor.onDidChangeModelContent(() => {
+                state.editor.onDidChangeModelContent((event) => {
                     if (state.suppressEditorChange || !state.activePath) return;
+                    if (event.isUndoing) phiFriction?.undo();
+                    else phiFriction?.activity();
                     const documentState = state.openDocuments.get(state.activePath);
                     if (!documentState) return;
                     const content = state.editor.getValue();
@@ -2479,6 +2510,7 @@ async function runApplyAction() {
     const button = $('#node-apply-action');
     const result = $('#node-result');
     const requestId = ++state.applyRequest;
+    phiFriction?.endReview('closed');
     setBusy(button, true);
     result.className = 'inspector-result pane-state';
     result.textContent = `Staging ${kind} run for ${target}…`;
@@ -2577,11 +2609,32 @@ function renderApplyRun(run, status) {
         applyButton.addEventListener('click', () => commitApplyRun(run.id, diff.digest, applyButton));
         wrap.appendChild(applyButton);
 
+        const rejectButton = document.createElement('button');
+        rejectButton.className = 'command-button';
+        rejectButton.type = 'button';
+        rejectButton.textContent = 'Reject diff';
+        rejectButton.title = 'Record a rejected review; keep the staged worktree available for inspection';
+        rejectButton.addEventListener('click', () => {
+            phiFriction?.endReview('rejected', run.id);
+            rejectButton.disabled = true;
+            note.textContent = 'Review marked rejected. The staged worktree is retained; you can inspect it or deliberately Apply later.';
+        });
+        wrap.appendChild(rejectButton);
+
         result.className = 'inspector-result';
         result.replaceChildren(wrap);
         // Persist the staged run GLOBALLY: navigating to another node replaces
         // #node-result and would hide the preview + Apply button (touch UX).
         state.activeStagedRun = { id: run.id, diff };
+        phiFriction?.beginReview({ generationId: run.id, addedLines: diff.insertions,
+            digest: diff.digest, isVisible: () => {
+                if (!details.isConnected || !details.open || !details.getClientRects().length) return false;
+                const rect = details.getBoundingClientRect();
+                return rect.bottom > 0 && rect.top < window.innerHeight;
+            } });
+        for (const kind of ['click', 'pointerdown', 'wheel']) {
+            details.addEventListener(kind, () => phiFriction?.reviewActivity(), { passive: true });
+        }
         renderStagedBanner();
         setGlobalStatus('Apply run staged — review the diff', 'warning');
         appendOutput(`Apply run staged: ${run.id}`, {
@@ -2652,7 +2705,13 @@ function renderStagedBanner() {
     review.className = 'command-button';
     review.type = 'button';
     review.textContent = 'Review';
-    review.addEventListener('click', () => selectInspector('node'));
+    review.addEventListener('click', async () => {
+        selectInspector('node');
+        try {
+            const run = await request(`/api/actions/apply/status?id=${encodeURIComponent(id)}`);
+            renderApplyRun(run, applyRunStatus(run));
+        } catch (error) { toast(`Review unavailable: ${formatError(error)}`, 'error'); }
+    });
     const apply = document.createElement('button');
     apply.className = 'command-button primary';
     apply.type = 'button';
@@ -2672,6 +2731,7 @@ async function commitApplyRun(runId, digest, button) {
             body: { run_id: runId, diff_digest: digest },
         });
         const head = String(payload?.new_head || '');
+        phiFriction?.endReview('accepted', runId);
         const result = $('#node-result');
         result.className = 'inspector-result pane-state';
         result.textContent = `Merged ${formatCount(payload?.files_changed)} files · new HEAD ${head.slice(0, 12)}`;

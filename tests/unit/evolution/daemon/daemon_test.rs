@@ -33,7 +33,7 @@ fn test_format_history_with_entries() {
             description: "Optimized token counting".into(),
             composite_score: 0.85,
             sab_delta: 3.0,
-            token_delta: -50000.0,
+            token_delta: Some(-50000.0),
             patch: String::new(),
             git_tag: None,
         },
@@ -42,7 +42,7 @@ fn test_format_history_with_entries() {
             description: "Rewrote XML parser".into(),
             composite_score: 0.91,
             sab_delta: 5.0,
-            token_delta: -30000.0,
+            token_delta: Some(-30000.0),
             patch: String::new(),
             git_tag: Some("evolve-gen-5".into()),
         },
@@ -103,13 +103,15 @@ fn test_metrics_from_sab_result() {
     let sab = SabResult {
         aggregate_score: 88.5,
         scenario_scores: vec![],
-        total_tokens_used: 250_000,
+        total_tokens_used: Some(250_000),
         wall_clock: std::time::Duration::from_secs(1200),
         rating: GenerationRating::Bloom,
+        binary_sha256: "test".to_string(),
+        run_id: "test".to_string(),
     };
     let metrics = metrics_from_sab_result(&sab, Path::new("target/release/selfware"), 50.0);
     assert_eq!(metrics.sab_score, 88.5);
-    assert_eq!(metrics.tokens_used, 250_000);
+    assert_eq!(metrics.tokens_used, Some(250_000));
     assert_eq!(metrics.token_budget, DEFAULT_TOKEN_BUDGET);
     assert!((metrics.wall_clock_secs - 1200.0).abs() < 0.01);
     assert_eq!(metrics.max_binary_size_mb, 50.0);
@@ -123,7 +125,7 @@ fn test_format_history_caps_at_10() {
             description: format!("Mutation {}", i),
             composite_score: 0.80 + i as f64 * 0.01,
             sab_delta: 1.0,
-            token_delta: -1000.0,
+            token_delta: Some(-1000.0),
             patch: String::new(),
             git_tag: None,
         })
@@ -276,19 +278,20 @@ fn test_generation_winner_fields() {
         description: "Cache optimization".to_string(),
         composite_score: 0.92,
         sab_delta: 7.5,
-        token_delta: -25000.0,
+        token_delta: Some(-25000.0),
         patch: "--- a/src/cache.rs\n+++ b/src/cache.rs".to_string(),
         git_tag: Some("evolve-gen-42".to_string()),
     };
     assert_eq!(winner.generation, 42);
     assert!(winner.sab_delta > 0.0);
-    assert!(winner.token_delta < 0.0);
+    assert!(winner.token_delta.is_some_and(|d| d < 0.0));
     assert!(winner.git_tag.as_ref().unwrap().contains("42"));
 }
 
 #[test]
 fn test_evolution_result_fields() {
     let result = EvolutionResult {
+        aborted: None,
         generations_run: 0,
         improvements: vec![],
         final_sab_score: 0.0,
@@ -304,9 +307,10 @@ fn test_evolution_result_fields() {
 fn make_metrics(tests_passed: usize, tests_total: usize) -> FitnessMetrics {
     FitnessMetrics {
         sab_score: 100.0,
-        tokens_used: 0,
+        tokens_used: Some(0),
         token_budget: DEFAULT_TOKEN_BUDGET,
         wall_clock_secs: 1.0,
+        full_evaluation_secs: None,
         timeout_secs: DEFAULT_TIMEOUT_SECS,
         test_coverage_pct: 100.0,
         binary_size_mb: 10.0,
@@ -339,6 +343,148 @@ fn test_winner_gate_allows_equal_or_more_tests() {
     // Zero-baseline (synthetic) never blocks the first generation.
     let synthetic = make_metrics(0, 0);
     assert!(winner_test_count_gate(&synthetic, &make_metrics(1, 1)).is_ok());
+}
+
+fn make_sab(scores: Vec<(&str, f64, bool)>) -> crate::evolution::fitness::SabResult {
+    use crate::evolution::fitness::{Difficulty, SabResult, ScenarioScore};
+    use std::time::Duration;
+
+    SabResult {
+        aggregate_score: 80.0,
+        scenario_scores: scores
+            .into_iter()
+            .map(|(name, score, passed)| ScenarioScore {
+                name: name.to_string(),
+                difficulty: Difficulty::Medium,
+                score,
+                tests_passed: passed,
+                broken_tests_fixed: false,
+                clean_exit: true,
+                tokens_used: None,
+                duration: Duration::from_secs(1),
+            })
+            .collect(),
+        total_tokens_used: None,
+        wall_clock: Duration::from_secs(1),
+        rating: GenerationRating::Grow,
+        binary_sha256: "dummy".to_string(),
+        run_id: "test".to_string(),
+    }
+}
+
+#[test]
+fn test_winner_darwinx_gate_enforcement() {
+    let base = make_sab(vec![("sc1", 90.0, true), ("sc2", 80.0, true)]);
+
+    // 1. Regressed candidate (pass regression on sc1: true -> false) must be rejected
+    let cand_regressed = make_sab(vec![("sc1", 70.0, false), ("sc2", 85.0, true)]);
+    let err = winner_darwinx_gate(Some(&base), Some(&cand_regressed)).unwrap_err();
+    assert!(err.contains("DarwinX non-regression check failed"));
+    assert!(err.contains("sc1"));
+
+    // 2. Candidate missing a scenario must be rejected
+    let cand_missing = make_sab(vec![("sc1", 95.0, true)]);
+    let err = winner_darwinx_gate(Some(&base), Some(&cand_missing)).unwrap_err();
+    assert!(err.contains("DarwinX non-regression check failed"));
+    assert!(err.contains("sc2"));
+
+    // 3. Candidate with equal or better scores must pass
+    let cand_better = make_sab(vec![("sc1", 90.0, true), ("sc2", 95.0, true)]);
+    assert!(winner_darwinx_gate(Some(&base), Some(&cand_better)).is_ok());
+
+    // 4. SAB evidence contract:
+    // Both absent is allowed (compile-only mode).
+    assert!(winner_darwinx_gate(None, None).is_ok());
+
+    // Exactly one absent is rejected fail-closed.
+    let err_cand_none = winner_darwinx_gate(Some(&base), None).unwrap_err();
+    assert!(err_cand_none.contains("baseline has SAB benchmark evidence but candidate has none"));
+
+    let err_base_none = winner_darwinx_gate(None, Some(&cand_better)).unwrap_err();
+    assert!(err_base_none.contains("candidate has SAB benchmark evidence but baseline has none"));
+}
+
+#[test]
+fn test_evaluate_candidate_promotion_gates() {
+    let base_metrics = make_metrics(100, 100);
+    let cand_metrics_ok = make_metrics(100, 100);
+    let cand_metrics_fewer_tests = make_metrics(50, 50);
+
+    let base_sab = make_sab(vec![("sc1", 90.0, true), ("sc2", 80.0, true)]);
+    let cand_sab_ok = make_sab(vec![("sc1", 90.0, true), ("sc2", 85.0, true)]);
+    let cand_sab_regressed = make_sab(vec![("sc1", 70.0, false), ("sc2", 85.0, true)]);
+
+    // 1. Score does not exceed baseline -> Reject
+    let decision = evaluate_candidate_promotion(
+        0.8,
+        0.75,
+        Some(&base_sab),
+        Some(&cand_sab_ok),
+        &base_metrics,
+        &cand_metrics_ok,
+    );
+    assert!(matches!(
+        decision,
+        PromotionDecision::Reject(r) if r.contains("does not exceed baseline")
+    ));
+
+    // 2. DarwinX regression -> Reject
+    let decision = evaluate_candidate_promotion(
+        0.8,
+        0.85,
+        Some(&base_sab),
+        Some(&cand_sab_regressed),
+        &base_metrics,
+        &cand_metrics_ok,
+    );
+    assert!(matches!(
+        decision,
+        PromotionDecision::Reject(r) if r.contains("DarwinX non-regression check failed")
+    ));
+
+    // 3. Test count regression -> Reject
+    let decision = evaluate_candidate_promotion(
+        0.8,
+        0.85,
+        Some(&base_sab),
+        Some(&cand_sab_ok),
+        &base_metrics,
+        &cand_metrics_fewer_tests,
+    );
+    assert!(matches!(
+        decision,
+        PromotionDecision::Reject(r) if r.contains("test count regressed")
+    ));
+
+    // 4. Valid winner -> Promote
+    let decision = evaluate_candidate_promotion(
+        0.8,
+        0.85,
+        Some(&base_sab),
+        Some(&cand_sab_ok),
+        &base_metrics,
+        &cand_metrics_ok,
+    );
+    assert_eq!(decision, PromotionDecision::Promote);
+
+    // 5. Compile-only mode (both None) -> Promote if score and tests ok
+    let decision =
+        evaluate_candidate_promotion(0.8, 0.85, None, None, &base_metrics, &cand_metrics_ok);
+    assert_eq!(decision, PromotionDecision::Promote);
+
+    // 6. Asymmetric SAB evidence -> Reject
+    let decision = evaluate_candidate_promotion(
+        0.8,
+        0.85,
+        Some(&base_sab),
+        None,
+        &base_metrics,
+        &cand_metrics_ok,
+    );
+    assert!(matches!(
+        decision,
+        PromotionDecision::Reject(r) if r.contains("baseline has SAB benchmark evidence but candidate has none")
+    ));
 }
 
 #[test]

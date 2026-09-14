@@ -18,10 +18,27 @@ THIS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${THIS_DIR}/../.." && pwd)"
 CONFIG_FILE="${CONFIG_FILE:-${THIS_DIR}/config/crazyshit_model.toml}"
 CONFIG_FILE="$(cd "$(dirname "${CONFIG_FILE}")" && pwd)/$(basename "${CONFIG_FILE}")"
-BIN="${REPO_ROOT}/target/release/selfware"
+# The executable under evaluation.
+#
+# `SELFWARE_BINARY` is the contract the Rust fitness harness uses to say WHICH
+# build to score (src/evolution/fitness.rs). This script ignored it entirely and
+# always used its own repository's release build, so evaluating a candidate
+# worktree measured the ORIGINAL checkout every time. Fitness could not
+# distinguish a candidate from the baseline, and any apparent gain was noise.
+if [[ -n "${SELFWARE_BINARY:-}" ]]; then
+  BIN="${SELFWARE_BINARY}"
+  BIN_SOURCE="SELFWARE_BINARY"
+  if [[ ! -x "${BIN}" ]]; then
+    echo "ERROR: SELFWARE_BINARY is not an executable file: ${BIN}" >&2
+    exit 1
+  fi
+else
+  BIN="${REPO_ROOT}/target/release/selfware"
+  BIN_SOURCE="repo-default"
+fi
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
-OUT_DIR="${THIS_DIR}/reports/${TIMESTAMP}"
-WORK_ROOT="${THIS_DIR}/work"
+OUT_DIR="${OUT_DIR:-${THIS_DIR}/reports/${TIMESTAMP}}"
+WORK_ROOT="${WORK_ROOT:-${OUT_DIR}/work}"
 LOG_ROOT="${OUT_DIR}/logs"
 RESULTS_DIR="${OUT_DIR}/results"
 SUMMARY_MD="${OUT_DIR}/REPORT.md"
@@ -114,11 +131,32 @@ echo "  Output: ${OUT_DIR}"
 echo "============================================================"
 echo ""
 
-echo "Building selfware (release, all features)..."
-(cd "${REPO_ROOT}" && cargo build --all-features --release -q 2>&1) || {
-  echo "ERROR: Build failed" >&2
+if [[ "${BIN_SOURCE}" == "SELFWARE_BINARY" ]]; then
+  # Never rebuild over a supplied binary: that would replace the artifact under
+  # evaluation with this repository's build, which is the bug above by another
+  # route.
+  echo "Evaluating supplied binary: ${BIN}"
+else
+  echo "Building selfware (release, all features)..."
+  (cd "${REPO_ROOT}" && cargo build --all-features --release -q 2>&1) || {
+    echo "ERROR: Build failed" >&2
+    exit 1
+  }
+fi
+
+if [[ ! -x "${BIN}" ]]; then
+  echo "ERROR: no executable to evaluate at ${BIN}" >&2
   exit 1
-}
+fi
+# Identity of what actually ran, recorded so a report can be checked against
+# the binary the caller asked to have scored.
+BIN_SHA256="$(shasum -a 256 "${BIN}" 2>/dev/null | awk '{print $1}')"
+BIN_SHA256="${BIN_SHA256:-$(sha256sum "${BIN}" | awk '{print $1}')}"
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+echo "  binary:        ${BIN}"
+echo "  binary sha256: ${BIN_SHA256}"
+echo "  binary source: ${BIN_SOURCE}"
+echo "  run id:        ${RUN_ID}"
 
 if [[ ! -x "${BIN}" ]]; then
   echo "ERROR: Binary not found at ${BIN}" >&2
@@ -556,7 +594,47 @@ lines.append(f'- Logs: \`system_tests/projecte2e/reports/{timestamp}/logs/<scena
 with open('${SUMMARY_MD}', 'w') as f:
     f.write('\n'.join(lines) + '\n')
 
+# Structured aggregate report.
+#
+# The Rust harness previously hunted stdout for a path, and when it found none
+# fell back to scraping 'name: NN/100' lines and INVENTING outcomes from score
+# thresholds (tests_passed = score >= 70). Per-scenario outcomes were already
+# recorded here; nothing published them in one place. This does, and carries
+# the identity of the binary that produced them so a caller can check it got
+# the build it asked to have scored.
+aggregate = {
+    'schema': 'sab-report/1',
+    'run_id': '${RUN_ID}',
+    'binary': '${BIN}',
+    'binary_sha256': '${BIN_SHA256}',
+    'binary_source': '${BIN_SOURCE}',
+    'endpoint': endpoint,
+    'model': model_name,
+    'scenarios_expected': total,
+    'scenarios_completed': completed,
+    'total_elapsed_secs': total_elapsed,
+    'scenarios': [
+        {
+            'name': r['name'],
+            'difficulty': r['difficulty'],
+            'score': r['score'],
+            # Measured outcomes, not thresholds over a score.
+            'tests_passed': r['post_status'] == 0,
+            'broken_tests_fixed': r['baseline_status'] != 0 and r['post_status'] == 0,
+            'clean_exit': r['agent_status'] == 0 and r['timed_out'] == 0,
+            'duration_secs': r['duration_secs'],
+            # The runner does not observe token usage. Absent, not zero.
+            'tokens_used': None,
+        }
+        for r in results
+    ],
+}
+report_json = os.path.join(os.path.dirname('${SUMMARY_MD}'), 'report.json')
+with open(report_json, 'w') as f:
+    json.dump(aggregate, f, indent=2)
+
 print(f'Report written to ${SUMMARY_MD}')
+print(f'SAB_REPORT_JSON={report_json}')
 print(f'')
 print(f'============================================================')
 print(f'  SAB RUN COMPLETE')

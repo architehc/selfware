@@ -627,10 +627,13 @@ impl Tool for FileDelete {
         let path = PathBuf::from(&args.path);
 
         if !path.exists() {
-            return Err(ToolError::FileNotFound {
-                path: args.path.clone(),
-            }
-            .into());
+            clear_file_snapshot(&args.path);
+            return Ok(serde_json::json!({
+                "deleted": true,
+                "already_absent": true,
+                "path": args.path,
+                "message": format!("File already absent: {}", args.path)
+            }));
         }
         if path.is_dir() {
             return Err(ToolError::PathIsDirectory {

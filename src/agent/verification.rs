@@ -627,6 +627,17 @@ fn artifact_readback_guidance(paths: &[String]) -> String {
 }
 
 impl Agent {
+    /// The root this task's verification relevance is measured against.
+    ///
+    /// Defaults to the working directory the agent was started in, which is the
+    /// project the user pointed it at — not whatever ancestor a language
+    /// toolchain happens to discover.
+    pub(super) fn verification_task_root(&self) -> std::path::PathBuf {
+        self.task_verification_root.clone().unwrap_or_else(|| {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        })
+    }
+
     /// Tool categories that inherently bypass the Rust/cargo verification gate.
     /// These tools indicate non-Rust tasks (browser automation, vision analysis,
     /// desktop control, web fetching, etc.) where `cargo check` is meaningless.
@@ -678,14 +689,15 @@ impl Agent {
     ///    queried information without making any changes. No code was modified,
     ///    so there is nothing to verify.
     pub(super) async fn should_skip_cargo_verification(&self) -> bool {
-        // Condition 1: No Cargo.toml in the project root or its ancestors → not a Rust project
-        let cargo_toml_path = super::current_project_root().join("Cargo.toml");
-        let has_cargo_toml = tokio::fs::try_exists(&cargo_toml_path)
-            .await
-            .unwrap_or(false);
-        if !has_cargo_toml {
+        // Condition 1: cargo must apply to THIS task, not merely to some
+        // ancestor. Accepting any Cargo.toml found by walking up told a Python
+        // task nested in a Rust repository to run cargo_check, which then
+        // failed in the parent crate and blocked a correct, tested repair.
+        let task_root = self.verification_task_root();
+        if !super::verification_scope::cargo_applies_to_task(&task_root) {
             debug!(
-                "Completion gate: no Cargo.toml found in project ancestors, skipping cargo verification"
+                task_root = %task_root.display(),
+                "Completion gate: nearest Cargo.toml is outside the task root;                  skipping cargo verification guidance"
             );
             return true;
         }
@@ -1141,11 +1153,30 @@ impl Agent {
             && self.last_failed_verification_mutation_sequence
                 >= self.last_successful_verification_mutation_sequence
         {
-            if let Some(summary) = &self.last_failed_verification_summary {
+            // Only a failure this task's work could have caused blocks it.
+            // A broken crate that merely ENCLOSES the task is reported, not
+            // enforced: a Python repair with passing Python tests must be
+            // allowed to finish even inside a Rust workspace that does not
+            // build. Unknown scope still blocks -- unknown is not permission.
+            let task_root = self.verification_task_root();
+            if let Some(record) = self
+                .verification_failures
+                .blocking(&task_root, self.mutation_sequence)
+            {
+                let summary = &record.summary;
+                let check = &record.check_id;
                 return Some(format!(
-                    "FailingTestsAccepted: the latest verification after your edit failed: {summary}. \
+                    "FailingTestsAccepted: `{check}` failed after your edit: {summary}. \
                      Fix the issue and run verification again before completing."
                 ));
+            }
+            if self.verification_failures.is_empty() {
+                if let Some(summary) = &self.last_failed_verification_summary {
+                    return Some(format!(
+                        "FailingTestsAccepted: the latest verification after your edit failed: {summary}. \
+                         Fix the issue and run verification again before completing."
+                    ));
+                }
             }
         }
 
@@ -2070,7 +2101,12 @@ impl Agent {
                     None
                 } else if report.overall_passed {
                     self.last_successful_verification_mutation_sequence = self.mutation_sequence;
-                    self.last_failed_verification_summary = None;
+                    // Route through the ledger rather than assigning `None`.
+                    // This path used to clear every outstanding failure on any
+                    // pass, so a green post-edit check erased a red test suite
+                    // the model had run itself moments earlier — the scoped
+                    // clearing rule existed but this caller never reached it.
+                    self.note_verification_report(tool_name, path, &report);
                     spinner.stop_success("Verification passed");
                     self.cognitive_state.episodic_memory.what_worked(
                         tool_name,
@@ -2081,17 +2117,10 @@ impl Agent {
                     }
                     None
                 } else {
-                    let summary = report
-                        .checks
-                        .iter()
-                        .find(|check| !check.passed)
-                        .map(|check| {
-                            let output: String = check.output.chars().take(300).collect();
-                            format!("{} failed: {}", check.check_type.as_str(), output)
-                        })
-                        .unwrap_or_else(|| "verification failed".to_string());
-                    self.last_failed_verification_summary = Some(summary);
-                    self.last_failed_verification_mutation_sequence = self.mutation_sequence;
+                    // The per-check summaries are built inside the ledger
+                    // entry for each failing check, so the gate quotes the check
+                    // that actually failed rather than a flattened first-error.
+                    self.note_verification_report(tool_name, path, &report);
                     spinner.stop_error("Verification failed");
                     self.cognitive_state.episodic_memory.what_failed(
                         tool_name,
@@ -2107,11 +2136,72 @@ impl Agent {
             Err(e) => {
                 spinner.stop_error("Verification failed to run");
                 warn!("Verification failed to run: {}", e);
-                self.last_failed_verification_summary =
-                    Some(format!("verification could not run: {}", e));
-                self.last_failed_verification_mutation_sequence = self.mutation_sequence;
+                let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                self.note_verification_record(super::verification_scope::VerificationRecord {
+                    check_id: format!("verification:{}", tool_name),
+                    command: format!("{}:{}", tool_name, path),
+                    summary: format!("verification could not run: {}", e),
+                    passed: false,
+                    mutation_sequence: self.mutation_sequence,
+                    scope: super::verification_scope::VerificationScope {
+                        working_dir: cwd.clone(),
+                        project_root: Some(cwd),
+                    },
+                });
                 None
             }
+        }
+    }
+
+    /// Enter each check of a post-edit report into the verification ledger.
+    ///
+    /// One record PER CHECK, not one per report. A report is a bundle of
+    /// different questions — type_check, lint, test — and collapsing it into a
+    /// single outcome is what let a passing compile clear a failing test suite.
+    /// Recording them separately means a green `type_check` clears only a red
+    /// `type_check`.
+    fn note_verification_report(
+        &mut self,
+        tool_name: &str,
+        path: &str,
+        report: &crate::testing::verification::VerificationReport,
+    ) {
+        // The scope is the TASK's root, resolved the same way the explicit path
+        // resolves it. The previous code used the process working directory for
+        // both fields, which is neither the task root nor the project cargo
+        // would discover.
+        let working_dir = self.verification_task_root();
+        // A Rust check is run by cargo, which walks UP to the nearest manifest.
+        // Recording the working directory as the project would hide exactly the
+        // nested case this module exists for, so resolve it the way cargo does.
+        // `CheckResult` carries no command, so the file being verified is what
+        // decides.
+        let is_rust = path.ends_with(".rs");
+        let project_root = if is_rust {
+            super::verification_scope::cargo_project_root(&working_dir)
+        } else {
+            Some(working_dir.clone())
+        };
+        for check in &report.checks {
+            let kind = check.check_type.as_str();
+            let scope = super::verification_scope::VerificationScope {
+                working_dir: working_dir.clone(),
+                project_root: project_root.clone(),
+            };
+            let summary = if check.passed {
+                format!("{kind} passed")
+            } else {
+                let output: String = check.output.chars().take(300).collect();
+                format!("{kind} failed: {output}")
+            };
+            self.note_verification_record(super::verification_scope::VerificationRecord {
+                check_id: format!("gate:{kind}"),
+                command: format!("{tool_name}:{path}"),
+                summary,
+                passed: check.passed,
+                mutation_sequence: self.mutation_sequence,
+                scope,
+            });
         }
     }
 

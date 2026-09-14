@@ -1769,14 +1769,19 @@ impl Agent {
                 let name = parts.next().unwrap_or("");
                 let arguments = parts.next().unwrap_or("").trim();
                 if let Some(skill) = skill_registry.get(name) {
-                    let content = skill.render_content(arguments);
+                    let content = skill.render_with_trust_gate(arguments);
                     self.messages.push(Message::system(format!(
                         "The user invoked the /{} skill. Follow these instructions:\n\n{}",
                         skill.name, content
                     )));
+                    let status = if skill.verified {
+                        "loaded"
+                    } else {
+                        "loaded (UNVERIFIED)"
+                    };
                     println!(
-                        "  Skill '{}' loaded — instructions added to context.",
-                        skill.name
+                        "  Skill '{}' {} — instructions added to context.",
+                        skill.name, status
                     );
                     continue;
                 }
@@ -2996,14 +3001,19 @@ impl Agent {
                 let name = parts.next().unwrap_or("");
                 let arguments = parts.next().unwrap_or("").trim();
                 if let Some(skill) = skill_registry.get(name) {
-                    let content = skill.render_content(arguments);
+                    let content = skill.render_with_trust_gate(arguments);
                     self.messages.push(Message::system(format!(
                         "The user invoked the /{} skill. Follow these instructions:\n\n{}",
                         skill.name, content
                     )));
+                    let status = if skill.verified {
+                        "loaded"
+                    } else {
+                        "loaded (UNVERIFIED)"
+                    };
                     println!(
-                        "  Skill '{}' loaded — instructions added to context.",
-                        skill.name
+                        "  Skill '{}' {} — instructions added to context.",
+                        skill.name, status
                     );
                     continue;
                 }

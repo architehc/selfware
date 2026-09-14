@@ -110,6 +110,8 @@ assert.equal(rows.length,4);
 for(const row of rows)assert.equal(row.children[2].children[0].textContent,"Not run");
 assert.equal(nodes.get("development-route").hasAttribute("hidden"),true);
 assert(!nodes.get("group-filter").children.some(option=>option.value==="development"));
+assert(!nodes.get("group-filter").children.some(option=>option.value==="tool_runtime"));
+assert(!nodes.get("limitations").children.some(item=>item.textContent.startsWith("Actual Selfware tools:")));
 assert.equal(nodes.get("latency-chart").hasAttribute("hidden"),true);
 const svg=document.createElementNS("http://www.w3.org/2000/svg","svg");
 svg.setAttribute("hidden","");svg.hidden=false;
@@ -277,6 +279,83 @@ const rows=nodes.get("receipt-body").children;
 assert.equal(rows.length,1);
 assert.equal(rows[0].children[2].children[0].className,"badge notrun");
 assert.equal(nodes.get("development-gpu-state").className,"badge notrun");
+''')
+
+    def test_actual_tools_group_preserves_failures_nested_evidence_and_scope(self):
+        # Presentation fixture only. No real tool, model or Docker invocation.
+        report = {"experiments": {"tool_runtime": {
+            "status": "failed", "run_id": "synthetic-runtime",
+            "full_agent_loop": {"status": "not_run"},
+            "checks": [
+                {"id": "workspace_read_after", "status": "passed",
+                 "expected": {"content": "value=after", "regular_file": True},
+                 "observed": {"content": "value=after", "regular_file": True},
+                 "verification": {"method": "parent artifact inspection",
+                                  "checks": [{"status": "passed", "id": "nested-only"}]},
+                 "detail": {"tool": "file_read", "arguments": {"path": "/work/fixture"}}},
+                {"id": "outside_write_refused", "status": "failed",
+                 "expected": {"refused": True}, "observed": {"refused": False},
+                 "detail": "Synthetic negative result"},
+            ],
+            "limitations": ["Only fixed tool calls were exercised.",
+                            "<b>Runtime text remains data.</b>"],
+        }}}
+        self.run_browser_logic(report, r'''
+const option=nodes.get("group-filter").children.find(option=>option.value==="tool_runtime");
+assert(option,"the optional actual-tools group must be selectable");
+assert.equal(option.textContent,"Actual Selfware tools");
+nodes.get("group-filter").value="tool_runtime";
+nodes.get("group-filter").listeners.change();
+let rows=nodes.get("receipt-body").children;
+assert.equal(rows.length,3,"one supplied stage plus two checks; nested evidence is not a check collection");
+assert(rows.every(row=>row.children[0].textContent==="Actual Selfware tools"));
+const stage=rows.find(row=>row.children[1].children[0].textContent==="Actual Selfware tools");
+assert.equal(stage.children[2].children[0].className,"badge failed");
+const stageRaw=JSON.parse(stage.children[1].children[2].children[1].textContent);
+assert.deepEqual(stageRaw.full_agent_loop,{status:"not_run"});
+const read=rows.find(row=>row.children[1].children[0].textContent==="workspace_read_after");
+assert.equal(read.children[2].children[0].className,"badge passed");
+const original=JSON.parse(read.children[1].children[2].children[1].textContent);
+assert.deepEqual(original.expected,{content:"value=after",regular_file:true});
+assert.deepEqual(original.observed,original.expected);
+assert.deepEqual(original.verification,{method:"parent artifact inspection",checks:[{status:"passed",id:"nested-only"}]});
+assert.deepEqual(original.detail,{tool:"file_read",arguments:{path:"/work/fixture"}});
+const refusal=rows.find(row=>row.children[1].children[0].textContent==="outside_write_refused");
+assert.equal(refusal.children[2].children[0].className,"badge failed");
+assert(nodes.get("limitations").children.some(item=>item.textContent.includes("Full agent loop (full_agent_loop): not run.")));
+assert(nodes.get("limitations").children.some(item=>item.textContent==="Actual Selfware tools: Only fixed tool calls were exercised."));
+assert(nodes.get("limitations").children.some(item=>item.textContent==="Actual Selfware tools: <b>Runtime text remains data.</b>"));
+nodes.get("search").value="Actual Selfware tools";
+nodes.get("search").listeners.input();
+assert.equal(nodes.get("receipt-body").children.length,3,"human label must also be searchable");
+nodes.get("status-filter").value="failed";
+nodes.get("status-filter").listeners.change();
+assert.equal(nodes.get("receipt-body").children.length,2);
+''')
+
+    def test_unrun_actual_tools_does_not_fabricate_checks(self):
+        self.run_browser_logic({"experiments": {"tool_runtime": {
+            "status": "not_run", "full_agent_loop": {"status": "not_run"},
+            "checks": [],
+        }}}, r'''
+nodes.get("group-filter").value="tool_runtime";
+nodes.get("group-filter").listeners.change();
+const rows=nodes.get("receipt-body").children;
+assert.equal(rows.length,1);
+assert.equal(rows[0].children[0].textContent,"Actual Selfware tools");
+assert.equal(rows[0].children[2].children[0].className,"badge notrun");
+assert(nodes.get("limitations").children.some(item=>item.textContent.includes("Full agent loop (full_agent_loop): not run.")));
+''')
+
+    def test_empty_actual_tools_is_unknown_and_scope_is_not_invented(self):
+        self.run_browser_logic({"experiments": {"tool_runtime": {}}}, r'''
+nodes.get("group-filter").value="tool_runtime";
+nodes.get("group-filter").listeners.change();
+const rows=nodes.get("receipt-body").children;
+assert.equal(rows.length,1);
+assert.equal(rows[0].children[2].children[0].className,"badge notrun");
+assert.equal(rows[0].children[1].children.length,2,"missing receipts do not invent original JSON");
+assert(nodes.get("limitations").children.some(item=>item.textContent.includes("Full agent loop (full_agent_loop): not reported.")));
 ''')
 
 

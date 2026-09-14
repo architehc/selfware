@@ -1,0 +1,194 @@
+{
+  "scope": "Narrow polish recheck: smooth paw rotation, mobile closed eyes/text, static gestures; previous review retained",
+  "created_at": "2026-09-10T04:34:17.798547+00:00",
+  "status": "failed",
+  "checks": [
+    {
+      "name": "paw_rotation_is_continuous_across_old_threshold",
+      "status": "passed",
+      "observed": {
+        "samples": [
+          {
+            "y": 0.51,
+            "left": -8,
+            "right": 8
+          },
+          {
+            "y": 0.5,
+            "left": -8,
+            "right": 8
+          },
+          {
+            "y": 0.49,
+            "left": -8.10875,
+            "right": 8.10875
+          },
+          {
+            "y": 0.41,
+            "left": -14.37875,
+            "right": 14.37875
+          },
+          {
+            "y": 0.4001,
+            "left": -15.48875,
+            "right": 15.48875
+          },
+          {
+            "y": 0.4,
+            "left": -15.5,
+            "right": 15.5
+          },
+          {
+            "y": 0.3999,
+            "left": -15.51125,
+            "right": 15.51125
+          },
+          {
+            "y": 0.39,
+            "left": -16.62125,
+            "right": 16.62125
+          },
+          {
+            "y": 0.31,
+            "left": -22.89125,
+            "right": 22.89125
+          },
+          {
+            "y": 0.3,
+            "left": -23,
+            "right": 23
+          },
+          {
+            "y": 0.29,
+            "left": -23,
+            "right": 23
+          }
+        ],
+        "cross_threshold_delta_degrees": 0.022500000000000853
+      }
+    },
+    {
+      "name": "all_six_reduced_motion_gestures_have_expressive_static_poses",
+      "status": "passed",
+      "observed": [
+        {
+          "gesture": "wave",
+          "expression_changed": true,
+          "stays_still": true,
+          "active": false
+        },
+        {
+          "gesture": "look",
+          "expression_changed": true,
+          "stays_still": true,
+          "active": false
+        },
+        {
+          "gesture": "stretch",
+          "expression_changed": true,
+          "stays_still": true,
+          "active": false
+        },
+        {
+          "gesture": "walk",
+          "expression_changed": true,
+          "stays_still": true,
+          "active": false
+        },
+        {
+          "gesture": "celebrate",
+          "expression_changed": true,
+          "stays_still": true,
+          "active": false
+        },
+        {
+          "gesture": "nod",
+          "expression_changed": true,
+          "stays_still": true,
+          "active": false
+        }
+      ]
+    },
+    {
+      "name": "mobile_closed_eye_contours_have_visible_thickness",
+      "status": "passed",
+      "observed": [
+        {
+          "name": "lid-l",
+          "local_center_thickness": 0.010999999999999998,
+          "screen_center_thickness": 1.1181133333333333
+        },
+        {
+          "name": "lid-r",
+          "local_center_thickness": 0.010999999999999998,
+          "screen_center_thickness": 1.1181133333333333
+        }
+      ]
+    },
+    {
+      "name": "mobile_hidden_linebreaks_preserve_word_spacing",
+      "status": "passed",
+      "observed": {
+        "motion": "Eyes lead. The head follows. The tail takes its time.",
+        "export": "A reusable vector character. No generated frames or external assets."
+      }
+    },
+    {
+      "name": "mobile_remains_without_horizontal_overflow",
+      "status": "passed",
+      "observed": {
+        "viewport": 390,
+        "page": 390
+      }
+    },
+    {
+      "name": "paused_gestures_render_a_still_without_resuming_clock",
+      "status": "failed",
+      "observed": {
+        "pose_changed": true,
+        "stays_still": false,
+        "label": "Spring motion \u00b7 preview"
+      }
+    },
+    {
+      "name": "live_wave_passes_through_intermediate_paw_angles",
+      "status": "failed",
+      "observed": {
+        "frames": 140,
+        "min_angle": -23,
+        "max_angle": -8,
+        "distinct_angles": 7,
+        "crossing_steps": [
+          {
+            "previous": {
+              "y": 0.4135831609461234,
+              "angle": -13.98129
+            },
+            "current": {
+              "y": 0.3757645034140253,
+              "angle": -18.17311
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "no_browser_script_errors",
+      "status": "passed",
+      "observed": []
+    }
+  ],
+  "screenshots": [
+    "polish-mobile-still-wave.png",
+    "polish-mobile-sleep.png"
+  ],
+  "page_errors": [],
+  "source_sha256": {
+    "rig.js": "230ffc30df7091bd0b4a72f8c42f08c93dd8b57f9f0fb64f1b424923c9a3ec86",
+    "motion.js": "0e4a1ec56a3f78f797211416939863585ac7ebc17e872d0baad2742cb738f403",
+    "studio.js": "7275fcf1ff288b35ca391cfe7f19de52842ffd9d05e0fcaf75760d77ce999716",
+    "index.html": "46c7e1643e312ee7a63949fbe73214224f6237c8a0a51b4b3d70cd4eadf3dcc8",
+    "style.css": "8d073e5712eebd5bd0387997e400ac3605e6030c7702f5aae5770a53c4de3060"
+  },
+  "browser": "152.0.7977.83"
+}

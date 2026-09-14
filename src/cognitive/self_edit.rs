@@ -3,7 +3,7 @@
 //! Enables the agent to analyze its own codebase, identify improvement targets,
 //! and safely apply edits with verification and rollback.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -149,15 +149,6 @@ pub struct AppliedMutation {
     /// Human-readable summary of the applied mutation.
     pub summary: String,
 }
-
-/// Files and patterns that must never be self-edited
-const DENY_LIST: &[&str] = &[
-    "safety/checker.rs",
-    "safety/path_validator.rs",
-    "Cargo.toml",
-    ".github/workflows/",
-    "src/main.rs",
-];
 
 /// Orchestrates the self-improvement loop
 pub struct SelfEditOrchestrator {
@@ -370,9 +361,20 @@ impl SelfEditOrchestrator {
 
     /// Returns true when this target has a concrete mutation strategy.
     pub fn supports_target(&self, target: &ImprovementTarget) -> bool {
-        matches!(target.category, ImprovementCategory::CodeQuality)
-            && target.file.is_some()
-            && (target.description.contains("TODO") || target.description.contains("FIXME"))
+        if target.file.is_none() {
+            return false;
+        }
+        match target.category {
+            ImprovementCategory::CodeQuality => {
+                target.description.contains("TODO") || target.description.contains("FIXME")
+            }
+            ImprovementCategory::PromptTemplate
+            | ImprovementCategory::ToolPipeline
+            | ImprovementCategory::ErrorHandling
+            | ImprovementCategory::ContextManagement
+            | ImprovementCategory::VerificationLogic
+            | ImprovementCategory::NewCapability => false,
+        }
     }
 
     /// Apply a supported mutation to the provided sandbox.
@@ -392,17 +394,73 @@ impl SelfEditOrchestrator {
             .file
             .as_ref()
             .ok_or_else(|| anyhow!("Target missing file path"))?;
-        let path = sandbox.work_dir().join(file);
-        let original = std::fs::read_to_string(&path)?;
-        let line_hint = parse_line_hint(&target.description);
-        let (updated, line_number) = rewrite_todo_fixme_marker(&original, line_hint)
-            .ok_or_else(|| anyhow!("Failed to locate a mutable TODO/FIXME marker in {}", file))?;
 
-        std::fs::write(&path, updated)?;
+        let file_path = Path::new(file);
+        if file_path.is_absolute()
+            || file_path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(anyhow!(
+                "Path traversal detected or absolute path not allowed: {}",
+                file
+            ));
+        }
+
+        if self.is_denied(target) {
+            return Err(anyhow!("Target file is in deny list: {:?}", target.file));
+        }
+
+        let sandbox_root = sandbox
+            .work_dir()
+            .canonicalize()
+            .context("Failed to canonicalize sandbox directory")?;
+
+        let path = sandbox.work_dir().join(file_path);
+        if !path.exists() {
+            return Err(anyhow!("Target file '{}' does not exist in sandbox", file));
+        }
+
+        let canonical_path = path
+            .canonicalize()
+            .map_err(|e| anyhow!("Failed to canonicalize target file path '{}': {}", file, e))?;
+
+        if !canonical_path.starts_with(&sandbox_root) {
+            return Err(anyhow!("Target file '{}' escapes sandbox directory", file));
+        }
+
+        let original = std::fs::read_to_string(&canonical_path)?;
+
+        let (updated, summary) = match target.category {
+            ImprovementCategory::CodeQuality => {
+                let line_hint = parse_line_hint(&target.description);
+                if let Some((rewritten, line_number)) =
+                    rewrite_todo_fixme_marker(&original, line_hint)
+                {
+                    (
+                        rewritten,
+                        format!("Rewrote TODO/FIXME marker in {}:{}", file, line_number),
+                    )
+                } else {
+                    return Err(anyhow!(
+                        "Failed to locate mutable code quality pattern in {}",
+                        file
+                    ));
+                }
+            }
+            _ => {
+                return Err(anyhow!(
+                    "Category {:?} requires generative agent synthesis",
+                    target.category
+                ));
+            }
+        };
+
+        std::fs::write(&canonical_path, updated)?;
 
         Ok(AppliedMutation {
             edited_files: vec![file.clone()],
-            summary: format!("Rewrote TODO/FIXME marker in {}:{}", file, line_number),
+            summary,
         })
     }
 
@@ -447,8 +505,26 @@ impl SelfEditOrchestrator {
     /// the path is denied by default to prevent bypass.  Non-existent
     /// paths (common in tests and for proposed-but-not-yet-created files)
     /// fall through to substring matching.
-    fn is_denied(&self, target: &ImprovementTarget) -> bool {
+    pub(crate) fn is_denied(&self, target: &ImprovementTarget) -> bool {
         if let Some(ref file) = target.file {
+            let file_path = Path::new(file);
+
+            // Path traversal or absolute paths outside root are denied
+            if file_path.is_absolute()
+                || file_path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return true;
+            }
+
+            // Direct check against PROTECTED_PATHS (also testing with src/ prefix if omitted)
+            if crate::evolution::is_protected(file_path)
+                || crate::evolution::is_protected(&Path::new("src").join(file_path))
+            {
+                return true;
+            }
+
             let raw_path = self.project_root.join(file);
 
             // If the path exists on disk, we MUST be able to canonicalize it.
@@ -462,36 +538,20 @@ impl SelfEditOrchestrator {
                     return true;
                 }
                 Err(_) => {
-                    // Path doesn't exist — fall through to substring check
-                    // (covers tests and proposed files).
-                    for denied in DENY_LIST {
-                        if file.contains(denied) {
-                            return true;
-                        }
-                    }
-                    return false;
+                    // Path doesn't exist — check if file path itself is protected
+                    return crate::evolution::is_protected(file_path)
+                        || crate::evolution::is_protected(&Path::new("src").join(file_path));
                 }
             };
-            let resolved_str = resolved.to_string_lossy();
 
-            for denied in DENY_LIST {
-                // Canonicalize the denied path against project_root too.
-                let denied_resolved = self
-                    .project_root
-                    .join(denied)
-                    .canonicalize()
-                    .unwrap_or_else(|_| self.project_root.join(denied));
-                let denied_str = denied_resolved.to_string_lossy();
+            // Check if the resolved canonical path is protected
+            if crate::evolution::is_protected(&resolved) {
+                return true;
+            }
 
-                // Check if the resolved path starts with (is inside) a denied
-                // directory, or equals a denied file exactly.
-                if resolved_str.starts_with(denied_str.as_ref()) {
-                    return true;
-                }
-
-                // Also check the raw file string for substring matches,
-                // covering cases where the denied path itself doesn't exist.
-                if file.contains(denied) {
+            // Ensure resolved path does not escape project_root
+            if let Ok(canonical_root) = self.project_root.canonicalize() {
+                if !resolved.starts_with(&canonical_root) {
                     return true;
                 }
             }

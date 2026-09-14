@@ -257,7 +257,7 @@ pub struct GitCheckpointInfo {
 /// auto-resumes a crash-looping task would hand it fresh rope forever, turning
 /// crash-loops into amnesiac infinite loops. Persisting them lets the guards
 /// (prefill breaker, mutation-gate abort, no-action abort) fire ACROSS resumes.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct GuardCounters {
     #[serde(default)]
     pub consecutive_no_action_prompts: usize,
@@ -280,6 +280,15 @@ pub struct GuardCounters {
     /// refusal message after resume.
     #[serde(default)]
     pub last_failed_verification_summary: Option<String>,
+    /// Outstanding verification failures with the scope and check identity
+    /// each concerned.
+    ///
+    /// The summary string above survived resume but the structure did not, so
+    /// a resumed run could no longer tell a failure in its OWN project from one
+    /// in an enclosing workspace — every restored failure blocked. Persisting
+    /// the records keeps the scoped gate working across a resume.
+    #[serde(default)]
+    pub verification_failures: crate::agent::verification_scope::VerificationLedger,
 }
 
 /// Represents the delta/diff between two checkpoints
@@ -294,6 +303,15 @@ pub struct CheckpointDelta {
     pub status: Option<TaskStatus>,
     pub current_step: Option<usize>,
     pub current_iteration: Option<usize>,
+
+    /// Full ledger state at the delta's target version.
+    ///
+    /// Not a diff: the ledger is append-only but its satisfaction marks mutate
+    /// in place, so a "new obligations" list would lose discharges. Carrying
+    /// the whole value is small and correct. Without it, an incremental save
+    /// resumed with stale evidence while the full-save path looked fine.
+    #[serde(default)]
+    pub evidence_ledger: Option<crate::phi::ledger::Ledger>,
 
     // Context additions (we only append messages in the context window)
     pub new_messages: Vec<Message>,
@@ -337,6 +355,12 @@ pub struct TaskCheckpoint {
     pub messages: Vec<Message>,
     pub memory_entries: Vec<MemoryEntry>,
     pub estimated_tokens: usize,
+
+    /// Shadow-mode evidence ledger. `#[serde(default)]` so checkpoints written
+    /// before it existed still load — an absent ledger is an empty one, which
+    /// is honest: those sessions recorded nothing.
+    #[serde(default)]
+    pub evidence_ledger: crate::phi::ledger::Ledger,
 
     // Execution log
     pub tool_calls: Vec<ToolCallLog>,
@@ -472,6 +496,7 @@ impl TaskCheckpoint {
         }
 
         Some(CheckpointDelta {
+            evidence_ledger: Some(self.evidence_ledger.clone()),
             task_id: self.task_id.clone(),
             base_version: base.version,
             target_version: self.version,
@@ -508,6 +533,9 @@ impl TaskCheckpoint {
         }
 
         self.version = delta.target_version;
+        if let Some(ledger) = &delta.evidence_ledger {
+            self.evidence_ledger = ledger.clone();
+        }
         self.updated_at = delta.updated_at;
 
         if let Some(ref status) = delta.status {
@@ -571,6 +599,7 @@ impl TaskCheckpoint {
     pub fn new(task_id: String, task_description: String) -> Self {
         let now = Utc::now();
         Self {
+            evidence_ledger: crate::phi::ledger::Ledger::new(),
             version: CURRENT_CHECKPOINT_VERSION,
             task_id,
             task_description,

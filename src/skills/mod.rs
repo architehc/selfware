@@ -8,6 +8,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
+fn default_verified() -> bool {
+    true
+}
+
 /// A skill loaded from a markdown file with YAML frontmatter.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Skill {
@@ -18,6 +22,9 @@ pub struct Skill {
     /// Optional list of tool names the skill may use.
     #[serde(default)]
     pub tools: Vec<String>,
+    /// Whether this skill is verified or distilled from unverified traces.
+    #[serde(default = "default_verified")]
+    pub verified: bool,
     /// The body of the skill (markdown content after frontmatter).
     #[serde(skip)]
     pub content: String,
@@ -71,6 +78,24 @@ impl Skill {
         let mut skill = Self::from_markdown(&source)?;
         skill.source = Some(path.to_path_buf());
         Ok(skill)
+    }
+
+    /// Format the trust header badge for this skill.
+    pub fn trust_badge(&self) -> String {
+        if self.verified {
+            format!("[Skill: {}]", self.name)
+        } else {
+            format!(
+                "[Skill: {} (UNVERIFIED - Distilled from unverified execution trace)]",
+                self.name
+            )
+        }
+    }
+
+    /// Render the skill body with its trust gate badge applied.
+    pub fn render_with_trust_gate(&self, arguments: &str) -> String {
+        let content = self.render_content(arguments);
+        format!("{}\n{}", self.trust_badge(), content)
     }
 
     /// Render the skill body for an invocation: `$ARGUMENTS` substituted
@@ -174,12 +199,8 @@ impl SkillRegistry {
     /// Wrap a task string with the named skill's instructions, for headless
     /// `run --skill`. Returns `None` when the skill is unknown.
     pub fn wrap_task_with_skill(&self, task: &str, skill_name: &str) -> Option<String> {
-        self.get(skill_name).map(|skill| {
-            format!(
-                "[Skill: {}]\n{}\n\n[Task]\n{}",
-                skill.name, skill.content, task
-            )
-        })
+        self.get(skill_name)
+            .map(|skill| format!("{}\n\n[Task]\n{}", skill.render_with_trust_gate(""), task))
     }
 
     /// Number of discovered skills.

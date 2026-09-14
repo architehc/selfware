@@ -12,7 +12,9 @@ use crate::checkpoint::ToolCallLog;
 use crate::cognitive::self_improvement::Outcome;
 use crate::hooks::HookContext;
 
-mod helpers;
+pub(crate) mod helpers;
+#[cfg(test)]
+mod lifecycle_counterexamples;
 mod spill;
 mod trust_gate;
 
@@ -29,6 +31,45 @@ impl Agent {
     /// this AFTER the mutating-call accounting, so a command that is both
     /// mutating and verifying (e.g. an inline `python3 -c` check) still ends
     /// the turn credited rather than stale.
+    /// The exit status a shell-style tool result reports, when it reports one.
+    ///
+    /// The dispatcher's own success flag says whether the process was spawned
+    /// and reaped, not what it returned.
+    fn shell_exit_code(result_str: &str) -> Option<i64> {
+        serde_json::from_str::<serde_json::Value>(result_str)
+            .ok()?
+            .get("exit_code")?
+            .as_i64()
+    }
+
+    /// The accounting a completed tool call performs on the agent's lifecycle
+    /// state: advance the mutation sequence if it edited, then enter its
+    /// verification outcome in the ledger.
+    ///
+    /// Both dispatch paths call this, and so do the lifecycle tests. That is
+    /// deliberate: the previous "lifecycle counterexamples" asserted on
+    /// `tool_call_is_mutating` directly, so they passed no matter what the
+    /// dispatcher did with the answer — no `Agent` existed, no counter moved,
+    /// no gate ran. A test that drives this function exercises the real
+    /// sequence and cannot silently diverge from it.
+    pub(crate) fn note_tool_call_lifecycle(
+        &mut self,
+        name: &str,
+        args: &serde_json::Value,
+        args_str: &str,
+        success: bool,
+        result_str: &str,
+    ) {
+        if success && tool_call_is_mutating(name, args) {
+            self.note_mutating_tool_call();
+            if tool_call_writes_file(name) {
+                self.has_written_any_file = true;
+                self.terminal_guard_hits = 0;
+            }
+        }
+        self.note_verification_outcome(name, args_str, success, result_str);
+    }
+
     pub(super) fn note_verification_outcome(
         &mut self,
         name: &str,
@@ -36,20 +77,88 @@ impl Agent {
         success: bool,
         result_str: &str,
     ) {
-        if success && tool_call_is_verification(name, args_str) {
+        if !tool_call_is_verification(name, args_str) {
+            return;
+        }
+        // A command the shell could not execute ran no check.
+        //
+        // 127 is "command not found", 126 "found but not executable". Recording
+        // either as a failing check asserts that the suite ran and was red. It
+        // did not run at all, and the distinction became load-bearing once
+        // failures were tracked per check: a typo'd `python -m unittest`
+        // (127 on an image with only `python3`) parked a permanent failure
+        // under its own check identity, which the passing `python3` run could
+        // never clear because it is a different check. Completion then stayed
+        // blocked by a suite that had never executed.
+        //
+        // Not recording it does not wave the task through: with no successful
+        // verification at this revision the gate still refuses, as
+        // StaleVerification — which is what actually happened.
+        if Self::shell_exit_code(result_str).is_some_and(|code| code == 126 || code == 127) {
+            debug!("{name} could not be executed; no check ran, so nothing is recorded");
+            return;
+        }
+        // Relative to the TASK, not to wherever the process currently is.
+        let working_dir = self.verification_task_root();
+        let command = serde_json::from_str::<serde_json::Value>(args_str)
+            .ok()
+            .and_then(|v| {
+                v.get("command")
+                    .and_then(|c| c.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_default();
+        let scope = super::verification_scope::scope_for_command(name, &command, &working_dir);
+        let record = super::verification_scope::VerificationRecord {
+            check_id: super::verification_scope::check_id_for(name, &command),
+            command: name.to_string(),
+            scope,
+            passed: success,
+            mutation_sequence: self.mutation_sequence,
+            summary: format!(
+                "{} failed: {}",
+                name,
+                result_str.chars().take(300).collect::<String>()
+            ),
+        };
+
+        if success {
             // Loop 12: a passing verification breaks any repeated-probe
             // streak — probes interleaved with green checks are iteration,
             // not a stall.
             self.probe_command_counts.clear();
             if self.mutation_sequence > 0 {
                 self.last_successful_verification_mutation_sequence = self.mutation_sequence;
-                self.last_failed_verification_summary = None;
             }
-        } else if !success && tool_call_is_verification(name, args_str) {
-            let preview: String = result_str.chars().take(300).collect();
-            self.last_failed_verification_summary = Some(format!("{} failed: {}", name, preview));
+        }
+        self.note_verification_record(record);
+    }
+
+    /// The single point where a verification outcome enters the ledger.
+    ///
+    /// Both the explicit path (a verification tool the model called) and the
+    /// automatic post-edit path route through here. They used to keep their own
+    /// accounting, and the automatic one cleared failures unconditionally.
+    pub(super) fn note_verification_record(
+        &mut self,
+        record: super::verification_scope::VerificationRecord,
+    ) {
+        let passed = record.passed;
+        if !passed {
             self.last_failed_verification_mutation_sequence = self.mutation_sequence;
         }
+        self.verification_failures.record(record);
+        // Kept in step with the ledger so the gate's message and the checkpoint
+        // summary cannot disagree with the records they describe.
+        let task_root = self.verification_task_root();
+        // Only a failure that actually concerns THIS task. Falling back to any
+        // outstanding record would put a foreign workspace's compile error in a
+        // refusal message about the task's own work — the same conflation the
+        // scoped gate exists to prevent, reintroduced through the text.
+        self.last_failed_verification_summary = self
+            .verification_failures
+            .blocking(&task_root, self.mutation_sequence)
+            .map(|failed| failed.summary.clone());
     }
 
     fn current_task_tool_policy_violation(&self, tool_name: &str) -> Option<String> {
@@ -1346,6 +1455,12 @@ impl Agent {
         use super::tui_events::AgentEvent;
         use crate::hooks::HookAction;
 
+        // Ledger position BEFORE anything in this batch runs. Tools in a
+        // parallel batch have no order relative to each other, so a test run
+        // sharing a batch with an edit must be treated as having started before
+        // that edit — the ledger will decline to discharge on it.
+        let ledger_snapshot = self.ledger_batch_snapshot();
+
         // Pre-validate all tools and collect validated ones for concurrent execution
         struct ValidatedTool {
             name: String,
@@ -1752,15 +1867,7 @@ impl Agent {
             self.track_task_state_after_tool(&vt.name, &vt.args, &result_str, success)
                 .await;
 
-            if success && tool_call_is_mutating(&vt.name, &vt.args) {
-                self.note_mutating_tool_call();
-                if tool_call_writes_file(&vt.name) {
-                    self.has_written_any_file = true;
-                    self.terminal_guard_hits = 0;
-                }
-            }
-
-            self.note_verification_outcome(&vt.name, &vt.args_str, success, &result_str);
+            self.note_tool_call_lifecycle(&vt.name, &vt.args, &vt.args_str, success, &result_str);
 
             // Track file operations for context management
             if success {
@@ -1806,6 +1913,16 @@ impl Agent {
             let post_ctx = HookContext::post_tool(&vt.name, &vt.args_str, success, &result_str);
             self.hook_registry.fire(&post_ctx).await;
 
+            // Shadow-mode evidence ledger. Observational only.
+            self.observe_tool_call(
+                &vt.name,
+                &vt.args_str,
+                success,
+                ledger_snapshot,
+                Some(vt.call_id.as_str()),
+                &result_str,
+            );
+
             // Audit log
             if let Some(ref logger) = self.audit_logger {
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1837,6 +1954,10 @@ impl Agent {
         use super::tui_events::AgentEvent;
         use crate::hooks::HookAction;
 
+        // Ledger position before this tool runs; see execute_parallel_tools.
+        let ledger_snapshot = self.ledger_batch_snapshot();
+        // Captured before `tool_call_id` is consumed downstream.
+        let observed_call_id = tool_call_id.clone();
         let start_time = std::time::Instant::now();
         if let Some(warning) = self
             .self_improvement
@@ -2149,6 +2270,16 @@ impl Agent {
         // Fire PostToolUse hooks (e.g., auto-format, lint, auto-commit)
         let post_ctx = HookContext::post_tool(&name, &args_str, success, &result);
         self.hook_registry.fire(&post_ctx).await;
+
+        // Shadow-mode evidence ledger. Observational only.
+        self.observe_tool_call(
+            &name,
+            &args_str,
+            success,
+            ledger_snapshot,
+            observed_call_id.as_deref(),
+            &result,
+        );
 
         // Audit: log tool execution
         if let Some(ref logger) = self.audit_logger {
@@ -3056,11 +3187,7 @@ impl Agent {
                 // `sed -i`, redirects).  Observational shell calls like
                 // `cargo check` / `git status` / `ls` should NOT bump the
                 // mutating counter.
-                if tool_call_is_mutating(name, args) && tool_success {
-                    self.note_mutating_tool_call();
-                }
-
-                self.note_verification_outcome(name, args_str, tool_success, &result_str);
+                self.note_tool_call_lifecycle(name, args, args_str, tool_success, &result_str);
 
                 // Record successful tool usage for learning
                 self.self_improvement.record_tool(
@@ -3368,8 +3495,13 @@ impl Agent {
             } else {
                 String::new()
             };
+            let hint = if tool == "call" {
+                " Note: 'call' is not a tool name; use an exact tool name like 'file_read', 'file_edit', or 'shell_exec'."
+            } else {
+                ""
+            };
             return format!(
-                "Safety check failed: tool '{tool}' does not exist. Available tools: {}{suffix}. \
+                "Safety check failed: tool '{tool}' does not exist.{hint} Available tools: {}{suffix}. \
                  Call one of those by exact name, or use tool_search with a keyword to discover more tools.",
                 preview.join(", ")
             );

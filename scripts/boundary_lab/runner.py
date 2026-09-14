@@ -47,8 +47,10 @@ def capture(args, timeout=15):
 
 def harness_sources():
     paths = [Path(__file__).with_name(name) for name in
-             ("runner.py", "policy.py", "endpoint.py", "docker_probe.py", "development.py", "gateway.py", "__init__.py")]
+             ("runner.py", "policy.py", "endpoint.py", "docker_probe.py", "development.py", "gateway.py",
+              "tool_runtime.py", "runtime_oracle.py", "runtime_build.py", "Dockerfile.runtime-base", "__init__.py")]
     paths.append(REPO / "scripts/run_boundary_lab.py")
+    paths.append(REPO / "tests/boundary_runtime.rs")
     return {str(path.relative_to(REPO)): hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
 
 
@@ -83,7 +85,8 @@ def run(args):
     from . import dashboard, development, docker_probe, endpoint
 
     base_url = endpoint.normalize_endpoint(args.endpoint, allow_localhost=args.allow_localhost)
-    output = Path(args.output).expanduser().resolve() if args.output else Path(tempfile.gettempdir()) / (
+    default_parent = (Path.home() / ".local/state/selfware/boundary-lab") if args.tool_runtime else Path(tempfile.gettempdir())
+    output = Path(args.output).expanduser().resolve() if args.output else default_parent / (
         "selfware-boundary-lab-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:6])
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
     host, docker = inventory()
@@ -170,6 +173,16 @@ def run(args):
             report["experiments"]["policy"] = {"status": "not_run"}
         else:
             stage("policy", lambda: policy.run_policy(REPO, output / "policy", proposal_list, args.checker_binary))
+        if args.tool_runtime:
+            from . import runtime_build, tool_runtime
+
+            def execute_runtime():
+                build = args.runtime_build_receipt
+                if build is None:
+                    build = runtime_build.build_runtime(REPO, output / "runtime-build")
+                return tool_runtime.run_runtime(output / "tool-runtime", build)
+
+            stage("tool_runtime", execute_runtime)
         statuses = [value.get("status") for value in report["experiments"].values()]
         successful = {"passed", "completed", "needs_review", "not_run"}
         report["status"] = "completed_with_findings" if any(s not in successful for s in statuses) else "completed"
@@ -179,9 +192,14 @@ def run(args):
             report["limitations"].append("Harness source changed during the run; rerun before comparing results.")
     except KeyboardInterrupt:
         report["status"] = "interrupted"
-        for result in report["experiments"].values():
+        for name, result in list(report["experiments"].items()):
             if result.get("status") == "running":
                 result["status"] = "interrupted"
+                if name == "tool_runtime":
+                    try:
+                        report["experiments"][name] = json.loads((output / "tool-runtime/runtime-result.json").read_text())
+                    except (OSError, ValueError):
+                        pass
     except Exception as exc:
         report["status"] = "error"
         report["error"] = f"{type(exc).__name__}: run incomplete"
@@ -214,9 +232,11 @@ def main(argv=None):
     parser.add_argument("--image", default="python:3.12-alpine", help="Already pulled local image; runtime pins its image ID")
     parser.add_argument("--development", action="store_true", help="Run the writable npm workload through a fixed package gateway")
     parser.add_argument("--node-image", default="node:22-alpine", help="Already pulled local Node image for --development")
+    parser.add_argument("--tool-runtime", action="store_true", help="Execute fixed real Selfware tools inside the bounded Linux runtime")
+    parser.add_argument("--runtime-build-receipt", type=Path, help="Reuse an explicit verified runtime build receipt; otherwise build Linux ARM64")
     parser.add_argument("--checker-binary", help="Explicit prebuilt Rust redteam_probe_dump executable; otherwise build with Cargo")
     parser.add_argument("--skip-endpoint", action="store_true")
-    parser.add_argument("--skip-docker", action="store_true", help="Skip the E4 baseline Docker probes; --development still runs E5 containers")
+    parser.add_argument("--skip-docker", action="store_true", help="Skip E4 baseline probes; explicit --development/--tool-runtime still run containers")
     parser.add_argument("--skip-policy", action="store_true")
     parser.add_argument("--allow-localhost", action="store_true", help="Permit HTTP localhost for deterministic test servers only")
     parser.add_argument("--gpu-model", help="Operator-reported remote GPU, never inferred from the Mac")
@@ -226,6 +246,14 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if not 0 <= args.generate <= 16 or not 1 <= args.timeout <= 120:
         parser.error("generate must be 0–16 and timeout must be 1–120 seconds")
+    if args.runtime_build_receipt is not None and not args.tool_runtime:
+        parser.error("--runtime-build-receipt requires --tool-runtime")
+    if args.tool_runtime and args.output:
+        import re
+        destination = Path(args.output).expanduser().resolve()
+        if (destination.is_relative_to("/tmp") or destination.is_relative_to("/work")
+                or re.fullmatch(r"/[A-Za-z0-9/._-]+", str(destination)) is None):
+            parser.error("Tool runtime output must use a simple absolute path outside /tmp and /work so the host canary is outside container scratch")
     if args.render_only:
         from . import dashboard
         report = json.loads(args.render_only.read_text())

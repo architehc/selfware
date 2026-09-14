@@ -65,6 +65,7 @@ pub mod collector;
 pub mod compactor;
 pub mod config;
 pub mod multimodal;
+pub mod skill_distiller;
 pub mod store;
 pub mod temporal;
 
@@ -74,6 +75,10 @@ pub use collector::{
 pub use compactor::MemoryCompactor;
 pub use config::ConsolidationConfig;
 pub use multimodal::MultimodalRef;
+pub use skill_distiller::{
+    DistilledSkill, DistilledSkillType, SkillDistillationReport, SkillDistiller, SkillLedgerEntry,
+    DEFAULT_MAX_SKILLS_CAP,
+};
 pub use store::LongTermStore;
 pub use temporal::{CompactedContent, ConsolidationReport, RecordImportance, TemporalRecord};
 
@@ -122,6 +127,7 @@ pub struct ConsolidationEngine {
     collector: ShortTermCollector,
     compactor: MemoryCompactor,
     store: LongTermStore,
+    skill_distiller: Option<SkillDistiller>,
 }
 
 impl ConsolidationEngine {
@@ -139,6 +145,7 @@ impl ConsolidationEngine {
             collector,
             compactor,
             store,
+            skill_distiller: None,
         })
     }
 
@@ -146,6 +153,22 @@ impl ConsolidationEngine {
     pub fn with_storage_dir(mut self, dir: PathBuf) -> Self {
         self.store = LongTermStore::new(dir);
         self
+    }
+
+    /// Attach a skill distiller to the engine.
+    pub fn with_skill_distiller(mut self, distiller: SkillDistiller) -> Self {
+        self.skill_distiller = Some(distiller);
+        self
+    }
+
+    /// Access the attached skill distiller immutably.
+    pub fn skill_distiller(&self) -> Option<&SkillDistiller> {
+        self.skill_distiller.as_ref()
+    }
+
+    /// Access the attached skill distiller mutably.
+    pub fn skill_distiller_mut(&mut self) -> Option<&mut SkillDistiller> {
+        self.skill_distiller.as_mut()
     }
 
     /// Run one consolidation cycle ("sleep" episode).
@@ -180,10 +203,30 @@ impl ConsolidationEngine {
             });
         }
 
+        // 1b. Distill reusable skills from collected items if distiller is configured
+        let mut distill_errors = Vec::new();
+        if let Some(ref mut distiller) = self.skill_distiller {
+            match distiller.distill_from_collected_items(&items) {
+                Ok(distill_report) => {
+                    info!(
+                        "Distilled {} skills (updated {}, evicted {}) during consolidation cycle",
+                        distill_report.skills_created,
+                        distill_report.skills_updated,
+                        distill_report.skills_evicted
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("Skill distillation failed during consolidation: {e}");
+                    distill_errors.push(format!("Skill distillation failed: {e}"));
+                }
+            }
+        }
+
         let batch = self.collector.assemble_batch(items);
 
         // 2. Compact via parallel LLM calls
         let (records, mut report) = self.compactor.compact(batch).await?;
+        report.errors.extend(distill_errors);
 
         // 3. Store in long-term storage
         let store_result = self.store.store(&records).await?;

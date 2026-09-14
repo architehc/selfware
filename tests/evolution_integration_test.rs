@@ -113,9 +113,11 @@ fn test_fitness_pipeline_end_to_end() {
     let sab = SabResult {
         aggregate_score: 82.0,
         scenario_scores: vec![],
-        total_tokens_used: 200_000,
+        total_tokens_used: Some(200_000),
         wall_clock: Duration::from_secs(1200),
         rating: GenerationRating::Grow,
+        binary_sha256: "test".to_string(),
+        run_id: "test".to_string(),
     };
 
     let metrics = fitness::build_fitness_metrics(
@@ -137,7 +139,7 @@ fn test_fitness_pipeline_end_to_end() {
     // Create a "better" candidate and verify delta is positive
     let better_sab = SabResult {
         aggregate_score: 92.0,
-        total_tokens_used: 150_000,
+        total_tokens_used: Some(150_000),
         ..sab.clone()
     };
     let better_metrics = fitness::build_fitness_metrics(
@@ -594,7 +596,7 @@ fn test_e2e_evolution_history_prompt_builds_correctly() {
             description: "Optimized token counting".into(),
             composite_score: 0.85,
             sab_delta: 3.0,
-            token_delta: -5000.0,
+            token_delta: Some(-5000.0),
             patch: String::new(),
             git_tag: None,
         },
@@ -603,7 +605,7 @@ fn test_e2e_evolution_history_prompt_builds_correctly() {
             description: "Reduced allocations".into(),
             composite_score: 0.90,
             sab_delta: 5.0,
-            token_delta: -3000.0,
+            token_delta: Some(-3000.0),
             patch: String::new(),
             git_tag: Some("evolve-gen-2".into()),
         },

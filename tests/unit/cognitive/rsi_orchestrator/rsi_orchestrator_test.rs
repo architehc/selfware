@@ -100,6 +100,22 @@ fn test_mutation_is_trivial_rust_attribute_change_not_trivial() {
 }
 
 #[test]
+fn test_mutation_is_trivial_rust_asterisk_dereference_not_trivial() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    let sandbox = dir.path().join("sandbox");
+    write_pair(
+        &root,
+        &sandbox,
+        "src/lib.rs",
+        "fn run(ptr: &mut i32) {\n*ptr = 1;\n}\n",
+        "fn run(ptr: &mut i32) {\n*ptr = 2;\n}\n",
+    );
+    let edited = vec!["src/lib.rs".to_string()];
+    assert!(!mutation_is_trivial(&root, &sandbox, &edited));
+}
+
+#[test]
 fn test_mutation_is_trivial_hash_comment_in_toml() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("root");
@@ -231,6 +247,143 @@ fn test_tsv_score_parsing_short_row() {
     let (total_score, count) = parse_tsv_scores(tsv_content);
     assert_eq!(count, 0);
     assert_eq!(total_score, 0.0);
+}
+
+#[test]
+fn test_parse_benchmark_report_and_darwinx_non_regression() {
+    let tsv_content = "\
+scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|duration_secs|score|changed_files|error_hits|notes
+sc1|coding|easy|1|0|0|0|10|85.0|1|0|ok
+sc2|coding|medium|1|1|0|0|10|40.0|1|1|failed
+";
+    let baseline_report = parse_benchmark_report(tsv_content).unwrap();
+    assert_eq!(baseline_report.scenarios.len(), 2);
+    assert_eq!(baseline_report.average_score, 62.5);
+    assert!(baseline_report.scenarios["sc1"].passed);
+    assert!(!baseline_report.scenarios["sc2"].passed);
+}
+
+#[test]
+fn test_parse_benchmark_report_rejects_unknown_scenario_type() {
+    let tsv_content = "\
+scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|duration_secs|score|changed_files|error_hits|notes
+sc1|unit|easy|1|0|0|0|10|85.0|1|0|ok
+";
+    let err = parse_benchmark_report(tsv_content).unwrap_err();
+    assert!(
+        err.contains("Unknown scenario type 'unit'"),
+        "Expected unknown scenario type error, got: {err}"
+    );
+}
+
+#[test]
+fn test_parse_benchmark_report_darwinx_suite_comparison() {
+    let baseline_report = parse_benchmark_report(
+        "\
+scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|duration_secs|score|changed_files|error_hits|notes
+sc1|coding|easy|1|0|0|0|10|85.0|1|0|ok
+sc2|coding|medium|1|1|0|0|10|40.0|1|1|failed
+",
+    )
+    .unwrap();
+
+    // Candidate 1: maintains sc1, passes sc2 -> DarwinX ok
+    let candidate_ok = parse_benchmark_report(
+        "\
+scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|duration_secs|score|changed_files|error_hits|notes
+sc1|coding|easy|1|0|0|0|10|90.0|1|0|ok
+sc2|coding|medium|1|0|0|0|10|80.0|1|0|ok
+",
+    )
+    .unwrap();
+    assert!(baseline_report
+        .check_darwinx_non_regression(&candidate_ok)
+        .is_ok());
+
+    // Candidate 2: improves sc2 to 100, but breaks sc1 -> DarwinX violation
+    let candidate_regressed = parse_benchmark_report(
+        "\
+scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|duration_secs|score|changed_files|error_hits|notes
+sc1|coding|easy|1|1|0|0|10|0.0|1|1|broke
+sc2|coding|medium|1|0|0|0|10|100.0|1|0|ok
+",
+    )
+    .unwrap();
+    let err = baseline_report
+        .check_darwinx_non_regression(&candidate_regressed)
+        .expect_err("should catch sc1 regression");
+    assert_eq!(err, vec!["sc1".to_string()]);
+
+    // Candidate 3: drops sc2 -> suite identity mismatch
+    let candidate_dropped = parse_benchmark_report(
+        "\
+scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|duration_secs|score|changed_files|error_hits|notes
+sc1|coding|easy|1|0|0|0|10|95.0|1|0|ok
+",
+    )
+    .unwrap();
+    let err = baseline_report
+        .check_darwinx_non_regression(&candidate_dropped)
+        .expect_err("should catch dropped scenario");
+    assert!(err[0].contains("Missing scenarios in candidate"));
+
+    // Duplicate rejection test: duplicate scenarios fail closed
+    let tsv_with_dups = "\
+scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|duration_secs|score|changed_files|error_hits|notes
+sc1|coding|easy|1|0|0|0|10|80.0|1|0|ok
+sc1|coding|easy|1|0|0|0|10|20.0|1|0|dup
+";
+    let dup_err = parse_benchmark_report(tsv_with_dups).expect_err("duplicates must fail closed");
+    assert!(dup_err.contains("Duplicate scenario 'sc1'"));
+
+    // Malformed row rejection test
+    let tsv_malformed = "\
+scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|duration_secs|score|changed_files|error_hits|notes
+sc1|coding|easy
+";
+    let malformed_err =
+        parse_benchmark_report(tsv_malformed).expect_err("malformed row must fail closed");
+    assert!(malformed_err.contains("Malformed TSV row"));
+}
+
+#[test]
+fn test_parse_benchmark_report_edge_cases_and_swarm() {
+    // 1. Empty input
+    assert!(parse_benchmark_report("").is_err());
+    assert!(parse_benchmark_report("   \n\n  ").is_err());
+
+    // 2. Header only (no scenarios)
+    let header_only = "scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|duration_secs|score|changed_files|error_hits|notes\n";
+    let err = parse_benchmark_report(header_only).unwrap_err();
+    assert!(err.contains("contains no scenarios"));
+
+    // 3. Invalid header
+    let bad_header = "scenario|type|difficulty\nsc1|coding|easy\n";
+    let err = parse_benchmark_report(bad_header).unwrap_err();
+    assert!(err.contains("Invalid TSV header"));
+
+    // 4. Malformed row (< 11 columns)
+    let bad_row = "\
+scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|duration_secs|score|changed_files|error_hits|notes
+sc1|coding|easy|0|0|0|0|0|80.0|1
+";
+    let err = parse_benchmark_report(bad_row).unwrap_err();
+    assert!(err.contains("Malformed TSV row"));
+
+    // 5. Swarm scenarios (both passing and failing cases)
+    let swarm_tsv = "\
+scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|duration_secs|score|changed_files|error_hits|notes
+swarm_pass|swarm|n/a|n/a|n/a|0|0|10|85.0|2|0|ok
+swarm_err|swarm|n/a|n/a|n/a|0|0|10|85.0|2|1|errors present
+swarm_bad_agent|swarm|n/a|n/a|n/a|1|0|10|90.0|2|0|agent failed
+swarm_low_score|swarm|n/a|n/a|n/a|0|0|10|65.0|2|0|below threshold
+";
+    let report = parse_benchmark_report(swarm_tsv).unwrap();
+    assert_eq!(report.scenarios.len(), 4);
+    assert!(report.scenarios["swarm_pass"].passed);
+    assert!(!report.scenarios["swarm_err"].passed);
+    assert!(!report.scenarios["swarm_bad_agent"].passed);
+    assert!(!report.scenarios["swarm_low_score"].passed);
 }
 
 #[test]
@@ -467,13 +620,18 @@ mod tests {
     let content = fs::read_to_string(project_root.join("src/lib.rs")).unwrap();
     assert!(content.contains("// TODO: remove this marker"));
 
-    // No paid e2e suite ran: the benchmark script never produced a TSV.
-    assert!(
-        !project_root
-            .join("system_tests/projecte2e/reports/latest/results.tsv")
-            .exists(),
-        "trivial mutation must not burn a paid e2e suite"
-    );
+    // No paid e2e suite ran: no benchmark directory was created under reports.
+    let reports_dir = project_root.join("system_tests/projecte2e/reports");
+    if reports_dir.exists() {
+        let has_rsi_reports = fs::read_dir(&reports_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().starts_with("rsi-"));
+        assert!(
+            !has_rsi_reports,
+            "trivial mutation must not burn a paid e2e suite"
+        );
+    }
 
     let history = orch.edit_orchestrator.history();
     assert_eq!(history.len(), 1);
@@ -545,16 +703,17 @@ path = "src/lib.rs"
         root.join("system_tests/projecte2e/run_projecte2e.sh"),
         r#"#!/usr/bin/env bash
 set -euo pipefail
-mkdir -p system_tests/projecte2e/reports/latest
+OUT_DIR="${OUT_DIR:-system_tests/projecte2e/reports/latest}"
+mkdir -p "${OUT_DIR}"
 # Detect if running in sandbox (path contains .selfware-sandbox)
 if pwd | grep -q ".selfware-sandbox"; then
-    score="0.95"  # Higher score in sandbox to simulate improvement
+    score="95.0"  # Higher score in sandbox to simulate improvement
 else
-    score="0.90"  # Baseline score
+    score="90.0"  # Baseline score
 fi
-cat > system_tests/projecte2e/reports/latest/results.tsv <<EOF
-scenario|type|difficulty|baseline|post|agent|timeout|duration|score|changed|error|notes
-todo_cleanup|unit|easy|0|0|selfware|0|0|${score}|yes||
+cat > "${OUT_DIR}/results.tsv" <<EOF
+scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|duration_secs|score|changed_files|error_hits|notes
+todo_cleanup|coding|easy|0|0|0|0|0|${score}|yes|0|
 EOF
 "#,
     )

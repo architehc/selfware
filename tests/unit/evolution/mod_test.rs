@@ -9,6 +9,38 @@ fn test_protected_paths() {
     assert!(is_protected(std::path::Path::new(
         "system_tests/projecte2e/easy_calculator/"
     )));
+    assert!(is_protected(std::path::Path::new(
+        "src/agent/verification.rs"
+    )));
+    assert!(is_protected(std::path::Path::new(
+        "src/agent/verification_scope.rs"
+    )));
+    assert!(is_protected(std::path::Path::new(
+        "src/agent/checkpointing.rs"
+    )));
+    assert!(is_protected(std::path::Path::new(
+        "src/agent/tool_dispatch/mod.rs"
+    )));
+    assert!(is_protected(std::path::Path::new(
+        "src/cognitive/rsi_orchestrator.rs"
+    )));
+    assert!(is_protected(std::path::Path::new(
+        "src/testing/verification.rs"
+    )));
+    assert!(is_protected(std::path::Path::new(
+        "src/cognitive/self_edit.rs"
+    )));
+    assert!(is_protected(std::path::Path::new(
+        "src/cognitive/compilation_manager.rs"
+    )));
+    assert!(is_protected(std::path::Path::new("Cargo.toml")));
+    assert!(is_protected(std::path::Path::new("Cargo.lock")));
+    assert!(is_protected(std::path::Path::new(
+        ".github/workflows/ci.yml"
+    )));
+    assert!(is_protected(std::path::Path::new("src/main.rs")));
+    assert!(is_protected(std::path::Path::new("tests/unit/mod.rs")));
+
     assert!(!is_protected(std::path::Path::new("src/agent/agent.rs")));
     assert!(!is_protected(std::path::Path::new(
         "src/tools/file_edit.rs"
@@ -36,9 +68,10 @@ fn test_composite_score_perfect() {
     let w = FitnessWeights::default();
     let metrics = FitnessMetrics {
         sab_score: 100.0,
-        tokens_used: 0,
+        tokens_used: Some(0),
         token_budget: 500_000,
         wall_clock_secs: 0.0,
+        full_evaluation_secs: None,
         timeout_secs: 3600.0,
         test_coverage_pct: 100.0,
         binary_size_mb: 0.0,
@@ -59,9 +92,10 @@ fn test_composite_score_ordering() {
     let w = FitnessWeights::default();
     let good = FitnessMetrics {
         sab_score: 95.0,
-        tokens_used: 100_000,
+        tokens_used: Some(100_000),
         token_budget: 500_000,
         wall_clock_secs: 60.0,
+        full_evaluation_secs: None,
         timeout_secs: 3600.0,
         test_coverage_pct: 85.0,
         binary_size_mb: 10.0,
@@ -72,9 +106,10 @@ fn test_composite_score_ordering() {
     };
     let bad = FitnessMetrics {
         sab_score: 60.0,
-        tokens_used: 400_000,
+        tokens_used: Some(400_000),
         token_budget: 500_000,
         wall_clock_secs: 3000.0,
+        full_evaluation_secs: None,
         timeout_secs: 3600.0,
         test_coverage_pct: 50.0,
         binary_size_mb: 40.0,
@@ -97,9 +132,10 @@ fn test_composite_score_zero_budget() {
     let w = FitnessWeights::default();
     let metrics = FitnessMetrics {
         sab_score: 50.0,
-        tokens_used: 10,
+        tokens_used: Some(10),
         token_budget: 1, // edge: budget=1, tokens_used > budget
         wall_clock_secs: 100.0,
+        full_evaluation_secs: None,
         timeout_secs: 3600.0,
         test_coverage_pct: 80.0,
         binary_size_mb: 10.0,
@@ -126,9 +162,10 @@ fn test_composite_score_custom_weights() {
     };
     let metrics = FitnessMetrics {
         sab_score: 75.0,
-        tokens_used: 999_999,
+        tokens_used: Some(999_999),
         token_budget: 100,
         wall_clock_secs: 99999.0,
+        full_evaluation_secs: None,
         timeout_secs: 1.0,
         test_coverage_pct: 0.0,
         binary_size_mb: 999.0,
@@ -191,9 +228,10 @@ fn test_composite_score_worst_case() {
     let w = FitnessWeights::default();
     let metrics = FitnessMetrics {
         sab_score: 0.0,
-        tokens_used: 500_000,
+        tokens_used: Some(500_000),
         token_budget: 500_000,
         wall_clock_secs: 3600.0,
+        full_evaluation_secs: None,
         timeout_secs: 3600.0,
         test_coverage_pct: 0.0,
         binary_size_mb: 50.0,

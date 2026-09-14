@@ -47,6 +47,7 @@ fn test_wrap_task_with_skill() {
             name: "commit".to_string(),
             description: "Create a git commit".to_string(),
             tools: vec![],
+            verified: true,
             content: "Write a concise commit message.".to_string(),
             source: None,
         },
@@ -60,6 +61,25 @@ fn test_wrap_task_with_skill() {
     assert!(registry
         .wrap_task_with_skill("fix the bug", "missing")
         .is_none());
+
+    // Test unverified skill wrapping carries explicit warning
+    registry.skills.insert(
+        "unverified_skill".to_string(),
+        Skill {
+            name: "unverified_skill".to_string(),
+            description: "Distilled procedure".to_string(),
+            tools: vec![],
+            verified: false,
+            content: "Some raw distilled instructions.".to_string(),
+            source: None,
+        },
+    );
+    let unverified_wrapped = registry
+        .wrap_task_with_skill("fix the bug", "unverified_skill")
+        .unwrap();
+    assert!(unverified_wrapped.contains(
+        "[Skill: unverified_skill (UNVERIFIED - Distilled from unverified execution trace)]"
+    ));
 }
 
 #[test]
@@ -71,6 +91,7 @@ fn test_registry_list_sorted() {
             name: "beta".to_string(),
             description: "B".to_string(),
             tools: vec![],
+            verified: true,
             content: "beta content".to_string(),
             source: None,
         },
@@ -81,6 +102,7 @@ fn test_registry_list_sorted() {
             name: "alpha".to_string(),
             description: "A".to_string(),
             tools: vec![],
+            verified: true,
             content: "alpha content".to_string(),
             source: None,
         },
@@ -133,5 +155,34 @@ fn discover_dir_loads_commands_markdown_files() {
     assert_eq!(
         skill.render_content("src/lib.rs"),
         "Review src/lib.rs carefully."
+    );
+}
+
+#[test]
+fn test_render_with_trust_gate_verified_and_unverified() {
+    let verified_skill = Skill {
+        name: "test_verified".to_string(),
+        description: "A verified test skill".to_string(),
+        tools: vec![],
+        verified: true,
+        content: "Run test $ARGUMENTS.".to_string(),
+        source: None,
+    };
+    let unverified_skill = Skill {
+        name: "test_unverified".to_string(),
+        description: "An unverified distilled skill".to_string(),
+        tools: vec![],
+        verified: false,
+        content: "Run unverified $ARGUMENTS.".to_string(),
+        source: None,
+    };
+
+    let rendered_verified = verified_skill.render_with_trust_gate("unit");
+    assert_eq!(rendered_verified, "[Skill: test_verified]\nRun test unit.");
+
+    let rendered_unverified = unverified_skill.render_with_trust_gate("e2e");
+    assert_eq!(
+        rendered_unverified,
+        "[Skill: test_unverified (UNVERIFIED - Distilled from unverified execution trace)]\nRun unverified e2e."
     );
 }

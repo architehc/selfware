@@ -2,7 +2,8 @@ use crate::cognitive::compilation_manager::CompilationSandbox;
 use crate::cognitive::meta_learning::MetaLearner;
 use crate::cognitive::metrics::MetricsStore;
 use crate::cognitive::self_edit::{
-    AppliedMutation, ImprovementRecord, ImprovementTarget, SelfEditOrchestrator,
+    AppliedMutation, ImprovementCategory, ImprovementRecord, ImprovementSource, ImprovementTarget,
+    SelfEditOrchestrator,
 };
 use crate::errors::{Result, SelfwareError};
 use serde::{Deserialize, Serialize};
@@ -391,16 +392,29 @@ impl RSIOrchestrator {
 
         // 6. Measure Baseline Fitness (PAID suite #1) — deferred until the
         // mutation is known to be non-trivial and compiling.
-        let baseline_score = self.measure_fitness().await?;
+        let baseline_report = self.run_benchmark_report(&self.project_root).await?;
+        let baseline_score = baseline_report.average_score;
         debug!("Baseline fitness score: {}", baseline_score);
 
         // 7. Measure New Fitness in Sandbox (PAID suite #2)
-        // Since we can't easily run the benchmark on the sandbox right now without changing paths,
-        // we assume the sandbox passed tests and check its score.
-        let new_score = self.measure_sandbox_fitness(&sandbox).await?;
+        let new_report = self.run_benchmark_report(sandbox.work_dir()).await?;
+        let new_score = new_report.average_score;
         debug!("New fitness score: {}", new_score);
 
-        // 7. Evaluate
+        // 7a. DarwinX Non-Regression Invariant Gate:
+        // Passed(baseline) ∩ Failed(candidate) = ∅
+        if let Err(regressed) = baseline_report.check_darwinx_non_regression(&new_report) {
+            warn!(
+                "DarwinX Non-Regression violation: candidate broke previously passing scenario(s): {:?}. Rejecting mutation.",
+                regressed
+            );
+            self.record_improvement(&target, Some(new_score), baseline_score, true, true)
+                .await?;
+            sandbox.cleanup()?;
+            return Ok(false);
+        }
+
+        // 7c. Evaluate
         if new_score > baseline_score {
             info!(
                 "Mutation improved fitness ({} > {}). Merging.",
@@ -424,23 +438,18 @@ impl RSIOrchestrator {
         }
     }
 
-    /// Measure fitness score using E2E benchmarks
-    async fn measure_fitness(&self) -> Result<f64> {
-        self.run_benchmark_and_get_score(&self.project_root).await
-    }
-
-    /// Measure fitness in the sandbox environment
-    async fn measure_sandbox_fitness(&self, sandbox: &CompilationSandbox) -> Result<f64> {
-        self.run_benchmark_and_get_score(sandbox.work_dir()).await
-    }
-
-    async fn run_benchmark_and_get_score(&self, work_dir: &std::path::Path) -> Result<f64> {
+    async fn run_benchmark_report(&self, work_dir: &std::path::Path) -> Result<BenchmarkReport> {
         info!("Running E2E benchmark suite in {:?}", work_dir);
         let script_path = work_dir.join("system_tests/projecte2e/run_projecte2e.sh");
 
-        // This might take a long time
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let unique_out_dir = work_dir
+            .join("system_tests/projecte2e/reports")
+            .join(format!("rsi-{}", run_id));
+
         let output = Command::new("bash")
             .arg(&script_path)
+            .env("OUT_DIR", &unique_out_dir)
             .current_dir(work_dir)
             .output()
             .await
@@ -449,48 +458,28 @@ impl RSIOrchestrator {
             })?;
 
         if !output.status.success() {
-            warn!(
-                "Benchmark script returned non-zero exit code: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(SelfwareError::Internal(format!(
+                "Benchmark script failed with exit code {:?}: {}",
+                output.status.code(),
+                stderr
+            )));
         }
 
-        // Parse the TSV
-        let reports_dir = work_dir.join("system_tests/projecte2e/reports/latest");
-        let results_tsv = reports_dir.join("results.tsv");
-
+        let results_tsv = unique_out_dir.join("results.tsv");
         if !results_tsv.exists() {
-            return Err(SelfwareError::Internal(
-                "Benchmark results.tsv not found".to_string(),
-            ));
+            return Err(SelfwareError::Internal(format!(
+                "Benchmark results.tsv not found in {:?}",
+                unique_out_dir
+            )));
         }
 
         let tsv_content = std::fs::read_to_string(&results_tsv)
             .map_err(|e| SelfwareError::Internal(format!("Failed to read results.tsv: {}", e)))?;
 
-        // Calculate average score from the TSV
-        // Format: scenario|type|difficulty|baseline|post|agent|timeout|duration|score|changed|error|notes
-        let mut total_score = 0.0;
-        let mut count = 0;
-
-        for (i, line) in tsv_content.lines().enumerate() {
-            if i == 0 {
-                continue;
-            } // Skip header
-            let parts: Vec<&str> = line.split('|').collect();
-            if parts.len() > 8 {
-                if let Ok(score) = parts[8].parse::<f64>() {
-                    total_score += score;
-                    count += 1;
-                }
-            }
-        }
-
-        if count == 0 {
-            return Ok(0.0);
-        }
-
-        Ok(total_score / count as f64)
+        parse_benchmark_report(&tsv_content).map_err(|e| {
+            SelfwareError::Internal(format!("Failed to parse benchmark report: {}", e))
+        })
     }
 
     async fn merge_sandbox(
@@ -500,20 +489,97 @@ impl RSIOrchestrator {
     ) -> Result<()> {
         info!("Merging sandbox changes back to main workspace...");
 
+        let canonical_project_root = self.project_root.canonicalize().map_err(|e| {
+            SelfwareError::Internal(format!("Failed to canonicalize project root: {}", e))
+        })?;
+        let canonical_sandbox_root = sandbox.work_dir().canonicalize().map_err(|e| {
+            SelfwareError::Internal(format!("Failed to canonicalize sandbox root: {}", e))
+        })?;
+
         for rel_path in &applied.edited_files {
-            let source = sandbox.work_dir().join(rel_path);
-            let destination = self.project_root.join(rel_path);
+            let rel = Path::new(rel_path);
+            if rel.is_absolute()
+                || rel
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return Err(SelfwareError::Internal(format!(
+                    "Path traversal detected or absolute path forbidden in merge candidate: {}",
+                    rel_path
+                )));
+            }
+
+            let dummy_target = ImprovementTarget::new(
+                ImprovementCategory::CodeQuality,
+                "merge_check",
+                "merge_check",
+                ImprovementSource::TechDebt,
+            )
+            .with_file(rel_path.clone());
+            if self.edit_orchestrator.is_denied(&dummy_target) {
+                return Err(SelfwareError::Internal(format!(
+                    "Cannot merge denied file: {}",
+                    rel_path
+                )));
+            }
+
+            let source = sandbox.work_dir().join(rel);
+            let canonical_source = source.canonicalize().map_err(|e| {
+                SelfwareError::Internal(format!(
+                    "Failed to canonicalize sandbox source {}: {}",
+                    rel_path, e
+                ))
+            })?;
+            if !canonical_source.starts_with(&canonical_sandbox_root) {
+                return Err(SelfwareError::Internal(format!(
+                    "Sandbox source {} escapes sandbox directory",
+                    rel_path
+                )));
+            }
+
+            let destination = self.project_root.join(rel);
+            if let Ok(meta) = destination.symlink_metadata() {
+                if meta.file_type().is_symlink() {
+                    return Err(SelfwareError::Internal(format!(
+                        "Merge destination {} is a symlink",
+                        rel_path
+                    )));
+                }
+            }
             if let Some(parent) = destination.parent() {
                 tokio::fs::create_dir_all(parent).await.map_err(|e| {
                     SelfwareError::Internal(format!("Failed to create merge dir: {}", e))
                 })?;
             }
-            tokio::fs::copy(&source, &destination).await.map_err(|e| {
-                SelfwareError::Internal(format!("Failed to merge sandbox file {}: {}", rel_path, e))
-            })?;
+            let canonical_dest_parent = destination
+                .parent()
+                .unwrap_or(&self.project_root)
+                .canonicalize()
+                .map_err(|e| {
+                    SelfwareError::Internal(format!(
+                        "Failed to canonicalize destination parent {}: {}",
+                        rel_path, e
+                    ))
+                })?;
+            if !canonical_dest_parent.starts_with(&canonical_project_root) {
+                return Err(SelfwareError::Internal(format!(
+                    "Merge destination {} escapes project root",
+                    rel_path
+                )));
+            }
+
+            tokio::fs::copy(&canonical_source, &destination)
+                .await
+                .map_err(|e| {
+                    SelfwareError::Internal(format!(
+                        "Failed to merge sandbox file {}: {}",
+                        rel_path, e
+                    ))
+                })?;
         }
 
         sandbox.cleanup()?;
+        info!("Successfully merged sandbox changes");
         Ok(())
     }
 
@@ -570,6 +636,186 @@ impl RSIOrchestrator {
     }
 }
 
+/// Scenario outcome parsed from benchmark reports.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScenarioOutcome {
+    pub name: String,
+    pub score: f64,
+    pub passed: bool,
+}
+
+/// Structured outcome of a full benchmark evaluation run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BenchmarkReport {
+    pub average_score: f64,
+    pub scenarios: std::collections::HashMap<String, ScenarioOutcome>,
+}
+
+impl BenchmarkReport {
+    /// DarwinX non-regression invariant:
+    /// Passed(baseline) ∩ Failed(candidate) = ∅
+    ///
+    /// Every scenario that passed in the baseline MUST also pass in the candidate,
+    /// and the suite of scenario names must match.
+    pub fn check_darwinx_non_regression(
+        &self,
+        candidate: &BenchmarkReport,
+    ) -> std::result::Result<(), Vec<String>> {
+        let baseline_names: std::collections::HashSet<&str> =
+            self.scenarios.keys().map(|s| s.as_str()).collect();
+        let candidate_names: std::collections::HashSet<&str> =
+            candidate.scenarios.keys().map(|s| s.as_str()).collect();
+
+        if baseline_names != candidate_names {
+            let missing: Vec<String> = baseline_names
+                .difference(&candidate_names)
+                .map(|s| s.to_string())
+                .collect();
+            let unexpected: Vec<String> = candidate_names
+                .difference(&baseline_names)
+                .map(|s| s.to_string())
+                .collect();
+            let mut errors = Vec::new();
+            if !missing.is_empty() {
+                errors.push(format!("Missing scenarios in candidate: {:?}", missing));
+            }
+            if !unexpected.is_empty() {
+                errors.push(format!(
+                    "Unexpected scenarios in candidate: {:?}",
+                    unexpected
+                ));
+            }
+            return Err(errors);
+        }
+
+        let mut regressed = Vec::new();
+        for (name, baseline_sc) in &self.scenarios {
+            if baseline_sc.passed {
+                if let Some(cand_sc) = candidate.scenarios.get(name) {
+                    if !cand_sc.passed {
+                        regressed.push(name.clone());
+                    }
+                } else {
+                    regressed.push(name.clone());
+                }
+            }
+        }
+        if regressed.is_empty() {
+            Ok(())
+        } else {
+            Err(regressed)
+        }
+    }
+}
+
+/// Parse TSV benchmark report into a structured `BenchmarkReport`.
+pub fn parse_benchmark_report(tsv_content: &str) -> std::result::Result<BenchmarkReport, String> {
+    let mut lines = tsv_content.lines().filter(|l| !l.trim().is_empty());
+    let header = lines
+        .next()
+        .ok_or_else(|| "Benchmark TSV report is empty".to_string())?;
+    let header_parts: Vec<&str> = header.split('|').map(|s| s.trim()).collect();
+    const EXPECTED_COLUMNS: [&str; 12] = [
+        "scenario",
+        "type",
+        "difficulty",
+        "baseline_status",
+        "post_status",
+        "agent_status",
+        "timed_out",
+        "duration_secs",
+        "score",
+        "changed_files",
+        "error_hits",
+        "notes",
+    ];
+
+    if header_parts != EXPECTED_COLUMNS {
+        return Err(format!(
+            "Invalid TSV header: expected '{}', got '{}'",
+            EXPECTED_COLUMNS.join("|"),
+            header
+        ));
+    }
+
+    let mut total_score = 0.0;
+    let mut count = 0;
+    let mut scenarios = std::collections::HashMap::new();
+
+    for (i, line) in lines.enumerate() {
+        let line_num = i + 2; // 1-based, accounting for header
+        let parts: Vec<&str> = line.trim().split('|').collect();
+        if parts.len() < 11 {
+            return Err(format!(
+                "Malformed TSV row {line_num}: expected at least 11 columns, got {}",
+                parts.len()
+            ));
+        }
+        let name = parts[0].trim().to_string();
+        if name.is_empty() {
+            return Err(format!("Empty scenario name on TSV row {line_num}"));
+        }
+        if scenarios.contains_key(&name) {
+            return Err(format!(
+                "Duplicate scenario '{}' on TSV row {line_num}",
+                name
+            ));
+        }
+
+        let score = parts[8]
+            .trim()
+            .parse::<f64>()
+            .map_err(|e| format!("Invalid score '{}' on TSV row {line_num}: {e}", parts[8]))?;
+        if !score.is_finite() || !(0.0..=100.0).contains(&score) {
+            return Err(format!(
+                "Out-of-range score {score} on TSV row {line_num} (must be 0..=100)"
+            ));
+        }
+
+        let scenario_type = parts[1].trim();
+        let post_status = parts[4].trim();
+        let agent_status = parts[5].trim();
+        let error_hits = parts[10].trim();
+        let has_error = if let Ok(hits) = error_hits.parse::<u64>() {
+            hits > 0
+        } else {
+            !error_hits.is_empty() && error_hits != "0"
+        };
+
+        let passed = match scenario_type {
+            "coding" => post_status == "0" && score >= 70.0,
+            "swarm" => agent_status == "0" && !has_error && score >= 70.0,
+            unknown => {
+                return Err(format!(
+                    "Unknown scenario type '{unknown}' on TSV row {line_num} (expected 'coding' or 'swarm')"
+                ));
+            }
+        };
+
+        scenarios.insert(
+            name.clone(),
+            ScenarioOutcome {
+                name,
+                score,
+                passed,
+            },
+        );
+        total_score += score;
+        count += 1;
+    }
+
+    if count == 0 {
+        return Err("Benchmark report contains no scenarios".to_string());
+    }
+
+    let average_score = total_score / count as f64;
+
+    Ok(BenchmarkReport {
+        average_score,
+        scenarios,
+    })
+}
+
 /// Whether the mutation applied to the sandbox only rewrites comment or
 /// documentation lines. Such a mutation cannot change benchmark behaviour, so
 /// the paid e2e evaluation is skipped for it.
@@ -589,25 +835,24 @@ fn mutation_is_trivial(project_root: &Path, sandbox_dir: &Path, edited_files: &[
     edited_files.iter().all(|rel| {
         let old = std::fs::read_to_string(project_root.join(rel)).unwrap_or_default();
         let new = std::fs::read_to_string(sandbox_dir.join(rel)).unwrap_or_default();
-        // `#` is a comment marker in shell/TOML/YAML/Python/Markdown but an
-        // ATTRIBUTE in Rust (`#[derive(...)]`) — stripping it there would
-        // call attribute-only changes "trivial", so keep it for .rs files.
-        let strip_hash = Path::new(rel)
+        let ext = Path::new(rel)
             .extension()
             .and_then(|e| e.to_str())
-            .is_some_and(|ext| {
-                matches!(
-                    ext,
-                    "toml" | "sh" | "bash" | "yaml" | "yml" | "py" | "md" | "cfg" | "ini" | "txt"
-                )
-            });
-        code_lines(&old, strip_hash) == code_lines(&new, strip_hash)
+            .unwrap_or_default();
+        let strip_hash = matches!(
+            ext,
+            "toml" | "sh" | "bash" | "yaml" | "yml" | "py" | "md" | "cfg" | "ini" | "txt"
+        );
+        // In Rust, `*` can be a dereference operation (`*ptr = ...`) at the
+        // start of a line — only strip leading asterisk in non-Rust files.
+        let strip_asterisk = ext != "rs";
+        code_lines(&old, strip_hash, strip_asterisk) == code_lines(&new, strip_hash, strip_asterisk)
     })
 }
 
 /// The content lines of `content` with blank lines and whole-line comments
 /// removed — see [`mutation_is_trivial`] for the exact stripping rules.
-fn code_lines(content: &str, strip_hash: bool) -> Vec<&str> {
+fn code_lines(content: &str, strip_hash: bool, strip_asterisk: bool) -> Vec<&str> {
     content
         .lines()
         .map(str::trim)
@@ -616,7 +861,7 @@ fn code_lines(content: &str, strip_hash: bool) -> Vec<&str> {
                 || line.starts_with("//")
                 || (strip_hash && line.starts_with('#'))
                 || line.starts_with("/*")
-                || line.starts_with('*')
+                || (strip_asterisk && line.starts_with('*'))
                 || line.starts_with("--"))
         })
         .collect()

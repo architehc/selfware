@@ -1,0 +1,17 @@
+//! Phi's observation layer.
+//!
+//! Status: observe-only. These modules record what the human/agent loop is
+//! doing and report it. Nothing here influences agent behaviour, and nothing
+//! should until recorded sessions have been evaluated.
+
+pub mod activity;
+pub mod ledger;
+pub mod observer;
+
+#[cfg(test)]
+#[path = "ledger_tests.rs"]
+mod ledger_tests;
+
+#[cfg(test)]
+#[path = "observer_tests.rs"]
+mod observer_tests;

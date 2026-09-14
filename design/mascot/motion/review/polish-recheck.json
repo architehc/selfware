@@ -1,0 +1,123 @@
+{
+  "created_at": "2026-09-10T04:36:07.345564+00:00",
+  "status": "passed",
+  "checks": [
+    {
+      "name": "paw_rotation_is_continuous_across_old_threshold",
+      "status": "passed",
+      "observed": {
+        "samples": [
+          {
+            "y": 0.88,
+            "left": -8,
+            "right": 8
+          },
+          {
+            "y": 0.82,
+            "left": -8,
+            "right": 8
+          },
+          {
+            "y": 0.7,
+            "left": -8.69902,
+            "right": 8.69902
+          },
+          {
+            "y": 0.5,
+            "left": -12.1818,
+            "right": 12.1818
+          },
+          {
+            "y": 0.4001,
+            "left": -14.52178,
+            "right": 14.52178
+          },
+          {
+            "y": 0.4,
+            "left": -14.5242,
+            "right": 14.5242
+          },
+          {
+            "y": 0.3999,
+            "left": -14.52663,
+            "right": 14.52663
+          },
+          {
+            "y": 0.3,
+            "left": -16.95907,
+            "right": 16.95907
+          },
+          {
+            "y": 0.1,
+            "left": -21.18156,
+            "right": 21.18156
+          },
+          {
+            "y": -0.1,
+            "left": -23,
+            "right": 23
+          },
+          {
+            "y": -0.15,
+            "left": -23,
+            "right": 23
+          }
+        ],
+        "cross_threshold_delta_degrees": 0.004850000000001131
+      }
+    },
+    {
+      "name": "paused_gestures_render_a_still_without_resuming_clock",
+      "status": "passed",
+      "observed": {
+        "pose_changed": true,
+        "stays_still": true,
+        "label": "Motion paused \u00b7 preview",
+        "media_control_synchronized_before_uncheck": true
+      }
+    },
+    {
+      "name": "live_wave_passes_through_intermediate_paw_angles",
+      "status": "passed",
+      "observed": {
+        "frames": 140,
+        "tempo": 1,
+        "duration_ms": 2316.6000000000004,
+        "min_angle": -23,
+        "max_angle": -8,
+        "distinct_angles": 33,
+        "crossing_steps": [
+          {
+            "previous": {
+              "y": 0.41359684053706114,
+              "angle": -14.19514,
+              "time": 3143.7
+            },
+            "current": {
+              "y": 0.37577589881573126,
+              "angle": -15.11433,
+              "time": 3160.4
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "no_browser_script_errors",
+      "status": "passed",
+      "observed": []
+    }
+  ],
+  "page_errors": [],
+  "source_sha256": {
+    "rig.js": "e8dc79f05506fdafc2e8670f558e6aaee79978ede806897836dfbf278b0610ee",
+    "motion.js": "0e4a1ec56a3f78f797211416939863585ac7ebc17e872d0baad2742cb738f403",
+    "studio.js": "7275fcf1ff288b35ca391cfe7f19de52842ffd9d05e0fcaf75760d77ce999716",
+    "index.html": "46c7e1643e312ee7a63949fbe73214224f6237c8a0a51b4b3d70cd4eadf3dcc8",
+    "style.css": "8d073e5712eebd5bd0387997e400ac3605e6030c7702f5aae5770a53c4de3060"
+  },
+  "setup_correction": "Wait for reduced-motion media-change handlers to synchronize the animation checkbox before uncheck; uncheck previously saw the stale already-unchecked control and did not dispatch an event.",
+  "sampling": "Retain original >10 distinct-angle assertion at normal1x tempo, after settling idle. Production paw easing was separately widened to the full arm raise.",
+  "browser": "152.0.7977.83",
+  "screenshot": "polish-wave-normal-tempo.png"
+}

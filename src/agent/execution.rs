@@ -407,6 +407,7 @@ impl Agent {
         });
 
         let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let evidence = Some(self.evidence_snapshot());
         let artifact = super::turn_artifacts::TurnArtifact {
             step,
             timestamp: chrono::Utc::now(),
@@ -419,6 +420,7 @@ impl Agent {
             parsed_tool_calls: parsed_tool_calls.to_vec(),
             agent_decision: decision,
             elapsed_ms: meta.elapsed_ms,
+            evidence,
         };
         super::turn_artifacts::write_artifact(&workdir, &artifact).await;
     }
@@ -528,7 +530,8 @@ impl Agent {
                 "lake build".to_string(),
             ));
         }
-        let is_rust = root.join("Cargo.toml").exists();
+        let is_rust = root.join("Cargo.toml").exists()
+            && super::verification_scope::cargo_applies_to_task(&self.verification_task_root());
         if is_rust && self.tools.get("cargo_check").is_some() {
             return Some((
                 "cargo_check".to_string(),
@@ -1366,15 +1369,21 @@ impl Agent {
             self.messages.push(crate::api::types::Message::user(
                 "Your edit was NOT applied and has been discarded — no FILES: checklist was \
                  provided yet. First output a line `FILES: <path>` naming the file(s) you will \
-                 change, then RE-ISSUE the file_edit/file_write (or file-writing shell) tool \
-                 call (send it again — the previous one did not run). Do not claim the edit is \
+                 change, then RE-ISSUE your edit using the `file_edit` or `file_write` tool \
+                 (send it again — the previous one did not run). Do not claim the edit is \
                  done until a tool result confirms it."
                     .to_string(),
             ));
             return Ok(false);
         }
 
-        self.execute_tool_batch(tool_calls).await?;
+        // The diagnostic artifact above is written BEFORE these tools run, so
+        // its evidence necessarily omits this turn's changes. Record a second,
+        // clearly-labelled snapshot afterwards -- and on the error path too,
+        // since a batch that failed part-way still moved the tree.
+        let batch_result = self.execute_tool_batch(tool_calls).await;
+        self.write_post_execution_evidence().await;
+        batch_result?;
 
         // After tool batch execution, check if all tool calls were suppressed.
         // When the model keeps emitting identical tool calls that are all
@@ -1842,7 +1851,10 @@ fn is_observational_shell_batch(tool_calls: &[CollectedToolCall]) -> bool {
 /// turns while the model re-issues the identical command.
 fn tool_call_is_file_write_intent(name: &str, args_str: &str) -> bool {
     if name != "shell_exec" {
-        return super::tool_dispatch::tool_call_counts_as_state_change(name, args_str);
+        return matches!(
+            name,
+            "file_edit" | "file_write" | "file_fim_edit" | "file_multi_edit" | "patch_apply"
+        );
     }
     let command = serde_json::from_str::<serde_json::Value>(args_str)
         .ok()

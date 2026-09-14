@@ -68,7 +68,11 @@ impl FnDedupAnalyzer {
     /// closest clones come first.
     pub fn find(&self) -> Result<Vec<DuplicateFnPair>> {
         let mut fns: Vec<FnBody> = Vec::new();
-        for entry in WalkDir::new(&self.root).into_iter().filter_map(|e| e.ok()) {
+        for entry in WalkDir::new(&self.root)
+            .into_iter()
+            .filter_entry(super::graph::retain_outside_python_environments)
+            .filter_map(|e| e.ok())
+        {
             let p = entry.path();
             if p.extension().is_some_and(|e| e == "rs") {
                 if let Ok(text) = std::fs::read_to_string(p) {

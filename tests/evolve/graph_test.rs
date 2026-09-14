@@ -7,6 +7,93 @@ fn write_rust(path: &std::path::Path, content: &str) {
 }
 
 #[test]
+fn test_graph_prunes_nonstandard_python_environments_and_keeps_project_sources() {
+    let project = tempfile::tempdir().unwrap();
+    for (path, content) in [
+        ("src/lib.rs", "pub struct ProjectType;\n"),
+        ("src/tools/helper.py", "def product():\n    return 1\n"),
+        ("src/scratchpad/local.py", "def local():\n    return 2\n"),
+        (
+            "src/python-tools/pyvenv.cfg",
+            "home = /synthetic/python\ninclude-system-site-packages = false\n",
+        ),
+        (
+            "src/python-tools/lib/dependency.py",
+            "def dependency():\n    return 3\n",
+        ),
+        (
+            "src/python-tools/lib/dependency.rs",
+            "pub struct DependencyType;\n",
+        ),
+    ] {
+        write_rust(&project.path().join(path), content);
+    }
+    let graph = GraphBuilder::new(project.path().join("src"))
+        .scan_src()
+        .unwrap();
+    let paths = graph
+        .nodes
+        .iter()
+        .filter_map(|node| node.path.as_deref())
+        .collect::<Vec<_>>();
+    for retained in [
+        "src/lib.rs",
+        "src/tools/helper.py",
+        "src/scratchpad/local.py",
+    ] {
+        assert!(
+            paths.contains(&retained),
+            "missing project source {retained}"
+        );
+    }
+    assert!(!paths.iter().any(|path| path.contains("python-tools")));
+
+    // The concept/structure walks run independently of the graph inventory.
+    let index = selfware::evolve::ConceptIndex::build(project.path().join("src")).unwrap();
+    assert!(index.xray("ProjectType").is_some());
+    assert!(index.xray("DependencyType").is_none());
+    let outline = selfware::evolve::StructureAnalyzer::new(project.path().join("src"))
+        .outline()
+        .unwrap();
+    assert!(outline.iter().any(|file| file.path == "lib.rs"));
+    assert!(!outline
+        .iter()
+        .any(|file| file.path.contains("python-tools")));
+}
+
+#[test]
+fn test_python_environment_marker_does_not_hide_explicit_scan_root() {
+    let project = tempfile::tempdir().unwrap();
+    write_rust(
+        &project.path().join("pyvenv.cfg"),
+        "home = /synthetic/python\n",
+    );
+    write_rust(
+        &project.path().join("src/lib.rs"),
+        "pub struct SelectedType;\n",
+    );
+    write_rust(
+        &project.path().join("src/app.py"),
+        "def app():\n    return 4\n",
+    );
+    let graph = GraphBuilder::new(project.path().join("src"))
+        .scan_src()
+        .unwrap();
+    assert!(graph
+        .nodes
+        .iter()
+        .any(|node| node.path.as_deref() == Some("src/app.py")));
+
+    // Direct analysis of a marked directory also preserves its own source.
+    let index = selfware::evolve::ConceptIndex::build(project.path()).unwrap();
+    assert!(index.xray("SelectedType").is_some());
+    let outline = selfware::evolve::StructureAnalyzer::new(project.path())
+        .outline()
+        .unwrap();
+    assert!(outline.iter().any(|file| file.path == "src/lib.rs"));
+}
+
+#[test]
 fn test_non_rust_implementation_sources_are_code_nodes_with_test_partition() {
     let project = tempfile::tempdir().unwrap();
     write_rust(&project.path().join("src/lib.rs"), "pub fn library() {}\n");

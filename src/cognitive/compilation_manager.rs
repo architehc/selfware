@@ -3,11 +3,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tracing::{error, info};
 
-/// Configuration for the compilation sandbox
-#[derive(Debug, Clone)]
+/// Configuration for the compilation sandbox (RAII guard: cleans up on drop).
+#[derive(Debug)]
 pub struct CompilationSandbox {
     _original_dir: PathBuf,
     work_dir: PathBuf,
+    owns_work_dir: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -21,14 +22,19 @@ impl CompilationSandbox {
     /// Creates a new compilation sandbox by copying the current project root to a temporary location
     pub fn new(project_root: impl AsRef<Path>) -> Result<Self> {
         let original_dir = project_root.as_ref().to_path_buf();
-        let work_dir = original_dir.join(".selfware-sandbox");
+        let work_dir = original_dir.join(format!(
+            ".selfware-sandbox-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
 
         info!("Setting up compilation sandbox at {:?}", work_dir);
 
-        // Remove old sandbox if it exists
-        if work_dir.exists() {
-            std::fs::remove_dir_all(&work_dir)?;
-        }
+        let cleanup_on_fail = |err: anyhow::Error| -> anyhow::Error {
+            if work_dir.exists() {
+                let _ = std::fs::remove_dir_all(&work_dir);
+            }
+            err
+        };
 
         // Clone the repo to get a clean working tree without build artifacts.
         // Pin the child's cwd to the source repo. Without this the clone
@@ -42,40 +48,100 @@ impl CompilationSandbox {
             .arg(&original_dir)
             .arg(&work_dir)
             .current_dir(&original_dir)
-            .status()?;
+            .status()
+            .map_err(|e| cleanup_on_fail(anyhow!("Failed to spawn git clone: {e}")))?;
 
         if !status.success() {
-            return Err(anyhow!("Failed to clone repository into sandbox"));
+            return Err(cleanup_on_fail(anyhow!(
+                "Failed to clone repository into sandbox"
+            )));
         }
 
         // Carry over uncommitted changes (staged + unstaged) so the sandbox
-        // reflects the actual working tree, not just the last commit.
+        // reflects the exact working tree, not just the last commit.
         let diff_output = Command::new("git")
             .args(["diff", "HEAD"])
             .current_dir(&original_dir)
-            .output()?;
+            .output()
+            .map_err(|e| cleanup_on_fail(anyhow!("Failed to run git diff: {e}")))?;
 
-        if diff_output.status.success() && !diff_output.stdout.is_empty() {
+        if !diff_output.status.success() {
+            let stderr = String::from_utf8_lossy(&diff_output.stderr);
+            return Err(cleanup_on_fail(anyhow!(
+                "Failed to compute working tree diff: {stderr}"
+            )));
+        }
+
+        if !diff_output.stdout.is_empty() {
             let mut apply = Command::new("git")
                 .args(["apply", "--allow-empty"])
                 .current_dir(&work_dir)
                 .stdin(std::process::Stdio::piped())
-                .spawn()?;
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|e| cleanup_on_fail(anyhow!("Failed to spawn git apply: {e}")))?;
 
-            if let Some(ref mut stdin) = apply.stdin {
+            if let Some(mut stdin) = apply.stdin.take() {
                 use std::io::Write;
-                stdin.write_all(&diff_output.stdout)?;
+                stdin.write_all(&diff_output.stdout).map_err(|e| {
+                    cleanup_on_fail(anyhow!("Failed to write patch to git apply stdin: {e}"))
+                })?;
             }
 
-            let apply_status = apply.wait()?;
-            if !apply_status.success() {
-                info!("Some uncommitted changes could not be applied to sandbox (merge conflict); proceeding with committed state");
+            let apply_output = apply
+                .wait_with_output()
+                .map_err(|e| cleanup_on_fail(anyhow!("Failed waiting for git apply: {e}")))?;
+            if !apply_output.status.success() {
+                let stderr = String::from_utf8_lossy(&apply_output.stderr);
+                return Err(cleanup_on_fail(anyhow!(
+                    "Failed to apply uncommitted changes to sandbox: {stderr}"
+                )));
+            }
+        }
+
+        // Carry over untracked, non-ignored source files so new files in the working
+        // tree are part of the evaluated sandbox snapshot.
+        let untracked_output = Command::new("git")
+            .args(["ls-files", "--others", "--exclude-standard"])
+            .current_dir(&original_dir)
+            .output()
+            .map_err(|e| cleanup_on_fail(anyhow!("Failed to list untracked files: {e}")))?;
+
+        if !untracked_output.status.success() {
+            let stderr = String::from_utf8_lossy(&untracked_output.stderr);
+            return Err(cleanup_on_fail(anyhow!(
+                "Failed to list untracked files in original repository: {stderr}"
+            )));
+        }
+
+        let untracked_list = String::from_utf8_lossy(&untracked_output.stdout);
+        for line in untracked_list.lines().filter(|l| !l.trim().is_empty()) {
+            let rel = Path::new(line.trim());
+            if rel.is_absolute() || rel.starts_with("..") {
+                continue;
+            }
+            let src = original_dir.join(rel);
+            let dst = work_dir.join(rel);
+            if let Ok(meta) = src.symlink_metadata() {
+                if meta.is_file() {
+                    if let Some(parent) = dst.parent() {
+                        std::fs::create_dir_all(parent).map_err(|e| {
+                            cleanup_on_fail(anyhow!(
+                                "Failed creating parent directory for untracked file {line}: {e}"
+                            ))
+                        })?;
+                    }
+                    std::fs::copy(&src, &dst).map_err(|e| {
+                        cleanup_on_fail(anyhow!("Failed copying untracked file {line}: {e}"))
+                    })?;
+                }
             }
         }
 
         Ok(Self {
             _original_dir: original_dir,
             work_dir,
+            owns_work_dir: true,
         })
     }
 
@@ -130,11 +196,9 @@ impl CompilationSandbox {
         Ok(true)
     }
 
-    /// Cleanup the sandbox
+    /// Cleanup the sandbox manually (also cleaned up automatically on drop via RAII).
     pub fn cleanup(self) -> Result<()> {
-        if self.work_dir.exists() {
-            std::fs::remove_dir_all(&self.work_dir)?;
-        }
+        drop(self);
         Ok(())
     }
 
@@ -144,6 +208,14 @@ impl CompilationSandbox {
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         })
+    }
+}
+
+impl Drop for CompilationSandbox {
+    fn drop(&mut self) {
+        if self.owns_work_dir && self.work_dir.exists() {
+            let _ = std::fs::remove_dir_all(&self.work_dir);
+        }
     }
 }
 

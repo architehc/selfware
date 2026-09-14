@@ -1,0 +1,22 @@
+ARG BASE_IMAGE=rust:1.95-bookworm
+FROM ${BASE_IMAGE}
+
+# Trusted build dependencies only. No workspace or credentials enter this image.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       pkg-config libssl-dev cmake libdbus-1-dev libxcb1-dev \
+       libxcb-randr0-dev libxcb-shm0-dev libxcb-composite0-dev python3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /build /work \
+    && chown 65534:65534 /build /work
+
+ENV CARGO_HOME=/build/cargo \
+    CARGO_TARGET_DIR=/build/target \
+    CARGO_BUILD_JOBS=2 \
+    CARGO_PROFILE_DEV_DEBUG=0 \
+    CARGO_PROFILE_TEST_DEBUG=0 \
+    CARGO_INCREMENTAL=0 \
+    HOME=/build/home
+USER 65534:65534
+WORKDIR /build
+CMD ["sleep", "1800"]

@@ -107,6 +107,9 @@ new_template_results_*/
 __pycache__/
 /.selfware/turns/
 .selfware/
+.theseus.md
+/.selfware-sandbox*/
+/.selfware-sandbox
 
 # Machine-specific / personal config (untracked 2026-07-12, kept locally)
 .claude/settings.local.json
@@ -144,3 +147,7 @@ research/
 # autonomous self-improve loop workspace
 scratchpad/
 .worktrees/
+
+# Phi ledger scenario fixtures (regenerable; see docs/quant_bench)
+target/phi-session-eval/
+target/install-validation/*/source.tar

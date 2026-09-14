@@ -258,9 +258,25 @@ fn test_observational_includes_direct_test_script_runs() {
     assert!(shell_command_is_observational(
         "python3 -c \"assert x == 1\""
     ));
+    assert!(shell_command_is_observational("python3 -m unittest"));
+    assert!(shell_command_is_observational(
+        "python3 -m unittest test_calc.py"
+    ));
+    assert!(shell_command_is_observational(
+        "python -m unittest discover"
+    ));
+    assert!(shell_command_is_observational("python3 -m pytest"));
+    assert!(shell_command_is_observational("node --test"));
+    assert!(shell_command_is_observational(
+        "find . -name 'Cargo.toml' 2>/dev/null"
+    ));
     assert!(!tool_call_is_mutating(
         "shell_exec",
         &serde_json::json!({"command": "python3 test_calc.py"})
+    ));
+    assert!(!tool_call_is_mutating(
+        "shell_exec",
+        &serde_json::json!({"command": "python3 -m unittest"})
     ));
     // Inline snippets NOT framed as checks stay mutating, a redirect
     // still writes a file, and running the app is not observational.

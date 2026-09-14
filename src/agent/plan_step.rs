@@ -52,18 +52,72 @@ impl Agent {
                     name: None,
                 },
                 Err(e) => {
-                    self.log_turn_end_event(
-                        "planning",
-                        false,
-                        false,
-                        turn_start.elapsed().as_millis() as u64,
-                        Some(e.to_string()),
-                        serde_json::json!({
-                            "message_count": self.messages.len(),
-                            "estimated_message_tokens": self.estimate_messages_tokens(),
-                        }),
+                    // A streaming failure that a non-streaming retry could
+                    // plausibly survive must fall back here too. Planning was
+                    // the path a cross-distribution install test found: a
+                    // provider returning an empty stream killed the run at
+                    // planning, three streamed requests and zero non-streamed,
+                    // because this arm returned the error directly while the
+                    // identical guard in assistant_response.rs fell back.
+                    if super::assistant_response::is_terminal_api_client_error(&e)
+                        || self.is_cancelled()
+                    {
+                        self.log_turn_end_event(
+                            "planning",
+                            false,
+                            false,
+                            turn_start.elapsed().as_millis() as u64,
+                            Some(e.to_string()),
+                            serde_json::json!({
+                                "message_count": self.messages.len(),
+                                "estimated_message_tokens": self.estimate_messages_tokens(),
+                            }),
+                        );
+                        return Err(e);
+                    }
+
+                    warn!(
+                        "Streaming planning request failed ({}); retrying this step with non-streaming API",
+                        e
                     );
-                    return Err(e);
+                    let fallback = self
+                        .client
+                        .chat_with_meta(
+                            request_messages,
+                            self.api_tools(),
+                            ThinkingMode::Enabled,
+                        )
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "Streaming planning failed: {e}. Non-streaming fallback request also failed"
+                            )
+                        });
+                    match fallback {
+                        Ok((response, meta)) => {
+                            plan_meta = meta;
+                            response
+                                .choices
+                                .into_iter()
+                                .next()
+                                .context("No response from model")?
+                                .message
+                        }
+                        Err(fallback_err) => {
+                            self.log_turn_end_event(
+                                "planning",
+                                false,
+                                false,
+                                turn_start.elapsed().as_millis() as u64,
+                                Some(fallback_err.to_string()),
+                                serde_json::json!({
+                                    "message_count": self.messages.len(),
+                                    "estimated_message_tokens": self.estimate_messages_tokens(),
+                                }),
+                            );
+                            return Err(fallback_err);
+                        }
+                    }
                 }
             }
         } else {

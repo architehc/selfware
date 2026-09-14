@@ -140,6 +140,15 @@ impl Agent {
         // Reset loop state so queued tasks don't inherit the previous
         // task's iteration counter and hit the max-iterations limit.
         self.loop_control.reset_for_task();
+        // A new task starts with no outstanding obligations. Debt is per-task:
+        // carrying it across would attribute one task's unread code to another.
+        self.task_verification_root = std::env::current_dir().ok();
+        self.evidence_ledger = crate::phi::ledger::Ledger::new();
+        // Reset with it: journal entries from a previous task would otherwise
+        // be attributed to this one, and the ledger reset would look like a
+        // clean start while the telemetry disagreed.
+        self.ledger_unattributed.clear();
+        self.ledger_journal.clear();
         self.clear_failed_tool_attempts();
         self.edit_loop_recovery_used = false;
         self.clear_task_state_memory();
@@ -362,13 +371,28 @@ impl Agent {
                      4. FIX: If verification fails, fix errors before proceeding\n\
                      {test_step}\n"
                 );
+                let primary_tools: Vec<&str> = if project_type == super::ProjectType::Rust {
+                    task_type.primary_tools().to_vec()
+                } else {
+                    let mut pt = Vec::new();
+                    for &tool in task_type.primary_tools() {
+                        if tool.starts_with("cargo_") {
+                            if !pt.contains(&"shell_exec") {
+                                pt.push("shell_exec");
+                            }
+                        } else {
+                            pt.push(tool);
+                        }
+                    }
+                    pt
+                };
                 format!(
                     "\n\n## TASK FOCUS (READ THIS FIRST)\n{}{}{}{}\n\nPrimary tools for this task: {}\nUse these tools FIRST. Do NOT start with git_status, context_status, or process_list.\n",
                     workflow,
                     preamble,
                     file_hint,
                     explicit_tool_guidance,
-                    task_type.primary_tools().join(", ")
+                    primary_tools.join(", ")
                 )
             };
             if !focus_block.is_empty() {
@@ -823,6 +847,7 @@ impl Agent {
                         Err(e2) => warn!("best snapshot restore failed: {e2}"),
                     }
                 }
+                self.publish_phi_failure_if_unfinished();
                 self.emit_terminal_event_once(AgentEvent::Error {
                     message: e.to_string(),
                 });

@@ -107,21 +107,23 @@ mod interactive;
 pub mod last_tool;
 mod learning;
 pub mod loop_control;
+mod phi_observation;
 pub mod plan_mode;
 mod plan_step;
 pub mod planning;
 pub mod progress;
 pub mod prompt_builder;
 mod recovery;
-mod session_log;
+pub mod session_log;
 mod streaming;
 mod task_policy;
 mod task_runner;
 mod tool_collect;
-mod tool_dispatch;
+pub(crate) mod tool_dispatch;
 mod tool_validator;
 pub mod tui_events;
 pub mod turn_artifacts;
+pub(crate) mod verification_scope;
 
 pub use task_runner::RunSummary;
 mod verification;
@@ -138,7 +140,7 @@ pub(crate) const MAX_PENDING_MESSAGES: usize = 100;
 
 /// Detected project type for adapting verification instructions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProjectType {
+pub(super) enum ProjectType {
     Python,
     JavaScript,
     TypeScript,
@@ -157,10 +159,16 @@ fn find_project_root_with_markers(
     markers: &[&str],
 ) -> Option<std::path::PathBuf> {
     start.ancestors().find_map(|ancestor| {
-        markers
-            .iter()
-            .any(|marker| ancestor.join(marker).exists())
-            .then(|| ancestor.to_path_buf())
+        let has_marker = markers.iter().any(|marker| {
+            if *marker == "Cargo.toml"
+                && ancestor != start
+                && !self::verification_scope::cargo_applies_to_task(start)
+            {
+                return false;
+            }
+            ancestor.join(marker).exists()
+        });
+        has_marker.then(|| ancestor.to_path_buf())
     })
 }
 
@@ -231,6 +239,61 @@ async fn read_bounded_file(
 
 /// Detect the project type from marker files in the working directory or its ancestors.
 async fn detect_project_type() -> ProjectType {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    detect_project_type_at(&cwd).await
+}
+
+async fn detect_project_type_at(cwd: &std::path::Path) -> ProjectType {
+    // 1. Inspect cwd itself first. Nested subprojects (e.g. py_sub inside a parent repo)
+    // must be identified by their own contents rather than falling through to an enclosing parent's manifest.
+    if try_exists(&cwd.join("pyproject.toml")).await
+        || try_exists(&cwd.join("setup.py")).await
+        || try_exists(&cwd.join("requirements.txt")).await
+        || has_file_with_extension(cwd, "py").await
+    {
+        return ProjectType::Python;
+    }
+    if try_exists(&cwd.join("tsconfig.json")).await || has_file_with_extension(cwd, "ts").await {
+        return ProjectType::TypeScript;
+    }
+    if try_exists(&cwd.join("package.json")).await || has_file_with_extension(cwd, "js").await {
+        return ProjectType::JavaScript;
+    }
+    if try_exists(&cwd.join("Cargo.toml")).await || has_file_with_extension(cwd, "rs").await {
+        return ProjectType::Rust;
+    }
+    if try_exists(&cwd.join("go.mod")).await || has_file_with_extension(cwd, "go").await {
+        return ProjectType::Go;
+    }
+    if try_exists(&cwd.join("pom.xml")).await
+        || try_exists(&cwd.join("build.gradle")).await
+        || try_exists(&cwd.join("build.gradle.kts")).await
+        || has_file_with_extension(cwd, "java").await
+    {
+        return ProjectType::Java;
+    }
+    if has_file_with_extension(cwd, "csproj").await
+        || has_file_with_extension(cwd, "sln").await
+        || has_file_with_extension(cwd, "cs").await
+    {
+        return ProjectType::CSharp;
+    }
+    if has_file_with_extension(cwd, "cpp").await
+        || has_file_with_extension(cwd, "cc").await
+        || has_file_with_extension(cwd, "cxx").await
+        || has_file_with_extension(cwd, "c").await
+        || try_exists(&cwd.join("CMakeLists.txt")).await
+    {
+        return ProjectType::Cpp;
+    }
+    if has_file_with_extension(cwd, "sql").await {
+        return ProjectType::Sql;
+    }
+    if try_exists(&cwd.join("Package.swift")).await || has_file_with_extension(cwd, "swift").await {
+        return ProjectType::Swift;
+    }
+
+    // 2. If cwd doesn't have any markers or code, check project root from ancestors
     let root = current_project_root();
     if try_exists(&root.join("pyproject.toml")).await
         || try_exists(&root.join("setup.py")).await
@@ -265,7 +328,9 @@ async fn detect_project_type() -> ProjectType {
         || has_file_with_extension(&root, "swift").await
     {
         ProjectType::Swift
-    } else if try_exists(&root.join("Cargo.toml")).await {
+    } else if try_exists(&root.join("Cargo.toml")).await
+        && self::verification_scope::cargo_applies_to_task(cwd)
+    {
         ProjectType::Rust
     } else {
         ProjectType::Generic
@@ -509,6 +574,22 @@ pub(crate) const ESCALATED_EDIT_ARGS_WINDOW_SIZE: usize = 64;
 /// checker, supports checkpointing for task resumption, and implements an
 /// observe-orient-decide-act cognitive loop.
 pub struct Agent {
+    /// Opt-in, workspace-scoped activity receipts consumed by the Phi UI.
+    phi_activity: Option<crate::phi::activity::ActivityCapture>,
+    /// Task whose typed terminal Phi receipt has already been published.
+    phi_activity_terminal_task: Option<String>,
+    /// Shadow-mode record of what has been changed and what has verified it.
+    ///
+    /// Observe-only: nothing reads this to make a decision. It exists so
+    /// recorded sessions can be evaluated before anything acts on them.
+    pub(crate) evidence_ledger: crate::phi::ledger::Ledger,
+    /// Observations the classifier could not attribute to a path, kept for the
+    /// life of the task. Without these persisted, a debt figure cannot be told
+    /// apart from a complete one — the count is what makes it a floor.
+    pub(crate) ledger_unattributed: Vec<crate::phi::observer::UnattributedRecord>,
+    /// Everything observed that the ledger cannot itself represent: commands
+    /// run, their outcomes, and uncertainty about what they touched.
+    pub(crate) ledger_journal: Vec<crate::phi::observer::ObservationRecord>,
     client: ApiClient,
     tools: ToolRegistry,
     memory: AgentMemory,
@@ -786,6 +867,20 @@ pub struct Agent {
     last_successful_verification_mutation_sequence: usize,
     /// Most recent failed verification summary, used by the completion gate.
     last_failed_verification_summary: Option<String>,
+    /// The most recent failing verification, WITH the project it concerned.
+    ///
+    /// The bare summary above cannot distinguish a failing test in this task's
+    /// project from a compile error in an unrelated crate that encloses it, so
+    /// both blocked completion. See `verification_scope`.
+    /// Outstanding verification failures, one per check identity.
+    ///
+    /// Was a single `Option<VerificationRecord>`: a second failing check
+    /// overwrote the first, and the automatic post-edit path bypassed the
+    /// scoped clearing rule entirely by assigning `None` on any pass.
+    verification_failures: verification_scope::VerificationLedger,
+    /// Root the current task is working in; verification relevance is measured
+    /// against it.
+    task_verification_root: Option<std::path::PathBuf>,
     /// Mutation sequence at which the most recent verification failure was
     /// recorded. The gate compares this against the credited success: a
     /// failure at the SAME revision as (or after) the last pass is an
@@ -1170,10 +1265,12 @@ To call a tool, use this EXACT XML structure:
                 .await
                 .unwrap_or(None);
 
-        // Initialize verification gate with project root
+        // Initialize verification gate with project root and active working dir
         let project_root = current_project_root();
+        let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let mut verification_gate =
-            VerificationGate::new(&project_root, VerificationConfig::fast());
+            VerificationGate::new(&project_root, VerificationConfig::fast())
+                .with_working_dir(workdir);
         if let Some(ref cmd) = config.agent.post_edit_test_command {
             verification_gate.set_post_edit_test_command(Some(cmd.clone()));
         }
@@ -1249,6 +1346,17 @@ To call a tool, use this EXACT XML structure:
         let session_id = uuid::Uuid::new_v4().to_string();
         let audit_logger = crate::safety::audit::AuditLogger::new(&session_id);
         let session_logger = session_log::SessionLogger::new(&session_id).await;
+        let phi_activity = if config.agent.disable_turn_artifacts {
+            None
+        } else {
+            match crate::phi::activity::ActivityCapture::from_environment(&session_id) {
+                Ok(capture) => Some(capture),
+                Err(error) => {
+                    tracing::warn!(%error, "Phi activity capture unavailable");
+                    None
+                }
+            }
+        };
         if let Some(ref logger) = audit_logger {
             logger.log_session_start();
         }
@@ -1317,6 +1425,11 @@ To call a tool, use this EXACT XML structure:
         #[cfg(feature = "resilience")]
         let credential_origin_endpoint = config.endpoint.clone();
         let agent = Self {
+            phi_activity,
+            phi_activity_terminal_task: None,
+            evidence_ledger: crate::phi::ledger::Ledger::new(),
+            ledger_unattributed: Vec::new(),
+            ledger_journal: Vec::new(),
             client,
             tools,
             memory,
@@ -1421,6 +1534,10 @@ To call a tool, use this EXACT XML structure:
             mutation_sequence: 0,
             last_successful_verification_mutation_sequence: 0,
             last_failed_verification_summary: None,
+            verification_failures: Default::default(),
+            // Pinned at construction: reading the process cwd live made verification
+            // relevance depend on whatever else the process had chdir'd to.
+            task_verification_root: std::env::current_dir().ok(),
             last_failed_verification_mutation_sequence: 0,
             compression_orchestrator: CompressionOrchestrator::new(),
             mutating_tool_call_count: 0,
@@ -2697,6 +2814,7 @@ To call a tool, use this EXACT XML structure:
         self.mutation_sequence = 0;
         self.last_successful_verification_mutation_sequence = 0;
         self.last_failed_verification_summary = None;
+        self.verification_failures.clear();
         self.last_failed_verification_mutation_sequence = 0;
         self.permanently_blocked_tool_calls.clear();
         self.prefill_400_count = 0;

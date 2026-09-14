@@ -850,8 +850,16 @@ async fn test_file_delete_success() {
     assert!(!file_path.exists());
 }
 
+/// Deleting an absent path succeeds: the requested end state already holds.
+///
+/// This test previously asserted the opposite. In a live container run the
+/// model's `file_delete` was blocked by the FILES: checklist guard, it fell
+/// back to `rm -f`, and the retried `file_delete` then returned "File not
+/// found" -- which retry-suppression escalated into a hard block on a task
+/// that had already done what was asked. Idempotency is the fix; this test is
+/// updated to match rather than left asserting the behaviour that caused it.
 #[tokio::test]
-async fn test_file_delete_not_found() {
+async fn test_file_delete_absent_path_is_idempotent() {
     let temp_dir = TempDir::new().unwrap();
     let file_path = temp_dir.path().join("nonexistent.txt");
 
@@ -859,8 +867,15 @@ async fn test_file_delete_not_found() {
     let args = serde_json::json!({"path": file_path.to_str().unwrap()});
 
     let result = tool.execute(args).await;
-    assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("File not found"));
+    assert!(
+        result.is_ok(),
+        "removing something already absent achieved the requested end state: {result:?}"
+    );
+    let text = format!("{:?}", result.unwrap());
+    assert!(
+        !text.to_lowercase().contains("file not found"),
+        "and must not report an error the caller would retry on: {text}"
+    );
 }
 
 #[tokio::test]

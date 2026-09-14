@@ -10,8 +10,88 @@ use std::process::Stdio;
 use tokio::process::Command;
 
 use super::runtime::{get_runtime, ContainerRuntime};
-use super::validation::{validate_port_mapping, validate_volume_spec};
+use super::validation::{
+    is_valid_memory, is_valid_user, validate_port_mapping, validate_volume_spec,
+};
 use crate::tools::Tool;
+
+/// Build the container-runtime isolation flags for a run request's `profile`
+/// (default: "hardened"). Pure and validated so it is unit-tested without a
+/// container runtime. See docs/redteam_boundary_lab.md for the threat model and
+/// the measured containment of each profile.
+///
+/// - `hardened` (default): `--security-opt no-new-privileges`, `--pids-limit`,
+///   `--memory`/`--memory-swap`, and drops `NET_RAW`+`MKNOD`. Keeps root, a
+///   writable rootfs and networking so ordinary build/dev images still work.
+/// - `sealed`: hardened plus `--cap-drop ALL`, `--read-only`, a `tmpfs /tmp`
+///   and a non-root `--user`. For untrusted code; pair with `network: "none"`.
+/// - `unsafe`: no added isolation (legacy behaviour) — an explicit opt-out.
+pub fn security_flags(args: &Value) -> Result<Vec<String>> {
+    let profile = args
+        .get("profile")
+        .and_then(|v| v.as_str())
+        .unwrap_or("hardened");
+    match profile {
+        "unsafe" => return Ok(Vec::new()),
+        "hardened" | "sealed" => {}
+        other => anyhow::bail!(
+            "Unknown container profile '{}'. Use 'hardened', 'sealed', or 'unsafe'.",
+            other
+        ),
+    }
+
+    let mut flags: Vec<String> = vec!["--security-opt".into(), "no-new-privileges".into()];
+
+    let pids = args
+        .get("pids_limit")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1024);
+    if pids < 1 {
+        anyhow::bail!("pids_limit must be >= 1, got {}", pids);
+    }
+    flags.push("--pids-limit".into());
+    flags.push(pids.to_string());
+
+    let memory = args.get("memory").and_then(|v| v.as_str()).unwrap_or("4g");
+    if !is_valid_memory(memory) {
+        anyhow::bail!("Invalid memory '{}'. Expected e.g. '512m', '2g'.", memory);
+    }
+    flags.push("--memory".into());
+    flags.push(memory.into());
+    flags.push("--memory-swap".into());
+    flags.push(memory.into());
+
+    if profile == "sealed" {
+        flags.push("--cap-drop".into());
+        flags.push("ALL".into());
+        flags.push("--read-only".into());
+        flags.push("--tmpfs".into());
+        flags.push("/tmp:rw,nosuid,nodev,size=256m".into());
+        let user = args
+            .get("user")
+            .and_then(|v| v.as_str())
+            .unwrap_or("65534:65534");
+        if !is_valid_user(user) {
+            anyhow::bail!("Invalid user '{}'. Expected uid[:gid] or name.", user);
+        }
+        flags.push("--user".into());
+        flags.push(user.into());
+    } else {
+        for cap in ["NET_RAW", "MKNOD"] {
+            flags.push("--cap-drop".into());
+            flags.push(cap.into());
+        }
+        if let Some(user) = args.get("user").and_then(|v| v.as_str()) {
+            if !is_valid_user(user) {
+                anyhow::bail!("Invalid user '{}'. Expected uid[:gid] or name.", user);
+            }
+            flags.push("--user".into());
+            flags.push(user.into());
+        }
+    }
+
+    Ok(flags)
+}
 
 // ============================================================================
 // Container Run
@@ -81,6 +161,23 @@ impl Tool for ContainerRun {
                     "type": "string",
                     "enum": ["docker", "podman", "auto"],
                     "description": "Container runtime to use (default: auto-detect)"
+                },
+                "profile": {
+                    "type": "string",
+                    "enum": ["hardened", "sealed", "unsafe"],
+                    "description": "Isolation profile (default: hardened). 'hardened' adds no-new-privileges, pid/memory caps and drops NET_RAW+MKNOD while staying usable for normal builds. 'sealed' also drops all capabilities, makes the rootfs read-only and runs non-root — for untrusted code (pair with network 'none' for full isolation). 'unsafe' disables all added isolation."
+                },
+                "memory": {
+                    "type": "string",
+                    "description": "Memory limit for hardened/sealed profiles (e.g. '512m', '2g'). Default '4g'."
+                },
+                "pids_limit": {
+                    "type": "integer",
+                    "description": "Max process count for hardened/sealed profiles. Default 1024."
+                },
+                "user": {
+                    "type": "string",
+                    "description": "Run as this user (uid, uid:gid, or name). 'sealed' defaults to 65534:65534 (nobody)."
                 }
             },
             "required": ["image"]
@@ -96,6 +193,13 @@ impl Tool for ContainerRun {
         let runtime = get_runtime(args.get("runtime").and_then(|v| v.as_str())).await?;
         let mut cmd = Command::new(runtime.command());
         cmd.arg("run");
+
+        // Isolation profile (default: hardened). A bare `docker run` is root,
+        // full-caps and unlimited — see docs/redteam_boundary_lab.md. Applied
+        // before user-supplied flags so an explicit `network`/`user` still wins.
+        for flag in security_flags(&args)? {
+            cmd.arg(flag);
+        }
 
         // Container name
         if let Some(name) = args.get("name").and_then(|v| v.as_str()) {

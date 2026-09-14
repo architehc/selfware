@@ -778,6 +778,8 @@ fn test_apply_delta_task_id_mismatch() {
     use crate::checkpoint::CheckpointDelta;
     let mut cp = TaskCheckpoint::new("task-a".to_string(), "desc".to_string());
     let delta = CheckpointDelta {
+        // Pre-ledger deltas carried none; None must leave existing evidence intact.
+        evidence_ledger: None,
         task_id: "task-b".to_string(),
         base_version: cp.version,
         target_version: cp.version + 1,
@@ -811,6 +813,8 @@ fn test_apply_delta_version_mismatch() {
     use crate::checkpoint::CheckpointDelta;
     let mut cp = TaskCheckpoint::new("task-x".to_string(), "desc".to_string());
     let delta = CheckpointDelta {
+        // Pre-ledger deltas carried none; None must leave existing evidence intact.
+        evidence_ledger: None,
         task_id: "task-x".to_string(),
         base_version: cp.version + 99, // wrong base version
         target_version: cp.version + 100,
@@ -846,6 +850,8 @@ fn test_apply_delta_with_all_fields_set() {
     cp.set_step(0); // version = 2
 
     let delta = CheckpointDelta {
+        // Pre-ledger deltas carried none; None must leave existing evidence intact.
+        evidence_ledger: None,
         task_id: "full-delta".to_string(),
         base_version: cp.version,
         target_version: cp.version + 1,
@@ -914,6 +920,8 @@ fn test_apply_delta_preserves_existing_data_when_fields_none() {
     cp.set_messages(vec![Message::user("existing")]);
 
     let delta = CheckpointDelta {
+        // Pre-ledger deltas carried none; None must leave existing evidence intact.
+        evidence_ledger: None,
         task_id: "partial".to_string(),
         base_version: cp.version,
         target_version: cp.version + 1,
@@ -952,6 +960,8 @@ fn test_apply_delta_preserves_existing_data_when_fields_none() {
 fn test_checkpoint_delta_serialization_roundtrip() {
     use crate::checkpoint::CheckpointDelta;
     let delta = CheckpointDelta {
+        // Pre-ledger deltas carried none; None must leave existing evidence intact.
+        evidence_ledger: None,
         task_id: "delta-ser".to_string(),
         base_version: 3,
         target_version: 5,

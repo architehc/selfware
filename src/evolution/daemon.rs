@@ -21,7 +21,9 @@ pub struct GenerationWinner {
     pub description: String,
     pub composite_score: f64,
     pub sab_delta: f64,
-    pub token_delta: f64,
+    /// `None` when either side did not report token usage. It was `f64`, and
+    /// two unmeasured runs produced a confident `0.0` delta.
+    pub token_delta: Option<f64>,
     pub patch: String,
     pub git_tag: Option<String>,
 }
@@ -34,6 +36,12 @@ pub struct EvolutionResult {
     pub final_sab_score: f64,
     pub initial_sab_score: f64,
     pub total_duration: std::time::Duration,
+    /// Why the run stopped early, if it did.
+    ///
+    /// A run abandoned because its baseline could not be measured used to be
+    /// indistinguishable from one that ran fully and found no improvement:
+    /// both returned zero improvements. They mean opposite things.
+    pub aborted: Option<String>,
 }
 
 const DEFAULT_TOKEN_BUDGET: u64 = 500_000;
@@ -108,6 +116,15 @@ fn measure_compile_test_baseline(
         ));
     }
 
+    // Time the TEST PHASE ONLY, because that is what the candidate arm times.
+    //
+    // `start` above covers check + test + fmt + clippy + release build, and
+    // `build_candidate_metrics` recorded only its test duration. Latency is a
+    // weighted fitness term, so the baseline carried four extra phases of
+    // wall-clock that no candidate ever paid: every candidate looked faster
+    // than the baseline by construction, and that bias pushed toward promotion.
+    // Two arms must measure the same boundary or the comparison is not one.
+    let test_start = Instant::now();
     let mut test_cmd = Command::new("cargo");
     test_cmd.arg("test").current_dir(dir);
     if !features.is_empty() {
@@ -116,6 +133,7 @@ fn measure_compile_test_baseline(
     let test = test_cmd
         .output()
         .map_err(|e| format!("cargo test failed to run: {e}"))?;
+    let test_duration = test_start.elapsed();
     let test_stdout = String::from_utf8_lossy(&test.stdout);
     let test_stderr = String::from_utf8_lossy(&test.stderr);
     let full_output = format!("{}\n{}", test_stdout, test_stderr);
@@ -169,10 +187,14 @@ fn measure_compile_test_baseline(
 
     Ok(FitnessMetrics {
         sab_score,
-        tokens_used: 0,
+        // Compile/test mode runs no agent, so no tokens are spent OR observed.
+        // Recording 0 scored this as perfect token efficiency.
+        tokens_used: None,
         token_budget: DEFAULT_TOKEN_BUDGET,
-        wall_clock_secs: start.elapsed().as_secs_f64(),
+        // Same boundary as the candidate arm: the test phase.
+        wall_clock_secs: test_duration.as_secs_f64(),
         timeout_secs,
+        full_evaluation_secs: Some(start.elapsed().as_secs_f64()),
         test_coverage_pct: pass_ratio * 100.0,
         binary_size_mb,
         max_binary_size_mb: 50.0,
@@ -219,10 +241,12 @@ fn build_candidate_metrics(
 
     Some(FitnessMetrics {
         sab_score: pass_ratio * 100.0,
-        tokens_used: 0,
+        tokens_used: None,
         token_budget: DEFAULT_TOKEN_BUDGET,
         wall_clock_secs: test_duration.as_secs_f64(),
         timeout_secs: DEFAULT_TIMEOUT_SECS,
+        // The candidate arm does not time its own build phase separately.
+        full_evaluation_secs: None,
         test_coverage_pct: pass_ratio * 100.0,
         binary_size_mb,
         max_binary_size_mb: config.safety.max_binary_size_mb,
@@ -232,21 +256,14 @@ fn build_candidate_metrics(
     })
 }
 
-fn synthetic_baseline_metrics() -> FitnessMetrics {
-    FitnessMetrics {
-        sab_score: 50.0,
-        tokens_used: 0,
-        token_budget: DEFAULT_TOKEN_BUDGET,
-        wall_clock_secs: 0.0,
-        timeout_secs: DEFAULT_TIMEOUT_SECS,
-        test_coverage_pct: 50.0,
-        binary_size_mb: 15.0,
-        max_binary_size_mb: 50.0,
-        tests_passed: 0,
-        tests_total: 0,
-        visual_score: 0.0,
-    }
-}
+// `synthetic_baseline_metrics` used to live here. It returned sab_score 50.0,
+// coverage 50.0 and a 15 MB binary when real baseline measurement FAILED, and
+// that fiction became the bar every candidate was promoted against. A candidate
+// scoring 55 on a suite the baseline never ran looked like an improvement.
+//
+// There is no honest substitute for a measurement that did not happen: if the
+// baseline cannot be measured, the generation cannot be judged, so it is
+// abandoned rather than scored against an invention.
 
 /// Convert a SAB result into FitnessMetrics, preserving the real SAB score.
 fn metrics_from_sab_result(
@@ -293,6 +310,71 @@ fn winner_test_count_gate(
     }
 }
 
+/// Enforces DarwinX non-regression: a candidate must pass all baseline-passed scenarios
+/// without regressions, and cannot drop any scenarios from the suite.
+///
+/// Returns `Err(reason)` when the candidate regressed; `Ok(())` otherwise.
+pub(crate) fn winner_darwinx_gate(
+    base_sab: Option<&SabResult>,
+    cand_sab: Option<&SabResult>,
+) -> Result<(), String> {
+    match (base_sab, cand_sab) {
+        (Some(base), Some(cand)) => {
+            if let Err(violation) = base.check_darwinx_non_regression(cand) {
+                Err(format!("DarwinX non-regression check failed: {violation}"))
+            } else {
+                Ok(())
+            }
+        }
+        (None, None) => Ok(()),
+        (Some(_), None) => Err(
+            "DarwinX gate rejected: baseline has SAB benchmark evidence but candidate has none"
+                .to_string(),
+        ),
+        (None, Some(_)) => Err(
+            "DarwinX gate rejected: candidate has SAB benchmark evidence but baseline has none"
+                .to_string(),
+        ),
+    }
+}
+
+/// Promotion decision for a generation winner candidate.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PromotionDecision {
+    Promote,
+    Reject(String),
+}
+
+/// Evaluates whether a candidate winner should be promoted to baseline:
+/// 1. Composite score must strictly exceed baseline.
+/// 2. Must pass the DarwinX non-regression gate over SAB results.
+/// 3. Must not regress total test count relative to baseline.
+pub(crate) fn evaluate_candidate_promotion(
+    baseline_composite: f64,
+    winner_composite: f64,
+    base_sab: Option<&SabResult>,
+    cand_sab: Option<&SabResult>,
+    base_metrics: &FitnessMetrics,
+    winner_metrics: &FitnessMetrics,
+) -> PromotionDecision {
+    if winner_composite <= baseline_composite {
+        return PromotionDecision::Reject(format!(
+            "winner composite ({:.4}) does not exceed baseline ({:.4})",
+            winner_composite, baseline_composite
+        ));
+    }
+
+    if let Err(reason) = winner_darwinx_gate(base_sab, cand_sab) {
+        return PromotionDecision::Reject(reason);
+    }
+
+    if let Err(reason) = winner_test_count_gate(base_metrics, winner_metrics) {
+        return PromotionDecision::Reject(reason);
+    }
+
+    PromotionDecision::Promote
+}
+
 /// Run the evolution daemon
 pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
     let start = Instant::now();
@@ -324,18 +406,30 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
     // Only run SAB baseline if explicitly requested via env var
     // (SAB runs all 12 scenarios and takes 30+ minutes). Otherwise use real
     // compile / test / fmt / clippy / binary-size metrics.
-    let baseline_metrics = if sab_mode {
+    let (baseline_metrics, mut current_baseline_sab) = if sab_mode {
         let selfware_binary = repo_root.join("target/release/selfware");
         match fitness::run_sab(&selfware_binary, &sab_config) {
             Ok(r) => {
-                metrics_from_sab_result(&r, &selfware_binary, config.safety.max_binary_size_mb)
+                let m =
+                    metrics_from_sab_result(&r, &selfware_binary, config.safety.max_binary_size_mb);
+                (m, Some(r))
             }
             Err(e) => {
                 log_warning(&format!(
-                    "SAB baseline failed ({}), using synthetic baseline",
-                    e
+                    "SAB baseline failed ({e}); refusing to evolve against an unmeasured baseline"
                 ));
-                synthetic_baseline_metrics()
+                return EvolutionResult {
+                    generations_run: 0,
+                    improvements: Vec::new(),
+                    final_sab_score: 0.0,
+                    initial_sab_score: 0.0,
+                    total_duration: start.elapsed(),
+                    aborted: Some(format!(
+                        "baseline measurement failed: {e}. Promotion needs a real baseline \
+                         to compare against; scoring candidates against a placeholder \
+                         cannot show improvement."
+                    )),
+                };
             }
         }
     } else {
@@ -343,14 +437,25 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         match measure_compile_test_baseline(repo_root, EVOLVE_FEATURES, DEFAULT_TIMEOUT_SECS) {
             Ok(mut m) => {
                 m.max_binary_size_mb = config.safety.max_binary_size_mb;
-                m
+                (m, None)
             }
             Err(e) => {
                 log_warning(&format!(
-                    "Compile/test baseline failed ({}), using synthetic baseline",
-                    e
+                    "Compile/test baseline failed ({e}); refusing to evolve against an \
+                     unmeasured baseline"
                 ));
-                synthetic_baseline_metrics()
+                return EvolutionResult {
+                    generations_run: 0,
+                    improvements: Vec::new(),
+                    final_sab_score: 0.0,
+                    initial_sab_score: 0.0,
+                    total_duration: start.elapsed(),
+                    aborted: Some(format!(
+                        "baseline measurement failed: {e}. Promotion needs a real baseline \
+                         to compare against; scoring candidates against a placeholder \
+                         cannot show improvement."
+                    )),
+                };
             }
         }
     };
@@ -444,7 +549,12 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         // ─── Step 4: Evaluate each hypothesis (apply → check → test) ───
         let sab_available =
             sab_config.runner_script.exists() && std::env::var("SELFWARE_EVOLVE_SAB").is_ok();
-        let mut generation_winner: Option<(Hypothesis, FitnessMetrics, String)> = None;
+        let mut generation_winner: Option<(
+            Hypothesis,
+            FitnessMetrics,
+            Option<fitness::SabResult>,
+            String,
+        )> = None;
 
         for hypothesis in &valid {
             log_phase(&format!(
@@ -484,15 +594,14 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 .output();
 
             if fmt_check.map(|o| !o.status.success()).unwrap_or(true) {
-                log_warning(&format!(
-                    "  {} failed fmt check — auto-formatting before evaluation",
-                    hypothesis.id
-                ));
-                // Auto-fix: run cargo fmt to correct formatting
-                let _ = Command::new("cargo")
-                    .args(["fmt"])
+                let fmt_fix = Command::new("cargo")
+                    .arg("fmt")
                     .current_dir(&worktree)
                     .output();
+                if fmt_fix.map(|o| !o.status.success()).unwrap_or(true) {
+                    log_frost(generation, &format!("cargo fmt failed: {}", hypothesis.id));
+                    continue;
+                }
             }
 
             // Compile check
@@ -560,7 +669,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
             // Compute real fitness metrics. If SAB is available, run the full
             // benchmark; otherwise derive compile/test/binary-size metrics.
-            let winner_metrics = if sab_available {
+            let (winner_metrics, winner_sab) = if sab_available {
                 let build = Command::new("cargo")
                     .args(["build", "--release", "--features", "self-improvement"])
                     .current_dir(&worktree)
@@ -576,10 +685,13 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
                 let mutated_binary = worktree.join("target/release/selfware");
                 match fitness::run_sab(&mutated_binary, &sab_config) {
-                    Ok(r) => metrics_from_sab_result(
-                        &r,
-                        &mutated_binary,
-                        config.safety.max_binary_size_mb,
+                    Ok(r) => (
+                        metrics_from_sab_result(
+                            &r,
+                            &mutated_binary,
+                            config.safety.max_binary_size_mb,
+                        ),
+                        Some(r),
                     ),
                     Err(e) => {
                         log_warning(&format!("  SAB failed: {}", e));
@@ -594,7 +706,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     EVOLVE_FEATURES,
                     &config,
                 ) {
-                    Some(m) => m,
+                    Some(m) => (m, None),
                     None => {
                         log_frost(
                             generation,
@@ -629,12 +741,13 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
             // Keep the first passing hypothesis as winner
             if generation_winner.is_none() {
-                generation_winner = Some((hypothesis.clone(), winner_metrics, tested_diff));
+                generation_winner =
+                    Some((hypothesis.clone(), winner_metrics, winner_sab, tested_diff));
             }
         }
 
         // ─── Step 5: EMERGE OR DIE ───
-        let (winner, winner_metrics, tested_diff) = match generation_winner {
+        let (winner, winner_metrics, winner_sab, tested_diff) = match generation_winner {
             Some(w) => w,
             None => {
                 log_frost(generation, "No hypotheses survived evaluation");
@@ -656,14 +769,97 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         let baseline_composite = config.fitness_weights.composite(&current_baseline_metrics);
         let winner_composite = config.fitness_weights.composite(&winner_metrics);
 
-        if winner_composite > baseline_composite {
-            // Hard gate: a winner that runs FEWER tests than the baseline
-            // must never be committed — it enforces the invariant the dead
-            // `SafetyConfig.min_test_count` promised. A regression here
-            // usually means the mutation deleted/skipped tests to inflate
-            // its pass ratio.
-            if let Err(reason) = winner_test_count_gate(&current_baseline_metrics, &winner_metrics)
-            {
+        match evaluate_candidate_promotion(
+            baseline_composite,
+            winner_composite,
+            current_baseline_sab.as_ref(),
+            winner_sab.as_ref(),
+            &current_baseline_metrics,
+            &winner_metrics,
+        ) {
+            PromotionDecision::Promote => {
+                log_bloom(
+                    generation,
+                    &winner.description,
+                    current_baseline_metrics.sab_score,
+                    winner_metrics.sab_score,
+                );
+
+                let commit_msg = format!(
+                    "🧬 Gen {} BLOOM: {:.0} → {:.0} | {}",
+                    generation,
+                    current_baseline_metrics.sab_score,
+                    winner_metrics.sab_score,
+                    winner.description
+                );
+                // Apply the EXACT tested diff (not the raw LLM patch) and commit
+                // ONLY the paths it edits — never `git add -A`, which swept every
+                // dirty edit and untracked file (.env, scratch, credentials) into
+                // the BLOOM commit on whatever branch was checked out.
+                if commit_winner_to_repo(repo_root, &tested_diff, &commit_msg) {
+                    let git_tag = if generation.is_multiple_of(config.checkpoint_interval) {
+                        let tag = format!("evolve-gen-{}", generation);
+                        let _ = Command::new("git")
+                            .args(["tag", &tag])
+                            .current_dir(repo_root)
+                            .output();
+                        Some(tag)
+                    } else {
+                        None
+                    };
+
+                    hall_of_fame.push(GenerationWinner {
+                        generation,
+                        description: winner.description.clone(),
+                        composite_score: winner_composite,
+                        sab_delta: winner_metrics.sab_score - current_baseline_metrics.sab_score,
+                        token_delta: match (
+                            winner_metrics.tokens_used,
+                            current_baseline_metrics.tokens_used,
+                        ) {
+                            (Some(w), Some(b)) => Some(w as f64 - b as f64),
+                            _ => None,
+                        },
+                        // The tested diff actually committed (incl. fmt fixes),
+                        // not the raw LLM patch.
+                        patch: tested_diff.clone(),
+                        git_tag,
+                    });
+
+                    log_event(
+                        repo_root,
+                        &serde_json::json!({
+                            "event": "generation_end",
+                            "timestamp": chrono_now(),
+                            "generation": generation,
+                            "outcome": "bloom",
+                            "description": winner.description,
+                            "score_before": current_baseline_metrics.sab_score,
+                            "score_after": winner_metrics.sab_score,
+                            "composite": winner_composite,
+                            "duration_secs": gen_start.elapsed().as_secs_f64(),
+                            "improvements_total": hall_of_fame.len(),
+                        }),
+                    );
+
+                    current_baseline_metrics = winner_metrics;
+                    if winner_sab.is_some() {
+                        current_baseline_sab = winner_sab;
+                    }
+                }
+            }
+            PromotionDecision::Reject(reason) => {
+                let rating = if winner_composite < baseline_composite * 0.9 {
+                    GenerationRating::Frost
+                } else {
+                    GenerationRating::Wilt
+                };
+                log_reject(
+                    generation,
+                    &rating,
+                    winner_metrics.sab_score,
+                    current_baseline_metrics.sab_score,
+                );
                 log_warning(&reason);
                 log_event(
                     repo_root,
@@ -671,99 +867,15 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         "event": "generation_end",
                         "timestamp": chrono_now(),
                         "generation": generation,
-                        "outcome": "frost",
+                        "outcome": format!("{}", rating),
                         "reason": reason,
-                        "duration_secs": gen_start.elapsed().as_secs_f64(),
-                    }),
-                );
-                continue;
-            }
-            log_bloom(
-                generation,
-                &winner.description,
-                current_baseline_metrics.sab_score,
-                winner_metrics.sab_score,
-            );
-
-            let commit_msg = format!(
-                "🧬 Gen {} BLOOM: {:.0} → {:.0} | {}",
-                generation,
-                current_baseline_metrics.sab_score,
-                winner_metrics.sab_score,
-                winner.description
-            );
-            // Apply the EXACT tested diff (not the raw LLM patch) and commit
-            // ONLY the paths it edits — never `git add -A`, which swept every
-            // dirty edit and untracked file (.env, scratch, credentials) into
-            // the BLOOM commit on whatever branch was checked out.
-            if commit_winner_to_repo(repo_root, &tested_diff, &commit_msg) {
-                let git_tag = if generation.is_multiple_of(config.checkpoint_interval) {
-                    let tag = format!("evolve-gen-{}", generation);
-                    let _ = Command::new("git")
-                        .args(["tag", &tag])
-                        .current_dir(repo_root)
-                        .output();
-                    Some(tag)
-                } else {
-                    None
-                };
-
-                hall_of_fame.push(GenerationWinner {
-                    generation,
-                    description: winner.description.clone(),
-                    composite_score: winner_composite,
-                    sab_delta: winner_metrics.sab_score - current_baseline_metrics.sab_score,
-                    token_delta: winner_metrics.tokens_used as f64
-                        - current_baseline_metrics.tokens_used as f64,
-                    // The tested diff actually committed (incl. fmt fixes),
-                    // not the raw LLM patch.
-                    patch: tested_diff.clone(),
-                    git_tag,
-                });
-
-                log_event(
-                    repo_root,
-                    &serde_json::json!({
-                        "event": "generation_end",
-                        "timestamp": chrono_now(),
-                        "generation": generation,
-                        "outcome": "bloom",
                         "description": winner.description,
-                        "score_before": current_baseline_metrics.sab_score,
-                        "score_after": winner_metrics.sab_score,
-                        "composite": winner_composite,
+                        "winner_score": winner_metrics.sab_score,
+                        "baseline_score": current_baseline_metrics.sab_score,
                         "duration_secs": gen_start.elapsed().as_secs_f64(),
-                        "improvements_total": hall_of_fame.len(),
                     }),
                 );
-
-                current_baseline_metrics = winner_metrics;
             }
-        } else {
-            let rating = if winner_composite < baseline_composite * 0.9 {
-                GenerationRating::Frost
-            } else {
-                GenerationRating::Wilt
-            };
-            log_reject(
-                generation,
-                &rating,
-                winner_metrics.sab_score,
-                current_baseline_metrics.sab_score,
-            );
-            log_event(
-                repo_root,
-                &serde_json::json!({
-                    "event": "generation_end",
-                    "timestamp": chrono_now(),
-                    "generation": generation,
-                    "outcome": format!("{}", rating),
-                    "description": winner.description,
-                    "winner_score": winner_metrics.sab_score,
-                    "baseline_score": current_baseline_metrics.sab_score,
-                    "duration_secs": gen_start.elapsed().as_secs_f64(),
-                }),
-            );
         }
     }
 
@@ -773,6 +885,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         final_sab_score: current_baseline_metrics.sab_score,
         initial_sab_score: initial_sab,
         total_duration: start.elapsed(),
+        aborted: None,
     }
 }
 
@@ -1405,7 +1518,12 @@ pub fn format_evolution_history(hall_of_fame: &[GenerationWinner]) -> String {
     for winner in hall_of_fame.iter().rev().take(10) {
         prompt.push_str(&format!(
             "- Gen {}: {} (SAB +{:.1}, tokens {:.0})\n",
-            winner.generation, winner.description, winner.sab_delta, winner.token_delta
+            winner.generation,
+            winner.description,
+            winner.sab_delta,
+            winner
+                .token_delta
+                .map_or_else(|| "unmeasured".to_string(), |d| format!("{d:+.0}"))
         ));
     }
     prompt
@@ -2024,7 +2142,9 @@ fn log_baseline(metrics: &FitnessMetrics, sab_mode: bool) {
         label,
         metrics.sab_score,
         rating_from_score(metrics.sab_score),
-        metrics.tokens_used,
+        metrics
+            .tokens_used
+            .map_or_else(|| "unmeasured".to_string(), |t| t.to_string()),
         metrics.wall_clock_secs
     );
 }

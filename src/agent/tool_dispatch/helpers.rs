@@ -632,15 +632,111 @@ pub(crate) fn has_file_redirect(command: &str) -> bool {
                 while chars.get(j) == Some(&' ') {
                     j += 1;
                 }
-                if chars.get(j) != Some(&'&') {
-                    return true;
+                if chars.get(j) == Some(&'&') {
+                    i = j;
+                    continue;
                 }
+                // Check if redirecting to /dev/null (e.g. 2>/dev/null, >/dev/null)
+                let rem: String = chars[j..].iter().collect();
+                if let Some(after) = rem.strip_prefix("/dev/null") {
+                    if after.is_empty()
+                        || after.starts_with(' ')
+                        || after.starts_with(';')
+                        || after.starts_with('&')
+                        || after.starts_with('|')
+                    {
+                        i = j + "/dev/null".len();
+                        continue;
+                    }
+                }
+                return true;
             }
             _ => {}
         }
         i += 1;
     }
     false
+}
+
+/// Split a command on shell operators, ignoring operators inside quotes.
+///
+/// Quote-awareness is not a nicety: `jq '.nodes | length' file` contains a pipe
+/// that is part of an argument, and treating it as a separator turns one
+/// read-only command into two unrecognisable fragments.
+///
+/// Shared with Phi's observer so the two cannot disagree about where one
+/// command ends and the next begins — they did, and the observer's naive
+/// `split('|')` reintroduced the very bug this function was written to fix.
+pub(crate) fn split_shell_segments(command: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    let chars: Vec<char> = command.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if escaped {
+            current.push(c);
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        match c {
+            '\\' => {
+                current.push(c);
+                escaped = true;
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+                current.push(c);
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                current.push(c);
+            }
+            // `&` is three different things, and an earlier revision treated
+            // only the first as a separator:
+            //   `&&`   — connector, separates
+            //   `2>&1` — descriptor duplication, does NOT separate
+            //   `cmd &`— background job, DOES separate
+            // Refusing to split on the third let a read-only prefix vouch for
+            // whatever followed it: `ls & python3 fix.py` stayed one segment,
+            // matched the `ls` prefix, and an arbitrary script ran without
+            // advancing the mutation sequence.
+            '&' if !in_single && !in_double && chars.get(i + 1) == Some(&'&') => {
+                i += 1;
+                segments.push(std::mem::take(&mut current));
+            }
+            '&' if !in_single
+                && !in_double
+                && !current.trim_end().ends_with('>')
+                && !current.trim_end().ends_with('<')
+                && chars.get(i + 1) != Some(&'>') =>
+            {
+                // Backgrounding. The job still runs; it just runs detached.
+                segments.push(std::mem::take(&mut current));
+            }
+            '|' if !in_single && !in_double => {
+                if chars.get(i + 1) == Some(&'|') {
+                    i += 1;
+                }
+                segments.push(std::mem::take(&mut current));
+            }
+            ';' if !in_single && !in_double => {
+                segments.push(std::mem::take(&mut current));
+            }
+            _ => current.push(c),
+        }
+        i += 1;
+    }
+    segments.push(current);
+    segments
+        .into_iter()
+        .map(|segment| segment.trim().to_string())
+        .filter(|segment| !segment.is_empty())
+        .collect()
 }
 
 pub(crate) fn shell_command_is_observational(command: &str) -> bool {
@@ -651,6 +747,20 @@ pub(crate) fn shell_command_is_observational(command: &str) -> bool {
 
     if has_file_redirect(&normalized) {
         return false;
+    }
+
+    // A compound command is observational only if EVERY segment is.
+    //
+    // `shell_command_runs_test_script` scans all tokens, so a trailing
+    // `python3 -m unittest` vouched for a leading `python3 fix.py` and the
+    // whole thing read as read-only — an arbitrary script could run without
+    // advancing the mutation sequence, and a later edit would not invalidate
+    // the verification that followed it. One segment cannot speak for another.
+    let segments = split_shell_segments(&normalized);
+    if segments.len() > 1 {
+        return segments
+            .iter()
+            .all(|segment| shell_command_is_observational(segment));
     }
 
     // A plain formatter check does not write. Limit this special case to
@@ -670,6 +780,15 @@ pub(crate) fn shell_command_is_observational(command: &str) -> bool {
     }
 
     let mutating_markers = [
+        // `find` is a read-only prefix below, but these options make it write.
+        // Phi's observer already knew this; the dispatcher did not, so the two
+        // disagreed about the same command.
+        " -delete",
+        " -exec",
+        " -execdir",
+        " -ok",
+        " -fprint",
+        " -fls",
         "| tee",
         " tee ",
         "touch ",
@@ -713,6 +832,14 @@ pub(crate) fn shell_command_is_observational(command: &str) -> bool {
         "git status",
         "git diff",
         "git log",
+        // Phi's observer listed these as read-only and the dispatcher did not.
+        // They are: none of them write to the working tree.
+        "git show",
+        "git branch",
+        "git ls-files",
+        "git rev-parse",
+        "less",
+        "more",
         "ls",
         "pwd",
         "find",
@@ -753,10 +880,33 @@ pub(crate) fn shell_command_is_observational(command: &str) -> bool {
         "whoami",
         "pytest",
         "python -m pytest",
+        "python3 -m pytest",
+        "python -m unittest",
+        "python3 -m unittest",
+        "python -m test",
+        "python3 -m test",
+        "python -m py_compile",
+        "python3 -m py_compile",
+        "node --test",
         "npm test",
         "pnpm test",
         "yarn test",
+        "bun test",
+        "deno test",
+        "npx jest",
+        "npx mocha",
+        "npx vitest",
+        "npx ava",
         "go test",
+        "mvn test",
+        "mvn verify",
+        "gradle test",
+        "./gradlew test",
+        "dotnet test",
+        "ctest",
+        "make test",
+        "swift test",
+        "lake test",
         "which",
         "echo",
         "env",
@@ -899,6 +1049,87 @@ pub(crate) fn tool_call_is_mutating(name: &str, args: &serde_json::Value) -> boo
     false
 }
 
+/// What kind of verification a command performs.
+///
+/// `shell_command_is_verification` is deliberately broad — it answers "is this
+/// a checking command", which includes compilers and linters. Consumers that
+/// care whether TESTS RAN must not reuse that boolean: `cargo check`,
+/// `npx tsc`, `go build` and `sqlfluff lint` all return true and execute no
+/// tests. The evidence ledger discharged test obligations on them until this
+/// split existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VerificationKind {
+    /// Executes tests.
+    TestExecution,
+    /// Compiles, type-checks or lints. Proves the code builds, not that it works.
+    CompileOrLint,
+}
+
+/// Commands that check without executing tests. Subset of the prefixes below,
+/// kept as one list so the two cannot drift.
+const COMPILE_OR_LINT_PREFIXES: &[&str] = &[
+    "cargo check",
+    "cargo clippy",
+    "python -m py_compile",
+    "python3 -m py_compile",
+    "npx tsc",
+    "tsc ",
+    "go build",
+    "javac",
+    "dotnet build",
+    "cmake --build",
+    "swift build",
+    "sqlfluff lint",
+    "lake build",
+];
+
+/// Classify a verification command by kind. `None` when it is not verification
+/// at all.
+pub(crate) fn shell_command_verification_kind(command: &str) -> Option<VerificationKind> {
+    if !shell_command_is_verification(command) {
+        return None;
+    }
+    let normalized = command.trim().to_lowercase();
+    // A compound command is judged by its LAST verification segment: in
+    // `cargo check && cargo test` the tests did run.
+    let mut kind = VerificationKind::CompileOrLint;
+    let mut saw_any = false;
+    let segments: Vec<&str> = normalized
+        .split("&&")
+        .flat_map(|s| s.split("||"))
+        .flat_map(|s| s.split(';'))
+        .flat_map(|s| s.split('|'))
+        .collect();
+    for segment in segments {
+        let segment = segment.trim();
+        if segment.is_empty() || !shell_command_is_verification(segment) {
+            continue;
+        }
+        saw_any = true;
+        kind = if COMPILE_OR_LINT_PREFIXES
+            .iter()
+            .any(|prefix| segment.starts_with(prefix))
+        {
+            VerificationKind::CompileOrLint
+        } else {
+            VerificationKind::TestExecution
+        };
+        if kind == VerificationKind::TestExecution {
+            return Some(kind);
+        }
+    }
+    if saw_any {
+        Some(kind)
+    } else if COMPILE_OR_LINT_PREFIXES
+        .iter()
+        .any(|prefix| normalized.starts_with(prefix))
+    {
+        Some(VerificationKind::CompileOrLint)
+    } else {
+        Some(VerificationKind::TestExecution)
+    }
+}
+
 pub(crate) fn shell_command_is_verification(command: &str) -> bool {
     let normalized = command.trim().to_lowercase();
     if normalized.is_empty() {
@@ -919,9 +1150,18 @@ pub(crate) fn shell_command_is_verification(command: &str) -> bool {
         "python3 -m unittest",
         "python -m py_compile",
         "python3 -m py_compile",
+        "python -m test",
+        "python3 -m test",
+        "node --test",
         "npm test",
         "pnpm test",
         "yarn test",
+        "bun test",
+        "deno test",
+        "npx jest",
+        "npx mocha",
+        "npx vitest",
+        "npx ava",
         "npx tsc",
         "tsc ",
         "go test",
@@ -1225,7 +1465,8 @@ pub(crate) fn shell_command_runs_test_script(command: &str) -> bool {
             );
 
         if is_interpreter {
-            for arg in &tokens[index + 1..] {
+            let mut iter = tokens[index + 1..].iter().peekable();
+            while let Some(arg) = iter.next() {
                 if matches!(*arg, "-c" | "-e" | "--eval") {
                     if command
                         .find(*arg)
@@ -1235,6 +1476,20 @@ pub(crate) fn shell_command_runs_test_script(command: &str) -> bool {
                         return true;
                     }
                     break;
+                }
+                if *arg == "-m" {
+                    if let Some(mod_name) = iter.next() {
+                        if mod_name.starts_with("unittest")
+                            || mod_name.starts_with("pytest")
+                            || *mod_name == "test"
+                        {
+                            return true;
+                        }
+                    }
+                    continue;
+                }
+                if matches!(*arg, "--test" | "test") {
+                    return true;
                 }
                 if arg.starts_with('-') {
                     continue;
