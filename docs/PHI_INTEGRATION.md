@@ -55,6 +55,7 @@ read-only and does not alter agent prompts, tools, or acceptance decisions.
 The activity receipt endpoint (`GET /api/phi/activity`) provides a strictly read-only, non-destructive projection of `.selfware/phi/activity`. It obeys HTTP GET idempotence:
 - **Zero Read-Time Deletions**: Multiple concurrent readers or monitoring tools attaching to `/api/phi/activity` will never delete or truncate receipt files on disk.
 - **Write-Time Retention Bounding**: Receipt retention is enforced exclusively during writes (`ActivityCapture::write`). Orphaned temporary files (`.tmp-*`) older than 5 minutes and expired receipts older than 24 hours are pruned. If receipt count exceeds 256 (`MAX_SCAN`), excess oldest receipts are pruned during write operations.
+- **Directory Advisory Locking (`.lock`)**: An advisory lock file (`.selfware/phi/activity/.lock`) synchronizes concurrent writers and pruning passes via blocking exclusive flocking (`flock(LOCK_EX)`). Writers fail closed if the lock cannot be acquired; prune operations skip unlinking candidates if lock acquisition fails. The `.lock` file persists across runs and is strictly excluded from receipt scanning, parsing, and pruning.
 - **Latest-Run Semantics**: If a task previously failed a check but subsequently passed on a retry or completion, the latest run outcome is preserved in the evidence snapshot, preventing historical failures from falsely categorizing current workspace health as an error.
 
 The real-agent validation harness is:

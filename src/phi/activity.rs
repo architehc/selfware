@@ -239,8 +239,14 @@ impl Drop for ActivityDirLock {
 }
 
 #[cfg(all(test, unix))]
+type PreUnlinkHook = Option<Box<dyn FnMut()>>;
+#[cfg(all(test, unix))]
+type PreRecheckHook = Option<Box<dyn FnMut(&std::ffi::CStr)>>;
+
+#[cfg(all(test, unix))]
 thread_local! {
-    static PRE_UNLINK_HOOK: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
+    static PRE_UNLINK_HOOK: std::cell::RefCell<PreUnlinkHook> = const { std::cell::RefCell::new(None) };
+    static PRE_RECHECK_HOOK: std::cell::RefCell<PreRecheckHook> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(all(test, unix))]
@@ -248,6 +254,15 @@ fn call_pre_unlink_hook() {
     PRE_UNLINK_HOOK.with(|hook| {
         if let Some(ref mut action) = *hook.borrow_mut() {
             action();
+        }
+    });
+}
+
+#[cfg(all(test, unix))]
+fn call_pre_recheck_hook(name: &std::ffi::CStr) {
+    PRE_RECHECK_HOOK.with(|hook| {
+        if let Some(ref mut action) = *hook.borrow_mut() {
+            action(name);
         }
     });
 }
@@ -375,7 +390,12 @@ fn prune_retention(directory: &std::fs::File) {
     // Clean up orphaned temporary files older than 5 minutes
     for (tmp_mtime, tmp_ino, cname) in temporary_entries {
         if now_sec.saturating_sub(tmp_mtime) > 300 {
-            let _lock = ActivityDirLock::acquire(directory);
+            #[cfg(all(test, unix))]
+            call_pre_recheck_hook(&cname);
+
+            let Ok(_lock) = ActivityDirLock::acquire(directory) else {
+                continue;
+            };
             let mut stat: libc::stat = unsafe { std::mem::zeroed() };
             let res = unsafe {
                 libc::fstatat(
@@ -406,7 +426,12 @@ fn prune_retention(directory: &std::fs::File) {
     // Bounded receipt GC: prune excess oldest files past MAX_SCAN
     if json_files.len() > MAX_SCAN {
         for (scanned_mtime, scanned_ino, cname) in json_files.iter().skip(MAX_SCAN) {
-            let _lock = ActivityDirLock::acquire(directory);
+            #[cfg(all(test, unix))]
+            call_pre_recheck_hook(cname);
+
+            let Ok(_lock) = ActivityDirLock::acquire(directory) else {
+                continue;
+            };
             let mut stat: libc::stat = unsafe { std::mem::zeroed() };
             let res = unsafe {
                 libc::fstatat(
@@ -435,7 +460,12 @@ fn prune_retention(directory: &std::fs::File) {
     // Retention policy: prune expired receipts older than 24 hours
     for (scanned_mtime, scanned_ino, cname) in json_files {
         if now_sec.saturating_sub(scanned_mtime) > RETENTION_SECS {
-            let _lock = ActivityDirLock::acquire(directory);
+            #[cfg(all(test, unix))]
+            call_pre_recheck_hook(&cname);
+
+            let Ok(_lock) = ActivityDirLock::acquire(directory) else {
+                continue;
+            };
             let mut stat: libc::stat = unsafe { std::mem::zeroed() };
             let res = unsafe {
                 libc::fstatat(
@@ -736,15 +766,14 @@ mod tests {
     #[test]
     fn atomically_replaced_receipt_is_preserved_during_prune() {
         use nix::libc;
-        use std::os::fd::AsRawFd;
+        use std::os::fd::{AsRawFd, FromRawFd};
         let root = tempfile::tempdir().unwrap();
         let capture = ActivityCapture::new(root.path(), "session-race", "agent-race").unwrap();
         let dir = capture.activity_directory().unwrap();
 
-        // Create 260 files with deterministic past timestamps
-        for i in 0..260 {
-            let name = format!("receipt-{i:03}.json");
-            write_atomic(&dir, &name, b"initial").unwrap();
+        // Create 2 receipts with past timestamps (> 24h old)
+        for name in ["receipt-000.json", "receipt-001.json"] {
+            write_atomic(&dir, name, b"initial").unwrap();
             let cname = std::ffi::CString::new(name).unwrap();
             let times = [
                 libc::timespec {
@@ -761,16 +790,47 @@ mod tests {
             }
         }
 
-        // Atomically replace one of the oldest receipts (current timestamp will be preserved)
-        write_atomic(&dir, "receipt-000.json", b"replacement").unwrap();
+        let hook_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook_called_clone = hook_called.clone();
+        let dir_fd = dir.as_raw_fd();
+
+        PRE_RECHECK_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |cname: &std::ffi::CStr| {
+                if cname.to_bytes() == b"receipt-000.json" {
+                    let dup_fd = unsafe { libc::dup(dir_fd) };
+                    assert!(dup_fd >= 0);
+                    let dup_file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
+                    write_atomic(&dup_file, "receipt-000.json", b"replacement").unwrap();
+                    hook_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }));
+        });
 
         prune_retention(&dir);
 
+        PRE_RECHECK_HOOK.with(|hook| {
+            *hook.borrow_mut() = None;
+        });
+
+        assert!(
+            hook_called.load(std::sync::atomic::Ordering::SeqCst),
+            "pre-recheck hook must have been called for receipt-000.json"
+        );
+
         let act_dir = root.path().join(".selfware/phi/activity");
+        // receipt-000.json was replaced between scan and recheck; its inode/mtime changed,
+        // so fstatat detected the mismatch and declined to unlink.
         assert!(act_dir.join("receipt-000.json").exists());
         assert_eq!(
             std::fs::read(act_dir.join("receipt-000.json")).unwrap(),
             b"replacement"
+        );
+
+        // receipt-001.json was not replaced, so prune_retention verified its inode/mtime
+        // and unlinked it under the retention policy.
+        assert!(
+            !act_dir.join("receipt-001.json").exists(),
+            "unreplaced expired receipt must be pruned"
         );
     }
 

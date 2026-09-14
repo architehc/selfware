@@ -299,8 +299,14 @@ mod phi_observation_tests {
         std::fs::read_dir(root.join(".selfware/phi/activity"))
             .unwrap()
             .filter_map(|entry| {
+                let entry = entry.ok()?;
+                if entry.file_name() == ".lock"
+                    || entry.path().extension().and_then(|s| s.to_str()) != Some("json")
+                {
+                    return None;
+                }
                 let value: serde_json::Value =
-                    serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap();
+                    serde_json::from_slice(&std::fs::read(entry.path()).ok()?).ok()?;
                 (value["task_id"] == task_id).then(|| value["phase"].as_str().unwrap().to_owned())
             })
             .next()
