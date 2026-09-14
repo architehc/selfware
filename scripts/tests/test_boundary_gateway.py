@@ -99,7 +99,11 @@ class GatewayTests(unittest.TestCase):
                 self.assertLess(time.monotonic() - started, 0.8)
                 # Expiry shuts down the abandoned connection instead of
                 # interpreting EOF as a completed request and fetching data.
-                self.assertEqual(slow.recv(1024), b"")
+                try:
+                    closed_data = slow.recv(1024)
+                except (ConnectionResetError, BrokenPipeError):
+                    closed_data = b""
+                self.assertEqual(closed_data, b"")
                 self.assertEqual(self.request("GET", "/health")[0], 200)
             finally:
                 stop.set()

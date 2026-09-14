@@ -165,8 +165,17 @@ def chat(endpoint: str, model: str, prompt: str, seed: int) -> str:
     )
     parts = []
     usage: dict = {}
+    deadline = time.monotonic() + 900
     with urllib.request.urlopen(req, timeout=600) as resp:
         for raw in resp:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("generation exceeded 900s wall clock")
+            if hasattr(resp, "fp") and hasattr(resp.fp, "raw") and hasattr(resp.fp.raw, "_sock"):
+                try:
+                    resp.fp.raw._sock.settimeout(min(600.0, max(0.1, remaining)))
+                except Exception:
+                    pass
             line = raw.decode("utf-8", "replace").strip()
             if not line.startswith("data:"):
                 continue

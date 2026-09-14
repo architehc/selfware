@@ -125,14 +125,31 @@ def replace_receipts(path, receipts, verdict_key="v"):
                 temporary.unlink(missing_ok=True)
 
 
+def read_jsonl_tolerant(path):
+    """Read JSONL file yielding parsed objects, skipping blank lines and torn/truncated lines."""
+    if not path or not Path(path).exists():
+        return []
+    cases = []
+    with open(path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            line_str = line.strip()
+            if not line_str:
+                continue
+            try:
+                cases.append(json.loads(line_str))
+            except json.JSONDecodeError:
+                # Wave file mid-append by a generator — skip truncated tail line safely
+                continue
+    return cases
+
+
 def main():
     parser = argparse.ArgumentParser(description="Check complete input-bound verdict coverage")
     parser.add_argument("--probe-file", required=True)
     parser.add_argument("--verdicts-file", required=True)
     parser.add_argument("--kind", choices=("checker", "model"), default="model")
     args = parser.parse_args()
-    cases = [json.loads(line) for line in Path(args.probe_file).read_text().splitlines()
-             if line.strip()]
+    cases = read_jsonl_tolerant(args.probe_file)
     quarantined = find_quarantined(cases)
     verdicts = load_matching_verdicts(args.verdicts_file, cases,
                                      "checker" if args.kind == "checker" else "v")

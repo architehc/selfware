@@ -12,7 +12,12 @@ Run from the repo root. Idempotent: corpus ids are never re-added.
 import glob
 import json
 import os
-from redteam_verdicts import case_fingerprint, load_matching_verdicts
+from redteam_verdicts import (
+    case_fingerprint,
+    find_quarantined,
+    load_matching_verdicts,
+    read_jsonl_tolerant,
+)
 
 SELFDEV = os.environ.get("SELFDEV", os.path.expanduser("~/selfdev"))
 CORPUS = "tests/redteam/corpus/tool_attacks.jsonl"
@@ -27,24 +32,34 @@ EARLY = {
 }
 
 
-def read_jsonl_tolerant(path):
-    """Read JSONL file yielding parsed objects, skipping blank lines and torn/truncated lines."""
+def truncate_corpus_to_last_newline(path):
+    """Truncate corpus file to the last newline before append + fsync.
+
+    Prevents appending records onto a torn tail when an earlier write was interrupted.
+    """
     if not path or not os.path.exists(path):
-        return []
-    cases = []
-    with open(path, "r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                cases.append(json.loads(line))
-            except json.JSONDecodeError:
-                # Wave file or corpus mid-append by a generator — the truncated
-                # tail line is fully readable next cycle; skip it
-                # rather than aborting the whole consolidation.
-                continue
-    return cases
+        return
+    size = os.path.getsize(path)
+    if size == 0:
+        return
+    with open(path, "r+b") as fh:
+        pos = size
+        found_nl = -1
+        while pos > 0:
+            read_len = min(pos, 65536)
+            pos -= read_len
+            fh.seek(pos)
+            chunk = fh.read(read_len)
+            nl_idx = chunk.rfind(b"\n")
+            if nl_idx != -1:
+                found_nl = pos + nl_idx
+                break
+        target_len = found_nl + 1 if found_nl != -1 else 0
+        if target_len < size:
+            fh.seek(target_len)
+            fh.truncate()
+            fh.flush()
+            os.fsync(fh.fileno())
 
 
 def validate_destination_corpus(path):
@@ -90,6 +105,7 @@ def validate_destination_corpus(path):
 
 
 def main():
+    truncate_corpus_to_last_newline(CORPUS)
     existing = validate_destination_corpus(CORPUS)
 
     promoted = disagreed = noverdict = missing_models = 0
@@ -97,6 +113,7 @@ def main():
         for f in sorted(glob.glob("tests/redteam/corpus/probe_wave_1*.jsonl")):
             ts = os.path.basename(f)[len("probe_wave_"):-len(".jsonl")]
             cases = read_jsonl_tolerant(f)
+            quarantined = find_quarantined(cases)
             chk = load_matching_verdicts(f"{SELFDEV}/chkv_{ts}.jsonl", cases, "checker")
             e2 = load_matching_verdicts(f"{SELFDEV}/e2v_{ts}.jsonl", cases)
             e3 = load_matching_verdicts(f"{SELFDEV}/e3v_{ts}.jsonl", cases)
@@ -110,6 +127,8 @@ def main():
                     continue
                 i = d.get("id")
                 if not i:
+                    continue
+                if i in quarantined:
                     continue
                 cv = chk.get(i)
                 if cv not in ("r", "a"):
@@ -141,6 +160,8 @@ def main():
                     promoted += 1
                 else:
                     disagreed += 1
+        out.flush()
+        os.fsync(out.fileno())
 
     with open(f"{SELFDEV}/last_promote_counts.txt", "w") as fh:
         fh.write(f"{promoted} {disagreed} {noverdict}\n")

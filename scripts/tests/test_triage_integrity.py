@@ -181,6 +181,15 @@ class ReceiptIntegrityTests(unittest.TestCase):
                 promote.validate_destination_corpus(str(corpus_path))
             self.assertIn("invalid JSON", str(ctx.exception))
 
+    def test_truncate_corpus_to_last_newline_repairs_torn_tail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            corpus_path = Path(directory) / "torn_corpus.jsonl"
+            corpus_path.write_text('{"id":"c1","tool":"exec"}\n{"id":"torn_record')
+            promote.truncate_corpus_to_last_newline(str(corpus_path))
+            self.assertEqual(corpus_path.read_text(), '{"id":"c1","tool":"exec"}\n')
+            existing = promote.validate_destination_corpus(str(corpus_path))
+            self.assertEqual(existing, {"c1"})
+
 
 if __name__ == "__main__":
     unittest.main()

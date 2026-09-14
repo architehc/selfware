@@ -20,7 +20,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from redteam_gen import _log_usage, chat  # noqa: E402
-from redteam_verdicts import case_fingerprint, find_quarantined, load_matching_verdicts, replace_receipts  # noqa: E402
+from redteam_verdicts import (  # noqa: E402
+    case_fingerprint,
+    find_quarantined,
+    load_matching_verdicts,
+    read_jsonl_tolerant,
+    replace_receipts,
+)
 
 PROBE = Path("tests/redteam/corpus/probe_backlog_waves1292plus.jsonl")
 VERDICTS = Path("/home/rig/selfdev/triage_verdicts.jsonl")
@@ -120,8 +126,14 @@ def classify_batch(endpoint: str, model: str, batch: list, seed: int) -> dict:
     deadline = _time.monotonic() + 900  # per-batch wall clock; the 600s
     with urllib.request.urlopen(req, timeout=600) as resp:  # per-read timeout
         for raw in resp:  # alone cannot stop a slow trickle
-            if _time.monotonic() > deadline:
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
                 raise TimeoutError("batch exceeded 900s wall clock")
+            if hasattr(resp, "fp") and hasattr(resp.fp, "raw") and hasattr(resp.fp.raw, "_sock"):
+                try:
+                    resp.fp.raw._sock.settimeout(min(600.0, max(0.1, remaining)))
+                except Exception:
+                    pass
             line = raw.decode("utf-8", "replace").strip()
             if not line.startswith("data:"):
                 continue
@@ -227,13 +239,8 @@ def main():
     k, n = (int(x) for x in args.shard.split("/"))
     if not (n > 0 and 0 <= k < n and args.lanes > 0 and args.batch > 0):
         ap.error("invalid shard, lane count, or batch size")
-    cases = []
-    with PROBE.open() as f:
-        for idx, line in enumerate(f):
-            if idx % n != k:
-                continue
-            d = json.loads(line)
-            cases.append(d)
+    raw_cases = read_jsonl_tolerant(PROBE)
+    cases = [d for idx, d in enumerate(raw_cases) if idx % n == k]
     quarantined = find_quarantined(cases)
     done = load_done(cases)
     # Repeated identical inputs are one classification; differing inputs
