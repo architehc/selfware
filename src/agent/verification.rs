@@ -750,7 +750,7 @@ impl Agent {
         // Async process spawn — this runs inside the async check_completion_gate,
         // so a blocking std::process::Command would stall a tokio worker thread.
         let output = tokio::process::Command::new("git")
-            .args(["diff", "--name-only", "HEAD", "--"])
+            .args(["diff", "-z", "--name-only", "HEAD", "--"])
             .current_dir(&root)
             .output()
             .await
@@ -758,30 +758,34 @@ impl Agent {
         if !output.status.success() {
             return None;
         }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut all_paths: Vec<String> = stdout
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(ToOwned::to_owned)
+        let mut all_paths: Vec<String> = output
+            .stdout
+            .split(|&b| b == 0)
+            .filter(|chunk| !chunk.is_empty())
+            .map(|chunk| String::from_utf8_lossy(chunk).trim().to_string())
+            .filter(|s| !s.is_empty())
             .collect();
 
         // `git diff HEAD` never lists untracked files, so a task whose
         // deliverable is a brand-new file ("create hello.py") looked like an
         // empty diff and the gate churned to MAX_ITERATIONS unless the model
         // spontaneously `git add`ed. Union in untracked, non-ignored paths so
-        // files created during the run count as changes.
+        // files created during the run count as changes. Use -z so filenames with
+        // spaces or unusual characters are safely parsed.
         if let Ok(untracked) = tokio::process::Command::new("git")
-            .args(["ls-files", "--others", "--exclude-standard"])
+            .args(["ls-files", "-z", "--others", "--exclude-standard"])
             .current_dir(&root)
             .output()
             .await
         {
             if untracked.status.success() {
-                for line in String::from_utf8_lossy(&untracked.stdout).lines() {
-                    let line = line.trim();
-                    if !line.is_empty() && !all_paths.iter().any(|p| p == line) {
-                        all_paths.push(line.to_string());
+                for chunk in untracked.stdout.split(|&b| b == 0) {
+                    if chunk.is_empty() {
+                        continue;
+                    }
+                    let line = String::from_utf8_lossy(chunk).trim().to_string();
+                    if !line.is_empty() && !all_paths.iter().any(|p| p == &line) {
+                        all_paths.push(line);
                     }
                 }
             }

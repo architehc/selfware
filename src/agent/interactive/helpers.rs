@@ -224,8 +224,13 @@ pub(crate) fn spawn_esc_listener(
         use std::time::Duration;
 
         #[cfg(unix)]
-        unsafe {
-            nix::libc::signal(nix::libc::SIGTTOU, nix::libc::SIG_IGN);
+        {
+            // Ignore SIGTTOU so tcsetattr (called by terminal::enable_raw_mode /
+            // disable_raw_mode) does not cause the OS to stop/suspend the process
+            // when selfware is running in a background process group or test runner.
+            use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
+            let action = SigAction::new(SigHandler::SigIgn, SaFlags::empty(), SigSet::empty());
+            let _ = unsafe { sigaction(Signal::SIGTTOU, &action) };
         }
 
         let mut input_buf = String::new();

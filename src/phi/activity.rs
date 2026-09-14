@@ -324,11 +324,20 @@ fn prune_retention(directory: &std::fs::File) {
 
     let dir_fd = unsafe { libc::dup(directory.as_raw_fd()) };
     if dir_fd < 0 {
+        tracing::warn!(
+            error = %std::io::Error::last_os_error(),
+            "prune_retention failed to dup activity directory descriptor"
+        );
         return;
     }
     let dir_ptr = unsafe { libc::fdopendir(dir_fd) };
     if dir_ptr.is_null() {
+        let err = std::io::Error::last_os_error();
         unsafe { libc::close(dir_fd) };
+        tracing::warn!(
+            error = %err,
+            "prune_retention failed to fdopendir activity directory descriptor"
+        );
         return;
     }
 

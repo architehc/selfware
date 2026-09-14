@@ -2866,16 +2866,17 @@ To call a tool, use this EXACT XML structure:
     pub(super) fn capture_baseline_dirty_paths(&self) {
         let root = self::current_project_root();
         let output = std::process::Command::new("git")
-            .args(["diff", "--name-only", "HEAD", "--"])
+            .args(["diff", "-z", "--name-only", "HEAD", "--"])
             .current_dir(root)
             .output();
         if let Ok(output) = output {
             if output.status.success() {
-                let paths: Vec<String> = String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty())
-                    .map(ToOwned::to_owned)
+                let paths: Vec<String> = output
+                    .stdout
+                    .split(|&b| b == 0)
+                    .filter(|chunk| !chunk.is_empty())
+                    .map(|chunk| String::from_utf8_lossy(chunk).trim().to_string())
+                    .filter(|s| !s.is_empty())
                     .collect();
                 if let Ok(mut guard) = self.baseline_dirty_paths.lock() {
                     *guard = Some(paths);
