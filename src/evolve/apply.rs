@@ -1052,7 +1052,7 @@ mod tests {
     }
 
     #[test]
-    fn tracked_scaffold_file_in_base_tree_is_not_staged_as_deletion() {
+    fn tracked_scaffold_file_in_base_tree_is_preserved_in_staged_index() {
         let dir = tempfile::tempdir().unwrap();
         let repo = git2::Repository::init(dir.path()).unwrap();
         let sig = git2::Signature::now("test", "test@example.com").unwrap();

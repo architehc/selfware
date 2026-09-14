@@ -16,7 +16,7 @@ apply.
 
 ## 1. Stop-the-line: CI red means stop
 
-`cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` must be green
+`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --lib` must be green
 before every commit. A `.git/hooks/pre-commit` gate enforces this locally (also
 mirrored in `.pre-commit-config.yaml` for pre-commit-framework users).
 

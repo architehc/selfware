@@ -20,11 +20,10 @@ repos:
 
       - id: cargo-test
         name: cargo test
-        entry: cargo test --all-targets
+        entry: sh -c "unset GIT_INDEX_FILE GIT_DIR GIT_WORK_TREE && cargo test --lib"
         language: system
         types: [rust]
         pass_filenames: false
-        stages: [push]
 
       - id: cargo-check
         name: cargo check
