@@ -392,9 +392,16 @@ fn test_winner_darwinx_gate_enforcement() {
     let cand_better = make_sab(vec![("sc1", 90.0, true), ("sc2", 95.0, true)]);
     assert!(winner_darwinx_gate(Some(&base), Some(&cand_better)).is_ok());
 
-    // 4. None for baseline or candidate allows first gen or non-SAB mode
-    assert!(winner_darwinx_gate(None, Some(&cand_better)).is_ok());
-    assert!(winner_darwinx_gate(Some(&base), None).is_ok());
+    // 4. SAB evidence contract:
+    // Both absent is allowed (compile-only mode).
+    assert!(winner_darwinx_gate(None, None).is_ok());
+
+    // Exactly one absent is rejected fail-closed.
+    let err_cand_none = winner_darwinx_gate(Some(&base), None).unwrap_err();
+    assert!(err_cand_none.contains("baseline has SAB benchmark evidence but candidate has none"));
+
+    let err_base_none = winner_darwinx_gate(None, Some(&cand_better)).unwrap_err();
+    assert!(err_base_none.contains("candidate has SAB benchmark evidence but baseline has none"));
 }
 
 #[test]
@@ -459,6 +466,25 @@ fn test_evaluate_candidate_promotion_gates() {
         &cand_metrics_ok,
     );
     assert_eq!(decision, PromotionDecision::Promote);
+
+    // 5. Compile-only mode (both None) -> Promote if score and tests ok
+    let decision =
+        evaluate_candidate_promotion(0.8, 0.85, None, None, &base_metrics, &cand_metrics_ok);
+    assert_eq!(decision, PromotionDecision::Promote);
+
+    // 6. Asymmetric SAB evidence -> Reject
+    let decision = evaluate_candidate_promotion(
+        0.8,
+        0.85,
+        Some(&base_sab),
+        None,
+        &base_metrics,
+        &cand_metrics_ok,
+    );
+    assert!(matches!(
+        decision,
+        PromotionDecision::Reject(r) if r.contains("baseline has SAB benchmark evidence but candidate has none")
+    ));
 }
 
 #[test]

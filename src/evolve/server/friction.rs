@@ -1041,6 +1041,7 @@ mod tests {
                 insertions: 400,
                 deletions: 2,
                 preview: "private code".into(),
+                tree_oid: None,
             }),
         }
     }

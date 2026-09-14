@@ -318,12 +318,24 @@ pub(crate) fn winner_darwinx_gate(
     base_sab: Option<&SabResult>,
     cand_sab: Option<&SabResult>,
 ) -> Result<(), String> {
-    if let (Some(base), Some(cand)) = (base_sab, cand_sab) {
-        if let Err(violation) = base.check_darwinx_non_regression(cand) {
-            return Err(format!("DarwinX non-regression check failed: {violation}"));
+    match (base_sab, cand_sab) {
+        (Some(base), Some(cand)) => {
+            if let Err(violation) = base.check_darwinx_non_regression(cand) {
+                Err(format!("DarwinX non-regression check failed: {violation}"))
+            } else {
+                Ok(())
+            }
         }
+        (None, None) => Ok(()),
+        (Some(_), None) => Err(
+            "DarwinX gate rejected: baseline has SAB benchmark evidence but candidate has none"
+                .to_string(),
+        ),
+        (None, Some(_)) => Err(
+            "DarwinX gate rejected: candidate has SAB benchmark evidence but baseline has none"
+                .to_string(),
+        ),
     }
-    Ok(())
 }
 
 /// Promotion decision for a generation winner candidate.
@@ -757,15 +769,97 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         let baseline_composite = config.fitness_weights.composite(&current_baseline_metrics);
         let winner_composite = config.fitness_weights.composite(&winner_metrics);
 
-        if winner_composite > baseline_composite {
-            if let PromotionDecision::Reject(reason) = evaluate_candidate_promotion(
-                baseline_composite,
-                winner_composite,
-                current_baseline_sab.as_ref(),
-                winner_sab.as_ref(),
-                &current_baseline_metrics,
-                &winner_metrics,
-            ) {
+        match evaluate_candidate_promotion(
+            baseline_composite,
+            winner_composite,
+            current_baseline_sab.as_ref(),
+            winner_sab.as_ref(),
+            &current_baseline_metrics,
+            &winner_metrics,
+        ) {
+            PromotionDecision::Promote => {
+                log_bloom(
+                    generation,
+                    &winner.description,
+                    current_baseline_metrics.sab_score,
+                    winner_metrics.sab_score,
+                );
+
+                let commit_msg = format!(
+                    "🧬 Gen {} BLOOM: {:.0} → {:.0} | {}",
+                    generation,
+                    current_baseline_metrics.sab_score,
+                    winner_metrics.sab_score,
+                    winner.description
+                );
+                // Apply the EXACT tested diff (not the raw LLM patch) and commit
+                // ONLY the paths it edits — never `git add -A`, which swept every
+                // dirty edit and untracked file (.env, scratch, credentials) into
+                // the BLOOM commit on whatever branch was checked out.
+                if commit_winner_to_repo(repo_root, &tested_diff, &commit_msg) {
+                    let git_tag = if generation.is_multiple_of(config.checkpoint_interval) {
+                        let tag = format!("evolve-gen-{}", generation);
+                        let _ = Command::new("git")
+                            .args(["tag", &tag])
+                            .current_dir(repo_root)
+                            .output();
+                        Some(tag)
+                    } else {
+                        None
+                    };
+
+                    hall_of_fame.push(GenerationWinner {
+                        generation,
+                        description: winner.description.clone(),
+                        composite_score: winner_composite,
+                        sab_delta: winner_metrics.sab_score - current_baseline_metrics.sab_score,
+                        token_delta: match (
+                            winner_metrics.tokens_used,
+                            current_baseline_metrics.tokens_used,
+                        ) {
+                            (Some(w), Some(b)) => Some(w as f64 - b as f64),
+                            _ => None,
+                        },
+                        // The tested diff actually committed (incl. fmt fixes),
+                        // not the raw LLM patch.
+                        patch: tested_diff.clone(),
+                        git_tag,
+                    });
+
+                    log_event(
+                        repo_root,
+                        &serde_json::json!({
+                            "event": "generation_end",
+                            "timestamp": chrono_now(),
+                            "generation": generation,
+                            "outcome": "bloom",
+                            "description": winner.description,
+                            "score_before": current_baseline_metrics.sab_score,
+                            "score_after": winner_metrics.sab_score,
+                            "composite": winner_composite,
+                            "duration_secs": gen_start.elapsed().as_secs_f64(),
+                            "improvements_total": hall_of_fame.len(),
+                        }),
+                    );
+
+                    current_baseline_metrics = winner_metrics;
+                    if winner_sab.is_some() {
+                        current_baseline_sab = winner_sab;
+                    }
+                }
+            }
+            PromotionDecision::Reject(reason) => {
+                let rating = if winner_composite < baseline_composite * 0.9 {
+                    GenerationRating::Frost
+                } else {
+                    GenerationRating::Wilt
+                };
+                log_reject(
+                    generation,
+                    &rating,
+                    winner_metrics.sab_score,
+                    current_baseline_metrics.sab_score,
+                );
                 log_warning(&reason);
                 log_event(
                     repo_root,
@@ -773,107 +867,15 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         "event": "generation_end",
                         "timestamp": chrono_now(),
                         "generation": generation,
-                        "outcome": "frost",
+                        "outcome": format!("{}", rating),
                         "reason": reason,
-                        "duration_secs": gen_start.elapsed().as_secs_f64(),
-                    }),
-                );
-                continue;
-            }
-            log_bloom(
-                generation,
-                &winner.description,
-                current_baseline_metrics.sab_score,
-                winner_metrics.sab_score,
-            );
-
-            let commit_msg = format!(
-                "🧬 Gen {} BLOOM: {:.0} → {:.0} | {}",
-                generation,
-                current_baseline_metrics.sab_score,
-                winner_metrics.sab_score,
-                winner.description
-            );
-            // Apply the EXACT tested diff (not the raw LLM patch) and commit
-            // ONLY the paths it edits — never `git add -A`, which swept every
-            // dirty edit and untracked file (.env, scratch, credentials) into
-            // the BLOOM commit on whatever branch was checked out.
-            if commit_winner_to_repo(repo_root, &tested_diff, &commit_msg) {
-                let git_tag = if generation.is_multiple_of(config.checkpoint_interval) {
-                    let tag = format!("evolve-gen-{}", generation);
-                    let _ = Command::new("git")
-                        .args(["tag", &tag])
-                        .current_dir(repo_root)
-                        .output();
-                    Some(tag)
-                } else {
-                    None
-                };
-
-                hall_of_fame.push(GenerationWinner {
-                    generation,
-                    description: winner.description.clone(),
-                    composite_score: winner_composite,
-                    sab_delta: winner_metrics.sab_score - current_baseline_metrics.sab_score,
-                    token_delta: match (
-                        winner_metrics.tokens_used,
-                        current_baseline_metrics.tokens_used,
-                    ) {
-                        (Some(w), Some(b)) => Some(w as f64 - b as f64),
-                        _ => None,
-                    },
-                    // The tested diff actually committed (incl. fmt fixes),
-                    // not the raw LLM patch.
-                    patch: tested_diff.clone(),
-                    git_tag,
-                });
-
-                log_event(
-                    repo_root,
-                    &serde_json::json!({
-                        "event": "generation_end",
-                        "timestamp": chrono_now(),
-                        "generation": generation,
-                        "outcome": "bloom",
                         "description": winner.description,
-                        "score_before": current_baseline_metrics.sab_score,
-                        "score_after": winner_metrics.sab_score,
-                        "composite": winner_composite,
+                        "winner_score": winner_metrics.sab_score,
+                        "baseline_score": current_baseline_metrics.sab_score,
                         "duration_secs": gen_start.elapsed().as_secs_f64(),
-                        "improvements_total": hall_of_fame.len(),
                     }),
                 );
-
-                current_baseline_metrics = winner_metrics;
-                if winner_sab.is_some() {
-                    current_baseline_sab = winner_sab;
-                }
             }
-        } else {
-            let rating = if winner_composite < baseline_composite * 0.9 {
-                GenerationRating::Frost
-            } else {
-                GenerationRating::Wilt
-            };
-            log_reject(
-                generation,
-                &rating,
-                winner_metrics.sab_score,
-                current_baseline_metrics.sab_score,
-            );
-            log_event(
-                repo_root,
-                &serde_json::json!({
-                    "event": "generation_end",
-                    "timestamp": chrono_now(),
-                    "generation": generation,
-                    "outcome": format!("{}", rating),
-                    "description": winner.description,
-                    "winner_score": winner_metrics.sab_score,
-                    "baseline_score": current_baseline_metrics.sab_score,
-                    "duration_secs": gen_start.elapsed().as_secs_f64(),
-                }),
-            );
         }
     }
 

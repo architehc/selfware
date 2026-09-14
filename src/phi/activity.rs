@@ -185,9 +185,79 @@ fn open_directory(
 }
 
 #[cfg(unix)]
+struct ActivityDirLock {
+    file: std::fs::File,
+}
+
+#[cfg(unix)]
+impl ActivityDirLock {
+    fn acquire(directory: &std::fs::File) -> io::Result<Self> {
+        use nix::libc;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let cname = std::ffi::CString::new(".lock")?;
+        let mut fd = -1;
+        for _ in 0..16 {
+            fd = unsafe {
+                libc::openat(
+                    directory.as_raw_fd(),
+                    cname.as_ptr(),
+                    libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                    0o600,
+                )
+            };
+            if fd >= 0 {
+                break;
+            }
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ENOENT) {
+                std::thread::yield_now();
+                continue;
+            }
+            return Err(err);
+        }
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self { file })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ActivityDirLock {
+    fn drop(&mut self) {
+        use nix::libc;
+        use std::os::fd::AsRawFd;
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static PRE_UNLINK_HOOK: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, unix))]
+fn call_pre_unlink_hook() {
+    PRE_UNLINK_HOOK.with(|hook| {
+        if let Some(ref mut action) = *hook.borrow_mut() {
+            action();
+        }
+    });
+}
+
+#[cfg(unix)]
 fn write_atomic(directory: &std::fs::File, destination: &str, bytes: &[u8]) -> io::Result<()> {
     use nix::libc;
     use std::os::fd::{AsRawFd, FromRawFd};
+    // Acquire advisory directory lock to coordinate with prune_retention and other writers
+    let _lock = ActivityDirLock::acquire(directory)?;
     let destination = std::ffi::CString::new(destination)?;
     let temporary = std::ffi::CString::new(format!(".tmp-{}", uuid::Uuid::new_v4()))?;
     // SAFETY: names are bounded, generated components; directory owns a live fd.
@@ -256,7 +326,7 @@ fn prune_retention(directory: &std::fs::File) {
             break;
         }
         let name_bytes = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
-        if name_bytes == b"." || name_bytes == b".." {
+        if name_bytes == b"." || name_bytes == b".." || name_bytes == b".lock" {
             continue;
         }
         let cname = match std::ffi::CString::new(name_bytes) {
@@ -305,6 +375,7 @@ fn prune_retention(directory: &std::fs::File) {
     // Clean up orphaned temporary files older than 5 minutes
     for (tmp_mtime, tmp_ino, cname) in temporary_entries {
         if now_sec.saturating_sub(tmp_mtime) > 300 {
+            let _lock = ActivityDirLock::acquire(directory);
             let mut stat: libc::stat = unsafe { std::mem::zeroed() };
             let res = unsafe {
                 libc::fstatat(
@@ -315,6 +386,9 @@ fn prune_retention(directory: &std::fs::File) {
                 )
             };
             if res == 0 && stat.st_mtime == tmp_mtime && stat.st_ino == tmp_ino {
+                #[cfg(all(test, unix))]
+                call_pre_unlink_hook();
+
                 let unlinked = unsafe { libc::unlinkat(directory.as_raw_fd(), cname.as_ptr(), 0) };
                 if unlinked != 0 {
                     let err = std::io::Error::last_os_error();
@@ -332,6 +406,7 @@ fn prune_retention(directory: &std::fs::File) {
     // Bounded receipt GC: prune excess oldest files past MAX_SCAN
     if json_files.len() > MAX_SCAN {
         for (scanned_mtime, scanned_ino, cname) in json_files.iter().skip(MAX_SCAN) {
+            let _lock = ActivityDirLock::acquire(directory);
             let mut stat: libc::stat = unsafe { std::mem::zeroed() };
             let res = unsafe {
                 libc::fstatat(
@@ -342,6 +417,9 @@ fn prune_retention(directory: &std::fs::File) {
                 )
             };
             if res == 0 && stat.st_mtime == *scanned_mtime && stat.st_ino == *scanned_ino {
+                #[cfg(all(test, unix))]
+                call_pre_unlink_hook();
+
                 let unlinked = unsafe { libc::unlinkat(directory.as_raw_fd(), cname.as_ptr(), 0) };
                 if unlinked != 0 {
                     let err = std::io::Error::last_os_error();
@@ -357,6 +435,7 @@ fn prune_retention(directory: &std::fs::File) {
     // Retention policy: prune expired receipts older than 24 hours
     for (scanned_mtime, scanned_ino, cname) in json_files {
         if now_sec.saturating_sub(scanned_mtime) > RETENTION_SECS {
+            let _lock = ActivityDirLock::acquire(directory);
             let mut stat: libc::stat = unsafe { std::mem::zeroed() };
             let res = unsafe {
                 libc::fstatat(
@@ -367,6 +446,9 @@ fn prune_retention(directory: &std::fs::File) {
                 )
             };
             if res == 0 && stat.st_mtime == scanned_mtime && stat.st_ino == scanned_ino {
+                #[cfg(all(test, unix))]
+                call_pre_unlink_hook();
+
                 let unlinked = unsafe { libc::unlinkat(directory.as_raw_fd(), cname.as_ptr(), 0) };
                 if unlinked != 0 {
                     let err = std::io::Error::last_os_error();
@@ -417,11 +499,13 @@ mod tests {
         });
         let entries: Vec<_> = std::fs::read_dir(root.path().join(".selfware/phi/activity"))
             .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name() != ".lock")
             .collect();
         assert_eq!(entries.len(), 16);
         for entry in entries {
             let value: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap();
+                serde_json::from_slice(&std::fs::read(entry.path()).unwrap()).unwrap();
             assert_eq!(value["phase"], "partial");
             assert_eq!(value["evidence"]["outstanding"], 2);
         }
@@ -444,8 +528,8 @@ mod tests {
             .is_err());
         let entry = std::fs::read_dir(root.path().join(".selfware/phi/activity"))
             .unwrap()
-            .next()
-            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.file_name() != ".lock")
             .unwrap();
         let value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(entry.path()).unwrap()).unwrap();
@@ -482,11 +566,12 @@ mod tests {
         assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
         let receipts: Vec<_> = std::fs::read_dir(moved.join(".selfware/phi/activity"))
             .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name() != ".lock")
             .collect();
         assert_eq!(receipts.len(), 1);
         let receipt: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(receipts[0].as_ref().unwrap().path()).unwrap())
-                .unwrap();
+            serde_json::from_slice(&std::fs::read(receipts[0].path()).unwrap()).unwrap();
         assert_eq!(receipt["phase"], "partial");
     }
 
@@ -524,7 +609,14 @@ mod tests {
                 std::fs::metadata(actual).unwrap().permissions().mode() & 0o777,
                 0o600
             );
-            assert_eq!(std::fs::read_dir(moved.join(suffix)).unwrap().count(), 1);
+            assert_eq!(
+                std::fs::read_dir(moved.join(suffix))
+                    .unwrap()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_name() != ".lock")
+                    .count(),
+                1
+            );
         }
     }
 
@@ -555,7 +647,14 @@ mod tests {
         std::fs::create_dir(path.join("receipt.json")).unwrap();
         assert!(write_atomic(&directory, "receipt.json", b"capture").is_err());
         assert!(path.join("receipt.json").is_dir());
-        assert_eq!(std::fs::read_dir(path).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_dir(path)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_name() != ".lock")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -636,16 +735,33 @@ mod tests {
 
     #[test]
     fn atomically_replaced_receipt_is_preserved_during_prune() {
+        use nix::libc;
+        use std::os::fd::AsRawFd;
         let root = tempfile::tempdir().unwrap();
         let capture = ActivityCapture::new(root.path(), "session-race", "agent-race").unwrap();
         let dir = capture.activity_directory().unwrap();
 
-        // Create 260 files so pruning triggers
+        // Create 260 files with deterministic past timestamps
         for i in 0..260 {
-            write_atomic(&dir, &format!("receipt-{i:03}.json"), b"initial").unwrap();
+            let name = format!("receipt-{i:03}.json");
+            write_atomic(&dir, &name, b"initial").unwrap();
+            let cname = std::ffi::CString::new(name).unwrap();
+            let times = [
+                libc::timespec {
+                    tv_sec: 1_000_000,
+                    tv_nsec: 0,
+                },
+                libc::timespec {
+                    tv_sec: 1_000_000,
+                    tv_nsec: 0,
+                },
+            ];
+            unsafe {
+                libc::utimensat(dir.as_raw_fd(), cname.as_ptr(), times.as_ptr(), 0);
+            }
         }
 
-        // Atomically replace one of the oldest receipts
+        // Atomically replace one of the oldest receipts (current timestamp will be preserved)
         write_atomic(&dir, "receipt-000.json", b"replacement").unwrap();
 
         prune_retention(&dir);
@@ -655,6 +771,66 @@ mod tests {
         assert_eq!(
             std::fs::read(act_dir.join("receipt-000.json")).unwrap(),
             b"replacement"
+        );
+    }
+
+    #[test]
+    fn test_prune_pauses_before_unlink_and_lock_prevents_writer_race() {
+        use nix::libc;
+        use std::os::fd::AsRawFd;
+        let root = tempfile::tempdir().unwrap();
+        let capture = ActivityCapture::new(root.path(), "session-hook", "agent-hook").unwrap();
+        let dir = capture.activity_directory().unwrap();
+
+        // Write 257 files so prune_retention will unlink at least one excess receipt
+        for i in 0..257 {
+            write_atomic(&dir, &format!("receipt-{i:03}.json"), b"{}").unwrap();
+        }
+
+        let hook_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook_called_clone = hook_called.clone();
+
+        let dir_fd = dir.as_raw_fd();
+        PRE_UNLINK_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                hook_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                // While prune holds the lock, attempt non-blocking lock on .lock from another fd
+                let cname = std::ffi::CString::new(".lock").unwrap();
+                let fd = unsafe {
+                    libc::openat(
+                        dir_fd,
+                        cname.as_ptr(),
+                        libc::O_RDWR | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                        0o600,
+                    )
+                };
+                assert!(fd >= 0);
+                let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+                assert_eq!(
+                    rc, -1,
+                    "flock must fail because prune holds the directory lock"
+                );
+                let err = std::io::Error::last_os_error();
+                assert_eq!(
+                    err.raw_os_error(),
+                    Some(libc::EWOULDBLOCK),
+                    "expected EWOULDBLOCK while lock is held"
+                );
+                unsafe {
+                    libc::close(fd);
+                }
+            }));
+        });
+
+        prune_retention(&dir);
+
+        PRE_UNLINK_HOOK.with(|hook| {
+            *hook.borrow_mut() = None;
+        });
+
+        assert!(
+            hook_called.load(std::sync::atomic::Ordering::SeqCst),
+            "pre-unlink hook must have been called"
         );
     }
 }

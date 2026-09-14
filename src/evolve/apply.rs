@@ -88,6 +88,8 @@ pub struct StagedDiff {
     pub insertions: usize,
     pub deletions: usize,
     pub preview: String,
+    #[serde(default)]
+    pub tree_oid: Option<String>,
 }
 
 /// One agent-driven apply run.
@@ -247,7 +249,8 @@ pub fn verify_staged_diff(
         .find_commit(git2::Oid::from_str(base_revision)?)?
         .tree()?;
 
-    let index = stage_workdir_without_scaffolding(&repo, Some(&base))?;
+    let mut index = stage_workdir_without_scaffolding(&repo, Some(&base))?;
+    let tree_id = index.write_tree()?;
     let diff = repo.diff_tree_to_index(Some(&base), Some(&index), None)?;
 
     if diff.deltas().len() == 0 {
@@ -306,6 +309,7 @@ pub fn verify_staged_diff(
         insertions: stats.insertions(),
         deletions: stats.deletions(),
         preview,
+        tree_oid: Some(tree_id.to_string()),
     }))
 }
 
@@ -869,8 +873,8 @@ pub async fn commit_staged(
     // this, bytes could change between staging and merge (review round 6 #1).
     let recomputed = verify_staged_diff(shadow, base)
         .map_err(|e| CommitError::Git(format!("failed to re-verify staged diff: {e}")))?;
-    let recomputed_digest = match &recomputed {
-        Ok(staged) => staged.digest.clone(),
+    let (recomputed_digest, recomputed_tree_oid) = match &recomputed {
+        Ok(staged) => (staged.digest.clone(), staged.tree_oid.clone()),
         Err(rejection) => {
             return Err(CommitError::Git(format!(
                 "staged diff no longer verifies: {rejection}"
@@ -884,8 +888,12 @@ pub async fn commit_staged(
         });
     }
 
+    let tree_oid = recomputed_tree_oid
+        .or_else(|| diff.tree_oid.clone())
+        .ok_or_else(|| CommitError::Git("verified staged diff missing tree OID".to_string()))?;
+
     let files_changed = diff.files_changed;
-    let new_head = merge_shadow(shadow, project_root, base, run_id, &run.prompt)?;
+    let new_head = merge_shadow(shadow, project_root, base, run_id, &run.prompt, &tree_oid)?;
 
     // Consume one-use: removal also cleans up the shadow worktree. The merge
     // commit lives on in the shared object store.
@@ -909,6 +917,7 @@ fn merge_shadow(
     base_revision: &str,
     run_id: &str,
     prompt: &str,
+    tree_oid: &str,
 ) -> std::result::Result<String, CommitError> {
     fn git_err(e: git2::Error) -> CommitError {
         CommitError::Git(e.to_string())
@@ -928,12 +937,9 @@ fn merge_shadow(
             head: format!("shadow at {}", shadow_head.id()),
         });
     }
-    let base_tree = shadow_head.tree().map_err(git_err)?;
-    // Re-stage the workdir without scaffolding so the commit captures exactly what
-    // verify_staged_diff indexed.
-    let mut index =
-        stage_workdir_without_scaffolding(&shadow_repo, Some(&base_tree)).map_err(git_err)?;
-    let tree_id = index.write_tree().map_err(git_err)?;
+    // Commit the exact immutable tree produced during verification — never re-stage
+    // the mutable workdir (which could race between verification and commit).
+    let tree_id = git2::Oid::from_str(tree_oid).map_err(git_err)?;
     let tree = shadow_repo.find_tree(tree_id).map_err(git_err)?;
     let base_commit = shadow_head;
     let signature = shadow_repo
@@ -1051,17 +1057,19 @@ mod tests {
         let repo = git2::Repository::init(dir.path()).unwrap();
         let sig = git2::Signature::now("test", "test@example.com").unwrap();
 
-        std::fs::create_dir_all(dir.path().join(".selfware")).unwrap();
+        std::fs::create_dir_all(dir.path().join(".selfware/theseus")).unwrap();
         std::fs::write(
-            dir.path().join(".selfware/config.json"),
-            b"{\"tracked\": true}",
+            dir.path().join(".selfware/theseus/plan.md"),
+            b"# tracked scaffold",
         )
         .unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         std::fs::write(dir.path().join("src/main.rs"), b"fn main() {}\n").unwrap();
 
         let mut index = repo.index().unwrap();
-        index.add_path(Path::new(".selfware/config.json")).unwrap();
+        index
+            .add_path(Path::new(".selfware/theseus/plan.md"))
+            .unwrap();
         index.add_path(Path::new("src/main.rs")).unwrap();
         index.write().unwrap();
         let tree_id = index.write_tree().unwrap();

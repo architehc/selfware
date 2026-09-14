@@ -58,31 +58,83 @@ impl CompilationSandbox {
         }
 
         // Carry over uncommitted changes (staged + unstaged) so the sandbox
-        // reflects the actual working tree, not just the last commit.
+        // reflects the exact working tree, not just the last commit.
         let diff_output = Command::new("git")
             .args(["diff", "HEAD"])
             .current_dir(&original_dir)
             .output()
             .map_err(|e| cleanup_on_fail(anyhow!("Failed to run git diff: {e}")))?;
 
-        if diff_output.status.success() && !diff_output.stdout.is_empty() {
+        if !diff_output.status.success() {
+            let stderr = String::from_utf8_lossy(&diff_output.stderr);
+            return Err(cleanup_on_fail(anyhow!(
+                "Failed to compute working tree diff: {stderr}"
+            )));
+        }
+
+        if !diff_output.stdout.is_empty() {
             let mut apply = Command::new("git")
                 .args(["apply", "--allow-empty"])
                 .current_dir(&work_dir)
                 .stdin(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
                 .spawn()
                 .map_err(|e| cleanup_on_fail(anyhow!("Failed to spawn git apply: {e}")))?;
 
-            if let Some(ref mut stdin) = apply.stdin {
+            if let Some(mut stdin) = apply.stdin.take() {
                 use std::io::Write;
-                let _ = stdin.write_all(&diff_output.stdout);
+                stdin.write_all(&diff_output.stdout).map_err(|e| {
+                    cleanup_on_fail(anyhow!("Failed to write patch to git apply stdin: {e}"))
+                })?;
             }
 
-            let apply_status = apply
-                .wait()
+            let apply_output = apply
+                .wait_with_output()
                 .map_err(|e| cleanup_on_fail(anyhow!("Failed waiting for git apply: {e}")))?;
-            if !apply_status.success() {
-                info!("Some uncommitted changes could not be applied to sandbox (merge conflict); proceeding with committed state");
+            if !apply_output.status.success() {
+                let stderr = String::from_utf8_lossy(&apply_output.stderr);
+                return Err(cleanup_on_fail(anyhow!(
+                    "Failed to apply uncommitted changes to sandbox: {stderr}"
+                )));
+            }
+        }
+
+        // Carry over untracked, non-ignored source files so new files in the working
+        // tree are part of the evaluated sandbox snapshot.
+        let untracked_output = Command::new("git")
+            .args(["ls-files", "--others", "--exclude-standard"])
+            .current_dir(&original_dir)
+            .output()
+            .map_err(|e| cleanup_on_fail(anyhow!("Failed to list untracked files: {e}")))?;
+
+        if !untracked_output.status.success() {
+            let stderr = String::from_utf8_lossy(&untracked_output.stderr);
+            return Err(cleanup_on_fail(anyhow!(
+                "Failed to list untracked files in original repository: {stderr}"
+            )));
+        }
+
+        let untracked_list = String::from_utf8_lossy(&untracked_output.stdout);
+        for line in untracked_list.lines().filter(|l| !l.trim().is_empty()) {
+            let rel = Path::new(line.trim());
+            if rel.is_absolute() || rel.starts_with("..") {
+                continue;
+            }
+            let src = original_dir.join(rel);
+            let dst = work_dir.join(rel);
+            if let Ok(meta) = src.symlink_metadata() {
+                if meta.is_file() {
+                    if let Some(parent) = dst.parent() {
+                        std::fs::create_dir_all(parent).map_err(|e| {
+                            cleanup_on_fail(anyhow!(
+                                "Failed creating parent directory for untracked file {line}: {e}"
+                            ))
+                        })?;
+                    }
+                    std::fs::copy(&src, &dst).map_err(|e| {
+                        cleanup_on_fail(anyhow!("Failed copying untracked file {line}: {e}"))
+                    })?;
+                }
             }
         }
 

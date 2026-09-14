@@ -37,8 +37,8 @@ else
   BIN_SOURCE="repo-default"
 fi
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
-OUT_DIR="${THIS_DIR}/reports/${TIMESTAMP}"
-WORK_ROOT="${THIS_DIR}/work"
+OUT_DIR="${OUT_DIR:-${THIS_DIR}/reports/${TIMESTAMP}}"
+WORK_ROOT="${WORK_ROOT:-${OUT_DIR}/work}"
 LOG_ROOT="${OUT_DIR}/logs"
 RESULTS_DIR="${OUT_DIR}/results"
 SUMMARY_MD="${OUT_DIR}/REPORT.md"

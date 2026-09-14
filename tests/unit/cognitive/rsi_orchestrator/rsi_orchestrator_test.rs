@@ -261,6 +261,31 @@ sc2|coding|medium|1|1|0|0|10|40.0|1|1|failed
     assert_eq!(baseline_report.average_score, 62.5);
     assert!(baseline_report.scenarios["sc1"].passed);
     assert!(!baseline_report.scenarios["sc2"].passed);
+}
+
+#[test]
+fn test_parse_benchmark_report_rejects_unknown_scenario_type() {
+    let tsv_content = "\
+scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|duration_secs|score|changed_files|error_hits|notes
+sc1|unit|easy|1|0|0|0|10|85.0|1|0|ok
+";
+    let err = parse_benchmark_report(tsv_content).unwrap_err();
+    assert!(
+        err.contains("Unknown scenario type 'unit'"),
+        "Expected unknown scenario type error, got: {err}"
+    );
+}
+
+#[test]
+fn test_parse_benchmark_report_darwinx_suite_comparison() {
+    let baseline_report = parse_benchmark_report(
+        "\
+scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|duration_secs|score|changed_files|error_hits|notes
+sc1|coding|easy|1|0|0|0|10|85.0|1|0|ok
+sc2|coding|medium|1|1|0|0|10|40.0|1|1|failed
+",
+    )
+    .unwrap();
 
     // Candidate 1: maintains sc1, passes sc2 -> DarwinX ok
     let candidate_ok = parse_benchmark_report(
@@ -595,13 +620,18 @@ mod tests {
     let content = fs::read_to_string(project_root.join("src/lib.rs")).unwrap();
     assert!(content.contains("// TODO: remove this marker"));
 
-    // No paid e2e suite ran: the benchmark script never produced a TSV.
-    assert!(
-        !project_root
-            .join("system_tests/projecte2e/reports/latest/results.tsv")
-            .exists(),
-        "trivial mutation must not burn a paid e2e suite"
-    );
+    // No paid e2e suite ran: no benchmark directory was created under reports.
+    let reports_dir = project_root.join("system_tests/projecte2e/reports");
+    if reports_dir.exists() {
+        let has_rsi_reports = fs::read_dir(&reports_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().starts_with("rsi-"));
+        assert!(
+            !has_rsi_reports,
+            "trivial mutation must not burn a paid e2e suite"
+        );
+    }
 
     let history = orch.edit_orchestrator.history();
     assert_eq!(history.len(), 1);
@@ -683,7 +713,7 @@ else
 fi
 cat > "${OUT_DIR}/results.tsv" <<EOF
 scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|duration_secs|score|changed_files|error_hits|notes
-todo_cleanup|unit|easy|0|0|0|0|0|${score}|yes|0|
+todo_cleanup|coding|easy|0|0|0|0|0|${score}|yes|0|
 EOF
 "#,
     )

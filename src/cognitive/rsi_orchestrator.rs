@@ -785,7 +785,11 @@ pub fn parse_benchmark_report(tsv_content: &str) -> std::result::Result<Benchmar
         let passed = match scenario_type {
             "coding" => post_status == "0" && score >= 70.0,
             "swarm" => agent_status == "0" && !has_error && score >= 70.0,
-            _ => agent_status == "0" && !has_error && score >= 70.0,
+            unknown => {
+                return Err(format!(
+                    "Unknown scenario type '{unknown}' on TSV row {line_num} (expected 'coding' or 'swarm')"
+                ));
+            }
         };
 
         scenarios.insert(

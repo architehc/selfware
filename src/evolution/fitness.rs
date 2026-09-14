@@ -83,9 +83,16 @@ pub enum Difficulty {
 pub fn run_sab(selfware_binary: &Path, config: &SabConfig) -> Result<SabResult, FitnessError> {
     let start = Instant::now();
 
+    let unique_out_dir = config
+        .runner_script
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("reports/sab-{}", uuid::Uuid::new_v4()));
+
     // Set up environment for SAB runner
     let output = Command::new("bash")
         .arg(&config.runner_script)
+        .env("OUT_DIR", &unique_out_dir)
         .env("ENDPOINT", &config.endpoint)
         .env("MODEL", &config.model)
         .env("MAX_PARALLEL", config.max_parallel.to_string())
