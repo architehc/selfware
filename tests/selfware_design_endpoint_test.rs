@@ -163,6 +163,7 @@ fn file_read_tool() -> ToolDefinition {
 // ── 1. Endpoint Discovery & SGLang Runtime Metadata ─────────────────────────
 
 #[tokio::test]
+#[ignore = "requires live endpoint"]
 async fn test_selfware_design_models_discovery() {
     skip_if_unreachable!();
 
@@ -201,21 +202,25 @@ async fn test_selfware_design_models_discovery() {
     );
 
     let model_entry = found.unwrap();
-    if let Some(owned_by) = model_entry.get("owned_by").and_then(|v| v.as_str()) {
-        assert_eq!(owned_by, "sglang", "expected SGLang backend");
-    }
-    if let Some(max_len) = model_entry.get("max_model_len").and_then(|v| v.as_u64()) {
-        assert!(
-            max_len >= 1_000_000,
-            "advertised max_model_len should be >= 1,000,000 (1M context window), got: {}",
-            max_len
-        );
-    } else if std::env::var("REQUIRE_ENDPOINT").is_ok() {
-        panic!("model catalog entry must advertise max_model_len when REQUIRE_ENDPOINT is set");
-    }
+    let owned_by = model_entry
+        .get("owned_by")
+        .and_then(|v| v.as_str())
+        .expect("model catalog entry must contain owned_by");
+    assert_eq!(owned_by, "sglang", "expected SGLang backend");
+
+    let max_len = model_entry
+        .get("max_model_len")
+        .and_then(|v| v.as_u64())
+        .expect("model catalog entry must contain max_model_len");
+    assert!(
+        max_len >= 1_000_000,
+        "advertised max_model_len should be >= 1,000,000 (1M context window), got: {}",
+        max_len
+    );
 }
 
 #[tokio::test]
+#[ignore = "requires live endpoint"]
 async fn test_selfware_design_sglang_server_info() {
     skip_if_unreachable!();
 
@@ -244,17 +249,22 @@ async fn test_selfware_design_sglang_server_info() {
 
     let body: Value = resp.json().await.expect("valid JSON from /get_server_info");
     assert!(body.get("version").is_some(), "expected SGLang version");
-    if let Some(tool_parser) = body.get("tool_call_parser").and_then(|v| v.as_str()) {
-        assert_eq!(tool_parser, "qwen");
-    }
-    if let Some(reasoning_parser) = body.get("reasoning_parser").and_then(|v| v.as_str()) {
-        assert_eq!(reasoning_parser, "qwen3");
-    }
+    let tool_parser = body
+        .get("tool_call_parser")
+        .and_then(|v| v.as_str())
+        .expect("expected tool_call_parser in /get_server_info");
+    assert_eq!(tool_parser, "qwen");
+    let reasoning_parser = body
+        .get("reasoning_parser")
+        .and_then(|v| v.as_str())
+        .expect("expected reasoning_parser in /get_server_info");
+    assert_eq!(reasoning_parser, "qwen3");
 }
 
 // ── 2. Plain Chat Completion & Token Usage ───────────────────────────────────
 
 #[tokio::test]
+#[ignore = "requires live endpoint"]
 async fn test_selfware_design_plain_chat_completion() {
     skip_if_unreachable!();
 
@@ -299,6 +309,7 @@ async fn test_selfware_design_plain_chat_completion() {
 // ── 3. Streaming SSE Contract & Chunk Accumulation ───────────────────────────
 
 #[tokio::test]
+#[ignore = "requires live endpoint"]
 async fn test_selfware_design_streaming_sse_contract() {
     skip_if_unreachable!();
 
@@ -341,6 +352,7 @@ async fn test_selfware_design_streaming_sse_contract() {
         }
     }
 
+    assert!(got_done, "expected StreamChunk::Done terminating stream");
     assert!(
         chunks_received > 0,
         "empty stream error: no chunks received"
@@ -362,6 +374,7 @@ async fn test_selfware_design_streaming_sse_contract() {
 // ── 4. Reasoning Channel Separation (Thinking Mode) ──────────────────────────
 
 #[tokio::test]
+#[ignore = "requires live endpoint"]
 async fn test_selfware_design_thinking_separation() {
     skip_if_unreachable!();
 
@@ -419,6 +432,53 @@ async fn test_selfware_design_thinking_separation() {
         content
     );
 
+    // Critical assertion 4: verify reasoning tokens reported in endpoint usage
+    let http = HttpClient::builder()
+        .timeout(PER_TEST_TIMEOUT)
+        .build()
+        .unwrap();
+    let mut raw_req = http
+        .post(format!("{}/chat/completions", endpoint().trim_end_matches('/')))
+        .json(&json!({
+            "model": model(),
+            "messages": [
+                {"role": "system", "content": "Solve the problem. Your final answer must be a single number only."},
+                {"role": "user", "content": "Alice has 12 apples. She gives half to Bob, then eats two of the remainder. How many apples does Alice have left? Answer with a number only."}
+            ],
+            "temperature": 0.0,
+            "max_tokens": 1024,
+            "chat_template_kwargs": { "enable_thinking": true }
+        }));
+    if let Some(key) = api_key() {
+        raw_req = raw_req.bearer_auth(key);
+    }
+    if let Ok(raw_res) = raw_req.send().await {
+        if raw_res.status().is_success() {
+            if let Ok(raw_json) = raw_res.json::<Value>().await {
+                let reasoning_tokens = raw_json
+                    .pointer("/usage/completion_tokens_details/reasoning_tokens")
+                    .and_then(|v| v.as_u64())
+                    .or_else(|| {
+                        raw_json
+                            .pointer("/usage/reasoning_tokens")
+                            .and_then(|v| v.as_u64())
+                    });
+                if let Some(tokens) = reasoning_tokens {
+                    assert!(
+                        tokens > 0,
+                        "expected >0 reasoning tokens when enable_thinking=true, got: {}",
+                        tokens
+                    );
+                } else if std::env::var("REQUIRE_ENDPOINT").is_ok() {
+                    panic!(
+                        "endpoint usage did not report reasoning_tokens: {:?}",
+                        raw_json.get("usage")
+                    );
+                }
+            }
+        }
+    }
+
     println!(
         "Thinking test in {:.2?}: reasoning={} chars, content='{}'",
         start.elapsed(),
@@ -430,6 +490,7 @@ async fn test_selfware_design_thinking_separation() {
 // ── 5. Fast Path with Thinking Disabled ──────────────────────────────────────
 
 #[tokio::test]
+#[ignore = "requires live endpoint"]
 async fn test_selfware_design_thinking_disabled_budget() {
     skip_if_unreachable!();
 
@@ -468,6 +529,50 @@ async fn test_selfware_design_thinking_disabled_budget() {
         "expected '2' in content"
     );
 
+    // Verify 0 reasoning tokens reported in endpoint usage
+    let http = HttpClient::builder()
+        .timeout(PER_TEST_TIMEOUT)
+        .build()
+        .unwrap();
+    let mut raw_req = http
+        .post(format!("{}/chat/completions", endpoint().trim_end_matches('/')))
+        .json(&json!({
+            "model": model(),
+            "messages": [{"role": "user", "content": "What is 1 + 1? Answer with only the number."}],
+            "temperature": 0.0,
+            "max_tokens": 64,
+            "chat_template_kwargs": { "enable_thinking": false }
+        }));
+    if let Some(key) = api_key() {
+        raw_req = raw_req.bearer_auth(key);
+    }
+    if let Ok(raw_res) = raw_req.send().await {
+        if raw_res.status().is_success() {
+            if let Ok(raw_json) = raw_res.json::<Value>().await {
+                let reasoning_tokens = raw_json
+                    .pointer("/usage/completion_tokens_details/reasoning_tokens")
+                    .and_then(|v| v.as_u64())
+                    .or_else(|| {
+                        raw_json
+                            .pointer("/usage/reasoning_tokens")
+                            .and_then(|v| v.as_u64())
+                    });
+                if let Some(tokens) = reasoning_tokens {
+                    assert_eq!(
+                        tokens, 0,
+                        "expected 0 reasoning tokens when enable_thinking=false, got: {}",
+                        tokens
+                    );
+                } else if std::env::var("REQUIRE_ENDPOINT").is_ok() {
+                    panic!(
+                        "endpoint usage did not report reasoning_tokens: {:?}",
+                        raw_json.get("usage")
+                    );
+                }
+            }
+        }
+    }
+
     println!(
         "Fast path completed in {:.2?}, tokens={}",
         start.elapsed(),
@@ -478,6 +583,7 @@ async fn test_selfware_design_thinking_disabled_budget() {
 // ── 6. Qwen XML Tool-Calling Extraction via Unified Extractor ────────────────
 
 #[tokio::test]
+#[ignore = "requires live endpoint"]
 async fn test_selfware_design_tool_call_xml_extraction() {
     skip_if_unreachable!();
 
@@ -544,6 +650,7 @@ async fn test_selfware_design_tool_call_xml_extraction() {
 // ── 7. Multi-Turn Tool Execution Round-Trip ──────────────────────────────────
 
 #[tokio::test]
+#[ignore = "requires live endpoint"]
 async fn test_selfware_design_multiturn_tool_execution_roundtrip() {
     skip_if_unreachable!();
 
@@ -622,6 +729,7 @@ async fn test_selfware_design_multiturn_tool_execution_roundtrip() {
 // ── 8. Agent File Tool Calling Contract ──────────────────────────────────────
 
 #[tokio::test]
+#[ignore = "requires live endpoint"]
 async fn test_selfware_design_file_read_tool_contract() {
     skip_if_unreachable!();
 
@@ -670,6 +778,7 @@ async fn test_selfware_design_file_read_tool_contract() {
 // ── 9. Concurrent Stream Throughput & Stability ──────────────────────────────
 
 #[tokio::test]
+#[ignore = "requires live endpoint"]
 async fn test_selfware_design_concurrent_streams() {
     skip_if_unreachable!();
 
