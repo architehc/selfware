@@ -1990,7 +1990,7 @@ fn capture_tested_diff(worktree: &Path) -> Option<String> {
         return None;
     }
     let diff = Command::new("git")
-        .args(["diff", "--cached", "HEAD"])
+        .args(["diff", "--cached", "--binary", "HEAD"])
         .current_dir(worktree)
         .output()
         .ok()?;
