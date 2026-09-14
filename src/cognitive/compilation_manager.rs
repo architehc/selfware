@@ -60,7 +60,7 @@ impl CompilationSandbox {
         // Carry over uncommitted changes (staged + unstaged) so the sandbox
         // reflects the exact working tree, not just the last commit.
         let diff_output = Command::new("git")
-            .args(["diff", "HEAD"])
+            .args(["diff", "HEAD", "--binary"])
             .current_dir(&original_dir)
             .output()
             .map_err(|e| cleanup_on_fail(anyhow!("Failed to run git diff: {e}")))?;
@@ -100,9 +100,10 @@ impl CompilationSandbox {
         }
 
         // Carry over untracked, non-ignored source files so new files in the working
-        // tree are part of the evaluated sandbox snapshot.
+        // tree are part of the evaluated sandbox snapshot. Use NUL-delimited output
+        // so filenames with spaces, quotes, or special characters are safely preserved.
         let untracked_output = Command::new("git")
-            .args(["ls-files", "--others", "--exclude-standard"])
+            .args(["ls-files", "-z", "--others", "--exclude-standard"])
             .current_dir(&original_dir)
             .output()
             .map_err(|e| cleanup_on_fail(anyhow!("Failed to list untracked files: {e}")))?;
@@ -114,27 +115,99 @@ impl CompilationSandbox {
             )));
         }
 
-        let untracked_list = String::from_utf8_lossy(&untracked_output.stdout);
-        for line in untracked_list.lines().filter(|l| !l.trim().is_empty()) {
-            let rel = Path::new(line.trim());
+        const MAX_UNTRACKED_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB per file
+
+        for item in untracked_output.stdout.split(|&b| b == 0) {
+            if item.is_empty() {
+                continue;
+            }
+            #[cfg(unix)]
+            use std::os::unix::ffi::OsStrExt;
+            #[cfg(unix)]
+            let rel = Path::new(std::ffi::OsStr::from_bytes(item));
+            #[cfg(not(unix))]
+            let item_str = match std::str::from_utf8(item) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            #[cfg(not(unix))]
+            let rel = Path::new(item_str);
+
             if rel.is_absolute() || rel.starts_with("..") {
+                continue;
+            }
+            if rel.to_string_lossy().starts_with(".selfware-sandbox-") {
                 continue;
             }
             let src = original_dir.join(rel);
             let dst = work_dir.join(rel);
-            if let Ok(meta) = src.symlink_metadata() {
-                if meta.is_file() {
+            let meta = src.symlink_metadata().map_err(|e| {
+                cleanup_on_fail(anyhow!(
+                    "Failed reading metadata for untracked entry {:?}: {e}",
+                    rel
+                ))
+            })?;
+
+            if meta.is_dir() {
+                continue;
+            }
+
+            if meta.file_type().is_symlink() {
+                #[cfg(unix)]
+                {
                     if let Some(parent) = dst.parent() {
                         std::fs::create_dir_all(parent).map_err(|e| {
                             cleanup_on_fail(anyhow!(
-                                "Failed creating parent directory for untracked file {line}: {e}"
+                                "Failed creating parent directory for untracked symlink {:?}: {e}",
+                                rel
                             ))
                         })?;
                     }
-                    std::fs::copy(&src, &dst).map_err(|e| {
-                        cleanup_on_fail(anyhow!("Failed copying untracked file {line}: {e}"))
+                    let target = std::fs::read_link(&src).map_err(|e| {
+                        cleanup_on_fail(anyhow!(
+                            "Failed reading untracked symlink target {:?}: {e}",
+                            rel
+                        ))
+                    })?;
+                    std::os::unix::fs::symlink(&target, &dst).map_err(|e| {
+                        cleanup_on_fail(anyhow!(
+                            "Failed replicating untracked symlink {:?}: {e}",
+                            rel
+                        ))
                     })?;
                 }
+                #[cfg(not(unix))]
+                {
+                    return Err(cleanup_on_fail(anyhow!(
+                        "Untracked symlinks are unsupported on this platform: {:?}",
+                        rel
+                    )));
+                }
+            } else if meta.is_file() {
+                if meta.len() > MAX_UNTRACKED_FILE_SIZE {
+                    return Err(cleanup_on_fail(anyhow!(
+                        "Untracked file {:?} exceeds size limit ({} bytes > {} bytes)",
+                        rel,
+                        meta.len(),
+                        MAX_UNTRACKED_FILE_SIZE
+                    )));
+                }
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        cleanup_on_fail(anyhow!(
+                            "Failed creating parent directory for untracked file {:?}: {e}",
+                            rel
+                        ))
+                    })?;
+                }
+                std::fs::copy(&src, &dst).map_err(|e| {
+                    cleanup_on_fail(anyhow!("Failed copying untracked file {:?}: {e}", rel))
+                })?;
+            } else {
+                return Err(cleanup_on_fail(anyhow!(
+                    "Unsupported untracked entry type for {:?}: expected regular file or symlink",
+                    rel
+                )));
             }
         }
 
