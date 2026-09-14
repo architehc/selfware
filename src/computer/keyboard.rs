@@ -7,7 +7,7 @@
 //! combos return an explicit "not supported" error rather than silently
 //! succeeding without performing the action.
 
-#[cfg(any(all(target_os = "linux", not(test)), target_os = "macos"))]
+#[cfg(all(any(target_os = "linux", target_os = "macos"), not(test)))]
 use anyhow::Context;
 use anyhow::{bail, Result};
 
@@ -279,6 +279,37 @@ async fn run_powershell_sendkeys(_sendkeys_sequence: &str) -> Result<()> {
     Ok(())
 }
 
+/// Run an AppleScript `keystroke` snippet via `osascript` (System Events).
+#[cfg(all(target_os = "macos", not(test)))]
+async fn run_macos_keystroke(script: &str) -> Result<()> {
+    let mut cmd = tokio::process::Command::new("osascript");
+    crate::safety::process_env::sanitize_command_env_preserve(&mut cmd, super::SESSION_ENV_VARS);
+    let output = cmd
+        .arg("-e")
+        .arg(script)
+        .output()
+        .await
+        .context("failed to run osascript for macOS keyboard typing")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "macOS keyboard typing via System Events failed (exit {}): {} — grant Accessibility permissions to the terminal app",
+            output.status,
+            stderr.trim()
+        );
+    }
+    Ok(())
+}
+
+/// No-op osascript stub for tests.
+///
+/// Without this, `cargo test` on macOS really types the test strings
+/// ("hello world", "hi", 10,000 × "x") into whichever window is focused.
+#[cfg(all(target_os = "macos", test))]
+async fn run_macos_keystroke(_script: &str) -> Result<()> {
+    Ok(())
+}
+
 impl KeyboardController {
     pub fn new() -> Self {
         Self {
@@ -356,25 +387,7 @@ impl KeyboardController {
                     "tell application \"System Events\" to keystroke \"{}\"",
                     escaped
                 );
-                let mut cmd = tokio::process::Command::new("osascript");
-                crate::safety::process_env::sanitize_command_env_preserve(
-                    &mut cmd,
-                    super::SESSION_ENV_VARS,
-                );
-                let output = cmd
-                    .arg("-e")
-                    .arg(&script)
-                    .output()
-                    .await
-                    .context("failed to run osascript for macOS keyboard typing")?;
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    bail!(
-                        "macOS keyboard typing via System Events failed (exit {}): {} — grant Accessibility permissions to the terminal app",
-                        output.status,
-                        stderr.trim()
-                    );
-                }
+                run_macos_keystroke(&script).await?;
             }
         }
 

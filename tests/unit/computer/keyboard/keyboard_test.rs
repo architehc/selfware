@@ -45,18 +45,10 @@ async fn test_safe_combo_allowed() {
 async fn test_type_text_success() {
     let kb = KeyboardController::new();
     let result = kb.type_text("hello world").await;
-    #[cfg(target_os = "linux")]
+    // Linux uses a no-op xdotool stub in tests; macOS uses a no-op osascript
+    // stub so the suite never types into the developer's focused window.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     assert!(result.is_ok());
-    // macOS actually attempts the action via osascript; without Accessibility
-    // permissions it must error honestly, never silently succeed.
-    #[cfg(target_os = "macos")]
-    if let Err(e) = &result {
-        let msg = e.to_string();
-        assert!(
-            msg.contains("System Events") || msg.contains("osascript"),
-            "unexpected error: {msg}"
-        );
-    }
 }
 
 #[tokio::test]
@@ -70,16 +62,8 @@ async fn test_type_text_at_limit() {
     let kb = KeyboardController::new();
     let text = "x".repeat(10_000);
     let result = kb.type_text(&text).await;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     assert!(result.is_ok());
-    #[cfg(target_os = "macos")]
-    if let Err(e) = &result {
-        let msg = e.to_string();
-        assert!(
-            msg.contains("System Events") || msg.contains("osascript"),
-            "unexpected error: {msg}"
-        );
-    }
 }
 
 #[tokio::test]
@@ -142,16 +126,8 @@ async fn test_type_text_with_delay_profile() {
     };
     let kb = KeyboardController::new().with_typing_profile(profile);
     let result = kb.type_text("hi").await;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     assert!(result.is_ok());
-    #[cfg(target_os = "macos")]
-    if let Err(e) = &result {
-        let msg = e.to_string();
-        assert!(
-            msg.contains("System Events") || msg.contains("osascript"),
-            "unexpected error: {msg}"
-        );
-    }
 }
 
 // ---- macOS: key presses/combos must error honestly, never silently succeed ----
