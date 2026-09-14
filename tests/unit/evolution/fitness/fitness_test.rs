@@ -530,3 +530,112 @@ fn duplicate_scenario_names_in_sab_report_are_rejected() {
         "unexpected error: {err:?}"
     );
 }
+
+#[test]
+fn test_prune_report_dirs_retention_and_protection() {
+    use std::fs::{self, File};
+    use tempfile::tempdir;
+
+    let temp = tempdir().unwrap();
+    let reports_dir = temp.path();
+
+    // 1. Create 12 completed prefixed directories with stepped mtimes
+    for i in 1..=12 {
+        let dir = reports_dir.join(format!("sab-run-{:02}", i));
+        fs::create_dir(&dir).unwrap();
+        File::create(dir.join(".completed")).unwrap();
+        #[cfg(unix)]
+        {
+            let cname = std::ffi::CString::new(dir.to_str().unwrap()).unwrap();
+            let times = [
+                nix::libc::timespec {
+                    tv_sec: (1_000_000 + i * 60) as i64,
+                    tv_nsec: 0,
+                },
+                nix::libc::timespec {
+                    tv_sec: (1_000_000 + i * 60) as i64,
+                    tv_nsec: 0,
+                },
+            ];
+            unsafe {
+                nix::libc::utimensat(nix::libc::AT_FDCWD, cname.as_ptr(), times.as_ptr(), 0);
+            }
+        }
+    }
+
+    // 2. Create non-prefixed directory (must NEVER be pruned)
+    let non_prefixed = reports_dir.join("other-benchmark");
+    fs::create_dir(&non_prefixed).unwrap();
+    File::create(non_prefixed.join("summary.txt")).unwrap();
+
+    // 3. Create an exempt directory (e.g. winner from older generation)
+    let exempt_dir = reports_dir.join("sab-run-02"); // older, normally would be pruned
+    let exempt_paths = vec![exempt_dir.clone()];
+
+    // 4. Create an actively leased directory (in-flight run)
+    let leased_dir = reports_dir.join("sab-run-in-flight");
+    fs::create_dir(&leased_dir).unwrap();
+    let lease_file = leased_dir.join(".lease");
+    let lease_handle = File::create(&lease_file).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        unsafe {
+            nix::libc::flock(
+                lease_handle.as_raw_fd(),
+                nix::libc::LOCK_EX | nix::libc::LOCK_NB,
+            );
+        }
+    }
+
+    // 5. Create a symlink in reports_dir (must not crash GC)
+    #[cfg(unix)]
+    {
+        let symlink_path = reports_dir.join("sab-symlink");
+        let _ = std::os::unix::fs::symlink(&non_prefixed, &symlink_path);
+    }
+
+    // Prune keeping at most 5 newest completed unleased runs
+    prune_report_dirs(reports_dir, "sab-", 5, &exempt_paths);
+
+    // Release lease
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        unsafe {
+            nix::libc::flock(lease_handle.as_raw_fd(), nix::libc::LOCK_UN);
+        }
+    }
+
+    // Assertions:
+    // Non-prefixed survived
+    assert!(
+        non_prefixed.exists(),
+        "non-prefixed dir must never be pruned"
+    );
+
+    // Exempt directory survived even though it's older than retention cutoff
+    assert!(
+        exempt_dir.exists(),
+        "exempt dir must be protected from pruning"
+    );
+
+    // Actively leased directory survived
+    assert!(leased_dir.exists(), "actively leased dir must be protected");
+
+    // Top 5 newest (sab-run-12 down to sab-run-08) must survive
+    for i in 8..=12 {
+        let dir = reports_dir.join(format!("sab-run-{:02}", i));
+        assert!(dir.exists(), "newest dir sab-run-{:02} should survive", i);
+    }
+
+    // Oldest eligible directories (sab-run-01, sab-run-03..=sab-run-07) must be pruned
+    assert!(
+        !reports_dir.join("sab-run-01").exists(),
+        "sab-run-01 should be pruned"
+    );
+    for i in 3..=7 {
+        let dir = reports_dir.join(format!("sab-run-{:02}", i));
+        assert!(!dir.exists(), "older dir sab-run-{:02} should be pruned", i);
+    }
+}
