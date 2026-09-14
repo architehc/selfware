@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from redteam_gen import _log_usage, chat  # noqa: E402
-from redteam_verdicts import case_fingerprint, load_matching_verdicts, replace_receipts  # noqa: E402
+from redteam_verdicts import case_fingerprint, find_quarantined, load_matching_verdicts, replace_receipts  # noqa: E402
 
 PROBE = Path("tests/redteam/corpus/probe_backlog_waves1292plus.jsonl")
 VERDICTS = Path("/home/rig/selfdev/triage_verdicts.jsonl")
@@ -186,17 +186,35 @@ def lane(endpoint: str, model: str, batches: list, lane_no: int):
               + (f" (missing {len(missing)})" if missing else ""), flush=True)
 
 
+def write_triage_summary(verdicts_path, total, verified, quarantined, missing):
+    summary = {
+        "total": total,
+        "verified": verified,
+        "quarantined": quarantined,
+        "missing": missing,
+    }
+    stem = verdicts_path.stem
+    summary_path = verdicts_path.parent / f"{stem}_summary.json"
+    counts_path = verdicts_path.parent / f"{stem}_counts.txt"
+    try:
+        verdicts_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_path.write_text(json.dumps(summary, indent=2))
+        counts_path.write_text(f"{verified} {quarantined} {missing}\n")
+    except Exception:
+        pass
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--endpoint")
-    ap.add_argument("--model")
-    ap.add_argument("--lanes", type=int, default=8)
-    ap.add_argument("--shard", required=True, help="K/N")
-    ap.add_argument("--batch", type=int, default=15)
-    ap.add_argument("--probe-file", help="override the probe corpus path")
-    ap.add_argument("--verdicts-file", help="override the verdicts output path")
+    ap.add_argument("--endpoint", default=os.environ.get("SELFWARE_ENDPOINT"))
+    ap.add_argument("--model", default=os.environ.get("SELFWARE_MODEL"))
+    ap.add_argument("--shard", default="0/1", help="k/n shard index")
+    ap.add_argument("--lanes", type=int, default=16, help="concurrent requests")
+    ap.add_argument("--batch", type=int, default=8, help="cases per worker slice")
+    ap.add_argument("--probe-file", help="path to probe wave jsonl")
+    ap.add_argument("--verdicts-file", help="path to destination verdicts jsonl")
     ap.add_argument("--check-complete", action="store_true",
-                    help="check input-bound verdict coverage without calling a model")
+                    help="exit 0 only if all valid cases have matching, non-corrupted verdicts")
     args = ap.parse_args()
 
     if args.probe_file:
@@ -216,13 +234,20 @@ def main():
                 continue
             d = json.loads(line)
             cases.append(d)
+    quarantined = find_quarantined(cases)
     done = load_done(cases)
     # Repeated identical inputs are one classification; differing inputs
-    # sharing an ID were rejected while loading matching verdicts above.
-    pending = list({d["id"]: d for d in cases if d["id"] not in done}.values())
+    # sharing an ID were quarantined and are excluded from pending classifications.
+    pending = list({d["id"]: d for d in cases if d["id"] not in done and d["id"] not in quarantined}.values())
+    all_unique_ids = {d["id"] for d in cases}
+    missing = (all_unique_ids - done) - quarantined
     if args.check_complete:
-        print(f"{len({d['id'] for d in cases}) - len(done)} cases missing verified verdicts")
-        return 1 if pending else 0
+        write_triage_summary(VERDICTS, len(all_unique_ids), len(done), len(quarantined), len(missing))
+        msg = f"{len(missing)} cases missing verified verdicts"
+        if quarantined:
+            msg += f" ({len(quarantined)} quarantined)"
+        print(msg)
+        return 1 if missing else 0
     if not args.endpoint or not args.model:
         ap.error("--endpoint and --model are required for classification")
     VERDICTS.parent.mkdir(parents=True, exist_ok=True)
@@ -236,10 +261,14 @@ def main():
                    for ln in range(args.lanes) if per_lane[ln]]
         for future in futures:
             future.result()
-    missing = {case["id"] for case in cases} - load_done(cases)
+    done = load_done(cases)
+    missing = (all_unique_ids - done) - quarantined
+    write_triage_summary(VERDICTS, len(all_unique_ids), len(done), len(quarantined), len(missing))
     if missing:
         print(f"incomplete triage: {len(missing)} cases remain; rerun to resume", file=sys.stderr)
         return 1
+    if quarantined:
+        print(f"triage complete: {len(done)} verified, {len(quarantined)} quarantined", flush=True)
     return 0
 
 

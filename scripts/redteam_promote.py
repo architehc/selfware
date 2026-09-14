@@ -27,20 +27,76 @@ EARLY = {
 }
 
 
-def main():
-    existing = set()
-    with open(CORPUS) as fh:
+def read_jsonl_tolerant(path):
+    """Read JSONL file yielding parsed objects, skipping blank lines and torn/truncated lines."""
+    if not path or not os.path.exists(path):
+        return []
+    cases = []
+    with open(path, "r", encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
-            if line:
-                existing.add(json.loads(line)["id"])
+            if not line:
+                continue
+            try:
+                cases.append(json.loads(line))
+            except json.JSONDecodeError:
+                # Wave file or corpus mid-append by a generator — the truncated
+                # tail line is fully readable next cycle; skip it
+                # rather than aborting the whole consolidation.
+                continue
+    return cases
+
+
+def validate_destination_corpus(path):
+    """Validate destination corpus strictly before appending.
+
+    Returns a set of existing case IDs.
+    Fails closed if the destination has an unterminated tail record
+    (missing trailing newline) or contains malformed JSON records.
+    """
+    if not path or not os.path.exists(path):
+        return set()
+
+    size = os.path.getsize(path)
+    if size > 0:
+        with open(path, "rb") as fh:
+            fh.seek(-1, os.SEEK_END)
+            last_byte = fh.read(1)
+            if last_byte != b"\n":
+                raise ValueError(
+                    f"Destination corpus {path} is not newline-terminated (truncated tail). "
+                    "Refusing to append to prevent persistent corruption."
+                )
+
+    existing = set()
+    with open(path, "r", encoding="utf-8") as fh:
+        for idx, line in enumerate(fh, 1):
+            line_str = line.strip()
+            if not line_str:
+                continue
+            try:
+                data = json.loads(line_str)
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    f"Destination corpus {path} contains invalid JSON on line {idx}: {e}. "
+                    "Refusing to append to prevent persistent corruption."
+                ) from e
+            if not isinstance(data, dict) or "id" not in data:
+                raise ValueError(
+                    f"Destination corpus {path} contains record without valid 'id' on line {idx}."
+                )
+            existing.add(data["id"])
+    return existing
+
+
+def main():
+    existing = validate_destination_corpus(CORPUS)
 
     promoted = disagreed = noverdict = missing_models = 0
     with open(CORPUS, "a") as out:
         for f in sorted(glob.glob("tests/redteam/corpus/probe_wave_1*.jsonl")):
             ts = os.path.basename(f)[len("probe_wave_"):-len(".jsonl")]
-            with open(f) as fh:
-                cases = [json.loads(line) for line in fh if line.strip()]
+            cases = read_jsonl_tolerant(f)
             chk = load_matching_verdicts(f"{SELFDEV}/chkv_{ts}.jsonl", cases, "checker")
             e2 = load_matching_verdicts(f"{SELFDEV}/e2v_{ts}.jsonl", cases)
             e3 = load_matching_verdicts(f"{SELFDEV}/e3v_{ts}.jsonl", cases)
@@ -49,49 +105,42 @@ def main():
                 chk = chk or load_matching_verdicts(f"{SELFDEV}/{name}_checker_verdicts.jsonl", cases, "checker")
                 e2 = e2 or load_matching_verdicts(f"{SELFDEV}/{name}_e2_verdicts.jsonl", cases)
                 e3 = e3 or load_matching_verdicts(f"{SELFDEV}/{name}_e3_verdicts.jsonl", cases)
-            with open(f) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        d = json.loads(line)
-                    except json.JSONDecodeError:
-                        # Wave file mid-append by a generator — the truncated
-                        # tail line is fully readable next cycle; skip it
-                        # rather than aborting the whole consolidation.
-                        continue
-                    i = d["id"]
-                    cv = chk.get(i)
-                    if cv not in ("r", "a"):
-                        noverdict += 1
-                        continue
-                    if i in existing:
-                        continue
-                    if i not in e2 and i not in e3:
-                        missing_models += 1
-                        continue
-                    if e2.get(i) == cv or e3.get(i) == cv:
-                        d["expect"] = "refuse" if cv == "r" else "allow"
-                        src = "E2" if e2.get(i) == cv else "E3"
-                        note = d.get("note", "")
-                        d["note"] = (
-                            f"{note} | dual-source promotion: {src} verdict "
-                            "agreed with checker"
-                        ).strip(" |")
-                        d["label_provenance"] = {
-                            "kind": "checker_agreement_regression",
-                            "input_sha256": case_fingerprint(d),
-                            "checker": cv,
-                            "model_verdicts": {name: verdict for name, verdict in
-                                               (("E2", e2.get(i)), ("E3", e3.get(i)))
-                                               if verdict is not None},
-                        }
-                        out.write(json.dumps(d) + "\n")
-                        existing.add(i)
-                        promoted += 1
-                    else:
-                        disagreed += 1
+            for d in cases:
+                if not isinstance(d, dict):
+                    continue
+                i = d.get("id")
+                if not i:
+                    continue
+                cv = chk.get(i)
+                if cv not in ("r", "a"):
+                    noverdict += 1
+                    continue
+                if i in existing:
+                    continue
+                if i not in e2 and i not in e3:
+                    missing_models += 1
+                    continue
+                if e2.get(i) == cv or e3.get(i) == cv:
+                    d["expect"] = "refuse" if cv == "r" else "allow"
+                    src = "E2" if e2.get(i) == cv else "E3"
+                    note = d.get("note", "")
+                    d["note"] = (
+                        f"{note} | dual-source promotion: {src} verdict "
+                        "agreed with checker"
+                    ).strip(" |")
+                    d["label_provenance"] = {
+                        "kind": "checker_agreement_regression",
+                        "input_sha256": case_fingerprint(d),
+                        "checker": cv,
+                        "model_verdicts": {name: verdict for name, verdict in
+                                           (("E2", e2.get(i)), ("E3", e3.get(i)))
+                                           if verdict is not None},
+                    }
+                    out.write(json.dumps(d) + "\n")
+                    existing.add(i)
+                    promoted += 1
+                else:
+                    disagreed += 1
 
     with open(f"{SELFDEV}/last_promote_counts.txt", "w") as fh:
         fh.write(f"{promoted} {disagreed} {noverdict}\n")

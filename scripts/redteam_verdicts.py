@@ -37,17 +37,25 @@ def _read_rows(path):
     return rows
 
 
-def load_matching_verdicts(path, cases, verdict_key="v"):
+def find_quarantined(cases):
     expected = {}
-    # An ID reused with DIFFERENT content (generator id collision) can never
-    # authorize a promotion for either copy — quarantine it, don't abort the
-    # run. Observed killing a full pipeline cycle on one collision.
     quarantined = set()
     for case in cases:
         digest = case_fingerprint(case)
         if case["id"] in expected and expected[case["id"]] != digest:
             quarantined.add(case["id"])
         expected[case["id"]] = digest
+    return quarantined
+
+
+def load_matching_verdicts(path, cases, verdict_key="v"):
+    expected = {}
+    # An ID reused with DIFFERENT content (generator id collision) can never
+    # authorize a promotion for either copy — quarantine it, don't abort the
+    # run. Observed killing a full pipeline cycle on one collision.
+    quarantined = find_quarantined(cases)
+    for case in cases:
+        expected[case["id"]] = case_fingerprint(case)
     if quarantined:
         import sys
         print(f"quarantined {len(quarantined)} colliding case IDs: "
@@ -125,10 +133,12 @@ def main():
     args = parser.parse_args()
     cases = [json.loads(line) for line in Path(args.probe_file).read_text().splitlines()
              if line.strip()]
+    quarantined = find_quarantined(cases)
     verdicts = load_matching_verdicts(args.verdicts_file, cases,
                                      "checker" if args.kind == "checker" else "v")
-    missing = {case["id"] for case in cases} - verdicts.keys()
-    print(f"{len(missing)} cases missing verified {args.kind} verdicts")
+    missing = ({case["id"] for case in cases} - verdicts.keys()) - quarantined
+    print(f"{len(missing)} cases missing verified {args.kind} verdicts"
+          + (f" ({len(quarantined)} quarantined)" if quarantined else ""))
     return 1 if missing else 0
 
 

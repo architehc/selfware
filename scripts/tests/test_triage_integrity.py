@@ -129,6 +129,58 @@ class ReceiptIntegrityTests(unittest.TestCase):
             self.assertEqual(promoted["expect"], "refuse")
             self.assertEqual(promoted["label_provenance"]["input_sha256"], case_fingerprint(case))
 
+    def test_read_jsonl_tolerant_skips_torn_tail_lines(self):
+        case = fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "torn.jsonl"
+            path.write_text(json.dumps(case) + '\n{"id":"interrupted", "args":')
+            rows = promote.read_jsonl_tolerant(str(path))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["id"], case["id"])
+
+    def test_quarantine_excluded_from_triage_completeness(self):
+        case1 = fixture("case-clean")
+        case2_a = {"id": "case-collision", "tool": "exec", "arguments": '{"cmd":"ls"}'}
+        case2_b = {"id": "case-collision", "tool": "exec", "arguments": '{"cmd":"pwd"}'}
+        with tempfile.TemporaryDirectory() as directory:
+            probe_path = Path(directory) / "probe.jsonl"
+            probe_path.write_text("\n".join(json.dumps(c) for c in [case1, case2_a, case2_b]) + "\n")
+            verdicts_path = Path(directory) / "verdicts.jsonl"
+            replace_receipts(verdicts_path, [receipt(case1)])
+
+            with patch.object(sys, "argv", ["redteam_triage.py", "--check-complete",
+                                           "--shard", "0/1",
+                                           "--probe-file", str(probe_path),
+                                           "--verdicts-file", str(verdicts_path)]):
+                exit_code = triage.main()
+                self.assertEqual(exit_code, 0)
+                summary_file = verdicts_path.parent / "verdicts_summary.json"
+                counts_file = verdicts_path.parent / "verdicts_counts.txt"
+                self.assertTrue(summary_file.exists())
+                self.assertTrue(counts_file.exists())
+                summary = json.loads(summary_file.read_text())
+                self.assertEqual(summary["total"], 2)
+                self.assertEqual(summary["verified"], 1)
+                self.assertEqual(summary["quarantined"], 1)
+                self.assertEqual(summary["missing"], 0)
+                self.assertEqual(counts_file.read_text(), "1 1 0\n")
+
+    def test_destination_corpus_validation_rejects_unterminated_tail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            corpus_path = Path(directory) / "corrupt_corpus.jsonl"
+            corpus_path.write_text('{"id":"c1","tool":"exec"}')
+            with self.assertRaises(ValueError) as ctx:
+                promote.validate_destination_corpus(str(corpus_path))
+            self.assertIn("newline-terminated", str(ctx.exception))
+
+    def test_destination_corpus_validation_rejects_malformed_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            corpus_path = Path(directory) / "corrupt_corpus.jsonl"
+            corpus_path.write_text('{"id":"c1","tool":"exec"}\n{"id":"broken",\n')
+            with self.assertRaises(ValueError) as ctx:
+                promote.validate_destination_corpus(str(corpus_path))
+            self.assertIn("invalid JSON", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
