@@ -15,6 +15,7 @@ fn test_rating_thresholds() {
         },
         binary_sha256: "test".to_string(),
         run_id: "test".to_string(),
+        report_path: PathBuf::from("reports/sab-test/sab_report.json"),
     };
 
     assert_eq!(make_result(95.0).rating, GenerationRating::Bloom);
@@ -142,6 +143,7 @@ fn test_build_fitness_metrics_missing_binary() {
         rating: GenerationRating::Grow,
         binary_sha256: "test".to_string(),
         run_id: "test".to_string(),
+        report_path: PathBuf::from("reports/sab-test/sab_report.json"),
     };
     let metrics = build_fitness_metrics(
         &sab,
@@ -395,6 +397,7 @@ fn test_darwinx_non_regression_passes_when_all_baseline_passed_scenarios_pass() 
         rating: GenerationRating::Wilt,
         binary_sha256: "hash".to_string(),
         run_id: "r1".to_string(),
+        report_path: PathBuf::from("reports/sab-r1/sab_report.json"),
     };
 
     // Candidate solves sc2 as well, keeps sc1 passing
@@ -406,6 +409,7 @@ fn test_darwinx_non_regression_passes_when_all_baseline_passed_scenarios_pass() 
         rating: GenerationRating::Bloom,
         binary_sha256: "hash".to_string(),
         run_id: "r2".to_string(),
+        report_path: PathBuf::from("reports/sab-r2/sab_report.json"),
     };
 
     assert!(baseline
@@ -434,6 +438,7 @@ fn test_darwinx_non_regression_rejects_candidate_when_previously_passing_scenari
         rating: GenerationRating::Wilt,
         binary_sha256: "hash".to_string(),
         run_id: "r1".to_string(),
+        report_path: PathBuf::from("reports/sab-r1/sab_report.json"),
     };
 
     // Candidate has higher score on sc2, but broke sc1! Even if aggregate score was identical or higher!
@@ -445,6 +450,7 @@ fn test_darwinx_non_regression_rejects_candidate_when_previously_passing_scenari
         rating: GenerationRating::Wilt,
         binary_sha256: "hash".to_string(),
         run_id: "r2".to_string(),
+        report_path: PathBuf::from("reports/sab-r2/sab_report.json"),
     };
 
     let err = baseline
@@ -480,6 +486,7 @@ fn test_darwinx_non_regression_rejects_candidate_when_baseline_passed_scenario_m
         rating: GenerationRating::Bloom,
         binary_sha256: "hash".to_string(),
         run_id: "r1".to_string(),
+        report_path: PathBuf::from("reports/sab-r1/sab_report.json"),
     };
 
     // Candidate omits sc2 entirely (e.g. silently dropped test)
@@ -491,6 +498,7 @@ fn test_darwinx_non_regression_rejects_candidate_when_baseline_passed_scenario_m
         rating: GenerationRating::Bloom,
         binary_sha256: "hash".to_string(),
         run_id: "r2".to_string(),
+        report_path: PathBuf::from("reports/sab-r2/sab_report.json"),
     };
 
     let err = baseline

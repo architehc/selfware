@@ -118,6 +118,7 @@ fn test_fitness_pipeline_end_to_end() {
         rating: GenerationRating::Grow,
         binary_sha256: "test".to_string(),
         run_id: "test".to_string(),
+        report_path: std::path::PathBuf::from("reports/sab-test/sab_report.json"),
     };
 
     let metrics = fitness::build_fitness_metrics(
@@ -599,6 +600,9 @@ fn test_e2e_evolution_history_prompt_builds_correctly() {
             token_delta: Some(-5000.0),
             patch: String::new(),
             git_tag: None,
+            run_id: None,
+            binary_sha256: None,
+            report_path: None,
         },
         daemon::GenerationWinner {
             generation: 2,
@@ -608,6 +612,9 @@ fn test_e2e_evolution_history_prompt_builds_correctly() {
             token_delta: Some(-3000.0),
             patch: String::new(),
             git_tag: Some("evolve-gen-2".into()),
+            run_id: None,
+            binary_sha256: None,
+            report_path: None,
         },
     ];
 

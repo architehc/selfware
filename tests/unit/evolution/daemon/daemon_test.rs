@@ -36,6 +36,9 @@ fn test_format_history_with_entries() {
             token_delta: Some(-50000.0),
             patch: String::new(),
             git_tag: None,
+            run_id: None,
+            binary_sha256: None,
+            report_path: None,
         },
         GenerationWinner {
             generation: 5,
@@ -45,6 +48,9 @@ fn test_format_history_with_entries() {
             token_delta: Some(-30000.0),
             patch: String::new(),
             git_tag: Some("evolve-gen-5".into()),
+            run_id: None,
+            binary_sha256: None,
+            report_path: None,
         },
     ];
     let history = format_evolution_history(&winners);
@@ -108,6 +114,7 @@ fn test_metrics_from_sab_result() {
         rating: GenerationRating::Bloom,
         binary_sha256: "test".to_string(),
         run_id: "test".to_string(),
+        report_path: PathBuf::from("reports/sab-test/sab_report.json"),
     };
     let metrics = metrics_from_sab_result(&sab, Path::new("target/release/selfware"), 50.0);
     assert_eq!(metrics.sab_score, 88.5);
@@ -128,6 +135,9 @@ fn test_format_history_caps_at_10() {
             token_delta: Some(-1000.0),
             patch: String::new(),
             git_tag: None,
+            run_id: None,
+            binary_sha256: None,
+            report_path: None,
         })
         .collect();
     let history = format_evolution_history(&winners);
@@ -281,6 +291,9 @@ fn test_generation_winner_fields() {
         token_delta: Some(-25000.0),
         patch: "--- a/src/cache.rs\n+++ b/src/cache.rs".to_string(),
         git_tag: Some("evolve-gen-42".to_string()),
+        run_id: Some("rsi-42".to_string()),
+        binary_sha256: Some("sha256-42".to_string()),
+        report_path: Some(PathBuf::from("reports/sab-42/sab_report.json")),
     };
     assert_eq!(winner.generation, 42);
     assert!(winner.sab_delta > 0.0);
@@ -369,6 +382,7 @@ fn make_sab(scores: Vec<(&str, f64, bool)>) -> crate::evolution::fitness::SabRes
         rating: GenerationRating::Grow,
         binary_sha256: "dummy".to_string(),
         run_id: "test".to_string(),
+        report_path: std::path::PathBuf::from("reports/sab-test/sab_report.json"),
     }
 }
 

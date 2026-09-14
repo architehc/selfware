@@ -24,6 +24,10 @@ pub struct SabConfig {
     pub scenario_timeout: Duration,
     /// Which scenarios to run (None = all 12)
     pub scenario_filter: Option<Vec<String>>,
+    /// How many completed report directories to retain (default 10)
+    pub report_retention: usize,
+    /// Promoted or baseline report directories that must not be deleted
+    pub exempt_reports: Vec<PathBuf>,
 }
 
 impl Default for SabConfig {
@@ -35,6 +39,8 @@ impl Default for SabConfig {
             max_parallel: 6,
             scenario_timeout: Duration::from_secs(3600),
             scenario_filter: None,
+            report_retention: 10,
+            exempt_reports: Vec::new(),
         }
     }
 }
@@ -52,6 +58,7 @@ pub struct SabResult {
     /// SHA-256 of the executable the runner actually ran.
     pub binary_sha256: String,
     pub run_id: String,
+    pub report_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -79,15 +86,109 @@ pub enum Difficulty {
     Expert,
 }
 
+/// Bounded report GC: retain at most `keep_count` newest completed, unleased directories matching `prefix`.
+/// Exempts directories in `exempt_paths` (e.g. promoted generation winners or active baselines).
+pub fn prune_report_dirs(
+    reports_dir: &Path,
+    prefix: &str,
+    keep_count: usize,
+    exempt_paths: &[PathBuf],
+) {
+    if let Ok(entries) = std::fs::read_dir(reports_dir) {
+        let mut eligible_dirs: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|s| s.starts_with(prefix))
+                    .unwrap_or(false)
+                    && e.path().is_dir()
+            })
+            .filter_map(|e| {
+                let path = e.path();
+                // 1. Check if exempt (e.g. promoted generation winner)
+                if exempt_paths
+                    .iter()
+                    .any(|exempt| path.starts_with(exempt) || &path == exempt)
+                {
+                    return None;
+                }
+                // 2. Check if active/leased by an in-flight run
+                let lease_path = path.join(".lease");
+                if lease_path.exists() {
+                    #[cfg(unix)]
+                    {
+                        use std::os::fd::AsRawFd;
+                        if let Ok(file) = std::fs::File::open(&lease_path) {
+                            let rc = unsafe {
+                                nix::libc::flock(
+                                    file.as_raw_fd(),
+                                    nix::libc::LOCK_EX | nix::libc::LOCK_NB,
+                                )
+                            };
+                            if rc != 0 {
+                                // Currently locked by an active process
+                                return None;
+                            }
+                            unsafe {
+                                nix::libc::flock(file.as_raw_fd(), nix::libc::LOCK_UN);
+                            }
+                        }
+                    }
+                }
+                // 3. Check for completion marker or valid structured report
+                let is_completed = path.join(".completed").exists()
+                    || path.join("sab_report.json").exists()
+                    || path.join("results.tsv").exists();
+                let mtime = e.metadata().ok()?.modified().ok()?;
+                let age = std::time::SystemTime::now()
+                    .duration_since(mtime)
+                    .unwrap_or_default();
+                // If not completed and less than 2 hours old, consider it in-flight and protect it
+                if !is_completed && age < Duration::from_secs(7200) {
+                    return None;
+                }
+                Some((mtime, path))
+            })
+            .collect();
+
+        if eligible_dirs.len() > keep_count {
+            eligible_dirs.sort_by_key(|(mtime, _)| std::cmp::Reverse(*mtime));
+            for (_, path) in eligible_dirs.into_iter().skip(keep_count) {
+                let _ = std::fs::remove_dir_all(path);
+            }
+        }
+    }
+}
+
 /// Run the full SAB benchmark and return structured results
 pub fn run_sab(selfware_binary: &Path, config: &SabConfig) -> Result<SabResult, FitnessError> {
     let start = Instant::now();
 
-    let unique_out_dir = config
+    let reports_dir = config
         .runner_script
         .parent()
         .unwrap_or_else(|| Path::new("."))
-        .join(format!("reports/sab-{}", uuid::Uuid::new_v4()));
+        .join("reports");
+    prune_report_dirs(
+        &reports_dir,
+        "sab-",
+        config.report_retention,
+        &config.exempt_reports,
+    );
+
+    let unique_out_dir = reports_dir.join(format!("sab-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&unique_out_dir)
+        .map_err(|e| FitnessError::SabRunFailed(e.to_string()))?;
+
+    // Hold an exclusive lock on .lease for the duration of the run
+    let lease_file = std::fs::File::create(unique_out_dir.join(".lease"))
+        .map_err(|e| FitnessError::SabRunFailed(e.to_string()))?;
+    #[cfg(unix)]
+    unsafe {
+        use std::os::fd::AsRawFd;
+        nix::libc::flock(lease_file.as_raw_fd(), nix::libc::LOCK_EX);
+    }
 
     // Set up environment for SAB runner
     let output = Command::new("bash")
@@ -110,6 +211,8 @@ pub fn run_sab(selfware_binary: &Path, config: &SabConfig) -> Result<SabResult, 
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(FitnessError::SabRunFailed(stderr.to_string()));
     }
+
+    let _ = std::fs::write(unique_out_dir.join(".completed"), b"");
 
     // Parse SAB output — the runner produces JSON reports
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -285,6 +388,7 @@ fn parse_sab_output(
         rating,
         binary_sha256: evaluated.to_string(),
         run_id: json["run_id"].as_str().unwrap_or("unknown").to_string(),
+        report_path: PathBuf::from(report_path),
     })
 }
 

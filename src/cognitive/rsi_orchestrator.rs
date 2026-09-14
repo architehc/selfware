@@ -443,9 +443,23 @@ impl RSIOrchestrator {
         let script_path = work_dir.join("system_tests/projecte2e/run_projecte2e.sh");
 
         let run_id = uuid::Uuid::new_v4().to_string();
-        let unique_out_dir = work_dir
-            .join("system_tests/projecte2e/reports")
-            .join(format!("rsi-{}", run_id));
+        let reports_dir = work_dir.join("system_tests/projecte2e/reports");
+        crate::evolution::fitness::prune_report_dirs(&reports_dir, "rsi-", 10, &[]);
+        let unique_out_dir = reports_dir.join(format!("rsi-{}", run_id));
+        std::fs::create_dir_all(&unique_out_dir).map_err(|e| {
+            SelfwareError::Internal(format!(
+                "Failed to create benchmark output directory: {}",
+                e
+            ))
+        })?;
+
+        let _lease_file = std::fs::File::create(unique_out_dir.join(".lease"))
+            .map_err(|e| SelfwareError::Internal(format!("Failed to create lease file: {}", e)))?;
+        #[cfg(unix)]
+        unsafe {
+            use std::os::fd::AsRawFd;
+            nix::libc::flock(_lease_file.as_raw_fd(), nix::libc::LOCK_EX);
+        }
 
         let output = Command::new("bash")
             .arg(&script_path)
@@ -465,6 +479,8 @@ impl RSIOrchestrator {
                 stderr
             )));
         }
+
+        let _ = std::fs::write(unique_out_dir.join(".completed"), b"");
 
         let results_tsv = unique_out_dir.join("results.tsv");
         if !results_tsv.exists() {

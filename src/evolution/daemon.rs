@@ -26,6 +26,9 @@ pub struct GenerationWinner {
     pub token_delta: Option<f64>,
     pub patch: String,
     pub git_tag: Option<String>,
+    pub run_id: Option<String>,
+    pub binary_sha256: Option<String>,
+    pub report_path: Option<PathBuf>,
 }
 
 /// Summary of the evolution run
@@ -313,7 +316,11 @@ fn winner_test_count_gate(
 /// Enforces DarwinX non-regression: a candidate must pass all baseline-passed scenarios
 /// without regressions, and cannot drop any scenarios from the suite.
 ///
-/// Returns `Err(reason)` when the candidate regressed; `Ok(())` otherwise.
+/// SAB benchmark evidence is evaluated symmetrically: if either baseline or candidate
+/// has SAB evidence, the other must also provide evidence. Asymmetric runs (one present,
+/// one missing) are rejected fail-closed.
+///
+/// Returns `Err(reason)` when the candidate regressed or evidence is asymmetric; `Ok(())` otherwise.
 pub(crate) fn winner_darwinx_gate(
     base_sab: Option<&SabResult>,
     cand_sab: Option<&SabResult>,
@@ -400,7 +407,8 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
     // ═══════════════════════════════════════════════════════
 
     log_phase("Measuring baseline fitness...");
-    let sab_config = SabConfig::default();
+    let mut sab_config = SabConfig::default();
+    let mut exempt_reports: Vec<std::path::PathBuf> = Vec::new();
     let sab_mode = std::env::var("SELFWARE_EVOLVE_SAB").is_ok();
 
     // Only run SAB baseline if explicitly requested via env var
@@ -410,6 +418,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         let selfware_binary = repo_root.join("target/release/selfware");
         match fitness::run_sab(&selfware_binary, &sab_config) {
             Ok(r) => {
+                exempt_reports.push(r.report_path.clone());
                 let m =
                     metrics_from_sab_result(&r, &selfware_binary, config.safety.max_binary_size_mb);
                 (m, Some(r))
@@ -808,6 +817,16 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         None
                     };
 
+                    let mut run_id = None;
+                    let mut binary_sha256 = None;
+                    let mut report_path = None;
+                    if let Some(ref sab) = winner_sab {
+                        sab_config.exempt_reports.push(sab.report_path.clone());
+                        run_id = Some(sab.run_id.clone());
+                        binary_sha256 = Some(sab.binary_sha256.clone());
+                        report_path = Some(sab.report_path.clone());
+                    }
+
                     hall_of_fame.push(GenerationWinner {
                         generation,
                         description: winner.description.clone(),
@@ -824,6 +843,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         // not the raw LLM patch.
                         patch: tested_diff.clone(),
                         git_tag,
+                        run_id: run_id.clone(),
+                        binary_sha256: binary_sha256.clone(),
+                        report_path: report_path.clone(),
                     });
 
                     log_event(
@@ -839,6 +861,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             "composite": winner_composite,
                             "duration_secs": gen_start.elapsed().as_secs_f64(),
                             "improvements_total": hall_of_fame.len(),
+                            "run_id": run_id,
+                            "binary_sha256": binary_sha256,
+                            "report_path": report_path.as_ref().map(|p| p.to_string_lossy().to_string()),
                         }),
                     );
 
@@ -846,6 +871,19 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     if winner_sab.is_some() {
                         current_baseline_sab = winner_sab;
                     }
+                } else {
+                    log_warning("Failed to commit winner diff to repository");
+                    log_event(
+                        repo_root,
+                        &serde_json::json!({
+                            "event": "commit_failed",
+                            "timestamp": chrono_now(),
+                            "generation": generation,
+                            "description": winner.description,
+                            "composite": winner_composite,
+                            "duration_secs": gen_start.elapsed().as_secs_f64(),
+                        }),
+                    );
                 }
             }
             PromotionDecision::Reject(reason) => {

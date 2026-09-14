@@ -94,6 +94,7 @@ pub fn create_shadow_worktree_named(
     let worktree_path = repo_root.join(".worktrees").join(worktree_name);
 
     let output = Command::new("git")
+        .env_remove("GIT_INDEX_FILE")
         .args(["worktree", "add", "--detach"])
         .arg(&worktree_path)
         .arg("HEAD")
@@ -113,6 +114,7 @@ pub fn create_shadow_worktree_named(
 /// Remove a git worktree after evaluation
 pub fn cleanup_worktree(repo_root: &Path, worktree_path: &Path) -> Result<(), WorktreeError> {
     let output = Command::new("git")
+        .env_remove("GIT_INDEX_FILE")
         .args(["worktree", "remove", "--force"])
         .arg(worktree_path)
         .current_dir(repo_root)
@@ -123,6 +125,7 @@ pub fn cleanup_worktree(repo_root: &Path, worktree_path: &Path) -> Result<(), Wo
         // Force cleanup if normal removal fails
         let _ = std::fs::remove_dir_all(worktree_path);
         let _ = Command::new("git")
+            .env_remove("GIT_INDEX_FILE")
             .args(["worktree", "prune"])
             .current_dir(repo_root)
             .output();
