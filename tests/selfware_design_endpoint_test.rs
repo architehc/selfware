@@ -207,9 +207,11 @@ async fn test_selfware_design_models_discovery() {
     if let Some(max_len) = model_entry.get("max_model_len").and_then(|v| v.as_u64()) {
         assert!(
             max_len >= 1_000_000,
-            "advertised max_model_len should be >= 1,000,000, got: {}",
+            "advertised max_model_len should be >= 1,000,000 (1M context window), got: {}",
             max_len
         );
+    } else if std::env::var("REQUIRE_ENDPOINT").is_ok() {
+        panic!("model catalog entry must advertise max_model_len when REQUIRE_ENDPOINT is set");
     }
 }
 
@@ -232,6 +234,9 @@ async fn test_selfware_design_sglang_server_info() {
     let resp = match client.get(&url).send().await {
         Ok(r) if r.status().is_success() => r,
         _ => {
+            if std::env::var("REQUIRE_ENDPOINT").is_ok() {
+                panic!("/get_server_info endpoint must be reachable when REQUIRE_ENDPOINT is set");
+            }
             eprintln!("SKIPPED: /get_server_info endpoint not reachable or disabled on proxy");
             return;
         }

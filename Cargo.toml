@@ -206,6 +206,11 @@ name = "integration"
 path = "tests/integration/mod.rs"
 required-features = ["integration"]
 
+[[test]]
+name = "selfware_design_endpoint_test"
+path = "tests/selfware_design_endpoint_test.rs"
+required-features = ["integration"]
+
 # Examples
 [[example]]
 name = "basic_chat"
