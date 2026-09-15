@@ -1106,7 +1106,7 @@ impl Agent {
             .args([
                 "log",
                 "-z",
-                "--pretty=format:--%ct",
+                "--pretty=format:%x01%ct",
                 "--name-only",
                 &format!("--since={}", since.to_rfc3339()),
                 "--",
@@ -2623,20 +2623,42 @@ fn build_requirements_audit_prompt(
 
 pub(crate) fn parse_git_log_z_output(stdout: &str, run_start: i64) -> Vec<String> {
     let mut commit_ts: i64 = 0;
+    let uses_binary_marker = stdout.contains('\x01');
     let mut paths: Vec<String> = stdout
         .split('\0')
         .filter(|chunk| !chunk.is_empty())
         .filter_map(|chunk| {
-            if let Some(ts_and_path) = chunk.strip_prefix("--") {
-                if let Some((ts, rest)) = ts_and_path.split_once('\n') {
-                    commit_ts = ts.parse().unwrap_or(0);
-                    if commit_ts >= run_start && !rest.is_empty() {
-                        return Some(rest.to_string());
+            if uses_binary_marker {
+                if let Some(ts_and_path) = chunk.strip_prefix('\x01') {
+                    if let Some((ts, rest)) = ts_and_path.split_once('\n') {
+                        if ts.chars().all(|c| c.is_ascii_digit()) && !ts.is_empty() {
+                            commit_ts = ts.parse().unwrap_or(0);
+                            if commit_ts >= run_start && !rest.is_empty() {
+                                return Some(rest.to_string());
+                            }
+                            return None;
+                        }
+                    } else if ts_and_path.chars().all(|c| c.is_ascii_digit())
+                        && !ts_and_path.is_empty()
+                    {
+                        commit_ts = ts_and_path.parse().unwrap_or(0);
+                        return None;
                     }
-                } else {
-                    commit_ts = ts_and_path.parse().unwrap_or(0);
                 }
-                return None;
+            } else if let Some(ts_and_path) = chunk.strip_prefix("--") {
+                if let Some((ts, rest)) = ts_and_path.split_once('\n') {
+                    if ts.chars().all(|c| c.is_ascii_digit()) && !ts.is_empty() {
+                        commit_ts = ts.parse().unwrap_or(0);
+                        if commit_ts >= run_start && !rest.is_empty() {
+                            return Some(rest.to_string());
+                        }
+                        return None;
+                    }
+                } else if ts_and_path.chars().all(|c| c.is_ascii_digit()) && !ts_and_path.is_empty()
+                {
+                    commit_ts = ts_and_path.parse().unwrap_or(0);
+                    return None;
+                }
             }
             (commit_ts >= run_start).then(|| chunk.to_string())
         })

@@ -29,19 +29,36 @@ CODING_SCENARIOS=(
 
 mkdir -p "${OUT_DIR}" "${WORK_ROOT}" "${LOG_ROOT}" "${SCREENSHOT_DIR}"
 
+# When called from a harness that already holds an exclusive flock on ${OUT_DIR}/.lease
+# (such as Selfware's rsi_orchestrator), set SELFWARE_LEASE_HELD=1 in the environment
+# to skip lease acquisition and inherit the parent's lease.
 LEASE_FILE="${OUT_DIR}/.lease"
 touch "${LEASE_FILE}"
 if [[ "${SELFWARE_LEASE_HELD:-0}" != "1" ]]; then
   if command -v flock >/dev/null 2>&1; then
     exec 9<"${LEASE_FILE}"
     flock -n 9 || { echo "ERROR: Could not acquire lease on ${LEASE_FILE}" >&2; exit 1; }
+    echo "$$" > "${OUT_DIR}/.lease_pid"
   else
+    if ! command -v python3 >/dev/null 2>&1; then
+      echo "ERROR: python3 required for lease acquisition on systems without flock" >&2
+      exit 1
+    fi
     FIFO="${OUT_DIR}/.lease_fifo_$$"
     mkfifo "${FIFO}"
-    python3 -c "import fcntl, sys, signal
+    python3 -c "import fcntl, os, signal, sys, threading, time
+parent_pid = os.getppid()
+def watchdog():
+    while True:
+        time.sleep(1)
+        if os.getppid() != parent_pid:
+            os._exit(0)
+threading.Thread(target=watchdog, daemon=True).start()
 try:
     f = open(sys.argv[1], 'r+')
     fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with open(sys.argv[1] + '_pid', 'w') as pf:
+        pf.write(str(os.getpid()) + '\n')
     with open(sys.argv[2], 'w') as fifo:
         fifo.write('OK\n')
     signal.pause()
@@ -54,14 +71,18 @@ except Exception as e:
     sys.exit(1)
 " "${LEASE_FILE}" "${FIFO}" &
     LEASE_PID=$!
-    read -r STATUS < "${FIFO}" || STATUS="ERR: fifo read failed"
+    exec 8<>"${FIFO}"
+    if ! read -t 5 -r STATUS <&8; then
+      STATUS="ERR: timeout waiting for lease handshake"
+    fi
+    exec 8>&-
     rm -f "${FIFO}"
     if [[ "${STATUS}" != "OK" ]]; then
       echo "ERROR: Could not acquire lease on ${LEASE_FILE}: ${STATUS}" >&2
       kill "${LEASE_PID}" 2>/dev/null || true
       exit 1
     fi
-    trap 'kill "${LEASE_PID}" 2>/dev/null || true' EXIT
+    trap 'kill "${LEASE_PID}" 2>/dev/null || true; rm -f "${LEASE_FILE}_pid"' EXIT
   fi
 fi
 

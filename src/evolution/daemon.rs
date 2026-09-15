@@ -418,6 +418,10 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         match fitness::run_sab(&selfware_binary, &sab_config) {
             Ok(r) => {
                 sab_config.exempt_reports.push(r.report_path.clone());
+                if sab_config.exempt_reports.len() > 10 {
+                    let excess = sab_config.exempt_reports.len() - 10;
+                    sab_config.exempt_reports.drain(0..excess);
+                }
                 let m =
                     metrics_from_sab_result(&r, &selfware_binary, config.safety.max_binary_size_mb);
                 (m, Some(r))
@@ -821,6 +825,10 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     let mut report_path = None;
                     if let Some(ref sab) = winner_sab {
                         sab_config.exempt_reports.push(sab.report_path.clone());
+                        if sab_config.exempt_reports.len() > 10 {
+                            let excess = sab_config.exempt_reports.len() - 10;
+                            sab_config.exempt_reports.drain(0..excess);
+                        }
                         run_id = Some(sab.run_id.clone());
                         binary_sha256 = Some(sab.binary_sha256.clone());
                         report_path = Some(sab.report_path.clone());

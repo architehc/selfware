@@ -781,3 +781,102 @@ fn test_prune_report_dirs_stale_unheld_lease_is_pruned() {
         "stale directory with unheld .lease must be pruned"
     );
 }
+
+#[test]
+fn test_prune_report_dirs_root_json_file_does_not_exempt_sibling_dirs() {
+    use std::fs::{self, File};
+    use tempfile::tempdir;
+
+    let temp = tempdir().unwrap();
+    let reports_dir = temp.path();
+
+    // Root-level JSON file in reports_dir (e.g. summary.json)
+    let root_json = reports_dir.join("summary.json");
+    File::create(&root_json).unwrap();
+
+    let old_dir = reports_dir.join("sab-old");
+    fs::create_dir(&old_dir).unwrap();
+    File::create(old_dir.join(".completed")).unwrap();
+
+    let new_dir = reports_dir.join("sab-new");
+    fs::create_dir(&new_dir).unwrap();
+    File::create(new_dir.join(".completed")).unwrap();
+
+    #[cfg(unix)]
+    {
+        for (dir, ts) in [(&old_dir, 1_000_000), (&new_dir, 2_000_000)] {
+            let cname = std::ffi::CString::new(dir.to_str().unwrap()).unwrap();
+            let times = [
+                nix::libc::timespec {
+                    tv_sec: ts,
+                    tv_nsec: 0,
+                },
+                nix::libc::timespec {
+                    tv_sec: ts,
+                    tv_nsec: 0,
+                },
+            ];
+            unsafe {
+                nix::libc::utimensat(nix::libc::AT_FDCWD, cname.as_ptr(), times.as_ptr(), 0);
+            }
+        }
+    }
+
+    // Exempt the root-level JSON file. keep_count = 1.
+    prune_report_dirs(reports_dir, "sab-", 1, std::slice::from_ref(&root_json));
+
+    assert!(root_json.exists(), "root-level JSON file must survive");
+    assert!(new_dir.exists(), "newest dir must survive");
+    assert!(
+        !old_dir.exists(),
+        "old sibling dir must be pruned; root JSON file must not exempt entire reports_dir"
+    );
+}
+
+#[test]
+fn test_prune_report_dirs_stale_orphan_lease_pid_is_cleaned_and_pruned() {
+    use std::fs::{self, File};
+    use tempfile::tempdir;
+
+    let temp = tempdir().unwrap();
+    let reports_dir = temp.path();
+
+    let orphan_dir = reports_dir.join("sab-orphan");
+    fs::create_dir(&orphan_dir).unwrap();
+    File::create(orphan_dir.join(".completed")).unwrap();
+    File::create(orphan_dir.join(".lease")).unwrap();
+    // Use an unlikely PID (99999999) that does not exist
+    fs::write(orphan_dir.join(".lease_pid"), "99999999\n").unwrap();
+
+    let fresh_dir = reports_dir.join("sab-fresh");
+    fs::create_dir(&fresh_dir).unwrap();
+    File::create(fresh_dir.join(".completed")).unwrap();
+
+    #[cfg(unix)]
+    {
+        for (dir, ts) in [(&orphan_dir, 1_000_000), (&fresh_dir, 2_000_000)] {
+            let cname = std::ffi::CString::new(dir.to_str().unwrap()).unwrap();
+            let times = [
+                nix::libc::timespec {
+                    tv_sec: ts,
+                    tv_nsec: 0,
+                },
+                nix::libc::timespec {
+                    tv_sec: ts,
+                    tv_nsec: 0,
+                },
+            ];
+            unsafe {
+                nix::libc::utimensat(nix::libc::AT_FDCWD, cname.as_ptr(), times.as_ptr(), 0);
+            }
+        }
+    }
+
+    prune_report_dirs(reports_dir, "sab-", 1, &[]);
+
+    assert!(fresh_dir.exists(), "fresh dir must survive");
+    assert!(
+        !orphan_dir.exists(),
+        "directory with stale orphan .lease_pid must be pruned"
+    );
+}

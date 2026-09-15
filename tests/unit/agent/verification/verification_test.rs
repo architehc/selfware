@@ -375,6 +375,37 @@ mod completion_gate_tests {
         );
     }
 
+    #[test]
+    fn test_parse_git_log_z_output_binary_marker_with_hyphen_files() {
+        // Commits formatted with %x01%ct and files starting with dashes like --a, --b
+        let raw = "\x01100\n--old.rs\0\x01200\n--a\0--b\0---flag.txt\0normal.rs\0";
+        let paths = parse_git_log_z_output(raw, 150);
+        assert_eq!(
+            paths,
+            vec![
+                "---flag.txt".to_string(),
+                "--a".to_string(),
+                "--b".to_string(),
+                "normal.rs".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_git_log_z_output_legacy_format_with_hyphen_files() {
+        // Even in legacy format, non-digit chunks starting with -- must not be mistaken for headers
+        let raw = "--200\n--file1.rs\0--file2.rs\0subsequent.rs\0";
+        let paths = parse_git_log_z_output(raw, 150);
+        assert_eq!(
+            paths,
+            vec![
+                "--file1.rs".to_string(),
+                "--file2.rs".to_string(),
+                "subsequent.rs".to_string(),
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn non_code_artifact_without_readback_guides_to_file_read_only() {
         let agent = artifact_agent(

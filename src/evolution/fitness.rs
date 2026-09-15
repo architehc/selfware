@@ -118,6 +118,7 @@ pub fn prune_report_dirs(
         })
         .filter_map(|e| {
             let path = e.path();
+            let mtime = e.metadata().ok()?.modified().ok()?;
             // 1. Check if exempt (e.g. promoted generation winner or baseline report)
             if exempt_paths.iter().any(|exempt| {
                 let is_file = exempt.is_file()
@@ -127,6 +128,9 @@ pub fn prune_report_dirs(
                 } else {
                     exempt
                 };
+                if exempt_dir == reports_dir {
+                    return path == *exempt;
+                }
                 path == *exempt
                     || path == exempt_dir
                     || path.starts_with(exempt)
@@ -137,6 +141,26 @@ pub fn prune_report_dirs(
             }
             // 2. Check if active/leased by an in-flight run
             let lease_path = path.join(".lease");
+            let lease_pid_path = path.join(".lease_pid");
+            if lease_pid_path.exists() {
+                if let Ok(pid_str) = std::fs::read_to_string(&lease_pid_path) {
+                    if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                        #[cfg(unix)]
+                        {
+                            let res = unsafe { nix::libc::kill(pid, 0) };
+                            if res != 0 {
+                                let errno =
+                                    std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                                if errno == nix::libc::ESRCH {
+                                    // Process is dead; clean up stale lease files
+                                    let _ = std::fs::remove_file(&lease_pid_path);
+                                    let _ = std::fs::remove_file(&lease_path);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             if lease_path.exists() {
                 #[cfg(unix)]
                 {
@@ -172,7 +196,6 @@ pub fn prune_report_dirs(
             let is_completed = path.join(".completed").exists()
                 || path.join("sab_report.json").exists()
                 || path.join("report.json").exists();
-            let mtime = e.metadata().ok()?.modified().ok()?;
             let age = std::time::SystemTime::now()
                 .duration_since(mtime)
                 .unwrap_or_default();
