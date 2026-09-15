@@ -236,6 +236,20 @@ mod macos {
         assert!(err.contains("Unknown window ID"));
     }
 
+    #[tokio::test]
+    async fn test_focus_known_window_id_succeeds_in_test_mode() {
+        let wm = WindowManager::new();
+        {
+            let mut map = wm.window_id_to_app.lock().unwrap();
+            map.insert(WindowId(42), "Safari".to_string());
+        }
+        let result = wm.focus_window(&WindowId(42)).await;
+        assert!(
+            result.is_ok(),
+            "focusing known window id must succeed via test stub without raising desktop windows"
+        );
+    }
+
     #[test]
     fn test_window_manager_creation_macos() {
         let wm = WindowManager::new();

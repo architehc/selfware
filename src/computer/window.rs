@@ -1111,20 +1111,7 @@ end tell"#,
             app = escaped_app_name
         );
 
-        let mut cmd = tokio::process::Command::new("osascript");
-        sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
-        let output = cmd.args(["-e", &focus_script]).output().await?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("not allowed") || stderr.contains("assistive") {
-                anyhow::bail!(
-                    "Accessibility permissions required. \
-                     Please enable System Settings > Privacy & Security > Accessibility for this application."
-                );
-            }
-            anyhow::bail!("Failed to focus window: {}", stderr);
-        }
+        run_macos_focus_script(&focus_script).await?;
 
         info!("Focused macOS window for app: {}", app_name);
         Ok(())
@@ -1159,6 +1146,35 @@ end tell"#,
 #[cfg(target_os = "macos")]
 fn escape_applescript_string(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Run an AppleScript focus snippet via osascript.
+#[cfg(all(target_os = "macos", not(test)))]
+async fn run_macos_focus_script(script: &str) -> Result<()> {
+    let mut cmd = tokio::process::Command::new("osascript");
+    sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
+    let output = cmd.args(["-e", script]).output().await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("not allowed") || stderr.contains("assistive") {
+            anyhow::bail!(
+                "Accessibility permissions required. \
+                 Please enable System Settings > Privacy & Security > Accessibility for this application."
+            );
+        }
+        anyhow::bail!("Failed to focus window: {}", stderr);
+    }
+    Ok(())
+}
+
+/// No-op osascript stub for tests.
+///
+/// Without this, tests running on macOS actually activate and raise real desktop
+/// application windows, violating Rule 6 ("stay inside visible region, touch only your own windows").
+#[cfg(all(target_os = "macos", test))]
+async fn run_macos_focus_script(_script: &str) -> Result<()> {
+    Ok(())
 }
 
 impl Default for WindowManager {

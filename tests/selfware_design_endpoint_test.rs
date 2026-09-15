@@ -12,7 +12,7 @@
 //! 9. Concurrent Stream Throughput & Stability
 //!
 //! Run with:
-//!   cargo test --test selfware_design_endpoint_test -- --nocapture
+//!   cargo test --test selfware_design_endpoint_test --features integration -- --ignored --nocapture
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -452,31 +452,45 @@ async fn test_selfware_design_thinking_separation() {
     if let Some(key) = api_key() {
         raw_req = raw_req.bearer_auth(key);
     }
-    if let Ok(raw_res) = raw_req.send().await {
-        if raw_res.status().is_success() {
-            if let Ok(raw_json) = raw_res.json::<Value>().await {
-                let reasoning_tokens = raw_json
-                    .pointer("/usage/completion_tokens_details/reasoning_tokens")
-                    .and_then(|v| v.as_u64())
-                    .or_else(|| {
-                        raw_json
-                            .pointer("/usage/reasoning_tokens")
-                            .and_then(|v| v.as_u64())
-                    });
-                if let Some(tokens) = reasoning_tokens {
-                    assert!(
-                        tokens > 0,
-                        "expected >0 reasoning tokens when enable_thinking=true, got: {}",
-                        tokens
-                    );
-                } else if std::env::var("REQUIRE_ENDPOINT").is_ok() {
-                    panic!(
-                        "endpoint usage did not report reasoning_tokens: {:?}",
-                        raw_json.get("usage")
-                    );
-                }
-            }
+    let raw_res = match raw_req.send().await {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) if std::env::var("REQUIRE_ENDPOINT").is_ok() => {
+            panic!(
+                "raw chat completion request failed with status: {}",
+                r.status()
+            );
         }
+        Err(e) if std::env::var("REQUIRE_ENDPOINT").is_ok() => {
+            panic!("raw chat completion request network error: {e}");
+        }
+        _ => return,
+    };
+    let raw_json = match raw_res.json::<Value>().await {
+        Ok(j) => j,
+        Err(e) if std::env::var("REQUIRE_ENDPOINT").is_ok() => {
+            panic!("failed to parse raw response JSON: {e}");
+        }
+        _ => return,
+    };
+    let reasoning_tokens = raw_json
+        .pointer("/usage/completion_tokens_details/reasoning_tokens")
+        .and_then(|v| v.as_u64())
+        .or_else(|| {
+            raw_json
+                .pointer("/usage/reasoning_tokens")
+                .and_then(|v| v.as_u64())
+        });
+    if let Some(tokens) = reasoning_tokens {
+        assert!(
+            tokens > 0,
+            "expected >0 reasoning tokens when enable_thinking=true, got: {}",
+            tokens
+        );
+    } else if std::env::var("REQUIRE_ENDPOINT").is_ok() {
+        panic!(
+            "endpoint usage did not report reasoning_tokens: {:?}",
+            raw_json.get("usage")
+        );
     }
 
     println!(
@@ -546,31 +560,45 @@ async fn test_selfware_design_thinking_disabled_budget() {
     if let Some(key) = api_key() {
         raw_req = raw_req.bearer_auth(key);
     }
-    if let Ok(raw_res) = raw_req.send().await {
-        if raw_res.status().is_success() {
-            if let Ok(raw_json) = raw_res.json::<Value>().await {
-                let reasoning_tokens = raw_json
-                    .pointer("/usage/completion_tokens_details/reasoning_tokens")
-                    .and_then(|v| v.as_u64())
-                    .or_else(|| {
-                        raw_json
-                            .pointer("/usage/reasoning_tokens")
-                            .and_then(|v| v.as_u64())
-                    });
-                if let Some(tokens) = reasoning_tokens {
-                    assert_eq!(
-                        tokens, 0,
-                        "expected 0 reasoning tokens when enable_thinking=false, got: {}",
-                        tokens
-                    );
-                } else if std::env::var("REQUIRE_ENDPOINT").is_ok() {
-                    panic!(
-                        "endpoint usage did not report reasoning_tokens: {:?}",
-                        raw_json.get("usage")
-                    );
-                }
-            }
+    let raw_res = match raw_req.send().await {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) if std::env::var("REQUIRE_ENDPOINT").is_ok() => {
+            panic!(
+                "raw chat completion request failed with status: {}",
+                r.status()
+            );
         }
+        Err(e) if std::env::var("REQUIRE_ENDPOINT").is_ok() => {
+            panic!("raw chat completion request network error: {e}");
+        }
+        _ => return,
+    };
+    let raw_json = match raw_res.json::<Value>().await {
+        Ok(j) => j,
+        Err(e) if std::env::var("REQUIRE_ENDPOINT").is_ok() => {
+            panic!("failed to parse raw response JSON: {e}");
+        }
+        _ => return,
+    };
+    let reasoning_tokens = raw_json
+        .pointer("/usage/completion_tokens_details/reasoning_tokens")
+        .and_then(|v| v.as_u64())
+        .or_else(|| {
+            raw_json
+                .pointer("/usage/reasoning_tokens")
+                .and_then(|v| v.as_u64())
+        });
+    if let Some(tokens) = reasoning_tokens {
+        assert_eq!(
+            tokens, 0,
+            "expected 0 reasoning tokens when enable_thinking=false, got: {}",
+            tokens
+        );
+    } else if std::env::var("REQUIRE_ENDPOINT").is_ok() {
+        panic!(
+            "endpoint usage did not report reasoning_tokens: {:?}",
+            raw_json.get("usage")
+        );
     }
 
     println!(
