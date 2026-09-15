@@ -259,3 +259,109 @@ fn test_untracked_symlinks_are_replicated() {
         "# Test Repo\n"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn test_untracked_escaping_symlink_is_rejected() {
+    let repo_dir = tempfile::tempdir().unwrap();
+    let rpath = repo_dir.path();
+
+    let init_ok = Command::new("git")
+        .args(["init"])
+        .current_dir(rpath)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !init_ok {
+        return;
+    }
+    let _ = Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(rpath)
+        .status();
+    let _ = Command::new("git")
+        .args(["config", "user.name", "Test User"])
+        .current_dir(rpath)
+        .status();
+
+    std::fs::write(rpath.join("README.md"), b"# Test Repo\n").unwrap();
+    let _ = Command::new("git")
+        .args(["add", "README.md"])
+        .current_dir(rpath)
+        .status();
+    let _ = Command::new("git")
+        .args(["commit", "-m", "initial commit"])
+        .current_dir(rpath)
+        .status();
+
+    // 1. Escaping relative symlink
+    let escaping_rel = rpath.join("escape_rel.txt");
+    std::os::unix::fs::symlink(Path::new("../../etc/passwd"), &escaping_rel).unwrap();
+
+    let result = CompilationSandbox::new(rpath);
+    assert!(result.is_err(), "escaping symlink must be rejected");
+    let err_msg = result.err().unwrap().to_string();
+    assert!(
+        err_msg.contains("targets path outside repository"),
+        "error message should cite path outside repository: {err_msg}"
+    );
+
+    // Remove escaping relative symlink
+    std::fs::remove_file(&escaping_rel).unwrap();
+
+    // 2. Escaping absolute symlink
+    let escaping_abs = rpath.join("escape_abs.txt");
+    std::os::unix::fs::symlink(Path::new("/etc/passwd"), &escaping_abs).unwrap();
+
+    let result_abs = CompilationSandbox::new(rpath);
+    assert!(
+        result_abs.is_err(),
+        "absolute escaping symlink must be rejected"
+    );
+    let err_msg_abs = result_abs.err().unwrap().to_string();
+    assert!(
+        err_msg_abs.contains("targets path outside repository"),
+        "error message should cite path outside repository: {err_msg_abs}"
+    );
+}
+
+#[test]
+fn test_symlink_target_containment_logic() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path();
+    let sub = base.join("subdir");
+    std::fs::create_dir(&sub).unwrap();
+
+    let link_in_sub = sub.join("link.txt");
+    let link_in_base = base.join("link.txt");
+
+    // Internal relative: same dir
+    assert!(symlink_target_is_contained(
+        base,
+        &link_in_sub,
+        Path::new("sibling.txt")
+    ));
+    // Internal relative: parent dir inside repo
+    assert!(symlink_target_is_contained(
+        base,
+        &link_in_sub,
+        Path::new("../root_file.txt")
+    ));
+    // Escaping relative: escaping repo root
+    assert!(!symlink_target_is_contained(
+        base,
+        &link_in_sub,
+        Path::new("../../outside.txt")
+    ));
+    assert!(!symlink_target_is_contained(
+        base,
+        &link_in_base,
+        Path::new("../outside.txt")
+    ));
+    // Absolute external
+    assert!(!symlink_target_is_contained(
+        base,
+        &link_in_base,
+        Path::new("/etc/passwd")
+    ));
+}

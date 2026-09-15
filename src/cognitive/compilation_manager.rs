@@ -169,6 +169,13 @@ impl CompilationSandbox {
                             rel
                         ))
                     })?;
+                    if !symlink_target_is_contained(&original_dir, &src, &target) {
+                        return Err(cleanup_on_fail(anyhow!(
+                            "Untracked symlink {:?} targets path outside repository: {:?}",
+                            rel,
+                            target
+                        )));
+                    }
                     std::os::unix::fs::symlink(&target, &dst).map_err(|e| {
                         cleanup_on_fail(anyhow!(
                             "Failed replicating untracked symlink {:?}: {e}",
@@ -281,6 +288,50 @@ impl CompilationSandbox {
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         })
+    }
+}
+
+fn lexical_normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut components = Vec::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if let Some(Component::Normal(_)) = components.last() {
+                    components.pop();
+                } else if !path.is_absolute() {
+                    components.push(Component::ParentDir);
+                }
+            }
+            c => components.push(c),
+        }
+    }
+    components.into_iter().collect()
+}
+
+pub(crate) fn symlink_target_is_contained(
+    base_dir: &Path,
+    symlink_file: &Path,
+    target: &Path,
+) -> bool {
+    let parent = symlink_file.parent().unwrap_or(base_dir);
+    let resolved = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        parent.join(target)
+    };
+
+    if let (Ok(c_base), Ok(c_target)) = (base_dir.canonicalize(), resolved.canonicalize()) {
+        return c_target.starts_with(&c_base);
+    }
+
+    let norm_target = lexical_normalize(&resolved);
+    let norm_base = lexical_normalize(base_dir);
+    if let Ok(c_base) = base_dir.canonicalize() {
+        norm_target.starts_with(&c_base) || norm_target.starts_with(&norm_base)
+    } else {
+        norm_target.starts_with(&norm_base)
     }
 }
 
