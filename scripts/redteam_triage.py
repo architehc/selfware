@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from redteam_gen import _log_usage, chat  # noqa: E402
 from redteam_verdicts import (  # noqa: E402
     case_fingerprint,
+    filter_conforming_cases,
     find_quarantined,
     load_matching_verdicts,
     read_jsonl_tolerant,
@@ -229,27 +230,33 @@ def lane(endpoint: str, model: str, batches: list, lane_no: int):
               + (f" (missing {len(missing)})" if missing else ""), flush=True)
 
 
-def write_triage_summary(verdicts_path, total, verified, quarantined, missing):
+def write_triage_summary(verdicts_path, total, verified, quarantined, missing, skipped_nonconforming=0):
     summary = {
         "total": total,
         "verified": verified,
         "quarantined": quarantined,
         "missing": missing,
+        "skipped_nonconforming": skipped_nonconforming,
     }
     stem = verdicts_path.stem
     summary_path = verdicts_path.parent / f"{stem}_summary.json"
     counts_path = verdicts_path.parent / f"{stem}_counts.txt"
-    try:
-        verdicts_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_summary = summary_path.with_suffix(".tmp")
-        tmp_summary.write_text(json.dumps(summary, indent=2))
-        tmp_summary.replace(summary_path)
 
-        tmp_counts = counts_path.with_suffix(".tmp")
-        tmp_counts.write_text(f"{verified} {quarantined} {missing}\n")
-        tmp_counts.replace(counts_path)
-    except Exception:
-        pass
+    verdicts_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_summary = summary_path.with_suffix(".tmp")
+    with open(tmp_summary, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_summary, summary_path)
+
+    tmp_counts = counts_path.with_suffix(".tmp")
+    with open(tmp_counts, "w", encoding="utf-8") as f:
+        f.write(f"{verified} {quarantined} {missing}\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_counts, counts_path)
 
 
 def main():
@@ -276,7 +283,10 @@ def main():
     if not (n > 0 and 0 <= k < n and args.lanes > 0 and args.batch > 0):
         ap.error("invalid shard, lane count, or batch size")
     raw_cases = read_jsonl_tolerant(PROBE)
-    cases = [d for idx, d in enumerate(raw_cases) if idx % n == k]
+    conforming_cases, skipped = filter_conforming_cases(raw_cases)
+    if skipped:
+        print(f"skipped {skipped} non-conforming cases from {PROBE}", file=sys.stderr)
+    cases = [d for idx, d in enumerate(conforming_cases) if idx % n == k]
     quarantined = find_quarantined(cases)
     done = load_done(cases)
     # Repeated identical inputs are one classification; differing inputs
@@ -285,7 +295,7 @@ def main():
     all_unique_ids = {d["id"] for d in cases}
     missing = (all_unique_ids - done) - quarantined
     if args.check_complete:
-        write_triage_summary(VERDICTS, len(all_unique_ids), len(done), len(quarantined), len(missing))
+        write_triage_summary(VERDICTS, len(all_unique_ids), len(done), len(quarantined), len(missing), skipped_nonconforming=skipped)
         msg = f"{len(missing)} cases missing verified verdicts"
         if quarantined:
             msg += f" ({len(quarantined)} quarantined)"
@@ -306,7 +316,7 @@ def main():
             future.result()
     done = load_done(cases)
     missing = (all_unique_ids - done) - quarantined
-    write_triage_summary(VERDICTS, len(all_unique_ids), len(done), len(quarantined), len(missing))
+    write_triage_summary(VERDICTS, len(all_unique_ids), len(done), len(quarantined), len(missing), skipped_nonconforming=skipped)
     if missing:
         print(f"incomplete triage: {len(missing)} cases remain; rerun to resume", file=sys.stderr)
         return 1

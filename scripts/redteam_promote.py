@@ -14,6 +14,7 @@ import json
 import os
 from redteam_verdicts import (
     case_fingerprint,
+    filter_conforming_cases,
     find_quarantined,
     load_matching_verdicts,
     read_jsonl_tolerant,
@@ -123,23 +124,28 @@ def main():
     existing = validate_destination_corpus(CORPUS)
 
     promoted = disagreed = noverdict = missing_models = total_quarantined = 0
+    total_skipped_nonconforming = 0
     with open(CORPUS, "a") as out:
         for f in sorted(glob.glob("tests/redteam/corpus/probe_wave_1*.jsonl")):
             ts = os.path.basename(f)[len("probe_wave_"):-len(".jsonl")]
-            cases = read_jsonl_tolerant(f)
+            raw_cases = read_jsonl_tolerant(f)
+            cases, skipped = filter_conforming_cases(raw_cases)
+            total_skipped_nonconforming += skipped
             quarantined = find_quarantined(cases)
             total_quarantined += len(quarantined)
-            chk = load_matching_verdicts(f"{SELFDEV}/chkv_{ts}.jsonl", cases, "checker")
-            e2 = load_matching_verdicts(f"{SELFDEV}/e2v_{ts}.jsonl", cases)
-            e3 = load_matching_verdicts(f"{SELFDEV}/e3v_{ts}.jsonl", cases)
+            if quarantined:
+                import sys
+                print(f"quarantined {len(quarantined)} colliding case IDs in {f}: "
+                      f"{sorted(quarantined)[:5]}", file=sys.stderr)
+            chk = load_matching_verdicts(f"{SELFDEV}/chkv_{ts}.jsonl", cases, "checker", quarantined=quarantined, warn=False)
+            e2 = load_matching_verdicts(f"{SELFDEV}/e2v_{ts}.jsonl", cases, quarantined=quarantined, warn=False)
+            e3 = load_matching_verdicts(f"{SELFDEV}/e3v_{ts}.jsonl", cases, quarantined=quarantined, warn=False)
             if ts in EARLY:
                 name = EARLY[ts]
-                chk = chk or load_matching_verdicts(f"{SELFDEV}/{name}_checker_verdicts.jsonl", cases, "checker")
-                e2 = e2 or load_matching_verdicts(f"{SELFDEV}/{name}_e2_verdicts.jsonl", cases)
-                e3 = e3 or load_matching_verdicts(f"{SELFDEV}/{name}_e3_verdicts.jsonl", cases)
+                chk = chk or load_matching_verdicts(f"{SELFDEV}/{name}_checker_verdicts.jsonl", cases, "checker", quarantined=quarantined, warn=False)
+                e2 = e2 or load_matching_verdicts(f"{SELFDEV}/{name}_e2_verdicts.jsonl", cases, quarantined=quarantined, warn=False)
+                e3 = e3 or load_matching_verdicts(f"{SELFDEV}/{name}_e3_verdicts.jsonl", cases, quarantined=quarantined, warn=False)
             for d in cases:
-                if not isinstance(d, dict) or not {"id", "tool", "arguments"}.issubset(d.keys()):
-                    continue
                 i = d.get("id")
                 if not i or i in quarantined:
                     continue
@@ -186,7 +192,7 @@ def main():
 
     print(f"promoted: {promoted} no-model-agreement: {disagreed} "
           f"no-checker-verdict: {noverdict} no-verified-model-verdict: {missing_models} "
-          f"quarantined: {total_quarantined}")
+          f"quarantined: {total_quarantined} skipped-nonconforming: {total_skipped_nonconforming}")
 
     summary_path = f"{SELFDEV}/last_promote_summary.json"
     summary_tmp = f"{summary_path}.tmp"
@@ -198,6 +204,7 @@ def main():
             "missing_checker": noverdict,
             "missing_verified_model": missing_models,
             "quarantined": total_quarantined,
+            "skipped_nonconforming": total_skipped_nonconforming,
         }, fh, indent=2)
         fh.flush()
         os.fsync(fh.fileno())

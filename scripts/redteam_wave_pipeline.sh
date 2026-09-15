@@ -86,8 +86,8 @@ done
 # 3. join + promote dual-source agreements
 log "join"
 python3 scripts/redteam_promote.py
-read PROMOTED DISAGREED NOVERDICT < "$SELFDEV/last_promote_counts.txt"
-log "promoted=$PROMOTED disagreed=$DISAGREED no_checker_verdict=$NOVERDICT"
+read -r PROMOTED DISAGREED NOVERDICT QUARANTINED < "$SELFDEV/last_promote_counts.txt"
+log "promoted=$PROMOTED disagreed=$DISAGREED no_checker_verdict=$NOVERDICT quarantined=$QUARANTINED"
 
 # 4. gate
 if [ "$PROMOTED" -gt 0 ]; then

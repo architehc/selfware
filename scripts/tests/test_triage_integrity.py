@@ -190,6 +190,87 @@ class ReceiptIntegrityTests(unittest.TestCase):
             existing = promote.validate_destination_corpus(str(corpus_path))
             self.assertEqual(existing, {"c1"})
 
+    def test_schema_filter_handles_nonconforming_records_in_promote(self):
+        case_valid = fixture("valid1")
+        with tempfile.TemporaryDirectory() as directory:
+            corpus = Path(directory) / "corpus"
+            corpus.mkdir(parents=True)
+            selfdev = Path(directory) / "selfdev"
+            selfdev.mkdir(parents=True)
+            (corpus / "tool_attacks.jsonl").write_text("")
+
+            wave_path = corpus / "probe_wave_1999999999.jsonl"
+            # Include valid record, non-dict, and records missing tool/arguments/id
+            wave_content = "\n".join([
+                json.dumps(case_valid),
+                json.dumps({"id": "broken_no_tool", "arguments": '{"cmd":"ls"}'}),
+                json.dumps({"id": "broken_no_args", "tool": "exec"}),
+                json.dumps({"tool": "exec", "arguments": '{"cmd":"ls"}'}),
+                "12345",
+            ]) + "\n"
+            wave_path.write_text(wave_content)
+
+            checker = selfdev / "chkv_1999999999.jsonl"
+            replace_receipts(checker, [receipt(case_valid, key="checker")], "checker")
+            e2 = selfdev / "e2v_1999999999.jsonl"
+            replace_receipts(e2, [receipt(case_valid)])
+
+            with patch.object(promote, "CORPUS", str(corpus / "tool_attacks.jsonl")), \
+                 patch.object(promote, "SELFDEV", str(selfdev)), \
+                 patch("glob.glob", return_value=[str(wave_path)]):
+                promote.main()
+
+            promoted_content = (corpus / "tool_attacks.jsonl").read_text().strip()
+            self.assertTrue(promoted_content)
+            promoted = json.loads(promoted_content)
+            self.assertEqual(promoted["id"], "valid1")
+
+            summary = json.loads((selfdev / "last_promote_summary.json").read_text())
+            self.assertEqual(summary["promoted"], 1)
+            self.assertEqual(summary["skipped_nonconforming"], 4)
+
+    def test_schema_filter_handles_nonconforming_records_in_triage(self):
+        case_valid = fixture("valid1")
+        with tempfile.TemporaryDirectory() as directory:
+            probe_path = Path(directory) / "probe.jsonl"
+            probe_content = "\n".join([
+                json.dumps(case_valid),
+                json.dumps({"id": "broken_no_tool", "arguments": '{"cmd":"ls"}'}),
+            ]) + "\n"
+            probe_path.write_text(probe_content)
+            verdicts_path = Path(directory) / "verdicts.jsonl"
+            replace_receipts(verdicts_path, [receipt(case_valid)])
+
+            with patch.object(sys, "argv", ["redteam_triage.py", "--check-complete",
+                                           "--shard", "0/1",
+                                           "--probe-file", str(probe_path),
+                                           "--verdicts-file", str(verdicts_path)]):
+                exit_code = triage.main()
+                self.assertEqual(exit_code, 0)
+                summary = json.loads((verdicts_path.parent / "verdicts_summary.json").read_text())
+                self.assertEqual(summary["total"], 1)
+                self.assertEqual(summary["verified"], 1)
+                self.assertEqual(summary["skipped_nonconforming"], 1)
+
+    def test_schema_filter_handles_nonconforming_records_in_verdicts(self):
+        import redteam_verdicts
+        case_valid = fixture("valid1")
+        with tempfile.TemporaryDirectory() as directory:
+            probe_path = Path(directory) / "probe.jsonl"
+            probe_content = "\n".join([
+                json.dumps(case_valid),
+                json.dumps({"id": "broken_no_tool", "arguments": '{"cmd":"ls"}'}),
+            ]) + "\n"
+            probe_path.write_text(probe_content)
+            verdicts_path = Path(directory) / "verdicts.jsonl"
+            replace_receipts(verdicts_path, [receipt(case_valid)])
+
+            with patch.object(sys, "argv", ["redteam_verdicts.py",
+                                           "--probe-file", str(probe_path),
+                                           "--verdicts-file", str(verdicts_path)]):
+                exit_code = redteam_verdicts.main()
+                self.assertEqual(exit_code, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

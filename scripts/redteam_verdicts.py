@@ -12,13 +12,37 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 
 
 def case_fingerprint(case):
+    if not isinstance(case, dict) or not {"id", "tool", "arguments"}.issubset(case.keys()):
+        raise ValueError(f"cannot fingerprint non-conforming case: {case!r}")
     payload = [case[key] for key in ("id", "tool", "arguments")]
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False,
                                      separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def filter_conforming_cases(raw_cases):
+    """Filter cases to only valid dicts containing id, tool, and arguments.
+
+    Returns (conforming_cases, skipped_nonconforming_count).
+    """
+    conforming = []
+    skipped = 0
+    for case in raw_cases:
+        if (
+            isinstance(case, dict)
+            and isinstance(case.get("id"), str)
+            and bool(case.get("id"))
+            and "tool" in case
+            and "arguments" in case
+        ):
+            conforming.append(case)
+        else:
+            skipped += 1
+    return conforming, skipped
 
 
 def _read_rows(path):
@@ -58,18 +82,18 @@ def find_quarantined(cases):
     return quarantined
 
 
-def load_matching_verdicts(path, cases, verdict_key="v"):
+def load_matching_verdicts(path, cases, verdict_key="v", quarantined=None, warn=True):
     expected = {}
     # An ID reused with DIFFERENT content (generator id collision) can never
     # authorize a promotion for either copy — quarantine it, don't abort the
     # run. Observed killing a full pipeline cycle on one collision.
-    quarantined = find_quarantined(cases)
+    if quarantined is None:
+        quarantined = find_quarantined(cases)
+        if quarantined and warn:
+            print(f"quarantined {len(quarantined)} colliding case IDs: "
+                  f"{sorted(quarantined)[:5]}", file=sys.stderr)
     for case in cases:
         expected[case["id"]] = case_fingerprint(case)
-    if quarantined:
-        import sys
-        print(f"quarantined {len(quarantined)} colliding case IDs: "
-              f"{sorted(quarantined)[:5]}", file=sys.stderr)
     verdicts, conflicts = {}, set()
     for row in _read_rows(path):
         case_id, verdict = row.get("id"), row.get(verdict_key)
@@ -159,13 +183,18 @@ def main():
     parser.add_argument("--verdicts-file", required=True)
     parser.add_argument("--kind", choices=("checker", "model"), default="model")
     args = parser.parse_args()
-    cases = read_jsonl_tolerant(args.probe_file)
+    raw_cases = read_jsonl_tolerant(args.probe_file)
+    cases, skipped = filter_conforming_cases(raw_cases)
+    if skipped:
+        print(f"skipped {skipped} non-conforming cases from {args.probe_file}", file=sys.stderr)
     quarantined = find_quarantined(cases)
     verdicts = load_matching_verdicts(args.verdicts_file, cases,
-                                     "checker" if args.kind == "checker" else "v")
+                                      "checker" if args.kind == "checker" else "v",
+                                      quarantined=quarantined)
     missing = ({case["id"] for case in cases} - verdicts.keys()) - quarantined
     print(f"{len(missing)} cases missing verified {args.kind} verdicts"
-          + (f" ({len(quarantined)} quarantined)" if quarantined else ""))
+          + (f" ({len(quarantined)} quarantined)" if quarantined else "")
+          + (f" ({skipped} non-conforming skipped)" if skipped else ""))
     return 1 if missing else 0
 
 
