@@ -1,7 +1,8 @@
 use anyhow::{anyhow, Result};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 /// Configuration for the compilation sandbox (RAII guard: cleans up on drop).
 #[derive(Debug)]
@@ -19,13 +20,22 @@ pub struct CompileResult {
 }
 
 impl CompilationSandbox {
-    /// Creates a new compilation sandbox by copying the current project root to a temporary location
+    /// Creates a new compilation sandbox by copying the current project root to an isolated working directory.
+    ///
+    /// ### Contract
+    /// - **Size Limits**: Enforces a 10 MB per-file limit (`MAX_UNTRACKED_FILE_SIZE`) and a 50 MB
+    ///   aggregate limit (`MAX_AGGREGATE_UNTRACKED_SIZE`) on untracked files copied into the sandbox.
+    /// - **Symlink Containment**: Untracked internal absolute symlinks are rewritten to sandbox-relative
+    ///   paths; untracked symlinks targeting paths outside the repository are rejected (fail-closed).
+    ///   Tracked internal absolute symlinks are rebased to the sandbox root, and all symlinks (including
+    ///   intermediate chains) are verified to resolve strictly within the sandbox boundaries.
+    /// - **Directory Exclusion**: Only the active ephemeral sandbox directory
+    ///   (`.selfware-sandbox-<uuid>`) is excluded from untracked file replication, preserving legitimate user
+    ///   files that happen to share the prefix.
     pub fn new(project_root: impl AsRef<Path>) -> Result<Self> {
         let original_dir = project_root.as_ref().to_path_buf();
-        let work_dir = original_dir.join(format!(
-            ".selfware-sandbox-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
+        let work_dir_name = format!(".selfware-sandbox-{}", uuid::Uuid::new_v4().simple());
+        let work_dir = original_dir.join(&work_dir_name);
 
         info!("Setting up compilation sandbox at {:?}", work_dir);
 
@@ -46,9 +56,9 @@ impl CompilationSandbox {
         // Note on security boundary: Tracked symlinks checked in to git history
         // are checked out directly by git during clone/apply. Untracked symlinks
         // in the working tree are screened for containment: external targets
-        // are skipped with a warning to preserve availability without escaping
-        // isolation, while internal absolute targets are rewritten to sandbox-relative
-        // paths so they evaluate against sandbox copies rather than host repository files.
+        // are rejected (fail-closed) to prevent sandbox escape, while internal
+        // absolute targets are rewritten to sandbox-relative paths so they evaluate
+        // against sandbox copies rather than host repository files.
         let status = Command::new("git")
             .arg("clone")
             .arg("--no-hardlinks")
@@ -146,7 +156,9 @@ impl CompilationSandbox {
             if rel.is_absolute() || rel.starts_with("..") {
                 continue;
             }
-            if rel.to_string_lossy().starts_with(".selfware-sandbox-") {
+            // Only skip the specific active sandbox directory created for this instance;
+            // do not silently drop user files that happen to begin with the prefix.
+            if rel == Path::new(&work_dir_name) || rel.starts_with(&work_dir_name) {
                 continue;
             }
             let src = original_dir.join(rel);
@@ -171,20 +183,17 @@ impl CompilationSandbox {
                             rel
                         ))
                     })?;
-                    let rewritten_target = match rewrite_symlink_target_for_sandbox(
-                        &original_dir,
-                        &src,
-                        &target,
-                    ) {
-                        Some(t) => t,
-                        None => {
-                            warn!(
-                                "Skipping untracked symlink {:?} targeting path outside repository: {:?}",
-                                rel, target
-                            );
-                            continue;
-                        }
-                    };
+                    let rewritten_target =
+                        match rewrite_symlink_target_for_sandbox(&original_dir, &src, &target) {
+                            Some(t) => t,
+                            None => {
+                                return Err(cleanup_on_fail(anyhow!(
+                                    "Untracked symlink {:?} targets path outside repository: {:?}",
+                                    rel,
+                                    target
+                                )));
+                            }
+                        };
                     if let Some(parent) = dst.parent() {
                         std::fs::create_dir_all(parent).map_err(|e| {
                             cleanup_on_fail(anyhow!(
@@ -244,6 +253,10 @@ impl CompilationSandbox {
                 )));
             }
         }
+
+        #[cfg(unix)]
+        rebase_and_validate_sandbox_symlinks(&work_dir, &original_dir)
+            .map_err(|e| cleanup_on_fail(anyhow!("Sandbox symlink validation failed: {e}")))?;
 
         Ok(Self {
             _original_dir: original_dir,
@@ -381,16 +394,32 @@ pub(crate) fn rewrite_symlink_target_for_sandbox(
         parent.join(target)
     };
 
-    let is_contained =
-        if let (Ok(c_base), Ok(c_target)) = (base_dir.canonicalize(), resolved.canonicalize()) {
-            c_target.starts_with(&c_base)
+    let norm_base = lexical_normalize(base_dir);
+    let c_base = base_dir.canonicalize().ok();
+
+    // Determine if resolved target is contained in base_dir, and which base representation matched.
+    // Keying off the matching base prevents macOS /var vs /private/var canonical alias escapes.
+    let (is_contained, matched_base_is_canonical) =
+        if let (Some(ref cb), Ok(ct)) = (&c_base, resolved.canonicalize()) {
+            if ct.starts_with(cb) {
+                (true, true)
+            } else {
+                (false, false)
+            }
         } else {
             let norm_target = lexical_normalize(&resolved);
-            let norm_base = lexical_normalize(base_dir);
-            if let Ok(c_base) = base_dir.canonicalize() {
-                norm_target.starts_with(&c_base) || norm_target.starts_with(&norm_base)
+            if let Some(ref cb) = c_base {
+                if norm_target.starts_with(cb) {
+                    (true, true)
+                } else if norm_target.starts_with(&norm_base) {
+                    (true, false)
+                } else {
+                    (false, false)
+                }
+            } else if norm_target.starts_with(&norm_base) {
+                (true, false)
             } else {
-                norm_target.starts_with(&norm_base)
+                (false, false)
             }
         };
 
@@ -398,38 +427,226 @@ pub(crate) fn rewrite_symlink_target_for_sandbox(
         return None;
     }
 
-    // Relative targets within the repository resolve inside the sandbox identically.
+    // Relative targets within the repository resolve inside the sandbox identically,
+    // provided lexical normalization does not escape the repository boundary.
     if target.is_relative() {
-        return Some(target.to_path_buf());
+        let norm = lexical_normalize(&parent.join(target));
+        let base_to_check = if matched_base_is_canonical {
+            c_base.as_deref().unwrap_or(&norm_base)
+        } else {
+            &norm_base
+        };
+        let stays_inside = norm.starts_with(base_to_check)
+            || (c_base.is_some() && norm.starts_with(c_base.as_ref().unwrap()));
+        if stays_inside {
+            return Some(target.to_path_buf());
+        }
     }
 
     // Absolute internal targets must be rewritten to sandbox-relative so they resolve
     // to files within the sandbox copy instead of pointing back to the host repository.
-    let rel_symlink_dir =
-        if let (Ok(c_base), Ok(c_parent)) = (base_dir.canonicalize(), parent.canonicalize()) {
-            c_parent
-                .strip_prefix(&c_base)
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|_| {
-                    make_relative_path(&lexical_normalize(base_dir), &lexical_normalize(parent))
-                })
-        } else {
-            make_relative_path(&lexical_normalize(base_dir), &lexical_normalize(parent))
-        };
+    // Key BOTH rel_symlink_dir and rel_target_file off the EXACT base form that matched.
+    let matched_base = if matched_base_is_canonical {
+        c_base.as_deref().unwrap_or(&norm_base)
+    } else {
+        &norm_base
+    };
 
-    let rel_target_file =
-        if let (Ok(c_base), Ok(c_resolved)) = (base_dir.canonicalize(), resolved.canonicalize()) {
-            c_resolved
-                .strip_prefix(&c_base)
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|_| {
-                    make_relative_path(&lexical_normalize(base_dir), &lexical_normalize(&resolved))
-                })
-        } else {
-            make_relative_path(&lexical_normalize(base_dir), &lexical_normalize(&resolved))
-        };
+    let parent_path = if matched_base_is_canonical {
+        parent
+            .canonicalize()
+            .unwrap_or_else(|_| lexical_normalize(parent))
+    } else {
+        lexical_normalize(parent)
+    };
+
+    let target_path = if matched_base_is_canonical {
+        resolved
+            .canonicalize()
+            .unwrap_or_else(|_| lexical_normalize(&resolved))
+    } else {
+        lexical_normalize(&resolved)
+    };
+
+    let rel_symlink_dir = parent_path
+        .strip_prefix(matched_base)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|_| make_relative_path(matched_base, &parent_path));
+
+    let rel_target_file = target_path
+        .strip_prefix(matched_base)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|_| make_relative_path(matched_base, &target_path));
 
     Some(make_relative_path(&rel_symlink_dir, &rel_target_file))
+}
+
+#[cfg(unix)]
+fn rebase_and_validate_sandbox_symlinks(work_dir: &Path, original_dir: &Path) -> Result<()> {
+    let c_orig = original_dir.canonicalize().ok();
+    let norm_orig = lexical_normalize(original_dir);
+    let c_work = work_dir.canonicalize().ok();
+    let norm_work = lexical_normalize(work_dir);
+
+    // Recursively collect all symlinks in work_dir
+    let mut symlinks = Vec::new();
+    fn collect_symlinks(dir: &Path, symlinks: &mut Vec<PathBuf>) -> Result<()> {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) => return Err(anyhow!("Failed reading dir {:?}: {e}", dir)),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            let ft = entry.file_type()?;
+            if ft.is_dir() {
+                collect_symlinks(&path, symlinks)?;
+            } else if ft.is_symlink() {
+                symlinks.push(path);
+            }
+        }
+        Ok(())
+    }
+
+    collect_symlinks(work_dir, &mut symlinks)?;
+
+    // 1. Rebase any tracked internal absolute symlinks pointing to original_dir
+    for link_path in &symlinks {
+        let raw_target = std::fs::read_link(link_path)?;
+        if raw_target.is_absolute() {
+            let points_to_orig = if let Some(ref co) = c_orig {
+                raw_target.starts_with(co) || raw_target.starts_with(&norm_orig)
+            } else {
+                raw_target.starts_with(&norm_orig)
+            };
+            if points_to_orig {
+                let rel_sub = if let Some(ref co) = c_orig {
+                    raw_target
+                        .strip_prefix(co)
+                        .ok()
+                        .or_else(|| raw_target.strip_prefix(&norm_orig).ok())
+                } else {
+                    raw_target.strip_prefix(&norm_orig).ok()
+                };
+                if let Some(sub) = rel_sub {
+                    let new_abs = work_dir.join(sub);
+                    let parent = link_path.parent().unwrap_or(work_dir);
+                    let new_rel = make_relative_path(
+                        &lexical_normalize(parent),
+                        &lexical_normalize(&new_abs),
+                    );
+                    std::fs::remove_file(link_path)?;
+                    std::os::unix::fs::symlink(&new_rel, link_path)?;
+                }
+            }
+        }
+    }
+
+    // 2. Validate resolution of all symlinks in work_dir
+    for link_path in &symlinks {
+        validate_single_symlink_containment(work_dir, link_path, c_work.as_deref(), &norm_work)?;
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_single_symlink_containment(
+    work_dir: &Path,
+    symlink_path: &Path,
+    c_work: Option<&Path>,
+    norm_work: &Path,
+) -> Result<()> {
+    let mut current = symlink_path.to_path_buf();
+    let mut visited = HashSet::new();
+
+    for _ in 0..32 {
+        if !visited.insert(current.clone()) {
+            return Err(anyhow!(
+                "Symlink cycle detected in sandbox at {:?}",
+                symlink_path
+            ));
+        }
+
+        let meta = match current.symlink_metadata() {
+            Ok(m) => m,
+            Err(_) => {
+                // Target does not exist (dangling symlink). Verify lexical resolution does not escape work_dir
+                let norm = lexical_normalize(&current);
+                let contained = if let Some(cw) = c_work {
+                    norm.starts_with(cw) || norm.starts_with(norm_work)
+                } else {
+                    norm.starts_with(norm_work)
+                };
+                if !contained {
+                    return Err(anyhow!(
+                        "Dangling symlink {:?} resolves outside sandbox to {:?}",
+                        symlink_path,
+                        norm
+                    ));
+                }
+                return Ok(());
+            }
+        };
+
+        if meta.file_type().is_symlink() {
+            let target = std::fs::read_link(&current)?;
+            if target.is_absolute() {
+                let contained = if let Some(cw) = c_work {
+                    target.starts_with(cw) || target.starts_with(norm_work)
+                } else {
+                    target.starts_with(norm_work)
+                };
+                if !contained {
+                    return Err(anyhow!(
+                        "Symlink {:?} targets path outside sandbox: {:?}",
+                        symlink_path,
+                        target
+                    ));
+                }
+                current = target;
+            } else {
+                let parent = current.parent().unwrap_or(work_dir);
+                let next = parent.join(&target);
+                let norm = lexical_normalize(&next);
+                let contained = if let Some(cw) = c_work {
+                    norm.starts_with(cw) || norm.starts_with(norm_work)
+                } else {
+                    norm.starts_with(norm_work)
+                };
+                if !contained {
+                    return Err(anyhow!(
+                        "Symlink {:?} targets path outside sandbox: {:?}",
+                        symlink_path,
+                        norm
+                    ));
+                }
+                current = next;
+            }
+        } else {
+            // Reached non-symlink target; verify final canonical location
+            if let Ok(canon) = current.canonicalize() {
+                let contained = if let Some(cw) = c_work {
+                    canon.starts_with(cw) || canon.starts_with(norm_work)
+                } else {
+                    canon.starts_with(norm_work)
+                };
+                if !contained {
+                    return Err(anyhow!(
+                        "Symlink {:?} resolves outside sandbox to {:?}",
+                        symlink_path,
+                        canon
+                    ));
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    Err(anyhow!(
+        "Symlink resolution exceeded maximum hop depth (32) at {:?}",
+        symlink_path
+    ))
 }
 
 #[cfg(test)]

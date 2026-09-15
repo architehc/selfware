@@ -262,7 +262,7 @@ fn test_untracked_symlinks_are_replicated() {
 
 #[cfg(unix)]
 #[test]
-fn test_untracked_escaping_symlink_is_skipped_with_warn() {
+fn test_untracked_escaping_symlink_is_rejected() {
     let repo_dir = tempfile::tempdir().unwrap();
     let rpath = repo_dir.path();
 
@@ -286,7 +286,7 @@ fn test_untracked_escaping_symlink_is_skipped_with_warn() {
 
     std::fs::write(rpath.join("README.md"), b"# Test Repo\n").unwrap();
     let _ = Command::new("git")
-        .args(["add", "README.md"])
+        .args(["add", "."])
         .current_dir(rpath)
         .status();
     let _ = Command::new("git")
@@ -298,24 +298,127 @@ fn test_untracked_escaping_symlink_is_skipped_with_warn() {
     let escaping_rel = rpath.join("escape_rel.txt");
     std::os::unix::fs::symlink(Path::new("../../etc/passwd"), &escaping_rel).unwrap();
 
+    let result = CompilationSandbox::new(rpath);
+    assert!(result.is_err(), "escaping symlink must be rejected");
+    let err_msg = result.err().unwrap().to_string();
+    assert!(
+        err_msg.contains("targets path outside repository"),
+        "error message should cite path outside repository: {err_msg}"
+    );
+
+    // Remove escaping relative symlink
+    std::fs::remove_file(&escaping_rel).unwrap();
+
     // 2. Escaping absolute symlink
     let escaping_abs = rpath.join("escape_abs.txt");
     std::os::unix::fs::symlink(Path::new("/etc/passwd"), &escaping_abs).unwrap();
 
-    // Sandbox creation succeeds via skip-with-warn (does not abort entire sandbox)
-    let sandbox =
-        CompilationSandbox::new(rpath).expect("escaping symlinks should be skipped with warning");
+    let result_abs = CompilationSandbox::new(rpath);
     assert!(
-        !sandbox.work_dir().join("escape_rel.txt").exists(),
-        "escaping relative symlink must be skipped from sandbox"
+        result_abs.is_err(),
+        "absolute escaping symlink must be rejected"
     );
+    let err_msg_abs = result_abs.err().unwrap().to_string();
     assert!(
-        !sandbox.work_dir().join("escape_abs.txt").exists(),
-        "escaping absolute symlink must be skipped from sandbox"
+        err_msg_abs.contains("targets path outside repository"),
+        "error message should cite path outside repository: {err_msg_abs}"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_untracked_symlink_chain_resolving_outside_is_rejected() {
+    let repo_dir = tempfile::tempdir().unwrap();
+    let rpath = repo_dir.path();
+
+    let init_ok = Command::new("git")
+        .args(["init"])
+        .current_dir(rpath)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !init_ok {
+        return;
+    }
+    let _ = Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(rpath)
+        .status();
+    let _ = Command::new("git")
+        .args(["config", "user.name", "Test User"])
+        .current_dir(rpath)
+        .status();
+
+    std::fs::write(rpath.join("README.md"), b"# Test\n").unwrap();
+
+    // Create an intermediate tracked symlink that points to /etc
+    let bridge = rpath.join("bridge");
+    std::os::unix::fs::symlink(Path::new("/etc"), &bridge).unwrap();
+
+    let _ = Command::new("git")
+        .args(["add", "."])
+        .current_dir(rpath)
+        .status();
+    let _ = Command::new("git")
+        .args(["commit", "-m", "initial commit"])
+        .current_dir(rpath)
+        .status();
+
+    // Now create an untracked relative symlink that points into bridge: link.txt -> bridge/passwd
+    let link = rpath.join("link.txt");
+    std::os::unix::fs::symlink(Path::new("bridge/passwd"), &link).unwrap();
+
+    let result = CompilationSandbox::new(rpath);
     assert!(
-        sandbox.work_dir().join("README.md").exists(),
-        "valid repository files must still be present in sandbox"
+        result.is_err(),
+        "symlink chain resolving outside sandbox must be rejected"
+    );
+}
+
+#[test]
+fn test_untracked_selfware_sandbox_prefix_user_file_is_preserved() {
+    let repo_dir = tempfile::tempdir().unwrap();
+    let rpath = repo_dir.path();
+
+    let init_ok = Command::new("git")
+        .args(["init"])
+        .current_dir(rpath)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !init_ok {
+        return;
+    }
+    let _ = Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(rpath)
+        .status();
+    let _ = Command::new("git")
+        .args(["config", "user.name", "Test User"])
+        .current_dir(rpath)
+        .status();
+
+    std::fs::write(rpath.join("README.md"), b"# Test\n").unwrap();
+    let _ = Command::new("git")
+        .args(["add", "."])
+        .current_dir(rpath)
+        .status();
+    let _ = Command::new("git")
+        .args(["commit", "-m", "initial commit"])
+        .current_dir(rpath)
+        .status();
+
+    // Create an untracked file that starts with .selfware-sandbox- (legit user file)
+    let user_fixture = rpath.join(".selfware-sandbox-user-fixture.rs");
+    std::fs::write(&user_fixture, b"// test fixture\n").unwrap();
+
+    let sandbox = CompilationSandbox::new(rpath).expect("sandbox creation should succeed");
+    assert!(
+        sandbox
+            .work_dir()
+            .join(".selfware-sandbox-user-fixture.rs")
+            .exists(),
+        "untracked file sharing prefix with sandbox directory must not be dropped"
     );
 }
 
