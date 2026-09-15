@@ -503,25 +503,37 @@ async fn run_llm_doctor_inner(config: &Config) -> Result<(DoctorReport, bool)> {
         fix_hint: thinking_fix.map(String::from),
     });
 
-    let mm_ok = caps.multimodal;
-    let mm_status = if mm_ok {
-        DoctorCheckStatus::Ok
-    } else {
-        DoctorCheckStatus::Warning
-    };
-    let mm_detail = if mm_ok {
-        "model conditioned on image input (red/blue control probes passed)"
-    } else if looks_multimodal(&model_name) {
-        "model name suggests vision but behavioral image conditioning failed"
-    } else {
-        "no vision modality detected for this model"
-    };
-    let mm_fix = if mm_ok {
-        None
-    } else if looks_multimodal(&model_name) {
-        Some("Vision endpoint returned unconditioned or unsupported responses. Verify server multimodal image pipeline.")
-    } else {
-        Some("Multimodal is optional. To enable, configure a vision-language model (Qwen3.5-VL, Llava, etc.) and set `modalities = [\"text\", \"vision\"]`.")
+    let (mm_status, mm_detail, mm_fix) = match caps.multimodal {
+        Some(VisionProbeOutcome::Conditioned) => (
+            DoctorCheckStatus::Ok,
+            "model conditioned on image input (red/blue control probes passed)",
+            None,
+        ),
+        Some(VisionProbeOutcome::Inconclusive) => (
+            DoctorCheckStatus::Warning,
+            "vision capability unknown (probe inconclusive or empty response)",
+            Some("Model did not return conclusive color tokens for 1x1 test probes. Multimodal processing may still work for natural images."),
+        ),
+        Some(VisionProbeOutcome::Unconditioned) => (
+            DoctorCheckStatus::Warning,
+            "model name suggests vision but behavioral image conditioning failed (color invariant or inverted)",
+            Some("Vision endpoint returned unconditioned or inverted responses. Verify server multimodal image pipeline."),
+        ),
+        None => {
+            if looks_multimodal(&model_name) {
+                (
+                    DoctorCheckStatus::Warning,
+                    "model name suggests vision but vision probe was not completed",
+                    Some("Vision endpoint could not be probed. Verify network connection and model configuration."),
+                )
+            } else {
+                (
+                    DoctorCheckStatus::Ok,
+                    "no vision modality detected for this model",
+                    Some("Multimodal is optional. To enable, configure a vision-language model (Qwen3.5-VL, Llava, etc.) and set `modalities = [\"text\", \"vision\"]`."),
+                )
+            }
+        }
     };
     had_fail |= print_unified_check("multimodal (vision)", mm_status, mm_detail, mm_fix);
     report.capabilities.push(DoctorCheckResult {
@@ -571,6 +583,17 @@ fn print_unified_check(
     status == DoctorCheckStatus::Missing
 }
 
+/// Behavioral vision conditioning probe outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VisionProbeOutcome {
+    /// Control images condition properly on pixel content (e.g. Red for red image, Blue for blue image).
+    Conditioned,
+    /// Probe outputs fail conditioning: either invariant response to different images or inverted colors.
+    Unconditioned,
+    /// Probe was inconclusive: empty response, tokens exhausted by reasoning, or non-color answer.
+    Inconclusive,
+}
+
 /// Capability probe results.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Capabilities {
@@ -580,15 +603,12 @@ pub(crate) struct Capabilities {
     pub streaming: Option<bool>,
     /// `chat_template_kwargs` accepted by the backend without error.
     pub thinking: Option<bool>,
-    /// Configured model looks multimodal (heuristic by name).
-    pub multimodal: bool,
+    /// Behavioral vision conditioning outcome (None = not probed / non-multimodal model).
+    pub multimodal: Option<VisionProbeOutcome>,
 }
 
 async fn probe_capabilities(endpoint: &str, model: &str, config: &Config) -> Capabilities {
-    let mut caps = Capabilities {
-        multimodal: looks_multimodal(model),
-        ..Default::default()
-    };
+    let mut caps = Capabilities::default();
 
     let probe_timeout = connection_test_timeout(config);
     let client = match Client::builder().timeout(probe_timeout).build() {
@@ -651,7 +671,8 @@ async fn probe_capabilities(endpoint: &str, model: &str, config: &Config) -> Cap
 
     // ── behavioral vision conditioning probe ──
     if looks_multimodal(model) {
-        caps.multimodal = probe_vision_conditioning(&client, &url, model, api_key.as_deref()).await;
+        caps.multimodal =
+            Some(probe_vision_conditioning(&client, &url, model, api_key.as_deref()).await);
     }
 
     caps
@@ -663,24 +684,49 @@ const RED_PNG_B64: &str =
 const BLUE_PNG_B64: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYPgPAAEDAQAIicLsAAAAAElFTkSuQmCC";
 
-/// Behavioral check: verify that vision outputs condition on pixel content
-/// and differentiate between distinct control images.
-pub(crate) fn verify_vision_responses(red_resp: Option<&str>, blue_resp: Option<&str>) -> bool {
+/// Behavioral check: evaluate vision outputs on control images, distinguishing
+/// between conditioned responses, invariant/inverted unconditioned failures, and
+/// inconclusive/empty outputs.
+pub(crate) fn evaluate_vision_responses(
+    red_resp: Option<&str>,
+    blue_resp: Option<&str>,
+) -> VisionProbeOutcome {
     let (Some(red), Some(blue)) = (red_resp, blue_resp) else {
-        return false;
+        return VisionProbeOutcome::Inconclusive;
     };
     let r_lower = red.trim().to_lowercase();
     let b_lower = blue.trim().to_lowercase();
 
-    // If both return identical text (e.g. invariant "White" or "ok"), image conditioning is broken.
-    if r_lower == b_lower {
-        return false;
+    if r_lower.is_empty() || b_lower.is_empty() {
+        return VisionProbeOutcome::Inconclusive;
     }
 
-    let red_ok = r_lower.contains("red") && !r_lower.contains("blue");
-    let blue_ok = b_lower.contains("blue") && !b_lower.contains("red");
+    // If both return identical text (e.g. invariant "White" or "ok"), image conditioning is broken.
+    if r_lower == b_lower {
+        return VisionProbeOutcome::Unconditioned;
+    }
 
-    red_ok && blue_ok
+    let red_has_red = r_lower.contains("red");
+    let red_has_blue = r_lower.contains("blue");
+    let blue_has_blue = b_lower.contains("blue");
+    let blue_has_red = b_lower.contains("red");
+
+    if red_has_red && !red_has_blue && blue_has_blue && !blue_has_red {
+        VisionProbeOutcome::Conditioned
+    } else if (red_has_blue && !red_has_red) || (blue_has_red && !blue_has_blue) {
+        // Inverted colors / color swap
+        VisionProbeOutcome::Unconditioned
+    } else if !red_has_red && !red_has_blue && !blue_has_blue && !blue_has_red {
+        // Neither color token detected (empty, exhausted tokens, or irrelevant response)
+        VisionProbeOutcome::Inconclusive
+    } else {
+        VisionProbeOutcome::Unconditioned
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn verify_vision_responses(red_resp: Option<&str>, blue_resp: Option<&str>) -> bool {
+    evaluate_vision_responses(red_resp, blue_resp) == VisionProbeOutcome::Conditioned
 }
 
 async fn probe_vision_conditioning(
@@ -688,7 +734,7 @@ async fn probe_vision_conditioning(
     url: &str,
     model: &str,
     api_key: Option<&str>,
-) -> bool {
+) -> VisionProbeOutcome {
     let send_probe = |b64: &'static str| {
         let body = serde_json::json!({
             "model": model,
@@ -709,8 +755,11 @@ async fn probe_vision_conditioning(
                     ]
                 }
             ],
-            "max_tokens": 8,
-            "temperature": 0.0
+            "max_tokens": 64,
+            "temperature": 0.0,
+            "chat_template_kwargs": {
+                "enable_thinking": false
+            }
         });
         let mut req = client.post(url).json(&body);
         if let Some(k) = api_key {
@@ -724,8 +773,17 @@ async fn probe_vision_conditioning(
     let red_res = match send_probe(RED_PNG_B64).send().await {
         Ok(resp) if resp.status().is_success() => {
             resp.json::<serde_json::Value>().await.ok().and_then(|j| {
-                j["choices"][0]["message"]["content"]
-                    .as_str()
+                let msg = j
+                    .get("choices")
+                    .and_then(|c| c.get(0))
+                    .and_then(|c| c.get("message"));
+                let content = msg.and_then(|m| m.get("content")).and_then(|v| v.as_str());
+                content
+                    .filter(|s| !s.trim().is_empty())
+                    .or_else(|| {
+                        msg.and_then(|m| m.get("reasoning_content"))
+                            .and_then(|v| v.as_str())
+                    })
                     .map(String::from)
             })
         }
@@ -735,15 +793,24 @@ async fn probe_vision_conditioning(
     let blue_res = match send_probe(BLUE_PNG_B64).send().await {
         Ok(resp) if resp.status().is_success() => {
             resp.json::<serde_json::Value>().await.ok().and_then(|j| {
-                j["choices"][0]["message"]["content"]
-                    .as_str()
+                let msg = j
+                    .get("choices")
+                    .and_then(|c| c.get(0))
+                    .and_then(|c| c.get("message"));
+                let content = msg.and_then(|m| m.get("content")).and_then(|v| v.as_str());
+                content
+                    .filter(|s| !s.trim().is_empty())
+                    .or_else(|| {
+                        msg.and_then(|m| m.get("reasoning_content"))
+                            .and_then(|v| v.as_str())
+                    })
                     .map(String::from)
             })
         }
         _ => None,
     };
 
-    verify_vision_responses(red_res.as_deref(), blue_res.as_deref())
+    evaluate_vision_responses(red_res.as_deref(), blue_res.as_deref())
 }
 
 /// Heuristic: does the model name suggest vision-language capabilities?

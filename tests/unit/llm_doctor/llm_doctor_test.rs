@@ -521,7 +521,7 @@ fn test_capabilities_default() {
     assert_eq!(c.tools, None);
     assert_eq!(c.streaming, None);
     assert_eq!(c.thinking, None);
-    assert!(!c.multimodal);
+    assert_eq!(c.multimodal, None);
 }
 
 // =========================================================================
@@ -569,4 +569,63 @@ fn test_verify_vision_responses_hallucinated_or_contradictory() {
     ));
     // Completely irrelevant text (e.g. OCR hallucinating 13)
     assert!(!verify_vision_responses(Some("13"), Some("blue")));
+}
+
+#[test]
+fn test_evaluate_vision_responses_distinguishes_inconclusive_empty_from_unconditioned_inverted() {
+    // Conditioned: red has red, blue has blue
+    assert_eq!(
+        evaluate_vision_responses(Some("Red"), Some("Blue")),
+        VisionProbeOutcome::Conditioned
+    );
+    assert_eq!(
+        evaluate_vision_responses(Some("It is red"), Some("It is blue")),
+        VisionProbeOutcome::Conditioned
+    );
+
+    // Inverted / color swap: red has blue, blue has red -> Unconditioned
+    assert_eq!(
+        evaluate_vision_responses(Some("Blue"), Some("Red")),
+        VisionProbeOutcome::Unconditioned
+    );
+
+    // Invariant responses: both say same text -> Unconditioned
+    assert_eq!(
+        evaluate_vision_responses(Some("White"), Some("White")),
+        VisionProbeOutcome::Unconditioned
+    );
+    assert_eq!(
+        evaluate_vision_responses(Some("red"), Some("red")),
+        VisionProbeOutcome::Unconditioned
+    );
+
+    // Inconclusive: empty string or token exhaustion
+    assert_eq!(
+        evaluate_vision_responses(Some(""), Some("blue")),
+        VisionProbeOutcome::Inconclusive
+    );
+    assert_eq!(
+        evaluate_vision_responses(Some("   "), Some("")),
+        VisionProbeOutcome::Inconclusive
+    );
+
+    // Inconclusive: missing response (None)
+    assert_eq!(
+        evaluate_vision_responses(None, Some("blue")),
+        VisionProbeOutcome::Inconclusive
+    );
+    assert_eq!(
+        evaluate_vision_responses(Some("red"), None),
+        VisionProbeOutcome::Inconclusive
+    );
+    assert_eq!(
+        evaluate_vision_responses(None, None),
+        VisionProbeOutcome::Inconclusive
+    );
+
+    // Inconclusive: non-color tokens (e.g. model output didn't contain red or blue)
+    assert_eq!(
+        evaluate_vision_responses(Some("13"), Some("42")),
+        VisionProbeOutcome::Inconclusive
+    );
 }
