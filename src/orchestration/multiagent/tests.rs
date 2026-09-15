@@ -242,7 +242,7 @@ fn test_multiagent_event_started() {
 
 #[test]
 fn test_total_usage_sums_tokens_and_cost() {
-    use crate::api::types::Usage;
+    use crate::api::types::{CompletionTokensDetails, PromptTokensDetails, Usage};
 
     let make = |usage: Option<Usage>| AgentResult {
         agent_id: 0,
@@ -261,14 +261,30 @@ fn test_total_usage_sums_tokens_and_cost() {
             completion_tokens: 5,
             total_tokens: 15,
             cost: Some(0.001),
-            ..Default::default()
+            reasoning_tokens: Some(3),
+            completion_tokens_details: Some(CompletionTokensDetails {
+                reasoning_tokens: Some(3),
+                accepted_prediction_tokens: Some(2),
+                rejected_prediction_tokens: None,
+            }),
+            prompt_tokens_details: Some(PromptTokensDetails {
+                cached_tokens: Some(4),
+            }),
         })),
         make(Some(Usage {
             prompt_tokens: 2,
             completion_tokens: 3,
             total_tokens: 5,
             cost: None,
-            ..Default::default()
+            reasoning_tokens: Some(2),
+            completion_tokens_details: Some(CompletionTokensDetails {
+                reasoning_tokens: Some(2),
+                accepted_prediction_tokens: Some(1),
+                rejected_prediction_tokens: Some(1),
+            }),
+            prompt_tokens_details: Some(PromptTokensDetails {
+                cached_tokens: Some(1),
+            }),
         })),
         make(None),
     ];
@@ -277,6 +293,35 @@ fn test_total_usage_sums_tokens_and_cost() {
     assert_eq!(total.prompt_tokens, 12);
     assert_eq!(total.completion_tokens, 8);
     assert_eq!(total.total_tokens, 20);
+    assert_eq!(total.reasoning_tokens, Some(5));
+    assert_eq!(
+        total
+            .completion_tokens_details
+            .as_ref()
+            .unwrap()
+            .reasoning_tokens,
+        Some(5)
+    );
+    assert_eq!(
+        total
+            .completion_tokens_details
+            .as_ref()
+            .unwrap()
+            .accepted_prediction_tokens,
+        Some(3)
+    );
+    assert_eq!(
+        total
+            .completion_tokens_details
+            .as_ref()
+            .unwrap()
+            .rejected_prediction_tokens,
+        Some(1)
+    );
+    assert_eq!(
+        total.prompt_tokens_details.as_ref().unwrap().cached_tokens,
+        Some(5)
+    );
     // Cost sums only over results whose provider reported one.
     assert!((total.cost.unwrap() - 0.001).abs() < 1e-12);
 }

@@ -939,21 +939,6 @@ impl Config {
         ) {
             user_explicit.streaming = true;
         }
-        if matches!(sources.get("context_length"), Some(ConfigSource::EnvVar(_))) {
-            user_explicit.context_length = true;
-        }
-        if matches!(
-            sources.get("concurrency.max_streams"),
-            Some(ConfigSource::EnvVar(_))
-        ) {
-            user_explicit.max_streams = true;
-        }
-        if matches!(
-            sources.get("concurrency.max_global"),
-            Some(ConfigSource::EnvVar(_))
-        ) {
-            user_explicit.max_global = true;
-        }
         if let Some(profile) = match_profile(&config.model) {
             let profile_name = profile.name.to_string();
             let applied = apply_profile(&mut config, &profile, &user_explicit);

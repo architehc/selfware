@@ -20,17 +20,58 @@ fn streaming_usage_delta(
         .saturating_sub(previous.completion_tokens) as u64;
     previous.prompt_tokens = previous.prompt_tokens.max(current.prompt_tokens);
     previous.completion_tokens = previous.completion_tokens.max(current.completion_tokens);
-    previous.total_tokens = previous.total_tokens.max(current.total_tokens);
+    previous.total_tokens = previous.total_tokens.max(current.total_tokens).max(
+        previous
+            .prompt_tokens
+            .saturating_add(previous.completion_tokens),
+    );
     previous.cost = current.cost;
-    previous.reasoning_tokens = current.reasoning_tokens.or(previous.reasoning_tokens);
-    previous.completion_tokens_details = current
-        .completion_tokens_details
-        .clone()
-        .or(previous.completion_tokens_details.clone());
-    previous.prompt_tokens_details = current
-        .prompt_tokens_details
-        .clone()
-        .or(previous.prompt_tokens_details.clone());
+    previous.reasoning_tokens = match (previous.reasoning_tokens, current.reasoning_tokens) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    };
+    previous.completion_tokens_details = match (
+        &previous.completion_tokens_details,
+        &current.completion_tokens_details,
+    ) {
+        (Some(p), Some(c)) => Some(crate::api::types::CompletionTokensDetails {
+            reasoning_tokens: match (p.reasoning_tokens, c.reasoning_tokens) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            },
+            accepted_prediction_tokens: match (
+                p.accepted_prediction_tokens,
+                c.accepted_prediction_tokens,
+            ) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            },
+            rejected_prediction_tokens: match (
+                p.rejected_prediction_tokens,
+                c.rejected_prediction_tokens,
+            ) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            },
+        }),
+        (Some(p), None) => Some(p.clone()),
+        (None, Some(c)) => Some(c.clone()),
+        (None, None) => None,
+    };
+    previous.prompt_tokens_details = match (
+        &previous.prompt_tokens_details,
+        &current.prompt_tokens_details,
+    ) {
+        (Some(p), Some(c)) => Some(crate::api::types::PromptTokensDetails {
+            cached_tokens: match (p.cached_tokens, c.cached_tokens) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            },
+        }),
+        (Some(p), None) => Some(p.clone()),
+        (None, Some(c)) => Some(c.clone()),
+        (None, None) => None,
+    };
     (prompt, completion)
 }
 
@@ -396,6 +437,7 @@ impl Agent {
         let mut display_buf = String::new();
         // Which suppressed tag we're currently inside, if any
         let mut suppressed_tag_idx: Option<usize> = None;
+        let mut captured_logprobs: Option<serde_json::Value> = None;
 
         let cancel = self.cancel_token();
 
@@ -637,7 +679,13 @@ impl Agent {
                         completion_tokens: completion_delta,
                     });
                 }
-                StreamChunk::Logprobs(_) => {}
+                StreamChunk::Logprobs(lp) => {
+                    if let Some(existing) = &mut captured_logprobs {
+                        crate::api::streaming::merge_logprobs(existing, lp);
+                    } else {
+                        captured_logprobs = Some(lp);
+                    }
+                }
                 StreamChunk::FinishReason(reason) => {
                     captured_finish_reason = Some(reason);
                 }
@@ -734,6 +782,7 @@ impl Agent {
                 total_tokens: captured_total_tokens,
                 cost: captured_cost,
                 accounted_usage: None,
+                logprobs: captured_logprobs,
             };
         }
 

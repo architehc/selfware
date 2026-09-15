@@ -297,7 +297,11 @@ impl StreamingResponse {
                 }
                 StreamChunk::Logprobs(lp) => {
                     saw_events = true;
-                    logprobs = Some(lp);
+                    if let Some(existing) = &mut logprobs {
+                        merge_logprobs(existing, lp);
+                    } else {
+                        logprobs = Some(lp);
+                    }
                 }
                 StreamChunk::FinishReason(reason) => {
                     saw_events = true;
@@ -677,6 +681,39 @@ pub(crate) fn parse_sse_event(
         }
     }
     chunks
+}
+
+/// Merge streaming logprobs chunk into accumulated logprobs structure.
+/// OpenAI / SGLang streaming logprobs typically provide choices[0].logprobs with
+/// a "content" (and optional "refusal") array containing per-token logprob records.
+pub(crate) fn merge_logprobs(existing: &mut serde_json::Value, new_val: serde_json::Value) {
+    match (existing, new_val) {
+        (serde_json::Value::Object(target_map), serde_json::Value::Object(source_map)) => {
+            for (k, v) in source_map {
+                match target_map.get_mut(&k) {
+                    Some(serde_json::Value::Array(target_arr)) => {
+                        if let serde_json::Value::Array(source_arr) = v {
+                            target_arr.extend(source_arr);
+                        } else {
+                            target_arr.push(v);
+                        }
+                    }
+                    Some(existing_val) => {
+                        *existing_val = v;
+                    }
+                    None => {
+                        target_map.insert(k, v);
+                    }
+                }
+            }
+        }
+        (serde_json::Value::Array(target_arr), serde_json::Value::Array(source_arr)) => {
+            target_arr.extend(source_arr);
+        }
+        (target, src) => {
+            *target = src;
+        }
+    }
 }
 
 #[cfg(test)]

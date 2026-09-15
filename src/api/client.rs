@@ -832,6 +832,7 @@ impl ApiClient {
             ..
         } = resp.usage.clone();
 
+        let logprobs = resp.choices.first().and_then(|c| c.logprobs.clone());
         let meta = ChatMetadata {
             request_body: body,
             elapsed_ms,
@@ -841,6 +842,7 @@ impl ApiClient {
             total_tokens: coverage.total.then_some(total_tokens as u32),
             cost,
             accounted_usage: Some(accounted_usage),
+            logprobs,
         };
         Ok((resp, meta))
     }
@@ -996,6 +998,7 @@ impl ApiClient {
             total_tokens: None,
             cost: None,
             accounted_usage: None,
+            logprobs: None,
         };
         Ok((stream, meta))
     }
@@ -1706,7 +1709,7 @@ impl ApiClient {
                                 );
                         }
                         let coverage = super::usage::receipt_coverage(&[attempt_usage.receipt()]);
-                        if !coverage.prompt || !coverage.completion {
+                        if !coverage.prompt || !coverage.completion || !coverage.total {
                             let (prompt, completion) = measured_chat_tokens(&body, &chat_response);
                             attempt_usage.record_fallback(prompt, completion);
                         }

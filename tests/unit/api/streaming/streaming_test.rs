@@ -109,3 +109,58 @@ fn parse_sse_event_preserves_logprobs_and_flat_reasoning_tokens() {
     assert!(found_logprobs, "logprobs must survive SSE parse");
     assert!(found_usage, "flat reasoning tokens must survive SSE parse");
 }
+
+#[tokio::test]
+async fn multi_token_stream_collection_merges_logprobs() {
+    use super::StreamingResponse;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let sse_data = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"logprobs\":{\"content\":[{\"token\":\"Hello\",\"logprob\":-0.05}]}}]}\n\n\
+                    data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"},\"logprobs\":{\"content\":[{\"token\":\" world\",\"logprob\":-0.12}]}}]}\n\n\
+                    data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}\n\n\
+                    data: [DONE]\n\n";
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 1024];
+        let _ = socket.read(&mut buf).await;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{}",
+            sse_data
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{}/stream", addr))
+        .send()
+        .await
+        .unwrap();
+
+    let streaming_resp = StreamingResponse::new(resp, std::time::Duration::from_secs(5), None);
+    let chat_resp = streaming_resp.collect().await.unwrap();
+    server.await.unwrap();
+
+    assert_eq!(chat_resp.choices.len(), 1);
+    assert_eq!(chat_resp.choices[0].message.content, "Hello world");
+    assert_eq!(chat_resp.choices[0].finish_reason.as_deref(), Some("stop"));
+
+    let logprobs = chat_resp.choices[0]
+        .logprobs
+        .as_ref()
+        .expect("logprobs must survive multi-chunk stream");
+    let content_tokens = logprobs["content"]
+        .as_array()
+        .expect("logprobs.content must be an array");
+    assert_eq!(
+        content_tokens.len(),
+        2,
+        "both token logprobs must be retained"
+    );
+    assert_eq!(content_tokens[0]["token"], "Hello");
+    assert_eq!(content_tokens[1]["token"], " world");
+}

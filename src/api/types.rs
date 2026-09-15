@@ -731,6 +731,8 @@ pub struct ChatMetadata {
     /// Usage charged for this operation, including explicitly measured
     /// fallbacks. Provider-only fields above stay None when unreported.
     pub accounted_usage: Option<Usage>,
+    /// Log probability information for tokens, when requested and returned.
+    pub logprobs: Option<serde_json::Value>,
 }
 
 /// A streaming chunk of a chat completion response.

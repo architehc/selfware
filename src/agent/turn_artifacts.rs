@@ -65,6 +65,9 @@ pub struct TurnArtifact {
     /// artifacts, hence `default`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence: Option<EvidenceSnapshot>,
+    /// Log probability information for tokens, when requested and returned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<serde_json::Value>,
 }
 
 /// What the ledger held at the end of a turn. Deliberately a summary plus

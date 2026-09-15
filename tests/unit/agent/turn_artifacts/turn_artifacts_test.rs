@@ -58,6 +58,7 @@ fn sample_artifact() -> TurnArtifact {
             tools: vec!["file_read".into()],
         },
         elapsed_ms: 1234,
+        logprobs: None,
     }
 }
 
@@ -263,5 +264,46 @@ async fn write_artifact_prunes_to_cap() {
         count, MAX_TURN_ARTIFACTS,
         "turns dir must be capped at {} files, found {}",
         MAX_TURN_ARTIFACTS, count
+    );
+}
+
+#[tokio::test]
+async fn turn_artifact_preserves_logprobs() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let mut artifact = sample_artifact();
+    let sample_logprobs = serde_json::json!({
+        "content": [
+            {"token": "hello", "logprob": -0.05},
+            {"token": " world", "logprob": -0.12}
+        ]
+    });
+    artifact.logprobs = Some(sample_logprobs.clone());
+    artifact.response_body = serde_json::json!({
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "hello world",
+            },
+            "finish_reason": "stop",
+            "logprobs": sample_logprobs,
+        }],
+        "usage": {
+            "prompt_tokens": 5,
+            "completion_tokens": 2,
+        },
+    });
+
+    write_artifact(dir.path(), &artifact).await;
+    let written = artifact_dir(dir.path()).join("turn_0001.json");
+    assert!(written.exists());
+    let content = std::fs::read_to_string(&written).expect("read written artifact");
+    let decoded: TurnArtifact =
+        serde_json::from_str(&content).expect("written artifact must be valid JSON");
+
+    assert_eq!(decoded.logprobs, Some(sample_logprobs.clone()));
+    assert_eq!(
+        decoded.response_body["choices"][0]["logprobs"],
+        sample_logprobs
     );
 }

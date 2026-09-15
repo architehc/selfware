@@ -534,12 +534,7 @@ impl MultiAgentChat {
         let mut total = Usage::default();
         for result in results {
             if let Some(usage) = &result.usage {
-                total.prompt_tokens += usage.prompt_tokens;
-                total.completion_tokens += usage.completion_tokens;
-                total.total_tokens += usage.total_tokens;
-                if let Some(cost) = usage.cost {
-                    *total.cost.get_or_insert(0.0) += cost;
-                }
+                crate::api::usage::add_usage(&mut total, usage);
             }
         }
         total

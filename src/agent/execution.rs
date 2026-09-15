@@ -399,6 +399,7 @@ impl Agent {
                     "tool_calls": parsed_tool_calls,
                 },
                 "finish_reason": meta.finish_reason,
+                "logprobs": meta.logprobs,
             }],
             "usage": {
                 "prompt_tokens": meta.prompt_tokens,
@@ -421,6 +422,7 @@ impl Agent {
             agent_decision: decision,
             elapsed_ms: meta.elapsed_ms,
             evidence,
+            logprobs: meta.logprobs.clone(),
         };
         super::turn_artifacts::write_artifact(&workdir, &artifact).await;
     }
