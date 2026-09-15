@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::Config;
 
 #[test]
 fn glob_qwen36_matches_only_36() {
@@ -222,6 +223,9 @@ fn apply_profile_respects_explicit_user_config() {
         streaming: false,
         temperature: true,
         max_tokens: true,
+        context_length: false,
+        max_streams: false,
+        max_global: false,
         extra_body_keys: vec!["presence_penalty".to_string()],
     };
     let applied = apply_profile(&mut config, &profile, &user_explicit);
@@ -250,12 +254,92 @@ fn applied_fields_render_is_stable() {
         streaming: false,
         temperature: true,
         max_tokens: false,
+        context_length: true,
+        max_streams: true,
+        max_global: true,
         extra_body_keys: vec!["a".to_string(), "b".to_string()],
     };
     let s = af.render();
     assert!(s.contains("native_function_calling"));
     assert!(s.contains("temperature"));
+    assert!(s.contains("context_length"));
+    assert!(s.contains("concurrency.max_streams"));
+    assert!(s.contains("concurrency.max_global"));
     assert!(s.contains("extra_body.a"));
     assert!(s.contains("extra_body.b"));
     assert!(!s.contains("streaming"));
+}
+
+#[test]
+fn qwen38_profile_sets_preserve_thinking_false_and_sampling_defaults() {
+    let p = match_profile("Qwen/Qwen3.8-Flash-Next").expect("Qwen/Qwen3.8-Flash-Next should match");
+    assert_eq!(p.name, "qwen3.8");
+    assert_eq!(p.native_function_calling, Some(false));
+    assert_eq!(p.streaming, Some(true));
+    assert_eq!(p.temperature, Some(0.7));
+    assert_eq!(p.context_length, Some(350_000));
+    assert_eq!(p.max_streams, Some(16));
+    assert_eq!(p.max_global, Some(16));
+    let obj = p.extra_body.as_object().expect("extra_body object");
+    assert_eq!(obj.get("top_p"), Some(&json!(0.95)));
+    assert_eq!(obj.get("top_k"), Some(&json!(20)));
+    assert_eq!(obj.get("presence_penalty"), Some(&json!(0.0)));
+    assert_eq!(obj.get("repetition_penalty"), Some(&json!(1.0)));
+    let ctk = obj
+        .get("chat_template_kwargs")
+        .and_then(|v| v.as_object())
+        .expect("chat_template_kwargs object");
+    assert_eq!(ctk.get("enable_thinking"), Some(&json!(true)));
+    assert_eq!(ctk.get("preserve_thinking"), Some(&json!(false)));
+
+    let p2 = match_profile("qwen38-flash-next").expect("qwen38-flash-next should match");
+    assert_eq!(p2.name, "qwen38");
+    assert_eq!(p2.native_function_calling, Some(false));
+    assert_eq!(p2.temperature, Some(0.7));
+    assert_eq!(p2.context_length, Some(350_000));
+    assert_eq!(p2.max_streams, Some(16));
+    assert_eq!(p2.max_global, Some(16));
+    let obj2 = p2.extra_body.as_object().expect("extra_body object");
+    let ctk2 = obj2
+        .get("chat_template_kwargs")
+        .and_then(|v| v.as_object())
+        .expect("chat_template_kwargs object");
+    assert_eq!(ctk2.get("preserve_thinking"), Some(&json!(false)));
+}
+
+#[test]
+fn test_config_preserve_thinking_false_by_default_and_true_when_configured() {
+    let cfg = Config::default();
+    assert!(
+        !cfg.preserve_thinking(),
+        "preserve_thinking must be false by default"
+    );
+
+    let mut cfg2 = Config::default();
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "chat_template_kwargs".to_string(),
+        json!({ "preserve_thinking": true }),
+    );
+    cfg2.extra_body = Some(extra);
+    assert!(
+        cfg2.preserve_thinking(),
+        "preserve_thinking must be true when set"
+    );
+}
+
+#[test]
+fn test_apply_profile_sets_context_length_and_max_streams_for_qwen38() {
+    let mut config = Config::default();
+    let profile = match_profile("Qwen/Qwen3.8-Flash-Next").expect("should match profile");
+    let user_explicit = UserExplicitFields::default();
+    let applied = apply_profile(&mut config, &profile, &user_explicit);
+
+    assert!(applied.context_length);
+    assert!(applied.max_streams);
+    assert!(applied.max_global);
+    assert_eq!(config.context_length, 350_000);
+    assert_eq!(config.concurrency.max_streams, 16);
+    assert_eq!(config.concurrency.max_global, 16);
+    assert_eq!(config.temperature, 0.7);
 }

@@ -238,14 +238,13 @@ impl Agent {
         // Snapshot reasoning_content before the message-push moves it, so the
         // turn artifact can capture the model's <think> output too.
         let reasoning_for_artifact = assistant_msg.reasoning_content.clone();
-        self.messages.push(Message {
-            role: "assistant".to_string(),
-            content: content.clone(),
-            reasoning_content: assistant_msg.reasoning_content,
-            tool_calls: native_tool_calls.clone(),
-            tool_call_id: None,
-            name: None,
-        });
+        let history_msg = super::assistant_response::build_assistant_history_message(
+            content.text(),
+            assistant_msg.reasoning_content,
+            native_tool_calls.clone(),
+            self.config.preserve_thinking(),
+        );
+        self.messages.push(history_msg);
 
         // Per-turn debug capture for the planning step. Increment the
         // counter so this becomes turn_0001.json (planning is always the

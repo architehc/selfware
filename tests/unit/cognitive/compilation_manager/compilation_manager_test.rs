@@ -327,6 +327,55 @@ fn test_untracked_escaping_symlink_is_rejected() {
 
 #[cfg(unix)]
 #[test]
+fn test_relative_dot_dot_escape_symlink_is_rejected() {
+    let repo_dir = tempfile::tempdir().unwrap();
+    let rpath = repo_dir.path();
+
+    let init_ok = Command::new("git")
+        .args(["init"])
+        .current_dir(rpath)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !init_ok {
+        return;
+    }
+    let _ = Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(rpath)
+        .status();
+    let _ = Command::new("git")
+        .args(["config", "user.name", "Test User"])
+        .current_dir(rpath)
+        .status();
+
+    std::fs::write(rpath.join("README.md"), b"# Test Repo\n").unwrap();
+    let _ = Command::new("git")
+        .args(["add", "."])
+        .current_dir(rpath)
+        .status();
+    let _ = Command::new("git")
+        .args(["commit", "-m", "initial commit"])
+        .current_dir(rpath)
+        .status();
+
+    let escaping_rel = rpath.join("escape_rel");
+    std::os::unix::fs::symlink(Path::new("../.."), &escaping_rel).unwrap();
+
+    let result = CompilationSandbox::new(rpath);
+    assert!(
+        result.is_err(),
+        "relative ../.. escaping symlink must be rejected"
+    );
+    let err_msg = result.err().unwrap().to_string();
+    assert!(
+        err_msg.contains("targets path outside repository"),
+        "error message should cite path outside repository: {err_msg}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn test_untracked_symlink_chain_resolving_outside_is_rejected() {
     let repo_dir = tempfile::tempdir().unwrap();
     let rpath = repo_dir.path();
@@ -578,4 +627,122 @@ fn test_symlink_target_containment_logic() {
         &link_in_base,
         Path::new("/etc/passwd")
     ));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_tracked_absolute_internal_symlink_rebase() {
+    let temp_orig = tempfile::tempdir().unwrap();
+    let orig_dir = temp_orig.path();
+    let temp_work = tempfile::tempdir().unwrap();
+    let work_dir = temp_work.path();
+
+    let target_file = orig_dir.join("target.txt");
+    std::fs::write(&target_file, b"content").unwrap();
+
+    let work_target = work_dir.join("target.txt");
+    std::fs::write(&work_target, b"content in sandbox").unwrap();
+
+    // In sandbox, a symlink points absolutely to orig_dir/target.txt
+    let work_link = work_dir.join("link.txt");
+    std::os::unix::fs::symlink(&target_file, &work_link).unwrap();
+
+    let res = rebase_and_validate_sandbox_symlinks(work_dir, orig_dir);
+    assert!(
+        res.is_ok(),
+        "rebasing absolute internal symlink must succeed: {:?}",
+        res.err()
+    );
+
+    let new_target = std::fs::read_link(&work_link).unwrap();
+    assert!(
+        new_target.is_relative(),
+        "rebased link must be relative: {:?}",
+        new_target
+    );
+    assert_eq!(
+        std::fs::read_to_string(&work_link).unwrap(),
+        "content in sandbox"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_tracked_symlink_chain_resolving_outside_is_rejected() {
+    let temp_orig = tempfile::tempdir().unwrap();
+    let orig_dir = temp_orig.path();
+    let temp_work = tempfile::tempdir().unwrap();
+    let work_dir = temp_work.path();
+
+    // link1 -> link2 -> outside
+    let outside = tempfile::tempdir().unwrap();
+    let outside_file = outside.path().join("secret.txt");
+    std::fs::write(&outside_file, b"secret").unwrap();
+
+    let link2 = work_dir.join("link2.txt");
+    std::os::unix::fs::symlink(&outside_file, &link2).unwrap();
+
+    let link1 = work_dir.join("link1.txt");
+    std::os::unix::fs::symlink("link2.txt", &link1).unwrap();
+
+    let res = rebase_and_validate_sandbox_symlinks(work_dir, orig_dir);
+    assert!(res.is_err(), "symlink chain resolving outside must fail");
+    let err = res.unwrap_err().to_string();
+    assert!(
+        err.contains("outside sandbox"),
+        "error must cite path outside sandbox: {err}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_tracked_symlink_cycle_detected() {
+    let temp_orig = tempfile::tempdir().unwrap();
+    let orig_dir = temp_orig.path();
+    let temp_work = tempfile::tempdir().unwrap();
+    let work_dir = temp_work.path();
+
+    // a -> b -> a
+    let link_a = work_dir.join("link_a.txt");
+    let link_b = work_dir.join("link_b.txt");
+    std::os::unix::fs::symlink("link_b.txt", &link_a).unwrap();
+    std::os::unix::fs::symlink("link_a.txt", &link_b).unwrap();
+
+    let res = rebase_and_validate_sandbox_symlinks(work_dir, orig_dir);
+    assert!(res.is_err(), "symlink cycle must be detected and rejected");
+    let err = res.unwrap_err().to_string();
+    assert!(
+        err.contains("Symlink cycle detected in sandbox"),
+        "error must cite cycle detection: {err}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_tracked_symlink_hop_cap_exceeded() {
+    let temp_orig = tempfile::tempdir().unwrap();
+    let orig_dir = temp_orig.path();
+    let temp_work = tempfile::tempdir().unwrap();
+    let work_dir = temp_work.path();
+
+    // Create a 35-hop chain: hop_0 -> hop_1 -> ... -> hop_34 -> target.txt
+    let target = work_dir.join("target.txt");
+    std::fs::write(&target, b"deep").unwrap();
+
+    std::os::unix::fs::symlink("target.txt", work_dir.join("hop_34.txt")).unwrap();
+    for i in (0..34).rev() {
+        std::os::unix::fs::symlink(
+            format!("hop_{}.txt", i + 1),
+            work_dir.join(format!("hop_{}.txt", i)),
+        )
+        .unwrap();
+    }
+
+    let res = rebase_and_validate_sandbox_symlinks(work_dir, orig_dir);
+    assert!(res.is_err(), "chain exceeding 32 hops must be rejected");
+    let err = res.unwrap_err().to_string();
+    assert!(
+        err.contains("exceeded maximum hop depth (32)"),
+        "error must cite hop depth exceeded: {err}"
+    );
 }

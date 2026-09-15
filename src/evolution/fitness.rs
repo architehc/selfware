@@ -139,28 +139,16 @@ pub fn prune_report_dirs(
             }) {
                 return None;
             }
-            // 2. Check if active/leased by an in-flight run
+            // 2. Check if active/leased by an in-flight run.
+            // Treat the flock as authoritative: NEVER unlink a lease based solely on
+            // recorded PID liveness, because surviving child processes can still hold the lock.
             let lease_path = path.join(".lease");
             let lease_pid_path = path.join(".lease_pid");
-            if lease_pid_path.exists() {
-                if let Ok(pid_str) = std::fs::read_to_string(&lease_pid_path) {
-                    if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                        #[cfg(unix)]
-                        {
-                            let res = unsafe { nix::libc::kill(pid, 0) };
-                            if res != 0 {
-                                let errno =
-                                    std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-                                if errno == nix::libc::ESRCH {
-                                    // Process is dead; clean up stale lease files
-                                    let _ = std::fs::remove_file(&lease_pid_path);
-                                    let _ = std::fs::remove_file(&lease_path);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            // Check for completion marker or valid structured report
+            let is_completed = path.join(".completed").exists()
+                || path.join("sab_report.json").exists()
+                || path.join("report.json").exists();
+
             if lease_path.exists() {
                 #[cfg(unix)]
                 {
@@ -174,11 +162,49 @@ pub fn prune_report_dirs(
                                 )
                             };
                             if rc != 0 {
-                                // Currently locked by an active process
+                                // Currently locked by an active process (parent or child) -> in-flight!
                                 return None;
                             }
-                            unsafe {
-                                nix::libc::flock(file.as_raw_fd(), nix::libc::LOCK_UN);
+                            // Lock acquired by us! No process actively holds this lease lock.
+                            if is_completed {
+                                // Completed run: a surviving parent daemon must NOT exempt a finished run
+                                // from retention limits (Finding 2). Clean up leftover lease files and proceed.
+                                let _ = std::fs::remove_file(&lease_pid_path);
+                                let _ = std::fs::remove_file(&lease_path);
+                                unsafe {
+                                    nix::libc::flock(file.as_raw_fd(), nix::libc::LOCK_UN);
+                                }
+                            } else {
+                                // Not completed: check if the recorded PID is dead.
+                                let mut pid_is_dead = false;
+                                if lease_pid_path.exists() {
+                                    if let Ok(pid_str) = std::fs::read_to_string(&lease_pid_path) {
+                                        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                                            let res = unsafe { nix::libc::kill(pid, 0) };
+                                            if res != 0 {
+                                                let errno = std::io::Error::last_os_error()
+                                                    .raw_os_error()
+                                                    .unwrap_or(0);
+                                                if errno == nix::libc::ESRCH {
+                                                    pid_is_dead = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if pid_is_dead {
+                                    // Lock is held by us and the recorded PID is dead.
+                                    // Clean up stale lease files before releasing the lock.
+                                    let _ = std::fs::remove_file(&lease_pid_path);
+                                    let _ = std::fs::remove_file(&lease_path);
+                                }
+                                unsafe {
+                                    nix::libc::flock(file.as_raw_fd(), nix::libc::LOCK_UN);
+                                }
+                                if !pid_is_dead && lease_pid_path.exists() {
+                                    // In-flight/uncompleted run with live process: exempt this directory
+                                    return None;
+                                }
                             }
                         }
                         Err(err) => {
@@ -191,11 +217,30 @@ pub fn prune_report_dirs(
                         }
                     }
                 }
+            } else if lease_pid_path.exists() {
+                if is_completed {
+                    let _ = std::fs::remove_file(&lease_pid_path);
+                } else {
+                    #[cfg(unix)]
+                    {
+                        if let Ok(pid_str) = std::fs::read_to_string(&lease_pid_path) {
+                            if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                                let res = unsafe { nix::libc::kill(pid, 0) };
+                                if res == 0 {
+                                    return None;
+                                }
+                                let errno =
+                                    std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                                if errno == nix::libc::ESRCH {
+                                    let _ = std::fs::remove_file(&lease_pid_path);
+                                } else {
+                                    return None;
+                                }
+                            }
+                        }
+                    }
+                }
             }
-            // 3. Check for completion marker or valid structured report
-            let is_completed = path.join(".completed").exists()
-                || path.join("sab_report.json").exists()
-                || path.join("report.json").exists();
             let age = std::time::SystemTime::now()
                 .duration_since(mtime)
                 .unwrap_or_default();
@@ -238,19 +283,26 @@ pub fn run_sab(selfware_binary: &Path, config: &SabConfig) -> Result<SabResult, 
     std::fs::create_dir_all(&unique_out_dir)
         .map_err(|e| FitnessError::SabRunFailed(e.to_string()))?;
 
-    // Hold an exclusive lock on .lease for the duration of the run
+    // Hold an exclusive non-blocking lock on .lease for the duration of the run
     let lease_file = std::fs::File::create(unique_out_dir.join(".lease"))
         .map_err(|e| FitnessError::SabRunFailed(e.to_string()))?;
     #[cfg(unix)]
     unsafe {
         use std::os::fd::AsRawFd;
-        let rc = nix::libc::flock(lease_file.as_raw_fd(), nix::libc::LOCK_EX);
+        let rc = nix::libc::flock(
+            lease_file.as_raw_fd(),
+            nix::libc::LOCK_EX | nix::libc::LOCK_NB,
+        );
         if rc != 0 {
             return Err(FitnessError::SabRunFailed(format!(
                 "failed to acquire exclusive lease lock: rc={rc}"
             )));
         }
     }
+    let _ = std::fs::write(
+        unique_out_dir.join(".lease_pid"),
+        std::process::id().to_string(),
+    );
 
     // Set up environment for SAB runner
     let output = Command::new("bash")
@@ -281,6 +333,9 @@ pub fn run_sab(selfware_binary: &Path, config: &SabConfig) -> Result<SabResult, 
             unique_out_dir.display()
         );
     }
+    let _ = std::fs::remove_file(unique_out_dir.join(".lease_pid"));
+    drop(lease_file);
+    let _ = std::fs::remove_file(unique_out_dir.join(".lease"));
 
     // Parse SAB output — the runner produces JSON reports
     let stdout = String::from_utf8_lossy(&output.stdout);

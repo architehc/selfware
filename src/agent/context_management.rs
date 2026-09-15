@@ -780,9 +780,14 @@ impl Agent {
             .map(|m| {
                 let text_tokens =
                     crate::token_count::estimate_tokens_with_overhead(&m.content.text_all(), 4);
+                let reasoning_tokens = m
+                    .reasoning_content
+                    .as_deref()
+                    .map(crate::token_count::estimate_content_tokens)
+                    .unwrap_or(0);
                 let image_tokens =
                     m.content.image_count() * crate::token_count::DEFAULT_IMAGE_TOKEN_ESTIMATE;
-                text_tokens + image_tokens
+                text_tokens + reasoning_tokens + image_tokens
             })
             .sum()
     }

@@ -510,12 +510,16 @@ async fn run_llm_doctor_inner(config: &Config) -> Result<(DoctorReport, bool)> {
         DoctorCheckStatus::Warning
     };
     let mm_detail = if mm_ok {
-        "model name suggests vision-language support"
+        "model conditioned on image input (red/blue control probes passed)"
+    } else if looks_multimodal(&model_name) {
+        "model name suggests vision but behavioral image conditioning failed"
     } else {
         "no vision modality detected for this model"
     };
     let mm_fix = if mm_ok {
         None
+    } else if looks_multimodal(&model_name) {
+        Some("Vision endpoint returned unconditioned or unsupported responses. Verify server multimodal image pipeline.")
     } else {
         Some("Multimodal is optional. To enable, configure a vision-language model (Qwen3.5-VL, Llava, etc.) and set `modalities = [\"text\", \"vision\"]`.")
     };
@@ -645,11 +649,105 @@ async fn probe_capabilities(endpoint: &str, model: &str, config: &Config) -> Cap
         Err(_) => Some(false),
     };
 
+    // ── behavioral vision conditioning probe ──
+    if looks_multimodal(model) {
+        caps.multimodal = probe_vision_conditioning(&client, &url, model, api_key.as_deref()).await;
+    }
+
     caps
 }
 
+/// Solid 1x1 Red and Blue PNGs (base64) for behavioral vision conditioning verification.
+const RED_PNG_B64: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+const BLUE_PNG_B64: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYPgPAAEDAQAIicLsAAAAAElFTkSuQmCC";
+
+/// Behavioral check: verify that vision outputs condition on pixel content
+/// and differentiate between distinct control images.
+pub(crate) fn verify_vision_responses(red_resp: Option<&str>, blue_resp: Option<&str>) -> bool {
+    let (Some(red), Some(blue)) = (red_resp, blue_resp) else {
+        return false;
+    };
+    let r_lower = red.trim().to_lowercase();
+    let b_lower = blue.trim().to_lowercase();
+
+    // If both return identical text (e.g. invariant "White" or "ok"), image conditioning is broken.
+    if r_lower == b_lower {
+        return false;
+    }
+
+    let red_ok = r_lower.contains("red") && !r_lower.contains("blue");
+    let blue_ok = b_lower.contains("blue") && !b_lower.contains("red");
+
+    red_ok && blue_ok
+}
+
+async fn probe_vision_conditioning(
+    client: &Client,
+    url: &str,
+    model: &str,
+    api_key: Option<&str>,
+) -> bool {
+    let send_probe = |b64: &'static str| {
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "What color is this image? Reply with only one word: red or blue."
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": format!("data:image/png;base64,{}", b64)
+                            }
+                        }
+                    ]
+                }
+            ],
+            "max_tokens": 8,
+            "temperature": 0.0
+        });
+        let mut req = client.post(url).json(&body);
+        if let Some(k) = api_key {
+            if crate::config::api_key::assert_credential_endpoint_safe(url, true).is_ok() {
+                req = req.bearer_auth(k);
+            }
+        }
+        req
+    };
+
+    let red_res = match send_probe(RED_PNG_B64).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            resp.json::<serde_json::Value>().await.ok().and_then(|j| {
+                j["choices"][0]["message"]["content"]
+                    .as_str()
+                    .map(String::from)
+            })
+        }
+        _ => None,
+    };
+
+    let blue_res = match send_probe(BLUE_PNG_B64).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            resp.json::<serde_json::Value>().await.ok().and_then(|j| {
+                j["choices"][0]["message"]["content"]
+                    .as_str()
+                    .map(String::from)
+            })
+        }
+        _ => None,
+    };
+
+    verify_vision_responses(red_res.as_deref(), blue_res.as_deref())
+}
+
 /// Heuristic: does the model name suggest vision-language capabilities?
-fn looks_multimodal(model: &str) -> bool {
+pub(crate) fn looks_multimodal(model: &str) -> bool {
     let l = model.to_lowercase();
     l.contains("vl")
         || l.contains("vision")
@@ -905,16 +1003,25 @@ fn analyse_model(det: &DetectionResult, config: &Config) {
             );
 
             if config.context_length < ctx as usize {
-                println!(
-                    "  {} Configured context_length ({}) is below backend max_model_len ({})",
-                    ">>".yellow(),
-                    config.context_length,
-                    ctx
-                );
-                println!(
-                    "     Raise selfware.toml {} to use the full window.",
-                    "context_length".bright_white()
-                );
+                if config.context_length >= MIN_RECOMMENDED_CONTEXT as usize {
+                    println!(
+                        "  {} Configured context_length ({}) operates within backend capacity ({}) (operational margin)",
+                        "ok".green().bold(),
+                        config.context_length,
+                        ctx
+                    );
+                } else {
+                    println!(
+                        "  {} Configured context_length ({}) is below backend max_model_len ({})",
+                        ">>".yellow(),
+                        config.context_length,
+                        ctx
+                    );
+                    println!(
+                        "     Raise selfware.toml {} to use the full window.",
+                        "context_length".bright_white()
+                    );
+                }
             } else if config.context_length > ctx as usize {
                 println!(
                     "  {} Configured context_length ({}) exceeds backend max_model_len ({})",
@@ -1582,13 +1689,23 @@ fn print_recommendations(
             }
 
             if config.context_length < ctx as usize {
-                checks.push((
-                    CheckStatus::Info,
-                    format!(
-                        "Raise selfware context_length from {} to {} to use the full backend window",
-                        config.context_length, ctx
-                    ),
-                ));
+                if config.context_length < MIN_RECOMMENDED_CONTEXT as usize {
+                    checks.push((
+                        CheckStatus::Info,
+                        format!(
+                            "Raise selfware context_length from {} to {} to use the full backend window",
+                            config.context_length, ctx
+                        ),
+                    ));
+                } else {
+                    checks.push((
+                        CheckStatus::Ok,
+                        format!(
+                            "Configured context_length ({}) operates within backend capacity ({}) (operational margin)",
+                            config.context_length, ctx
+                        ),
+                    ));
+                }
             } else if config.context_length > ctx as usize {
                 checks.push((
                     CheckStatus::Warn,

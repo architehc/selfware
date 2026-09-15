@@ -1024,6 +1024,7 @@ fn multi_agent_result_json_shape() {
             completion_tokens: 12,
             total_tokens: 42,
             cost: Some(0.001),
+            ..Default::default()
         }),
         duration: std::time::Duration::from_millis(1500),
         success: true,

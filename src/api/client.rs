@@ -829,6 +829,7 @@ impl ApiClient {
             completion_tokens,
             total_tokens,
             cost,
+            ..
         } = resp.usage.clone();
 
         let meta = ChatMetadata {

@@ -327,7 +327,7 @@ impl VisualVerifier {
 
         match result {
             Ok(vr) => {
-                let errors = vr
+                let errors: Vec<super::verification::VerificationError> = vr
                     .issues
                     .iter()
                     .map(|issue| super::verification::VerificationError {
@@ -341,14 +341,16 @@ impl VisualVerifier {
                     })
                     .collect();
 
+                let passed = vr.passed && errors.is_empty();
+
                 Ok(super::verification::CheckResult {
                     check_type: super::verification::CheckType::Custom,
-                    passed: vr.passed,
+                    passed,
                     duration_ms,
                     output: vr.description,
                     errors,
                     warnings: vec![],
-                    suggestions: if !vr.passed {
+                    suggestions: if !passed {
                         vec!["Visual verification failed -- review screenshot against expected layout".to_string()]
                     } else {
                         vec![]
@@ -656,31 +658,32 @@ fn parse_verification_response(raw: &str) -> Result<VisualVerificationResult> {
         )
     })?;
 
+    let raw_passed = parsed["passed"].as_bool().unwrap_or(false);
+    let issues: Vec<String> = parsed["issues"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Reject contradictory success: a verification response containing passed: true
+    // while listing defect issues is contradictory and must not pass (Rule 3: honest status).
+    let passed = raw_passed && issues.is_empty();
+
     Ok(VisualVerificationResult {
-        passed: parsed["passed"].as_bool().unwrap_or(false),
+        passed,
         confidence: parsed["confidence"]
             .as_f64()
-            .unwrap_or_else(|| {
-                if parsed["passed"].as_bool().unwrap_or(false) {
-                    1.0
-                } else {
-                    0.0
-                }
-            })
+            .unwrap_or(if passed { 1.0 } else { 0.0 })
             .clamp(0.0, 1.0),
         description: parsed["description"]
             .as_str()
             .or_else(|| parsed["summary"].as_str())
             .unwrap_or("")
             .to_string(),
-        issues: parsed["issues"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default(),
+        issues,
     })
 }
 

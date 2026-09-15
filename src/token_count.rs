@@ -182,6 +182,10 @@ pub fn estimate_messages_tokens(messages: &[crate::api::types::Message]) -> usiz
         total += 4;
         // Content (use text_all to capture all text blocks)
         total += estimate_tokens(&msg.content.text_all());
+        // Reasoning content if preserved in history
+        if let Some(ref reasoning) = msg.reasoning_content {
+            total += estimate_tokens(reasoning);
+        }
         // Image tokens
         total += msg.content.image_count() * DEFAULT_IMAGE_TOKEN_ESTIMATE;
         // Tool calls if present

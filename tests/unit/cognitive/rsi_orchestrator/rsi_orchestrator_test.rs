@@ -908,3 +908,66 @@ fn test_run_full_sab_real_lease_block_under_parent_lock() {
         "run_full_sab standalone lease acquisition must succeed in fresh dir"
     );
 }
+
+#[test]
+fn test_lease_heal_fires_warning_and_locks_when_held_1_spoofed_unlocked() {
+    let script_content = std::fs::read_to_string("system_tests/projecte2e/run_full_sab.sh")
+        .expect("must read run_full_sab.sh");
+
+    let lines: Vec<&str> = script_content.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| l.contains("LEASE_FILE="))
+        .expect("LEASE_FILE= block not found");
+    let end = lines
+        .iter()
+        .position(|l| l.contains("Connectivity check"))
+        .expect("Connectivity check block not found");
+    let lease_snippet = lines[start..end].join("\n");
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let out_dir = temp_dir.path().join("out_unlocked");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    // Run with SELFWARE_LEASE_HELD=1 in an UNLOCKED directory.
+    // The self-healing logic must detect the missing lock, emit a warning,
+    // and acquire/retain the lock.
+    let test_cmd = format!(
+        "{}\ntest -f \"${{OUT_DIR}}/.lease_pid\" && echo \"HEALED_PID=$(cat \"${{OUT_DIR}}/.lease_pid\")\"\n",
+        lease_snippet
+    );
+
+    let output = StdCommand::new("bash")
+        .arg("-euo")
+        .arg("pipefail")
+        .arg("-c")
+        .arg(&test_cmd)
+        .env("OUT_DIR", &out_dir)
+        .env("SELFWARE_LEASE_HELD", "1")
+        .output()
+        .expect("bash execution must run");
+
+    assert!(
+        output.status.success(),
+        "healed lease acquisition must succeed"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("WARNING: SELFWARE_LEASE_HELD=1 was set, but"),
+        "stderr must warn that SELFWARE_LEASE_HELD=1 was set on an unlocked lease: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("Self-healing lease lock."),
+        "stderr must note self-healing: {}",
+        stderr
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("HEALED_PID="),
+        ".lease_pid must be written during self-healing: {}",
+        stdout
+    );
+}

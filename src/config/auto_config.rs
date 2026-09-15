@@ -237,27 +237,44 @@ impl AutoConfigurator {
             .unwrap_or(super::UNKNOWN_MODEL_CONTEXT_LENGTH);
         let model_root = model_info.map(|m| m.root.as_str()).unwrap_or(model);
 
-        let max_tokens = if results.thinking_eats_tokens {
+        let profile = crate::config::model_profiles::match_profile(model);
+        // If a profile pins context_length (e.g. 350k operational margin for Qwen3.8),
+        // use that deliberate margin instead of blindly accepting the server's raw
+        // advertised max_model_len (e.g. 1M), which leads to upstream gateway timeout cliffs.
+        let effective_context_len = profile
+            .as_ref()
+            .and_then(|p| p.context_length)
+            .unwrap_or(max_model_len);
+
+        let default_max_tokens = if results.thinking_eats_tokens {
             16384
-        } else if max_model_len > 500_000 {
+        } else if effective_context_len > 500_000 {
             32768
-        } else if max_model_len > 100_000 {
+        } else if effective_context_len > 100_000 {
             16384
         } else {
             8192
         };
+        let max_tokens = profile
+            .as_ref()
+            .and_then(|p| p.max_tokens)
+            .unwrap_or(default_max_tokens);
 
-        let temperature = if model_root.to_lowercase().contains("qwen") {
+        let default_temperature = if model_root.to_lowercase().contains("qwen") {
             0.6
         } else {
             0.7
         };
+        let temperature = profile
+            .as_ref()
+            .and_then(|p| p.temperature)
+            .unwrap_or(default_temperature);
 
         let mut config = Config {
             endpoint: self.endpoint.clone(),
             model: model.to_string(),
             max_tokens,
-            context_length: max_model_len,
+            context_length: effective_context_len,
             temperature,
             ..Default::default()
         };
@@ -266,20 +283,46 @@ impl AutoConfigurator {
             config.api_key = Some(RedactedString::new(key));
         }
 
-        config.agent.native_function_calling = results.function_calling;
-        config.agent.streaming = results.streaming;
-        // Preferred budget: context minus headroom for output + overhead. When
-        // that saturates to 0 (small/unknown context), the 0 sentinel lets
-        // `validate_generated` derive the standard 60%-of-context budget.
-        config.agent.token_budget = max_model_len.saturating_sub(max_tokens + 50_000);
+        config.agent.native_function_calling = profile
+            .as_ref()
+            .and_then(|p| p.native_function_calling)
+            .unwrap_or(results.function_calling);
+        config.agent.streaming = profile
+            .as_ref()
+            .and_then(|p| p.streaming)
+            .unwrap_or(results.streaming);
+
+        // Preferred budget: when context_length is profile-pinned, derive the standard
+        // 60%-of-context budget (e.g. 210,000 for 350,000). Otherwise, context minus
+        // headroom for output + overhead. When that saturates to 0 (small/unknown context),
+        // the 0 sentinel lets `validate_generated` derive the standard 60%-of-context budget.
+        config.agent.token_budget = if profile.as_ref().and_then(|p| p.context_length).is_some() {
+            effective_context_len * 3 / 5
+        } else {
+            effective_context_len.saturating_sub(max_tokens + 50_000)
+        };
+
+        if let Some(ref p) = profile {
+            if let Some(ms) = p.max_streams {
+                config.concurrency.max_streams = ms;
+            }
+            if let Some(mg) = p.max_global {
+                config.concurrency.max_global = mg;
+            }
+            if let serde_json::Value::Object(extra) = &p.extra_body {
+                let dest = config.extra_body.get_or_insert_with(serde_json::Map::new);
+                for (k, v) in extra {
+                    dest.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+            }
+        }
 
         if results.thinking_eats_tokens {
-            let mut extra = serde_json::Map::new();
+            let extra = config.extra_body.get_or_insert_with(serde_json::Map::new);
             extra.insert(
                 "chat_template_kwargs".to_string(),
                 json!({"enable_thinking": false}),
             );
-            config.extra_body = Some(extra);
         }
 
         // Never hand back a config the loader would refuse: derive the

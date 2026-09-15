@@ -129,6 +129,7 @@ fn test_usage_struct() {
         completion_tokens: 50,
         total_tokens: 150,
         cost: None,
+        ..Default::default()
     };
     assert_eq!(
         usage.prompt_tokens + usage.completion_tokens,
@@ -167,6 +168,7 @@ fn test_choice_struct() {
         message: Message::assistant("Hello"),
         reasoning_content: Some("I thought about it".to_string()),
         finish_reason: Some("stop".to_string()),
+        logprobs: None,
     };
     assert_eq!(choice.index, 0);
     assert_eq!(choice.message.content, "Hello");
@@ -404,4 +406,67 @@ fn test_usage_deserialization_with_missing_fields() {
     assert_eq!(usage.completion_tokens, 0);
     assert_eq!(usage.total_tokens, 0);
     assert!(usage.cost.is_none());
+}
+
+#[test]
+fn test_choice_delta_with_logprobs_deserialization() {
+    let json = r#"{
+            "id": "chunk_logprobs_123",
+            "object": "chat.completion.chunk",
+            "created": 1234567890,
+            "model": "qwen38-flash-next",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "hello"},
+                "finish_reason": null,
+                "logprobs": {
+                    "content": [{
+                        "token": "hello",
+                        "logprob": -0.05
+                    }]
+                }
+            }]
+        }"#;
+    let chunk: ChatResponseChunk = serde_json::from_str(json).unwrap();
+    assert_eq!(chunk.choices.len(), 1);
+    let choice = &chunk.choices[0];
+    assert!(choice.logprobs.is_some());
+    assert_eq!(
+        choice.logprobs.as_ref().unwrap()["content"][0]["token"],
+        "hello"
+    );
+}
+
+#[test]
+fn test_usage_flat_reasoning_tokens_and_nested_details_survive() {
+    // SGLang/vLLM flat usage.reasoning_tokens
+    let flat_json = r#"{
+        "prompt_tokens": 100,
+        "completion_tokens": 50,
+        "total_tokens": 150,
+        "reasoning_tokens": 30
+    }"#;
+    let flat_usage: Usage = serde_json::from_str(flat_json).unwrap();
+    assert_eq!(flat_usage.reasoning_tokens, Some(30));
+    assert_eq!(flat_usage.reasoning_tokens(), Some(30));
+
+    // OpenAI nested completion_tokens_details
+    let nested_json = r#"{
+        "prompt_tokens": 100,
+        "completion_tokens": 50,
+        "total_tokens": 150,
+        "completion_tokens_details": {
+            "reasoning_tokens": 42
+        }
+    }"#;
+    let nested_usage: Usage = serde_json::from_str(nested_json).unwrap();
+    assert_eq!(
+        nested_usage
+            .completion_tokens_details
+            .as_ref()
+            .unwrap()
+            .reasoning_tokens,
+        Some(42)
+    );
+    assert_eq!(nested_usage.reasoning_tokens(), Some(42));
 }

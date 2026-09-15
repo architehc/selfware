@@ -939,6 +939,21 @@ impl Config {
         ) {
             user_explicit.streaming = true;
         }
+        if matches!(sources.get("context_length"), Some(ConfigSource::EnvVar(_))) {
+            user_explicit.context_length = true;
+        }
+        if matches!(
+            sources.get("concurrency.max_streams"),
+            Some(ConfigSource::EnvVar(_))
+        ) {
+            user_explicit.max_streams = true;
+        }
+        if matches!(
+            sources.get("concurrency.max_global"),
+            Some(ConfigSource::EnvVar(_))
+        ) {
+            user_explicit.max_global = true;
+        }
         if let Some(profile) = match_profile(&config.model) {
             let profile_name = profile.name.to_string();
             let applied = apply_profile(&mut config, &profile, &user_explicit);
@@ -957,8 +972,20 @@ impl Config {
                 if applied.max_tokens {
                     fields.push("max_tokens".to_string());
                 }
+                if applied.context_length {
+                    fields.push("context_length".to_string());
+                }
+                if applied.max_streams {
+                    fields.push("concurrency.max_streams".to_string());
+                }
+                if applied.max_global {
+                    fields.push("concurrency.max_global".to_string());
+                }
                 for k in &applied.extra_body_keys {
                     fields.push(format!("extra_body.{}", k));
+                }
+                if applied.context_length && !token_budget_was_explicit {
+                    config.agent.token_budget = config.context_length * 3 / 5;
                 }
                 // Record provenance for every field the profile filled in so
                 // `selfware config show` reports them as `[profile: <name>]`
@@ -1099,6 +1126,10 @@ impl Config {
     pub fn validate_generated_toml(content: &str) -> Result<()> {
         let mut cfg: Config =
             toml::from_str(content).context("generated config does not match the Config schema")?;
+        let user_explicit = UserExplicitFields::from_toml(content);
+        if let Some(profile) = match_profile(&cfg.model) {
+            apply_profile(&mut cfg, &profile, &user_explicit);
+        }
         // Mirror the load pipeline in order: the unknown-model context
         // fallback fires BEFORE token_budget derives from context_length, and
         // the strict context-fit check holds generated output to the

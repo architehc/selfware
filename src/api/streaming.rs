@@ -262,13 +262,9 @@ impl StreamingResponse {
         let mut content = String::new();
         let mut reasoning = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
-        let mut usage = Usage {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-            cost: None,
-        };
+        let mut usage = Usage::default();
         let mut finish_reason: Option<String> = None;
+        let mut logprobs: Option<serde_json::Value> = None;
         let mut saw_events = false;
         let mut saw_done = false;
 
@@ -298,6 +294,10 @@ impl StreamingResponse {
                     } else {
                         usage = u;
                     }
+                }
+                StreamChunk::Logprobs(lp) => {
+                    saw_events = true;
+                    logprobs = Some(lp);
                 }
                 StreamChunk::FinishReason(reason) => {
                     saw_events = true;
@@ -337,12 +337,7 @@ impl StreamingResponse {
                 "Final streamed usage has inconsistent token counts: {}. Using zeroed usage.",
                 e
             );
-            usage = Usage {
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                total_tokens: 0,
-                cost: None,
-            };
+            usage = Usage::default();
         }
 
         Ok(ChatResponse {
@@ -375,6 +370,7 @@ impl StreamingResponse {
                 // Keep `None` when the stream never reported a finish reason;
                 // callers map `None` to "unknown" where a label is required.
                 finish_reason,
+                logprobs,
             }],
             usage,
         })
@@ -424,6 +420,8 @@ pub enum StreamChunk {
     ToolCall(ToolCall),
     /// Token usage information
     Usage(Usage),
+    /// Log probabilities information for choice tokens
+    Logprobs(serde_json::Value),
     /// The model's reported finish reason for this turn (e.g. `"stop"`,
     /// `"length"`, `"tool_calls"`).  Emitted at most once per stream when
     /// the backend includes it on the SSE choice; consumers that don't care
@@ -659,6 +657,12 @@ pub(crate) fn parse_sse_event(
             }
             if !finish.is_empty() {
                 chunks.push(StreamChunk::FinishReason(finish.to_string()));
+            }
+        }
+
+        if let Some(logprobs) = choice.and_then(|c| c.get("logprobs")).cloned() {
+            if !logprobs.is_null() {
+                chunks.push(StreamChunk::Logprobs(logprobs));
             }
         }
 

@@ -898,3 +898,168 @@ fn profile_max_retries_rejects_sentinel_overflow() {
         "profile u32::MAX must be rejected, got: {err}"
     );
 }
+
+#[test]
+fn test_extra_body_rejects_top_level_xhigh_and_high_for_qwen_on_sglang() {
+    let mut cfg = valid_config();
+    cfg.endpoint = "https://llm.selfware.design/v1".to_string();
+    cfg.model = "qwen38-flash-next".to_string();
+
+    // xhigh rejected on SGLang serving deployment
+    let mut extra = serde_json::Map::new();
+    extra.insert("reasoning_effort".to_string(), serde_json::json!("xhigh"));
+    cfg.extra_body = Some(extra.clone());
+    let err = cfg.validate().unwrap_err().to_string();
+    assert!(
+        err.contains("extra_body.reasoning_effort cannot be 'xhigh' at top-level for Qwen models on SGLang serving deployments"),
+        "validation must reject top-level xhigh reasoning_effort for Qwen on SGLang: {err}"
+    );
+
+    // high rejected on SGLang serving deployment
+    let mut extra_high = serde_json::Map::new();
+    extra_high.insert("reasoning_effort".to_string(), serde_json::json!("high"));
+    cfg.extra_body = Some(extra_high);
+    let err_high = cfg.validate().unwrap_err().to_string();
+    assert!(
+        err_high
+            .contains("extra_body.reasoning_effort cannot be 'high' at top-level for Qwen models on SGLang serving deployments"),
+        "validation must reject top-level high reasoning_effort for Qwen on SGLang: {err_high}"
+    );
+
+    // low and medium accepted on SGLang serving deployment
+    for allowed in ["low", "medium"] {
+        let mut extra_ok = serde_json::Map::new();
+        extra_ok.insert("reasoning_effort".to_string(), serde_json::json!(allowed));
+        cfg.extra_body = Some(extra_ok);
+        assert!(
+            cfg.validate().is_ok(),
+            "validation should accept top-level {allowed} for Qwen on SGLang"
+        );
+    }
+
+    // Test the SAME model against a different capability configuration (Finding 4):
+    // On OpenRouter or generic OpenAI endpoint, top-level xhigh is allowed.
+    let mut openrouter_cfg = valid_config();
+    openrouter_cfg.endpoint = "https://openrouter.ai/api/v1".to_string();
+    openrouter_cfg.model = "qwen38-flash-next".to_string();
+    openrouter_cfg.extra_body = Some(extra);
+    assert!(
+        openrouter_cfg.validate().is_ok(),
+        "same Qwen model on non-SGLang endpoint must allow top-level xhigh"
+    );
+
+    // Non-Qwen allows high
+    let mut non_qwen_cfg = valid_config();
+    non_qwen_cfg.model = "gpt-4o".to_string();
+    let mut extra_gpt = serde_json::Map::new();
+    extra_gpt.insert("reasoning_effort".to_string(), serde_json::json!("high"));
+    non_qwen_cfg.extra_body = Some(extra_gpt);
+    assert!(
+        non_qwen_cfg.validate().is_ok(),
+        "non-Qwen models should allow top-level high"
+    );
+}
+
+#[test]
+fn test_model_profile_extra_body_rejects_top_level_xhigh() {
+    let mut cfg = valid_config();
+    let mut extra = serde_json::Map::new();
+    extra.insert("reasoning_effort".to_string(), serde_json::json!("xhigh"));
+    cfg.models.insert(
+        "qwen".to_string(),
+        crate::config::ModelProfile {
+            endpoint: "https://llm.selfware.design/v1".to_string(),
+            model: "qwen38-flash-next".to_string(),
+            api_key: None,
+            max_tokens: cfg.max_tokens,
+            temperature: cfg.temperature,
+            modalities: vec!["text".to_string()],
+            context_length: cfg.context_length,
+            extra_body: Some(extra.clone()),
+            native_function_calling: None,
+            max_retries: None,
+            response_timeout_floor_secs: None,
+        },
+    );
+
+    let err = cfg.validate().unwrap_err().to_string();
+    assert!(
+        err.contains("models.qwen.extra_body.reasoning_effort cannot be 'xhigh' at top-level for Qwen models on SGLang serving deployments"),
+        "profile validation must reject top-level xhigh on SGLang: {err}"
+    );
+
+    // Same profile model on OpenRouter endpoint succeeds
+    cfg.models.get_mut("qwen").unwrap().endpoint = "https://openrouter.ai/api/v1".to_string();
+    assert!(
+        cfg.validate().is_ok(),
+        "same profile model on non-SGLang endpoint must accept top-level xhigh"
+    );
+}
+
+#[test]
+fn test_extra_body_allows_nested_chat_template_kwargs_xhigh() {
+    let mut cfg = valid_config();
+    cfg.model = "qwen38-flash-next".to_string();
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "chat_template_kwargs".to_string(),
+        serde_json::json!({
+            "enable_thinking": true,
+            "preserve_thinking": true,
+            "reasoning_effort": "xhigh"
+        }),
+    );
+    cfg.extra_body = Some(extra);
+
+    assert!(
+        cfg.validate().is_ok(),
+        "nested chat_template_kwargs reasoning_effort=xhigh must be accepted"
+    );
+}
+
+#[test]
+fn test_reject_non_string_reasoning_effort() {
+    let mut cfg = valid_config();
+    cfg.endpoint = "https://llm.selfware.design/v1".to_string();
+    cfg.model = "qwen38-flash-next".to_string();
+
+    // Top-level non-string (integer)
+    let mut extra = serde_json::Map::new();
+    extra.insert("reasoning_effort".to_string(), serde_json::json!(42));
+    cfg.extra_body = Some(extra);
+
+    let err = cfg.validate().unwrap_err().to_string();
+    assert!(
+        err.contains("extra_body.reasoning_effort must be a string ('low' or 'medium')"),
+        "must reject integer reasoning_effort: {err}"
+    );
+
+    // Profile non-string (boolean)
+    let mut cfg2 = valid_config();
+    let mut prof_extra = serde_json::Map::new();
+    prof_extra.insert("reasoning_effort".to_string(), serde_json::json!(true));
+    cfg2.models.insert(
+        "qwen".to_string(),
+        crate::config::ModelProfile {
+            endpoint: "https://llm.selfware.design/v1".to_string(),
+            model: "qwen38-flash-next".to_string(),
+            api_key: None,
+            max_tokens: cfg2.max_tokens,
+            temperature: cfg2.temperature,
+            modalities: vec!["text".to_string()],
+            context_length: cfg2.context_length,
+            extra_body: Some(prof_extra),
+            native_function_calling: None,
+            max_retries: None,
+            response_timeout_floor_secs: None,
+        },
+    );
+
+    let err2 = cfg2.validate().unwrap_err().to_string();
+    assert!(
+        err2.contains(
+            "models.qwen.extra_body.reasoning_effort must be a string ('low' or 'medium')"
+        ),
+        "must reject boolean reasoning_effort in profile: {err2}"
+    );
+}

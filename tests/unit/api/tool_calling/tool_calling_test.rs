@@ -239,3 +239,118 @@ fn swl_runtime_parses_same_as_main_agent() {
     assert_eq!(main[0].function.name, swl[0].function.name);
     assert_eq!(main[0].function.arguments, swl[0].function.arguments);
 }
+
+/// Dual tool_choice setting round-trip:
+/// Assert that structured path (native tool_calls with tool_choice="auto") and
+/// XML fallback path (Qwen <tool_call> with empty tool_calls) produce structurally
+/// identical ToolCall values with exact argument equivalency.
+#[test]
+fn test_tool_calling_roundtrip_both_tool_choice_settings() {
+    let mut body_native = serde_json::json!({"model": "test"});
+    let tools = Some(vec![dummy_tool_def("file_read")]);
+    attach_tools(&mut body_native, &tools, true);
+    assert_eq!(body_native["tool_choice"], "auto");
+
+    let mut body_prompt = serde_json::json!({"model": "test"});
+    attach_tools(&mut body_prompt, &tools, false);
+    assert!(body_prompt.get("tool_choice").is_none());
+
+    // Structured response
+    let structured_call = ToolCall {
+        id: "call_native_123".to_string(),
+        call_type: "function".to_string(),
+        function: ToolFunction {
+            name: "file_read".to_string(),
+            arguments: r#"{"path":"src/main.rs"}"#.to_string(),
+        },
+    };
+    let msg_structured = assistant_msg_with_native_calls(vec![structured_call]);
+
+    // XML fallback response from Qwen/SGLang
+    let xml_text = "<tool_call>\n<function=file_read>\n<parameter=path>src/main.rs</parameter>\n</function>\n</tool_call>";
+    let mut msg_xml = assistant_msg_with_text(xml_text);
+    msg_xml.tool_calls = Some(vec![]);
+
+    let calls_structured = extract_tool_calls(&msg_structured, true);
+    let calls_xml = extract_tool_calls(&msg_xml, false);
+
+    assert_eq!(calls_structured.len(), 1);
+    assert_eq!(calls_xml.len(), 1);
+    assert_eq!(calls_structured[0].call_type, calls_xml[0].call_type);
+    assert_eq!(
+        calls_structured[0].function.name,
+        calls_xml[0].function.name
+    );
+
+    let args_structured: serde_json::Value =
+        serde_json::from_str(&calls_structured[0].function.arguments).unwrap();
+    let args_xml: serde_json::Value =
+        serde_json::from_str(&calls_xml[0].function.arguments).unwrap();
+    assert_eq!(args_structured, args_xml);
+    assert_eq!(args_xml["path"], "src/main.rs");
+}
+
+/// Parallel tool calls:
+/// Assert that multi-tool execution in structured vs XML format extracts
+/// all invocations in order with exact arguments and unique synthetic IDs.
+#[test]
+fn test_parallel_tool_calls_roundtrip_and_structural_equivalence() {
+    // Structured response with parallel calls
+    let structured_calls = vec![
+        ToolCall {
+            id: "call_paris_01".to_string(),
+            call_type: "function".to_string(),
+            function: ToolFunction {
+                name: "get_weather".to_string(),
+                arguments: r#"{"city":"Paris"}"#.to_string(),
+            },
+        },
+        ToolCall {
+            id: "call_tokyo_02".to_string(),
+            call_type: "function".to_string(),
+            function: ToolFunction {
+                name: "get_weather".to_string(),
+                arguments: r#"{"city":"Tokyo"}"#.to_string(),
+            },
+        },
+    ];
+    let msg_structured = assistant_msg_with_native_calls(structured_calls);
+
+    // Qwen/SGLang parallel tool calls in XML format
+    let parallel_xml = r#"I will query weather for both cities in parallel.
+<tool_call>
+<function=get_weather>
+<parameter=city>Paris</parameter>
+</function>
+</tool_call>
+<tool_call>
+<function=get_weather>
+<parameter=city>Tokyo</parameter>
+</function>
+</tool_call>"#;
+    let mut msg_xml = assistant_msg_with_text(parallel_xml);
+    msg_xml.tool_calls = Some(vec![]);
+
+    let parsed_structured = extract_tool_calls(&msg_structured, true);
+    let parsed_xml = extract_tool_calls(&msg_xml, false);
+
+    assert_eq!(parsed_structured.len(), 2);
+    assert_eq!(parsed_xml.len(), 2);
+
+    for i in 0..2 {
+        assert_eq!(parsed_structured[i].call_type, parsed_xml[i].call_type);
+        assert_eq!(
+            parsed_structured[i].function.name,
+            parsed_xml[i].function.name
+        );
+        let s_args: serde_json::Value =
+            serde_json::from_str(&parsed_structured[i].function.arguments).unwrap();
+        let x_args: serde_json::Value =
+            serde_json::from_str(&parsed_xml[i].function.arguments).unwrap();
+        assert_eq!(s_args, x_args);
+    }
+
+    assert_ne!(parsed_xml[0].id, parsed_xml[1].id);
+    assert!(parsed_xml[0].id.starts_with("parsed_"));
+    assert!(parsed_xml[1].id.starts_with("parsed_"));
+}

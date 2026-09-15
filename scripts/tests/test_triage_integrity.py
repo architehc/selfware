@@ -282,6 +282,11 @@ class ReceiptIntegrityTests(unittest.TestCase):
                                            "--verdicts-file", str(verdicts_path)]):
                 exit_code = redteam_verdicts.main()
                 self.assertEqual(exit_code, 1)
+                summary_file = verdicts_path.parent / "verdicts_summary.json"
+                self.assertTrue(summary_file.exists())
+                summary = json.loads(summary_file.read_text())
+                self.assertIn("error", summary)
+                self.assertNotIn("total", summary)
 
     def test_verdicts_corrupted_middle_record_exits_nonzero_and_records_summary(self):
         import redteam_verdicts

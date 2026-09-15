@@ -127,6 +127,20 @@ gives 262,144 native context, extensible to 1M via RoPE scaling, and I inferred
 the deployment was capped at native. That was wrong — 352,958 tokens succeed
 reproducibly, well past 262,144, so scaling is in effect.
 
+### O2c — Re-measurement with revised network routing: 823,538 tokens succeeds (2026-09-15)
+
+Measured 2026-09-15, same endpoint, revised network connection.
+Both streamed and non-streamed requests succeeded at **823,538 prompt_tokens**.
+
+**What this establishes:** the earlier connection closure at 61.2–62.0s was an artifact
+of network path timeouts rather than an architectural depth ceiling. The model and SGLang
+backend successfully prefilled and answered well beyond the previously observed 365k boundary.
+
+**Working guidance:** `context_length: Some(350_000)` in the built-in profile is a
+**deliberate operational safety margin** (ensuring prompt prefills reliably complete
+under ~57s across varied network paths without risking gateway timeout cliffs), NOT a measured
+ceiling of the model or endpoint.
+
 ### O4b — Template arguments, re-validated against the model card
 
 Measured 2026-09-13. The card

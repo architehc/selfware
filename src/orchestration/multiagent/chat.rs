@@ -531,12 +531,7 @@ impl MultiAgentChat {
     /// USD cost (e.g. OpenRouter's `usage.cost`); it stays `None` for
     /// providers that don't report cost at all.
     pub fn total_usage(results: &[AgentResult]) -> Usage {
-        let mut total = Usage {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-            cost: None,
-        };
+        let mut total = Usage::default();
         for result in results {
             if let Some(usage) = &result.usage {
                 total.prompt_tokens += usage.prompt_tokens;

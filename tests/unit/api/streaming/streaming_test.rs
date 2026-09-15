@@ -80,3 +80,32 @@ fn parse_sse_event_joins_multiline_data_field_per_sse_spec() {
     assert!(matches!(&chunks[0], StreamChunk::Content(text) if text == "hello"));
     assert!(matches!(&chunks[1], StreamChunk::Usage(u) if u.total_tokens == 7));
 }
+
+#[test]
+fn parse_sse_event_preserves_logprobs_and_flat_reasoning_tokens() {
+    let event = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"yes\"},\"logprobs\":{\"tokens\":[\"yes\"],\"logprobs\":[-0.01]},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":1,\"total_tokens\":11,\"reasoning_tokens\":5}}\n\n";
+    let mut acc = ToolCallAccumulator::new();
+    let chunks = parse_sse_event(event, &mut acc);
+
+    let mut found_content = false;
+    let mut found_logprobs = false;
+    let mut found_usage = false;
+    for c in chunks {
+        match c {
+            StreamChunk::Content(t) if t == "yes" => found_content = true,
+            StreamChunk::Logprobs(lp) => {
+                assert_eq!(lp["tokens"][0], "yes");
+                found_logprobs = true;
+            }
+            StreamChunk::Usage(u) => {
+                assert_eq!(u.reasoning_tokens, Some(5));
+                assert_eq!(u.reasoning_tokens(), Some(5));
+                found_usage = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(found_content, "content must survive SSE parse");
+    assert!(found_logprobs, "logprobs must survive SSE parse");
+    assert!(found_usage, "flat reasoning tokens must survive SSE parse");
+}

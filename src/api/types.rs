@@ -608,6 +608,27 @@ pub struct Choice {
     pub reasoning_content: Option<String>,
     /// Reason why the generation stopped: `"stop"`, `"length"`, `"tool_calls"`, etc.
     pub finish_reason: Option<String>,
+    /// Log probability information for choice tokens (when requested via logprobs=true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<serde_json::Value>,
+}
+
+/// Detailed token breakdown for completions (e.g. reasoning tokens).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompletionTokensDetails {
+    #[serde(default)]
+    pub reasoning_tokens: Option<usize>,
+    #[serde(default)]
+    pub accepted_prediction_tokens: Option<usize>,
+    #[serde(default)]
+    pub rejected_prediction_tokens: Option<usize>,
+}
+
+/// Detailed token breakdown for prompt tokens (e.g. cached tokens).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PromptTokensDetails {
+    #[serde(default)]
+    pub cached_tokens: Option<usize>,
 }
 
 /// Token usage statistics for a request/response.
@@ -625,6 +646,7 @@ pub struct Choice {
 ///     completion_tokens: 30,
 ///     total_tokens: 80,
 ///     cost: None,
+///     ..Default::default()
 /// };
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -638,10 +660,43 @@ pub struct Usage {
     /// Total tokens used (prompt + completion).
     #[serde(default)]
     pub total_tokens: usize,
+    /// Flat reasoning tokens (reported at the top level of usage by some SGLang/vLLM endpoints).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<usize>,
+    /// Details about completion tokens, including reasoning tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_tokens_details: Option<CompletionTokensDetails>,
+    /// Details about prompt tokens, including cached tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
     /// Provider-reported cost in USD for this call, when available (e.g.
     /// OpenRouter's `usage.cost`). `None` for providers that don't report it.
     #[serde(default)]
     pub cost: Option<f64>,
+}
+
+impl Usage {
+    /// Returns reasoning tokens from either the flat field or nested details.
+    pub fn reasoning_tokens(&self) -> Option<usize> {
+        self.reasoning_tokens.or_else(|| {
+            self.completion_tokens_details
+                .as_ref()
+                .and_then(|d| d.reasoning_tokens)
+        })
+    }
+
+    /// Verify honest token usage reconciliation:
+    /// Returns `true` if `total_tokens` matches `prompt_tokens + completion_tokens`.
+    pub fn is_reconciled(&self) -> bool {
+        self.prompt_tokens + self.completion_tokens == self.total_tokens
+    }
+
+    /// Check against silent prompt compression/shrinking:
+    /// If an expected minimum prompt token count is known, verify that reported `prompt_tokens`
+    /// does not drop below it (catching silent SGLang N-gram prefill dropping or truncation).
+    pub fn verifies_prompt_floor(&self, min_expected_prompt_tokens: usize) -> bool {
+        self.prompt_tokens >= min_expected_prompt_tokens
+    }
 }
 
 /// Side-channel metadata produced alongside a chat call.
@@ -722,6 +777,9 @@ pub struct ChoiceDelta {
     pub delta: MessageDelta,
     /// Reason why generation stopped, if complete.
     pub finish_reason: Option<String>,
+    /// Log probability information for choice delta tokens (when requested via logprobs=true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<serde_json::Value>,
 }
 
 /// Incremental message content in a streaming response.

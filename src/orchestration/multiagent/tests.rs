@@ -261,12 +261,14 @@ fn test_total_usage_sums_tokens_and_cost() {
             completion_tokens: 5,
             total_tokens: 15,
             cost: Some(0.001),
+            ..Default::default()
         })),
         make(Some(Usage {
             prompt_tokens: 2,
             completion_tokens: 3,
             total_tokens: 5,
             cost: None,
+            ..Default::default()
         })),
         make(None),
     ];
@@ -291,6 +293,7 @@ fn test_total_usage_cost_none_when_unreported() {
             completion_tokens: 1,
             total_tokens: 2,
             cost: None,
+            ..Default::default()
         }),
         duration: Duration::from_secs(1),
         success: true,

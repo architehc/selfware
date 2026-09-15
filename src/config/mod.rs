@@ -49,6 +49,7 @@ pub use provenance::{ConfigSource, ConfigSources};
 pub use resources::*;
 pub use safety::*;
 pub use types::*;
+pub use validation::is_sglang_serving_deployment;
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
@@ -317,6 +318,23 @@ impl Config {
             );
         }
         Ok(())
+    }
+
+    /// Returns `true` if `preserve_thinking` is enabled in `extra_body`.
+    ///
+    /// Checks both `extra_body.chat_template_kwargs.preserve_thinking` and
+    /// `extra_body.preserve_thinking`. Defaults to `false` so normal agent loops
+    /// do not balloon history with thinking blocks across turns.
+    pub fn preserve_thinking(&self) -> bool {
+        self.extra_body.as_ref().is_some_and(|extra| {
+            extra
+                .get("chat_template_kwargs")
+                .and_then(|v| v.as_object())
+                .and_then(|ctk| ctk.get("preserve_thinking"))
+                .and_then(|v| v.as_bool())
+                .or_else(|| extra.get("preserve_thinking").and_then(|v| v.as_bool()))
+                .unwrap_or(false)
+        })
     }
 }
 

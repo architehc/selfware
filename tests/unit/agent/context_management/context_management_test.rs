@@ -547,6 +547,40 @@ async fn test_estimate_messages_tokens_all_roles_counted() {
     server.stop().await;
 }
 
+#[tokio::test]
+async fn test_estimate_messages_tokens_includes_reasoning_content() {
+    let _g = crate::test_support::ExecGuard::hold();
+    let server = MockLlmServer::builder().with_response("ok").build().await;
+    let mut agent = make_test_agent(&server).await;
+
+    agent.messages.clear();
+    let mut msg = Message::assistant("Final content");
+    agent.messages.push(msg.clone());
+    let baseline_tokens = agent.estimate_messages_tokens();
+
+    // Now set reasoning_content on the assistant message
+    let reasoning =
+        "Step 1: analyze the problem. Step 2: verify requirements. Step 3: compute answer.";
+    msg.reasoning_content = Some(reasoning.to_string());
+    agent.messages.clear();
+    agent.messages.push(msg);
+
+    let with_reasoning_tokens = agent.estimate_messages_tokens();
+    let expected_reasoning_tokens = crate::token_count::estimate_content_tokens(reasoning);
+
+    assert!(
+        expected_reasoning_tokens > 0,
+        "reasoning must have positive token estimate"
+    );
+    assert_eq!(
+        with_reasoning_tokens - baseline_tokens,
+        expected_reasoning_tokens,
+        "agent.estimate_messages_tokens() must count reasoning_content accurately"
+    );
+
+    server.stop().await;
+}
+
 // =====================================================================
 // trim_message_history
 // =====================================================================

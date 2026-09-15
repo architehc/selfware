@@ -255,8 +255,69 @@ impl Config {
             }
         }
 
+        let is_sglang_top = is_sglang_serving_deployment(&self.endpoint);
+        let is_qwen_top = self.model.to_ascii_lowercase().contains("qwen");
+        if is_sglang_top && is_qwen_top {
+            if let Some(extra) = &self.extra_body {
+                if let Some(val_raw) = extra.get("reasoning_effort") {
+                    let Some(val) = val_raw.as_str() else {
+                        bail!(
+                            "Config error: extra_body.reasoning_effort must be a string ('low' or 'medium'), got: {}",
+                            val_raw
+                        );
+                    };
+                    if !val.eq_ignore_ascii_case("low") && !val.eq_ignore_ascii_case("medium") {
+                        bail!(
+                            "Config error: extra_body.reasoning_effort cannot be '{}' at top-level for Qwen models on SGLang serving deployments. \
+                             Top-level reasoning_effort only accepts 'low' or 'medium' ('high' is rejected by the model template, \
+                             and 'xhigh' is rejected by the endpoint schema). \
+                             For xhigh reasoning, place it under [extra_body.chat_template_kwargs.reasoning_effort] \
+                             or omit the field (default is xhigh).",
+                            val
+                        );
+                    }
+                }
+            }
+        }
+
+        // Validate model profile extra_body reasoning_effort for Qwen models on SGLang deployments
+        for (name, profile) in &self.models {
+            let is_sglang_profile = is_sglang_serving_deployment(&profile.endpoint);
+            let is_qwen_profile = profile.model.to_ascii_lowercase().contains("qwen");
+            if is_sglang_profile && is_qwen_profile {
+                if let Some(extra) = &profile.extra_body {
+                    if let Some(val_raw) = extra.get("reasoning_effort") {
+                        let Some(val) = val_raw.as_str() else {
+                            bail!(
+                                "Config error: models.{}.extra_body.reasoning_effort must be a string ('low' or 'medium'), got: {}",
+                                name,
+                                val_raw
+                            );
+                        };
+                        if !val.eq_ignore_ascii_case("low") && !val.eq_ignore_ascii_case("medium") {
+                            bail!(
+                                "Config error: models.{}.extra_body.reasoning_effort cannot be '{}' at top-level for Qwen models on SGLang serving deployments. \
+                                 Top-level reasoning_effort only accepts 'low' or 'medium' ('high' is rejected by the model template, \
+                                 and 'xhigh' is rejected by the endpoint schema). \
+                                 For xhigh reasoning, place it under [models.{}.extra_body.chat_template_kwargs.reasoning_effort] \
+                                 or omit the field (default is xhigh).",
+                                name, val, name
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
+}
+
+/// Returns true if the endpoint URL indicates an SGLang serving deployment
+/// where OpenAI schema enforcement and SGLang chat templates diverge on top-level `reasoning_effort`.
+pub fn is_sglang_serving_deployment(endpoint: &str) -> bool {
+    let lower = endpoint.to_ascii_lowercase();
+    lower.contains("sglang") || lower.contains("selfware.design") || lower.contains(":30000")
 }
 
 #[cfg(test)]

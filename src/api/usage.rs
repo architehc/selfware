@@ -262,6 +262,16 @@ impl AttemptGuard {
     }
 
     pub fn record(&self, usage: &Usage) {
+        // Validate raw per-attempt provider report before normalization or aggregation (Rule 3)
+        if !usage.is_reconciled() {
+            tracing::warn!(
+                "Provider reported unreconciled raw token usage on attempt: prompt={} + completion={} != total={}",
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                usage.total_tokens
+            );
+        }
+
         let mut state = self.ledger.0.lock().unwrap_or_else(|e| e.into_inner());
         if state.generation != self.generation {
             return;
@@ -275,12 +285,7 @@ impl AttemptGuard {
         let current = Usage {
             prompt_tokens: prior.prompt_tokens.max(usage.prompt_tokens),
             completion_tokens: prior.completion_tokens.max(usage.completion_tokens),
-            total_tokens: prior.total_tokens.max(usage.total_tokens).max(
-                prior
-                    .prompt_tokens
-                    .max(usage.prompt_tokens)
-                    .saturating_add(prior.completion_tokens.max(usage.completion_tokens)),
-            ),
+            total_tokens: prior.total_tokens.max(usage.total_tokens),
             cost: match (
                 prior.cost,
                 usage.cost.filter(|c| c.is_finite() && *c >= 0.0),
@@ -288,6 +293,15 @@ impl AttemptGuard {
                 (Some(a), Some(b)) => Some(a.max(b)),
                 (a, b) => a.or(b),
             },
+            reasoning_tokens: usage.reasoning_tokens.or(prior.reasoning_tokens),
+            completion_tokens_details: usage
+                .completion_tokens_details
+                .clone()
+                .or(prior.completion_tokens_details),
+            prompt_tokens_details: usage
+                .prompt_tokens_details
+                .clone()
+                .or(prior.prompt_tokens_details),
         };
         let delta = Usage {
             prompt_tokens: current.prompt_tokens.saturating_sub(prior.prompt_tokens),
@@ -296,6 +310,7 @@ impl AttemptGuard {
                 .saturating_sub(prior.completion_tokens),
             total_tokens: current.total_tokens.saturating_sub(prior.total_tokens),
             cost: current.cost.map(|c| c - prior.cost.unwrap_or(0.0)),
+            ..Default::default()
         };
         attempt.usage = Some(current);
         attempt.reported_fields = UsageCoverage::all();
@@ -367,6 +382,7 @@ impl AttemptGuard {
                 prompt.saturating_add(completion)
             },
             cost: None,
+            ..Default::default()
         };
         if reported.total_tokens == 0
             && estimated.total_tokens == 0
@@ -429,6 +445,43 @@ fn add_usage(total: &mut Usage, additional: &Usage) {
         (Some(a), Some(b)) => Some(a + b),
         (a, b) => a.or(b),
     };
+    total.reasoning_tokens = match (total.reasoning_tokens, additional.reasoning_tokens) {
+        (Some(a), Some(b)) => Some(a.saturating_add(b)),
+        (a, b) => a.or(b),
+    };
+    if let Some(add_details) = &additional.completion_tokens_details {
+        let details = total
+            .completion_tokens_details
+            .get_or_insert_with(Default::default);
+        if let Some(r) = add_details.reasoning_tokens {
+            details.reasoning_tokens =
+                Some(details.reasoning_tokens.unwrap_or(0).saturating_add(r));
+        }
+        if let Some(a) = add_details.accepted_prediction_tokens {
+            details.accepted_prediction_tokens = Some(
+                details
+                    .accepted_prediction_tokens
+                    .unwrap_or(0)
+                    .saturating_add(a),
+            );
+        }
+        if let Some(rej) = add_details.rejected_prediction_tokens {
+            details.rejected_prediction_tokens = Some(
+                details
+                    .rejected_prediction_tokens
+                    .unwrap_or(0)
+                    .saturating_add(rej),
+            );
+        }
+    }
+    if let Some(add_prompt) = &additional.prompt_tokens_details {
+        let details = total
+            .prompt_tokens_details
+            .get_or_insert_with(Default::default);
+        if let Some(c) = add_prompt.cached_tokens {
+            details.cached_tokens = Some(details.cached_tokens.unwrap_or(0).saturating_add(c));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -445,6 +498,7 @@ mod tests {
                 completion_tokens: 10,
                 total_tokens: 15,
                 cost: Some(0.1),
+                ..Default::default()
             };
             attempt.record(&usage);
             assert_eq!(ledger.take_pending().total_tokens, 15);

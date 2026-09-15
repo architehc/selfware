@@ -880,3 +880,92 @@ fn test_prune_report_dirs_stale_orphan_lease_pid_is_cleaned_and_pruned() {
         "directory with stale orphan .lease_pid must be pruned"
     );
 }
+
+#[test]
+fn test_prune_completed_run_with_alive_parent_pid_and_locked_run() {
+    use std::fs::{self, File};
+    use tempfile::tempdir;
+
+    let temp = tempdir().unwrap();
+    let reports_dir = temp.path();
+
+    // 1. Completed run whose parent daemon PID is still alive (Finding 2)
+    // Must NOT escape retention just because the daemon is alive.
+    let completed_dir = reports_dir.join("sab-completed-parent-alive");
+    fs::create_dir(&completed_dir).unwrap();
+    File::create(completed_dir.join(".completed")).unwrap();
+    File::create(completed_dir.join(".lease")).unwrap(); // unheld
+    fs::write(
+        completed_dir.join(".lease_pid"),
+        format!("{}\n", std::process::id()),
+    )
+    .unwrap();
+
+    // 2. Actively locked run (in flight) - must be protected
+    let locked_dir = reports_dir.join("sab-actively-locked");
+    fs::create_dir(&locked_dir).unwrap();
+    let locked_file = File::create(locked_dir.join(".lease")).unwrap();
+    fs::write(
+        locked_dir.join(".lease_pid"),
+        format!("{}\n", std::process::id()),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    unsafe {
+        use std::os::fd::AsRawFd;
+        let rc = nix::libc::flock(
+            locked_file.as_raw_fd(),
+            nix::libc::LOCK_EX | nix::libc::LOCK_NB,
+        );
+        assert_eq!(rc, 0, "must acquire exclusive test lock");
+    }
+
+    // 3. Newer completed run (survives under keep_count = 1)
+    let fresh_dir = reports_dir.join("sab-fresh-new");
+    fs::create_dir(&fresh_dir).unwrap();
+    File::create(fresh_dir.join(".completed")).unwrap();
+
+    #[cfg(unix)]
+    {
+        for (dir, ts) in [
+            (&completed_dir, 1_000_000),
+            (&locked_dir, 1_500_000),
+            (&fresh_dir, 2_000_000),
+        ] {
+            let cname = std::ffi::CString::new(dir.to_str().unwrap()).unwrap();
+            let times = [
+                nix::libc::timespec {
+                    tv_sec: ts,
+                    tv_nsec: 0,
+                },
+                nix::libc::timespec {
+                    tv_sec: ts,
+                    tv_nsec: 0,
+                },
+            ];
+            unsafe {
+                nix::libc::utimensat(nix::libc::AT_FDCWD, cname.as_ptr(), times.as_ptr(), 0);
+            }
+        }
+    }
+
+    // Prune with keep_count = 1
+    prune_report_dirs(reports_dir, "sab-", 1, &[]);
+
+    assert!(fresh_dir.exists(), "fresh completed dir must survive");
+    assert!(
+        locked_dir.exists(),
+        "actively locked in-flight run must be protected"
+    );
+    assert!(
+        !completed_dir.exists(),
+        "completed run must be pruned even if recorded parent daemon PID remains alive"
+    );
+
+    // Release lock on cleanup
+    #[cfg(unix)]
+    unsafe {
+        use std::os::fd::AsRawFd;
+        nix::libc::flock(locked_file.as_raw_fd(), nix::libc::LOCK_UN);
+    }
+}

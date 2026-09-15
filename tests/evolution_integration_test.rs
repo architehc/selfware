@@ -54,7 +54,11 @@ fn test_evolution_config_construction() {
 fn test_protected_paths_prevent_self_modification() {
     // All protected paths should be detected
     for protected in PROTECTED_PATHS {
-        let test_path = format!("{}test_file.rs", protected);
+        let test_path = if protected.ends_with('/') {
+            format!("{}test_file.rs", protected)
+        } else {
+            protected.to_string()
+        };
         assert!(
             is_protected(std::path::Path::new(&test_path)),
             "Path '{}' should be protected",
@@ -297,6 +301,13 @@ fn setup_test_repo(name: &str) -> PathBuf {
         .current_dir(&tmp)
         .output()
         .unwrap();
+
+    // Create Cargo.toml
+    std::fs::write(
+        tmp.join("Cargo.toml"),
+        "[package]\nname = \"test_pkg\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[features]\nself-improvement = []\n\n[lib]\npath = \"src/small.rs\"\n",
+    )
+    .unwrap();
 
     // Create source files
     std::fs::write(
@@ -576,8 +587,9 @@ async fn test_e2e_evolve_with_unreachable_endpoint() {
     let result = daemon::evolve(config, &repo).await;
     // Should complete without panicking
     assert_eq!(result.improvements.len(), 0);
-    assert_eq!(result.initial_sab_score, 50.0); // synthetic baseline
-    assert_eq!(result.final_sab_score, 50.0); // no improvement
+    // Honest measured baseline for a test-free repo is 0.0 (no longer a synthetic 50.0 placeholder)
+    assert_eq!(result.initial_sab_score, 0.0);
+    assert_eq!(result.final_sab_score, 0.0); // no improvement
 
     // Verify JSONL log was created
     let log_path = repo.join(".evolution-log.jsonl");

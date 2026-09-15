@@ -362,6 +362,7 @@ fn cumulative_stream_usage_snapshots_emit_only_new_token_deltas() {
             completion_tokens: completion,
             total_tokens: prompt + completion,
             cost: None,
+            ..Default::default()
         };
         let delta = streaming_usage_delta(&mut previous, &usage);
         added.0 += delta.0;

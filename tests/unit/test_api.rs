@@ -272,12 +272,14 @@ mod chat_response_tests {
                 message: Message::assistant("Hello!"),
                 reasoning_content: None,
                 finish_reason: Some("stop".to_string()),
+                logprobs: None,
             }],
             usage: Usage {
                 prompt_tokens: 10,
                 completion_tokens: 5,
                 total_tokens: 15,
                 cost: None,
+                ..Default::default()
             },
         }
     }
@@ -346,12 +348,14 @@ mod chat_response_tests {
                     message: Message::assistant("First"),
                     reasoning_content: None,
                     finish_reason: Some("stop".to_string()),
+                    logprobs: None,
                 },
                 Choice {
                     index: 1,
                     message: Message::assistant("Second"),
                     reasoning_content: None,
                     finish_reason: Some("stop".to_string()),
+                    logprobs: None,
                 },
             ],
             usage: Usage {
@@ -359,6 +363,7 @@ mod chat_response_tests {
                 completion_tokens: 0,
                 total_tokens: 0,
                 cost: None,
+                ..Default::default()
             },
         };
 
@@ -382,6 +387,7 @@ mod usage_tests {
             completion_tokens: 200,
             total_tokens: 300,
             cost: None,
+            ..Default::default()
         };
 
         assert_eq!(usage.prompt_tokens, 100);
@@ -396,6 +402,7 @@ mod usage_tests {
             completion_tokens: 25,
             total_tokens: 75,
             cost: None,
+            ..Default::default()
         };
 
         let json = serde_json::to_string(&usage).unwrap();
@@ -411,6 +418,7 @@ mod usage_tests {
             completion_tokens: 20,
             total_tokens: 30,
             cost: None,
+            ..Default::default()
         };
 
         let cloned = original.clone();

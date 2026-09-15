@@ -98,12 +98,7 @@ impl ContextCompressor {
         client: &ApiClient,
         messages: &[Message],
     ) -> Result<(Vec<Message>, Usage)> {
-        let zero_usage = || Usage {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-            cost: None,
-        };
+        let zero_usage = Usage::default;
         if messages.len() <= self.min_messages_to_keep + 1 {
             warn!("Too few messages to compress, returning as-is");
             return Ok((messages.to_vec(), zero_usage()));

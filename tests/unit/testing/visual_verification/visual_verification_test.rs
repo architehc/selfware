@@ -949,3 +949,67 @@ fn test_visual_state_tracker_history_limit() {
     // History should be capped at max_history
     assert_eq!(tracker.history_size(), 3);
 }
+
+/// Vision negative test:
+/// Assert that the harness does NOT claim multimodal or vision capabilities
+/// for `Qwen/Qwen3.8-Flash-Next` or `qwen38-flash-next`, despite server metadata
+/// claiming image understanding. Broken image conditioning (returning 'White'
+/// for red/blue images) requires the harness to remain text-only.
+#[test]
+fn test_endpoint_model_not_claimed_multimodal() {
+    assert!(
+        !crate::llm_doctor::looks_multimodal("Qwen/Qwen3.8-Flash-Next"),
+        "harness must not claim vision for Qwen/Qwen3.8-Flash-Next"
+    );
+    assert!(
+        !crate::llm_doctor::looks_multimodal("qwen38-flash-next"),
+        "harness must not claim vision for qwen38-flash-next"
+    );
+    assert!(
+        !crate::llm_doctor::looks_multimodal("qwen3.8-flash-next"),
+        "harness must not claim vision for qwen3.8-flash-next"
+    );
+}
+
+/// Garbage-image control:
+/// Assert that visual verification fails closed when given invariant/hallucinated
+/// responses or when pixel-dependent expectations (e.g. blue rectangle) encounter
+/// unconditioned output (e.g. describing 'White' or reporting issues).
+#[test]
+fn test_garbage_image_control_and_unconditioned_response_rejected() {
+    // 1. Model reports 'White' when expectation is a solid blue rectangle:
+    // With issues noted, verification MUST fail.
+    let unconditioned_resp = r#"{
+        "passed": false,
+        "confidence": 0.1,
+        "description": "Solid white surface",
+        "issues": ["No blue rectangle found at requested coordinates"]
+    }"#;
+    let res = parse_verification_response(unconditioned_resp).expect("valid json format");
+    assert!(!res.passed, "unconditioned 'White' response must not pass");
+    assert_eq!(res.issues.len(), 1);
+    assert!(res.issues[0].contains("No blue rectangle found"));
+
+    // 2. Model hallucinates passed: true despite conflicting description:
+    // If issues are non-empty, pass must be rejected or scrutinized.
+    let conflicting_resp = r#"{
+        "passed": true,
+        "confidence": 0.5,
+        "description": "White screen with no elements",
+        "issues": ["Expected red element missing"]
+    }"#;
+    let parsed_conflict = parse_verification_response(conflicting_resp).expect("valid json format");
+    assert!(
+        !parsed_conflict.passed,
+        "contradictory passed: true with non-empty issues must fail closed"
+    );
+    assert_eq!(parsed_conflict.issues.len(), 1);
+    assert!(parsed_conflict.issues[0].contains("Expected red element missing"));
+
+    // 3. Model returns garbage/unconditioned raw text (e.g. OCR hallucinating 13 for 7429):
+    let garbage_ocr = "The number visible on screen is 13.";
+    assert!(
+        parse_verification_response(garbage_ocr).is_err(),
+        "raw unconditioned text must fail parsing"
+    );
+}

@@ -164,7 +164,9 @@ def read_jsonl_tolerant(path, return_stats=False):
     if not path or not Path(path).exists():
         return ([], 0) if return_stats else []
     cases = []
-    lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    raw_content = Path(path).read_text(encoding="utf-8", errors="replace")
+    is_newline_terminated = raw_content.endswith("\n") or raw_content.endswith("\r\n")
+    lines = raw_content.splitlines()
     total = len(lines)
     corrupted_middle = 0
     for idx, line in enumerate(lines, 1):
@@ -174,8 +176,8 @@ def read_jsonl_tolerant(path, return_stats=False):
         try:
             cases.append(json.loads(line_str))
         except json.JSONDecodeError as e:
-            if idx == total:
-                # Wave file mid-append by a generator — skip truncated tail line safely
+            if idx == total and not is_newline_terminated:
+                # Wave file mid-append by a generator — skip genuinely truncated tail line safely
                 continue
             corrupted_middle += 1
             print(f"corrupted JSON in wave file {path} at line {idx}/{total}: {e}", file=sys.stderr)
@@ -188,21 +190,28 @@ read_jsonl_tolerant.last_corrupted_count = 0
 
 def write_verdicts_summary(
     summary_path,
-    total,
-    verified,
-    quarantined,
-    missing,
+    total=None,
+    verified=None,
+    quarantined=None,
+    missing=None,
     skipped_nonconforming=0,
     corrupted_middle=0,
+    error=None,
 ):
-    summary = {
-        "total": total,
-        "verified": verified,
-        "quarantined": quarantined,
-        "missing": missing,
-        "skipped_nonconforming": skipped_nonconforming,
-        "corrupted_middle": corrupted_middle,
-    }
+    summary = {}
+    if error is not None:
+        summary["error"] = error
+    if total is not None:
+        summary["total"] = total
+    if verified is not None:
+        summary["verified"] = verified
+    if quarantined is not None:
+        summary["quarantined"] = quarantined
+    if missing is not None:
+        summary["missing"] = missing
+    if total is not None:
+        summary["skipped_nonconforming"] = skipped_nonconforming
+        summary["corrupted_middle"] = corrupted_middle
     summary_path = Path(summary_path)
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = summary_path.with_suffix(".tmp")
@@ -231,15 +240,15 @@ def main():
     )
 
     if not probe_path.exists() or not probe_path.is_file():
-        print(f"probe file {args.probe_file} not found", file=sys.stderr)
+        err_msg = f"probe file {args.probe_file} not found"
+        print(err_msg, file=sys.stderr)
         write_verdicts_summary(
             summary_path,
-            total=0,
-            verified=0,
-            quarantined=0,
-            missing=0,
-            skipped_nonconforming=0,
-            corrupted_middle=0,
+            total=None,
+            verified=None,
+            quarantined=None,
+            missing=None,
+            error=err_msg,
         )
         return 1
 
@@ -248,6 +257,7 @@ def main():
     if skipped:
         print(f"skipped {skipped} non-conforming cases from {args.probe_file}", file=sys.stderr)
     quarantined = find_quarantined(cases)
+    load_error = None
     try:
         verdicts = load_matching_verdicts(
             args.verdicts_file,
@@ -256,7 +266,8 @@ def main():
             quarantined=quarantined,
         )
     except Exception as e:
-        print(f"error loading verdicts from {args.verdicts_file}: {e}", file=sys.stderr)
+        load_error = f"error loading verdicts from {args.verdicts_file}: {e}"
+        print(load_error, file=sys.stderr)
         verdicts = {}
 
     missing = ({case["id"] for case in cases} - verdicts.keys()) - quarantined
@@ -269,6 +280,7 @@ def main():
         missing=len(missing),
         skipped_nonconforming=skipped,
         corrupted_middle=corrupted_middle,
+        error=load_error,
     )
 
     print(

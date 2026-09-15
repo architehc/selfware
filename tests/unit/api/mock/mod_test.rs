@@ -8,12 +8,7 @@ async fn test_mock_returns_responses_in_order() {
         created: 0,
         model: "mock".into(),
         choices: vec![],
-        usage: Usage {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-            cost: None,
-        },
+        usage: Usage::default(),
     };
     let r2 = ChatResponse {
         id: "2".into(),

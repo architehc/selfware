@@ -523,3 +523,50 @@ fn test_capabilities_default() {
     assert_eq!(c.thinking, None);
     assert!(!c.multimodal);
 }
+
+// =========================================================================
+// Behavioral vision verification tests
+// =========================================================================
+
+#[test]
+fn test_verify_vision_responses_both_conditioned() {
+    assert!(verify_vision_responses(Some("Red"), Some("Blue")));
+    assert!(verify_vision_responses(
+        Some("The color is red."),
+        Some("This is a blue square.")
+    ));
+}
+
+#[test]
+fn test_verify_vision_responses_unconditioned_invariant_white() {
+    // Both return 'White' (the exact bug observed on the server)
+    assert!(!verify_vision_responses(Some("White"), Some("White")));
+    assert!(!verify_vision_responses(
+        Some("The image is solid white."),
+        Some("The image is solid white.")
+    ));
+}
+
+#[test]
+fn test_verify_vision_responses_unconditioned_invariant_same_color() {
+    // Model blindly guesses 'Red' for both probes
+    assert!(!verify_vision_responses(Some("red"), Some("red")));
+}
+
+#[test]
+fn test_verify_vision_responses_missing_or_error() {
+    assert!(!verify_vision_responses(None, Some("blue")));
+    assert!(!verify_vision_responses(Some("red"), None));
+    assert!(!verify_vision_responses(None, None));
+}
+
+#[test]
+fn test_verify_vision_responses_hallucinated_or_contradictory() {
+    // Mentions both red and blue in the answer
+    assert!(!verify_vision_responses(
+        Some("It looks red or blue"),
+        Some("blue")
+    ));
+    // Completely irrelevant text (e.g. OCR hallucinating 13)
+    assert!(!verify_vision_responses(Some("13"), Some("blue")));
+}

@@ -529,16 +529,11 @@ impl Agent {
             }
         }
 
-        // Qwen3.5 best practice: "No Thinking Content in History — historical
-        // model output should only include the final output part and does not
-        // need to include the thinking content."
-        // Strip inline <think> blocks from content before storing in message
-        // history. Keep the raw content in the response for tool parsing.
-        // Qwen3.5 best practice: "No Thinking Content in History — historical
-        // model output should only include the final output part and does not
-        // need to include the thinking content."
-        // Strip inline <think> blocks from content and omit reasoning_content.
-        let history_content = super::recovery::strip_think_blocks(&content);
+        // Qwen3.5 best practice / thinking retention: historical model output
+        // strips inline <think> blocks before storage in message history.
+        // Retention of reasoning_content in history is gated by `preserve_thinking`
+        // (via build_assistant_history_message). Keep raw content in the response
+        // for tool parsing.
 
         // Sanitize native tool calls before they enter history. A truncated
         // stream can leave `ToolCallAccumulator::flush` emitting a tool_call
@@ -567,14 +562,13 @@ impl Agent {
         // double-count this response in the input total.
         let prompt_token_estimate = self.estimate_messages_tokens();
 
-        self.messages.push(crate::api::types::Message {
-            role: "assistant".to_string(),
-            content: history_content.into(),
-            reasoning_content: None, // Excluded from history per Qwen3.5 best practice
-            tool_calls: native_tool_calls.clone(),
-            tool_call_id: None,
-            name: None,
-        });
+        let history_msg = build_assistant_history_message(
+            &content,
+            reasoning.clone(),
+            native_tool_calls.clone(),
+            self.config.preserve_thinking(),
+        );
+        self.messages.push(history_msg);
 
         // Accumulate token usage from this assistant step. Prefer the provider-
         // reported numbers, but fall back to a tokenizer estimate when the
@@ -604,6 +598,22 @@ impl Agent {
         );
 
         self.sync_api_usage();
+
+        // Validate raw provider measurements before fallback estimation or aggregation (Rule 3)
+        if let Some(meta) = chat_metadata.as_ref() {
+            if let (Some(p), Some(c), Some(t)) = (
+                meta.prompt_tokens,
+                meta.completion_tokens,
+                meta.total_tokens,
+            ) {
+                if (p as usize).saturating_add(c as usize) != t as usize {
+                    warn!(
+                        "Provider reported unreconciled token usage: prompt={} + completion={} != total={}",
+                        p, c, t
+                    );
+                }
+            }
+        }
         // Missing provider fields still use the measured content-token fallback.
         // Reported components have already been charged by the attempt ledger.
         let already_accounted = chat_metadata
@@ -708,6 +718,29 @@ pub(super) fn sanitize_tool_calls(
         .collect();
     let dropped = before - kept.len();
     (kept, dropped)
+}
+
+/// Build the assistant `Message` for storage in agent history.
+///
+/// Strips inline `<think>` blocks from `content`.
+/// Only attaches `reasoning_content` if `preserve_thinking` is enabled.
+pub(crate) fn build_assistant_history_message(
+    content: &str,
+    reasoning: Option<String>,
+    native_tool_calls: Option<Vec<crate::api::types::ToolCall>>,
+    preserve_thinking: bool,
+) -> crate::api::types::Message {
+    let history_content = super::recovery::strip_think_blocks(content);
+    let history_reasoning = if preserve_thinking { reasoning } else { None };
+
+    crate::api::types::Message {
+        role: "assistant".to_string(),
+        content: history_content.into(),
+        reasoning_content: history_reasoning,
+        tool_calls: native_tool_calls,
+        tool_call_id: None,
+        name: None,
+    }
 }
 
 /// Resolve a step's (input, output) token counts, preferring provider-reported

@@ -20,12 +20,17 @@ fn streaming_usage_delta(
         .saturating_sub(previous.completion_tokens) as u64;
     previous.prompt_tokens = previous.prompt_tokens.max(current.prompt_tokens);
     previous.completion_tokens = previous.completion_tokens.max(current.completion_tokens);
-    previous.total_tokens = previous.total_tokens.max(current.total_tokens).max(
-        previous
-            .prompt_tokens
-            .saturating_add(previous.completion_tokens),
-    );
+    previous.total_tokens = previous.total_tokens.max(current.total_tokens);
     previous.cost = current.cost;
+    previous.reasoning_tokens = current.reasoning_tokens.or(previous.reasoning_tokens);
+    previous.completion_tokens_details = current
+        .completion_tokens_details
+        .clone()
+        .or(previous.completion_tokens_details.clone());
+    previous.prompt_tokens_details = current
+        .prompt_tokens_details
+        .clone()
+        .or(previous.prompt_tokens_details.clone());
     (prompt, completion)
 }
 
@@ -632,6 +637,7 @@ impl Agent {
                         completion_tokens: completion_delta,
                     });
                 }
+                StreamChunk::Logprobs(_) => {}
                 StreamChunk::FinishReason(reason) => {
                     captured_finish_reason = Some(reason);
                 }

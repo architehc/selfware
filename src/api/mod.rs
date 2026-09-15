@@ -140,8 +140,8 @@ const RESERVED_EXTRA_BODY_KEYS: &[&str] = &[
 /// Allowlisted extra_body keys — safe sampling/backend parameters.
 ///
 /// Any key not in this list AND not reserved is rejected. This prevents
-/// injection of fields like `logprobs`, `logit_bias`, `n`, `user`, or
-/// `response_format` that could leak data or alter behavior unexpectedly.
+/// injection of fields like `logit_bias`, `n`, or `user` that could alter
+/// behavior unexpectedly.
 const ALLOWED_EXTRA_BODY_KEYS: &[&str] = &[
     // Sampling parameters
     "top_p",
@@ -160,6 +160,10 @@ const ALLOWED_EXTRA_BODY_KEYS: &[&str] = &[
     "skip_special_tokens",
     "spaces_between_special_tokens",
     "add_generation_prompt",
+    // Structured output and introspective capabilities
+    "response_format",
+    "logprobs",
+    "top_logprobs",
     // Best-of / beam search (resource control, not data leakage)
     "best_of",
     "use_beam_search",
@@ -195,7 +199,7 @@ pub(crate) fn merge_extra_body(
         .as_object_mut()
         .context("request body must be a JSON object")?;
 
-    for key in extra_body.keys() {
+    for (key, value) in extra_body {
         let k = key.as_str();
         if RESERVED_EXTRA_BODY_KEYS.contains(&k) {
             bail!("{} extra_body cannot override reserved key: {}", context, k);
@@ -209,6 +213,24 @@ pub(crate) fn merge_extra_body(
                 k,
                 ALLOWED_EXTRA_BODY_KEYS.join(", ")
             );
+        }
+        if k == "reasoning_effort" {
+            let model_name = body_obj.get("model").and_then(|v| v.as_str()).unwrap_or("");
+            let is_qwen = model_name.to_ascii_lowercase().contains("qwen");
+            if is_qwen {
+                if let Some(val) = value.as_str() {
+                    if !val.eq_ignore_ascii_case("low") && !val.eq_ignore_ascii_case("medium") {
+                        bail!(
+                            "{} extra_body cannot set reasoning_effort to '{}' at top-level for Qwen models. \
+                             Top-level reasoning_effort only accepts 'low' or 'medium' ('high' is rejected by the model template, \
+                             and 'xhigh' is rejected by the endpoint schema). \
+                             For xhigh reasoning, place it in chat_template_kwargs.reasoning_effort \
+                             or omit the field (default is xhigh).",
+                            context, val
+                        );
+                    }
+                }
+            }
         }
     }
 

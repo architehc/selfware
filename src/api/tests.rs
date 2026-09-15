@@ -72,6 +72,7 @@ fn test_stream_chunk_usage() {
         completion_tokens: 50,
         total_tokens: 150,
         cost: None,
+        ..Default::default()
     };
     let chunk = StreamChunk::Usage(usage.clone());
     if let StreamChunk::Usage(u) = chunk {
@@ -2540,6 +2541,59 @@ fn test_merge_extra_body_allows_reasoning_effort_keys() {
 }
 
 #[test]
+fn test_merge_extra_body_rejects_top_level_xhigh_and_high_reasoning_effort_for_qwen() {
+    let mut body = serde_json::json!({
+        "model": "qwen38-flash-next",
+        "messages": [],
+    });
+
+    // xhigh rejected
+    let mut extra_xhigh = serde_json::Map::new();
+    extra_xhigh.insert("reasoning_effort".to_string(), serde_json::json!("xhigh"));
+    let err = merge_extra_body(&mut body, Some(&extra_xhigh), "chat request")
+        .expect_err("top-level reasoning_effort=xhigh must be rejected");
+    assert!(
+        err.to_string()
+            .contains("cannot set reasoning_effort to 'xhigh' at top-level for Qwen models"),
+        "error should cite top-level xhigh rejection: {err}"
+    );
+
+    // high rejected
+    let mut extra_high = serde_json::Map::new();
+    extra_high.insert("reasoning_effort".to_string(), serde_json::json!("high"));
+    let err_high = merge_extra_body(&mut body, Some(&extra_high), "chat request")
+        .expect_err("top-level reasoning_effort=high must be rejected");
+    assert!(
+        err_high
+            .to_string()
+            .contains("cannot set reasoning_effort to 'high' at top-level for Qwen models"),
+        "error should cite top-level high rejection: {err_high}"
+    );
+
+    // low and medium accepted
+    for allowed in ["low", "medium"] {
+        let mut body_ok = serde_json::json!({
+            "model": "qwen38-flash-next",
+            "messages": [],
+        });
+        let mut extra_ok = serde_json::Map::new();
+        extra_ok.insert("reasoning_effort".to_string(), serde_json::json!(allowed));
+        merge_extra_body(&mut body_ok, Some(&extra_ok), "chat request").unwrap();
+        assert_eq!(body_ok["reasoning_effort"], allowed);
+    }
+
+    // Non-Qwen allows high
+    let mut body_gpt = serde_json::json!({
+        "model": "o3-mini",
+        "messages": [],
+    });
+    let mut extra_gpt = serde_json::Map::new();
+    extra_gpt.insert("reasoning_effort".to_string(), serde_json::json!("high"));
+    merge_extra_body(&mut body_gpt, Some(&extra_gpt), "chat request").unwrap();
+    assert_eq!(body_gpt["reasoning_effort"], "high");
+}
+
+#[test]
 fn test_merge_extra_body_rejects_non_allowlisted_keys() {
     let mut body = serde_json::json!({
         "model": "test",
@@ -2547,11 +2601,16 @@ fn test_merge_extra_body_rejects_non_allowlisted_keys() {
         "stream": false
     });
     let mut extra = serde_json::Map::new();
-    extra.insert("logprobs".to_string(), serde_json::json!(true));
+    extra.insert(
+        "unsupported_custom_key".to_string(),
+        serde_json::json!(true),
+    );
 
     let err = merge_extra_body(&mut body, Some(&extra), "test")
         .expect_err("non-allowlisted keys must be rejected");
-    assert!(err.to_string().contains("disallowed key 'logprobs'"));
+    assert!(err
+        .to_string()
+        .contains("disallowed key 'unsupported_custom_key'"));
 }
 
 #[test]
@@ -3208,6 +3267,7 @@ fn test_stream_chunk_usage_clone() {
         completion_tokens: 50,
         total_tokens: 150,
         cost: None,
+        ..Default::default()
     };
     let chunk = StreamChunk::Usage(usage);
     let cloned = chunk.clone();
@@ -3669,7 +3729,7 @@ fn test_merge_extra_body_rejects_user_field() {
 }
 
 #[test]
-fn test_merge_extra_body_rejects_response_format() {
+fn test_merge_extra_body_allows_response_format_and_logprobs() {
     let mut body = serde_json::json!({
         "model": "test",
         "messages": [],
@@ -3680,13 +3740,18 @@ fn test_merge_extra_body_rejects_response_format() {
         "response_format".to_string(),
         serde_json::json!({"type": "json_object"}),
     );
+    extra.insert("logprobs".to_string(), serde_json::json!(true));
+    extra.insert("top_logprobs".to_string(), serde_json::json!(5));
 
     let result = merge_extra_body(&mut body, Some(&extra), "test");
-    assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("disallowed key 'response_format'"));
+    assert!(
+        result.is_ok(),
+        "response_format and logprobs must be permitted: {:?}",
+        result.err()
+    );
+    assert_eq!(body["response_format"]["type"], "json_object");
+    assert_eq!(body["logprobs"], true);
+    assert_eq!(body["top_logprobs"], 5);
 }
 
 // ============================================
@@ -4626,4 +4691,96 @@ fn test_per_call_stream_deadline_merges_adaptive_and_run_wall() {
         (Duration::from_secs(1279)..=Duration::from_secs(1281)).contains(&delta),
         "per-call bound must win over a distant run wall, got {delta:?}"
     );
+}
+
+#[test]
+fn test_usage_reconciliation_and_prompt_floor_verification() {
+    // Exact reconciliation: prompt_tokens + completion_tokens == total_tokens
+    let reconciled_usage = Usage {
+        prompt_tokens: 1500,
+        completion_tokens: 350,
+        total_tokens: 1850,
+        cost: None,
+        ..Default::default()
+    };
+    assert!(
+        reconciled_usage.is_reconciled(),
+        "usage must be reconciled when total matches sum"
+    );
+    assert!(
+        reconciled_usage.verifies_prompt_floor(1000),
+        "prompt must satisfy lower expected floor"
+    );
+
+    // Unreconciled usage: server returns inconsistent numbers
+    let unreconciled_usage = Usage {
+        prompt_tokens: 1500,
+        completion_tokens: 350,
+        total_tokens: 2000,
+        cost: None,
+        ..Default::default()
+    };
+    assert!(
+        !unreconciled_usage.is_reconciled(),
+        "usage must fail reconciliation when sum differs"
+    );
+
+    // Silent prompt shrinking/compression detection:
+    // When sending 11k tokens, if the backend (SGLang N-gram prefill) silently drops/compresses
+    // the prompt to 52 tokens, verifies_prompt_floor must catch this dishonest accounting.
+    let compressed_usage = Usage {
+        prompt_tokens: 52,
+        completion_tokens: 100,
+        total_tokens: 152,
+        cost: None,
+        ..Default::default()
+    };
+    assert!(
+        !compressed_usage.verifies_prompt_floor(5000),
+        "silent prompt shrinking (52 tokens vs 5000 expected) must be caught by prompt floor check"
+    );
+}
+
+#[test]
+fn test_choice_logprobs_and_usage_token_details_serde() {
+    let choice_json = serde_json::json!({
+        "index": 0,
+        "message": {
+            "role": "assistant",
+            "content": "Hello world"
+        },
+        "finish_reason": "stop",
+        "logprobs": {
+            "content": [
+                { "token": "Hello", "logprob": -0.01 },
+                { "token": " world", "logprob": -0.05 }
+            ]
+        }
+    });
+    let choice: Choice = serde_json::from_value(choice_json).expect("choice should deserialize");
+    assert!(choice.logprobs.is_some());
+    let logprobs_obj = choice.logprobs.unwrap();
+    assert_eq!(logprobs_obj["content"][0]["token"], "Hello");
+
+    let usage_json = serde_json::json!({
+        "prompt_tokens": 120,
+        "completion_tokens": 80,
+        "total_tokens": 200,
+        "completion_tokens_details": {
+            "reasoning_tokens": 45,
+            "accepted_prediction_tokens": 0,
+            "rejected_prediction_tokens": 0
+        },
+        "prompt_tokens_details": {
+            "cached_tokens": 64
+        }
+    });
+    let usage: Usage = serde_json::from_value(usage_json).expect("usage should deserialize");
+    assert_eq!(usage.prompt_tokens, 120);
+    assert_eq!(usage.completion_tokens, 80);
+    assert_eq!(usage.total_tokens, 200);
+    let ctd = usage.completion_tokens_details.expect("completion details");
+    assert_eq!(ctd.reasoning_tokens, Some(45));
+    let ptd = usage.prompt_tokens_details.expect("prompt details");
+    assert_eq!(ptd.cached_tokens, Some(64));
 }

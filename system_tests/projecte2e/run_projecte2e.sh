@@ -45,6 +45,7 @@ if [[ "${SELFWARE_LEASE_HELD:-0}" != "1" ]]; then
       exit 1
     fi
     FIFO="${OUT_DIR}/.lease_fifo_$$"
+    rm -f "${FIFO}"
     mkfifo "${FIFO}"
     python3 -c "import fcntl, os, signal, sys, threading, time
 parent_pid = os.getppid()
@@ -83,6 +84,64 @@ except Exception as e:
       exit 1
     fi
     trap 'kill "${LEASE_PID}" 2>/dev/null || true; rm -f "${LEASE_FILE}_pid"' EXIT
+  fi
+else
+  # Probe-verify heal: if parent claimed lease held, probe whether lock is actually held.
+  # If the lock can be acquired, no lock was held by any parent (e.g. spoofed HELD=1 or dead parent)!
+  # Heal by acquiring and retaining the lock, warning loudly, and recording our PID.
+  if command -v flock >/dev/null 2>&1; then
+    exec 9<"${LEASE_FILE}"
+    if flock -n 9 2>/dev/null; then
+      echo "WARNING: SELFWARE_LEASE_HELD=1 was set, but ${LEASE_FILE} was not actually locked! Self-healing lease lock." >&2
+      echo "$$" > "${OUT_DIR}/.lease_pid"
+    fi
+  else
+    if command -v python3 >/dev/null 2>&1; then
+      # Probe non-blocking lock via python fcntl
+      if python3 -c "import fcntl, sys; f = open(sys.argv[1], 'r+'); fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)" "${LEASE_FILE}" 2>/dev/null; then
+        echo "WARNING: SELFWARE_LEASE_HELD=1 was set, but ${LEASE_FILE} was not actually locked! Self-healing lease lock." >&2
+        FIFO="${OUT_DIR}/.lease_fifo_$$"
+        rm -f "${FIFO}"
+        mkfifo "${FIFO}"
+        python3 -c "import fcntl, os, signal, sys, threading, time
+parent_pid = os.getppid()
+def watchdog():
+    while True:
+        time.sleep(1)
+        if os.getppid() != parent_pid:
+            os._exit(0)
+threading.Thread(target=watchdog, daemon=True).start()
+try:
+    f = open(sys.argv[1], 'r+')
+    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with open(sys.argv[1] + '_pid', 'w') as pf:
+        pf.write(str(os.getpid()) + '\n')
+    with open(sys.argv[2], 'w') as fifo:
+        fifo.write('OK\n')
+    signal.pause()
+except Exception as e:
+    try:
+        with open(sys.argv[2], 'w') as fifo:
+            fifo.write(f'ERR: {e}\n')
+    except Exception:
+        pass
+    sys.exit(1)
+" "${LEASE_FILE}" "${FIFO}" &
+        LEASE_PID=$!
+        exec 8<>"${FIFO}"
+        if ! read -t 5 -r STATUS <&8; then
+          STATUS="ERR: timeout waiting for lease handshake"
+        fi
+        exec 8>&-
+        rm -f "${FIFO}"
+        if [[ "${STATUS}" != "OK" ]]; then
+          echo "ERROR: Could not acquire healed lease on ${LEASE_FILE}: ${STATUS}" >&2
+          kill "${LEASE_PID}" 2>/dev/null || true
+          exit 1
+        fi
+        trap 'kill "${LEASE_PID}" 2>/dev/null || true; rm -f "${LEASE_FILE}_pid"' EXIT
+      fi
+    fi
   fi
 fi
 

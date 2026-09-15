@@ -143,3 +143,29 @@ fn test_estimate_messages_tokens_empty() {
     let estimate = estimate_messages_tokens(&messages);
     assert_eq!(estimate, 0);
 }
+
+#[test]
+fn test_estimate_messages_tokens_counts_reasoning_content() {
+    use crate::api::types::Message;
+
+    let mut msg_with_reasoning = Message::assistant("Final answer text.");
+    let reasoning_text =
+        "This is extensive internal chain-of-thought reasoning that takes up tokens.";
+    msg_with_reasoning.reasoning_content = Some(reasoning_text.to_string());
+
+    let msg_without_reasoning = Message::assistant("Final answer text.");
+
+    let tokens_with = estimate_messages_tokens(&[msg_with_reasoning]);
+    let tokens_without = estimate_messages_tokens(&[msg_without_reasoning]);
+
+    let expected_diff = estimate_tokens(reasoning_text);
+    assert!(
+        expected_diff > 0,
+        "reasoning text must have non-zero token estimate"
+    );
+    assert_eq!(
+        tokens_with - tokens_without,
+        expected_diff,
+        "estimate_messages_tokens must count reasoning_content when present"
+    );
+}
