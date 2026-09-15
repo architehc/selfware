@@ -125,31 +125,62 @@ def classify_batch(endpoint: str, model: str, batch: list, seed: int) -> dict:
     import time as _time
     deadline = _time.monotonic() + 900  # per-batch wall clock; the 600s
     with urllib.request.urlopen(req, timeout=600) as resp:  # per-read timeout
-        for raw in resp:  # alone cannot stop a slow trickle
-            remaining = deadline - _time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError("batch exceeded 900s wall clock")
-            if hasattr(resp, "fp") and hasattr(resp.fp, "raw") and hasattr(resp.fp.raw, "_sock"):
+        if hasattr(resp, "read"):
+            buffer = b""
+            done = False
+            while not done:
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("batch exceeded 900s wall clock")
+                if hasattr(resp, "fp") and hasattr(resp.fp, "raw") and hasattr(resp.fp.raw, "_sock"):
+                    try:
+                        resp.fp.raw._sock.settimeout(min(60.0, max(0.1, remaining)))
+                    except Exception:
+                        pass
+                chunk = resp.read(4096)
+                if not chunk:
+                    break
+                buffer += chunk
+                while b"\n" in buffer:
+                    raw, buffer = buffer.split(b"\n", 1)
+                    line = raw.decode("utf-8", "replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[5:].strip()
+                    if payload == "[DONE]":
+                        done = True
+                        break
+                    try:
+                        chunk_obj = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+                    if chunk_obj.get("usage"):
+                        usage = chunk_obj["usage"]
+                    choices = chunk_obj.get("choices") or []
+                    delta = choices[0].get("delta", {}) if choices else {}
+                    if delta.get("content"):
+                        parts.append(delta["content"])
+        else:
+            for raw in resp:
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("batch exceeded 900s wall clock")
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload == "[DONE]":
+                    break
                 try:
-                    resp.fp.raw._sock.settimeout(min(600.0, max(0.1, remaining)))
-                except Exception:
-                    pass
-            line = raw.decode("utf-8", "replace").strip()
-            if not line.startswith("data:"):
-                continue
-            payload = line[5:].strip()
-            if payload == "[DONE]":
-                break
-            try:
-                chunk = json.loads(payload)
-            except json.JSONDecodeError:
-                continue
-            if chunk.get("usage"):
-                usage = chunk["usage"]
-            choices = chunk.get("choices") or []
-            delta = choices[0].get("delta", {}) if choices else {}
-            if delta.get("content"):
-                parts.append(delta["content"])
+                    chunk = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                if chunk.get("usage"):
+                    usage = chunk["usage"]
+                choices = chunk.get("choices") or []
+                delta = choices[0].get("delta", {}) if choices else {}
+                if delta.get("content"):
+                    parts.append(delta["content"])
     text = "".join(parts)
     _log_usage(endpoint, model, usage,
                est_prompt=(len(DOCTRINE) + len(prompt)) // 4,
@@ -210,8 +241,13 @@ def write_triage_summary(verdicts_path, total, verified, quarantined, missing):
     counts_path = verdicts_path.parent / f"{stem}_counts.txt"
     try:
         verdicts_path.parent.mkdir(parents=True, exist_ok=True)
-        summary_path.write_text(json.dumps(summary, indent=2))
-        counts_path.write_text(f"{verified} {quarantined} {missing}\n")
+        tmp_summary = summary_path.with_suffix(".tmp")
+        tmp_summary.write_text(json.dumps(summary, indent=2))
+        tmp_summary.replace(summary_path)
+
+        tmp_counts = counts_path.with_suffix(".tmp")
+        tmp_counts.write_text(f"{verified} {quarantined} {missing}\n")
+        tmp_counts.replace(counts_path)
     except Exception:
         pass
 

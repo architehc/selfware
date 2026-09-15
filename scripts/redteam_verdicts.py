@@ -25,11 +25,21 @@ def _read_rows(path):
     if not path or not Path(path).exists():
         return []
     rows = []
-    for line in Path(path).read_text().splitlines():
+    lines = Path(path).read_text().splitlines()
+    total = len(lines)
+    for idx, line in enumerate(lines, 1):
+        line = line.strip()
+        if not line:
+            continue
         try:
             row = json.loads(line)
-        except json.JSONDecodeError:
-            continue  # Incomplete interrupted records cannot authorize promotion.
+        except json.JSONDecodeError as e:
+            if idx == total:
+                # Incomplete interrupted tail record from crash/kill; discard safely
+                continue
+            raise ValueError(
+                f"Receipts file {path} has corrupted JSON on line {idx}/{total}: {e}"
+            ) from e
         if (isinstance(row, dict) and isinstance(row.get("id"), str)
                 and row.get("v", row.get("checker")) in ("r", "a")
                 and ("input_sha256" not in row or isinstance(row["input_sha256"], str))):

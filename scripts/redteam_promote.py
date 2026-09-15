@@ -33,9 +33,10 @@ EARLY = {
 
 
 def truncate_corpus_to_last_newline(path):
-    """Truncate corpus file to the last newline before append + fsync.
+    """Ensure corpus file ends cleanly before append + fsync.
 
-    Prevents appending records onto a torn tail when an earlier write was interrupted.
+    If the tail after the last newline is a valid JSON record lacking a trailing newline,
+    append a newline. If the tail is torn/malformed, truncate to the last clean newline.
     """
     if not path or not os.path.exists(path):
         return
@@ -54,9 +55,22 @@ def truncate_corpus_to_last_newline(path):
             if nl_idx != -1:
                 found_nl = pos + nl_idx
                 break
-        target_len = found_nl + 1 if found_nl != -1 else 0
-        if target_len < size:
-            fh.seek(target_len)
+        tail_start = found_nl + 1 if found_nl != -1 else 0
+        if tail_start < size:
+            fh.seek(tail_start)
+            tail = fh.read().strip()
+            if tail:
+                try:
+                    json.loads(tail.decode("utf-8"))
+                    # Tail is valid JSON! Preserve it by appending a newline
+                    fh.seek(0, os.SEEK_END)
+                    fh.write(b"\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                    return
+                except Exception:
+                    pass
+            fh.seek(tail_start)
             fh.truncate()
             fh.flush()
             os.fsync(fh.fileno())
@@ -108,12 +122,13 @@ def main():
     truncate_corpus_to_last_newline(CORPUS)
     existing = validate_destination_corpus(CORPUS)
 
-    promoted = disagreed = noverdict = missing_models = 0
+    promoted = disagreed = noverdict = missing_models = total_quarantined = 0
     with open(CORPUS, "a") as out:
         for f in sorted(glob.glob("tests/redteam/corpus/probe_wave_1*.jsonl")):
             ts = os.path.basename(f)[len("probe_wave_"):-len(".jsonl")]
             cases = read_jsonl_tolerant(f)
             quarantined = find_quarantined(cases)
+            total_quarantined += len(quarantined)
             chk = load_matching_verdicts(f"{SELFDEV}/chkv_{ts}.jsonl", cases, "checker")
             e2 = load_matching_verdicts(f"{SELFDEV}/e2v_{ts}.jsonl", cases)
             e3 = load_matching_verdicts(f"{SELFDEV}/e3v_{ts}.jsonl", cases)
@@ -123,12 +138,10 @@ def main():
                 e2 = e2 or load_matching_verdicts(f"{SELFDEV}/{name}_e2_verdicts.jsonl", cases)
                 e3 = e3 or load_matching_verdicts(f"{SELFDEV}/{name}_e3_verdicts.jsonl", cases)
             for d in cases:
-                if not isinstance(d, dict):
+                if not isinstance(d, dict) or not {"id", "tool", "arguments"}.issubset(d.keys()):
                     continue
                 i = d.get("id")
-                if not i:
-                    continue
-                if i in quarantined:
+                if not i or i in quarantined:
                     continue
                 cv = chk.get(i)
                 if cv not in ("r", "a"):
@@ -163,14 +176,32 @@ def main():
         out.flush()
         os.fsync(out.fileno())
 
-    with open(f"{SELFDEV}/last_promote_counts.txt", "w") as fh:
-        fh.write(f"{promoted} {disagreed} {noverdict}\n")
+    counts_path = f"{SELFDEV}/last_promote_counts.txt"
+    counts_tmp = f"{counts_path}.tmp"
+    with open(counts_tmp, "w") as fh:
+        fh.write(f"{promoted} {disagreed} {noverdict} {total_quarantined}\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(counts_tmp, counts_path)
+
     print(f"promoted: {promoted} no-model-agreement: {disagreed} "
-          f"no-checker-verdict: {noverdict} no-verified-model-verdict: {missing_models}")
-    with open(f"{SELFDEV}/last_promote_summary.json", "w") as fh:
-        json.dump({"scope": "checker_agreement_regression", "promoted": promoted,
-                   "disagreements": disagreed, "missing_checker": noverdict,
-                   "missing_verified_model": missing_models}, fh)
+          f"no-checker-verdict: {noverdict} no-verified-model-verdict: {missing_models} "
+          f"quarantined: {total_quarantined}")
+
+    summary_path = f"{SELFDEV}/last_promote_summary.json"
+    summary_tmp = f"{summary_path}.tmp"
+    with open(summary_tmp, "w") as fh:
+        json.dump({
+            "scope": "checker_agreement_regression",
+            "promoted": promoted,
+            "disagreements": disagreed,
+            "missing_checker": noverdict,
+            "missing_verified_model": missing_models,
+            "quarantined": total_quarantined,
+        }, fh, indent=2)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(summary_tmp, summary_path)
 
 
 if __name__ == "__main__":
