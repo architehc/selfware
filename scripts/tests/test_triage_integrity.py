@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -271,6 +272,90 @@ class ReceiptIntegrityTests(unittest.TestCase):
                 exit_code = redteam_verdicts.main()
                 self.assertEqual(exit_code, 0)
 
+    def test_verdicts_missing_probe_file_exits_nonzero(self):
+        import redteam_verdicts
+        with tempfile.TemporaryDirectory() as directory:
+            probe_path = Path(directory) / "nonexistent_probe.jsonl"
+            verdicts_path = Path(directory) / "verdicts.jsonl"
+            with patch.object(sys, "argv", ["redteam_verdicts.py",
+                                           "--probe-file", str(probe_path),
+                                           "--verdicts-file", str(verdicts_path)]):
+                exit_code = redteam_verdicts.main()
+                self.assertEqual(exit_code, 1)
+
+    def test_verdicts_corrupted_middle_record_exits_nonzero_and_records_summary(self):
+        import redteam_verdicts
+        case1 = fixture("c1")
+        case2 = fixture("c2")
+        with tempfile.TemporaryDirectory() as directory:
+            probe_path = Path(directory) / "probe.jsonl"
+            probe_path.write_text(
+                json.dumps(case1) + "\n"
+                + '{"corrupted": "middle json' + "\n"
+                + json.dumps(case2) + "\n"
+            )
+            verdicts_path = Path(directory) / "verdicts.jsonl"
+            replace_receipts(verdicts_path, [receipt(case1), receipt(case2)])
+
+            with patch.object(sys, "argv", ["redteam_verdicts.py",
+                                           "--probe-file", str(probe_path),
+                                           "--verdicts-file", str(verdicts_path)]):
+                exit_code = redteam_verdicts.main()
+                self.assertEqual(exit_code, 1)
+                summary = json.loads((verdicts_path.parent / "verdicts_summary.json").read_text())
+                self.assertEqual(summary["corrupted_middle"], 1)
+                self.assertEqual(summary["verified"], 2)
+
+    def test_triage_corrupted_middle_record_exits_nonzero_and_records_summary(self):
+        case1 = fixture("c1")
+        case2 = fixture("c2")
+        with tempfile.TemporaryDirectory() as directory:
+            probe_path = Path(directory) / "probe.jsonl"
+            probe_path.write_text(
+                json.dumps(case1) + "\n"
+                + '{"corrupted": "middle json' + "\n"
+                + json.dumps(case2) + "\n"
+            )
+            verdicts_path = Path(directory) / "verdicts.jsonl"
+            replace_receipts(verdicts_path, [receipt(case1), receipt(case2)])
+
+            with patch.object(sys, "argv", ["redteam_triage.py", "--check-complete",
+                                           "--shard", "0/1",
+                                           "--probe-file", str(probe_path),
+                                           "--verdicts-file", str(verdicts_path)]):
+                exit_code = triage.main()
+                self.assertEqual(exit_code, 1)
+                summary = json.loads((verdicts_path.parent / "verdicts_summary.json").read_text())
+                self.assertEqual(summary["corrupted_records"], 1)
+
+    def test_promote_summary_records_corrupted_records(self):
+        case_valid = fixture("valid1")
+        with tempfile.TemporaryDirectory() as directory:
+            corpus = Path(directory) / "corpus"
+            corpus.mkdir()
+            (corpus / "tool_attacks.jsonl").write_text("")
+            selfdev = Path(directory) / "selfdev"
+            selfdev.mkdir()
+            wave_path = corpus / "probe_wave_1999999999.jsonl"
+            wave_path.write_text(
+                json.dumps(case_valid) + "\n"
+                + '{"corrupted": "middle json' + "\n"
+                + json.dumps(fixture("valid2")) + "\n"
+            )
+            chk = receipt(case_valid, key="checker")
+            e2 = receipt(case_valid)
+            replace_receipts(selfdev / "chkv_1999999999.jsonl", [chk], verdict_key="checker")
+            replace_receipts(selfdev / "e2v_1999999999.jsonl", [e2])
+
+            with patch.object(promote, "CORPUS", str(corpus / "tool_attacks.jsonl")), \
+                 patch.object(promote, "SELFDEV", str(selfdev)), \
+                 patch("glob.glob", return_value=[str(wave_path)]):
+                promote.main()
+
+            summary = json.loads((selfdev / "last_promote_summary.json").read_text())
+            self.assertEqual(summary["promoted"], 1)
+            self.assertEqual(summary["corrupted_records"], 1)
+
     def test_wave_middle_corruption_counted_and_logged(self):
         case1 = fixture("c1")
         case2 = fixture("c2")
@@ -316,6 +401,82 @@ class ReceiptIntegrityTests(unittest.TestCase):
              patch("redteam_gen._log_usage"):
             result = redteam_gen.chat("http://dummy", "dummy_model", "prompt", 42)
             self.assertEqual(result, "part1part2")
+
+    def test_sse_reader_uses_read1_if_available(self):
+        import io
+        from redteam_sse import read_sse_response
+
+        class Read1Response:
+            def __init__(self, data):
+                self._stream = io.BytesIO(data)
+                self.read1_called = 0
+                self.read_called = 0
+
+            def read1(self, size=4096):
+                self.read1_called += 1
+                return self._stream.read(size)
+
+            def read(self, size=4096):
+                self.read_called += 1
+                return self._stream.read(size)
+
+        sse_bytes = b'data: {"choices": [{"delta": {"content": "hello"}}]}\ndata: [DONE]\n'
+        resp = Read1Response(sse_bytes)
+        parts, usage = read_sse_response(resp, deadline=time.monotonic() + 10)
+        self.assertEqual("".join(parts), "hello")
+        self.assertGreater(resp.read1_called, 0)
+        self.assertEqual(resp.read_called, 0)
+
+    def test_sse_reader_deadline_exceeded_raises_timeout(self):
+        import io
+        from redteam_sse import read_sse_response
+
+        class StallingResponse:
+            def read(self, size=4096):
+                # Returns 1 byte per call
+                return b" "
+
+        resp = StallingResponse()
+        # Set deadline in the past
+        with self.assertRaises(TimeoutError):
+            read_sse_response(resp, deadline=time.monotonic() - 1.0)
+
+    def test_sse_reader_dynamic_socket_timeout_clamped(self):
+        import io
+        from redteam_sse import read_sse_response
+
+        class MockSock:
+            def __init__(self):
+                self.timeouts = []
+
+            def settimeout(self, val):
+                self.timeouts.append(val)
+
+        class MockRaw:
+            def __init__(self):
+                self._sock = MockSock()
+
+        class MockFp:
+            def __init__(self):
+                self.raw = MockRaw()
+
+        class SockResponse:
+            def __init__(self):
+                self.fp = MockFp()
+                self._stream = io.BytesIO(b'data: {"choices": [{"delta": {"content": "ok"}}]}\ndata: [DONE]\n')
+
+            def read1(self, size=4096):
+                return self._stream.read(size)
+
+        resp = SockResponse()
+        deadline = time.monotonic() + 5.0
+        parts, _ = read_sse_response(resp, deadline=deadline, per_read_timeout=600.0)
+        self.assertEqual("".join(parts), "ok")
+        self.assertTrue(len(resp.fp.raw._sock.timeouts) > 0)
+        # Timeout must be clamped to at most remaining deadline (< 5.0)
+        for t in resp.fp.raw._sock.timeouts:
+            self.assertLessEqual(t, 5.0)
+            self.assertGreaterEqual(t, 0.01)
 
 
 

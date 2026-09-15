@@ -5,7 +5,7 @@ dual-source agreements into the gate corpus.
 Promotion rule (corpus integrity): a case promotes only when at least one
 model verdict (E2 or E3, neutral first-pass) equals the checker verdict.
 Disagreements stay quarantined in their wave file. Writes the counts to
-$SELFDEV/last_promote_counts.txt: "promoted disagreed no_checker_verdict".
+$SELFDEV/last_promote_counts.txt: "promoted disagreed no_checker_verdict quarantined".
 
 Run from the repo root. Idempotent: corpus ids are never re-added.
 """
@@ -125,10 +125,12 @@ def main():
 
     promoted = disagreed = noverdict = missing_models = total_quarantined = 0
     total_skipped_nonconforming = 0
+    total_corrupted_records = 0
     with open(CORPUS, "a") as out:
         for f in sorted(glob.glob("tests/redteam/corpus/probe_wave_1*.jsonl")):
             ts = os.path.basename(f)[len("probe_wave_"):-len(".jsonl")]
-            raw_cases = read_jsonl_tolerant(f)
+            raw_cases, corrupted = read_jsonl_tolerant(f, return_stats=True)
+            total_corrupted_records += corrupted
             cases, skipped = filter_conforming_cases(raw_cases)
             total_skipped_nonconforming += skipped
             quarantined = find_quarantined(cases)
@@ -192,7 +194,8 @@ def main():
 
     print(f"promoted: {promoted} no-model-agreement: {disagreed} "
           f"no-checker-verdict: {noverdict} no-verified-model-verdict: {missing_models} "
-          f"quarantined: {total_quarantined} skipped-nonconforming: {total_skipped_nonconforming}")
+          f"quarantined: {total_quarantined} skipped-nonconforming: {total_skipped_nonconforming} "
+          f"corrupted-records: {total_corrupted_records}")
 
     summary_path = f"{SELFDEV}/last_promote_summary.json"
     summary_tmp = f"{summary_path}.tmp"
@@ -205,6 +208,7 @@ def main():
             "missing_verified_model": missing_models,
             "quarantined": total_quarantined,
             "skipped_nonconforming": total_skipped_nonconforming,
+            "corrupted_records": total_corrupted_records,
         }, fh, indent=2)
         fh.flush()
         os.fsync(fh.fileno())

@@ -20,6 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from redteam_gen import _log_usage, chat  # noqa: E402
+from redteam_sse import read_sse_response  # noqa: E402
 from redteam_verdicts import (  # noqa: E402
     case_fingerprint,
     filter_conforming_cases,
@@ -122,81 +123,10 @@ def classify_batch(endpoint: str, model: str, batch: list, seed: int) -> dict:
         data=body,
         headers={"Content-Type": "application/json"},
     )
-    parts, usage = [], {}
     import time as _time
     deadline = _time.monotonic() + 900  # per-batch wall clock; the 600s
     with urllib.request.urlopen(req, timeout=600) as resp:  # per-read timeout
-        if hasattr(resp, "read"):
-            buffer = b""
-            done = False
-            while not done:
-                remaining = deadline - _time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError("batch exceeded 900s wall clock")
-                if hasattr(resp, "fp") and hasattr(resp.fp, "raw") and hasattr(resp.fp.raw, "_sock"):
-                    try:
-                        resp.fp.raw._sock.settimeout(min(60.0, max(0.1, remaining)))
-                    except Exception:
-                        pass
-                chunk = resp.read(4096)
-                if not chunk:
-                    break
-                buffer += chunk
-                while b"\n" in buffer:
-                    raw, buffer = buffer.split(b"\n", 1)
-                    line = raw.decode("utf-8", "replace").strip()
-                    if not line.startswith("data:"):
-                        continue
-                    payload = line[5:].strip()
-                    if payload == "[DONE]":
-                        done = True
-                        break
-                    try:
-                        chunk_obj = json.loads(payload)
-                    except json.JSONDecodeError:
-                        continue
-                    if chunk_obj.get("usage"):
-                        usage = chunk_obj["usage"]
-                    choices = chunk_obj.get("choices") or []
-                    delta = choices[0].get("delta", {}) if choices else {}
-                    if delta.get("content"):
-                        parts.append(delta["content"])
-            if buffer and not done:
-                line = buffer.decode("utf-8", "replace").strip()
-                if line.startswith("data:"):
-                    payload = line[5:].strip()
-                    if payload != "[DONE]":
-                        try:
-                            chunk_obj = json.loads(payload)
-                            if chunk_obj.get("usage"):
-                                usage = chunk_obj["usage"]
-                            choices = chunk_obj.get("choices") or []
-                            delta = choices[0].get("delta", {}) if choices else {}
-                            if delta.get("content"):
-                                parts.append(delta["content"])
-                        except json.JSONDecodeError:
-                            pass
-        else:
-            for raw in resp:
-                remaining = deadline - _time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError("batch exceeded 900s wall clock")
-                line = raw.decode("utf-8", "replace").strip()
-                if not line.startswith("data:"):
-                    continue
-                payload = line[5:].strip()
-                if payload == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
-                if chunk.get("usage"):
-                    usage = chunk["usage"]
-                choices = chunk.get("choices") or []
-                delta = choices[0].get("delta", {}) if choices else {}
-                if delta.get("content"):
-                    parts.append(delta["content"])
+        parts, usage = read_sse_response(resp, deadline=deadline, per_read_timeout=600.0)
     text = "".join(parts)
     _log_usage(endpoint, model, usage,
                est_prompt=(len(DOCTRINE) + len(prompt)) // 4,
@@ -245,13 +175,14 @@ def lane(endpoint: str, model: str, batches: list, lane_no: int):
               + (f" (missing {len(missing)})" if missing else ""), flush=True)
 
 
-def write_triage_summary(verdicts_path, total, verified, quarantined, missing, skipped_nonconforming=0):
+def write_triage_summary(verdicts_path, total, verified, quarantined, missing, skipped_nonconforming=0, corrupted_records=0):
     summary = {
         "total": total,
         "verified": verified,
         "quarantined": quarantined,
         "missing": missing,
         "skipped_nonconforming": skipped_nonconforming,
+        "corrupted_records": corrupted_records,
     }
     stem = verdicts_path.stem
     summary_path = verdicts_path.parent / f"{stem}_summary.json"
@@ -297,7 +228,10 @@ def main():
     k, n = (int(x) for x in args.shard.split("/"))
     if not (n > 0 and 0 <= k < n and args.lanes > 0 and args.batch > 0):
         ap.error("invalid shard, lane count, or batch size")
-    raw_cases = read_jsonl_tolerant(PROBE)
+    if not PROBE.exists() or not PROBE.is_file():
+        print(f"probe file {PROBE} not found", file=sys.stderr)
+        return 1
+    raw_cases, corrupted = read_jsonl_tolerant(PROBE, return_stats=True)
     conforming_cases, skipped = filter_conforming_cases(raw_cases)
     if skipped:
         print(f"skipped {skipped} non-conforming cases from {PROBE}", file=sys.stderr)
@@ -310,11 +244,16 @@ def main():
     all_unique_ids = {d["id"] for d in cases}
     missing = (all_unique_ids - done) - quarantined
     if args.check_complete:
-        write_triage_summary(VERDICTS, len(all_unique_ids), len(done), len(quarantined), len(missing), skipped_nonconforming=skipped)
+        write_triage_summary(VERDICTS, len(all_unique_ids), len(done), len(quarantined), len(missing),
+                             skipped_nonconforming=skipped, corrupted_records=corrupted)
         msg = f"{len(missing)} cases missing verified verdicts"
         if quarantined:
             msg += f" ({len(quarantined)} quarantined)"
+        if corrupted:
+            msg += f" ({corrupted} corrupted records in probe file)"
         print(msg)
+        if corrupted > 0:
+            return 1
         return 1 if missing else 0
     if not args.endpoint or not args.model:
         ap.error("--endpoint and --model are required for classification")
@@ -331,7 +270,11 @@ def main():
             future.result()
     done = load_done(cases)
     missing = (all_unique_ids - done) - quarantined
-    write_triage_summary(VERDICTS, len(all_unique_ids), len(done), len(quarantined), len(missing), skipped_nonconforming=skipped)
+    write_triage_summary(VERDICTS, len(all_unique_ids), len(done), len(quarantined), len(missing),
+                         skipped_nonconforming=skipped, corrupted_records=corrupted)
+    if corrupted > 0:
+        print(f"probe file {PROBE} contains {corrupted} corrupted records", file=sys.stderr)
+        return 1
     if missing:
         print(f"incomplete triage: {len(missing)} cases remain; rerun to resume", file=sys.stderr)
         return 1

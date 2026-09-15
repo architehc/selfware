@@ -186,24 +186,100 @@ def read_jsonl_tolerant(path, return_stats=False):
 read_jsonl_tolerant.last_corrupted_count = 0
 
 
+def write_verdicts_summary(
+    summary_path,
+    total,
+    verified,
+    quarantined,
+    missing,
+    skipped_nonconforming=0,
+    corrupted_middle=0,
+):
+    summary = {
+        "total": total,
+        "verified": verified,
+        "quarantined": quarantined,
+        "missing": missing,
+        "skipped_nonconforming": skipped_nonconforming,
+        "corrupted_middle": corrupted_middle,
+    }
+    summary_path = Path(summary_path)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = summary_path.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, summary_path)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Check complete input-bound verdict coverage")
     parser.add_argument("--probe-file", required=True)
     parser.add_argument("--verdicts-file", required=True)
     parser.add_argument("--kind", choices=("checker", "model"), default="model")
+    parser.add_argument("--summary-file", help="optional path to summary json")
     args = parser.parse_args()
-    raw_cases = read_jsonl_tolerant(args.probe_file)
+
+    probe_path = Path(args.probe_file)
+    verdicts_path = Path(args.verdicts_file)
+    summary_path = (
+        Path(args.summary_file)
+        if args.summary_file
+        else verdicts_path.parent / f"{verdicts_path.stem}_summary.json"
+    )
+
+    if not probe_path.exists() or not probe_path.is_file():
+        print(f"probe file {args.probe_file} not found", file=sys.stderr)
+        write_verdicts_summary(
+            summary_path,
+            total=0,
+            verified=0,
+            quarantined=0,
+            missing=0,
+            skipped_nonconforming=0,
+            corrupted_middle=0,
+        )
+        return 1
+
+    raw_cases, corrupted_middle = read_jsonl_tolerant(args.probe_file, return_stats=True)
     cases, skipped = filter_conforming_cases(raw_cases)
     if skipped:
         print(f"skipped {skipped} non-conforming cases from {args.probe_file}", file=sys.stderr)
     quarantined = find_quarantined(cases)
-    verdicts = load_matching_verdicts(args.verdicts_file, cases,
-                                      "checker" if args.kind == "checker" else "v",
-                                      quarantined=quarantined)
+    try:
+        verdicts = load_matching_verdicts(
+            args.verdicts_file,
+            cases,
+            "checker" if args.kind == "checker" else "v",
+            quarantined=quarantined,
+        )
+    except Exception as e:
+        print(f"error loading verdicts from {args.verdicts_file}: {e}", file=sys.stderr)
+        verdicts = {}
+
     missing = ({case["id"] for case in cases} - verdicts.keys()) - quarantined
-    print(f"{len(missing)} cases missing verified {args.kind} verdicts"
-          + (f" ({len(quarantined)} quarantined)" if quarantined else "")
-          + (f" ({skipped} non-conforming skipped)" if skipped else ""))
+
+    write_verdicts_summary(
+        summary_path,
+        total=len(cases),
+        verified=len(verdicts),
+        quarantined=len(quarantined),
+        missing=len(missing),
+        skipped_nonconforming=skipped,
+        corrupted_middle=corrupted_middle,
+    )
+
+    print(
+        f"{len(missing)} cases missing verified {args.kind} verdicts"
+        + (f" ({len(quarantined)} quarantined)" if quarantined else "")
+        + (f" ({skipped} non-conforming skipped)" if skipped else "")
+        + (f" ({corrupted_middle} corrupted records in probe file)" if corrupted_middle else "")
+    )
+
+    if corrupted_middle > 0:
+        return 1
     return 1 if missing else 0
 
 

@@ -33,6 +33,9 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+from redteam_sse import read_sse_response
+
 CORPUS_DIR = Path(__file__).resolve().parent.parent / "tests" / "redteam" / "corpus"
 # Local Qwen 3.8 Flash-Next NVFP4 (8 streams, 1M ctx). Reasoning model:
 # reasoning_content is separate from content — chat() collects both.
@@ -163,81 +166,9 @@ def chat(endpoint: str, model: str, prompt: str, seed: int) -> str:
         data=body,
         headers=headers,
     )
-    parts = []
-    usage: dict = {}
     deadline = time.monotonic() + 900
     with urllib.request.urlopen(req, timeout=600) as resp:
-        if hasattr(resp, "read"):
-            buffer = b""
-            done = False
-            while not done:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError("generation exceeded 900s wall clock")
-                if hasattr(resp, "fp") and hasattr(resp.fp, "raw") and hasattr(resp.fp.raw, "_sock"):
-                    try:
-                        resp.fp.raw._sock.settimeout(min(60.0, max(0.1, remaining)))
-                    except Exception:
-                        pass
-                chunk = resp.read(4096)
-                if not chunk:
-                    break
-                buffer += chunk
-                while b"\n" in buffer:
-                    raw, buffer = buffer.split(b"\n", 1)
-                    line = raw.decode("utf-8", "replace").strip()
-                    if not line.startswith("data:"):
-                        continue
-                    payload = line[5:].strip()
-                    if payload == "[DONE]":
-                        done = True
-                        break
-                    try:
-                        chunk_obj = json.loads(payload)
-                    except json.JSONDecodeError:
-                        continue
-                    if chunk_obj.get("usage"):
-                        usage = chunk_obj["usage"]
-                    choices = chunk_obj.get("choices") or []
-                    delta = choices[0].get("delta", {}) if choices else {}
-                    if delta.get("content"):
-                        parts.append(delta["content"])
-            if buffer and not done:
-                line = buffer.decode("utf-8", "replace").strip()
-                if line.startswith("data:"):
-                    payload = line[5:].strip()
-                    if payload != "[DONE]":
-                        try:
-                            chunk_obj = json.loads(payload)
-                            if chunk_obj.get("usage"):
-                                usage = chunk_obj["usage"]
-                            choices = chunk_obj.get("choices") or []
-                            delta = choices[0].get("delta", {}) if choices else {}
-                            if delta.get("content"):
-                                parts.append(delta["content"])
-                        except json.JSONDecodeError:
-                            pass
-        else:
-            for raw in resp:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError("generation exceeded 900s wall clock")
-                line = raw.decode("utf-8", "replace").strip()
-                if not line.startswith("data:"):
-                    continue
-                payload = line[5:].strip()
-                if payload == "[DONE]":
-                    break
-                try:
-                    chunk_obj = json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
-                if chunk_obj.get("usage"):
-                    usage = chunk_obj["usage"]
-                choices = chunk_obj.get("choices") or []
-                delta = choices[0].get("delta", {}) if choices else {}
-                if delta.get("content"):
-                    parts.append(delta["content"])
+        parts, usage = read_sse_response(resp, deadline=deadline, per_read_timeout=600.0)
     text = "".join(parts)
     _log_usage(endpoint, model, usage,
                est_prompt=(len(SYSTEM) + len(prompt)) // 4,
