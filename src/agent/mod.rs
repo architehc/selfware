@@ -2875,7 +2875,7 @@ To call a tool, use this EXACT XML structure:
                     .stdout
                     .split(|&b| b == 0)
                     .filter(|chunk| !chunk.is_empty())
-                    .map(|chunk| String::from_utf8_lossy(chunk).trim().to_string())
+                    .map(|chunk| String::from_utf8_lossy(chunk).to_string())
                     .filter(|s| !s.is_empty())
                     .collect();
                 if let Ok(mut guard) = self.baseline_dirty_paths.lock() {

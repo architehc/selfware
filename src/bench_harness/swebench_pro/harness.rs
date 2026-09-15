@@ -414,6 +414,7 @@ pub fn capture_patch(workdir: &Path) -> Result<String> {
         .args([
             "diff",
             "--cached",
+            "--binary",
             "HEAD",
             "--",
             ".",

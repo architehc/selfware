@@ -305,6 +305,34 @@ mod completion_gate_tests {
     }
 
     #[tokio::test]
+    async fn diff_paths_preserves_filenames_with_spaces() {
+        let (dir, _guard) = git_repo(&[("base with spaces.txt", "initial content")]);
+        let agent = mutation_task_agent("Modify and create files with spaces").await;
+        agent.capture_baseline_dirty_paths();
+
+        // Mutate existing file with spaces
+        std::fs::write(dir.path().join("base with spaces.txt"), "modified content").unwrap();
+
+        // Create new untracked file with spaces
+        std::fs::write(dir.path().join("new file with spaces.txt"), "brand new").unwrap();
+
+        let paths = agent
+            .diff_paths_for_completion_gate()
+            .await
+            .expect("diff paths must succeed");
+        assert!(
+            paths.contains(&"base with spaces.txt".to_string()),
+            "diff_paths_for_completion_gate must preserve modified filename containing spaces: {:?}",
+            paths
+        );
+        assert!(
+            paths.contains(&"new file with spaces.txt".to_string()),
+            "diff_paths_for_completion_gate must preserve untracked filename containing spaces: {:?}",
+            paths
+        );
+    }
+
+    #[tokio::test]
     async fn non_code_artifact_without_readback_guides_to_file_read_only() {
         let agent = artifact_agent(
             "Create notes.txt containing hello.",

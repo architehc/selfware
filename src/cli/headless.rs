@@ -261,6 +261,7 @@ pub fn capture_patch() -> anyhow::Result<String> {
         .args([
             "diff",
             "--cached",
+            "--binary",
             "HEAD",
             "--",
             ".",

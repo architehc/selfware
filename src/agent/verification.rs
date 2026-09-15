@@ -745,7 +745,7 @@ impl Agent {
         false
     }
 
-    async fn diff_paths_for_completion_gate(&self) -> Option<Vec<String>> {
+    pub(crate) async fn diff_paths_for_completion_gate(&self) -> Option<Vec<String>> {
         let root = super::current_project_root();
         // Async process spawn — this runs inside the async check_completion_gate,
         // so a blocking std::process::Command would stall a tokio worker thread.
@@ -762,7 +762,7 @@ impl Agent {
             .stdout
             .split(|&b| b == 0)
             .filter(|chunk| !chunk.is_empty())
-            .map(|chunk| String::from_utf8_lossy(chunk).trim().to_string())
+            .map(|chunk| String::from_utf8_lossy(chunk).to_string())
             .filter(|s| !s.is_empty())
             .collect();
 
@@ -783,7 +783,7 @@ impl Agent {
                     if chunk.is_empty() {
                         continue;
                     }
-                    let line = String::from_utf8_lossy(chunk).trim().to_string();
+                    let line = String::from_utf8_lossy(chunk).to_string();
                     if !line.is_empty() && !all_paths.iter().any(|p| p == &line) {
                         all_paths.push(line);
                     }
@@ -1105,6 +1105,7 @@ impl Agent {
         let output = tokio::process::Command::new("git")
             .args([
                 "log",
+                "-z",
                 "--pretty=format:--%ct",
                 "--name-only",
                 &format!("--since={}", since.to_rfc3339()),
@@ -1120,15 +1121,21 @@ impl Agent {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut commit_ts: i64 = 0;
         let mut paths: Vec<String> = stdout
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .filter_map(|line| {
-                if let Some(ts) = line.strip_prefix("--") {
-                    commit_ts = ts.parse().unwrap_or(0);
+            .split('\0')
+            .filter(|chunk| !chunk.is_empty())
+            .filter_map(|chunk| {
+                if let Some(ts_and_path) = chunk.strip_prefix("--") {
+                    if let Some((ts, rest)) = ts_and_path.split_once('\n') {
+                        commit_ts = ts.parse().unwrap_or(0);
+                        if commit_ts >= run_start && !rest.is_empty() {
+                            return Some(rest.to_string());
+                        }
+                    } else {
+                        commit_ts = ts_and_path.parse().unwrap_or(0);
+                    }
                     return None;
                 }
-                (commit_ts >= run_start).then(|| line.to_string())
+                (commit_ts >= run_start).then(|| chunk.to_string())
             })
             .collect();
         paths.sort();
