@@ -271,6 +271,53 @@ class ReceiptIntegrityTests(unittest.TestCase):
                 exit_code = redteam_verdicts.main()
                 self.assertEqual(exit_code, 0)
 
+    def test_wave_middle_corruption_counted_and_logged(self):
+        case1 = fixture("c1")
+        case2 = fixture("c2")
+        with tempfile.TemporaryDirectory() as directory:
+            wave_path = Path(directory) / "wave.jsonl"
+            # 3 lines: line 2 is middle corruption
+            wave_path.write_text(
+                json.dumps(case1) + "\n"
+                + '{"corrupted": "middle json' + "\n"
+                + json.dumps(case2) + "\n"
+            )
+            cases, corrupted = promote.read_jsonl_tolerant(str(wave_path), return_stats=True)
+            self.assertEqual(len(cases), 2)
+            self.assertEqual(corrupted, 1)
+            self.assertEqual(promote.read_jsonl_tolerant.last_corrupted_count, 1)
+
+    def test_sse_reader_unterminated_final_line_at_eof(self):
+        import io
+        import redteam_gen
+
+        class FakeResponse:
+            def __init__(self, data):
+                self._stream = io.BytesIO(data)
+                self.fp = None
+
+            def read(self, size=4096):
+                return self._stream.read(size)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+        # Data with unterminated final chunk (no trailing newline)
+        sse_bytes = (
+            b'data: {"choices": [{"delta": {"content": "part1"}}]}\n'
+            b'data: {"choices": [{"delta": {"content": "part2"}}]}'
+        )
+        fake_resp = FakeResponse(sse_bytes)
+
+        with patch("urllib.request.urlopen", return_value=fake_resp), \
+             patch("redteam_gen._log_usage"):
+            result = redteam_gen.chat("http://dummy", "dummy_model", "prompt", 42)
+            self.assertEqual(result, "part1part2")
+
+
 
 if __name__ == "__main__":
     unittest.main()

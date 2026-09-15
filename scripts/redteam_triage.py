@@ -161,6 +161,21 @@ def classify_batch(endpoint: str, model: str, batch: list, seed: int) -> dict:
                     delta = choices[0].get("delta", {}) if choices else {}
                     if delta.get("content"):
                         parts.append(delta["content"])
+            if buffer and not done:
+                line = buffer.decode("utf-8", "replace").strip()
+                if line.startswith("data:"):
+                    payload = line[5:].strip()
+                    if payload != "[DONE]":
+                        try:
+                            chunk_obj = json.loads(payload)
+                            if chunk_obj.get("usage"):
+                                usage = chunk_obj["usage"]
+                            choices = chunk_obj.get("choices") or []
+                            delta = choices[0].get("delta", {}) if choices else {}
+                            if delta.get("content"):
+                                parts.append(delta["content"])
+                        except json.JSONDecodeError:
+                            pass
         else:
             for raw in resp:
                 remaining = deadline - _time.monotonic()

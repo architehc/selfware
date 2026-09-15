@@ -159,22 +159,31 @@ def replace_receipts(path, receipts, verdict_key="v"):
                 temporary.unlink(missing_ok=True)
 
 
-def read_jsonl_tolerant(path):
+def read_jsonl_tolerant(path, return_stats=False):
     """Read JSONL file yielding parsed objects, skipping blank lines and torn/truncated lines."""
     if not path or not Path(path).exists():
-        return []
+        return ([], 0) if return_stats else []
     cases = []
-    with open(path, "r", encoding="utf-8") as fh:
-        for line in fh:
-            line_str = line.strip()
-            if not line_str:
-                continue
-            try:
-                cases.append(json.loads(line_str))
-            except json.JSONDecodeError:
+    lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    total = len(lines)
+    corrupted_middle = 0
+    for idx, line in enumerate(lines, 1):
+        line_str = line.strip()
+        if not line_str:
+            continue
+        try:
+            cases.append(json.loads(line_str))
+        except json.JSONDecodeError as e:
+            if idx == total:
                 # Wave file mid-append by a generator — skip truncated tail line safely
                 continue
-    return cases
+            corrupted_middle += 1
+            print(f"corrupted JSON in wave file {path} at line {idx}/{total}: {e}", file=sys.stderr)
+    read_jsonl_tolerant.last_corrupted_count = corrupted_middle
+    return (cases, corrupted_middle) if return_stats else cases
+
+
+read_jsonl_tolerant.last_corrupted_count = 0
 
 
 def main():
