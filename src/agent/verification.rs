@@ -1119,28 +1119,7 @@ impl Agent {
             return None;
         }
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut commit_ts: i64 = 0;
-        let mut paths: Vec<String> = stdout
-            .split('\0')
-            .filter(|chunk| !chunk.is_empty())
-            .filter_map(|chunk| {
-                if let Some(ts_and_path) = chunk.strip_prefix("--") {
-                    if let Some((ts, rest)) = ts_and_path.split_once('\n') {
-                        commit_ts = ts.parse().unwrap_or(0);
-                        if commit_ts >= run_start && !rest.is_empty() {
-                            return Some(rest.to_string());
-                        }
-                    } else {
-                        commit_ts = ts_and_path.parse().unwrap_or(0);
-                    }
-                    return None;
-                }
-                (commit_ts >= run_start).then(|| chunk.to_string())
-            })
-            .collect();
-        paths.sort();
-        paths.dedup();
-        Some(paths)
+        Some(parse_git_log_z_output(&stdout, run_start))
     }
 
     async fn mutation_completion_gate(&self) -> Option<String> {
@@ -2640,6 +2619,31 @@ fn build_requirements_audit_prompt(
             "Task instruction:\n{instruction}\n\nAgent's final summary:\n{summary}\n\nFiles changed: {files}{census_block}"
         )),
     ]
+}
+
+pub(crate) fn parse_git_log_z_output(stdout: &str, run_start: i64) -> Vec<String> {
+    let mut commit_ts: i64 = 0;
+    let mut paths: Vec<String> = stdout
+        .split('\0')
+        .filter(|chunk| !chunk.is_empty())
+        .filter_map(|chunk| {
+            if let Some(ts_and_path) = chunk.strip_prefix("--") {
+                if let Some((ts, rest)) = ts_and_path.split_once('\n') {
+                    commit_ts = ts.parse().unwrap_or(0);
+                    if commit_ts >= run_start && !rest.is_empty() {
+                        return Some(rest.to_string());
+                    }
+                } else {
+                    commit_ts = ts_and_path.parse().unwrap_or(0);
+                }
+                return None;
+            }
+            (commit_ts >= run_start).then(|| chunk.to_string())
+        })
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 #[cfg(test)]

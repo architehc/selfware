@@ -1531,8 +1531,16 @@ async fn test_find_available_port_all_used() {
 #[tokio::test(start_paused = true)]
 #[cfg(unix)]
 async fn test_port_info_unused_port() {
-    // Port info for an unused high port
-    let info = port_info(59998).await;
+    // Find an unused high port with no active process or socket connection
+    let mut free_port = None;
+    for p in (61000..=61200).rev() {
+        if port_info(p).await.is_none() {
+            free_port = Some(p);
+            break;
+        }
+    }
+    let port = free_port.expect("should find an unused port in range 61000-61200");
+    let info = port_info(port).await;
     // Should return None since nothing is listening
     assert!(info.is_none() || info.as_ref().map(|s| s.is_empty()).unwrap_or(true));
 }

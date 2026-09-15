@@ -90,3 +90,46 @@ async fn test_localize_issue_tool_execute() {
     assert!(!candidates.is_empty());
     assert!(candidates[0]["file"].as_str().unwrap().contains("lib.rs"));
 }
+
+#[test]
+fn test_recent_git_files_with_spaces_and_leading_whitespace() {
+    let temp_dir = TempDir::new().unwrap();
+    let repo = temp_dir.path();
+
+    let init_ok = std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(repo)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !init_ok {
+        return;
+    }
+    let _ = std::process::Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(repo)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["config", "user.name", "Test User"])
+        .current_dir(repo)
+        .status();
+
+    fs::write(repo.join(" normal.rs"), "fn normal() {}\n").unwrap();
+    fs::write(repo.join("file with spaces.rs"), "fn spaces() {}\n").unwrap();
+
+    let _ = std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(repo)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(repo)
+        .status();
+
+    let files = recent_git_files(repo.to_str().unwrap());
+    assert!(files.contains(" normal.rs"), "must preserve leading space");
+    assert!(
+        files.contains("file with spaces.rs"),
+        "must preserve spaces"
+    );
+}

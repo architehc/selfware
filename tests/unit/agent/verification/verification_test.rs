@@ -306,15 +306,24 @@ mod completion_gate_tests {
 
     #[tokio::test]
     async fn diff_paths_preserves_filenames_with_spaces() {
-        let (dir, _guard) = git_repo(&[("base with spaces.txt", "initial content")]);
+        let (dir, _guard) = git_repo(&[
+            ("base with spaces.txt", "initial content"),
+            (" leading_base.txt", "initial leading"),
+        ]);
         let agent = mutation_task_agent("Modify and create files with spaces").await;
         agent.capture_baseline_dirty_paths();
 
-        // Mutate existing file with spaces
+        // Mutate existing files
         std::fs::write(dir.path().join("base with spaces.txt"), "modified content").unwrap();
+        std::fs::write(dir.path().join(" leading_base.txt"), "modified leading").unwrap();
 
-        // Create new untracked file with spaces
+        // Create new untracked files with spaces and leading whitespace
         std::fs::write(dir.path().join("new file with spaces.txt"), "brand new").unwrap();
+        std::fs::write(
+            dir.path().join(" leading_untracked.txt"),
+            "leading brand new",
+        )
+        .unwrap();
 
         let paths = agent
             .diff_paths_for_completion_gate()
@@ -326,9 +335,43 @@ mod completion_gate_tests {
             paths
         );
         assert!(
+            paths.contains(&" leading_base.txt".to_string()),
+            "diff_paths_for_completion_gate must preserve modified filename with leading whitespace: {:?}",
+            paths
+        );
+        assert!(
             paths.contains(&"new file with spaces.txt".to_string()),
             "diff_paths_for_completion_gate must preserve untracked filename containing spaces: {:?}",
             paths
+        );
+        assert!(
+            paths.contains(&" leading_untracked.txt".to_string()),
+            "diff_paths_for_completion_gate must preserve untracked filename with leading whitespace: {:?}",
+            paths
+        );
+    }
+
+    #[test]
+    fn test_parse_git_log_z_output_filtering_and_markers() {
+        // Output with two commits:
+        // Commit 1 at ts=100 (before run_start 150): should be filtered out
+        // Commit 2 at ts=200 (at/after run_start 150): should be included
+        let raw = "--100\nold_file.rs\0old_file2.rs\0\0--200\nnew_file.rs\0 leading_file.txt\0";
+        let paths = parse_git_log_z_output(raw, 150);
+        assert_eq!(
+            paths,
+            vec![" leading_file.txt".to_string(), "new_file.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_parse_git_log_z_output_empty_commit_and_duplicates() {
+        // Commit with no files, then commit with duplicates across commits
+        let raw = "--100\0\0--200\nshared.txt\0--300\nshared.txt\0another.txt\0";
+        let paths = parse_git_log_z_output(raw, 200);
+        assert_eq!(
+            paths,
+            vec!["another.txt".to_string(), "shared.txt".to_string()]
         );
     }
 

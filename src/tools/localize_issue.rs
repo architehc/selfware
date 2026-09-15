@@ -73,6 +73,7 @@ fn recent_git_files(repo_path: &str) -> HashSet<String> {
     let output = std::process::Command::new("git")
         .args([
             "log",
+            "-z",
             "--pretty=format:",
             "--name-only",
             "--since=30 days ago",
@@ -83,9 +84,9 @@ fn recent_git_files(repo_path: &str) -> HashSet<String> {
 
     match output {
         Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
+            .split('\0')
+            .filter(|chunk| !chunk.is_empty())
+            .map(|chunk| chunk.to_string())
             .collect(),
         _ => HashSet::new(),
     }
