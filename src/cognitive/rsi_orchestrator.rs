@@ -473,6 +473,10 @@ impl RSIOrchestrator {
             unique_out_dir.join(".lease_pid"),
             std::process::id().to_string(),
         );
+        let _lease_guard = crate::evolution::fitness::LeaseGuard {
+            dir: unique_out_dir.clone(),
+            lease_file: Some(_lease_file),
+        };
 
         let output = Command::new("bash")
             .arg(&script_path)

@@ -969,3 +969,70 @@ fn test_prune_completed_run_with_alive_parent_pid_and_locked_run() {
         nix::libc::flock(locked_file.as_raw_fd(), nix::libc::LOCK_UN);
     }
 }
+
+#[test]
+fn test_failed_run_becomes_prune_eligible_past_age_backstop() {
+    use std::fs::{self, File};
+    use tempfile::tempdir;
+
+    let temp = tempdir().unwrap();
+    let reports_dir = temp.path();
+
+    // 1. Failed uncompleted run (no .completed marker) older than 2 hours whose recorded
+    // daemon PID is still alive. The age backstop must prevent this from escaping retention.
+    let failed_old_dir = reports_dir.join("sab-failed-old");
+    fs::create_dir(&failed_old_dir).unwrap();
+    File::create(failed_old_dir.join(".lease")).unwrap(); // unheld
+    fs::write(
+        failed_old_dir.join(".lease_pid"),
+        format!("{}\n", std::process::id()),
+    )
+    .unwrap();
+
+    // 2. Active in-flight run (< 2h old) with live recorded PID: must be protected
+    let inflight_recent_dir = reports_dir.join("sab-inflight-recent");
+    fs::create_dir(&inflight_recent_dir).unwrap();
+    File::create(inflight_recent_dir.join(".lease")).unwrap(); // unheld lock, but recent & live PID
+    fs::write(
+        inflight_recent_dir.join(".lease_pid"),
+        format!("{}\n", std::process::id()),
+    )
+    .unwrap();
+
+    // 3. Fresh completed run (survives under keep_count = 1)
+    let fresh_dir = reports_dir.join("sab-fresh-completed");
+    fs::create_dir(&fresh_dir).unwrap();
+    File::create(fresh_dir.join(".completed")).unwrap();
+
+    #[cfg(unix)]
+    {
+        // Backdate failed_old_dir to > 2h ago
+        let cname = std::ffi::CString::new(failed_old_dir.to_str().unwrap()).unwrap();
+        let times = [
+            nix::libc::timespec {
+                tv_sec: 1_000_000,
+                tv_nsec: 0,
+            },
+            nix::libc::timespec {
+                tv_sec: 1_000_000,
+                tv_nsec: 0,
+            },
+        ];
+        unsafe {
+            nix::libc::utimensat(nix::libc::AT_FDCWD, cname.as_ptr(), times.as_ptr(), 0);
+        }
+    }
+
+    // Prune with keep_count = 1
+    prune_report_dirs(reports_dir, "sab-", 1, &[]);
+
+    assert!(fresh_dir.exists(), "fresh completed dir must survive");
+    assert!(
+        inflight_recent_dir.exists(),
+        "recent in-flight run (<2h) must be protected"
+    );
+    assert!(
+        !failed_old_dir.exists(),
+        "failed run older than 2h must be pruned despite still-alive daemon PID"
+    );
+}

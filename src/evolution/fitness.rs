@@ -149,6 +149,11 @@ pub fn prune_report_dirs(
                 || path.join("sab_report.json").exists()
                 || path.join("report.json").exists();
 
+            let age = std::time::SystemTime::now()
+                .duration_since(mtime)
+                .unwrap_or_default();
+            let is_recent = age < Duration::from_secs(7200);
+
             if lease_path.exists() {
                 #[cfg(unix)]
                 {
@@ -166,16 +171,17 @@ pub fn prune_report_dirs(
                                 return None;
                             }
                             // Lock acquired by us! No process actively holds this lease lock.
-                            if is_completed {
-                                // Completed run: a surviving parent daemon must NOT exempt a finished run
-                                // from retention limits (Finding 2). Clean up leftover lease files and proceed.
+                            if is_completed || !is_recent {
+                                // Completed run, or uncompleted run past the 2-hour backstop:
+                                // a surviving parent daemon must NOT exempt an abandoned or finished
+                                // run from retention limits. Clean up leftover lease files and proceed.
                                 let _ = std::fs::remove_file(&lease_pid_path);
                                 let _ = std::fs::remove_file(&lease_path);
                                 unsafe {
                                     nix::libc::flock(file.as_raw_fd(), nix::libc::LOCK_UN);
                                 }
                             } else {
-                                // Not completed: check if the recorded PID is dead.
+                                // Not completed and recent (< 2h): check if the recorded PID is dead.
                                 let mut pid_is_dead = false;
                                 if lease_pid_path.exists() {
                                     if let Ok(pid_str) = std::fs::read_to_string(&lease_pid_path) {
@@ -218,7 +224,7 @@ pub fn prune_report_dirs(
                     }
                 }
             } else if lease_pid_path.exists() {
-                if is_completed {
+                if is_completed || !is_recent {
                     let _ = std::fs::remove_file(&lease_pid_path);
                 } else {
                     #[cfg(unix)]
@@ -241,11 +247,8 @@ pub fn prune_report_dirs(
                     }
                 }
             }
-            let age = std::time::SystemTime::now()
-                .duration_since(mtime)
-                .unwrap_or_default();
             // If not completed and less than 2 hours old, consider it in-flight and protect it
-            if !is_completed && age < Duration::from_secs(7200) {
+            if !is_completed && is_recent {
                 return None;
             }
             Some((mtime, path))
@@ -260,6 +263,28 @@ pub fn prune_report_dirs(
                 tracing::warn!("Failed to remove pruned report directory {:?}: {}", path, e);
             }
         }
+    }
+}
+
+/// RAII lease guard to ensure `.lease_pid` and `.lease` are cleaned up on all exit paths,
+/// including early returns and error conditions.
+pub(crate) struct LeaseGuard {
+    pub(crate) dir: PathBuf,
+    pub(crate) lease_file: Option<std::fs::File>,
+}
+
+impl Drop for LeaseGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.dir.join(".lease_pid"));
+        if let Some(file) = self.lease_file.take() {
+            #[cfg(unix)]
+            unsafe {
+                use std::os::fd::AsRawFd;
+                nix::libc::flock(file.as_raw_fd(), nix::libc::LOCK_UN);
+            }
+            drop(file);
+        }
+        let _ = std::fs::remove_file(self.dir.join(".lease"));
     }
 }
 
@@ -303,6 +328,10 @@ pub fn run_sab(selfware_binary: &Path, config: &SabConfig) -> Result<SabResult, 
         unique_out_dir.join(".lease_pid"),
         std::process::id().to_string(),
     );
+    let lease_guard = LeaseGuard {
+        dir: unique_out_dir.clone(),
+        lease_file: Some(lease_file),
+    };
 
     // Set up environment for SAB runner
     let output = Command::new("bash")
@@ -333,9 +362,7 @@ pub fn run_sab(selfware_binary: &Path, config: &SabConfig) -> Result<SabResult, 
             unique_out_dir.display()
         );
     }
-    let _ = std::fs::remove_file(unique_out_dir.join(".lease_pid"));
-    drop(lease_file);
-    let _ = std::fs::remove_file(unique_out_dir.join(".lease"));
+    drop(lease_guard);
 
     // Parse SAB output — the runner produces JSON reports
     let stdout = String::from_utf8_lossy(&output.stdout);

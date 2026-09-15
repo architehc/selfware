@@ -2594,6 +2594,35 @@ fn test_merge_extra_body_rejects_top_level_xhigh_and_high_reasoning_effort_for_q
 }
 
 #[test]
+fn test_merge_extra_body_rejects_non_string_reasoning_effort() {
+    let mut body = serde_json::json!({
+        "model": "qwen38-flash-next",
+        "messages": [],
+    });
+    let mut extra = serde_json::Map::new();
+    extra.insert("reasoning_effort".to_string(), serde_json::json!(true));
+    let err = merge_extra_body(&mut body, Some(&extra), "chat request").unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("reasoning_effort must be a string"),
+        "error should state reasoning_effort must be a string: {err}"
+    );
+
+    let mut body2 = serde_json::json!({
+        "model": "gpt-4o",
+        "messages": [],
+    });
+    let mut extra2 = serde_json::Map::new();
+    extra2.insert("reasoning_effort".to_string(), serde_json::json!(123));
+    let err2 = merge_extra_body(&mut body2, Some(&extra2), "chat request").unwrap_err();
+    assert!(
+        err2.to_string()
+            .contains("reasoning_effort must be a string"),
+        "error should state reasoning_effort must be a string: {err2}"
+    );
+}
+
+#[test]
 fn test_merge_extra_body_rejects_non_allowlisted_keys() {
     let mut body = serde_json::json!({
         "model": "test",

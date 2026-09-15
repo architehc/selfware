@@ -450,7 +450,7 @@ pub async fn auto_calibrate(config: &mut Config) -> Result<bool> {
         config.endpoint = detected.endpoint;
         config.model = detected.model;
         config.max_tokens = detected.max_tokens;
-        config.context_length = best.context_length;
+        config.context_length = detected.context_length;
         config.temperature = detected.temperature;
         config.agent.native_function_calling = detected.agent.native_function_calling;
         config.agent.streaming = detected.agent.streaming;

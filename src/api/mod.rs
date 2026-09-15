@@ -217,19 +217,22 @@ pub(crate) fn merge_extra_body(
         if k == "reasoning_effort" {
             let model_name = body_obj.get("model").and_then(|v| v.as_str()).unwrap_or("");
             let is_qwen = model_name.to_ascii_lowercase().contains("qwen");
-            if is_qwen {
-                if let Some(val) = value.as_str() {
-                    if !val.eq_ignore_ascii_case("low") && !val.eq_ignore_ascii_case("medium") {
-                        bail!(
-                            "{} extra_body cannot set reasoning_effort to '{}' at top-level for Qwen models. \
-                             Top-level reasoning_effort only accepts 'low' or 'medium' ('high' is rejected by the model template, \
-                             and 'xhigh' is rejected by the endpoint schema). \
-                             For xhigh reasoning, place it in chat_template_kwargs.reasoning_effort \
-                             or omit the field (default is xhigh).",
-                            context, val
-                        );
-                    }
-                }
+            let Some(val) = value.as_str() else {
+                bail!(
+                    "{} extra_body.reasoning_effort must be a string ('low' or 'medium'), got: {}",
+                    context,
+                    value
+                );
+            };
+            if is_qwen && !val.eq_ignore_ascii_case("low") && !val.eq_ignore_ascii_case("medium") {
+                bail!(
+                    "{} extra_body cannot set reasoning_effort to '{}' at top-level for Qwen models. \
+                     Top-level reasoning_effort only accepts 'low' or 'medium' ('high' is rejected by the model template, \
+                     and 'xhigh' is rejected by the endpoint schema). \
+                     For xhigh reasoning, place it in chat_template_kwargs.reasoning_effort \
+                     or omit the field (default is xhigh).",
+                    context, val
+                );
             }
         }
     }

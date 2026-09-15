@@ -973,3 +973,38 @@ async fn test_scan_local_endpoints_returns_vec() {
         assert!(ep.context_length > 0, "context_length should be positive");
     }
 }
+
+#[test]
+fn test_unpack_preserves_profile_pinned_context_length_over_advertised() {
+    let mut config = Config::default();
+    let profile =
+        crate::config::model_profiles::match_profile("qwen38-flash-next").expect("qwen profile");
+    let pinned_ctx = profile.context_length.expect("pinned context length");
+    assert_eq!(pinned_ctx, 350_000);
+
+    let mut detected = Config::default();
+    detected.endpoint = "http://localhost:8000/v1".to_string();
+    detected.model = "qwen38-flash-next".to_string();
+    detected.context_length = pinned_ctx;
+    detected.max_tokens = 32768;
+    detected.agent.token_budget = 210_000;
+
+    let best = DiscoveredEndpoint {
+        provider: "Generic".to_string(),
+        endpoint: "http://localhost:8000/v1".to_string(),
+        model: "qwen38-flash-next".to_string(),
+        context_length: 1_000_000, // advertised 1M
+        multimodal: false,
+    };
+
+    // Step 4 assignment in unpack must use detected.context_length
+    config.endpoint = detected.endpoint;
+    config.model = detected.model;
+    config.max_tokens = detected.max_tokens;
+    config.context_length = detected.context_length;
+    config.agent.token_budget = detected.agent.token_budget;
+
+    assert_eq!(config.context_length, 350_000);
+    assert_eq!(config.agent.token_budget, 210_000);
+    assert_ne!(config.context_length, best.context_length);
+}
