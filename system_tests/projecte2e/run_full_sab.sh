@@ -587,9 +587,9 @@ for spec in all_scenarios:
 lines.append('')
 lines.append('## Artifacts')
 lines.append('')
-lines.append(f'- Report: \`system_tests/projecte2e/reports/{timestamp}/REPORT.md\`')
-lines.append(f'- Results: \`system_tests/projecte2e/reports/{timestamp}/results/\`')
-lines.append(f'- Logs: \`system_tests/projecte2e/reports/{timestamp}/logs/<scenario>/\`')
+lines.append(f'- Report: \`system_tests/projecte2e/reports/sab-{timestamp}/REPORT.md\`')
+lines.append(f'- Results: \`system_tests/projecte2e/reports/sab-{timestamp}/results/\`')
+lines.append(f'- Logs: \`system_tests/projecte2e/reports/sab-{timestamp}/logs/<scenario>/\`')
 
 with open('${SUMMARY_MD}', 'w') as f:
     f.write('\n'.join(lines) + '\n')

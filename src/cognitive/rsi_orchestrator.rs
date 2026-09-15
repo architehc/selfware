@@ -458,7 +458,13 @@ impl RSIOrchestrator {
         #[cfg(unix)]
         unsafe {
             use std::os::fd::AsRawFd;
-            nix::libc::flock(_lease_file.as_raw_fd(), nix::libc::LOCK_EX);
+            let rc = nix::libc::flock(_lease_file.as_raw_fd(), nix::libc::LOCK_EX);
+            if rc != 0 {
+                return Err(SelfwareError::Internal(format!(
+                    "Failed to acquire exclusive lease lock on {}: rc={rc}",
+                    unique_out_dir.display()
+                )));
+            }
         }
 
         let output = Command::new("bash")

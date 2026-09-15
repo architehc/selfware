@@ -29,6 +29,22 @@ CODING_SCENARIOS=(
 
 mkdir -p "${OUT_DIR}" "${WORK_ROOT}" "${LOG_ROOT}" "${SCREENSHOT_DIR}"
 
+LEASE_FILE="${OUT_DIR}/.lease"
+touch "${LEASE_FILE}"
+if command -v flock >/dev/null 2>&1; then
+  exec 9<"${LEASE_FILE}"
+  flock -n 9 || { echo "ERROR: Could not acquire lease on ${LEASE_FILE}" >&2; exit 1; }
+else
+  python3 -c "import fcntl, sys; f = open(sys.argv[1], 'r+'); fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); sys.stdin.read()" "${LEASE_FILE}" &
+  LEASE_PID=$!
+  sleep 0.05
+  if ! kill -0 "${LEASE_PID}" 2>/dev/null; then
+    echo "ERROR: Could not acquire lease on ${LEASE_FILE}" >&2
+    exit 1
+  fi
+  trap 'kill "${LEASE_PID}" 2>/dev/null || true' EXIT
+fi
+
 # Resolve timeout command (GNU coreutils on macOS installs as gtimeout)
 if command -v timeout >/dev/null 2>&1; then
   TIMEOUT_CMD="timeout"
@@ -340,12 +356,13 @@ ALL_SCENARIOS+=("swarm_session")
 
   echo "## Artifacts"
   echo
-  echo "- Results TSV: \`reports/${TIMESTAMP}/results.tsv\`"
-  echo "- Full logs: \`reports/${TIMESTAMP}/logs/\`"
-  echo "- Screenshots: \`reports/${TIMESTAMP}/screenshots/\`"
+  echo "- Results TSV: \`reports/sab-${TIMESTAMP}/results.tsv\`"
+  echo "- Full logs: \`reports/sab-${TIMESTAMP}/logs/\`"
+  echo "- Screenshots: \`reports/sab-${TIMESTAMP}/screenshots/\`"
   echo "- Scenario workdirs after run: \`work/\`"
 } > "${SUMMARY_MD}"
 
+touch "${OUT_DIR}/.completed"
 ln -sfn "${OUT_DIR}" "${THIS_DIR}/reports/latest"
 
 echo ""

@@ -408,7 +408,6 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
     log_phase("Measuring baseline fitness...");
     let mut sab_config = SabConfig::default();
-    let mut exempt_reports: Vec<std::path::PathBuf> = Vec::new();
     let sab_mode = std::env::var("SELFWARE_EVOLVE_SAB").is_ok();
 
     // Only run SAB baseline if explicitly requested via env var
@@ -418,7 +417,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         let selfware_binary = repo_root.join("target/release/selfware");
         match fitness::run_sab(&selfware_binary, &sab_config) {
             Ok(r) => {
-                exempt_reports.push(r.report_path.clone());
+                sab_config.exempt_reports.push(r.report_path.clone());
                 let m =
                     metrics_from_sab_result(&r, &selfware_binary, config.safety.max_binary_size_mb);
                 (m, Some(r))
@@ -877,6 +876,8 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         repo_root,
                         &serde_json::json!({
                             "event": "commit_failed",
+                            "outcome": "commit_failed",
+                            "reason": "git commit or tag creation failed",
                             "timestamp": chrono_now(),
                             "generation": generation,
                             "description": winner.description,

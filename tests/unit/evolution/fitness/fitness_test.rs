@@ -568,15 +568,37 @@ fn test_prune_report_dirs_retention_and_protection() {
     fs::create_dir(&non_prefixed).unwrap();
     File::create(non_prefixed.join("summary.txt")).unwrap();
 
-    // 3. Create an exempt directory (e.g. winner from older generation)
+    // 3. Create an exempt directory via file-shaped report path (e.g. winner from older generation)
     let exempt_dir = reports_dir.join("sab-run-02"); // older, normally would be pruned
-    let exempt_paths = vec![exempt_dir.clone()];
+    let exempt_report_file = exempt_dir.join("sab_report.json");
+    File::create(&exempt_report_file).unwrap();
+    let exempt_paths = vec![exempt_report_file];
 
     // 4. Create an actively leased directory (in-flight run)
+    // Make this non-vacuous: write .completed and set mtime to >2 hours ago,
+    // so it would be pruned if not for the exclusive flock on .lease.
     let leased_dir = reports_dir.join("sab-run-in-flight");
     fs::create_dir(&leased_dir).unwrap();
+    File::create(leased_dir.join(".completed")).unwrap();
     let lease_file = leased_dir.join(".lease");
     let lease_handle = File::create(&lease_file).unwrap();
+    #[cfg(unix)]
+    {
+        let cname = std::ffi::CString::new(leased_dir.to_str().unwrap()).unwrap();
+        let times = [
+            nix::libc::timespec {
+                tv_sec: 1_000_000,
+                tv_nsec: 0,
+            },
+            nix::libc::timespec {
+                tv_sec: 1_000_000,
+                tv_nsec: 0,
+            },
+        ];
+        unsafe {
+            nix::libc::utimensat(nix::libc::AT_FDCWD, cname.as_ptr(), times.as_ptr(), 0);
+        }
+    }
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
