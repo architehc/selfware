@@ -487,7 +487,12 @@ impl RSIOrchestrator {
             )));
         }
 
-        let _ = std::fs::write(unique_out_dir.join(".completed"), b"");
+        if let Err(e) = std::fs::write(unique_out_dir.join(".completed"), b"") {
+            tracing::warn!(
+                "Failed to write .completed marker to {}: {e}",
+                unique_out_dir.display()
+            );
+        }
 
         let results_tsv = unique_out_dir.join("results.tsv");
         if !results_tsv.exists() {

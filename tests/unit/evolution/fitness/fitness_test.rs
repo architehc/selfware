@@ -661,3 +661,123 @@ fn test_prune_report_dirs_retention_and_protection() {
         assert!(!dir.exists(), "older dir sab-run-{:02} should be pruned", i);
     }
 }
+
+#[test]
+fn test_prune_report_dirs_dotted_dir_does_not_exempt_siblings() {
+    use std::fs::{self, File};
+    use tempfile::tempdir;
+
+    let temp = tempdir().unwrap();
+    let reports_dir = temp.path();
+
+    // Create dotted exempt directory (e.g. sab-run.v2)
+    let dotted_dir = reports_dir.join("sab-run.v2");
+    fs::create_dir(&dotted_dir).unwrap();
+    File::create(dotted_dir.join(".completed")).unwrap();
+
+    // Create 2 older completed directories and 1 newer
+    let old_1 = reports_dir.join("sab-run-old-1");
+    fs::create_dir(&old_1).unwrap();
+    File::create(old_1.join(".completed")).unwrap();
+
+    let old_2 = reports_dir.join("sab-run-old-2");
+    fs::create_dir(&old_2).unwrap();
+    File::create(old_2.join(".completed")).unwrap();
+
+    let newest = reports_dir.join("sab-run-newest");
+    fs::create_dir(&newest).unwrap();
+    File::create(newest.join(".completed")).unwrap();
+
+    #[cfg(unix)]
+    {
+        for (dir, ts) in [
+            (&old_1, 1_000_000),
+            (&old_2, 1_000_100),
+            (&dotted_dir, 1_000_200),
+            (&newest, 1_000_300),
+        ] {
+            let cname = std::ffi::CString::new(dir.to_str().unwrap()).unwrap();
+            let times = [
+                nix::libc::timespec {
+                    tv_sec: ts,
+                    tv_nsec: 0,
+                },
+                nix::libc::timespec {
+                    tv_sec: ts,
+                    tv_nsec: 0,
+                },
+            ];
+            unsafe {
+                nix::libc::utimensat(nix::libc::AT_FDCWD, cname.as_ptr(), times.as_ptr(), 0);
+            }
+        }
+    }
+
+    // Exempt the dotted dir: exempt_paths = [reports/sab-run.v2]
+    // keep_count = 1: only 1 newest non-exempt directory should survive
+    let exempt_paths = vec![dotted_dir.clone()];
+    prune_report_dirs(reports_dir, "sab-", 1, &exempt_paths);
+
+    // Dotted dir must survive because it is explicitly exempt
+    assert!(dotted_dir.exists(), "dotted exempt dir must survive");
+    // Newest non-exempt must survive (keep_count = 1)
+    assert!(newest.exists(), "newest dir must survive");
+    // Old sibling directories must BE PRUNED (and NOT protected by a broken parent heuristic)
+    assert!(
+        !old_1.exists(),
+        "old_1 must be pruned; dotted sibling dir must not exempt entire parent reports_dir"
+    );
+    assert!(
+        !old_2.exists(),
+        "old_2 must be pruned; dotted sibling dir must not exempt entire parent reports_dir"
+    );
+}
+
+#[test]
+fn test_prune_report_dirs_stale_unheld_lease_is_pruned() {
+    use std::fs::{self, File};
+    use tempfile::tempdir;
+
+    let temp = tempdir().unwrap();
+    let reports_dir = temp.path();
+
+    // 1. Create an old directory with an unheld .lease file and .completed marker
+    let stale_dir = reports_dir.join("sab-stale-lease");
+    fs::create_dir(&stale_dir).unwrap();
+    File::create(stale_dir.join(".completed")).unwrap();
+    File::create(stale_dir.join(".lease")).unwrap(); // created and immediately closed (unheld)
+
+    // 2. Create a newer completed directory
+    let fresh_dir = reports_dir.join("sab-fresh");
+    fs::create_dir(&fresh_dir).unwrap();
+    File::create(fresh_dir.join(".completed")).unwrap();
+
+    #[cfg(unix)]
+    {
+        for (dir, ts) in [(&stale_dir, 1_000_000), (&fresh_dir, 2_000_000)] {
+            let cname = std::ffi::CString::new(dir.to_str().unwrap()).unwrap();
+            let times = [
+                nix::libc::timespec {
+                    tv_sec: ts,
+                    tv_nsec: 0,
+                },
+                nix::libc::timespec {
+                    tv_sec: ts,
+                    tv_nsec: 0,
+                },
+            ];
+            unsafe {
+                nix::libc::utimensat(nix::libc::AT_FDCWD, cname.as_ptr(), times.as_ptr(), 0);
+            }
+        }
+    }
+
+    // Prune with keep_count = 1: the newer one survives, stale unheld lease directory is pruned
+    prune_report_dirs(reports_dir, "sab-", 1, &[]);
+
+    assert!(fresh_dir.exists(), "fresh dir must survive");
+    assert!(
+        !stale_dir.exists(),
+        "stale directory with unheld .lease must be pruned"
+    );
+}

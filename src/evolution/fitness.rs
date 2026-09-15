@@ -94,40 +94,55 @@ pub fn prune_report_dirs(
     keep_count: usize,
     exempt_paths: &[PathBuf],
 ) {
-    if let Ok(entries) = std::fs::read_dir(reports_dir) {
-        let mut eligible_dirs: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_str()
-                    .map(|s| s.starts_with(prefix))
-                    .unwrap_or(false)
-                    && e.path().is_dir()
-            })
-            .filter_map(|e| {
-                let path = e.path();
-                // 1. Check if exempt (e.g. promoted generation winner or baseline report)
-                if exempt_paths.iter().any(|exempt| {
-                    let exempt_dir = if exempt.is_file() || exempt.extension().is_some() {
-                        exempt.parent().unwrap_or(exempt)
-                    } else {
-                        exempt
-                    };
-                    path == *exempt
-                        || path == exempt_dir
-                        || path.starts_with(exempt)
-                        || path.starts_with(exempt_dir)
-                        || exempt.starts_with(&path)
-                }) {
-                    return None;
-                }
-                // 2. Check if active/leased by an in-flight run
-                let lease_path = path.join(".lease");
-                if lease_path.exists() {
-                    #[cfg(unix)]
-                    {
-                        use std::os::fd::AsRawFd;
-                        if let Ok(file) = std::fs::File::open(&lease_path) {
+    if !reports_dir.exists() {
+        return;
+    }
+    let entries = match std::fs::read_dir(reports_dir) {
+        Ok(entries) => entries,
+        Err(err) => {
+            tracing::warn!(
+                "Failed to read report directory for pruning {}: {err}",
+                reports_dir.display()
+            );
+            return;
+        }
+    };
+    let mut eligible_dirs: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .map(|s| s.starts_with(prefix))
+                .unwrap_or(false)
+                && e.path().is_dir()
+        })
+        .filter_map(|e| {
+            let path = e.path();
+            // 1. Check if exempt (e.g. promoted generation winner or baseline report)
+            if exempt_paths.iter().any(|exempt| {
+                let is_file = exempt.is_file()
+                    || (!exempt.is_dir() && exempt.extension().is_some_and(|ext| ext == "json"));
+                let exempt_dir = if is_file {
+                    exempt.parent().unwrap_or(exempt)
+                } else {
+                    exempt
+                };
+                path == *exempt
+                    || path == exempt_dir
+                    || path.starts_with(exempt)
+                    || path.starts_with(exempt_dir)
+                    || exempt.starts_with(&path)
+            }) {
+                return None;
+            }
+            // 2. Check if active/leased by an in-flight run
+            let lease_path = path.join(".lease");
+            if lease_path.exists() {
+                #[cfg(unix)]
+                {
+                    use std::os::fd::AsRawFd;
+                    match std::fs::File::open(&lease_path) {
+                        Ok(file) => {
                             let rc = unsafe {
                                 nix::libc::flock(
                                     file.as_raw_fd(),
@@ -142,31 +157,39 @@ pub fn prune_report_dirs(
                                 nix::libc::flock(file.as_raw_fd(), nix::libc::LOCK_UN);
                             }
                         }
+                        Err(err) => {
+                            tracing::warn!(
+                                "Failed to probe open lease file {}: {err}",
+                                lease_path.display()
+                            );
+                            // Fail safe: treat as active/exempt so we don't delete an in-use dir
+                            return None;
+                        }
                     }
                 }
-                // 3. Check for completion marker or valid structured report
-                let is_completed = path.join(".completed").exists()
-                    || path.join("sab_report.json").exists()
-                    || path.join("report.json").exists();
-                let mtime = e.metadata().ok()?.modified().ok()?;
-                let age = std::time::SystemTime::now()
-                    .duration_since(mtime)
-                    .unwrap_or_default();
-                // If not completed and less than 2 hours old, consider it in-flight and protect it
-                if !is_completed && age < Duration::from_secs(7200) {
-                    return None;
-                }
-                Some((mtime, path))
-            })
-            .collect();
+            }
+            // 3. Check for completion marker or valid structured report
+            let is_completed = path.join(".completed").exists()
+                || path.join("sab_report.json").exists()
+                || path.join("report.json").exists();
+            let mtime = e.metadata().ok()?.modified().ok()?;
+            let age = std::time::SystemTime::now()
+                .duration_since(mtime)
+                .unwrap_or_default();
+            // If not completed and less than 2 hours old, consider it in-flight and protect it
+            if !is_completed && age < Duration::from_secs(7200) {
+                return None;
+            }
+            Some((mtime, path))
+        })
+        .collect();
 
-        if eligible_dirs.len() > keep_count {
-            eligible_dirs.sort_by_key(|(mtime, _)| std::cmp::Reverse(*mtime));
-            for (_, path) in eligible_dirs.into_iter().skip(keep_count) {
-                tracing::info!("Pruning old benchmark report directory: {:?}", path);
-                if let Err(e) = std::fs::remove_dir_all(&path) {
-                    tracing::warn!("Failed to remove pruned report directory {:?}: {}", path, e);
-                }
+    if eligible_dirs.len() > keep_count {
+        eligible_dirs.sort_by_key(|(mtime, _)| std::cmp::Reverse(*mtime));
+        for (_, path) in eligible_dirs.into_iter().skip(keep_count) {
+            tracing::info!("Pruning old benchmark report directory: {:?}", path);
+            if let Err(e) = std::fs::remove_dir_all(&path) {
+                tracing::warn!("Failed to remove pruned report directory {:?}: {}", path, e);
             }
         }
     }
@@ -229,7 +252,12 @@ pub fn run_sab(selfware_binary: &Path, config: &SabConfig) -> Result<SabResult, 
         return Err(FitnessError::SabRunFailed(stderr.to_string()));
     }
 
-    let _ = std::fs::write(unique_out_dir.join(".completed"), b"");
+    if let Err(e) = std::fs::write(unique_out_dir.join(".completed"), b"") {
+        tracing::warn!(
+            "Failed to write .completed marker to {}: {e}",
+            unique_out_dir.display()
+        );
+    }
 
     // Parse SAB output — the runner produces JSON reports
     let stdout = String::from_utf8_lossy(&output.stdout);
