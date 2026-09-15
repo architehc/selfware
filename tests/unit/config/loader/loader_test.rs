@@ -2393,6 +2393,59 @@ fn test_path_qualified_unknown_model_gets_fallback() {
     );
 }
 
+#[test]
+fn test_config_load_pins_qwen38_context_and_derives_token_budget() {
+    let _guard = clear_env();
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "http://localhost:8000/v1"
+        model = "qwen3.8-35b"
+        "#,
+        "qwen38_pinned.toml",
+    );
+    let config = Config::load(Some(path.to_str().unwrap())).unwrap();
+    assert_eq!(config.matched_profile.as_deref(), Some("qwen3.8"));
+    assert_eq!(
+        config.context_length, 350_000,
+        "qwen3.8 profile must pin context_length to 350,000"
+    );
+    assert_eq!(
+        config.max_tokens, 32_768,
+        "qwen3.8 profile must pin max_tokens to 32,768"
+    );
+    assert_eq!(
+        config.agent.token_budget, 210_000,
+        "agent token_budget must be derived as 60% of context (210,000 for 350,000)"
+    );
+    assert_eq!(
+        config.concurrency.max_streams, 16,
+        "qwen3.8 profile must pin max_streams to 16"
+    );
+    assert_eq!(
+        config.concurrency.max_global, 16,
+        "qwen3.8 profile must pin max_global to 16"
+    );
+
+    // Explicit user context_length overrides the profile pin
+    let (_dir2, path2) = write_temp_config(
+        r#"
+        endpoint = "http://localhost:8000/v1"
+        model = "qwen3.8-35b"
+        context_length = 500000
+        "#,
+        "qwen38_explicit_context.toml",
+    );
+    let config2 = Config::load(Some(path2.to_str().unwrap())).unwrap();
+    assert_eq!(
+        config2.context_length, 500_000,
+        "explicit context_length must take precedence over profile pin"
+    );
+    assert_eq!(
+        config2.agent.token_budget, 300_000,
+        "derived token_budget must follow the explicit context_length (60% of 500,000 = 300,000)"
+    );
+}
+
 // =========================================================================
 // Wizard validate-before-write helpers (P0-7)
 // =========================================================================

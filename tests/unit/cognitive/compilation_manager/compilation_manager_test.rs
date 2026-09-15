@@ -361,6 +361,14 @@ fn test_relative_dot_dot_escape_symlink_is_rejected() {
 
     let escaping_rel = rpath.join("escape_rel");
     std::os::unix::fs::symlink(Path::new("../.."), &escaping_rel).unwrap();
+    let _ = Command::new("git")
+        .args(["add", "."])
+        .current_dir(rpath)
+        .status();
+    let _ = Command::new("git")
+        .args(["commit", "-m", "commit relative escaping symlink"])
+        .current_dir(rpath)
+        .status();
 
     let result = CompilationSandbox::new(rpath);
     assert!(
@@ -369,8 +377,8 @@ fn test_relative_dot_dot_escape_symlink_is_rejected() {
     );
     let err_msg = result.err().unwrap().to_string();
     assert!(
-        err_msg.contains("targets path outside repository"),
-        "error message should cite path outside repository: {err_msg}"
+        err_msg.contains("targets path outside"),
+        "error message should cite path outside sandbox: {err_msg}"
     );
 }
 

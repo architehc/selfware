@@ -242,6 +242,7 @@ fn test_format_chat_response_valid_json() {
         "test-model",
         "Hello world",
         None,
+        None,
         MockServerConfig::default().usage,
     );
     let parsed: Result<serde_json::Value, _> = serde_json::from_str(&body);

@@ -971,3 +971,63 @@ fn test_lease_heal_fires_warning_and_locks_when_held_1_spoofed_unlocked() {
         stdout
     );
 }
+
+#[test]
+fn test_run_projecte2e_lease_heal_fires_warning_and_locks_when_held_1_spoofed_unlocked() {
+    let script_content = std::fs::read_to_string("system_tests/projecte2e/run_projecte2e.sh")
+        .expect("must read run_projecte2e.sh");
+
+    let lines: Vec<&str> = script_content.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| l.contains("LEASE_FILE="))
+        .expect("LEASE_FILE= block not found");
+    let end = lines
+        .iter()
+        .position(|l| l.contains("# Resolve timeout command"))
+        .expect("# Resolve timeout command block not found");
+    let lease_snippet = lines[start..end].join("\n");
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let out_dir = temp_dir.path().join("out_unlocked");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let test_cmd = format!(
+        "{}\ntest -f \"${{OUT_DIR}}/.lease_pid\" && echo \"HEALED_PID=$(cat \"${{OUT_DIR}}/.lease_pid\")\"\n",
+        lease_snippet
+    );
+
+    let output = StdCommand::new("bash")
+        .arg("-euo")
+        .arg("pipefail")
+        .arg("-c")
+        .arg(&test_cmd)
+        .env("OUT_DIR", &out_dir)
+        .env("SELFWARE_LEASE_HELD", "1")
+        .output()
+        .expect("bash execution must run");
+
+    assert!(
+        output.status.success(),
+        "healed lease acquisition must succeed in run_projecte2e"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("WARNING: SELFWARE_LEASE_HELD=1 was set, but"),
+        "stderr must warn that SELFWARE_LEASE_HELD=1 was set on an unlocked lease: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("Self-healing lease lock."),
+        "stderr must note self-healing: {}",
+        stderr
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("HEALED_PID="),
+        ".lease_pid must be written during self-healing: {}",
+        stdout
+    );
+}

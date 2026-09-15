@@ -49,6 +49,8 @@ pub struct MockToolCall {
 pub enum MockResponse {
     /// Return a plain assistant text message.
     Text(String),
+    /// Return an assistant text message with reasoning content.
+    TextWithReasoning { content: String, reasoning: String },
     /// Return a response containing tool calls.
     ToolCalls(Vec<MockToolCall>),
     /// Return an HTTP error with the given status code and body.
@@ -185,6 +187,19 @@ impl MockLlmServerBuilder {
     /// Queue a plain text response. Responses are served in FIFO order.
     pub fn with_response(mut self, text: impl Into<String>) -> Self {
         self.config.responses.push(MockResponse::Text(text.into()));
+        self
+    }
+
+    /// Queue a response with reasoning content.
+    pub fn with_reasoning_response(
+        mut self,
+        content: impl Into<String>,
+        reasoning: impl Into<String>,
+    ) -> Self {
+        self.config.responses.push(MockResponse::TextWithReasoning {
+            content: content.into(),
+            reasoning: reasoning.into(),
+        });
         self
     }
 
@@ -384,14 +399,33 @@ async fn handle_connection(
             if is_streaming {
                 write_sse_text_response(&mut stream, &text, config.usage).await?;
             } else {
-                let body = format_chat_response(&config.model, &text, None, config.usage);
+                let body = format_chat_response(&config.model, &text, None, None, config.usage);
+                write_http_response(&mut stream, 200, &body, &[]).await?;
+            }
+        }
+        MockResponse::TextWithReasoning { content, reasoning } => {
+            if is_streaming {
+                write_sse_text_response(&mut stream, &content, config.usage).await?;
+            } else {
+                let body = format_chat_response(
+                    &config.model,
+                    &content,
+                    Some(&reasoning),
+                    None,
+                    config.usage,
+                );
                 write_http_response(&mut stream, 200, &body, &[]).await?;
             }
         }
         MockResponse::ToolCalls(calls) => {
             let tool_calls_json = format_tool_calls(&calls);
-            let body =
-                format_chat_response(&config.model, "", Some(&tool_calls_json), config.usage);
+            let body = format_chat_response(
+                &config.model,
+                "",
+                None,
+                Some(&tool_calls_json),
+                config.usage,
+            );
             write_http_response(&mut stream, 200, &body, &[]).await?;
         }
         MockResponse::Error { status, body } => {
@@ -418,11 +452,20 @@ async fn handle_connection(
 fn format_chat_response(
     model: &str,
     content: &str,
+    reasoning: Option<&str>,
     tool_calls: Option<&str>,
     usage: MockUsage,
 ) -> String {
     let tool_calls_field = match tool_calls {
         Some(tc) => format!(r#","tool_calls":{}"#, tc),
+        None => String::new(),
+    };
+
+    let reasoning_field = match reasoning {
+        Some(r) => {
+            let escaped = serde_json::to_string(r).unwrap_or_else(|_| "\"\"".to_string());
+            format!(r#","reasoning_content":{}"#, escaped)
+        }
         None => String::new(),
     };
 
@@ -438,9 +481,10 @@ fn format_chat_response(
     let escaped_content = &escaped_content[1..escaped_content.len() - 1];
 
     format!(
-        r#"{{"id":"mock-resp-1","object":"chat.completion","created":1700000000,"model":"{}","choices":[{{"index":0,"message":{{"role":"assistant","content":"{}"{}}},"finish_reason":"{}"}}],"usage":{{"prompt_tokens":{},"completion_tokens":{},"total_tokens":{}}}}}"#,
+        r#"{{"id":"mock-resp-1","object":"chat.completion","created":1700000000,"model":"{}","choices":[{{"index":0,"message":{{"role":"assistant","content":"{}"{}{}}},"finish_reason":"{}"}}],"usage":{{"prompt_tokens":{},"completion_tokens":{},"total_tokens":{}}}}}"#,
         model,
         escaped_content,
+        reasoning_field,
         tool_calls_field,
         finish_reason,
         usage.prompt_tokens,

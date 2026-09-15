@@ -758,3 +758,80 @@ async fn test_plan_total_tokens_consistent_with_input_plus_output() {
 
     server.stop().await;
 }
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn test_plan_step_call_site_omits_reasoning_when_preserve_thinking_false() {
+    let server = MockLlmServer::builder()
+        .with_reasoning_response(
+            "I will inspect the codebase.",
+            "Planning thoughts about codebase",
+        )
+        .build()
+        .await;
+
+    let config = mock_agent_config(format!("{}/v1", server.url()), false);
+    assert!(!config.preserve_thinking());
+
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.messages.push(Message::user("Plan next steps"));
+
+    let res = agent.plan().await;
+    assert!(res.is_ok(), "plan() should succeed: {:?}", res.err());
+
+    let last_msg = agent
+        .messages
+        .last()
+        .expect("plan() must have pushed message to history");
+    assert_eq!(last_msg.content.text(), "I will inspect the codebase.");
+    assert!(
+        last_msg.reasoning_content.is_none(),
+        "planning history reasoning_content must be None when preserve_thinking=false"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn test_plan_step_call_site_preserves_reasoning_when_preserve_thinking_true() {
+    let server = MockLlmServer::builder()
+        .with_reasoning_response(
+            "I will inspect the codebase.",
+            "Planning thoughts about codebase",
+        )
+        .build()
+        .await;
+
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "chat_template_kwargs".to_string(),
+        serde_json::json!({ "preserve_thinking": true }),
+    );
+    config.extra_body = Some(extra);
+    assert!(config.preserve_thinking());
+
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.messages.push(Message::user("Plan next steps"));
+
+    let res = agent.plan().await;
+    assert!(res.is_ok(), "plan() should succeed: {:?}", res.err());
+
+    let last_msg = agent
+        .messages
+        .last()
+        .expect("plan() must have pushed message to history");
+    assert_eq!(last_msg.content.text(), "I will inspect the codebase.");
+    assert_eq!(
+        last_msg.reasoning_content.as_deref(),
+        Some("Planning thoughts about codebase"),
+        "planning history reasoning_content must be preserved when preserve_thinking=true"
+    );
+    server.stop().await;
+}
