@@ -210,6 +210,7 @@ pub fn run_sab(selfware_binary: &Path, config: &SabConfig) -> Result<SabResult, 
     let output = Command::new("bash")
         .arg(&config.runner_script)
         .env("OUT_DIR", &unique_out_dir)
+        .env("SELFWARE_LEASE_HELD", "1")
         .env("ENDPOINT", &config.endpoint)
         .env("MODEL", &config.model)
         .env("MAX_PARALLEL", config.max_parallel.to_string())

@@ -739,3 +739,172 @@ fn run_git(project_root: &Path, args: &[&str]) {
         .unwrap();
     assert!(status.success(), "git {:?} should succeed", args);
 }
+
+#[test]
+fn test_run_projecte2e_real_lease_block_under_parent_lock() {
+    let script_content = std::fs::read_to_string("system_tests/projecte2e/run_projecte2e.sh")
+        .expect("must read run_projecte2e.sh");
+
+    let lines: Vec<&str> = script_content.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| l.contains("LEASE_FILE="))
+        .expect("LEASE_FILE= block not found");
+    let end = lines
+        .iter()
+        .position(|l| l.contains("Resolve timeout command"))
+        .expect("timeout command block not found");
+    let lease_snippet = lines[start..end].join("\n");
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let out_dir = temp_dir.path().join("out");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let lease_path = out_dir.join(".lease");
+
+    // Case 1: Parent process holds LOCK_EX on .lease
+    let lease_file = std::fs::File::create(&lease_path).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let rc = unsafe { nix::libc::flock(lease_file.as_raw_fd(), nix::libc::LOCK_EX) };
+        assert_eq!(rc, 0, "parent must acquire exclusive lock");
+    }
+
+    // With SELFWARE_LEASE_HELD=1, child skips re-acquisition and succeeds
+    let status_held = StdCommand::new("bash")
+        .arg("-euo")
+        .arg("pipefail")
+        .arg("-c")
+        .arg(&lease_snippet)
+        .env("OUT_DIR", &out_dir)
+        .env("SELFWARE_LEASE_HELD", "1")
+        .status()
+        .expect("bash execution must succeed");
+    assert!(
+        status_held.success(),
+        "lease block with SELFWARE_LEASE_HELD=1 must succeed under parent lock"
+    );
+
+    // Without SELFWARE_LEASE_HELD, child attempts to acquire exclusive lock, which must FAIL due to parent lock
+    let output_unheld = StdCommand::new("bash")
+        .arg("-euo")
+        .arg("pipefail")
+        .arg("-c")
+        .arg(&lease_snippet)
+        .env("OUT_DIR", &out_dir)
+        .env("SELFWARE_LEASE_HELD", "0")
+        .output()
+        .expect("bash execution must run");
+    assert!(
+        !output_unheld.status.success(),
+        "lease block without SELFWARE_LEASE_HELD must fail when parent holds LOCK_EX"
+    );
+
+    // Release parent lock
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        unsafe { nix::libc::flock(lease_file.as_raw_fd(), nix::libc::LOCK_UN) };
+    }
+    drop(lease_file);
+
+    // Case 2: In an unleased directory, lease block succeeds and acquires lease
+    let temp_dir2 = tempfile::tempdir().unwrap();
+    let out_dir2 = temp_dir2.path().join("out2");
+    std::fs::create_dir_all(&out_dir2).unwrap();
+    let status_fresh = StdCommand::new("bash")
+        .arg("-euo")
+        .arg("pipefail")
+        .arg("-c")
+        .arg(&lease_snippet)
+        .env("OUT_DIR", &out_dir2)
+        .env("SELFWARE_LEASE_HELD", "0")
+        .status()
+        .expect("bash execution must succeed");
+    assert!(
+        status_fresh.success(),
+        "standalone lease acquisition must succeed in fresh dir"
+    );
+}
+
+#[test]
+fn test_run_full_sab_real_lease_block_under_parent_lock() {
+    let script_content = std::fs::read_to_string("system_tests/projecte2e/run_full_sab.sh")
+        .expect("must read run_full_sab.sh");
+
+    let lines: Vec<&str> = script_content.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| l.contains("LEASE_FILE="))
+        .expect("LEASE_FILE= block not found");
+    let end = lines
+        .iter()
+        .position(|l| l.contains("Connectivity check"))
+        .expect("Connectivity check block not found");
+    let lease_snippet = lines[start..end].join("\n");
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let out_dir = temp_dir.path().join("out");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let lease_path = out_dir.join(".lease");
+
+    let lease_file = std::fs::File::create(&lease_path).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let rc = unsafe { nix::libc::flock(lease_file.as_raw_fd(), nix::libc::LOCK_EX) };
+        assert_eq!(rc, 0, "parent must acquire exclusive lock");
+    }
+
+    let status_held = StdCommand::new("bash")
+        .arg("-euo")
+        .arg("pipefail")
+        .arg("-c")
+        .arg(&lease_snippet)
+        .env("OUT_DIR", &out_dir)
+        .env("SELFWARE_LEASE_HELD", "1")
+        .status()
+        .expect("bash execution must succeed");
+    assert!(
+        status_held.success(),
+        "run_full_sab lease block with SELFWARE_LEASE_HELD=1 must succeed under parent lock"
+    );
+
+    let output_unheld = StdCommand::new("bash")
+        .arg("-euo")
+        .arg("pipefail")
+        .arg("-c")
+        .arg(&lease_snippet)
+        .env("OUT_DIR", &out_dir)
+        .env("SELFWARE_LEASE_HELD", "0")
+        .output()
+        .expect("bash execution must run");
+    assert!(
+        !output_unheld.status.success(),
+        "run_full_sab lease block without SELFWARE_LEASE_HELD must fail when parent holds LOCK_EX"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        unsafe { nix::libc::flock(lease_file.as_raw_fd(), nix::libc::LOCK_UN) };
+    }
+    drop(lease_file);
+
+    let temp_dir2 = tempfile::tempdir().unwrap();
+    let out_dir2 = temp_dir2.path().join("out2");
+    std::fs::create_dir_all(&out_dir2).unwrap();
+    let status_fresh = StdCommand::new("bash")
+        .arg("-euo")
+        .arg("pipefail")
+        .arg("-c")
+        .arg(&lease_snippet)
+        .env("OUT_DIR", &out_dir2)
+        .env("SELFWARE_LEASE_HELD", "0")
+        .status()
+        .expect("bash execution must succeed");
+    assert!(
+        status_fresh.success(),
+        "run_full_sab standalone lease acquisition must succeed in fresh dir"
+    );
+}

@@ -105,6 +105,42 @@ fi
 
 mkdir -p "${OUT_DIR}" "${WORK_ROOT}" "${LOG_ROOT}" "${RESULTS_DIR}" "${PID_DIR}"
 
+LEASE_FILE="${OUT_DIR}/.lease"
+touch "${LEASE_FILE}"
+if [[ "${SELFWARE_LEASE_HELD:-0}" != "1" ]]; then
+  if command -v flock >/dev/null 2>&1; then
+    exec 9<"${LEASE_FILE}"
+    flock -n 9 || { echo "ERROR: Could not acquire lease on ${LEASE_FILE}" >&2; exit 1; }
+  else
+    FIFO="${OUT_DIR}/.lease_fifo_$$"
+    mkfifo "${FIFO}"
+    python3 -c "import fcntl, sys, signal
+try:
+    f = open(sys.argv[1], 'r+')
+    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with open(sys.argv[2], 'w') as fifo:
+        fifo.write('OK\n')
+    signal.pause()
+except Exception as e:
+    try:
+        with open(sys.argv[2], 'w') as fifo:
+            fifo.write(f'ERR: {e}\n')
+    except Exception:
+        pass
+    sys.exit(1)
+" "${LEASE_FILE}" "${FIFO}" &
+    LEASE_PID=$!
+    read -r STATUS < "${FIFO}" || STATUS="ERR: fifo read failed"
+    rm -f "${FIFO}"
+    if [[ "${STATUS}" != "OK" ]]; then
+      echo "ERROR: Could not acquire lease on ${LEASE_FILE}: ${STATUS}" >&2
+      kill "${LEASE_PID}" 2>/dev/null || true
+      exit 1
+    fi
+    trap 'kill "${LEASE_PID}" 2>/dev/null || true' EXIT
+  fi
+fi
+
 # ── Connectivity check ──────────────────────────────────────────────
 ENDPOINT="$(grep '^endpoint' "${CONFIG_FILE}" | head -1 | sed 's/.*= *"//;s/".*//')"
 MODEL_NAME="$(grep '^model' "${CONFIG_FILE}" | head -1 | sed 's/.*= *"//;s/".*//')"
@@ -652,3 +688,4 @@ print(f'============================================================')
 
 # Symlink latest
 ln -sfn "${OUT_DIR}" "${THIS_DIR}/reports/latest"
+touch "${OUT_DIR}/.completed"

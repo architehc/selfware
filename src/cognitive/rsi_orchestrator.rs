@@ -470,6 +470,7 @@ impl RSIOrchestrator {
         let output = Command::new("bash")
             .arg(&script_path)
             .env("OUT_DIR", &unique_out_dir)
+            .env("SELFWARE_LEASE_HELD", "1")
             .current_dir(work_dir)
             .output()
             .await
