@@ -262,7 +262,7 @@ fn test_untracked_symlinks_are_replicated() {
 
 #[cfg(unix)]
 #[test]
-fn test_untracked_escaping_symlink_is_rejected() {
+fn test_untracked_escaping_symlink_is_skipped_with_warn() {
     let repo_dir = tempfile::tempdir().unwrap();
     let rpath = repo_dir.path();
 
@@ -298,30 +298,141 @@ fn test_untracked_escaping_symlink_is_rejected() {
     let escaping_rel = rpath.join("escape_rel.txt");
     std::os::unix::fs::symlink(Path::new("../../etc/passwd"), &escaping_rel).unwrap();
 
-    let result = CompilationSandbox::new(rpath);
-    assert!(result.is_err(), "escaping symlink must be rejected");
-    let err_msg = result.err().unwrap().to_string();
-    assert!(
-        err_msg.contains("targets path outside repository"),
-        "error message should cite path outside repository: {err_msg}"
-    );
-
-    // Remove escaping relative symlink
-    std::fs::remove_file(&escaping_rel).unwrap();
-
     // 2. Escaping absolute symlink
     let escaping_abs = rpath.join("escape_abs.txt");
     std::os::unix::fs::symlink(Path::new("/etc/passwd"), &escaping_abs).unwrap();
 
-    let result_abs = CompilationSandbox::new(rpath);
+    // Sandbox creation succeeds via skip-with-warn (does not abort entire sandbox)
+    let sandbox =
+        CompilationSandbox::new(rpath).expect("escaping symlinks should be skipped with warning");
     assert!(
-        result_abs.is_err(),
-        "absolute escaping symlink must be rejected"
+        !sandbox.work_dir().join("escape_rel.txt").exists(),
+        "escaping relative symlink must be skipped from sandbox"
     );
-    let err_msg_abs = result_abs.err().unwrap().to_string();
     assert!(
-        err_msg_abs.contains("targets path outside repository"),
-        "error message should cite path outside repository: {err_msg_abs}"
+        !sandbox.work_dir().join("escape_abs.txt").exists(),
+        "escaping absolute symlink must be skipped from sandbox"
+    );
+    assert!(
+        sandbox.work_dir().join("README.md").exists(),
+        "valid repository files must still be present in sandbox"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_untracked_internal_absolute_symlink_is_rewritten_to_relative() {
+    let repo_dir = tempfile::tempdir().unwrap();
+    let rpath = repo_dir.path();
+
+    let init_ok = Command::new("git")
+        .args(["init"])
+        .current_dir(rpath)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !init_ok {
+        return;
+    }
+    let _ = Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(rpath)
+        .status();
+    let _ = Command::new("git")
+        .args(["config", "user.name", "Test User"])
+        .current_dir(rpath)
+        .status();
+
+    std::fs::write(rpath.join("README.md"), b"# Test Repo\n").unwrap();
+    let sub = rpath.join("subdir");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(sub.join("subfile.txt"), b"sub content\n").unwrap();
+
+    let _ = Command::new("git")
+        .args(["add", "."])
+        .current_dir(rpath)
+        .status();
+    let _ = Command::new("git")
+        .args(["commit", "-m", "initial commit"])
+        .current_dir(rpath)
+        .status();
+
+    // Create untracked absolute symlink pointing inside repository
+    let abs_target = rpath.join("README.md");
+    let link_in_sub = sub.join("link_to_root.txt");
+    std::os::unix::fs::symlink(&abs_target, &link_in_sub).unwrap();
+
+    let sandbox = CompilationSandbox::new(rpath).expect("sandbox creation should succeed");
+    let sandbox_link = sandbox.work_dir().join("subdir/link_to_root.txt");
+    assert!(
+        sandbox_link
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "link must be replicated as symlink"
+    );
+
+    let raw_target = std::fs::read_link(&sandbox_link).unwrap();
+    assert_eq!(
+        raw_target,
+        PathBuf::from("../README.md"),
+        "absolute internal target must be rewritten to relative inside sandbox"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&sandbox_link).unwrap(),
+        "# Test Repo\n"
+    );
+}
+
+#[test]
+fn test_untracked_aggregate_size_cap_exceeded() {
+    let repo_dir = tempfile::tempdir().unwrap();
+    let rpath = repo_dir.path();
+
+    let init_ok = Command::new("git")
+        .args(["init"])
+        .current_dir(rpath)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !init_ok {
+        return;
+    }
+    let _ = Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(rpath)
+        .status();
+    let _ = Command::new("git")
+        .args(["config", "user.name", "Test User"])
+        .current_dir(rpath)
+        .status();
+
+    std::fs::write(rpath.join("README.md"), b"# Test\n").unwrap();
+    let _ = Command::new("git")
+        .args(["add", "."])
+        .current_dir(rpath)
+        .status();
+    let _ = Command::new("git")
+        .args(["commit", "-m", "initial"])
+        .current_dir(rpath)
+        .status();
+
+    // Create 6 untracked files of 9 MB each (total 54 MB > 50 MB cap)
+    for i in 0..6 {
+        let f = std::fs::File::create(rpath.join(format!("big_{i}.bin"))).unwrap();
+        f.set_len(9 * 1024 * 1024).unwrap();
+    }
+
+    let result = CompilationSandbox::new(rpath);
+    assert!(
+        result.is_err(),
+        "aggregate size > 50 MB must fail sandbox creation"
+    );
+    let err = result.err().unwrap().to_string();
+    assert!(
+        err.contains("Aggregate untracked file size limit exceeded"),
+        "error message should cite aggregate limit: {err}"
     );
 }
 

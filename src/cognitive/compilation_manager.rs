@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Configuration for the compilation sandbox (RAII guard: cleans up on drop).
 #[derive(Debug)]
@@ -42,6 +42,13 @@ impl CompilationSandbox {
         // worktree/subagent flows) can move or delete mid-run; git then fails
         // the checkout with "fatal: this operation must be run in a work
         // tree" and the whole clone errors out intermittently.
+        //
+        // Note on security boundary: Tracked symlinks checked in to git history
+        // are checked out directly by git during clone/apply. Untracked symlinks
+        // in the working tree are screened for containment: external targets
+        // are skipped with a warning to preserve availability without escaping
+        // isolation, while internal absolute targets are rewritten to sandbox-relative
+        // paths so they evaluate against sandbox copies rather than host repository files.
         let status = Command::new("git")
             .arg("clone")
             .arg("--no-hardlinks")
@@ -116,6 +123,9 @@ impl CompilationSandbox {
         }
 
         const MAX_UNTRACKED_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB per file
+        const MAX_AGGREGATE_UNTRACKED_SIZE: u64 = 50 * 1024 * 1024; // 50 MB total
+
+        let mut aggregate_untracked_size: u64 = 0;
 
         for item in untracked_output.stdout.split(|&b| b == 0) {
             if item.is_empty() {
@@ -155,6 +165,26 @@ impl CompilationSandbox {
             if meta.file_type().is_symlink() {
                 #[cfg(unix)]
                 {
+                    let target = std::fs::read_link(&src).map_err(|e| {
+                        cleanup_on_fail(anyhow!(
+                            "Failed reading untracked symlink target {:?}: {e}",
+                            rel
+                        ))
+                    })?;
+                    let rewritten_target = match rewrite_symlink_target_for_sandbox(
+                        &original_dir,
+                        &src,
+                        &target,
+                    ) {
+                        Some(t) => t,
+                        None => {
+                            warn!(
+                                "Skipping untracked symlink {:?} targeting path outside repository: {:?}",
+                                rel, target
+                            );
+                            continue;
+                        }
+                    };
                     if let Some(parent) = dst.parent() {
                         std::fs::create_dir_all(parent).map_err(|e| {
                             cleanup_on_fail(anyhow!(
@@ -163,23 +193,11 @@ impl CompilationSandbox {
                             ))
                         })?;
                     }
-                    let target = std::fs::read_link(&src).map_err(|e| {
+                    std::os::unix::fs::symlink(&rewritten_target, &dst).map_err(|e| {
                         cleanup_on_fail(anyhow!(
-                            "Failed reading untracked symlink target {:?}: {e}",
-                            rel
-                        ))
-                    })?;
-                    if !symlink_target_is_contained(&original_dir, &src, &target) {
-                        return Err(cleanup_on_fail(anyhow!(
-                            "Untracked symlink {:?} targets path outside repository: {:?}",
+                            "Failed replicating untracked symlink {:?} -> {:?}: {e}",
                             rel,
-                            target
-                        )));
-                    }
-                    std::os::unix::fs::symlink(&target, &dst).map_err(|e| {
-                        cleanup_on_fail(anyhow!(
-                            "Failed replicating untracked symlink {:?}: {e}",
-                            rel
+                            rewritten_target
                         ))
                     })?;
                 }
@@ -197,6 +215,15 @@ impl CompilationSandbox {
                         rel,
                         meta.len(),
                         MAX_UNTRACKED_FILE_SIZE
+                    )));
+                }
+                aggregate_untracked_size = aggregate_untracked_size.saturating_add(meta.len());
+                if aggregate_untracked_size > MAX_AGGREGATE_UNTRACKED_SIZE {
+                    return Err(cleanup_on_fail(anyhow!(
+                        "Aggregate untracked file size limit exceeded ({} bytes > {} bytes) at {:?}",
+                        aggregate_untracked_size,
+                        MAX_AGGREGATE_UNTRACKED_SIZE,
+                        rel
                     )));
                 }
                 if let Some(parent) = dst.parent() {
@@ -310,11 +337,43 @@ fn lexical_normalize(path: &Path) -> PathBuf {
     components.into_iter().collect()
 }
 
-pub(crate) fn symlink_target_is_contained(
+pub(crate) fn make_relative_path(from_dir: &Path, to_file: &Path) -> PathBuf {
+    let from_comps: Vec<_> = from_dir
+        .components()
+        .filter(|c| !matches!(c, std::path::Component::CurDir))
+        .collect();
+    let to_comps: Vec<_> = to_file
+        .components()
+        .filter(|c| !matches!(c, std::path::Component::CurDir))
+        .collect();
+
+    let mut common = 0;
+    while common < from_comps.len()
+        && common < to_comps.len()
+        && from_comps[common] == to_comps[common]
+    {
+        common += 1;
+    }
+
+    let mut rel = PathBuf::new();
+    for _ in common..from_comps.len() {
+        rel.push("..");
+    }
+    for comp in &to_comps[common..] {
+        rel.push(comp.as_os_str());
+    }
+    if rel.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        rel
+    }
+}
+
+pub(crate) fn rewrite_symlink_target_for_sandbox(
     base_dir: &Path,
     symlink_file: &Path,
     target: &Path,
-) -> bool {
+) -> Option<PathBuf> {
     let parent = symlink_file.parent().unwrap_or(base_dir);
     let resolved = if target.is_absolute() {
         target.to_path_buf()
@@ -322,17 +381,64 @@ pub(crate) fn symlink_target_is_contained(
         parent.join(target)
     };
 
-    if let (Ok(c_base), Ok(c_target)) = (base_dir.canonicalize(), resolved.canonicalize()) {
-        return c_target.starts_with(&c_base);
+    let is_contained =
+        if let (Ok(c_base), Ok(c_target)) = (base_dir.canonicalize(), resolved.canonicalize()) {
+            c_target.starts_with(&c_base)
+        } else {
+            let norm_target = lexical_normalize(&resolved);
+            let norm_base = lexical_normalize(base_dir);
+            if let Ok(c_base) = base_dir.canonicalize() {
+                norm_target.starts_with(&c_base) || norm_target.starts_with(&norm_base)
+            } else {
+                norm_target.starts_with(&norm_base)
+            }
+        };
+
+    if !is_contained {
+        return None;
     }
 
-    let norm_target = lexical_normalize(&resolved);
-    let norm_base = lexical_normalize(base_dir);
-    if let Ok(c_base) = base_dir.canonicalize() {
-        norm_target.starts_with(&c_base) || norm_target.starts_with(&norm_base)
-    } else {
-        norm_target.starts_with(&norm_base)
+    // Relative targets within the repository resolve inside the sandbox identically.
+    if target.is_relative() {
+        return Some(target.to_path_buf());
     }
+
+    // Absolute internal targets must be rewritten to sandbox-relative so they resolve
+    // to files within the sandbox copy instead of pointing back to the host repository.
+    let rel_symlink_dir =
+        if let (Ok(c_base), Ok(c_parent)) = (base_dir.canonicalize(), parent.canonicalize()) {
+            c_parent
+                .strip_prefix(&c_base)
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|_| {
+                    make_relative_path(&lexical_normalize(base_dir), &lexical_normalize(parent))
+                })
+        } else {
+            make_relative_path(&lexical_normalize(base_dir), &lexical_normalize(parent))
+        };
+
+    let rel_target_file =
+        if let (Ok(c_base), Ok(c_resolved)) = (base_dir.canonicalize(), resolved.canonicalize()) {
+            c_resolved
+                .strip_prefix(&c_base)
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|_| {
+                    make_relative_path(&lexical_normalize(base_dir), &lexical_normalize(&resolved))
+                })
+        } else {
+            make_relative_path(&lexical_normalize(base_dir), &lexical_normalize(&resolved))
+        };
+
+    Some(make_relative_path(&rel_symlink_dir, &rel_target_file))
+}
+
+#[cfg(test)]
+pub(crate) fn symlink_target_is_contained(
+    base_dir: &Path,
+    symlink_file: &Path,
+    target: &Path,
+) -> bool {
+    rewrite_symlink_target_for_sandbox(base_dir, symlink_file, target).is_some()
 }
 
 impl Drop for CompilationSandbox {
