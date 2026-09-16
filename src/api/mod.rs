@@ -239,7 +239,10 @@ pub(crate) fn merge_extra_body(
             // 2. xhigh rejected on SGLang detected behaviourally
             if val.eq_ignore_ascii_case("xhigh") {
                 let is_sglang = endpoint
-                    .map(crate::config::is_sglang_backend)
+                    .map(|ep| {
+                        crate::config::get_sglang_capability(ep) == Some(true)
+                            || crate::config::is_sglang_serving_deployment(ep)
+                    })
                     .unwrap_or(false);
                 if is_sglang {
                     bail!(

@@ -8,8 +8,9 @@
 //! serializes them on one lock and restores the original cwd on drop.
 #![cfg(test)]
 
+use parking_lot::{ReentrantMutex, ReentrantMutexGuard};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::OnceLock;
 
 // A SINGLE lock serializes every test that touches process-global state — the
 // current directory AND the codemap budget atomics. These are entangled: the
@@ -18,21 +19,18 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 // the completion gate resolves `current_project_root()` from the cwd. Using one
 // lock (rather than separate cwd/budget locks) ensures a cwd test, a budget test,
 // and an execute-loop test can never run concurrently and corrupt each other.
-static STATE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+// ReentrantMutex allows tests to nest guards (e.g. KillswitchTestGuard and EnvGuard)
+// on the same thread without deadlocking.
+static STATE_LOCK: OnceLock<ReentrantMutex<()>> = OnceLock::new();
 
-pub(crate) fn state_lock() -> MutexGuard<'static, ()> {
-    // Recover from a poisoned lock: a panicking test still restores state on drop,
-    // so the guarded invariant (globals only mutated while the lock is held) holds.
-    STATE_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+pub(crate) fn state_lock() -> ReentrantMutexGuard<'static, ()> {
+    STATE_LOCK.get_or_init(|| ReentrantMutex::new(())).lock()
 }
 
 /// RAII guard that serializes cwd-sensitive tests and restores the original
 /// working directory when dropped (including on panic).
 pub(crate) struct CwdGuard {
-    _lock: MutexGuard<'static, ()>,
+    _lock: ReentrantMutexGuard<'static, ()>,
     saved: PathBuf,
 }
 
@@ -72,7 +70,7 @@ impl Drop for CwdGuard {
 /// a large known default on acquire and on drop, so guarded tests see a
 /// deterministic starting point.
 pub(crate) struct BudgetGuard {
-    _lock: MutexGuard<'static, ()>,
+    _lock: ReentrantMutexGuard<'static, ()>,
 }
 
 impl BudgetGuard {
@@ -98,7 +96,7 @@ impl Drop for BudgetGuard {
 /// drop. `CwdGuard` alone left the budget inherited — the cause of flaky
 /// `continue_execution`/`run_task` failures under parallel test execution.
 pub(crate) struct ExecGuard {
-    _lock: MutexGuard<'static, ()>,
+    _lock: ReentrantMutexGuard<'static, ()>,
     saved: PathBuf,
 }
 
@@ -128,7 +126,7 @@ impl Drop for ExecGuard {
 /// and restores each captured variable to its prior value on drop (including
 /// on panic).
 pub(crate) struct EnvGuard {
-    _lock: MutexGuard<'static, ()>,
+    _lock: ReentrantMutexGuard<'static, ()>,
     saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
     clear_selfware_on_drop: bool,
 }

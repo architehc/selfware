@@ -281,6 +281,7 @@ fn test_trip_file_killswitch_symlink_preservation() {
 #[cfg(unix)]
 fn test_global_killswitch_symlinked_home_detection() {
     let _lock = KILLSWITCH_TEST_LOCK.lock();
+    let _env = crate::test_support::EnvGuard::capture(&["HOME"]);
     let tmp = tempdir().unwrap();
 
     // Create real home directory with .selfware/KILLSWITCH
@@ -311,6 +312,7 @@ fn test_global_killswitch_symlinked_home_detection() {
 #[cfg(unix)]
 fn test_global_killswitch_inspection_error_fails_closed() {
     let _lock = KILLSWITCH_TEST_LOCK.lock();
+    let _env = crate::test_support::EnvGuard::capture(&["HOME"]);
     use std::os::unix::fs::PermissionsExt;
 
     let tmp = tempdir().unwrap();
@@ -376,4 +378,41 @@ fn test_safety_checker_ordinary_denied_path_does_not_trip_killswitch() {
 
     // Process killswitch must still be inactive
     assert!(!is_killswitch_active());
+}
+
+#[test]
+fn test_remove_file_killswitch_nonempty_directory_survives_and_errors() {
+    let _lock = KILLSWITCH_TEST_LOCK.lock();
+    let tmp = tempdir().unwrap();
+    let project_root = tmp.path();
+    let ks_dir = project_root.join(".selfware").join(KILLSWITCH_FILE_NAME);
+    std::fs::create_dir_all(&ks_dir).unwrap();
+
+    // Place an important file inside the killswitch directory
+    let inner_file = ks_dir.join("user_data.txt");
+    std::fs::write(&inner_file, "critical operator notes").unwrap();
+
+    // Attempting to remove the killswitch directory must refuse and error
+    let res = remove_file_killswitch(project_root);
+    assert!(
+        res.is_err(),
+        "remove_file_killswitch must fail on nonempty directory"
+    );
+    let err = res.unwrap_err();
+    assert!(err.to_string().contains("not empty"));
+    assert!(err.to_string().contains("refusing to recursively delete"));
+
+    // Contents must survive untouched
+    assert!(inner_file.exists());
+    assert_eq!(
+        std::fs::read_to_string(&inner_file).unwrap(),
+        "critical operator notes"
+    );
+
+    // After removing the inner file (making directory empty), remove_file_killswitch succeeds
+    std::fs::remove_file(&inner_file).unwrap();
+    let res_empty = remove_file_killswitch(project_root);
+    assert!(res_empty.is_ok());
+    assert!(res_empty.unwrap());
+    assert!(!ks_dir.exists());
 }

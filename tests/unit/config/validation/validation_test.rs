@@ -1332,3 +1332,22 @@ async fn test_is_sglang_backend_non_blocking_inside_tokio() {
     // Transient/unprobed endpoint must not have negative result cached
     assert_eq!(get_sglang_capability("http://192.0.2.1:8080"), None);
 }
+
+#[tokio::test]
+async fn test_check_sglang_backend_tri_state() {
+    clear_sglang_capability_cache();
+    let endpoint = "http://192.0.2.1:8080";
+    // Cold unprobed endpoint inside tokio: returns None (unknown)
+    assert_eq!(check_sglang_backend(endpoint), None);
+    assert!(!is_sglang_backend(endpoint));
+
+    // Cache positive determination
+    set_sglang_capability(endpoint, true);
+    assert_eq!(check_sglang_backend(endpoint), Some(true));
+    assert!(is_sglang_backend(endpoint));
+
+    // Cache negative determination
+    set_sglang_capability(endpoint, false);
+    assert_eq!(check_sglang_backend(endpoint), Some(false));
+    assert!(!is_sglang_backend(endpoint));
+}

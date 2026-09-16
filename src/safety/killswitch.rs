@@ -57,7 +57,7 @@ pub(crate) struct KillswitchTestLock;
 
 #[cfg(test)]
 pub(crate) struct KillswitchTestGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _lock: parking_lot::ReentrantMutexGuard<'static, ()>,
 }
 
 #[cfg(test)]
@@ -141,10 +141,10 @@ pub fn check_killswitch(project_root: Option<&Path>) -> Result<(), KillswitchErr
 
     // Specific project root if provided, otherwise check current working directory
     if let Some(root) = project_root {
-        check_paths.push((root.join(".selfware").join(KILLSWITCH_FILE_NAME), true));
+        check_paths.push(root.join(".selfware").join(KILLSWITCH_FILE_NAME));
     } else if let Ok(cwd) = std::env::current_dir() {
         let cwd_ks = cwd.join(".selfware").join(KILLSWITCH_FILE_NAME);
-        check_paths.push((cwd_ks, true));
+        check_paths.push(cwd_ks);
     }
 
     // User home directory (strictly test-only bypass for test suite isolation)
@@ -170,8 +170,8 @@ pub fn check_killswitch(project_root: Option<&Path>) -> Result<(), KillswitchErr
                         let home_ks = home_selfware.join(KILLSWITCH_FILE_NAME);
                         match home_ks.symlink_metadata() {
                             Ok(_) => {
-                                // Sentinel exists at home killswitch path; inspect it (fail_closed = true)
-                                check_paths.push((home_ks, true));
+                                // Sentinel exists at home killswitch path; inspect it
+                                check_paths.push(home_ks);
                             }
                             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                                 // Genuinely absent
@@ -211,7 +211,7 @@ pub fn check_killswitch(project_root: Option<&Path>) -> Result<(), KillswitchErr
         }
     }
 
-    for (path, fail_closed) in check_paths {
+    for path in check_paths {
         match path.symlink_metadata() {
             Ok(meta) => {
                 let reason = if meta.file_type().is_symlink() {
@@ -268,18 +268,11 @@ pub fn check_killswitch(project_root: Option<&Path>) -> Result<(), KillswitchErr
                 // Genuinely absent, continue to next path
             }
             Err(e) => {
-                if fail_closed {
-                    // Project root / cwd unreadable ancestor or permission denied: FAIL CLOSED
-                    return Err(KillswitchError::File {
-                        path: path.clone(),
-                        reason: format!("Cannot verify killswitch path ({e}): failing closed"),
-                    });
-                } else {
-                    tracing::debug!(
-                        "Non-critical killswitch path {:?} inaccessible ({e}); ignoring",
-                        path
-                    );
-                }
+                // Project root / cwd / home unreadable ancestor or permission denied: FAIL CLOSED
+                return Err(KillswitchError::File {
+                    path: path.clone(),
+                    reason: format!("Cannot verify killswitch path ({e}): failing closed"),
+                });
             }
         }
     }
@@ -356,7 +349,15 @@ pub fn remove_file_killswitch(project_root: &Path) -> std::io::Result<bool> {
     match killswitch_path.symlink_metadata() {
         Ok(meta) => {
             if meta.is_dir() {
-                std::fs::remove_dir_all(&killswitch_path)?;
+                // Verify directory is empty to ensure user/operator contents survive
+                let mut entries = std::fs::read_dir(&killswitch_path)?;
+                if entries.next().transpose()?.is_some() {
+                    return Err(std::io::Error::other(format!(
+                        "Killswitch directory '{}' is not empty; refusing to recursively delete contents",
+                        killswitch_path.display()
+                    )));
+                }
+                std::fs::remove_dir(&killswitch_path)?;
             } else {
                 std::fs::remove_file(&killswitch_path)?;
             }

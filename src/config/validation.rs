@@ -529,36 +529,45 @@ fn probe_sglang_backend_blocking_direct(base: &str) -> (bool, bool) {
     }
 }
 
-/// Detects if an endpoint is an SGLang deployment behaviourally via `/get_server_info`,
-/// falling back to hostname/port heuristics when offline or when probing cannot be performed.
-/// Transient failures preserve an unknown state and are not cached as negative results.
-pub fn is_sglang_backend(endpoint: &str) -> bool {
+/// Tri-state detection of whether an endpoint is an SGLang deployment:
+/// - `Some(true)`: confirmed SGLang (via server info body or known deployment heuristic)
+/// - `Some(false)`: confirmed non-SGLang (e.g. 404 on /get_server_info)
+/// - `None`: unknown / unprobed / transient failure / cold cache inside Tokio runtime
+pub fn check_sglang_backend(endpoint: &str) -> Option<bool> {
     let base = normalize_endpoint_base(endpoint);
 
     // 1. Cached capability
     if let Some(cached) = get_sglang_capability(&base) {
-        return cached;
+        return Some(cached);
     }
 
     // 2. Fast hostname / known deployment heuristic
     if is_sglang_serving_deployment(&base) {
         set_sglang_capability(&base, true);
-        return true;
+        return Some(true);
     }
 
     // 3. Do not block inside an async Tokio runtime.
     // In async contexts, capability discovery is performed non-blockingly via `validate_async`.
     if tokio::runtime::Handle::try_current().is_ok() {
-        return false;
+        return None;
     }
 
     // 4. Synchronous probe outside of Tokio runtime
     let (is_sg, is_conclusive) = probe_sglang_backend_blocking_direct(&base);
     if is_conclusive {
         set_sglang_capability(&base, is_sg);
+        Some(is_sg)
+    } else {
+        None
     }
+}
 
-    is_sg
+/// Detects if an endpoint is an SGLang deployment behaviourally via `/get_server_info`,
+/// falling back to hostname/port heuristics when offline or when probing cannot be performed.
+/// Transient failures preserve an unknown state and are not cached as negative results.
+pub fn is_sglang_backend(endpoint: &str) -> bool {
+    check_sglang_backend(endpoint).unwrap_or(false)
 }
 
 /// Returns true if the endpoint URL indicates an SGLang serving deployment

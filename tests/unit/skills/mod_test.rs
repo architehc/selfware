@@ -146,6 +146,7 @@ fn render_content_substitutes_arguments_claude_style() {
 
 #[test]
 fn discover_dir_loads_commands_markdown_files() {
+    let _lock = crate::safety::killswitch::KILLSWITCH_TEST_LOCK.lock();
     let temp = tempfile::tempdir().expect("tempdir");
     let commands = temp.path().join("commands");
     std::fs::create_dir_all(&commands).expect("mkdir");
@@ -547,73 +548,89 @@ fn test_corrupt_ledger_fails_closed() {
 }
 
 #[test]
-fn test_legacy_admitted_skill_backfill() {
+fn test_fabricated_skill_claiming_admitted_cannot_admit_or_verify_itself() {
+    let _lock = crate::safety::killswitch::KILLSWITCH_TEST_LOCK.lock();
     let temp = tempfile::tempdir().expect("tempdir");
     let active_skills = temp.path().join("skills");
     std::fs::create_dir_all(&active_skills).unwrap();
 
-    let content = "Legacy admitted skill instructions.";
+    let content = "Untrusted instructions from fabricated file.";
     let content_hash = format!("{:x}", sha2::Sha256::digest(content.as_bytes()));
 
-    // Write a skill with admitted: true and matching content_hash, without an .admitted_ledger.json file
-    let legacy_file = active_skills.join("legacy_skill.md");
+    // Fabricate a file declaring admitted: true and verified: true with a valid matching content_hash
+    let fabricated_file = active_skills.join("fabricated.md");
     let markdown = format!(
-        "---\nname: legacy_skill\ndescription: Legacy skill\nadmitted: true\ncontent_hash: {content_hash}\n---\n{content}"
+        "---\nname: fabricated\ndescription: Fabricated unadmitted skill\nadmitted: true\nverified: true\ncontent_hash: {content_hash}\n---\n{content}"
     );
-    std::fs::write(&legacy_file, markdown).unwrap();
+    std::fs::write(&fabricated_file, markdown).unwrap();
 
     let mut registry = SkillRegistry::new();
     registry.discover_dir(&active_skills);
 
-    // Skill should be discovered and admitted
-    let skill = registry
-        .get("legacy_skill")
-        .expect("Legacy skill should be discovered and backfilled");
-    assert!(skill.admitted);
+    // 1. Fabricated skill MUST be rejected during discovery: not admitted, not in registry
+    assert!(
+        registry.get("fabricated").is_none(),
+        "Fabricated skill claiming admitted: true without a ledger entry must be rejected"
+    );
+    assert!(
+        registry.is_empty(),
+        "Registry must be empty; unadmitted candidate cannot admit itself"
+    );
 
-    // .admitted_ledger.json should now exist and contain legacy_skill
-    let ledger =
-        AdmissionLedger::load_from_dir(&active_skills).expect("Ledger should have been persisted");
-    let entry = ledger
-        .entries
-        .get("legacy_skill")
-        .expect("Entry should be present in ledger");
-    assert_eq!(entry.content_hash, content_hash);
+    // 2. Discovery is strictly read-only: no .admitted_ledger.json must ever be created
+    let ledger_path = active_skills.join(".admitted_ledger.json");
+    assert!(
+        !ledger_path.exists(),
+        "Discovery must be strictly read-only; no ledger file should be created"
+    );
 
-    // Subsequent discovery should load from ledger
-    let mut fresh_registry = SkillRegistry::new();
-    fresh_registry.discover_dir(&active_skills);
-    assert!(fresh_registry.get("legacy_skill").is_some());
+    // 3. Even with an existing empty ledger, the fabricated file cannot grant itself admission or verification
+    let empty_ledger = AdmissionLedger::default();
+    empty_ledger.save_to_dir(&active_skills).unwrap();
+
+    let mut registry2 = SkillRegistry::new();
+    registry2.discover_dir(&active_skills);
+    assert!(
+        registry2.get("fabricated").is_none(),
+        "Fabricated skill cannot be admitted by discovery even if ledger exists"
+    );
+
+    let reloaded_ledger = AdmissionLedger::load_from_dir(&active_skills).unwrap();
+    assert!(
+        !reloaded_ledger.entries.contains_key("fabricated"),
+        "Ledger must not contain fabricated skill"
+    );
 }
 
 #[test]
-fn test_tampered_legacy_skill_rejected_no_backfill() {
+fn test_unadmitted_candidate_rejected_during_discovery() {
+    let _lock = crate::safety::killswitch::KILLSWITCH_TEST_LOCK.lock();
     let temp = tempfile::tempdir().expect("tempdir");
     let active_skills = temp.path().join("skills");
     std::fs::create_dir_all(&active_skills).unwrap();
 
-    let content = "Tampered legacy instructions.";
+    let content = "Tampered candidate instructions.";
     let wrong_hash = "0000000000000000000000000000000000000000000000000000000000000000";
 
     // Write a skill claiming admitted: true but with a mismatched content_hash
-    let legacy_file = active_skills.join("tampered_legacy.md");
+    let candidate_file = active_skills.join("unadmitted_candidate.md");
     let markdown = format!(
-        "---\nname: tampered_legacy\ndescription: Tampered legacy\nadmitted: true\ncontent_hash: {wrong_hash}\n---\n{content}"
+        "---\nname: unadmitted_candidate\ndescription: Unadmitted candidate\nadmitted: true\ncontent_hash: {wrong_hash}\n---\n{content}"
     );
-    std::fs::write(&legacy_file, markdown).unwrap();
+    std::fs::write(&candidate_file, markdown).unwrap();
 
     let mut registry = SkillRegistry::new();
     registry.discover_dir(&active_skills);
 
-    // Tampered legacy skill must NOT be discovered
+    // Unadmitted candidate skill must NOT be discovered
     assert!(
-        registry.get("tampered_legacy").is_none(),
-        "Tampered legacy skill must be rejected"
+        registry.get("unadmitted_candidate").is_none(),
+        "Unadmitted candidate skill must be rejected"
     );
 
-    // Ledger should NOT contain tampered_legacy
-    let ledger = AdmissionLedger::load_from_dir(&active_skills).unwrap();
-    assert!(!ledger.entries.contains_key("tampered_legacy"));
+    // Ledger should NOT be created or contain candidate
+    let ledger_path = active_skills.join(".admitted_ledger.json");
+    assert!(!ledger_path.exists());
 }
 
 #[test]
