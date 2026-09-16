@@ -35,10 +35,21 @@ pub mod ast_tools;
 pub mod daemon;
 pub mod fitness;
 pub mod micro_mode;
+pub mod policy;
+pub mod replay;
 pub mod sandbox;
 pub mod telemetry;
 pub mod tournament;
+pub mod tree_log;
 
+pub use policy::{
+    BreadthFirstPolicy, EarlyStopPlateauPolicy, LegalAction, ParetoAdaptivePolicy, PolicyDecision,
+    PrefixObservation, PrefixView, RefineTop1Policy, SearchPolicy,
+};
+pub use replay::{ReplayError, ReplayReport, ReplaySimulator};
+pub use tree_log::{AttemptNode, AttemptStatus, AttemptTree, FailureClass, TreeLogError};
+
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Files and directories that must NEVER be modified by any self-improvement or evolution loop.
@@ -141,7 +152,7 @@ pub struct EvolutionConfig {
     pub llm: LlmConfig,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FitnessWeights {
     /// Weight for SAB benchmark aggregate score (0-100)
     pub sab_score: f64,
@@ -227,7 +238,7 @@ impl Default for FitnessWeights {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FitnessMetrics {
     pub sab_score: f64,
     /// `None` when token usage was not observed.
@@ -290,7 +301,7 @@ impl Default for SafetyConfig {
 }
 
 /// Rating for a generation's outcome, using the garden aesthetic
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GenerationRating {
     /// Score >= baseline + improvement_threshold
     Bloom,

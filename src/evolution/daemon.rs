@@ -9,6 +9,7 @@ use super::ast_tools;
 use super::fitness::{self, SabConfig, SabResult};
 use super::telemetry;
 use super::tournament::Hypothesis;
+use super::tree_log::{compute_sha256, AttemptNode, AttemptStatus, AttemptTree, FailureClass};
 use super::{is_protected, EvolutionConfig, FitnessMetrics, GenerationRating, LlmConfig};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -388,8 +389,15 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
     let mut hall_of_fame: Vec<GenerationWinner> = Vec::new();
     let mut generation: usize = 0;
 
-    // Clear previous log
-    let _ = std::fs::write(repo_root.join(".evolution-log.jsonl"), "");
+    // Initialize durable attempt tree log directory and run file
+    let run_id = format!(
+        "run_{}_{}",
+        chrono::Utc::now().format("%Y%m%d_%H%M%S"),
+        &uuid::Uuid::new_v4().to_string()[..8]
+    );
+    let attempts_dir = repo_root.join(".selfware").join("attempts");
+    let _ = std::fs::create_dir_all(&attempts_dir);
+    let attempts_file = attempts_dir.join(format!("{}.jsonl", run_id));
 
     // Fail-closed killswitch check before starting evolution
     if let Err(err) = crate::safety::killswitch::check_killswitch(Some(repo_root)) {
@@ -408,6 +416,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         repo_root,
         &serde_json::json!({
             "event": "start",
+            "run_id": run_id,
             "timestamp": chrono_now(),
             "generations": config.generations,
             "population_size": config.population_size,
@@ -574,6 +583,29 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         "Hypothesis '{}' touches protected files, rejected",
                         h.id
                     ));
+                    let _ = AttemptTree::append_node_to_jsonl(
+                        &attempts_file,
+                        &AttemptNode {
+                            id: format!("att-g{}-{}", generation, h.id),
+                            parent_id: None,
+                            generation,
+                            branch_id: h.id.clone(),
+                            hypothesis_id: h.id.clone(),
+                            description: h.description.clone(),
+                            diff_sha256: compute_sha256(h.patch.as_bytes()),
+                            patch: Some(h.patch.clone()),
+                            sab_report_path: None,
+                            metrics: None,
+                            composite_score: None,
+                            tokens_used: None,
+                            wall_time_ms: 0,
+                            status: AttemptStatus::SafetyRejected,
+                            failure_class: Some(FailureClass::SafetyViolation),
+                            failure_reason: Some("Touches protected paths".into()),
+                            binary_sha256: None,
+                            created_at: chrono_now(),
+                        },
+                    );
                     return false;
                 }
                 true
@@ -600,6 +632,10 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         )> = None;
 
         for hypothesis in &valid {
+            let attempt_start = Instant::now();
+            let attempt_id = format!("att-g{}-{}", generation, hypothesis.id);
+            let raw_diff_sha256 = compute_sha256(hypothesis.patch.as_bytes());
+
             log_phase(&format!(
                 "  Testing '{}' [{}]...",
                 hypothesis.description, hypothesis.id
@@ -614,6 +650,29 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 Ok(w) => w,
                 Err(e) => {
                     log_warning(&format!("  Worktree failed: {}", e));
+                    let _ = AttemptTree::append_node_to_jsonl(
+                        &attempts_file,
+                        &AttemptNode {
+                            id: attempt_id.clone(),
+                            parent_id: None,
+                            generation,
+                            branch_id: hypothesis.id.clone(),
+                            hypothesis_id: hypothesis.id.clone(),
+                            description: hypothesis.description.clone(),
+                            diff_sha256: raw_diff_sha256.clone(),
+                            patch: Some(hypothesis.patch.clone()),
+                            sab_report_path: None,
+                            metrics: None,
+                            composite_score: None,
+                            tokens_used: None,
+                            wall_time_ms: attempt_start.elapsed().as_millis() as u64,
+                            status: AttemptStatus::InternalError,
+                            failure_class: Some(FailureClass::EnvironmentError),
+                            failure_reason: Some(format!("Worktree creation failed: {e}")),
+                            binary_sha256: None,
+                            created_at: chrono_now(),
+                        },
+                    );
                     continue;
                 }
             };
@@ -625,6 +684,29 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 // Log the first 500 chars of the edit data for debugging
                 let preview = truncate_char_boundary(&hypothesis.patch, 500);
                 log_warning(&format!("  Edit preview:\n{}", preview));
+                let _ = AttemptTree::append_node_to_jsonl(
+                    &attempts_file,
+                    &AttemptNode {
+                        id: attempt_id.clone(),
+                        parent_id: None,
+                        generation,
+                        branch_id: hypothesis.id.clone(),
+                        hypothesis_id: hypothesis.id.clone(),
+                        description: hypothesis.description.clone(),
+                        diff_sha256: raw_diff_sha256.clone(),
+                        patch: Some(hypothesis.patch.clone()),
+                        sab_report_path: None,
+                        metrics: None,
+                        composite_score: None,
+                        tokens_used: None,
+                        wall_time_ms: attempt_start.elapsed().as_millis() as u64,
+                        status: AttemptStatus::PatchFailed,
+                        failure_class: Some(FailureClass::Unclassified),
+                        failure_reason: Some("Patch failed to apply cleanly".into()),
+                        binary_sha256: None,
+                        created_at: chrono_now(),
+                    },
+                );
                 continue;
             }
 
@@ -643,6 +725,29 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     .output();
                 if fmt_fix.map(|o| !o.status.success()).unwrap_or(true) {
                     log_frost(generation, &format!("cargo fmt failed: {}", hypothesis.id));
+                    let _ = AttemptTree::append_node_to_jsonl(
+                        &attempts_file,
+                        &AttemptNode {
+                            id: attempt_id.clone(),
+                            parent_id: None,
+                            generation,
+                            branch_id: hypothesis.id.clone(),
+                            hypothesis_id: hypothesis.id.clone(),
+                            description: hypothesis.description.clone(),
+                            diff_sha256: raw_diff_sha256.clone(),
+                            patch: Some(hypothesis.patch.clone()),
+                            sab_report_path: None,
+                            metrics: None,
+                            composite_score: None,
+                            tokens_used: None,
+                            wall_time_ms: attempt_start.elapsed().as_millis() as u64,
+                            status: AttemptStatus::FormatFailed,
+                            failure_class: Some(FailureClass::RepairableSyntax),
+                            failure_reason: Some("cargo fmt failed".into()),
+                            binary_sha256: None,
+                            created_at: chrono_now(),
+                        },
+                    );
                     continue;
                 }
             }
@@ -658,6 +763,29 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
             if check.map(|o| !o.status.success()).unwrap_or(true) {
                 log_frost(generation, &format!("Compile failed: {}", hypothesis.id));
+                let _ = AttemptTree::append_node_to_jsonl(
+                    &attempts_file,
+                    &AttemptNode {
+                        id: attempt_id.clone(),
+                        parent_id: None,
+                        generation,
+                        branch_id: hypothesis.id.clone(),
+                        hypothesis_id: hypothesis.id.clone(),
+                        description: hypothesis.description.clone(),
+                        diff_sha256: raw_diff_sha256.clone(),
+                        patch: Some(hypothesis.patch.clone()),
+                        sab_report_path: None,
+                        metrics: None,
+                        composite_score: None,
+                        tokens_used: None,
+                        wall_time_ms: attempt_start.elapsed().as_millis() as u64,
+                        status: AttemptStatus::CompileFailed,
+                        failure_class: Some(FailureClass::RepairableSyntax),
+                        failure_reason: Some("cargo check failed".into()),
+                        binary_sha256: None,
+                        created_at: chrono_now(),
+                    },
+                );
                 continue;
             }
 
@@ -675,6 +803,29 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 Ok(o) => o,
                 Err(e) => {
                     log_warning(&format!("  Test execution failed: {}", e));
+                    let _ = AttemptTree::append_node_to_jsonl(
+                        &attempts_file,
+                        &AttemptNode {
+                            id: attempt_id.clone(),
+                            parent_id: None,
+                            generation,
+                            branch_id: hypothesis.id.clone(),
+                            hypothesis_id: hypothesis.id.clone(),
+                            description: hypothesis.description.clone(),
+                            diff_sha256: raw_diff_sha256.clone(),
+                            patch: Some(hypothesis.patch.clone()),
+                            sab_report_path: None,
+                            metrics: None,
+                            composite_score: None,
+                            tokens_used: None,
+                            wall_time_ms: attempt_start.elapsed().as_millis() as u64,
+                            status: AttemptStatus::InternalError,
+                            failure_class: Some(FailureClass::EnvironmentError),
+                            failure_reason: Some(format!("Test execution failed: {e}")),
+                            binary_sha256: None,
+                            created_at: chrono_now(),
+                        },
+                    );
                     continue;
                 }
             };
@@ -692,6 +843,29 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     generation,
                     &format!("Tests failed: {} — {}", hypothesis.id, fail_count),
                 );
+                let _ = AttemptTree::append_node_to_jsonl(
+                    &attempts_file,
+                    &AttemptNode {
+                        id: attempt_id.clone(),
+                        parent_id: None,
+                        generation,
+                        branch_id: hypothesis.id.clone(),
+                        hypothesis_id: hypothesis.id.clone(),
+                        description: hypothesis.description.clone(),
+                        diff_sha256: raw_diff_sha256.clone(),
+                        patch: Some(hypothesis.patch.clone()),
+                        sab_report_path: None,
+                        metrics: None,
+                        composite_score: None,
+                        tokens_used: None,
+                        wall_time_ms: attempt_start.elapsed().as_millis() as u64,
+                        status: AttemptStatus::TestFailed,
+                        failure_class: Some(FailureClass::RepairableTestFailure),
+                        failure_reason: Some(format!("Tests failed: {fail_count}")),
+                        binary_sha256: None,
+                        created_at: chrono_now(),
+                    },
+                );
                 continue;
             }
 
@@ -707,6 +881,29 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
             if clippy.map(|o| !o.status.success()).unwrap_or(true) {
                 log_frost(generation, &format!("Clippy failed: {}", hypothesis.id));
+                let _ = AttemptTree::append_node_to_jsonl(
+                    &attempts_file,
+                    &AttemptNode {
+                        id: attempt_id.clone(),
+                        parent_id: None,
+                        generation,
+                        branch_id: hypothesis.id.clone(),
+                        hypothesis_id: hypothesis.id.clone(),
+                        description: hypothesis.description.clone(),
+                        diff_sha256: raw_diff_sha256.clone(),
+                        patch: Some(hypothesis.patch.clone()),
+                        sab_report_path: None,
+                        metrics: None,
+                        composite_score: None,
+                        tokens_used: None,
+                        wall_time_ms: attempt_start.elapsed().as_millis() as u64,
+                        status: AttemptStatus::ClippyFailed,
+                        failure_class: Some(FailureClass::RepairableClippy),
+                        failure_reason: Some("cargo clippy warnings detected".into()),
+                        binary_sha256: None,
+                        created_at: chrono_now(),
+                    },
+                );
                 continue;
             }
 
@@ -723,6 +920,29 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         generation,
                         &format!("Release build failed: {}", hypothesis.id),
                     );
+                    let _ = AttemptTree::append_node_to_jsonl(
+                        &attempts_file,
+                        &AttemptNode {
+                            id: attempt_id.clone(),
+                            parent_id: None,
+                            generation,
+                            branch_id: hypothesis.id.clone(),
+                            hypothesis_id: hypothesis.id.clone(),
+                            description: hypothesis.description.clone(),
+                            diff_sha256: raw_diff_sha256.clone(),
+                            patch: Some(hypothesis.patch.clone()),
+                            sab_report_path: None,
+                            metrics: None,
+                            composite_score: None,
+                            tokens_used: None,
+                            wall_time_ms: attempt_start.elapsed().as_millis() as u64,
+                            status: AttemptStatus::BuildFailed,
+                            failure_class: Some(FailureClass::Unclassified),
+                            failure_reason: Some("Release build failed".into()),
+                            binary_sha256: None,
+                            created_at: chrono_now(),
+                        },
+                    );
                     continue;
                 }
 
@@ -738,6 +958,29 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     ),
                     Err(e) => {
                         log_warning(&format!("  SAB failed: {}", e));
+                        let _ = AttemptTree::append_node_to_jsonl(
+                            &attempts_file,
+                            &AttemptNode {
+                                id: attempt_id.clone(),
+                                parent_id: None,
+                                generation,
+                                branch_id: hypothesis.id.clone(),
+                                hypothesis_id: hypothesis.id.clone(),
+                                description: hypothesis.description.clone(),
+                                diff_sha256: raw_diff_sha256.clone(),
+                                patch: Some(hypothesis.patch.clone()),
+                                sab_report_path: None,
+                                metrics: None,
+                                composite_score: None,
+                                tokens_used: None,
+                                wall_time_ms: attempt_start.elapsed().as_millis() as u64,
+                                status: AttemptStatus::InternalError,
+                                failure_class: Some(FailureClass::EnvironmentError),
+                                failure_reason: Some(format!("SAB execution failed: {e}")),
+                                binary_sha256: None,
+                                created_at: chrono_now(),
+                            },
+                        );
                         continue;
                     }
                 }
@@ -754,6 +997,29 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         log_frost(
                             generation,
                             &format!("Release build failed: {}", hypothesis.id),
+                        );
+                        let _ = AttemptTree::append_node_to_jsonl(
+                            &attempts_file,
+                            &AttemptNode {
+                                id: attempt_id.clone(),
+                                parent_id: None,
+                                generation,
+                                branch_id: hypothesis.id.clone(),
+                                hypothesis_id: hypothesis.id.clone(),
+                                description: hypothesis.description.clone(),
+                                diff_sha256: raw_diff_sha256.clone(),
+                                patch: Some(hypothesis.patch.clone()),
+                                sab_report_path: None,
+                                metrics: None,
+                                composite_score: None,
+                                tokens_used: None,
+                                wall_time_ms: attempt_start.elapsed().as_millis() as u64,
+                                status: AttemptStatus::BuildFailed,
+                                failure_class: Some(FailureClass::Unclassified),
+                                failure_reason: Some("Candidate build failed".into()),
+                                binary_sha256: None,
+                                created_at: chrono_now(),
+                            },
                         );
                         continue;
                     }
@@ -773,17 +1039,76 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         generation,
                         &format!("No effective diff after evaluation: {}", hypothesis.id),
                     );
+                    let _ = AttemptTree::append_node_to_jsonl(
+                        &attempts_file,
+                        &AttemptNode {
+                            id: attempt_id.clone(),
+                            parent_id: None,
+                            generation,
+                            branch_id: hypothesis.id.clone(),
+                            hypothesis_id: hypothesis.id.clone(),
+                            description: hypothesis.description.clone(),
+                            diff_sha256: raw_diff_sha256.clone(),
+                            patch: Some(hypothesis.patch.clone()),
+                            sab_report_path: None,
+                            metrics: None,
+                            composite_score: None,
+                            tokens_used: None,
+                            wall_time_ms: attempt_start.elapsed().as_millis() as u64,
+                            status: AttemptStatus::Evaluated,
+                            failure_class: None,
+                            failure_reason: Some("No effective diff after evaluation".into()),
+                            binary_sha256: None,
+                            created_at: chrono_now(),
+                        },
+                    );
                     continue;
                 }
             };
 
+            let candidate_composite = config.fitness_weights.composite(&winner_metrics);
+            let tested_diff_sha256 = compute_sha256(tested_diff.as_bytes());
+
+            let _ = AttemptTree::append_node_to_jsonl(
+                &attempts_file,
+                &AttemptNode {
+                    id: attempt_id.clone(),
+                    parent_id: None,
+                    generation,
+                    branch_id: hypothesis.id.clone(),
+                    hypothesis_id: hypothesis.id.clone(),
+                    description: hypothesis.description.clone(),
+                    diff_sha256: tested_diff_sha256,
+                    patch: Some(tested_diff.clone()),
+                    sab_report_path: winner_sab.as_ref().map(|s| s.report_path.clone()),
+                    metrics: Some(winner_metrics.clone()),
+                    composite_score: Some(candidate_composite),
+                    tokens_used: winner_metrics.tokens_used,
+                    wall_time_ms: attempt_start.elapsed().as_millis() as u64,
+                    status: AttemptStatus::Evaluated,
+                    failure_class: None,
+                    failure_reason: None,
+                    binary_sha256: winner_sab.as_ref().map(|s| s.binary_sha256.clone()),
+                    created_at: chrono_now(),
+                },
+            );
+
             log_phase(&format!(
-                "  ✓ '{}' passed (score: {:.0}, {:.1}s)",
-                hypothesis.description, winner_metrics.sab_score, winner_metrics.wall_clock_secs
+                "  ✓ '{}' passed (score: {:.0}, composite: {:.4}, {:.1}s)",
+                hypothesis.description,
+                winner_metrics.sab_score,
+                candidate_composite,
+                winner_metrics.wall_clock_secs
             ));
 
-            // Keep the first passing hypothesis as winner
-            if generation_winner.is_none() {
+            // Best-of-generation selection under composite score
+            let is_better = match &generation_winner {
+                None => true,
+                Some((_, best_metrics, _, _)) => {
+                    candidate_composite > config.fitness_weights.composite(best_metrics)
+                }
+            };
+            if is_better {
                 generation_winner =
                     Some((hypothesis.clone(), winner_metrics, winner_sab, tested_diff));
             }

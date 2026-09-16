@@ -1,0 +1,229 @@
+use super::*;
+use tempfile::tempdir;
+
+fn sample_metrics(sab_score: f64) -> FitnessMetrics {
+    FitnessMetrics {
+        sab_score,
+        tokens_used: Some(1200),
+        token_budget: 16384,
+        wall_clock_secs: 14.2,
+        timeout_secs: 60.0,
+        full_evaluation_secs: Some(18.5),
+        test_coverage_pct: 88.5,
+        binary_size_mb: 12.4,
+        max_binary_size_mb: 50.0,
+        tests_passed: 120,
+        tests_total: 120,
+        visual_score: 0.0,
+    }
+}
+
+fn sample_node(
+    id: &str,
+    parent_id: Option<&str>,
+    branch_id: &str,
+    score: Option<f64>,
+    status: AttemptStatus,
+) -> AttemptNode {
+    AttemptNode {
+        id: id.to_string(),
+        parent_id: parent_id.map(|s| s.to_string()),
+        generation: 1,
+        branch_id: branch_id.to_string(),
+        hypothesis_id: format!("hyp-{}", id),
+        description: format!("Mutation {}", id),
+        diff_sha256: compute_sha256(id.as_bytes()),
+        patch: Some(format!("diff --git a/src/lib.rs b/src/lib.rs\n// {}", id)),
+        sab_report_path: None,
+        metrics: score.map(sample_metrics),
+        composite_score: score,
+        tokens_used: Some(1200),
+        wall_time_ms: 14200,
+        status,
+        failure_class: if status == AttemptStatus::Evaluated {
+            None
+        } else {
+            Some(FailureClass::RepairableSyntax)
+        },
+        failure_reason: if status == AttemptStatus::Evaluated {
+            None
+        } else {
+            Some("expected semicolon".into())
+        },
+        binary_sha256: None,
+        created_at: "2026-09-16T12:00:00Z".to_string(),
+    }
+}
+
+#[test]
+fn test_tree_construction_and_queries() {
+    let mut tree = AttemptTree::new();
+
+    let root_a = sample_node(
+        "node-1",
+        None,
+        "branch-A",
+        Some(0.65),
+        AttemptStatus::Evaluated,
+    );
+    let child_a1 = sample_node(
+        "node-2",
+        Some("node-1"),
+        "branch-A",
+        Some(0.72),
+        AttemptStatus::Evaluated,
+    );
+    let root_b = sample_node(
+        "node-3",
+        None,
+        "branch-B",
+        Some(0.50),
+        AttemptStatus::Evaluated,
+    );
+
+    tree.add_node(root_a).expect("add root_a");
+    tree.add_node(child_a1).expect("add child_a1");
+    tree.add_node(root_b).expect("add root_b");
+
+    assert_eq!(tree.len(), 3);
+    assert!(!tree.is_empty());
+
+    // Check roots
+    let roots = tree.roots();
+    assert_eq!(roots.len(), 2);
+    let root_ids: Vec<&str> = roots.iter().map(|n| n.id.as_str()).collect();
+    assert!(root_ids.contains(&"node-1"));
+    assert!(root_ids.contains(&"node-3"));
+
+    // Check children
+    let children_1 = tree.children("node-1");
+    assert_eq!(children_1.len(), 1);
+    assert_eq!(children_1[0].id, "node-2");
+
+    let children_2 = tree.children("node-2");
+    assert!(children_2.is_empty());
+
+    // Check branches
+    let branches = tree.branches();
+    assert_eq!(branches, vec!["branch-A", "branch-B"]);
+
+    let nodes_a = tree.branch_nodes("branch-A");
+    assert_eq!(nodes_a.len(), 2);
+
+    // Check best node
+    let best = tree.best_node().expect("best node");
+    assert_eq!(best.id, "node-2");
+    assert_eq!(best.composite_score, Some(0.72));
+
+    let best_b = tree.best_in_branch("branch-B").expect("best in branch B");
+    assert_eq!(best_b.id, "node-3");
+    assert_eq!(best_b.composite_score, Some(0.50));
+}
+
+#[test]
+fn test_duplicate_id_rejected() {
+    let mut tree = AttemptTree::new();
+    let node1 = sample_node("dup-1", None, "b1", Some(0.5), AttemptStatus::Evaluated);
+    let node2 = sample_node("dup-1", None, "b2", Some(0.8), AttemptStatus::Evaluated);
+
+    tree.add_node(node1).unwrap();
+    let err = tree.add_node(node2).unwrap_err();
+    match err {
+        TreeLogError::DuplicateId(id) => assert_eq!(id, "dup-1"),
+        other => panic!("Unexpected error: {:?}", other),
+    }
+}
+
+#[test]
+fn test_save_and_load_jsonl() {
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("attempts.jsonl");
+
+    let mut tree = AttemptTree::new();
+    tree.add_node(sample_node(
+        "n1",
+        None,
+        "b1",
+        Some(0.55),
+        AttemptStatus::Evaluated,
+    ))
+    .unwrap();
+    tree.add_node(sample_node(
+        "n2",
+        Some("n1"),
+        "b1",
+        None,
+        AttemptStatus::CompileFailed,
+    ))
+    .unwrap();
+
+    tree.save_to_jsonl(&file_path).unwrap();
+    assert!(file_path.exists());
+
+    let loaded = AttemptTree::load_from_jsonl(&file_path).unwrap();
+    assert_eq!(loaded.len(), 2);
+    assert_eq!(loaded.get("n1").unwrap().composite_score, Some(0.55));
+    assert_eq!(
+        loaded.get("n2").unwrap().status,
+        AttemptStatus::CompileFailed
+    );
+    assert_eq!(loaded.children("n1").len(), 1);
+}
+
+#[test]
+fn test_append_node_to_jsonl() {
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("attempts_append.jsonl");
+
+    let n1 = sample_node("app-1", None, "b1", Some(0.60), AttemptStatus::Evaluated);
+    let n2 = sample_node(
+        "app-2",
+        Some("app-1"),
+        "b1",
+        Some(0.75),
+        AttemptStatus::Evaluated,
+    );
+
+    AttemptTree::append_node_to_jsonl(&file_path, &n1).unwrap();
+    AttemptTree::append_node_to_jsonl(&file_path, &n2).unwrap();
+
+    let loaded = AttemptTree::load_from_jsonl(&file_path).unwrap();
+    assert_eq!(loaded.len(), 2);
+    assert_eq!(loaded.get("app-2").unwrap().composite_score, Some(0.75));
+}
+
+#[test]
+fn test_failure_class_repairability() {
+    assert!(FailureClass::RepairableSyntax.is_repairable());
+    assert!(FailureClass::RepairableTypeError.is_repairable());
+    assert!(FailureClass::RepairableTestFailure.is_repairable());
+    assert!(FailureClass::RepairableClippy.is_repairable());
+
+    assert!(!FailureClass::UnrecoverableResource.is_repairable());
+    assert!(!FailureClass::SafetyViolation.is_repairable());
+    assert!(!FailureClass::EnvironmentError.is_repairable());
+    assert!(!FailureClass::Unclassified.is_repairable());
+}
+
+#[test]
+fn test_compute_sha256() {
+    let hash = compute_sha256(b"hello world");
+    assert_eq!(
+        hash,
+        "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+    );
+}
+
+#[test]
+fn test_corrupt_line_handling() {
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("corrupt.jsonl");
+
+    std::fs::write(&file_path, "not a valid json\n").unwrap();
+    let res = AttemptTree::load_from_jsonl(&file_path);
+    assert!(res.is_err());
+    match res.unwrap_err() {
+        TreeLogError::CorruptLine(msg) => assert!(msg.contains("line 1")),
+        other => panic!("Unexpected error: {:?}", other),
+    }
+}
