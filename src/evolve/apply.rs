@@ -252,6 +252,14 @@ pub fn verify_staged_diff(
     }
 
     let repo = git2::Repository::open(shadow_path)?;
+
+    // Shadows never contain .selfware/ (gitignored, untracked, added to shadow's info/exclude).
+    // The real repository root containing .selfware/KILLSWITCH is at repo.commondir().parent()!
+    if let Some(parent) = repo.commondir().parent() {
+        if let Err(err) = crate::safety::killswitch::check_killswitch(Some(parent)) {
+            return Ok(Err(RejectReason::Killswitch(err.to_string())));
+        }
+    }
     let base = repo
         .find_commit(git2::Oid::from_str(base_revision)?)?
         .tree()?;
@@ -404,6 +412,9 @@ pub async fn finalize_run(
     base_revision: &str,
     project_root: &Path,
 ) -> RunVerification {
+    if let Err(err) = crate::safety::killswitch::check_killswitch(Some(project_root)) {
+        return RunVerification::Rejected(format!("Killswitch active: {err}"));
+    }
     match verify_staged_diff(shadow_path, base_revision) {
         Ok(Ok(diff)) => match cargo_check_shadow(shadow_path, project_root).await {
             CompileGate::Passed => RunVerification::Staged(diff),
@@ -864,6 +875,13 @@ pub async fn commit_staged(
     // the run.
     if diff.digest != diff_digest {
         return Err(CommitError::UnknownRun(run_id.to_string()));
+    }
+
+    // Fail-closed killswitch check before promoting/merging to project root
+    if let Err(err) = crate::safety::killswitch::check_killswitch(Some(project_root)) {
+        return Err(CommitError::Git(format!(
+            "Killswitch active before promote: {err}"
+        )));
     }
 
     // Revision lock: the live checkout must not have moved since staging.

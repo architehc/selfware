@@ -109,10 +109,13 @@ impl ModificationEngine {
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs();
 
+        // Honest status (AGENTS.md Rule 3): this engine records a proposed modification
+        // to state history, but does not apply mutations to the codebase.
+        // Therefore success is false and applied_at is 0.
         let result = ModificationResult {
             id: proposal.id,
-            success: true,
-            applied_at: timestamp,
+            success: false,
+            applied_at: 0,
             rollback_available: false,
         };
 

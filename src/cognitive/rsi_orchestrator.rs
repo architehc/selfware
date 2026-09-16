@@ -232,9 +232,10 @@ impl RSIOrchestrator {
                 );
             }
 
-            match self.execute_improvement_cycle().await {
+            let cycle_result = self.execute_improvement_cycle().await;
+            match cycle_result {
                 Ok(true) => {
-                    info!("Improvement cycle successful and merged.");
+                    info!("Improvement cycle succeeded and was integrated.");
                     self.consecutive_failures = 0;
                 }
                 Ok(false) => {
@@ -243,6 +244,13 @@ impl RSIOrchestrator {
                     // (see record_cycle_failure); a genuine improvement is
                     // the only thing that resets it.
                     self.record_cycle_failure(iteration)?;
+                }
+                Err(SelfwareError::Safety(crate::errors::SafetyError::KillswitchActive {
+                    reason,
+                })) => {
+                    warn!("RSI loop stopped immediately: fail-closed killswitch active: {reason}");
+                    self.is_running = false;
+                    break;
                 }
                 Err(e) => {
                     error!("Improvement cycle failed: {}", e);
@@ -309,7 +317,11 @@ impl RSIOrchestrator {
         // Fail-closed killswitch check before starting cycle
         if let Err(err) = crate::safety::killswitch::check_killswitch(Some(&self.project_root)) {
             warn!("Killswitch active in RSI orchestrator: {err}; halting cycle");
-            return Ok(false);
+            return Err(SelfwareError::Safety(
+                crate::errors::SafetyError::KillswitchActive {
+                    reason: err.to_string(),
+                },
+            ));
         }
 
         // NOTE on cost: each cycle that reaches fitness evaluation runs TWO
@@ -377,8 +389,15 @@ impl RSIOrchestrator {
                 "Mutation for '{}' only touches comment/doc lines — skipping paid e2e evaluation.",
                 target.description
             );
-            self.record_improvement(&target, None, 0.0, false, true)
-                .await?;
+            self.record_improvement(
+                &target,
+                None,
+                0.0,
+                false,
+                true,
+                crate::cognitive::self_edit::ProposalStatus::SkippedTrivial,
+            )
+            .await?;
             sandbox.cleanup()?;
             return Ok(false);
         }
@@ -390,8 +409,15 @@ impl RSIOrchestrator {
             // Baseline was not measured yet (see note above) — record a 0.0
             // baseline; the record's `verified=false` marks this as rejected
             // before evaluation, so the exact baseline is not meaningful.
-            self.record_improvement(&target, None, 0.0, false, true)
-                .await?;
+            self.record_improvement(
+                &target,
+                None,
+                0.0,
+                false,
+                true,
+                crate::cognitive::self_edit::ProposalStatus::VerificationFailed,
+            )
+            .await?;
             sandbox.cleanup()?;
             return Ok(false);
         }
@@ -414,8 +440,15 @@ impl RSIOrchestrator {
                 "DarwinX Non-Regression violation: candidate broke previously passing scenario(s): {:?}. Rejecting mutation.",
                 regressed
             );
-            self.record_improvement(&target, Some(new_score), baseline_score, true, true)
-                .await?;
+            self.record_improvement(
+                &target,
+                Some(new_score),
+                baseline_score,
+                true,
+                true,
+                crate::cognitive::self_edit::ProposalStatus::EvaluatedRegression,
+            )
+            .await?;
             sandbox.cleanup()?;
             return Ok(false);
         }
@@ -429,16 +462,30 @@ impl RSIOrchestrator {
             self.merge_sandbox(sandbox, &applied).await?;
 
             // Record success
-            self.record_improvement(&target, Some(new_score), baseline_score, true, false)
-                .await?;
+            self.record_improvement(
+                &target,
+                Some(new_score),
+                baseline_score,
+                true,
+                false,
+                crate::cognitive::self_edit::ProposalStatus::EvaluatedSuccess,
+            )
+            .await?;
             Ok(true)
         } else {
             info!(
                 "Mutation degraded or did not improve fitness ({} <= {}). Rolling back.",
                 new_score, baseline_score
             );
-            self.record_improvement(&target, Some(new_score), baseline_score, true, true)
-                .await?;
+            self.record_improvement(
+                &target,
+                Some(new_score),
+                baseline_score,
+                true,
+                true,
+                crate::cognitive::self_edit::ProposalStatus::EvaluatedRegression,
+            )
+            .await?;
             sandbox.cleanup()?;
             Ok(false)
         }
@@ -532,6 +579,16 @@ impl RSIOrchestrator {
         sandbox: CompilationSandbox,
         applied: &AppliedMutation,
     ) -> Result<()> {
+        // Re-check killswitch immediately before writing back to workspace
+        if let Err(err) = crate::safety::killswitch::check_killswitch(Some(&self.project_root)) {
+            warn!("Killswitch active before merge_sandbox: {err}; aborting merge");
+            return Err(SelfwareError::Safety(
+                crate::errors::SafetyError::KillswitchActive {
+                    reason: err.to_string(),
+                },
+            ));
+        }
+
         info!("Merging sandbox changes back to main workspace...");
 
         let canonical_project_root = self.project_root.canonicalize().map_err(|e| {
@@ -635,6 +692,7 @@ impl RSIOrchestrator {
         baseline_score: f64,
         verified: bool,
         rolled_back: bool,
+        status: crate::cognitive::self_edit::ProposalStatus,
     ) -> Result<()> {
         let effectiveness_score = new_score.map_or(0.0, |score| score - baseline_score);
         let record = ImprovementRecord {
@@ -651,6 +709,7 @@ impl RSIOrchestrator {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
+            status,
         };
         // Update meta-learner weights based on the outcome so future cycles
         // can prioritise categories that historically succeed.

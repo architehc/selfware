@@ -52,6 +52,8 @@ impl KillswitchStatus {
     }
 }
 
+pub static KILLSWITCH_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 /// Trip the in-process killswitch with an explanatory reason.
 pub fn trip_in_process(reason: impl Into<String>) {
     let reason_str = reason.into();
@@ -98,7 +100,7 @@ pub fn check_killswitch(project_root: Option<&Path>) -> Result<(), KillswitchErr
         }
     }
 
-    // 3. File existence checks
+    // 3. File existence checks (fail-closed)
     let mut check_paths = Vec::new();
 
     // Specific project root if provided, otherwise check current working directory
@@ -120,18 +122,36 @@ pub fn check_killswitch(project_root: Option<&Path>) -> Result<(), KillswitchErr
     }
 
     for path in check_paths {
-        if path.exists() && path.is_file() {
-            let reason = std::fs::read_to_string(&path)
-                .map(|s| {
-                    let trimmed = s.trim();
-                    if trimmed.is_empty() {
-                        "Killswitch file present".to_string()
-                    } else {
-                        trimmed.to_string()
-                    }
-                })
-                .unwrap_or_else(|_| "Killswitch file present (unreadable)".to_string());
-            return Err(KillswitchError::File { path, reason });
+        match path.symlink_metadata() {
+            Ok(meta) => {
+                let reason = if meta.file_type().is_symlink() {
+                    "Killswitch symlink present".to_string()
+                } else if meta.is_dir() {
+                    "Killswitch directory present".to_string()
+                } else {
+                    std::fs::read_to_string(&path)
+                        .map(|s| {
+                            let trimmed = s.trim();
+                            if trimmed.is_empty() {
+                                "Killswitch file present".to_string()
+                            } else {
+                                trimmed.to_string()
+                            }
+                        })
+                        .unwrap_or_else(|_| "Killswitch file present (unreadable)".to_string())
+                };
+                return Err(KillswitchError::File { path, reason });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Genuinely absent, continue to next path
+            }
+            Err(e) => {
+                // Unreadable ancestor, permission denied, or IO error: FAIL CLOSED
+                return Err(KillswitchError::File {
+                    path: path.clone(),
+                    reason: format!("Cannot verify killswitch path ({e}): failing closed"),
+                });
+            }
         }
     }
 

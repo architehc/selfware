@@ -148,3 +148,89 @@ fn test_dual_analyst_consensus_flow() {
         other => panic!("Expected ConsensusReached, got: {:?}", other),
     }
 }
+
+#[test]
+fn test_candidate_playbook_description_with_colons_valid_yaml() {
+    let evaluator = DualAnalystEvaluator::new();
+    let event = SessionLogEvent {
+        timestamp: Utc::now(),
+        session_id: "s_colon".to_string(),
+        event_type: crate::agent::session_log::SessionEventType::ToolCall,
+        task_id: None,
+        tool_name: Some("bash".to_string()),
+        input: None,
+        arguments: None,
+        result: Some("error: missing required argument: --target".to_string()),
+        success: Some(false),
+        duration_ms: Some(100),
+        details: None,
+    };
+
+    let res = evaluator.evaluate(
+        &[event],
+        "bash_arg_playbook",
+        &["src/cli/mod.rs".to_string()],
+    );
+
+    match res {
+        ConsensusResult::ConsensusReached {
+            candidate_playbook_content,
+            ..
+        } => {
+            // Must parse cleanly as a valid Skill without YAML parse error
+            let skill = crate::skills::Skill::from_markdown(&candidate_playbook_content).expect(
+                "Candidate playbook with colon in description must parse as valid YAML frontmatter",
+            );
+            assert_eq!(skill.name, "bash_arg_playbook");
+            assert!(!skill.verified);
+            assert!(skill.candidate);
+            assert!(!skill.admitted);
+        }
+        other => panic!("Expected ConsensusReached, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_save_candidate_playbook_rejects_path_traversal_and_symlinks() {
+    let tmp = tempdir().unwrap();
+    let candidates_dir = tmp.path().join("skill-candidates");
+    std::fs::create_dir_all(&candidates_dir).unwrap();
+
+    // 1. Traversal attempts must be rejected
+    assert!(DualAnalystEvaluator::save_candidate_playbook(
+        &candidates_dir,
+        "../escaped",
+        "some content"
+    )
+    .is_err());
+
+    assert!(DualAnalystEvaluator::save_candidate_playbook(
+        &candidates_dir,
+        "/etc/passwd",
+        "some content"
+    )
+    .is_err());
+
+    assert!(DualAnalystEvaluator::save_candidate_playbook(
+        &candidates_dir,
+        "foo/bar",
+        "some content"
+    )
+    .is_err());
+
+    // 2. Existing symlink target must be rejected
+    let real_file = tmp.path().join("real_target.txt");
+    std::fs::write(&real_file, "original").unwrap();
+    let symlink_dest = candidates_dir.join("symlink_target.md");
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&real_file, &symlink_dest).unwrap();
+        let err = DualAnalystEvaluator::save_candidate_playbook(
+            &candidates_dir,
+            "symlink_target",
+            "malicious overwrite",
+        );
+        assert!(err.is_err());
+        assert_eq!(std::fs::read_to_string(&real_file).unwrap(), "original");
+    }
+}

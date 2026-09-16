@@ -224,6 +224,9 @@ pub enum ShellError {
 
 #[derive(Error, Debug)]
 pub enum SafetyError {
+    #[error("Fail-closed killswitch active: {reason}")]
+    KillswitchActive { reason: String },
+
     // Path validation errors
     #[error("Path blocked by safety policy: {path}")]
     BlockedPath { path: String },

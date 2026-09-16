@@ -126,6 +126,20 @@ impl ImprovementTarget {
     }
 }
 
+/// Status of an improvement proposal attempt
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ProposalStatus {
+    /// Proposal was skipped before evaluation (e.g. trivial comment-only diff, no-op)
+    SkippedTrivial,
+    /// Compilation or local test verification failed in sandbox
+    #[default]
+    VerificationFailed,
+    /// Proposal was evaluated on benchmark suite and succeeded
+    EvaluatedSuccess,
+    /// Proposal was evaluated on benchmark suite and regressed, rolled back
+    EvaluatedRegression,
+}
+
 /// Record of a completed improvement attempt
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImprovementRecord {
@@ -139,6 +153,8 @@ pub struct ImprovementRecord {
     pub rolled_back: bool,
     pub effectiveness_score: f64,
     pub completed_at: u64,
+    #[serde(default)]
+    pub status: ProposalStatus,
 }
 
 /// Result of applying a concrete self-edit mutation.

@@ -1,4 +1,5 @@
 use super::*;
+use crate::cognitive::self_edit::ProposalStatus;
 
 #[test]
 fn test_strategy_score_new() {
@@ -46,6 +47,7 @@ fn test_meta_learner_update_weights() {
         rolled_back: false,
         effectiveness_score: 0.8,
         completed_at: 0,
+        status: ProposalStatus::EvaluatedSuccess,
     };
 
     learner.update_weights(&record);
@@ -184,6 +186,7 @@ fn test_update_weights_failure_applies_cooldown() {
         rolled_back: true,
         effectiveness_score: -0.5,
         completed_at: 0,
+        status: ProposalStatus::VerificationFailed,
     };
 
     learner.update_weights(&record);
@@ -218,6 +221,7 @@ fn test_update_weights_ema() {
         rolled_back: false,
         effectiveness_score: score,
         completed_at: 0,
+        status: ProposalStatus::EvaluatedSuccess,
     };
 
     // First record: avg = 1.0
@@ -327,9 +331,10 @@ fn test_skipped_proposal_does_not_penalize_strategy() {
         after_metrics: None,
         git_commits: vec![],
         verified: false,
-        rolled_back: true,
+        rolled_back: false,
         effectiveness_score: 0.0,
         completed_at: 1000,
+        status: ProposalStatus::SkippedTrivial,
     };
 
     learner.update_weights(&skipped_record);

@@ -80,6 +80,9 @@ pub fn default_denied_paths() -> Vec<String> {
         // through file_write/file_edit into .git/.
         "**/.git/hooks/**".to_string(),
         "**/.git/config".to_string(),
+        // Block writing/modifying the fail-closed killswitch file via agent tools
+        "**/.selfware/KILLSWITCH".to_string(),
+        "**/.selfware/KILLSWITCH/**".to_string(),
     ]
 }
 

@@ -195,6 +195,8 @@ fn test_render_with_trust_gate_verified_and_unverified() {
 
 #[test]
 fn test_candidate_admission_and_precedence_gates() {
+    let _lock = crate::safety::killswitch::KILLSWITCH_TEST_LOCK.lock();
+    crate::safety::killswitch::reset_in_process();
     let temp = tempfile::tempdir().expect("tempdir");
     let active_skills = temp.path().join("skills");
     let candidate_dir = temp.path().join("skill-candidates");
@@ -258,6 +260,7 @@ fn test_candidate_admission_and_precedence_gates() {
 
 #[test]
 fn test_killswitch_blocks_candidate_skill_access() {
+    let _lock = crate::safety::killswitch::KILLSWITCH_TEST_LOCK.lock();
     crate::safety::killswitch::reset_in_process();
 
     let mut registry = SkillRegistry::new();
@@ -294,4 +297,97 @@ fn test_killswitch_blocks_candidate_skill_access() {
     // Clean reset
     crate::safety::killswitch::reset_in_process();
     assert!(registry.get("candidate_skill").is_some());
+}
+
+#[test]
+fn test_validate_skill_name_rejects_traversal_and_invalid_chars() {
+    assert!(validate_skill_name("").is_err());
+    assert!(validate_skill_name("../escape").is_err());
+    assert!(validate_skill_name("escape/sub").is_err());
+    assert!(validate_skill_name("/absolute").is_err());
+    assert!(validate_skill_name(".hidden").is_err());
+    assert!(validate_skill_name("has spaces").is_err());
+    assert!(validate_skill_name("has$dollar").is_err());
+
+    assert_eq!(
+        validate_skill_name("valid_name-123").unwrap(),
+        "valid_name-123"
+    );
+    assert_eq!(validate_skill_name("SimpleSkill").unwrap(), "SimpleSkill");
+}
+
+#[test]
+fn test_candidate_admission_tampering_detection() {
+    let _lock = crate::safety::killswitch::KILLSWITCH_TEST_LOCK.lock();
+    crate::safety::killswitch::reset_in_process();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let active_skills = temp.path().join("skills");
+    let candidate_dir = temp.path().join("skill-candidates");
+    std::fs::create_dir_all(&active_skills).expect("mkdir skills");
+    std::fs::create_dir_all(&candidate_dir).expect("mkdir candidates");
+
+    let candidate_file = candidate_dir.join("tamper_test.md");
+    std::fs::write(
+        &candidate_file,
+        "---\nname: tamper_test\ndescription: Integrity test\ncandidate: true\nadmitted: false\n---\nOriginal content.",
+    )
+    .unwrap();
+
+    // Admit candidate
+    let admitted = SkillRegistry::admit_candidate(&candidate_file, &active_skills)
+        .expect("admission should succeed");
+    assert!(admitted.admitted);
+
+    // Verify it loads cleanly first
+    let mut registry = SkillRegistry::new();
+    registry.discover_dir(&active_skills);
+    assert!(registry.get("tamper_test").is_some());
+
+    // Tamper with the active file content
+    let active_file = active_skills.join("tamper_test.md");
+    std::fs::write(
+        &active_file,
+        "---\nname: tamper_test\ndescription: Integrity test\ncandidate: true\nadmitted: true\n---\nTampered backdoor content!",
+    )
+    .unwrap();
+
+    // Re-discover should reject the tampered skill because SHA-256 does not match ledger
+    let mut tampered_registry = SkillRegistry::new();
+    tampered_registry.discover_dir(&active_skills);
+    assert!(
+        tampered_registry.get("tamper_test").is_none(),
+        "Tampered skill must be rejected by admission ledger hash verification"
+    );
+}
+
+#[test]
+fn test_admit_candidate_rejects_symlink_destination() {
+    let _lock = crate::safety::killswitch::KILLSWITCH_TEST_LOCK.lock();
+    crate::safety::killswitch::reset_in_process();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let active_skills = temp.path().join("skills");
+    let candidate_dir = temp.path().join("skill-candidates");
+    std::fs::create_dir_all(&active_skills).expect("mkdir skills");
+    std::fs::create_dir_all(&candidate_dir).expect("mkdir candidates");
+
+    let candidate_file = candidate_dir.join("sym_test.md");
+    std::fs::write(
+        &candidate_file,
+        "---\nname: sym_test\ndescription: Symlink attack\ncandidate: true\nadmitted: false\n---\nPayload.",
+    )
+    .unwrap();
+
+    // Create a symlink at the destination path
+    let escape_target = temp.path().join("escape_target.txt");
+    std::fs::write(&escape_target, "safe").unwrap();
+    let dest_link = active_skills.join("sym_test.md");
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&escape_target, &dest_link).unwrap();
+        let result = SkillRegistry::admit_candidate(&candidate_file, &active_skills);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("symlink"));
+        assert_eq!(std::fs::read_to_string(&escape_target).unwrap(), "safe");
+    }
 }

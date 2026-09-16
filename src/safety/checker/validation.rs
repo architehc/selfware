@@ -498,6 +498,12 @@ impl SafetyChecker {
 
     /// Check if a tool call is safe to execute
     pub fn check_tool_call(&self, call: &ToolCall) -> Result<()> {
+        if let Err(err) = crate::safety::killswitch::check_killswitch(None) {
+            return Err(SelfwareError::Safety(SafetyError::KillswitchActive {
+                reason: err.to_string(),
+            }));
+        }
+
         let raw_name = &call.function.name;
         let tool_name = raw_name.trim();
         if raw_name != tool_name {

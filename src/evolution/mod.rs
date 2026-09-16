@@ -66,6 +66,7 @@ pub const PROTECTED_PATHS: &[&str] = &[
     "Cargo.lock",
     ".github/",
     "src/main.rs",
+    ".selfware/KILLSWITCH",
 ];
 
 /// LLM endpoint configuration for hypothesis generation

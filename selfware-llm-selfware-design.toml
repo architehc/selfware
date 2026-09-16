@@ -6,11 +6,13 @@ endpoint = "https://llm.selfware.design/v1"
 api_key = "EMPTY"
 model = "qwen38-flash-next"
 max_tokens = 65536
-context_length = 1000000
+# Cap context length at 350k tokens to avoid the 60s gateway/reverse-proxy timeout cliff
+# during prompt prefill on 1M context windows.
+context_length = 350000
 
 [extra_body.chat_template_kwargs]
 enable_thinking = true
-preserve_thinking = true
+preserve_thinking = false
 reasoning_effort = "xhigh"
 
 [safety]

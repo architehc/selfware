@@ -387,6 +387,7 @@ fn test_record_result_and_history() {
         rolled_back: false,
         effectiveness_score: 0.5,
         completed_at: 12345,
+        status: ProposalStatus::EvaluatedSuccess,
     };
 
     orchestrator.record_result(record).unwrap();
@@ -422,6 +423,7 @@ fn test_recently_failed_categories_cooldown() {
         rolled_back: true,
         effectiveness_score: -0.3,
         completed_at: 0,
+        status: ProposalStatus::VerificationFailed,
     };
     orchestrator.record_result(record).unwrap();
 
@@ -530,6 +532,7 @@ fn test_improvement_record_serialization_roundtrip() {
         rolled_back: false,
         effectiveness_score: 0.75,
         completed_at: 99999,
+        status: ProposalStatus::EvaluatedSuccess,
     };
 
     let json = serde_json::to_string(&record).unwrap();

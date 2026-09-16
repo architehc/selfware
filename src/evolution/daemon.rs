@@ -2045,6 +2045,15 @@ fn capture_tested_diff(worktree: &Path) -> Option<String> {
 /// its pre-apply state instead of being left half-winner'd. Returns true only
 /// when the winner is fully applied AND committed.
 fn commit_winner_to_repo(repo_root: &Path, tested_diff: &str, commit_msg: &str) -> bool {
+    // Re-check killswitch immediately before applying and committing:
+    // even if the cycle started green, a trip during in-flight evaluation must halt mutation.
+    if let Err(err) = crate::safety::killswitch::check_killswitch(Some(repo_root)) {
+        log_error(&format!(
+            "Killswitch active before commit: {err} — refusing to commit mutation"
+        ));
+        return false;
+    }
+
     if !apply_tested_diff_to_repo(repo_root, tested_diff) {
         return false;
     }

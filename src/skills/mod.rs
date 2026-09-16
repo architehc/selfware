@@ -10,11 +10,11 @@ use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
 fn default_verified() -> bool {
-    true
+    false
 }
 
 /// A skill loaded from a markdown file with YAML frontmatter.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Skill {
     /// Short machine-friendly name (used as `/name` command).
     pub name: String,
@@ -44,7 +44,7 @@ pub struct Skill {
     /// Applicable task or repository scope.
     #[serde(default)]
     pub scope: Option<String>,
-    /// The body of the skill (markdown content after frontmatter).
+    /// Markdown body content (instructions).
     #[serde(skip)]
     pub content: String,
     /// Source file path (for debugging).
@@ -52,23 +52,72 @@ pub struct Skill {
     pub source: Option<PathBuf>,
 }
 
-impl Default for Skill {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            description: String::new(),
-            tools: Vec::new(),
-            verified: true,
-            candidate: false,
-            origin: None,
-            admitted: false,
-            trace_ids: Vec::new(),
-            content_hash: None,
-            scope: None,
-            content: String::new(),
-            source: None,
+/// Entry in the external admission ledger tracking provenance and cryptographic integrity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdmittedSkillEntry {
+    pub name: String,
+    pub content_hash: String,
+    pub admitted_at: u64,
+    pub source_origin: Option<String>,
+}
+
+/// External ledger of admitted skills, stored separately from the skill markdown files.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AdmissionLedger {
+    #[serde(default)]
+    pub entries: HashMap<String, AdmittedSkillEntry>,
+}
+
+impl AdmissionLedger {
+    pub const FILE_NAME: &'static str = ".admitted_ledger.json";
+
+    pub fn load_from_dir(dir: &Path) -> Self {
+        let ledger_path = dir.join(Self::FILE_NAME);
+        if let Ok(content) = std::fs::read_to_string(&ledger_path) {
+            serde_json::from_str(&content).unwrap_or_default()
+        } else {
+            Self::default()
         }
     }
+
+    pub fn save_to_dir(&self, dir: &Path) -> Result<(), String> {
+        let ledger_path = dir.join(Self::FILE_NAME);
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| format!("Failed to serialize admission ledger: {e}"))?;
+        std::fs::write(&ledger_path, json).map_err(|e| {
+            format!(
+                "Failed to write admission ledger to {}: {e}",
+                ledger_path.display()
+            )
+        })
+    }
+}
+
+/// Validate that a skill name contains only safe alphanumeric characters and no path traversal sequences.
+pub fn validate_skill_name(name: &str) -> Result<String, String> {
+    if name.is_empty() {
+        return Err("Skill name cannot be empty".to_string());
+    }
+    if name.starts_with('.')
+        || name.contains("..")
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains('\0')
+    {
+        return Err(format!(
+            "Skill name contains invalid path traversal or special characters: '{name}'"
+        ));
+    }
+    let safe_name: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    if safe_name != name {
+        return Err(format!(
+            "Skill name '{name}' contains disallowed characters (only a-z, A-Z, 0-9, _, - permitted)"
+        ));
+    }
+    Ok(safe_name)
 }
 
 impl Skill {
@@ -177,6 +226,8 @@ impl SkillRegistry {
             return;
         }
 
+        let ledger = AdmissionLedger::load_from_dir(dir);
+
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(e) => {
@@ -192,17 +243,37 @@ impl SkillRegistry {
             }
 
             match Skill::from_file(&path) {
-                Ok(skill) => {
-                    // Check admission barrier: candidate skills require explicit admission
+                Ok(mut skill) => {
                     let is_candidate = skill.candidate
-                        || matches!(skill.origin.as_deref(), Some("distilled" | "generated"));
-                    if is_candidate && !skill.admitted {
-                        warn!(
-                            "Ignoring unadmitted candidate skill '{}' in {}",
-                            skill.name,
-                            path.display()
-                        );
-                        continue;
+                        || matches!(skill.origin.as_deref(), Some("distilled" | "generated"))
+                        || skill.admitted;
+
+                    if is_candidate {
+                        // Candidate skills MUST have an external admission ledger entry
+                        // AND their content hash must match the ledger entry exactly!
+                        let Some(ledger_entry) = ledger.entries.get(&skill.name) else {
+                            warn!(
+                                "Ignoring unadmitted candidate skill '{}' in {}: no entry in admission ledger",
+                                skill.name,
+                                path.display()
+                            );
+                            continue;
+                        };
+
+                        let actual_hash =
+                            format!("{:x}", sha2::Sha256::digest(skill.content.as_bytes()));
+                        if actual_hash != ledger_entry.content_hash {
+                            warn!(
+                                "Ignoring candidate skill '{}' in {}: content hash mismatch (expected {}, computed {}) — candidate tampered after admission",
+                                skill.name,
+                                path.display(),
+                                ledger_entry.content_hash,
+                                actual_hash
+                            );
+                            continue;
+                        }
+
+                        skill.admitted = true;
                     }
 
                     // Precedence gate: generated/candidate skills cannot overwrite user-defined skills
@@ -289,11 +360,27 @@ impl SkillRegistry {
         }
 
         let mut skill = Skill::from_file(candidate_path)?;
+        let safe_name = validate_skill_name(&skill.name)?;
 
         std::fs::create_dir_all(target_skills_dir)
             .map_err(|e| format!("Failed to create target skills dir: {e}"))?;
 
-        let target_file = target_skills_dir.join(format!("{}.md", skill.name));
+        let target_file = target_skills_dir.join(format!("{safe_name}.md"));
+        if !target_file.starts_with(target_skills_dir) {
+            return Err(format!(
+                "Destination path escapes skills directory: {}",
+                target_file.display()
+            ));
+        }
+        if let Ok(meta) = target_file.symlink_metadata() {
+            if meta.file_type().is_symlink() {
+                return Err(format!(
+                    "Destination file is a symlink: {}",
+                    target_file.display()
+                ));
+            }
+        }
+
         if target_file.exists() {
             let existing = Skill::from_file(&target_file)?;
             let existing_is_user = !existing.candidate
@@ -301,15 +388,34 @@ impl SkillRegistry {
             if existing_is_user {
                 return Err(format!(
                     "Cannot admit candidate '{}': shadows existing user skill",
-                    skill.name
+                    safe_name
                 ));
             }
         }
 
+        skill.name = safe_name.clone();
         skill.candidate = true;
         skill.admitted = true;
+        skill.verified = false;
         let content_hash = format!("{:x}", sha2::Sha256::digest(skill.content.as_bytes()));
-        skill.content_hash = Some(content_hash);
+        skill.content_hash = Some(content_hash.clone());
+
+        // Update external admission ledger first
+        let mut ledger = AdmissionLedger::load_from_dir(target_skills_dir);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        ledger.entries.insert(
+            safe_name.clone(),
+            AdmittedSkillEntry {
+                name: safe_name.clone(),
+                content_hash: content_hash.clone(),
+                admitted_at: now,
+                source_origin: skill.origin.clone(),
+            },
+        );
+        ledger.save_to_dir(target_skills_dir)?;
 
         // Format updated markdown frontmatter
         let mut frontmatter_map = serde_yaml::Mapping::new();

@@ -96,12 +96,12 @@ impl MetaLearner {
 
     /// Update weights from an improvement record
     pub fn update_weights(&mut self, record: &ImprovementRecord) {
-        // If a proposal was skipped or unattempted without evaluation, do not
-        // treat it as an attempted failure or penalize its effectiveness.
-        if !record.verified && record.effectiveness_score == 0.0 {
+        // If a proposal was skipped before evaluation (e.g. trivial comment rewrite),
+        // do not treat it as an attempted failure or penalize its effectiveness.
+        if record.status == crate::cognitive::self_edit::ProposalStatus::SkippedTrivial {
             tracing::info!(
                 category = ?record.category,
-                "Skipped proposal recorded without penalizing strategy effectiveness"
+                "Skipped trivial proposal recorded without penalizing strategy effectiveness"
             );
             return;
         }
@@ -114,20 +114,32 @@ impl MetaLearner {
         score.attempts += 1;
         score.last_attempted = record.completed_at;
 
-        if record.verified && !record.rolled_back && record.effectiveness_score > 0.0 {
+        if record.status == crate::cognitive::self_edit::ProposalStatus::EvaluatedSuccess {
             score.successes += 1;
         }
 
+        // Non-compiling proposals penalize effectiveness
+        let eff =
+            if record.status == crate::cognitive::self_edit::ProposalStatus::VerificationFailed {
+                -1.0
+            } else {
+                record.effectiveness_score
+            };
+
         // Exponential moving average for effectiveness
         if score.attempts == 1 {
-            score.avg_effectiveness = record.effectiveness_score;
+            score.avg_effectiveness = eff;
         } else {
-            score.avg_effectiveness = self.alpha * record.effectiveness_score
-                + (1.0 - self.alpha) * score.avg_effectiveness;
+            score.avg_effectiveness =
+                self.alpha * eff + (1.0 - self.alpha) * score.avg_effectiveness;
         }
 
-        // Apply cooldown on failure
-        if record.rolled_back || record.effectiveness_score < 0.0 {
+        // Apply cooldown on failure (verification failed, rolled back, or regression)
+        if record.status == crate::cognitive::self_edit::ProposalStatus::VerificationFailed
+            || record.status == crate::cognitive::self_edit::ProposalStatus::EvaluatedRegression
+            || record.rolled_back
+            || eff < 0.0
+        {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()

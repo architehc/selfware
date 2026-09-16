@@ -1,15 +1,13 @@
-//! Dual-analyst trace processing and log diagnosis for RSI.
+//! Rule-based trace triage and diagnostic filtering for RSI.
 //!
-//! Implements redundant meta-tasks:
-//! 1. [`AttributionAnalyst`]: Decouples transient environment friction (timeouts, 429s,
-//!    network drops) from actionable reasoning gaps and compilation/syntax failures.
-//! 2. [`SafetyInvariantAuditor`]: Verifies that proposed mitigations do not touch
-//!    [`PROTECTED_PATHS`](crate::evolution::PROTECTED_PATHS), weaken test assertions,
-//!    or introduce unsafe shell commands.
+//! Provides deterministic heuristic filters:
+//! 1. [`AttributionAnalyst`]: Decouples transient network/provider friction (HTTP 429s,
+//!    socket connection resets, gateway errors) from actionable compiler/type errors and tool failures.
+//! 2. [`SafetyInvariantAuditor`]: Verifies that candidate proposals do not touch
+//!    [`PROTECTED_PATHS`](crate::evolution::PROTECTED_PATHS) or delete test assertions.
 //!
-//! A candidate playbook is ONLY generated when both analysts agree on an actionable,
-//! safe, recurring failure pattern. Candidate playbooks are stored in
-//! `.selfware/skill-candidates/` outside automatic active discovery.
+//! Candidate playbooks generated here are stored in `.selfware/skill-candidates/`
+//! outside automatic discovery and require explicit evaluation before admission.
 
 use crate::agent::session_log::SessionLogEvent;
 use crate::evolution::is_protected;
@@ -19,7 +17,7 @@ use std::path::{Path, PathBuf};
 /// Classification of execution failure causes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FailureCategory {
-    /// Transient network errors, rate limits, provider downtime, or socket drops.
+    /// Transient network errors, provider rate limits (429), or socket drops.
     EnvironmentFriction,
     /// Compiler, lint, type-check, or language syntax error.
     SyntaxOrCompilation,
@@ -41,7 +39,7 @@ pub struct AttributionFinding {
     pub error_snippet: String,
 }
 
-/// Attribution Analyst decoupling environment friction from actionable defects.
+/// Attribution Analyst decoupling transient network friction from actionable defects.
 #[derive(Debug, Default, Clone)]
 pub struct AttributionAnalyst;
 
@@ -50,14 +48,23 @@ impl AttributionAnalyst {
         Self
     }
 
-    /// Check whether an error string represents transient environment friction.
+    /// Check whether an error string represents transient network/provider friction.
+    /// Does NOT treat command timeouts or test timeouts as friction.
     pub fn is_environment_friction(msg: &str) -> bool {
         let lower = msg.to_ascii_lowercase();
-        lower.contains("rate limit")
+
+        let is_network_timeout = (lower.contains("connection")
+            || lower.contains("request")
+            || lower.contains("socket")
+            || lower.contains("http")
+            || lower.contains("api.")
+            || lower.contains("tls"))
+            && (lower.contains("timed out") || lower.contains("timeout"));
+
+        is_network_timeout
+            || lower.contains("rate limit")
             || lower.contains("429")
             || lower.contains("too many requests")
-            || lower.contains("timed out")
-            || lower.contains("timeout")
             || lower.contains("connection refused")
             || lower.contains("connection reset")
             || lower.contains("dns resolution")
@@ -77,7 +84,9 @@ impl AttributionAnalyst {
         let lower = msg.to_ascii_lowercase();
         if lower.contains("error[e")
             || lower.contains("mismatched types")
-            || lower.contains("cannot find")
+            || lower.contains("cannot find value")
+            || lower.contains("cannot find type")
+            || lower.contains("cannot find function")
             || lower.contains("expected `")
             || lower.contains("syntax error")
             || lower.contains("parse error")
@@ -297,18 +306,40 @@ impl DualAnalystEvaluator {
             .audit_candidate(candidate_name, &draft_playbook, affected_paths)
         {
             SafetyAuditResult::Approved => {
-                let frontmatter = format!(
-                    "---\n\
-                    name: {}\n\
-                    description: {}\n\
-                    verified: false\n\
-                    candidate: true\n\
-                    origin: distilled\n\
-                    admitted: false\n\
-                    ---\n\n",
-                    candidate_name, actionable.description
+                let mut frontmatter_map = serde_yaml::Mapping::new();
+                frontmatter_map.insert(
+                    serde_yaml::Value::String("name".to_string()),
+                    serde_yaml::Value::String(candidate_name.to_string()),
                 );
-                let full_content = format!("{}{}", frontmatter, draft_playbook);
+                frontmatter_map.insert(
+                    serde_yaml::Value::String("description".to_string()),
+                    serde_yaml::Value::String(actionable.description.clone()),
+                );
+                frontmatter_map.insert(
+                    serde_yaml::Value::String("verified".to_string()),
+                    serde_yaml::Value::Bool(false),
+                );
+                frontmatter_map.insert(
+                    serde_yaml::Value::String("candidate".to_string()),
+                    serde_yaml::Value::Bool(true),
+                );
+                frontmatter_map.insert(
+                    serde_yaml::Value::String("origin".to_string()),
+                    serde_yaml::Value::String("distilled".to_string()),
+                );
+                frontmatter_map.insert(
+                    serde_yaml::Value::String("admitted".to_string()),
+                    serde_yaml::Value::Bool(false),
+                );
+
+                let yaml_str = serde_yaml::to_string(&serde_yaml::Value::Mapping(frontmatter_map))
+                    .unwrap_or_else(|_| {
+                        format!(
+                            "name: {:?}\ndescription: {:?}\nverified: false\ncandidate: true\norigin: distilled\nadmitted: false\n",
+                            candidate_name, actionable.description
+                        )
+                    });
+                let full_content = format!("---\n{}---\n\n{}", yaml_str, draft_playbook);
                 ConsensusResult::ConsensusReached {
                     finding: actionable,
                     candidate_playbook_content: full_content,
@@ -324,8 +355,31 @@ impl DualAnalystEvaluator {
         candidate_name: &str,
         content: &str,
     ) -> std::io::Result<PathBuf> {
+        let safe_name = crate::skills::validate_skill_name(candidate_name)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+
         std::fs::create_dir_all(candidates_dir)?;
-        let file_path = candidates_dir.join(format!("{}.md", candidate_name));
+        let file_path = candidates_dir.join(format!("{safe_name}.md"));
+
+        if !file_path.starts_with(candidates_dir) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "Destination path escapes candidate directory: {}",
+                    file_path.display()
+                ),
+            ));
+        }
+
+        if let Ok(meta) = file_path.symlink_metadata() {
+            if meta.file_type().is_symlink() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("Destination file is a symlink: {}", file_path.display()),
+                ));
+            }
+        }
+
         std::fs::write(&file_path, content)?;
         Ok(file_path)
     }
