@@ -4287,31 +4287,28 @@ max_recovery_attempts = 3
                     }
                 }
                 KillswitchCommands::Trip { reason, global } => {
-                    let target_dir = if global {
+                    let target_root = if global {
                         dirs::home_dir()
-                            .map(|h| h.join(".selfware"))
                             .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
                     } else {
-                        let cwd = std::env::current_dir()?;
-                        cwd.join(".selfware")
+                        std::env::current_dir()?
                     };
-                    std::fs::create_dir_all(&target_dir)?;
-                    let ks_path = target_dir.join(crate::safety::killswitch::KILLSWITCH_FILE_NAME);
-                    std::fs::write(&ks_path, format!("{reason}\n"))?;
+                    let ks_path =
+                        crate::safety::killswitch::trip_file_killswitch(&target_root, &reason)?;
                     println!("🛑 Killswitch TRIPPED at {}: {reason}", ks_path.display());
                 }
                 KillswitchCommands::Reset { global } => {
-                    let target_dir = if global {
+                    let target_root = if global {
                         dirs::home_dir()
-                            .map(|h| h.join(".selfware"))
                             .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
                     } else {
-                        let cwd = std::env::current_dir()?;
-                        cwd.join(".selfware")
+                        std::env::current_dir()?
                     };
-                    let ks_path = target_dir.join(crate::safety::killswitch::KILLSWITCH_FILE_NAME);
-                    if ks_path.exists() {
-                        std::fs::remove_file(&ks_path)?;
+                    let ks_path = target_root
+                        .join(".selfware")
+                        .join(crate::safety::killswitch::KILLSWITCH_FILE_NAME);
+                    let removed = crate::safety::killswitch::remove_file_killswitch(&target_root)?;
+                    if removed {
                         println!("✅ Killswitch file removed: {}", ks_path.display());
                     } else {
                         println!("Killswitch file not present at {}", ks_path.display());

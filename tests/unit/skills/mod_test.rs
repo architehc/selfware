@@ -649,3 +649,154 @@ fn test_corrupt_ledger_blocks_discovery_and_cannot_be_overwritten() {
         "Corrupt ledger must never be overwritten"
     );
 }
+
+#[test]
+fn test_scoped_skill_admission_disk_discovery_roundtrip() {
+    let _lock = crate::safety::killswitch::KILLSWITCH_TEST_LOCK.lock();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let candidates_dir = temp.path().join("candidates");
+    let active_skills = temp.path().join("skills");
+    std::fs::create_dir_all(&candidates_dir).unwrap();
+    std::fs::create_dir_all(&active_skills).unwrap();
+
+    let candidate_path = candidates_dir.join("scoped_skill.md");
+    let markdown = r#"---
+name: scoped_skill
+description: Scoped procedure for backend services
+tools: [file_read, bash]
+scope: backend/api
+trace_ids: [trace-abc-123, trace-def-456]
+---
+Execute scoped backend procedure safely.
+"#;
+    std::fs::write(&candidate_path, markdown).unwrap();
+
+    // Admit the scoped candidate
+    let admitted = SkillRegistry::admit_candidate(&candidate_path, &active_skills)
+        .expect("Admitting scoped candidate must succeed");
+    assert_eq!(admitted.scope.as_deref(), Some("backend/api"));
+    assert_eq!(admitted.trace_ids, vec!["trace-abc-123", "trace-def-456"]);
+
+    // Verify disk frontmatter contains scope and trace_ids
+    let target_file = active_skills.join("scoped_skill.md");
+    let file_content = std::fs::read_to_string(&target_file).unwrap();
+    assert!(file_content.contains("scope: backend/api"));
+    assert!(file_content.contains("trace-abc-123"));
+
+    // Reload from disk via fresh discovery
+    let mut fresh_registry = SkillRegistry::new();
+    fresh_registry.discover_dir(&active_skills);
+
+    let discovered = fresh_registry
+        .get("scoped_skill")
+        .expect("Scoped skill must be discovered and verified through metadata hash");
+    assert_eq!(discovered.scope.as_deref(), Some("backend/api"));
+    assert_eq!(discovered.trace_ids, vec!["trace-abc-123", "trace-def-456"]);
+    assert!(discovered.admitted);
+}
+
+#[test]
+fn test_failed_admission_corrupt_ledger_preserves_previous_skill() {
+    let _lock = crate::safety::killswitch::KILLSWITCH_TEST_LOCK.lock();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let candidates_dir = temp.path().join("candidates");
+    let active_skills = temp.path().join("skills");
+    std::fs::create_dir_all(&candidates_dir).unwrap();
+    std::fs::create_dir_all(&active_skills).unwrap();
+
+    // 1. Admit Version 1 successfully
+    let candidate_v1 = candidates_dir.join("versioned_skill.md");
+    std::fs::write(
+        &candidate_v1,
+        "---\nname: versioned_skill\ndescription: V1\n---\nVersion 1 instructions.",
+    )
+    .unwrap();
+    SkillRegistry::admit_candidate(&candidate_v1, &active_skills)
+        .expect("V1 admission must succeed");
+
+    let skill_path = active_skills.join("versioned_skill.md");
+    let v1_content = std::fs::read_to_string(&skill_path).unwrap();
+    assert!(v1_content.contains("Version 1 instructions."));
+
+    // 2. Corrupt the ledger file on disk
+    let ledger_file = active_skills.join(".admitted_ledger.json");
+    let corrupt_payload = "CORRUPT JSON NOT VALID";
+    std::fs::write(&ledger_file, corrupt_payload).unwrap();
+
+    // 3. Attempt to admit Version 2 (which should replace versioned_skill)
+    let candidate_v2 = candidates_dir.join("versioned_skill.md");
+    std::fs::write(
+        &candidate_v2,
+        "---\nname: versioned_skill\ndescription: V2\n---\nVersion 2 instructions (should fail).",
+    )
+    .unwrap();
+
+    let res = SkillRegistry::admit_candidate(&candidate_v2, &active_skills);
+    assert!(res.is_err(), "Admission must fail on corrupt ledger");
+
+    // 4. Invariant check: Previous Version 1 file on disk must be PRESERVED and UNMODIFIED
+    let preserved_content = std::fs::read_to_string(&skill_path).unwrap();
+    assert_eq!(
+        preserved_content, v1_content,
+        "Failed admission must not destroy previous usable skill version"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_failed_admission_ledger_save_failure_rolls_back_skill() {
+    let _lock = crate::safety::killswitch::KILLSWITCH_TEST_LOCK.lock();
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let candidates_dir = temp.path().join("candidates");
+    let active_skills = temp.path().join("skills");
+    std::fs::create_dir_all(&candidates_dir).unwrap();
+    std::fs::create_dir_all(&active_skills).unwrap();
+
+    // 1. Admit Version 1 successfully
+    let candidate_v1 = candidates_dir.join("rollback_skill.md");
+    std::fs::write(
+        &candidate_v1,
+        "---\nname: rollback_skill\ndescription: V1\n---\nRollback test V1 content.",
+    )
+    .unwrap();
+    SkillRegistry::admit_candidate(&candidate_v1, &active_skills)
+        .expect("V1 admission must succeed");
+
+    let skill_path = active_skills.join("rollback_skill.md");
+    let v1_content = std::fs::read_to_string(&skill_path).unwrap();
+    assert!(v1_content.contains("Rollback test V1 content."));
+
+    // 2. Make the ledger file read-only (0400) so saving the updated ledger fails
+    let ledger_file = active_skills.join(".admitted_ledger.json");
+    let mut perms = std::fs::metadata(&ledger_file).unwrap().permissions();
+    perms.set_mode(0o400);
+    std::fs::set_permissions(&ledger_file, perms).unwrap();
+
+    // 3. Attempt to admit Version 2
+    let candidate_v2 = candidates_dir.join("rollback_skill.md");
+    std::fs::write(
+        &candidate_v2,
+        "---\nname: rollback_skill\ndescription: V2\n---\nRollback test V2 content (should be rolled back).",
+    )
+    .unwrap();
+
+    let res = SkillRegistry::admit_candidate(&candidate_v2, &active_skills);
+    assert!(
+        res.is_err(),
+        "Admission must fail when ledger cannot be saved"
+    );
+
+    // Restore ledger permissions so cleanup succeeds
+    let mut restore_perms = std::fs::metadata(&ledger_file).unwrap().permissions();
+    restore_perms.set_mode(0o600);
+    let _ = std::fs::set_permissions(&ledger_file, restore_perms);
+
+    // 4. Invariant check: Version 1 content must have been rolled back and preserved
+    let final_content = std::fs::read_to_string(&skill_path).unwrap();
+    assert_eq!(
+        final_content, v1_content,
+        "Skill file must be rolled back to previous content when ledger save fails"
+    );
+}

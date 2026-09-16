@@ -53,7 +53,35 @@ impl KillswitchStatus {
 }
 
 #[cfg(test)]
-pub(crate) static KILLSWITCH_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+pub(crate) struct KillswitchTestLock;
+
+#[cfg(test)]
+pub(crate) struct KillswitchTestGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl KillswitchTestLock {
+    pub(crate) fn lock(&self) -> KillswitchTestGuard {
+        let lock = crate::test_support::state_lock();
+        std::env::remove_var(KILLSWITCH_ENV_VAR);
+        std::env::remove_var("SELFWARE_KILLSWITCH_IGNORE_HOME");
+        reset_in_process();
+        KillswitchTestGuard { _lock: lock }
+    }
+}
+
+#[cfg(test)]
+impl Drop for KillswitchTestGuard {
+    fn drop(&mut self) {
+        std::env::remove_var(KILLSWITCH_ENV_VAR);
+        std::env::remove_var("SELFWARE_KILLSWITCH_IGNORE_HOME");
+        reset_in_process();
+    }
+}
+
+#[cfg(test)]
+pub(crate) static KILLSWITCH_TEST_LOCK: KillswitchTestLock = KillswitchTestLock;
 
 /// Trip the in-process killswitch with an explanatory reason.
 pub fn trip_in_process(reason: impl Into<String>) {
@@ -119,8 +147,8 @@ pub fn check_killswitch(project_root: Option<&Path>) -> Result<(), KillswitchErr
         check_paths.push((cwd_ks, true));
     }
 
-    // User home directory (can be bypassed via escape hatches:
-    // SELFWARE_KILLSWITCH_IGNORE_HOME, SELFWARE_NO_HOME_KILLSWITCH, SELFWARE_DISABLE_HOME_KILLSWITCH)
+    // User home directory (strictly test-only bypass for test suite isolation)
+    #[cfg(test)]
     let ignore_home = std::env::var("SELFWARE_KILLSWITCH_IGNORE_HOME")
         .or_else(|_| std::env::var("SELFWARE_NO_HOME_KILLSWITCH"))
         .or_else(|_| std::env::var("SELFWARE_DISABLE_HOME_KILLSWITCH"))
@@ -129,34 +157,55 @@ pub fn check_killswitch(project_root: Option<&Path>) -> Result<(), KillswitchErr
             !lower.is_empty() && lower != "0" && lower != "false" && lower != "no" && lower != "off"
         })
         .unwrap_or(false);
+    #[cfg(not(test))]
+    let ignore_home = false;
 
     if !ignore_home {
         if let Some(home) = dirs::home_dir() {
             let home_selfware = home.join(".selfware");
-            // Only probe home killswitch if home and home/.selfware are accessible directories
-            match home_selfware.symlink_metadata() {
-                Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
-                    let home_ks = home_selfware.join(KILLSWITCH_FILE_NAME);
-                    // Check home killswitch file metadata without bricking process if home has EACCES
-                    match home_ks.symlink_metadata() {
-                        Ok(_) => {
-                            // File exists or is a special node — inspect it (fail_closed = false for home EACCES)
-                            check_paths.push((home_ks, false));
+            // Inspect home/.selfware directory: use std::fs::metadata to resolve symlinks
+            match std::fs::metadata(&home_selfware) {
+                Ok(meta) => {
+                    if meta.is_dir() {
+                        let home_ks = home_selfware.join(KILLSWITCH_FILE_NAME);
+                        match home_ks.symlink_metadata() {
+                            Ok(_) => {
+                                // Sentinel exists at home killswitch path; inspect it (fail_closed = true)
+                                check_paths.push((home_ks, true));
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                // Genuinely absent
+                            }
+                            Err(e) => {
+                                // Inspection error (e.g. EACCES, PermissionDenied, I/O error): fail closed!
+                                return Err(KillswitchError::File {
+                                    path: home_ks,
+                                    reason: format!(
+                                        "Cannot verify home killswitch path ({e}): failing closed"
+                                    ),
+                                });
+                            }
                         }
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                            // Genuinely absent
-                        }
-                        Err(e) => {
-                            // PermissionDenied or I/O error in home: do NOT brick process-wide tool execution
-                            tracing::debug!(
-                                "Home killswitch path {:?} inaccessible ({e}); skipping",
-                                home_ks
-                            );
-                        }
+                    } else {
+                        // .selfware exists in home but is not a directory: fail closed!
+                        return Err(KillswitchError::File {
+                            path: home_selfware,
+                            reason: "Home .selfware path is not a directory: failing closed"
+                                .to_string(),
+                        });
                     }
                 }
-                _ => {
-                    // Home or home/.selfware is not an accessible directory (or is a symlink); skip cleanly
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // ~/.selfware does not exist; no global killswitch present
+                }
+                Err(e) => {
+                    // Inspection error reading ~/.selfware (e.g. EACCES, PermissionDenied, I/O error): fail closed!
+                    return Err(KillswitchError::File {
+                        path: home_selfware,
+                        reason: format!(
+                            "Cannot verify home killswitch directory ({e}): failing closed"
+                        ),
+                    });
                 }
             }
         }
@@ -251,6 +300,31 @@ pub fn trip_file_killswitch(project_root: &Path, reason: &str) -> std::io::Resul
     let selfware_dir = project_root.join(".selfware");
     std::fs::create_dir_all(&selfware_dir)?;
     let killswitch_path = selfware_dir.join(KILLSWITCH_FILE_NAME);
+
+    // Inspect destination before opening or writing
+    match killswitch_path.symlink_metadata() {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+                // If a symlink, FIFO, socket, device, or directory already exists at the
+                // killswitch path, detection ALREADY treats it as active (fail-closed).
+                // Do NOT open, write, or replace it — doing so could block indefinitely on
+                // a FIFO or overwrite a symlink target outside the workspace.
+                // Preserve the existing sentinel node and return immediately.
+                tracing::info!(
+                    "Killswitch sentinel already exists as special file or symlink at {:?}; treating as active without opening",
+                    killswitch_path
+                );
+                return Ok(killswitch_path);
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Not present, safe to create
+        }
+        Err(e) => {
+            return Err(e);
+        }
+    }
+
     let content = if reason.trim().is_empty() {
         format!("Tripped at {}\n", chrono::Utc::now().to_rfc3339())
     } else {
@@ -260,7 +334,18 @@ pub fn trip_file_killswitch(project_root: &Path, reason: &str) -> std::io::Resul
             reason.trim()
         )
     };
-    std::fs::write(&killswitch_path, content)?;
+
+    let mut open_opts = std::fs::OpenOptions::new();
+    open_opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open_opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    use std::io::Write;
+    let mut file = open_opts.open(&killswitch_path)?;
+    file.write_all(content.as_bytes())?;
+    file.sync_all()?;
     Ok(killswitch_path)
 }
 
@@ -268,11 +353,17 @@ pub fn trip_file_killswitch(project_root: &Path, reason: &str) -> std::io::Resul
 /// Returns `Ok(true)` if a file was removed, `Ok(false)` if none existed.
 pub fn remove_file_killswitch(project_root: &Path) -> std::io::Result<bool> {
     let killswitch_path = project_root.join(".selfware").join(KILLSWITCH_FILE_NAME);
-    if killswitch_path.exists() {
-        std::fs::remove_file(killswitch_path)?;
-        Ok(true)
-    } else {
-        Ok(false)
+    match killswitch_path.symlink_metadata() {
+        Ok(meta) => {
+            if meta.is_dir() {
+                std::fs::remove_dir_all(&killswitch_path)?;
+            } else {
+                std::fs::remove_file(&killswitch_path)?;
+            }
+            Ok(true)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
     }
 }
 

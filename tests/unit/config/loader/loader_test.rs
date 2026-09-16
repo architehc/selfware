@@ -2850,7 +2850,7 @@ async fn test_load_async_accepts_xhigh_on_non_sglang_under_tokio() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_sync_load_under_tokio_probes_unfamiliar_endpoint() {
+async fn test_sync_load_under_tokio_does_not_block_and_uses_cached_capability() {
     let _guard = clear_env();
     crate::config::clear_sglang_capability_cache();
 
@@ -2868,17 +2868,33 @@ async fn test_sync_load_under_tokio_probes_unfamiliar_endpoint() {
     );
     let (_dir, path) = write_temp_config(&content, "sync_load_sglang.toml");
 
-    // Calling synchronous Config::load under an active Tokio runtime
-    let err = Config::load(Some(path.to_str().unwrap()))
+    // 1. Under an active Tokio runtime, synchronous Config::load on an unfamiliar endpoint
+    // must NOT block worker threads with a synchronous network probe.
+    let unprobed_config = Config::load(Some(path.to_str().unwrap()))
+        .expect("sync load under Tokio must not block on unfamiliar endpoint");
+    assert_eq!(unprobed_config.endpoint, endpoint);
+
+    // 2. Discover capabilities properly using the async loader
+    let err = Config::load_async(Some(path.to_str().unwrap()))
+        .await
         .unwrap_err()
         .to_string();
     assert!(
         err.contains("extra_body.reasoning_effort cannot be 'xhigh' at top-level on SGLang"),
-        "sync load under Tokio must probe unfamiliar endpoint and reject xhigh on SGLang: {err}"
+        "load_async must probe unfamiliar endpoint and reject xhigh on SGLang: {err}"
     );
     assert_eq!(
         crate::config::get_sglang_capability(&endpoint),
         Some(true),
         "endpoint must be cached as SGLang"
+    );
+
+    // 3. Once capability is cached, synchronous Config::load enforces the invariant
+    let sync_err = Config::load(Some(path.to_str().unwrap()))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        sync_err.contains("extra_body.reasoning_effort cannot be 'xhigh' at top-level on SGLang"),
+        "sync load must use cached capability and reject xhigh on SGLang: {sync_err}"
     );
 }

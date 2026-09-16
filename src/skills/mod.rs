@@ -460,6 +460,9 @@ impl SkillRegistry {
                         if entry.source_origin.is_some() {
                             skill.origin = entry.source_origin.clone();
                         }
+                        if entry.scope.is_some() {
+                            skill.scope = entry.scope.clone();
+                        }
                     } else if skill.admitted && skill.content_hash.as_deref() == Some(&actual_hash)
                     {
                         // Backfill legacy admitted skill whose content_hash matches actual content
@@ -624,9 +627,10 @@ impl SkillRegistry {
             }
         }
 
-        if target_file.exists() {
+        let previous_file_content: Option<Vec<u8>> = if target_file.exists() {
             let existing = Skill::from_file(&target_file)?;
             let existing_is_user = !existing.candidate
+                && !existing.admitted
                 && !matches!(existing.origin.as_deref(), Some("distilled" | "generated"));
             if existing_is_user {
                 return Err(format!(
@@ -634,7 +638,18 @@ impl SkillRegistry {
                     safe_name
                 ));
             }
-        }
+            Some(
+                std::fs::read(&target_file)
+                    .map_err(|e| format!("Failed to backup existing skill file: {e}"))?,
+            )
+        } else {
+            None
+        };
+
+        // 1. Validate and load ledger FIRST before any file modifications.
+        // A corrupt or unreadable ledger fails fast, preserving existing file state untouched.
+        let mut ledger = AdmissionLedger::load_from_dir(target_skills_dir)?;
+        let previous_ledger_entry = ledger.entries.get(&safe_name).cloned();
 
         skill.name = safe_name.clone();
         skill.candidate = true;
@@ -649,7 +664,7 @@ impl SkillRegistry {
             skill.origin.as_deref(),
         );
 
-        // Format updated markdown frontmatter
+        // Format updated markdown frontmatter preserving all metadata (including scope & trace_ids)
         let mut frontmatter_map = serde_yaml::Mapping::new();
         frontmatter_map.insert(
             serde_yaml::Value::String("name".to_string()),
@@ -688,6 +703,23 @@ impl SkillRegistry {
                 serde_yaml::Value::String(orig.clone()),
             );
         }
+        if let Some(ref sc) = skill.scope {
+            frontmatter_map.insert(
+                serde_yaml::Value::String("scope".to_string()),
+                serde_yaml::Value::String(sc.clone()),
+            );
+        }
+        if !skill.trace_ids.is_empty() {
+            let trace_val: Vec<serde_yaml::Value> = skill
+                .trace_ids
+                .iter()
+                .map(|t| serde_yaml::Value::String(t.clone()))
+                .collect();
+            frontmatter_map.insert(
+                serde_yaml::Value::String("trace_ids".to_string()),
+                serde_yaml::Value::Sequence(trace_val),
+            );
+        }
         if let Some(ref ch) = skill.content_hash {
             frontmatter_map.insert(
                 serde_yaml::Value::String("content_hash".to_string()),
@@ -699,32 +731,31 @@ impl SkillRegistry {
             .map_err(|e| format!("Failed to serialize admitted frontmatter: {e}"))?;
         let rendered = format!("---\n{}---\n\n{}", yaml, skill.content);
 
-        // Safe write: write the admitted skill file BEFORE updating the ledger
-        let mut open_opts = std::fs::OpenOptions::new();
-        open_opts.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            open_opts.custom_flags(libc::O_NOFOLLOW);
-        }
-        use std::io::Write;
-        let mut file = open_opts.open(&target_file).map_err(|e| {
-            format!(
-                "Failed to open admitted skill target for writing at {}: {e}",
-                target_file.display()
-            )
-        })?;
-        file.write_all(rendered.as_bytes())
-            .map_err(|e| format!("Failed to write admitted skill: {e}"))?;
-        file.sync_all().map_err(|e| {
-            format!(
-                "Failed to sync admitted skill at {}: {e}",
-                target_file.display()
-            )
-        })?;
+        // 2. Stage candidate file write via temporary file + atomic rename
+        let temp_file_path =
+            target_skills_dir.join(format!(".{safe_name}.md.tmp.{}", uuid::Uuid::new_v4()));
+        let write_res = (|| -> std::io::Result<()> {
+            let mut open_opts = std::fs::OpenOptions::new();
+            open_opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                open_opts.custom_flags(libc::O_NOFOLLOW);
+            }
+            use std::io::Write;
+            let mut file = open_opts.open(&temp_file_path)?;
+            file.write_all(rendered.as_bytes())?;
+            file.sync_all()?;
+            std::fs::rename(&temp_file_path, &target_file)?;
+            Ok(())
+        })();
 
-        // Update external admission ledger
-        let mut ledger = AdmissionLedger::load_from_dir(target_skills_dir)?;
+        if let Err(e) = write_res {
+            let _ = std::fs::remove_file(&temp_file_path);
+            return Err(format!("Failed to stage admitted skill file: {e}"));
+        }
+
+        // 3. Update and persist external admission ledger
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -744,7 +775,30 @@ impl SkillRegistry {
                 scope: skill.scope.clone(),
             },
         );
-        ledger.save_to_dir(target_skills_dir)?;
+
+        if let Err(e) = ledger.save_to_dir(target_skills_dir) {
+            // TRANSACTIONAL ROLLBACK: restore previous file content (or delete if newly created)
+            match previous_file_content {
+                Some(prev_bytes) => {
+                    let _ = std::fs::write(&target_file, prev_bytes);
+                }
+                None => {
+                    let _ = std::fs::remove_file(&target_file);
+                }
+            }
+            // Restore ledger entry in-memory
+            match previous_ledger_entry {
+                Some(entry) => {
+                    ledger.entries.insert(safe_name, entry);
+                }
+                None => {
+                    ledger.entries.remove(&safe_name);
+                }
+            }
+            return Err(format!(
+                "Failed to persist admission ledger: {e} (previous skill version preserved)"
+            ));
+        }
 
         skill.source = Some(target_file);
         Ok(skill)

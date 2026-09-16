@@ -1320,3 +1320,15 @@ async fn test_probe_transient_failures_and_conclusive_404() {
         "404 route missing is conclusive non-SGLang"
     );
 }
+
+#[tokio::test]
+async fn test_is_sglang_backend_non_blocking_inside_tokio() {
+    clear_sglang_capability_cache();
+    let start = std::time::Instant::now();
+    // In an async context, is_sglang_backend must return immediately without blocking worker threads
+    let is_sg = is_sglang_backend("http://192.0.2.1:8080"); // 192.0.2.1 is TEST-NET-1 (non-routable blackhole)
+    assert!(start.elapsed() < std::time::Duration::from_millis(50));
+    assert!(!is_sg);
+    // Transient/unprobed endpoint must not have negative result cached
+    assert_eq!(get_sglang_capability("http://192.0.2.1:8080"), None);
+}

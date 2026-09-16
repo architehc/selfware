@@ -20,7 +20,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 // and an execute-loop test can never run concurrently and corrupt each other.
 static STATE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-fn state_lock() -> MutexGuard<'static, ()> {
+pub(crate) fn state_lock() -> MutexGuard<'static, ()> {
     // Recover from a poisoned lock: a panicking test still restores state on drop,
     // so the guarded invariant (globals only mutated while the lock is held) holds.
     STATE_LOCK
@@ -148,6 +148,10 @@ const SELFWARE_ENV_VARS: &[&str] = &[
     "SELFWARE_LOG_LEVEL",
     "SELFWARE_MODE",
     "SELFWARE_STRICT_PERMISSIONS",
+    "SELFWARE_KILLSWITCH",
+    "SELFWARE_KILLSWITCH_IGNORE_HOME",
+    "SELFWARE_NO_HOME_KILLSWITCH",
+    "SELFWARE_DISABLE_HOME_KILLSWITCH",
 ];
 
 impl EnvGuard {

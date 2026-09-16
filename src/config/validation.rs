@@ -546,19 +546,17 @@ pub fn is_sglang_backend(endpoint: &str) -> bool {
         return true;
     }
 
-    // 3. Blocking probe (executed on an OS thread if inside Tokio to avoid blocking Tokio workers)
-    let (is_sg, _is_conclusive) = if tokio::runtime::Handle::try_current().is_ok() {
-        let base_clone = base.clone();
-        std::thread::spawn(move || probe_sglang_backend_blocking_direct(&base_clone))
-            .join()
-            .unwrap_or((false, false))
-    } else {
-        probe_sglang_backend_blocking_direct(&base)
-    };
+    // 3. Do not block inside an async Tokio runtime.
+    // In async contexts, capability discovery is performed non-blockingly via `validate_async`.
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return false;
+    }
 
-    // Always cache the probe result (negative caching on failure/timeout)
-    // so subsequent requests on the hot path do not repeatedly incur a blocking network probe.
-    set_sglang_capability(&base, is_sg);
+    // 4. Synchronous probe outside of Tokio runtime
+    let (is_sg, is_conclusive) = probe_sglang_backend_blocking_direct(&base);
+    if is_conclusive {
+        set_sglang_capability(&base, is_sg);
+    }
 
     is_sg
 }

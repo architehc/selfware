@@ -2444,7 +2444,7 @@ fn test_default_denied_paths_fn() {
     assert!(paths.contains(&"**/.selfware/skill-candidates".to_string()));
     assert!(paths.contains(&"**/.selfware/skill-candidates/**".to_string()));
     assert!(paths.contains(&"**/.admitted_ledger.json".to_string()));
-    assert!(paths.contains(&"**/.*ledger*.json".to_string()));
+    assert!(paths.contains(&"**/.selfware/**/.admitted_ledger.json".to_string()));
 }
 
 // ---- Config::Debug output completeness ----
