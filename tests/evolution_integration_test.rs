@@ -10,8 +10,10 @@ use selfware::evolution::fitness::{self, SabConfig, SabResult};
 use selfware::evolution::sandbox::SandboxConfig;
 use selfware::evolution::tournament::{Hypothesis, TournamentConfig};
 use selfware::evolution::{
-    is_protected, EvolutionConfig, FitnessWeights, GenerationRating, LlmConfig, MutationTargets,
-    SafetyConfig, PROTECTED_PATHS,
+    is_protected, AttemptNode, AttemptStatus, AttemptTree, BreadthFirstPolicy, EvolutionConfig,
+    FailureClass, FitnessWeights, GenerationRating, LlmConfig, MutationTargets,
+    ParetoAdaptivePolicy, RefineTop1Policy, ReplaySimulator, SafetyConfig, SearchPolicy,
+    PROTECTED_PATHS,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -665,6 +667,161 @@ fn test_e2e_unified_diff_fallback() {
 
     let content = std::fs::read_to_string(repo.join("src/small.rs")).unwrap();
     assert!(content.contains("pub fn add_numbers("));
+
+    cleanup_test_repo(&repo);
+}
+
+#[test]
+fn test_dream_rsi_end_to_end_replay_integration() {
+    let repo = setup_test_repo("dream-rsi-replay");
+    let attempts_dir = repo.join(".selfware/attempts");
+    std::fs::create_dir_all(&attempts_dir).unwrap();
+    let run_file = attempts_dir.join("run_sample.jsonl");
+
+    let mut tree = AttemptTree::new();
+
+    // Construct a multi-branch exploration tree
+    // Branch 1: root 0.60 -> syntax failure -> repair gets 0.94!
+    let a0 = AttemptNode {
+        id: "att-1".into(),
+        parent_id: None,
+        generation: 1,
+        branch_id: "b1".into(),
+        hypothesis_id: "h1".into(),
+        description: "Initial branch 1".into(),
+        diff_sha256: "hash1".into(),
+        patch: None,
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(0.60),
+        tokens_used: Some(1500),
+        wall_time_ms: 10000,
+        status: AttemptStatus::Evaluated,
+        failure_class: None,
+        failure_reason: None,
+        binary_sha256: None,
+        created_at: "2026-09-16T12:00:00Z".into(),
+    };
+    let a1 = AttemptNode {
+        id: "att-2".into(),
+        parent_id: Some("att-1".into()),
+        generation: 2,
+        branch_id: "b1".into(),
+        hypothesis_id: "h2".into(),
+        description: "Branch 1 syntax slip".into(),
+        diff_sha256: "hash2".into(),
+        patch: None,
+        sab_report_path: None,
+        metrics: None,
+        composite_score: None,
+        tokens_used: Some(1200),
+        wall_time_ms: 2000,
+        status: AttemptStatus::CompileFailed,
+        failure_class: Some(FailureClass::RepairableSyntax),
+        failure_reason: Some("missing semicolon".into()),
+        binary_sha256: None,
+        created_at: "2026-09-16T12:05:00Z".into(),
+    };
+    let a2 = AttemptNode {
+        id: "att-3".into(),
+        parent_id: Some("att-2".into()),
+        generation: 3,
+        branch_id: "b1".into(),
+        hypothesis_id: "h3".into(),
+        description: "Branch 1 repaired".into(),
+        diff_sha256: "hash3".into(),
+        patch: None,
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(0.94),
+        tokens_used: Some(1800),
+        wall_time_ms: 12000,
+        status: AttemptStatus::Evaluated,
+        failure_class: None,
+        failure_reason: None,
+        binary_sha256: None,
+        created_at: "2026-09-16T12:10:00Z".into(),
+    };
+
+    // Branch 2: root 0.70 -> child 0.72
+    let b0 = AttemptNode {
+        id: "att-4".into(),
+        parent_id: None,
+        generation: 1,
+        branch_id: "b2".into(),
+        hypothesis_id: "h4".into(),
+        description: "Initial branch 2".into(),
+        diff_sha256: "hash4".into(),
+        patch: None,
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(0.70),
+        tokens_used: Some(1400),
+        wall_time_ms: 9000,
+        status: AttemptStatus::Evaluated,
+        failure_class: None,
+        failure_reason: None,
+        binary_sha256: None,
+        created_at: "2026-09-16T12:00:00Z".into(),
+    };
+    let b1 = AttemptNode {
+        id: "att-5".into(),
+        parent_id: Some("att-4".into()),
+        generation: 2,
+        branch_id: "b2".into(),
+        hypothesis_id: "h5".into(),
+        description: "Branch 2 refinement".into(),
+        diff_sha256: "hash5".into(),
+        patch: None,
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(0.72),
+        tokens_used: Some(1300),
+        wall_time_ms: 9500,
+        status: AttemptStatus::Evaluated,
+        failure_class: None,
+        failure_reason: None,
+        binary_sha256: None,
+        created_at: "2026-09-16T12:05:00Z".into(),
+    };
+
+    tree.add_node(a0).unwrap();
+    tree.add_node(a1).unwrap();
+    tree.add_node(a2).unwrap();
+    tree.add_node(b0).unwrap();
+    tree.add_node(b1).unwrap();
+
+    tree.save_to_jsonl(&run_file).unwrap();
+    assert!(run_file.exists());
+
+    // Load from disk as an operator would
+    let loaded_tree = AttemptTree::load_from_jsonl(&run_file).unwrap();
+    assert_eq!(loaded_tree.len(), 5);
+
+    let sim = ReplaySimulator::new(loaded_tree, 0.50).with_max_parallelism(2);
+    let mut policies: Vec<Box<dyn SearchPolicy>> = vec![
+        Box::new(BreadthFirstPolicy::new(3)),
+        Box::new(RefineTop1Policy::new(3)),
+        Box::new(ParetoAdaptivePolicy::new()),
+    ];
+
+    let rankings = sim.compare_policies(&mut policies, 0.15).unwrap();
+    assert_eq!(rankings.len(), 3);
+
+    // Verify that ParetoAdaptivePolicy reaches 0.94 through the repairable slip,
+    // whereas RefineTop1 locked onto branch 2 (0.70) and was trapped at 0.72.
+    let pareto = rankings
+        .iter()
+        .find(|r| r.policy_name == "ParetoAdaptivePolicy")
+        .unwrap();
+    assert_eq!(pareto.terminal_score, 0.94);
+
+    let refine_top1 = rankings
+        .iter()
+        .find(|r| r.policy_name == "RefineTop1Policy")
+        .unwrap();
+    assert_eq!(refine_top1.terminal_score, 0.72);
+    assert!(pareto.terminal_score > refine_top1.terminal_score);
 
     cleanup_test_repo(&repo);
 }

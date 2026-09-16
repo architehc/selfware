@@ -2456,6 +2456,78 @@ async fn handle_command(
                         println!("\n   {} RSI loop stopped: {}", Glyphs::frost(), e);
                     }
                 }
+            } else if workflow == "replay" {
+                use crate::evolution::policy::{
+                    BreadthFirstPolicy, ParetoAdaptivePolicy, RefineTop1Policy, SearchPolicy,
+                };
+                use crate::evolution::replay::ReplaySimulator;
+                use crate::evolution::tree_log::AttemptTree;
+
+                if !quiet {
+                    println!(
+                        "\n{} {}\n",
+                        Glyphs::gear(),
+                        "Dream-RSI Offline Policy Replay".workshop_title()
+                    );
+                }
+
+                let attempts_dir = repo_root.join(".selfware").join("attempts");
+                if !attempts_dir.exists() {
+                    println!(
+                        "   {} No attempt history found at .selfware/attempts/",
+                        Glyphs::leaf()
+                    );
+                    return Ok(());
+                }
+
+                let mut log_files: Vec<std::path::PathBuf> = std::fs::read_dir(&attempts_dir)?
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| p.extension().is_some_and(|ext| ext == "jsonl"))
+                    .collect();
+                log_files.sort();
+
+                let latest_log = match log_files.last() {
+                    Some(f) => f,
+                    None => {
+                        println!(
+                            "   {} No JSONL attempt trees found in .selfware/attempts/",
+                            Glyphs::leaf()
+                        );
+                        return Ok(());
+                    }
+                };
+
+                println!("   Loading attempt tree from: {}", latest_log.display());
+                let tree = AttemptTree::load_from_jsonl(latest_log)?;
+                println!(
+                    "   Tree contains {} total attempts across {} branches\n",
+                    tree.len(),
+                    tree.branches().len()
+                );
+
+                let sim = ReplaySimulator::new(tree, 0.0).with_max_parallelism(parallel);
+                let mut policies: Vec<Box<dyn SearchPolicy>> = vec![
+                    Box::new(BreadthFirstPolicy::new(3)),
+                    Box::new(RefineTop1Policy::new(3)),
+                    Box::new(ParetoAdaptivePolicy::new()),
+                ];
+
+                let reports = sim.compare_policies(&mut policies, 0.2)?;
+                println!("┌───────────────────────┬──────────────┬──────────────┬──────────────┬────────────────┐");
+                println!("│ Policy                │ Score (V)    │ Probes (C)   │ Parallel Pen │ Objective J    │");
+                println!("├───────────────────────┼──────────────┼──────────────┼──────────────┼────────────────┤");
+                for r in reports {
+                    println!(
+                        "│ {:<21} │ {:>12.4} │ {:>12} │ {:>12.2} │ {:>14.4} │",
+                        r.policy_name,
+                        r.terminal_score,
+                        r.total_probes,
+                        r.parallel_penalty,
+                        r.objective_value
+                    );
+                }
+                println!("└───────────────────────┴──────────────┴──────────────┴──────────────┴────────────────┘");
+                return Ok(());
             } else {
                 // Default evolution daemon workflow
                 use crate::evolution::daemon;
