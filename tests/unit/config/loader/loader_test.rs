@@ -2422,8 +2422,8 @@ fn test_config_load_pins_qwen38_context_and_derives_token_budget() {
         "qwen3.8 profile must pin max_streams to 16"
     );
     assert_eq!(
-        config.concurrency.max_global, 16,
-        "qwen3.8 profile must pin max_global to 16"
+        config.concurrency.max_global, 24,
+        "qwen3.8 profile must pin max_global to 24"
     );
 
     // Explicit user context_length overrides the profile pin
@@ -2753,5 +2753,132 @@ fn test_empty_selfware_api_key_does_not_suppress_openrouter_fallback() {
         config.api_key.as_ref().map(|k| k.expose()),
         Some("sk-or-test-key"),
         "an empty SELFWARE_API_KEY must not suppress the OPENROUTER_API_KEY fallback"
+    );
+}
+
+// =========================================================================
+// Async and sync discovery during config loading under Tokio
+// =========================================================================
+
+async fn start_loader_mock_server(
+    status: u16,
+    body: &'static str,
+) -> (String, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let endpoint = format!("http://{}/v1", addr);
+    let handle = tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+            let wire = format!(
+                "HTTP/1.1 {} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                status,
+                body.len(),
+                body
+            );
+            let _ = socket.write_all(wire.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        }
+    });
+    (endpoint, handle)
+}
+
+#[tokio::test]
+async fn test_load_async_discovers_sglang_under_tokio() {
+    let _guard = clear_env();
+    crate::config::clear_sglang_capability_cache();
+
+    let sglang_body = r#"{"sglang_version": "0.4.3", "tool_call_parser": "qwen"}"#;
+    let (endpoint, _task) = start_loader_mock_server(200, sglang_body).await;
+
+    let content = format!(
+        r#"
+        endpoint = "{endpoint}"
+        model = "test-model"
+
+        [extra_body]
+        reasoning_effort = "xhigh"
+        "#
+    );
+    let (_dir, path) = write_temp_config(&content, "load_async_sglang.toml");
+
+    let err = Config::load_async(Some(path.to_str().unwrap()))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("extra_body.reasoning_effort cannot be 'xhigh' at top-level on SGLang"),
+        "load_async must run discovery and reject xhigh on SGLang: {err}"
+    );
+    assert_eq!(
+        crate::config::get_sglang_capability(&endpoint),
+        Some(true),
+        "endpoint must be cached as SGLang"
+    );
+}
+
+#[tokio::test]
+async fn test_load_async_accepts_xhigh_on_non_sglang_under_tokio() {
+    let _guard = clear_env();
+    crate::config::clear_sglang_capability_cache();
+
+    let generic_body = r#"{"version": "1.0.0", "status": "ok"}"#;
+    let (endpoint, _task) = start_loader_mock_server(200, generic_body).await;
+
+    let content = format!(
+        r#"
+        endpoint = "{endpoint}"
+        model = "test-model"
+
+        [extra_body]
+        reasoning_effort = "xhigh"
+        "#
+    );
+    let (_dir, path) = write_temp_config(&content, "load_async_non_sglang.toml");
+
+    let config = Config::load_async(Some(path.to_str().unwrap()))
+        .await
+        .expect("load_async must accept xhigh on non-SGLang server");
+    assert_eq!(config.endpoint, endpoint);
+    assert_eq!(
+        crate::config::get_sglang_capability(&endpoint),
+        Some(false),
+        "endpoint must be cached as non-SGLang"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_sync_load_under_tokio_probes_unfamiliar_endpoint() {
+    let _guard = clear_env();
+    crate::config::clear_sglang_capability_cache();
+
+    let sglang_body = r#"{"sglang_version": "0.4.3", "tool_call_parser": "qwen"}"#;
+    let (endpoint, _task) = start_loader_mock_server(200, sglang_body).await;
+
+    let content = format!(
+        r#"
+        endpoint = "{endpoint}"
+        model = "test-model"
+
+        [extra_body]
+        reasoning_effort = "xhigh"
+        "#
+    );
+    let (_dir, path) = write_temp_config(&content, "sync_load_sglang.toml");
+
+    // Calling synchronous Config::load under an active Tokio runtime
+    let err = Config::load(Some(path.to_str().unwrap()))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("extra_body.reasoning_effort cannot be 'xhigh' at top-level on SGLang"),
+        "sync load under Tokio must probe unfamiliar endpoint and reject xhigh on SGLang: {err}"
+    );
+    assert_eq!(
+        crate::config::get_sglang_capability(&endpoint),
+        Some(true),
+        "endpoint must be cached as SGLang"
     );
 }

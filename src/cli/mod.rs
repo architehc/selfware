@@ -660,10 +660,10 @@ pub async fn run() -> Result<()> {
     // cannot be parsed or trusted. Load it only for the diagnostic branch.
     if let Some(Commands::Boot { chat, check }) = &cli.command {
         if *check {
-            let loaded = Config::load(config_path.as_deref()).and_then(|mut config| {
-                apply_session_model_overrides(&cli, &mut config)?;
-                Ok(config)
-            });
+            let loaded = match Config::load_async(config_path.as_deref()).await {
+                Ok(mut config) => apply_session_model_overrides(&cli, &mut config).map(|_| config),
+                Err(e) => Err(e),
+            };
             let config_error = loaded.as_ref().err().map(|error| format!("{error:#}"));
             let current = loaded
                 .as_ref()
@@ -687,9 +687,10 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
 
-    let mut config = Config::load(config_path.as_deref())?;
+    let mut config = Config::load_async(config_path.as_deref()).await?;
 
     apply_session_model_overrides(&cli, &mut config)?;
+    config.discover_sglang_capabilities().await;
 
     // Tell the tokenizer which model is configured so it can pick a matching
     // HF tokenizer. It must NOT reload the config itself: a mid-session
@@ -712,7 +713,7 @@ pub async fn run() -> Result<()> {
 
     // ── Validate config and exit if requested ──
     if cli.validate_config {
-        match config.validate() {
+        match config.validate_async().await {
             Ok(()) => {
                 println!("{} Configuration is valid.", Glyphs::bloom());
                 return Ok(());

@@ -113,7 +113,7 @@ impl ModificationEngine {
             id: proposal.id,
             success: true,
             applied_at: timestamp,
-            rollback_available: true,
+            rollback_available: false,
         };
 
         let record = SelfReferenceRecord {

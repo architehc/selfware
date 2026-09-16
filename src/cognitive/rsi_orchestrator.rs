@@ -306,6 +306,12 @@ impl RSIOrchestrator {
     async fn execute_improvement_cycle(&mut self) -> Result<bool> {
         info!("Beginning new improvement cycle");
 
+        // Fail-closed killswitch check before starting cycle
+        if let Err(err) = crate::safety::killswitch::check_killswitch(Some(&self.project_root)) {
+            warn!("Killswitch active in RSI orchestrator: {err}; halting cycle");
+            return Ok(false);
+        }
+
         // NOTE on cost: each cycle that reaches fitness evaluation runs TWO
         // paid e2e benchmark suites (baseline + sandbox). Cheap local gates
         // (target selection, trivial-mutation detection, compilation/tests)
@@ -630,7 +636,7 @@ impl RSIOrchestrator {
         verified: bool,
         rolled_back: bool,
     ) -> Result<()> {
-        let effectiveness_score = new_score.map_or(-1.0, |score| score - baseline_score);
+        let effectiveness_score = new_score.map_or(0.0, |score| score - baseline_score);
         let record = ImprovementRecord {
             target_id: target.id.clone(),
             category: target.category.clone(),

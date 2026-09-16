@@ -7,6 +7,7 @@
 
 pub mod audit;
 pub mod checker;
+pub mod killswitch;
 pub mod path_validator;
 pub mod permissions;
 pub mod process_env;
@@ -26,6 +27,7 @@ pub use checker::validation::{
     is_private_or_internal, normalize_shell_command, split_shell_commands, PinnedDnsResolver,
 };
 pub use checker::SafetyChecker;
+pub use killswitch::{check_killswitch, is_killswitch_active, KillswitchError, KillswitchStatus};
 pub use scanner::{
     SecretScanner, SecurityCategory, SecurityFinding, SecurityScanner, SecuritySeverity,
 };

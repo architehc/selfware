@@ -152,6 +152,8 @@ pub enum RejectReason {
     /// The staged diff failed the compile gate (`cargo check` in the shadow);
     /// carries a capped excerpt of cargo's stderr.
     CompileFailed(String),
+    /// The killswitch is active, rejecting autonomous mutation.
+    Killswitch(String),
 }
 
 impl std::fmt::Display for RejectReason {
@@ -160,6 +162,7 @@ impl std::fmt::Display for RejectReason {
             RejectReason::OutOfScope(path) => write!(f, "diff_out_of_scope: {path}"),
             RejectReason::Empty => write!(f, "empty_diff"),
             RejectReason::CompileFailed(stderr) => write!(f, "compile_failed: {stderr}"),
+            RejectReason::Killswitch(reason) => write!(f, "killswitch_active: {reason}"),
         }
     }
 }
@@ -244,6 +247,10 @@ pub fn verify_staged_diff(
     shadow_path: &Path,
     base_revision: &str,
 ) -> std::result::Result<std::result::Result<StagedDiff, RejectReason>, git2::Error> {
+    if let Err(err) = crate::safety::killswitch::check_killswitch(Some(shadow_path)) {
+        return Ok(Err(RejectReason::Killswitch(err.to_string())));
+    }
+
     let repo = git2::Repository::open(shadow_path)?;
     let base = repo
         .find_commit(git2::Oid::from_str(base_revision)?)?

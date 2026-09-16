@@ -1,0 +1,28 @@
+# ==============================================================================
+# Selfware Configuration: Qwen 3.8 Flash-Next on llm.selfware.design
+# ==============================================================================
+
+endpoint = "https://llm.selfware.design/v1"
+api_key = "EMPTY"
+model = "qwen38-flash-next"
+max_tokens = 65536
+context_length = 1000000
+
+[extra_body.chat_template_kwargs]
+enable_thinking = true
+preserve_thinking = true
+reasoning_effort = "xhigh"
+
+[safety]
+allowed_paths = ["./**"]
+denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**", "**/target/**"]
+
+[agent]
+max_iterations = 100
+step_timeout_secs = 600
+native_function_calling = false
+
+[retry]
+max_retries = 3
+base_delay_ms = 1000
+max_delay_ms = 10000

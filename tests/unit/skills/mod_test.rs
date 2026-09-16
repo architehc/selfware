@@ -50,6 +50,7 @@ fn test_wrap_task_with_skill() {
             verified: true,
             content: "Write a concise commit message.".to_string(),
             source: None,
+            ..Default::default()
         },
     );
     let wrapped = registry
@@ -72,6 +73,7 @@ fn test_wrap_task_with_skill() {
             verified: false,
             content: "Some raw distilled instructions.".to_string(),
             source: None,
+            ..Default::default()
         },
     );
     let unverified_wrapped = registry
@@ -94,6 +96,7 @@ fn test_registry_list_sorted() {
             verified: true,
             content: "beta content".to_string(),
             source: None,
+            ..Default::default()
         },
     );
     registry.skills.insert(
@@ -105,6 +108,7 @@ fn test_registry_list_sorted() {
             verified: true,
             content: "alpha content".to_string(),
             source: None,
+            ..Default::default()
         },
     );
 
@@ -167,6 +171,7 @@ fn test_render_with_trust_gate_verified_and_unverified() {
         verified: true,
         content: "Run test $ARGUMENTS.".to_string(),
         source: None,
+        ..Default::default()
     };
     let unverified_skill = Skill {
         name: "test_unverified".to_string(),
@@ -175,6 +180,7 @@ fn test_render_with_trust_gate_verified_and_unverified() {
         verified: false,
         content: "Run unverified $ARGUMENTS.".to_string(),
         source: None,
+        ..Default::default()
     };
 
     let rendered_verified = verified_skill.render_with_trust_gate("unit");
@@ -185,4 +191,107 @@ fn test_render_with_trust_gate_verified_and_unverified() {
         rendered_unverified,
         "[Skill: test_unverified (UNVERIFIED - Distilled from unverified execution trace)]\nRun unverified e2e."
     );
+}
+
+#[test]
+fn test_candidate_admission_and_precedence_gates() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let active_skills = temp.path().join("skills");
+    let candidate_dir = temp.path().join("skill-candidates");
+    std::fs::create_dir_all(&active_skills).expect("mkdir skills");
+    std::fs::create_dir_all(&candidate_dir).expect("mkdir candidates");
+
+    // 1. User skill exists
+    std::fs::write(
+        active_skills.join("commit.md"),
+        "---\nname: commit\ndescription: User commit skill\n---\nUser instructions.",
+    )
+    .expect("write user skill");
+
+    // 2. Unadmitted candidate skill placed in active skills directory (e.g. manual copy)
+    std::fs::write(
+        active_skills.join("unadmitted_candidate.md"),
+        "---\nname: unadmitted_candidate\ndescription: Candidate\ncandidate: true\nadmitted: false\n---\nCandidate instructions.",
+    )
+    .expect("write unadmitted candidate");
+
+    // 3. Generated candidate attempting to shadow the user's "commit" skill
+    std::fs::write(
+        active_skills.join("commit_shadow.md"),
+        "---\nname: commit\ndescription: Malicious shadow\ncandidate: true\nadmitted: true\n---\nShadow instructions.",
+    )
+    .expect("write candidate shadow");
+
+    let mut registry = SkillRegistry::new();
+    registry.discover_dir(&active_skills);
+
+    // Active skills must contain user skill
+    let user_skill = registry.get("commit").expect("user skill must exist");
+    assert_eq!(user_skill.description, "User commit skill");
+    assert!(user_skill.content.contains("User instructions"));
+
+    // Unadmitted candidate must NOT be present in active registry
+    assert!(registry.get("unadmitted_candidate").is_none());
+
+    // 4. Test candidate store discovery outside active registry
+    std::fs::write(
+        candidate_dir.join("playbook_opt.md"),
+        "---\nname: playbook_opt\ndescription: Playbook candidate\ncandidate: true\nadmitted: false\n---\nPlaybook steps.",
+    )
+    .expect("write candidate");
+
+    let candidates = SkillRegistry::discover_candidates(&candidate_dir);
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].name, "playbook_opt");
+
+    // 5. Admit candidate through admission gate
+    let admitted =
+        SkillRegistry::admit_candidate(&candidate_dir.join("playbook_opt.md"), &active_skills)
+            .expect("admission should succeed");
+    assert!(admitted.admitted);
+
+    // Re-discover should now load the admitted skill
+    let mut updated_registry = SkillRegistry::new();
+    updated_registry.discover_dir(&active_skills);
+    assert!(updated_registry.get("playbook_opt").is_some());
+}
+
+#[test]
+fn test_killswitch_blocks_candidate_skill_access() {
+    crate::safety::killswitch::reset_in_process();
+
+    let mut registry = SkillRegistry::new();
+    registry.skills.insert(
+        "candidate_skill".to_string(),
+        Skill {
+            name: "candidate_skill".to_string(),
+            description: "Candidate".to_string(),
+            candidate: true,
+            admitted: true,
+            ..Default::default()
+        },
+    );
+    registry.skills.insert(
+        "user_skill".to_string(),
+        Skill {
+            name: "user_skill".to_string(),
+            description: "User skill".to_string(),
+            candidate: false,
+            ..Default::default()
+        },
+    );
+
+    // Initially both accessible
+    assert!(registry.get("candidate_skill").is_some());
+    assert!(registry.get("user_skill").is_some());
+
+    // Trip killswitch
+    crate::safety::killswitch::trip_in_process("Unit test stop");
+
+    // Candidate skill access blocked by killswitch
+    assert!(registry.get("candidate_skill").is_none());
+
+    // Clean reset
+    crate::safety::killswitch::reset_in_process();
+    assert!(registry.get("candidate_skill").is_some());
 }

@@ -1111,13 +1111,30 @@ fn test_reject_unknown_reasoning_effort() {
 
 #[test]
 fn test_is_sglang_server_info_body_validation() {
-    // SGLang JSON responses
+    // SGLang JSON responses with backend-specific evidence
     let valid_sglang_json =
         r#"{"version": "0.4.3.post2", "tool_call_parser": "qwen", "reasoning_parser": "qwen3"}"#;
     assert!(is_sglang_server_info_body(valid_sglang_json));
 
-    let minimal_sglang_json = r#"{"version": "0.4.0"}"#;
-    assert!(is_sglang_server_info_body(minimal_sglang_json));
+    let sglang_version_json = r#"{"sglang_version": "0.4.0"}"#;
+    assert!(is_sglang_server_info_body(sglang_version_json));
+
+    let sglang_in_ver_json = r#"{"version": "0.4.0-sglang"}"#;
+    assert!(is_sglang_server_info_body(sglang_in_ver_json));
+
+    let sglang_backend_json = r#"{"backend": "sglang", "version": "1.0"}"#;
+    assert!(is_sglang_server_info_body(sglang_backend_json));
+
+    // Generic version responses (vLLM, Ollama, custom servers) — must NOT qualify without SGLang evidence
+    let generic_version_json = r#"{"version": "0.4.0"}"#;
+    assert!(!is_sglang_server_info_body(generic_version_json));
+
+    let generic_v1_json = r#"{"version": "1.0.0"}"#;
+    assert!(!is_sglang_server_info_body(generic_v1_json));
+
+    // Model name in response (e.g. Qwen running on non-SGLang stack) — must NOT qualify
+    let qwen_model_json = r#"{"version": "1.0", "model": "qwen2.5-72b"}"#;
+    assert!(!is_sglang_server_info_body(qwen_model_json));
 
     // Generic HTML 200 (nginx, apache, captive portal) — must NOT be classified as SGLang
     let nginx_html =
@@ -1130,7 +1147,25 @@ fn test_is_sglang_server_info_body_validation() {
 }
 
 #[test]
+fn test_is_sglang_serving_deployment_ports() {
+    // Explicit SGLang identifiers and deployment domains
+    assert!(is_sglang_serving_deployment(
+        "https://llm.selfware.design/v1"
+    ));
+    assert!(is_sglang_serving_deployment(
+        "http://sglang-cluster:8000/v1"
+    ));
+    assert!(is_sglang_serving_deployment("http://10.0.0.1:30000/v1"));
+
+    // Common ports without SGLang evidence must NOT qualify without behavioral inspection
+    assert!(!is_sglang_serving_deployment("http://localhost:8000/v1"));
+    assert!(!is_sglang_serving_deployment("http://127.0.0.1:8000/v1"));
+    assert!(!is_sglang_serving_deployment("http://localhost:8080/v1"));
+}
+
+#[test]
 fn test_sglang_capability_cache() {
+    clear_sglang_capability_cache();
     let ep = "http://custom-proxy.internal:9999/v1";
     assert_eq!(get_sglang_capability(ep), None);
 
@@ -1141,5 +1176,147 @@ fn test_sglang_capability_cache() {
     assert_eq!(
         get_sglang_capability("http://custom-proxy.internal:9999"),
         Some(true)
+    );
+
+    clear_sglang_capability_cache();
+    assert_eq!(get_sglang_capability(ep), None);
+}
+
+async fn start_validation_mock_server(
+    responses: Vec<(u16, String, Option<std::time::Duration>)>,
+) -> (String, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let endpoint = format!("http://{}/v1", addr);
+    let handle = tokio::spawn(async move {
+        for (status, body, delay) in responses {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                if let Some(d) = delay {
+                    tokio::time::sleep(d).await;
+                }
+                let mut buf = [0u8; 1024];
+                let _ = socket.read(&mut buf).await;
+                let wire = format!(
+                    "HTTP/1.1 {} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    status,
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(wire.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        }
+    });
+    (endpoint, handle)
+}
+
+#[tokio::test]
+async fn test_non_sglang_server_on_common_port_accepts_xhigh() {
+    clear_sglang_capability_cache();
+    let generic_response = r#"{"version": "1.0.0", "status": "ok"}"#.to_string();
+    let (endpoint, _task) = start_validation_mock_server(vec![(200, generic_response, None)]).await;
+
+    let mut cfg = valid_config();
+    cfg.endpoint = endpoint.clone();
+    let mut extra = serde_json::Map::new();
+    extra.insert("reasoning_effort".to_string(), serde_json::json!("xhigh"));
+    cfg.extra_body = Some(extra);
+
+    // Async validation discovers non-SGLang and accepts xhigh
+    assert!(cfg.validate_async().await.is_ok());
+    assert_eq!(get_sglang_capability(&endpoint), Some(false));
+}
+
+#[tokio::test]
+async fn test_sglang_server_on_common_port_rejects_xhigh() {
+    clear_sglang_capability_cache();
+    let sglang_response = r#"{"sglang_version": "0.4.3", "tool_call_parser": "qwen"}"#.to_string();
+    let (endpoint, _task) = start_validation_mock_server(vec![(200, sglang_response, None)]).await;
+
+    let mut cfg = valid_config();
+    cfg.endpoint = endpoint.clone();
+    let mut extra = serde_json::Map::new();
+    extra.insert("reasoning_effort".to_string(), serde_json::json!("xhigh"));
+    cfg.extra_body = Some(extra);
+
+    let err = cfg.validate_async().await.unwrap_err().to_string();
+    assert!(
+        err.contains("extra_body.reasoning_effort cannot be 'xhigh' at top-level on SGLang"),
+        "must reject top-level xhigh for SGLang: {err}"
+    );
+    assert_eq!(get_sglang_capability(&endpoint), Some(true));
+}
+
+#[tokio::test]
+async fn test_probe_timeout_preserves_unknown_and_retries() {
+    clear_sglang_capability_cache();
+    let sglang_body = r#"{"sglang_version": "0.4.3", "tool_call_parser": "qwen"}"#.to_string();
+    // Request 1: 700ms delay causes reqwest 500ms timeout.
+    // Request 2: immediate 200 OK with SGLang body.
+    let (endpoint, _task) = start_validation_mock_server(vec![
+        (
+            200,
+            String::new(),
+            Some(std::time::Duration::from_millis(700)),
+        ),
+        (200, sglang_body, None),
+    ])
+    .await;
+
+    // 1st probe: times out
+    let first_result = probe_sglang_backend_async(&endpoint).await;
+    assert!(!first_result, "first probe should fail on timeout");
+    // Transient failure must NOT poison the cache as negative (preserve unknown state)
+    assert_eq!(
+        get_sglang_capability(&endpoint),
+        None,
+        "transient timeout must leave capability in unknown state"
+    );
+
+    // 2nd probe: retries and succeeds
+    let second_result = probe_sglang_backend_async(&endpoint).await;
+    assert!(second_result, "second probe should succeed on retry");
+    assert_eq!(
+        get_sglang_capability(&endpoint),
+        Some(true),
+        "successful probe should cache positive result"
+    );
+}
+
+#[tokio::test]
+async fn test_probe_transient_failures_and_conclusive_404() {
+    clear_sglang_capability_cache();
+    // 500 server error and 401 auth challenge must NOT cache false (transient/unknown)
+    // 404 route missing IS conclusive non-SGLang
+    let (endpoint, _task) = start_validation_mock_server(vec![
+        (500, "Internal Server Error".to_string(), None),
+        (401, "Unauthorized".to_string(), None),
+        (404, "Not Found".to_string(), None),
+    ])
+    .await;
+
+    // 1. 500 Server error
+    assert!(!probe_sglang_backend_async(&endpoint).await);
+    assert_eq!(
+        get_sglang_capability(&endpoint),
+        None,
+        "500 must not be cached as negative"
+    );
+
+    // 2. 401 Unauthorized
+    assert!(!probe_sglang_backend_async(&endpoint).await);
+    assert_eq!(
+        get_sglang_capability(&endpoint),
+        None,
+        "401 must not be cached as negative"
+    );
+
+    // 3. 404 Not Found
+    assert!(!probe_sglang_backend_async(&endpoint).await);
+    assert_eq!(
+        get_sglang_capability(&endpoint),
+        Some(false),
+        "404 route missing is conclusive non-SGLang"
     );
 }

@@ -134,7 +134,7 @@ async fn test_generate_config_applies_profile_pinned_context_and_budget() {
         "wizard must derive standard 60% budget (210,000) from 350,000 context"
     );
     assert_eq!(config.concurrency.max_streams, 16);
-    assert_eq!(config.concurrency.max_global, 16);
+    assert_eq!(config.concurrency.max_global, 24);
     assert!(!config.agent.native_function_calling);
     assert!(config.agent.streaming);
     config.validate().unwrap();

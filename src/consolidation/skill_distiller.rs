@@ -69,6 +69,9 @@ struct DistilledSkillFrontmatter<'a> {
     description: &'a str,
     category: &'a str,
     verified: bool,
+    candidate: bool,
+    origin: &'a str,
+    admitted: bool,
     #[serde(skip_serializing_if = "is_empty_slice")]
     tools: &'a [String],
     #[serde(skip_serializing_if = "is_empty_slice")]
@@ -83,6 +86,9 @@ impl DistilledSkill {
             description: &self.description,
             category: self.skill_type.as_str(),
             verified: false,
+            candidate: true,
+            origin: "distilled",
+            admitted: false,
             tools: &self.tools,
             triggers: &self.triggers,
         };
@@ -545,6 +551,12 @@ impl SkillDistiller {
         &mut self,
         candidates: Vec<DistilledSkill>,
     ) -> Result<SkillDistillationReport> {
+        if let Err(err) = crate::safety::killswitch::check_killswitch(None) {
+            return Err(anyhow!(
+                "Killswitch active: {err} - refusing to commit candidate skills"
+            ));
+        }
+
         fs::create_dir_all(&self.skills_dir)?;
         let mut ledger = self.load_ledger()?;
         let now = Utc::now();
@@ -565,6 +577,31 @@ impl SkillDistiller {
             } else {
                 safe_name
             };
+
+            // Candidate protection: never overwrite an existing user-authored skill
+            if let Ok(cwd) = std::env::current_dir() {
+                let user_skill_path = cwd
+                    .join(".selfware")
+                    .join("skills")
+                    .join(format!("{safe_name}.md"));
+                if user_skill_path.exists() {
+                    if let Ok(existing_skill) = Skill::from_file(&user_skill_path) {
+                        let is_user_skill = !existing_skill.candidate
+                            && !matches!(
+                                existing_skill.origin.as_deref(),
+                                Some("distilled" | "generated")
+                            );
+                        if is_user_skill {
+                            tracing::warn!(
+                                "Candidate skill '{}' would shadow user skill at {}; skipping",
+                                safe_name,
+                                user_skill_path.display()
+                            );
+                            continue;
+                        }
+                    }
+                }
+            }
 
             let skill_path = self.skills_dir.join(format!("{}.md", safe_name));
             if !skill_path.starts_with(&self.skills_dir) {

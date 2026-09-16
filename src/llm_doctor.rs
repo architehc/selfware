@@ -1140,7 +1140,11 @@ async fn identify_backend(client: &Client, base_url: &str, models_body: &Value) 
         .await
     {
         if resp.status().is_success() {
-            return Backend::Sglang;
+            if let Ok(body) = resp.text().await {
+                if crate::config::is_sglang_server_info_body(&body) {
+                    return Backend::Sglang;
+                }
+            }
         }
     }
 

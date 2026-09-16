@@ -96,6 +96,16 @@ impl MetaLearner {
 
     /// Update weights from an improvement record
     pub fn update_weights(&mut self, record: &ImprovementRecord) {
+        // If a proposal was skipped or unattempted without evaluation, do not
+        // treat it as an attempted failure or penalize its effectiveness.
+        if !record.verified && record.effectiveness_score == 0.0 {
+            tracing::info!(
+                category = ?record.category,
+                "Skipped proposal recorded without penalizing strategy effectiveness"
+            );
+            return;
+        }
+
         let score = self
             .scores
             .entry(record.category.clone())

@@ -308,3 +308,36 @@ fn test_strategy_score_serialization_roundtrip() {
     assert_eq!(deserialized.attempts, 5);
     assert!((deserialized.avg_effectiveness - 0.65).abs() < 0.001);
 }
+
+#[test]
+fn test_skipped_proposal_does_not_penalize_strategy() {
+    let mut learner = MetaLearner {
+        scores: HashMap::new(),
+        alpha: 0.3,
+        cooldown_secs: 3600,
+        persist_path: std::env::temp_dir().join("selfware_test_meta_skipped.json"),
+    };
+
+    // A skipped/unattempted proposal: verified=false, rolled_back=true, effectiveness_score=0.0
+    let skipped_record = ImprovementRecord {
+        target_id: "imp-skip".to_string(),
+        category: ImprovementCategory::PromptTemplate,
+        description: "trivial comment rewrite skipped".to_string(),
+        before_metrics: None,
+        after_metrics: None,
+        git_commits: vec![],
+        verified: false,
+        rolled_back: true,
+        effectiveness_score: 0.0,
+        completed_at: 1000,
+    };
+
+    learner.update_weights(&skipped_record);
+
+    // Should NOT have created a score entry or triggered cooldown
+    assert!(learner
+        .get_score(&ImprovementCategory::PromptTemplate)
+        .is_none());
+
+    std::fs::remove_file(&learner.persist_path).ok();
+}

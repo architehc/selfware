@@ -26,6 +26,13 @@ pub fn set_sglang_capability(endpoint: &str, is_sglang: bool) {
     }
 }
 
+/// Clear the capability cache for testing or runtime reset.
+pub fn clear_sglang_capability_cache() {
+    if let Ok(mut cache) = sglang_cache().lock() {
+        cache.clear();
+    }
+}
+
 /// Normalize an endpoint URL to its base host/root path (stripping /v1 and trailing slashes).
 pub fn normalize_endpoint_base(endpoint: &str) -> String {
     let trimmed = endpoint.trim().trim_end_matches('/');
@@ -388,6 +395,9 @@ impl Config {
             }
         }
 
+        endpoints_to_probe.sort();
+        endpoints_to_probe.dedup();
+
         for ep in endpoints_to_probe {
             probe_sglang_backend_async(ep).await;
         }
@@ -401,22 +411,40 @@ impl Config {
 }
 
 /// Validates whether the response body from /get_server_info corresponds to an SGLang deployment.
+/// Requires backend-specific evidence (e.g. `sglang_version`, `tool_call_parser`, `reasoning_parser`,
+/// or explicit mention of `sglang` in the payload) to prevent misclassifying generic servers or models.
 pub fn is_sglang_server_info_body(body: &str) -> bool {
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
-        if json.get("version").is_some()
-            || json.get("tool_call_parser").is_some()
-            || json.get("reasoning_parser").is_some()
-            || json.get("sglang_version").is_some()
-        {
-            return true;
+        if let Some(obj) = json.as_object() {
+            // 1. SGLang-specific fields
+            if obj.contains_key("sglang_version")
+                || obj.contains_key("tool_call_parser")
+                || obj.contains_key("reasoning_parser")
+            {
+                return true;
+            }
+
+            // 2. Version string explicitly mentioning sglang
+            if let Some(ver) = obj.get("version").and_then(|v| v.as_str()) {
+                if ver.to_ascii_lowercase().contains("sglang") {
+                    return true;
+                }
+            }
+
+            // 3. Any key or string value explicitly mentioning sglang
+            let lower_body = body.to_ascii_lowercase();
+            if lower_body.contains("sglang") {
+                return true;
+            }
         }
     }
-    let lower = body.to_ascii_lowercase();
-    lower.contains("\"version\"") && (lower.contains("sglang") || lower.contains("qwen"))
+    false
 }
 
 /// Bounded async discovery for SGLang backend via `/get_server_info`.
 /// Probes both HTTP and HTTPS, validates the response body, and caches the result.
+/// Transient failures (timeouts, connection errors, server errors, auth failures)
+/// preserve an unknown state and are NOT cached as negative results.
 pub async fn probe_sglang_backend_async(endpoint: &str) -> bool {
     let base = normalize_endpoint_base(endpoint);
 
@@ -431,7 +459,7 @@ pub async fn probe_sglang_backend_async(endpoint: &str) -> bool {
         return true;
     }
 
-    // 3. Bounded HTTP/HTTPS probe
+    // 3. Bounded HTTP probe
     let url = format!("{}/get_server_info", base);
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_millis(500))
@@ -442,20 +470,68 @@ pub async fn probe_sglang_backend_async(endpoint: &str) -> bool {
         Err(_) => return false,
     };
 
-    let is_sglang = match client.get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => match resp.text().await {
-            Ok(body) => is_sglang_server_info_body(&body),
-            Err(_) => false,
-        },
-        _ => false,
+    match client.get(&url).send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            if status.is_success() {
+                if let Ok(body) = resp.text().await {
+                    let is_sg = is_sglang_server_info_body(&body);
+                    set_sglang_capability(&base, is_sg);
+                    is_sg
+                } else {
+                    // Failed to read body - transient error, do not cache
+                    false
+                }
+            } else if status.as_u16() == 404 {
+                // Route does not exist on this server - conclusive non-SGLang
+                set_sglang_capability(&base, false);
+                false
+            } else {
+                // Transient status (401/403 auth, 408 timeout, 5xx server error) - do not cache
+                false
+            }
+        }
+        Err(_) => {
+            // Connection refused, timeout, DNS resolution error - transient failure, do not cache
+            false
+        }
+    }
+}
+
+fn probe_sglang_backend_blocking_direct(base: &str) -> (bool, bool) {
+    let url = format!("{}/get_server_info", base);
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_millis(500))
+        .connect_timeout(std::time::Duration::from_millis(300))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return (false, false),
     };
 
-    set_sglang_capability(&base, is_sglang);
-    is_sglang
+    match client.get(&url).send() {
+        Ok(resp) => {
+            let status = resp.status();
+            if status.is_success() {
+                if let Ok(body) = resp.text() {
+                    let is_sg = is_sglang_server_info_body(&body);
+                    (is_sg, true)
+                } else {
+                    (false, false)
+                }
+            } else if status.as_u16() == 404 {
+                (false, true)
+            } else {
+                (false, false)
+            }
+        }
+        Err(_) => (false, false),
+    }
 }
 
 /// Detects if an endpoint is an SGLang deployment behaviourally via `/get_server_info`,
 /// falling back to hostname/port heuristics when offline or when probing cannot be performed.
+/// Transient failures preserve an unknown state and are not cached as negative results.
 pub fn is_sglang_backend(endpoint: &str) -> bool {
     let base = normalize_endpoint_base(endpoint);
 
@@ -466,44 +542,32 @@ pub fn is_sglang_backend(endpoint: &str) -> bool {
 
     // 2. Fast hostname / known deployment heuristic
     if is_sglang_serving_deployment(&base) {
+        set_sglang_capability(&base, true);
         return true;
     }
 
-    // 3. For sync contexts outside an active Tokio runtime, probe via blocking client
-    if tokio::runtime::Handle::try_current().is_err() {
-        if let Ok(client) = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_millis(300))
-            .connect_timeout(std::time::Duration::from_millis(200))
-            .build()
-        {
-            let url = format!("{}/get_server_info", base);
-            if let Ok(resp) = client.get(&url).send() {
-                if resp.status().is_success() {
-                    if let Ok(body) = resp.text() {
-                        let is_sg = is_sglang_server_info_body(&body);
-                        set_sglang_capability(&base, is_sg);
-                        return is_sg;
-                    }
-                }
-            }
-        }
-        set_sglang_capability(&base, false);
-        return false;
+    // 3. Blocking probe (executed on an OS thread if inside Tokio to avoid blocking Tokio workers)
+    let (is_sg, is_conclusive) = if tokio::runtime::Handle::try_current().is_ok() {
+        let base_clone = base.clone();
+        std::thread::spawn(move || probe_sglang_backend_blocking_direct(&base_clone))
+            .join()
+            .unwrap_or((false, false))
+    } else {
+        probe_sglang_backend_blocking_direct(&base)
+    };
+
+    if is_conclusive {
+        set_sglang_capability(&base, is_sg);
     }
 
-    // Inside Tokio when not pre-cached, rely on heuristic to avoid blocking async workers
-    false
+    is_sg
 }
 
 /// Returns true if the endpoint URL indicates an SGLang serving deployment
 /// where OpenAI schema enforcement and SGLang chat templates diverge on top-level `reasoning_effort`.
 pub fn is_sglang_serving_deployment(endpoint: &str) -> bool {
     let lower = endpoint.to_ascii_lowercase();
-    lower.contains("sglang")
-        || lower.contains("selfware.design")
-        || lower.contains(":30000")
-        || lower.contains("localhost:8000")
-        || lower.contains("127.0.0.1:8000")
+    lower.contains("sglang") || lower.contains("selfware.design") || lower.contains(":30000")
 }
 
 #[cfg(test)]

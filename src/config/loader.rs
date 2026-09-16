@@ -450,7 +450,7 @@ impl Config {
         Ok(())
     }
 
-    pub fn load(path: Option<&str>) -> Result<Self> {
+    pub fn load_without_validation(path: Option<&str>) -> Result<Self> {
         // SELFWARE_CONFIG env var overrides the config file path when no explicit
         // path is provided via CLI.
         let env_config_path = std::env::var("SELFWARE_CONFIG").ok();
@@ -1022,9 +1022,21 @@ impl Config {
         // env vars always win.
         config.debug.apply_env_overrides();
 
-        // Validate the loaded configuration
-        config.validate()?;
+        Ok(config)
+    }
 
+    /// Load and validate configuration synchronously.
+    pub fn load(path: Option<&str>) -> Result<Self> {
+        let config = Self::load_without_validation(path)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Load configuration and execute bounded async capability discovery (e.g. probing backend
+    /// types for reasoning effort validation) before validating invariants.
+    pub async fn load_async(path: Option<&str>) -> Result<Self> {
+        let config = Self::load_without_validation(path)?;
+        config.validate_async().await?;
         Ok(config)
     }
 

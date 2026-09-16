@@ -68,6 +68,7 @@ pub mod multimodal;
 pub mod skill_distiller;
 pub mod store;
 pub mod temporal;
+pub mod trace_analyst;
 
 pub use collector::{
     CollectedBatch, CollectedItem, EpisodeData, MemoryEntryData, ShortTermCollector, SourceType,
@@ -81,6 +82,10 @@ pub use skill_distiller::{
 };
 pub use store::LongTermStore;
 pub use temporal::{CompactedContent, ConsolidationReport, RecordImportance, TemporalRecord};
+pub use trace_analyst::{
+    AttributionAnalyst, AttributionFinding, ConsensusResult, DualAnalystEvaluator, FailureCategory,
+    SafetyAuditResult, SafetyInvariantAuditor,
+};
 
 use anyhow::Result;
 use std::path::PathBuf;

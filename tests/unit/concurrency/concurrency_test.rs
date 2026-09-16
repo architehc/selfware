@@ -104,7 +104,7 @@ async fn test_concurrency_governor_16_slot_server_cap_queues_17th() {
     crate::config::model_profiles::apply_profile(&mut config, &profile, &user_explicit);
 
     assert_eq!(config.concurrency.max_streams, 16);
-    assert_eq!(config.concurrency.max_global, 16);
+    assert_eq!(config.concurrency.max_global, 24);
 
     let gov = ConcurrencyGovernor::from_config(&config.concurrency);
 
@@ -118,7 +118,7 @@ async fn test_concurrency_governor_16_slot_server_cap_queues_17th() {
     }
 
     assert_eq!(gov.stats().streams_available, 0);
-    assert_eq!(gov.stats().global_available, 0);
+    assert_eq!(gov.stats().global_available, 8);
 
     // 17th stream request must wait / queue when all 16 slots are held
     let timeout_result =

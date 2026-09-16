@@ -390,6 +390,20 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
     // Clear previous log
     let _ = std::fs::write(repo_root.join(".evolution-log.jsonl"), "");
+
+    // Fail-closed killswitch check before starting evolution
+    if let Err(err) = crate::safety::killswitch::check_killswitch(Some(repo_root)) {
+        log_warning(&format!("Killswitch active: {err}; aborting evolution"));
+        return EvolutionResult {
+            generations_run: 0,
+            improvements: Vec::new(),
+            final_sab_score: 0.0,
+            initial_sab_score: 0.0,
+            total_duration: start.elapsed(),
+            aborted: Some(format!("killswitch active: {err}")),
+        };
+    }
+
     log_event(
         repo_root,
         &serde_json::json!({
@@ -485,6 +499,23 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         generation += 1;
         if config.generations > 0 && generation > config.generations {
             break;
+        }
+
+        // Check fail-closed killswitch at each generation start
+        if let Err(err) = crate::safety::killswitch::check_killswitch(Some(repo_root)) {
+            log_warning(&format!(
+                "Killswitch active at generation {generation}: {err}; halting evolution"
+            ));
+            return EvolutionResult {
+                generations_run: generation.saturating_sub(1),
+                improvements: hall_of_fame,
+                final_sab_score: current_baseline_metrics.sab_score,
+                initial_sab_score: initial_sab,
+                total_duration: start.elapsed(),
+                aborted: Some(format!(
+                    "killswitch tripped at generation {generation}: {err}"
+                )),
+            };
         }
 
         log_generation_start(generation);

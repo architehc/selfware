@@ -122,9 +122,9 @@ fn qwen38_defaults_profile(name: &'static str, pattern: &'static str) -> ModelDe
         // prefills reliably under ~57s without risking upstream gateway timeout cliffs.
         context_length: Some(350_000),
         max_streams: Some(16),
-        // Pin max_global alongside max_streams so acquire_stream's global permit
-        // doesn't cap effective concurrency to the default max_global of 12.
-        max_global: Some(16),
+        // Pin max_global to 24 alongside max_streams: 16 so 16 inflight streams
+        // leave 8 global permits for simultaneous tool execution, avoiding tool starvation.
+        max_global: Some(24),
         extra_body: json!({
             "top_p": 0.95,
             "top_k": 20,
@@ -189,7 +189,7 @@ pub fn builtin_profiles() -> Vec<ModelDefaultsProfile> {
         // Sets preserve_thinking=false as the agent-loop default to keep multi-turn
         // context growth compact. Pinned to operational safety margin of ~350,000
         // (measured 823,538 tokens succeeded 2026-09-15; 350k bounds prefill to ~57s, safely
-        // under the 60s upstream gateway timeout cliff) and 16 streams with max_global = 16.
+        // under the 60s upstream gateway timeout cliff) and 16 streams with max_global = 24.
         // Native FC is false since SGLang Qwen3.8 emits XML tool calls in content.
         qwen38_defaults_profile("qwen3.8", "qwen3.8-*"),
         qwen38_defaults_profile("qwen38", "qwen38-flash-*"),

@@ -279,7 +279,7 @@ fn qwen38_profile_sets_preserve_thinking_false_and_sampling_defaults() {
     assert_eq!(p.temperature, Some(0.7));
     assert_eq!(p.context_length, Some(350_000));
     assert_eq!(p.max_streams, Some(16));
-    assert_eq!(p.max_global, Some(16));
+    assert_eq!(p.max_global, Some(24));
     let obj = p.extra_body.as_object().expect("extra_body object");
     assert_eq!(obj.get("top_p"), Some(&json!(0.95)));
     assert_eq!(obj.get("top_k"), Some(&json!(20)));
@@ -298,7 +298,7 @@ fn qwen38_profile_sets_preserve_thinking_false_and_sampling_defaults() {
     assert_eq!(p2.temperature, Some(0.7));
     assert_eq!(p2.context_length, Some(350_000));
     assert_eq!(p2.max_streams, Some(16));
-    assert_eq!(p2.max_global, Some(16));
+    assert_eq!(p2.max_global, Some(24));
     let obj2 = p2.extra_body.as_object().expect("extra_body object");
     let ctk2 = obj2
         .get("chat_template_kwargs")
@@ -340,6 +340,6 @@ fn test_apply_profile_sets_context_length_and_max_streams_for_qwen38() {
     assert!(applied.max_global);
     assert_eq!(config.context_length, 350_000);
     assert_eq!(config.concurrency.max_streams, 16);
-    assert_eq!(config.concurrency.max_global, 16);
+    assert_eq!(config.concurrency.max_global, 24);
     assert_eq!(config.temperature, 0.7);
 }
