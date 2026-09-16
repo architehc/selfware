@@ -18,5 +18,5 @@ mod tests;
 // Re-export all public types
 pub use chat::MultiAgentChat;
 pub use config::{MultiAgentConfig, MultiAgentFailurePolicy};
-pub use interactive::run_multiagent_task;
+pub use interactive::{print_agent_summary, run_multiagent_task};
 pub use types::{AgentInstance, AgentResult, AgentStatus, MultiAgentEvent, MAX_CONCURRENT_AGENTS};

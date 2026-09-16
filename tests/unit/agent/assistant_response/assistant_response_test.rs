@@ -223,3 +223,45 @@ async fn test_get_assistant_step_response_call_site_preserves_reasoning_when_pre
     );
     server.stop().await;
 }
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn test_get_assistant_step_response_streaming_preserves_thinking_when_configured() {
+    let server = MockLlmServer::builder()
+        .with_reasoning_response("Final step answer", "Internal step thinking")
+        .build()
+        .await;
+
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.agent.streaming = true;
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "chat_template_kwargs".to_string(),
+        serde_json::json!({ "preserve_thinking": true }),
+    );
+    config.extra_body = Some(extra);
+    assert!(config.preserve_thinking());
+
+    let mut agent = crate::agent::Agent::new(config).await.unwrap();
+    agent
+        .messages
+        .push(crate::api::types::Message::user("Hello"));
+
+    let response = agent.get_assistant_step_response(false).await.unwrap();
+    assert_eq!(response.content.trim(), "Final step answer");
+
+    let last_msg = agent
+        .messages
+        .last()
+        .expect("must have pushed message to history");
+    assert_eq!(last_msg.content.text(), "Final step answer");
+    assert_eq!(
+        last_msg.reasoning_content.as_deref(),
+        Some("Internal step thinking"),
+        "history message reasoning_content must be preserved in streaming mode when preserve_thinking=true"
+    );
+    server.stop().await;
+}

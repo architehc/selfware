@@ -49,7 +49,7 @@ pub use provenance::{ConfigSource, ConfigSources};
 pub use resources::*;
 pub use safety::*;
 pub use types::*;
-pub use validation::is_sglang_serving_deployment;
+pub use validation::{is_sglang_backend, is_sglang_serving_deployment};
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};

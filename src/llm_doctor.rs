@@ -503,44 +503,22 @@ async fn run_llm_doctor_inner(config: &Config) -> Result<(DoctorReport, bool)> {
         fix_hint: thinking_fix.map(String::from),
     });
 
-    let (mm_status, mm_detail, mm_fix) = match caps.multimodal {
-        Some(VisionProbeOutcome::Conditioned) => (
-            DoctorCheckStatus::Ok,
-            "model conditioned on image input (red/blue control probes passed)",
-            None,
-        ),
-        Some(VisionProbeOutcome::Inconclusive) => (
-            DoctorCheckStatus::Warning,
-            "vision capability unknown (probe inconclusive or empty response)",
-            Some("Model did not return conclusive color tokens for 1x1 test probes. Multimodal processing may still work for natural images."),
-        ),
-        Some(VisionProbeOutcome::Unconditioned) => (
-            DoctorCheckStatus::Warning,
-            "model name suggests vision but behavioral image conditioning failed (color invariant or inverted)",
-            Some("Vision endpoint returned unconditioned or inverted responses. Verify server multimodal image pipeline."),
-        ),
-        None => {
-            if looks_multimodal(&model_name) {
-                (
-                    DoctorCheckStatus::Warning,
-                    "model name suggests vision but vision probe was not completed",
-                    Some("Vision endpoint could not be probed. Verify network connection and model configuration."),
-                )
-            } else {
-                (
-                    DoctorCheckStatus::Ok,
-                    "no vision modality detected for this model",
-                    Some("Multimodal is optional. To enable, configure a vision-language model (Qwen3.5-VL, Llava, etc.) and set `modalities = [\"text\", \"vision\"]`."),
-                )
-            }
-        }
+    let is_expected = looks_multimodal(&model_name) || is_vision_configured(&model_name, config);
+    let (mm_status, mm_detail, mm_fix) = map_vision_status_and_detail(
+        caps.multimodal,
+        caps.multimodal_target.as_deref(),
+        is_expected,
+    );
+    let check_name = match &caps.multimodal_target {
+        Some(target) => format!("multimodal (vision: {})", target),
+        None => "multimodal (vision)".to_string(),
     };
-    had_fail |= print_unified_check("multimodal (vision)", mm_status, mm_detail, mm_fix);
+    had_fail |= print_unified_check(&check_name, mm_status, &mm_detail, mm_fix.as_deref());
     report.capabilities.push(DoctorCheckResult {
-        name: "multimodal (vision)".to_string(),
+        name: check_name,
         status: mm_status.into(),
-        detail: mm_detail.to_string(),
-        fix_hint: mm_fix.map(String::from),
+        detail: mm_detail,
+        fix_hint: mm_fix,
     });
     println!();
 
@@ -592,6 +570,8 @@ pub(crate) enum VisionProbeOutcome {
     Unconditioned,
     /// Probe was inconclusive: empty response, tokens exhausted by reasoning, or non-color answer.
     Inconclusive,
+    /// Authentication failed (HTTP 401/403) when reaching the vision endpoint.
+    Unauthorized,
 }
 
 /// Capability probe results.
@@ -605,6 +585,162 @@ pub(crate) struct Capabilities {
     pub thinking: Option<bool>,
     /// Behavioral vision conditioning outcome (None = not probed / non-multimodal model).
     pub multimodal: Option<VisionProbeOutcome>,
+    /// Label of the target probed for vision (e.g. "primary model (qwen-vl)" or "model profile 'vision' (qwen-vl)").
+    pub multimodal_target: Option<String>,
+}
+
+/// Map vision probe outcome into display status, detail message, and optional fix hint.
+pub(crate) fn map_vision_status_and_detail(
+    outcome: Option<VisionProbeOutcome>,
+    target_label: Option<&str>,
+    is_vision_expected: bool,
+) -> (DoctorCheckStatus, String, Option<String>) {
+    match outcome {
+        Some(VisionProbeOutcome::Conditioned) => (
+            DoctorCheckStatus::Ok,
+            match target_label {
+                Some(t) => format!(
+                    "target {} conditioned on image input (red/blue control probes passed)",
+                    t
+                ),
+                None => "model conditioned on image input (red/blue control probes passed)"
+                    .to_string(),
+            },
+            None,
+        ),
+        Some(VisionProbeOutcome::Inconclusive) => (
+            DoctorCheckStatus::Warning,
+            match target_label {
+                Some(t) => format!(
+                    "vision capability unknown for {} (probe inconclusive or empty response)",
+                    t
+                ),
+                None => "vision capability unknown (probe inconclusive or empty response)"
+                    .to_string(),
+            },
+            Some(
+                "Model did not return conclusive color tokens for 1x1 test probes. Multimodal processing may still work for natural images."
+                    .to_string(),
+            ),
+        ),
+        Some(VisionProbeOutcome::Unconditioned) => (
+            DoctorCheckStatus::Warning,
+            match target_label {
+                Some(t) => format!(
+                    "vision probe on {} failed image conditioning (color invariant or inverted)",
+                    t
+                ),
+                None => "model name suggests vision but behavioral image conditioning failed (color invariant or inverted)"
+                    .to_string(),
+            },
+            Some(
+                "Vision endpoint returned unconditioned or inverted responses. Verify server multimodal image pipeline."
+                    .to_string(),
+            ),
+        ),
+        Some(VisionProbeOutcome::Unauthorized) => (
+            DoctorCheckStatus::Warning,
+            match target_label {
+                Some(t) => format!(
+                    "vision probe for {} failed: authentication error (HTTP 401/403)",
+                    t
+                ),
+                None => "vision probe failed: authentication error (HTTP 401/403)".to_string(),
+            },
+            Some(
+                "Vision endpoint returned 401/403 Unauthorized. Check API key in config or model profile."
+                    .to_string(),
+            ),
+        ),
+        None => {
+            if is_vision_expected {
+                (
+                    DoctorCheckStatus::Warning,
+                    match target_label {
+                        Some(t) => format!(
+                            "vision suggested for {} but vision probe was not completed",
+                            t
+                        ),
+                        None => "model or config suggests vision but vision probe was not completed"
+                            .to_string(),
+                    },
+                    Some(
+                        "Vision endpoint could not be probed. Verify network connection and model configuration."
+                            .to_string(),
+                    ),
+                )
+            } else {
+                (
+                    DoctorCheckStatus::Ok,
+                    "no vision modality configured (text-only model)".to_string(),
+                    None,
+                )
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VisionTarget<'a> {
+    pub endpoint: &'a str,
+    pub model: &'a str,
+    pub api_key: Option<&'a str>,
+    pub label: String,
+}
+
+fn endpoints_share_host(a: &str, b: &str) -> bool {
+    let host_a = a
+        .split("://")
+        .nth(1)
+        .unwrap_or(a)
+        .split('/')
+        .next()
+        .unwrap_or("");
+    let host_b = b
+        .split("://")
+        .nth(1)
+        .unwrap_or(b)
+        .split('/')
+        .next()
+        .unwrap_or("");
+    !host_a.is_empty() && host_a.eq_ignore_ascii_case(host_b)
+}
+
+pub(crate) fn resolve_vision_target<'a>(
+    model: &'a str,
+    config: &'a Config,
+) -> Option<VisionTarget<'a>> {
+    // 1. Explicit model profiles take precedence over name heuristics
+    if let Some((name, p)) = config.models.iter().find(|(name, p)| {
+        p.supports_vision() && (p.model == model || p.model.ends_with(model) || *name == model)
+    }) {
+        let api_key = p.api_key.as_ref().map(|k| k.expose()).or_else(|| {
+            // Keep credentials scoped to their endpoint: only inherit primary key if endpoints share host
+            if endpoints_share_host(&p.endpoint, &config.endpoint) {
+                config.api_key.as_ref().map(|k| k.expose())
+            } else {
+                None
+            }
+        });
+        return Some(VisionTarget {
+            endpoint: &p.endpoint,
+            model: &p.model,
+            api_key,
+            label: format!("model profile '{}' ({})", name, p.model),
+        });
+    }
+
+    // 2. Fall back to name-based heuristic on primary endpoint
+    if looks_multimodal(model) {
+        return Some(VisionTarget {
+            endpoint: &config.endpoint,
+            model,
+            api_key: config.api_key.as_ref().map(|k| k.expose()),
+            label: format!("primary model ({})", model),
+        });
+    }
+
+    None
 }
 
 async fn probe_capabilities(endpoint: &str, model: &str, config: &Config) -> Capabilities {
@@ -670,12 +806,23 @@ async fn probe_capabilities(endpoint: &str, model: &str, config: &Config) -> Cap
     };
 
     // ── behavioral vision conditioning probe ──
-    if looks_multimodal(model) {
-        caps.multimodal =
-            Some(probe_vision_conditioning(&client, &url, model, api_key.as_deref()).await);
+    if let Some(target) = resolve_vision_target(model, config) {
+        let target_base = target.endpoint.trim_end_matches('/');
+        let target_url = format!("{}/chat/completions", target_base);
+        caps.multimodal = Some(
+            probe_vision_conditioning(&client, &target_url, target.model, target.api_key).await,
+        );
+        caps.multimodal_target = Some(target.label);
     }
 
     caps
+}
+
+/// Check if configuration specifies vision modality for the given model.
+pub(crate) fn is_vision_configured(model: &str, config: &Config) -> bool {
+    config.models.iter().any(|(name, p)| {
+        p.supports_vision() && (p.model == model || p.model.ends_with(model) || name == model)
+    })
 }
 
 /// Solid 1x1 Red and Blue PNGs (base64) for behavioral vision conditioning verification.
@@ -765,10 +912,14 @@ async fn probe_vision_conditioning(
         if let Some(k) = api_key {
             if crate::config::api_key::assert_credential_endpoint_safe(url, true).is_ok() {
                 req = req.bearer_auth(k);
+            } else {
+                eprintln!("  ⚠ not sending API key to unsafe endpoint {url}");
             }
         }
         req
     };
+
+    let mut auth_failed = false;
 
     let red_res = match send_probe(RED_PNG_B64).send().await {
         Ok(resp) if resp.status().is_success() => {
@@ -787,8 +938,23 @@ async fn probe_vision_conditioning(
                     .map(String::from)
             })
         }
+        Ok(resp)
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+                || resp.status() == reqwest::StatusCode::FORBIDDEN =>
+        {
+            eprintln!(
+                "  ⚠ vision probe: unauthorized (HTTP {}) — check API key",
+                resp.status()
+            );
+            auth_failed = true;
+            None
+        }
         _ => None,
     };
+
+    if auth_failed {
+        return VisionProbeOutcome::Unauthorized;
+    }
 
     let blue_res = match send_probe(BLUE_PNG_B64).send().await {
         Ok(resp) if resp.status().is_success() => {
@@ -807,8 +973,23 @@ async fn probe_vision_conditioning(
                     .map(String::from)
             })
         }
+        Ok(resp)
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+                || resp.status() == reqwest::StatusCode::FORBIDDEN =>
+        {
+            eprintln!(
+                "  ⚠ vision probe: unauthorized (HTTP {}) — check API key",
+                resp.status()
+            );
+            auth_failed = true;
+            None
+        }
         _ => None,
     };
+
+    if auth_failed {
+        return VisionProbeOutcome::Unauthorized;
+    }
 
     evaluate_vision_responses(red_res.as_deref(), blue_res.as_deref())
 }
@@ -1551,6 +1732,7 @@ async fn connection_test(
         &mut request_body,
         config.extra_body.as_ref(),
         "llm doctor completion probe",
+        Some(&config.endpoint),
     )?;
 
     let start = Instant::now();
@@ -1649,6 +1831,7 @@ async fn test_tool_calling(
         &mut request_body,
         config.extra_body.as_ref(),
         "llm doctor tool-calling probe",
+        Some(&config.endpoint),
     )?;
 
     let mut req = client

@@ -624,11 +624,73 @@ pub struct CompletionTokensDetails {
     pub rejected_prediction_tokens: Option<usize>,
 }
 
+impl CompletionTokensDetails {
+    pub fn max_merge(&self, other: &Self) -> Self {
+        Self {
+            reasoning_tokens: match (self.reasoning_tokens, other.reasoning_tokens) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            },
+            accepted_prediction_tokens: match (
+                self.accepted_prediction_tokens,
+                other.accepted_prediction_tokens,
+            ) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            },
+            rejected_prediction_tokens: match (
+                self.rejected_prediction_tokens,
+                other.rejected_prediction_tokens,
+            ) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            },
+        }
+    }
+}
+
 /// Detailed token breakdown for prompt tokens (e.g. cached tokens).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PromptTokensDetails {
     #[serde(default)]
     pub cached_tokens: Option<usize>,
+}
+
+impl PromptTokensDetails {
+    pub fn max_merge(&self, other: &Self) -> Self {
+        Self {
+            cached_tokens: match (self.cached_tokens, other.cached_tokens) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            },
+        }
+    }
+}
+
+/// Helper to merge optional completion token details monotonically across snapshots.
+pub fn merge_completion_details_max(
+    a: Option<&CompletionTokensDetails>,
+    b: Option<&CompletionTokensDetails>,
+) -> Option<CompletionTokensDetails> {
+    match (a, b) {
+        (Some(p), Some(u)) => Some(p.max_merge(u)),
+        (Some(p), None) => Some(p.clone()),
+        (None, Some(u)) => Some(u.clone()),
+        (None, None) => None,
+    }
+}
+
+/// Helper to merge optional prompt token details monotonically across snapshots.
+pub fn merge_prompt_details_max(
+    a: Option<&PromptTokensDetails>,
+    b: Option<&PromptTokensDetails>,
+) -> Option<PromptTokensDetails> {
+    match (a, b) {
+        (Some(p), Some(u)) => Some(p.max_merge(u)),
+        (Some(p), None) => Some(p.clone()),
+        (None, Some(u)) => Some(u.clone()),
+        (None, None) => None,
+    }
 }
 
 /// Token usage statistics for a request/response.

@@ -143,7 +143,7 @@ impl Tool for VisionAnalyze {
             "temperature": temperature,
             "stream": false
         });
-        merge_extra_body(&mut body, args.get("extra_body"))?;
+        merge_extra_body(&mut body, args.get("extra_body"), Some(endpoint))?;
 
         let response = call_vision_endpoint(endpoint, api_key, &body).await?;
 
@@ -326,7 +326,7 @@ impl Tool for VisionCompare {
                 "temperature": temperature,
                 "stream": false
             });
-            merge_extra_body(&mut body, args.get("extra_body"))?;
+            merge_extra_body(&mut body, args.get("extra_body"), Some(endpoint))?;
 
             match call_vision_endpoint(endpoint, api_key, &body).await {
                 Ok(response) => {
@@ -353,14 +353,18 @@ impl Tool for VisionCompare {
 /// Maximum image file size (50 MB).
 const MAX_IMAGE_SIZE: u64 = 50 * 1024 * 1024;
 
-fn merge_extra_body(body: &mut Value, extra_body: Option<&Value>) -> Result<()> {
+fn merge_extra_body(
+    body: &mut Value,
+    extra_body: Option<&Value>,
+    endpoint: Option<&str>,
+) -> Result<()> {
     let Some(extra_body) = extra_body else {
         return Ok(());
     };
     let Some(extra_obj) = extra_body.as_object() else {
         anyhow::bail!("extra_body must be an object");
     };
-    merge_request_extra_body(body, Some(extra_obj), "vision tool request")
+    merge_request_extra_body(body, Some(extra_obj), "vision tool request", endpoint)
 }
 
 /// Resolve an image to a data URI from either `image_path` or `image_base64`.

@@ -606,7 +606,7 @@ impl Agent {
                 meta.completion_tokens,
                 meta.total_tokens,
             ) {
-                if (p as usize).saturating_add(c as usize) != t as usize {
+                if t != 0 && (p as usize).saturating_add(c as usize) != t as usize {
                     warn!(
                         "Provider reported unreconciled token usage: prompt={} + completion={} != total={}",
                         p, c, t
@@ -619,6 +619,10 @@ impl Agent {
         let already_accounted = chat_metadata
             .as_ref()
             .is_some_and(|meta| meta.accounted_usage.is_some());
+        let reported_total = chat_metadata
+            .as_ref()
+            .and_then(|m| m.total_tokens)
+            .map(|t| t as usize);
         let estimated_input = if !already_accounted && reported_prompt.is_none() {
             input_tokens
         } else {
@@ -629,9 +633,29 @@ impl Agent {
         } else {
             0
         };
+        // Reconcile missing estimated components against what the ledger has already
+        // accounted for this step (Rule 4). If the provider reported a total_tokens
+        // that already covers the step's expected total, adding estimated output/input
+        // directly to cumulative total would double-count those tokens.
+        let missing_total = if !already_accounted {
+            let step_expected_total = input_tokens.saturating_add(output_tokens);
+            let step_accounted_total = reported_total.unwrap_or(0).max(
+                reported_prompt
+                    .unwrap_or(0)
+                    .saturating_add(reported_completion.unwrap_or(0)),
+            );
+            step_expected_total.saturating_sub(step_accounted_total)
+        } else {
+            0
+        };
         self.cumulative_token_usage.input += estimated_input;
         self.cumulative_token_usage.output += estimated_output;
-        self.cumulative_token_usage.total += estimated_input + estimated_output;
+        self.cumulative_token_usage.total += missing_total;
+        self.cumulative_token_usage.total = self.cumulative_token_usage.total.max(
+            self.cumulative_token_usage
+                .input
+                .saturating_add(self.cumulative_token_usage.output),
+        );
         self.client
             .ensure_budget_floor(self.cumulative_token_usage.total, self.cumulative_cost_usd);
 

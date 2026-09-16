@@ -74,8 +74,8 @@ fn test_stream_chunk_usage() {
         cost: None,
         ..Default::default()
     };
-    let chunk = StreamChunk::Usage(usage.clone());
-    if let StreamChunk::Usage(u) = chunk {
+    let chunk = StreamChunk::Usage(usage.clone(), crate::api::usage::UsageCoverage::all());
+    if let StreamChunk::Usage(u, _) = chunk {
         assert_eq!(u.total_tokens, 150);
     }
 }
@@ -130,7 +130,7 @@ fn test_parse_sse_event_usage() {
     let event = r#"data: {"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#;
     let results = parse_sse_event(event, &mut acc);
     assert_eq!(results.len(), 1);
-    assert!(matches!(&results[0], StreamChunk::Usage(_)));
+    assert!(matches!(&results[0], StreamChunk::Usage(_, _)));
 }
 
 #[test]
@@ -1099,7 +1099,7 @@ fn test_parse_sse_content_and_usage_same_event() {
     let results = parse_sse_event(event, &mut acc);
     assert_eq!(results.len(), 2);
     assert!(matches!(&results[0], StreamChunk::Content(t) if t == "hi"));
-    assert!(matches!(&results[1], StreamChunk::Usage(u) if u.total_tokens == 7));
+    assert!(matches!(&results[1], StreamChunk::Usage(u, _) if u.total_tokens == 7));
 }
 
 #[test]
@@ -1194,7 +1194,7 @@ fn test_parse_sse_event_usage_with_invalid_structure() {
     let event = r#"data: {"usage":{"invalid":"fields"}}"#;
     let results = parse_sse_event(event, &mut acc);
     assert_eq!(results.len(), 1);
-    assert!(matches!(&results[0], StreamChunk::Usage(u) if u.total_tokens == 0));
+    assert!(matches!(&results[0], StreamChunk::Usage(u, _) if u.total_tokens == 0));
 
     // A non-object usage still cannot deserialize and is dropped (with a
     // warn! log so the undercounting is visible).
@@ -2424,7 +2424,7 @@ fn test_merge_extra_body_allows_backend_specific_keys() {
     );
     extra.insert("top_p".to_string(), serde_json::json!(0.95));
 
-    merge_extra_body(&mut body, Some(&extra), "default chat request").unwrap();
+    merge_extra_body(&mut body, Some(&extra), "default chat request", None).unwrap();
 
     assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
     assert_eq!(body["top_p"], 0.95);
@@ -2453,7 +2453,7 @@ fn test_merge_extra_body_allows_openrouter_routing_keys() {
     );
     extra.insert("transforms".to_string(), serde_json::json!(["middle-out"]));
 
-    merge_extra_body(&mut body, Some(&extra), "openrouter routing")
+    merge_extra_body(&mut body, Some(&extra), "openrouter routing", None)
         .expect("OpenRouter routing keys must be allowed in extra_body");
 
     assert_eq!(body["provider"]["only"][0], "fireworks");
@@ -2478,7 +2478,7 @@ fn test_merge_extra_body_rejects_reserved_keys_for_default_chat_request() {
     );
     extra.insert("max_tokens".to_string(), serde_json::json!(256));
 
-    let err = merge_extra_body(&mut body, Some(&extra), "default chat request")
+    let err = merge_extra_body(&mut body, Some(&extra), "default chat request", None)
         .expect_err("reserved top-level keys must be rejected");
     let err_text = err.to_string();
 
@@ -2506,7 +2506,7 @@ fn test_merge_extra_body_rejects_reserved_keys_for_profile_chat_request() {
         serde_json::json!({ "budget_tokens": 32 }),
     );
 
-    let err = merge_extra_body(&mut body, Some(&extra), "model profile chat request")
+    let err = merge_extra_body(&mut body, Some(&extra), "model profile chat request", None)
         .expect_err("reserved top-level keys must be rejected");
     let err_text = err.to_string();
 
@@ -2533,7 +2533,7 @@ fn test_merge_extra_body_allows_reasoning_effort_keys() {
         serde_json::json!({ "max_tokens": 4096 }),
     );
 
-    merge_extra_body(&mut body, Some(&extra), "reasoning effort")
+    merge_extra_body(&mut body, Some(&extra), "reasoning effort", None)
         .expect("reasoning effort keys must be allowed in extra_body");
 
     assert_eq!(body["reasoning_effort"], "low");
@@ -2547,30 +2547,70 @@ fn test_merge_extra_body_rejects_top_level_xhigh_and_high_reasoning_effort_for_q
         "messages": [],
     });
 
-    // xhigh rejected
+    let sglang_endpoint = "http://selfware.design:30000/v1";
+
+    // xhigh rejected on SGLang
     let mut extra_xhigh = serde_json::Map::new();
     extra_xhigh.insert("reasoning_effort".to_string(), serde_json::json!("xhigh"));
-    let err = merge_extra_body(&mut body, Some(&extra_xhigh), "chat request")
-        .expect_err("top-level reasoning_effort=xhigh must be rejected");
+    let err = merge_extra_body(
+        &mut body,
+        Some(&extra_xhigh),
+        "chat request",
+        Some(sglang_endpoint),
+    )
+    .expect_err("top-level reasoning_effort=xhigh must be rejected on sglang");
     assert!(
         err.to_string()
-            .contains("cannot set reasoning_effort to 'xhigh' at top-level for Qwen models"),
+            .contains("cannot set reasoning_effort to 'xhigh' at top-level on SGLang"),
         "error should cite top-level xhigh rejection: {err}"
     );
 
-    // high rejected
+    // high rejected for Qwen on SGLang AND OpenRouter
     let mut extra_high = serde_json::Map::new();
     extra_high.insert("reasoning_effort".to_string(), serde_json::json!("high"));
-    let err_high = merge_extra_body(&mut body, Some(&extra_high), "chat request")
-        .expect_err("top-level reasoning_effort=high must be rejected");
+    let err_high = merge_extra_body(
+        &mut body,
+        Some(&extra_high),
+        "chat request",
+        Some(sglang_endpoint),
+    )
+    .expect_err("top-level reasoning_effort=high must be rejected on sglang");
     assert!(
         err_high
             .to_string()
-            .contains("cannot set reasoning_effort to 'high' at top-level for Qwen models"),
+            .contains("cannot set reasoning_effort to 'high' for Qwen models"),
         "error should cite top-level high rejection: {err_high}"
     );
 
-    // low and medium accepted
+    let err_high_openrouter = merge_extra_body(
+        &mut body,
+        Some(&extra_high),
+        "chat request",
+        Some("https://openrouter.ai/api/v1"),
+    )
+    .expect_err("top-level reasoning_effort=high must be rejected for Qwen everywhere");
+    assert!(
+        err_high_openrouter
+            .to_string()
+            .contains("cannot set reasoning_effort to 'high' for Qwen models"),
+        "error should cite high rejection for Qwen on any endpoint: {err_high_openrouter}"
+    );
+
+    // Non-SGLang endpoint allows xhigh for Qwen
+    let mut body_openrouter = serde_json::json!({
+        "model": "qwen38-flash-next",
+        "messages": [],
+    });
+    merge_extra_body(
+        &mut body_openrouter,
+        Some(&extra_xhigh),
+        "chat request",
+        Some("https://openrouter.ai/api/v1"),
+    )
+    .expect("non-SGLang endpoint should allow xhigh for Qwen");
+    assert_eq!(body_openrouter["reasoning_effort"], "xhigh");
+
+    // low and medium accepted on SGLang
     for allowed in ["low", "medium"] {
         let mut body_ok = serde_json::json!({
             "model": "qwen38-flash-next",
@@ -2578,7 +2618,13 @@ fn test_merge_extra_body_rejects_top_level_xhigh_and_high_reasoning_effort_for_q
         });
         let mut extra_ok = serde_json::Map::new();
         extra_ok.insert("reasoning_effort".to_string(), serde_json::json!(allowed));
-        merge_extra_body(&mut body_ok, Some(&extra_ok), "chat request").unwrap();
+        merge_extra_body(
+            &mut body_ok,
+            Some(&extra_ok),
+            "chat request",
+            Some(sglang_endpoint),
+        )
+        .unwrap();
         assert_eq!(body_ok["reasoning_effort"], allowed);
     }
 
@@ -2589,8 +2635,77 @@ fn test_merge_extra_body_rejects_top_level_xhigh_and_high_reasoning_effort_for_q
     });
     let mut extra_gpt = serde_json::Map::new();
     extra_gpt.insert("reasoning_effort".to_string(), serde_json::json!("high"));
-    merge_extra_body(&mut body_gpt, Some(&extra_gpt), "chat request").unwrap();
+    merge_extra_body(
+        &mut body_gpt,
+        Some(&extra_gpt),
+        "chat request",
+        Some(sglang_endpoint),
+    )
+    .unwrap();
     assert_eq!(body_gpt["reasoning_effort"], "high");
+}
+
+#[test]
+fn test_request_construction_matches_config_validation_for_qwen_reasoning_effort() {
+    use crate::config::Config;
+
+    // 1. Non-SGLang endpoint (e.g. OpenRouter):
+    // Top-level reasoning_effort: xhigh for Qwen validates AND constructs successfully.
+    let mut extra_xhigh = serde_json::Map::new();
+    extra_xhigh.insert("reasoning_effort".to_string(), serde_json::json!("xhigh"));
+
+    let config_openrouter = Config {
+        endpoint: "https://openrouter.ai/api/v1".to_string(),
+        model: "qwen/qwen3.8-flash-next".to_string(),
+        extra_body: Some(extra_xhigh.clone()),
+        ..Default::default()
+    };
+    config_openrouter
+        .validate()
+        .expect("non-SGLang config with Qwen and top-level xhigh must validate");
+
+    let mut body_openrouter = serde_json::json!({
+        "model": &config_openrouter.model,
+        "messages": [],
+    });
+    merge_extra_body(
+        &mut body_openrouter,
+        config_openrouter.extra_body.as_ref(),
+        "chat request",
+        Some(&config_openrouter.endpoint),
+    )
+    .expect("request construction must succeed when config validates");
+    assert_eq!(body_openrouter["reasoning_effort"], "xhigh");
+
+    // 2. SGLang endpoint:
+    // Top-level reasoning_effort: xhigh for Qwen fails validation AND fails request construction.
+    let config_sglang = Config {
+        endpoint: "http://selfware.design:30000/v1".to_string(),
+        model: "qwen/qwen3.8-flash-next".to_string(),
+        extra_body: Some(extra_xhigh),
+        ..Default::default()
+    };
+    let val_err = config_sglang
+        .validate()
+        .expect_err("SGLang config with Qwen and top-level xhigh must fail validation");
+    assert!(val_err
+        .to_string()
+        .contains("cannot be 'xhigh' at top-level on SGLang"));
+
+    let mut body_sglang = serde_json::json!({
+        "model": &config_sglang.model,
+        "messages": [],
+    });
+    let req_err = merge_extra_body(
+        &mut body_sglang,
+        config_sglang.extra_body.as_ref(),
+        "chat request",
+        Some(&config_sglang.endpoint),
+    )
+    .expect_err("request construction must fail when config is invalid for SGLang");
+    assert!(req_err
+        .to_string()
+        .contains("cannot set reasoning_effort to 'xhigh' at top-level on SGLang"));
 }
 
 #[test]
@@ -2601,7 +2716,7 @@ fn test_merge_extra_body_rejects_non_string_reasoning_effort() {
     });
     let mut extra = serde_json::Map::new();
     extra.insert("reasoning_effort".to_string(), serde_json::json!(true));
-    let err = merge_extra_body(&mut body, Some(&extra), "chat request").unwrap_err();
+    let err = merge_extra_body(&mut body, Some(&extra), "chat request", None).unwrap_err();
     assert!(
         err.to_string()
             .contains("reasoning_effort must be a string"),
@@ -2614,7 +2729,7 @@ fn test_merge_extra_body_rejects_non_string_reasoning_effort() {
     });
     let mut extra2 = serde_json::Map::new();
     extra2.insert("reasoning_effort".to_string(), serde_json::json!(123));
-    let err2 = merge_extra_body(&mut body2, Some(&extra2), "chat request").unwrap_err();
+    let err2 = merge_extra_body(&mut body2, Some(&extra2), "chat request", None).unwrap_err();
     assert!(
         err2.to_string()
             .contains("reasoning_effort must be a string"),
@@ -2635,7 +2750,7 @@ fn test_merge_extra_body_rejects_non_allowlisted_keys() {
         serde_json::json!(true),
     );
 
-    let err = merge_extra_body(&mut body, Some(&extra), "test")
+    let err = merge_extra_body(&mut body, Some(&extra), "test", None)
         .expect_err("non-allowlisted keys must be rejected");
     assert!(err
         .to_string()
@@ -2651,8 +2766,8 @@ fn test_merge_extra_body_rejects_logit_bias() {
         serde_json::json!({ "50256": -100 }),
     );
 
-    let err =
-        merge_extra_body(&mut body, Some(&extra), "test").expect_err("logit_bias must be rejected");
+    let err = merge_extra_body(&mut body, Some(&extra), "test", None)
+        .expect_err("logit_bias must be rejected");
     assert!(err.to_string().contains("disallowed key 'logit_bias'"));
 }
 
@@ -2662,7 +2777,8 @@ fn test_merge_extra_body_rejects_n_completions() {
     let mut extra = serde_json::Map::new();
     extra.insert("n".to_string(), serde_json::json!(5));
 
-    let err = merge_extra_body(&mut body, Some(&extra), "test").expect_err("n must be rejected");
+    let err =
+        merge_extra_body(&mut body, Some(&extra), "test", None).expect_err("n must be rejected");
     assert!(err.to_string().contains("disallowed key 'n'"));
 }
 
@@ -3298,11 +3414,11 @@ fn test_stream_chunk_usage_clone() {
         cost: None,
         ..Default::default()
     };
-    let chunk = StreamChunk::Usage(usage);
+    let chunk = StreamChunk::Usage(usage, crate::api::usage::UsageCoverage::all());
     let cloned = chunk.clone();
 
     match (chunk, cloned) {
-        (StreamChunk::Usage(u1), StreamChunk::Usage(u2)) => {
+        (StreamChunk::Usage(u1, _), StreamChunk::Usage(u2, _)) => {
             assert_eq!(u1.total_tokens, u2.total_tokens);
         }
         _ => panic!("Expected Usage variants"),
@@ -3685,7 +3801,7 @@ fn test_merge_extra_body_empty_extra() {
     let extra = serde_json::Map::new();
 
     // Should succeed with no changes
-    merge_extra_body(&mut body, Some(&extra), "test").unwrap();
+    merge_extra_body(&mut body, Some(&extra), "test", None).unwrap();
     assert_eq!(body["model"], "test");
 }
 
@@ -3696,7 +3812,7 @@ fn test_merge_extra_body_null_body() {
     extra.insert("top_p".to_string(), serde_json::json!(0.9));
 
     // Should fail because body is not an object
-    let result = merge_extra_body(&mut body, Some(&extra), "test");
+    let result = merge_extra_body(&mut body, Some(&extra), "test", None);
     assert!(result.is_err());
 }
 
@@ -3713,7 +3829,7 @@ fn test_merge_extra_body_guided_json() {
         serde_json::json!({"type": "object"}),
     );
 
-    merge_extra_body(&mut body, Some(&extra), "test").unwrap();
+    merge_extra_body(&mut body, Some(&extra), "test", None).unwrap();
     assert!(body.get("guided_json").is_some());
 }
 
@@ -3731,7 +3847,7 @@ fn test_merge_extra_body_sampling_params() {
     extra.insert("presence_penalty".to_string(), serde_json::json!(0.3));
     extra.insert("seed".to_string(), serde_json::json!(42));
 
-    merge_extra_body(&mut body, Some(&extra), "test").unwrap();
+    merge_extra_body(&mut body, Some(&extra), "test", None).unwrap();
     assert_eq!(body["top_k"], 40);
     assert_eq!(body["repetition_penalty"], 1.1);
     assert_eq!(body["frequency_penalty"], 0.5);
@@ -3749,7 +3865,7 @@ fn test_merge_extra_body_rejects_user_field() {
     let mut extra = serde_json::Map::new();
     extra.insert("user".to_string(), serde_json::json!("username"));
 
-    let result = merge_extra_body(&mut body, Some(&extra), "test");
+    let result = merge_extra_body(&mut body, Some(&extra), "test", None);
     assert!(result.is_err());
     assert!(result
         .unwrap_err()
@@ -3772,7 +3888,7 @@ fn test_merge_extra_body_allows_response_format_and_logprobs() {
     extra.insert("logprobs".to_string(), serde_json::json!(true));
     extra.insert("top_logprobs".to_string(), serde_json::json!(5));
 
-    let result = merge_extra_body(&mut body, Some(&extra), "test");
+    let result = merge_extra_body(&mut body, Some(&extra), "test", None);
     assert!(
         result.is_ok(),
         "response_format and logprobs must be permitted: {:?}",
@@ -4812,4 +4928,28 @@ fn test_choice_logprobs_and_usage_token_details_serde() {
     assert_eq!(ctd.reasoning_tokens, Some(45));
     let ptd = usage.prompt_tokens_details.expect("prompt details");
     assert_eq!(ptd.cached_tokens, Some(64));
+}
+
+#[tokio::test]
+async fn test_non_streaming_derive_total_when_zero() {
+    let server = crate::testing::mock_api::MockLlmServer::builder()
+        .with_usage(100, 50, 0)
+        .with_response("Hello from non-streaming")
+        .build()
+        .await;
+
+    let config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
+    let client = ApiClient::new(&config).expect("client should build");
+
+    let resp = client
+        .chat(vec![Message::user("Hi")], None, ThinkingMode::Disabled)
+        .await
+        .expect("chat should succeed");
+    assert_eq!(resp.usage.prompt_tokens, 100);
+    assert_eq!(resp.usage.completion_tokens, 50);
+    assert_eq!(
+        resp.usage.total_tokens, 150,
+        "total_tokens must be derived from prompt + completion when reported as 0"
+    );
+    server.stop().await;
 }

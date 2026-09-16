@@ -170,7 +170,7 @@ fn test_merge_extra_body() {
     let extra = json!({
         "chat_template_kwargs": { "enable_thinking": false }
     });
-    merge_extra_body(&mut body, Some(&extra)).unwrap();
+    merge_extra_body(&mut body, Some(&extra), None).unwrap();
     assert_eq!(
         body["chat_template_kwargs"]["enable_thinking"],
         json!(false)
@@ -181,7 +181,7 @@ fn test_merge_extra_body() {
 fn test_merge_extra_body_rejects_non_object() {
     let mut body = json!({ "model": "vision" });
     let extra = json!(["bad"]);
-    let result = merge_extra_body(&mut body, Some(&extra));
+    let result = merge_extra_body(&mut body, Some(&extra), None);
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("extra_body"));
 }
@@ -190,7 +190,7 @@ fn test_merge_extra_body_rejects_non_object() {
 fn test_merge_extra_body_rejects_reserved_keys() {
     let mut body = json!({ "model": "vision", "stream": false });
     let extra = json!({ "model": "override" });
-    let result = merge_extra_body(&mut body, Some(&extra));
+    let result = merge_extra_body(&mut body, Some(&extra), None);
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("reserved key"));
 }

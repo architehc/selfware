@@ -361,14 +361,24 @@ fn test_relative_dot_dot_escape_symlink_is_rejected() {
 
     let escaping_rel = rpath.join("escape_rel");
     std::os::unix::fs::symlink(Path::new("../.."), &escaping_rel).unwrap();
-    let _ = Command::new("git")
+    let add_status = Command::new("git")
         .args(["add", "."])
         .current_dir(rpath)
-        .status();
-    let _ = Command::new("git")
+        .status()
+        .expect("git add must execute");
+    assert!(
+        add_status.success(),
+        "git add must succeed for relative symlink fixture"
+    );
+    let commit_status = Command::new("git")
         .args(["commit", "-m", "commit relative escaping symlink"])
         .current_dir(rpath)
-        .status();
+        .status()
+        .expect("git commit must execute");
+    assert!(
+        commit_status.success(),
+        "git commit must succeed for relative symlink fixture"
+    );
 
     let result = CompilationSandbox::new(rpath);
     assert!(

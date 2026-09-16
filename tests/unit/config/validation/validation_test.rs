@@ -911,18 +911,17 @@ fn test_extra_body_rejects_top_level_xhigh_and_high_for_qwen_on_sglang() {
     cfg.extra_body = Some(extra.clone());
     let err = cfg.validate().unwrap_err().to_string();
     assert!(
-        err.contains("extra_body.reasoning_effort cannot be 'xhigh' at top-level for Qwen models on SGLang serving deployments"),
-        "validation must reject top-level xhigh reasoning_effort for Qwen on SGLang: {err}"
+        err.contains("extra_body.reasoning_effort cannot be 'xhigh' at top-level on SGLang serving deployments"),
+        "validation must reject top-level xhigh reasoning_effort on SGLang: {err}"
     );
 
-    // high rejected on SGLang serving deployment
+    // high rejected for Qwen on SGLang serving deployment
     let mut extra_high = serde_json::Map::new();
     extra_high.insert("reasoning_effort".to_string(), serde_json::json!("high"));
-    cfg.extra_body = Some(extra_high);
+    cfg.extra_body = Some(extra_high.clone());
     let err_high = cfg.validate().unwrap_err().to_string();
     assert!(
-        err_high
-            .contains("extra_body.reasoning_effort cannot be 'high' at top-level for Qwen models on SGLang serving deployments"),
+        err_high.contains("extra_body.reasoning_effort cannot be 'high' for Qwen models"),
         "validation must reject top-level high reasoning_effort for Qwen on SGLang: {err_high}"
     );
 
@@ -937,7 +936,7 @@ fn test_extra_body_rejects_top_level_xhigh_and_high_for_qwen_on_sglang() {
         );
     }
 
-    // Test the SAME model against a different capability configuration (Finding 4):
+    // Test the SAME model against a different capability configuration:
     // On OpenRouter or generic OpenAI endpoint, top-level xhigh is allowed.
     let mut openrouter_cfg = valid_config();
     openrouter_cfg.endpoint = "https://openrouter.ai/api/v1".to_string();
@@ -946,6 +945,14 @@ fn test_extra_body_rejects_top_level_xhigh_and_high_for_qwen_on_sglang() {
     assert!(
         openrouter_cfg.validate().is_ok(),
         "same Qwen model on non-SGLang endpoint must allow top-level xhigh"
+    );
+
+    // But 'high' is rejected for Qwen even on OpenRouter (Qwen template refuses high everywhere)
+    openrouter_cfg.extra_body = Some(extra_high);
+    let or_high_err = openrouter_cfg.validate().unwrap_err().to_string();
+    assert!(
+        or_high_err.contains("cannot be 'high' for Qwen models"),
+        "validation must reject high for Qwen on any endpoint: {or_high_err}"
     );
 
     // Non-Qwen allows high
@@ -984,7 +991,7 @@ fn test_model_profile_extra_body_rejects_top_level_xhigh() {
 
     let err = cfg.validate().unwrap_err().to_string();
     assert!(
-        err.contains("models.qwen.extra_body.reasoning_effort cannot be 'xhigh' at top-level for Qwen models on SGLang serving deployments"),
+        err.contains("models.qwen.extra_body.reasoning_effort cannot be 'xhigh' at top-level on SGLang serving deployments"),
         "profile validation must reject top-level xhigh on SGLang: {err}"
     );
 
@@ -1030,7 +1037,7 @@ fn test_reject_non_string_reasoning_effort() {
 
     let err = cfg.validate().unwrap_err().to_string();
     assert!(
-        err.contains("extra_body.reasoning_effort must be a string ('low' or 'medium')"),
+        err.contains("extra_body.reasoning_effort must be a string"),
         "must reject integer reasoning_effort: {err}"
     );
 
@@ -1057,9 +1064,82 @@ fn test_reject_non_string_reasoning_effort() {
 
     let err2 = cfg2.validate().unwrap_err().to_string();
     assert!(
-        err2.contains(
-            "models.qwen.extra_body.reasoning_effort must be a string ('low' or 'medium')"
-        ),
+        err2.contains("models.qwen.extra_body.reasoning_effort must be a string"),
         "must reject boolean reasoning_effort in profile: {err2}"
+    );
+}
+
+#[test]
+fn test_reject_unknown_reasoning_effort() {
+    let mut cfg = valid_config();
+    let mut extra = serde_json::Map::new();
+    extra.insert("reasoning_effort".to_string(), serde_json::json!("hig"));
+    cfg.extra_body = Some(extra);
+
+    let err = cfg.validate().unwrap_err().to_string();
+    assert!(
+        err.contains("extra_body.reasoning_effort must be one of 'low', 'medium', 'high', 'xhigh'"),
+        "must reject 'hig': {err}"
+    );
+
+    let mut cfg2 = valid_config();
+    let mut prof_extra = serde_json::Map::new();
+    prof_extra.insert("reasoning_effort".to_string(), serde_json::json!("x-high"));
+    cfg2.models.insert(
+        "qwen".to_string(),
+        crate::config::ModelProfile {
+            endpoint: "https://llm.selfware.design/v1".to_string(),
+            model: "qwen38-flash-next".to_string(),
+            api_key: None,
+            max_tokens: cfg2.max_tokens,
+            temperature: cfg2.temperature,
+            modalities: vec!["text".to_string()],
+            context_length: cfg2.context_length,
+            extra_body: Some(prof_extra),
+            native_function_calling: None,
+            max_retries: None,
+            response_timeout_floor_secs: None,
+        },
+    );
+
+    let err2 = cfg2.validate().unwrap_err().to_string();
+    assert!(
+        err2.contains("models.qwen.extra_body.reasoning_effort must be one of 'low', 'medium', 'high', 'xhigh'"),
+        "must reject 'x-high' in profile: {err2}"
+    );
+}
+
+#[test]
+fn test_is_sglang_server_info_body_validation() {
+    // SGLang JSON responses
+    let valid_sglang_json =
+        r#"{"version": "0.4.3.post2", "tool_call_parser": "qwen", "reasoning_parser": "qwen3"}"#;
+    assert!(is_sglang_server_info_body(valid_sglang_json));
+
+    let minimal_sglang_json = r#"{"version": "0.4.0"}"#;
+    assert!(is_sglang_server_info_body(minimal_sglang_json));
+
+    // Generic HTML 200 (nginx, apache, captive portal) — must NOT be classified as SGLang
+    let nginx_html =
+        "<html><head><title>200 OK</title></head><body>Welcome to nginx!</body></html>";
+    assert!(!is_sglang_server_info_body(nginx_html));
+
+    // Generic JSON 200 without SGLang fields — must NOT be classified as SGLang
+    let generic_json = r#"{"status": "ok", "message": "hello"}"#;
+    assert!(!is_sglang_server_info_body(generic_json));
+}
+
+#[test]
+fn test_sglang_capability_cache() {
+    let ep = "http://custom-proxy.internal:9999/v1";
+    assert_eq!(get_sglang_capability(ep), None);
+
+    set_sglang_capability(ep, true);
+    assert_eq!(get_sglang_capability(ep), Some(true));
+
+    // Subpath variation normalizes to the same base
+    assert_eq!(
+        get_sglang_capability("http://custom-proxy.internal:9999"),
+        Some(true)
     );
 }

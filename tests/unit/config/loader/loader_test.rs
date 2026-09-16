@@ -2562,6 +2562,40 @@ fn test_validate_generated_toml_rejects_schema_mismatch() {
 }
 
 #[test]
+fn test_validate_generated_toml_qwen38_applies_builtin_profile_and_validates() {
+    // Part 1: A generated config specifying a Qwen 3.8 model without explicit context_length
+    // or max_tokens passes validation. (Profile application is confirmed in Part 2 below,
+    // where exceeding the profile-pinned 350k window triggers context-fit rejection).
+    let content = r#"
+endpoint = "http://127.0.0.1:1234/v1"
+model = "qwen38-flash-next"
+
+[safety]
+allowed_paths = ["./**"]
+"#;
+    Config::validate_generated_toml(content)
+        .expect("qwen38 generated config without explicit limits must pass validation");
+
+    // But an explicit max_tokens exceeding the 350k context_length must be rejected by context fit
+    let invalid_content = r#"
+endpoint = "http://127.0.0.1:1234/v1"
+model = "qwen38-flash-next"
+max_tokens = 500000
+
+[safety]
+allowed_paths = ["./**"]
+"#;
+    let err = Config::validate_generated_toml(invalid_content)
+        .expect_err("oversized max_tokens against qwen38 350k window must fail");
+    let chain = format!("{:?}", err);
+    assert!(
+        chain.contains("context_length") && chain.contains("max_tokens"),
+        "error should name context_length and max_tokens: {}",
+        chain
+    );
+}
+
+#[test]
 fn test_loaded_config_path_recorded_and_absent_for_default() {
     let _guard = clear_env();
     assert!(Config::default().loaded_config_path().is_none());

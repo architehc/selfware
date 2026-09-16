@@ -1945,3 +1945,37 @@ async fn written_without_verification_rejection_carries_gate_envelope() {
     );
     assert!(msg.contains("You have written code, but you have not verified it."));
 }
+
+#[tokio::test]
+async fn test_sync_api_usage_accumulates_nested_only_reasoning_tokens() {
+    let mut config = crate::config::Config::default();
+    config.agent.min_completion_steps = 0;
+    let mut agent = Agent::new(config).await.expect("agent should build");
+
+    let usage = crate::api::Usage {
+        prompt_tokens: 100,
+        completion_tokens: 50,
+        total_tokens: 150,
+        cost: Some(0.001),
+        reasoning_tokens: None,
+        completion_tokens_details: Some(crate::api::CompletionTokensDetails {
+            reasoning_tokens: Some(30),
+            accepted_prediction_tokens: None,
+            rejected_prediction_tokens: None,
+        }),
+        prompt_tokens_details: None,
+    };
+    let coverage = crate::api::UsageCoverage::all();
+
+    agent.client.record_with_coverage(&usage, coverage);
+    agent.sync_api_usage();
+
+    assert_eq!(agent.cumulative_token_usage.input, 100);
+    assert_eq!(agent.cumulative_token_usage.output, 50);
+    assert_eq!(agent.cumulative_token_usage.total, 150);
+    assert_eq!(
+        agent.cumulative_token_usage.reasoning,
+        Some(30),
+        "nested reasoning tokens in completion_tokens_details must flow into agent cumulative_token_usage"
+    );
+}

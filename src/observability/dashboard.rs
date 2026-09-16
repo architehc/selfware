@@ -16,6 +16,9 @@ pub struct TokenUsage {
     pub total: usize,
     /// Estimated cost
     pub cost: Option<f64>,
+    /// Reasoning tokens (if reported)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<usize>,
 }
 
 impl TokenUsage {
@@ -26,6 +29,7 @@ impl TokenUsage {
             output,
             total: input + output,
             cost: None,
+            reasoning: None,
         }
     }
 
@@ -45,6 +49,9 @@ impl TokenUsage {
         if let (Some(a), Some(b)) = (self.cost, other.cost) {
             self.cost = Some(a + b);
         }
+        if let Some(r) = other.reasoning {
+            self.reasoning = Some(self.reasoning.unwrap_or(0).saturating_add(r));
+        }
     }
 
     /// Format for display
@@ -53,9 +60,13 @@ impl TokenUsage {
             .cost
             .map(|c| format!(" (${:.4})", c))
             .unwrap_or_default();
+        let reasoning = self
+            .reasoning
+            .map(|r| format!(", {} reasoning", r))
+            .unwrap_or_default();
         format!(
-            "{} tokens ({} in, {} out){}",
-            self.total, self.input, self.output, cost
+            "{} tokens ({} in, {} out{}){}",
+            self.total, self.input, self.output, reasoning, cost
         )
     }
 }

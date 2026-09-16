@@ -21,11 +21,31 @@ pub struct UsageCoverage {
 }
 
 impl UsageCoverage {
-    pub(crate) fn all() -> Self {
+    pub fn all() -> Self {
         Self {
             prompt: true,
             completion: true,
             total: true,
+        }
+    }
+    pub fn from_json(value: &serde_json::Value) -> Self {
+        Self {
+            prompt: value
+                .get("prompt_tokens")
+                .is_some_and(serde_json::Value::is_u64),
+            completion: value
+                .get("completion_tokens")
+                .is_some_and(serde_json::Value::is_u64),
+            total: value
+                .get("total_tokens")
+                .is_some_and(serde_json::Value::is_u64),
+        }
+    }
+    pub fn union(self, other: Self) -> Self {
+        Self {
+            prompt: self.prompt || other.prompt,
+            completion: self.completion || other.completion,
+            total: self.total || other.total,
         }
     }
     pub(crate) fn intersect(self, other: Self) -> Self {
@@ -51,6 +71,9 @@ pub struct UsageAttempt {
     /// Exact raw usage reported by the provider before any budget derivations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_usage: Option<Usage>,
+    /// Chronological list of exact raw usage snapshots received from the provider for this attempt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub raw_snapshots: Vec<Usage>,
 }
 
 #[derive(Debug, Default)]
@@ -77,6 +100,7 @@ impl UsageLedger {
             reported_fields: UsageCoverage::default(),
             estimated_usage: None,
             raw_usage: None,
+            raw_snapshots: Vec::new(),
         });
         AttemptGuard {
             ledger: self.clone(),
@@ -265,12 +289,20 @@ impl AttemptGuard {
         }
     }
 
-    /// Record raw provider usage for this attempt, preserving the exact raw report
-    /// in `attempt.raw_usage` while deriving full budget charges from available
-    /// token counts (prompt + completion) in `attempt.usage` and the ledger.
+    /// Record raw provider usage for this attempt, assuming full coverage.
+    #[cfg(test)]
     pub fn record(&self, usage: &Usage) {
-        // Validate raw per-attempt provider report before normalization or aggregation (Rule 3)
-        if !usage.is_reconciled() {
+        self.record_with_coverage(usage, UsageCoverage::all());
+    }
+
+    /// Record raw provider usage for this attempt, preserving the exact raw report
+    /// in `attempt.raw_usage` and `attempt.raw_snapshots` without max-merging,
+    /// while deriving full budget charges from available token counts
+    /// (prompt + completion) in `attempt.usage` and the ledger.
+    pub fn record_with_coverage(&self, usage: &Usage, coverage: UsageCoverage) {
+        // Validate raw per-attempt provider report before normalization or aggregation (Rule 3).
+        // Only warn when total_tokens is reported (non-zero); omitted totals deserialize to 0 routinely.
+        if usage.total_tokens != 0 && !usage.is_reconciled() {
             tracing::warn!(
                 "Provider reported unreconciled raw token usage on attempt: prompt={} + completion={} != total={}",
                 usage.prompt_tokens,
@@ -288,66 +320,15 @@ impl AttemptGuard {
         };
 
         // Preserve raw provider claims separately from derived budget charges.
-        let prior_raw = attempt.raw_usage.clone().unwrap_or_default();
-        let raw = Usage {
-            prompt_tokens: prior_raw.prompt_tokens.max(usage.prompt_tokens),
-            completion_tokens: prior_raw.completion_tokens.max(usage.completion_tokens),
-            total_tokens: prior_raw.total_tokens.max(usage.total_tokens),
-            cost: match (
-                prior_raw.cost,
-                usage.cost.filter(|c| c.is_finite() && *c >= 0.0),
-            ) {
-                (Some(a), Some(b)) => Some(a.max(b)),
-                (a, b) => a.or(b),
-            },
-            reasoning_tokens: match (prior_raw.reasoning_tokens, usage.reasoning_tokens) {
-                (Some(a), Some(b)) => Some(a.max(b)),
-                (a, b) => a.or(b),
-            },
-            completion_tokens_details: match (
-                &prior_raw.completion_tokens_details,
-                &usage.completion_tokens_details,
-            ) {
-                (Some(p), Some(u)) => Some(CompletionTokensDetails {
-                    reasoning_tokens: match (p.reasoning_tokens, u.reasoning_tokens) {
-                        (Some(a), Some(b)) => Some(a.max(b)),
-                        (a, b) => a.or(b),
-                    },
-                    accepted_prediction_tokens: match (
-                        p.accepted_prediction_tokens,
-                        u.accepted_prediction_tokens,
-                    ) {
-                        (Some(a), Some(b)) => Some(a.max(b)),
-                        (a, b) => a.or(b),
-                    },
-                    rejected_prediction_tokens: match (
-                        p.rejected_prediction_tokens,
-                        u.rejected_prediction_tokens,
-                    ) {
-                        (Some(a), Some(b)) => Some(a.max(b)),
-                        (a, b) => a.or(b),
-                    },
-                }),
-                (Some(p), None) => Some(p.clone()),
-                (None, Some(u)) => Some(u.clone()),
-                (None, None) => None,
-            },
-            prompt_tokens_details: match (
-                &prior_raw.prompt_tokens_details,
-                &usage.prompt_tokens_details,
-            ) {
-                (Some(p), Some(u)) => Some(PromptTokensDetails {
-                    cached_tokens: match (p.cached_tokens, u.cached_tokens) {
-                        (Some(a), Some(b)) => Some(a.max(b)),
-                        (a, b) => a.or(b),
-                    },
-                }),
-                (Some(p), None) => Some(p.clone()),
-                (None, Some(u)) => Some(u.clone()),
-                (None, None) => None,
-            },
-        };
-        attempt.raw_usage = Some(raw);
+        // Store exact reports in attempt.raw_usage and attempt.raw_snapshots without .max() merging.
+        // Cap raw_snapshots at 64 to prevent unbounded memory growth if a provider emits per-chunk usage.
+        const MAX_RAW_SNAPSHOTS: usize = 64;
+        if attempt.raw_snapshots.len() < MAX_RAW_SNAPSHOTS {
+            attempt.raw_snapshots.push(usage.clone());
+        } else if let Some(last) = attempt.raw_snapshots.last_mut() {
+            *last = usage.clone();
+        }
+        attempt.raw_usage = Some(usage.clone());
 
         let prior = attempt.usage.clone().unwrap_or_default();
         // SSE usage is cumulative for this request; repeated snapshots must
@@ -365,47 +346,15 @@ impl AttemptGuard {
             (a, b) => a.or(b),
         };
 
-        let current_completion_details = match (
-            &prior.completion_tokens_details,
-            &usage.completion_tokens_details,
-        ) {
-            (Some(p), Some(u)) => Some(CompletionTokensDetails {
-                reasoning_tokens: match (p.reasoning_tokens, u.reasoning_tokens) {
-                    (Some(a), Some(b)) => Some(a.max(b)),
-                    (a, b) => a.or(b),
-                },
-                accepted_prediction_tokens: match (
-                    p.accepted_prediction_tokens,
-                    u.accepted_prediction_tokens,
-                ) {
-                    (Some(a), Some(b)) => Some(a.max(b)),
-                    (a, b) => a.or(b),
-                },
-                rejected_prediction_tokens: match (
-                    p.rejected_prediction_tokens,
-                    u.rejected_prediction_tokens,
-                ) {
-                    (Some(a), Some(b)) => Some(a.max(b)),
-                    (a, b) => a.or(b),
-                },
-            }),
-            (Some(p), None) => Some(p.clone()),
-            (None, Some(u)) => Some(u.clone()),
-            (None, None) => None,
-        };
+        let current_completion_details = super::types::merge_completion_details_max(
+            prior.completion_tokens_details.as_ref(),
+            usage.completion_tokens_details.as_ref(),
+        );
 
-        let current_prompt_details =
-            match (&prior.prompt_tokens_details, &usage.prompt_tokens_details) {
-                (Some(p), Some(u)) => Some(PromptTokensDetails {
-                    cached_tokens: match (p.cached_tokens, u.cached_tokens) {
-                        (Some(a), Some(b)) => Some(a.max(b)),
-                        (a, b) => a.or(b),
-                    },
-                }),
-                (Some(p), None) => Some(p.clone()),
-                (None, Some(u)) => Some(u.clone()),
-                (None, None) => None,
-            };
+        let current_prompt_details = super::types::merge_prompt_details_max(
+            prior.prompt_tokens_details.as_ref(),
+            usage.prompt_tokens_details.as_ref(),
+        );
 
         let current = Usage {
             prompt_tokens: current_prompt,
@@ -506,36 +455,19 @@ impl AttemptGuard {
             prompt_tokens_details: delta_prompt_details,
         };
         attempt.usage = Some(current);
-        attempt.reported_fields = UsageCoverage::all();
+        attempt.reported_fields = attempt.reported_fields.union(coverage);
         add_usage(&mut state.total, &delta);
         add_usage(&mut state.pending, &delta);
     }
 
     pub fn record_json(&self, body: &str) -> Option<Usage> {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
-            if let Some(usage) = value
-                .get("usage")
-                .and_then(|u| serde_json::from_value::<Usage>(u.clone()).ok())
-            {
-                self.record(&usage);
-                let fields = &value["usage"];
-                let mut state = self.ledger.0.lock().unwrap_or_else(|e| e.into_inner());
-                if state.generation == self.generation {
-                    if let Some(attempt) = state.attempts.get_mut(self.index) {
-                        attempt.reported_fields = UsageCoverage {
-                            prompt: fields
-                                .get("prompt_tokens")
-                                .is_some_and(serde_json::Value::is_u64),
-                            completion: fields
-                                .get("completion_tokens")
-                                .is_some_and(serde_json::Value::is_u64),
-                            total: fields
-                                .get("total_tokens")
-                                .is_some_and(serde_json::Value::is_u64),
-                        };
-                    }
+            if let Some(usage_val) = value.get("usage") {
+                if let Ok(usage) = serde_json::from_value::<Usage>(usage_val.clone()) {
+                    let coverage = UsageCoverage::from_json(usage_val);
+                    self.record_with_coverage(&usage, coverage);
+                    return Some(usage);
                 }
-                return Some(usage);
             }
         }
         None
@@ -1009,5 +941,66 @@ mod tests {
             attempts[1].usage.as_ref().unwrap().reasoning_tokens,
             Some(5)
         );
+    }
+
+    #[test]
+    fn test_decreasing_corrected_provider_reports_preserves_exact_snapshots_and_monotonic_budget() {
+        let ledger = UsageLedger::default();
+        let attempt = ledger.begin("m");
+
+        // First snapshot: (100, 20, 120)
+        let s1 = Usage {
+            prompt_tokens: 100,
+            completion_tokens: 20,
+            total_tokens: 120,
+            ..Default::default()
+        };
+        attempt.record(&s1);
+
+        let attempts = ledger.attempts();
+        assert_eq!(attempts[0].raw_snapshots.len(), 1);
+        assert_eq!(attempts[0].raw_snapshots[0].prompt_tokens, 100);
+        assert_eq!(attempts[0].raw_snapshots[0].completion_tokens, 20);
+        assert_eq!(attempts[0].raw_snapshots[0].total_tokens, 120);
+        assert_eq!(attempts[0].raw_usage.as_ref().unwrap().total_tokens, 120);
+        assert_eq!(attempts[0].usage.as_ref().unwrap().total_tokens, 120);
+        assert_eq!(ledger.total().total_tokens, 120);
+
+        // Corrected/decreasing snapshot: (90, 25, 115)
+        // Prompt tokens decreased (100 -> 90) and total decreased (120 -> 115).
+        let s2 = Usage {
+            prompt_tokens: 90,
+            completion_tokens: 25,
+            total_tokens: 115,
+            ..Default::default()
+        };
+        attempt.record(&s2);
+
+        let attempts = ledger.attempts();
+        assert_eq!(attempts[0].raw_snapshots.len(), 2);
+        // Snapshot 1 is preserved exactly
+        assert_eq!(attempts[0].raw_snapshots[0].prompt_tokens, 100);
+        assert_eq!(attempts[0].raw_snapshots[0].completion_tokens, 20);
+        assert_eq!(attempts[0].raw_snapshots[0].total_tokens, 120);
+
+        // Snapshot 2 is preserved exactly (not max-merged into 100, 25, 120)
+        assert_eq!(attempts[0].raw_snapshots[1].prompt_tokens, 90);
+        assert_eq!(attempts[0].raw_snapshots[1].completion_tokens, 25);
+        assert_eq!(attempts[0].raw_snapshots[1].total_tokens, 115);
+
+        // attempt.raw_usage reflects the exact latest report
+        let raw = attempts[0].raw_usage.as_ref().unwrap();
+        assert_eq!(raw.prompt_tokens, 90);
+        assert_eq!(raw.completion_tokens, 25);
+        assert_eq!(raw.total_tokens, 115);
+
+        // attempt.usage retains monotonic derived budget charges (max(100, 90) = 100, max(20, 25) = 25, total = 125)
+        let budget = attempts[0].usage.as_ref().unwrap();
+        assert_eq!(budget.prompt_tokens, 100);
+        assert_eq!(budget.completion_tokens, 25);
+        assert_eq!(budget.total_tokens, 125);
+        assert_eq!(ledger.total().total_tokens, 125);
+
+        attempt.complete();
     }
 }

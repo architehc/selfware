@@ -397,7 +397,7 @@ async fn handle_connection(
     match mock_response {
         MockResponse::Text(text) => {
             if is_streaming {
-                write_sse_text_response(&mut stream, &text, config.usage).await?;
+                write_sse_text_response(&mut stream, &text, None, config.usage).await?;
             } else {
                 let body = format_chat_response(&config.model, &text, None, None, config.usage);
                 write_http_response(&mut stream, 200, &body, &[]).await?;
@@ -405,7 +405,8 @@ async fn handle_connection(
         }
         MockResponse::TextWithReasoning { content, reasoning } => {
             if is_streaming {
-                write_sse_text_response(&mut stream, &content, config.usage).await?;
+                write_sse_text_response(&mut stream, &content, Some(&reasoning), config.usage)
+                    .await?;
             } else {
                 let body = format_chat_response(
                     &config.model,
@@ -499,6 +500,7 @@ fn format_chat_response(
 async fn write_sse_text_response(
     stream: &mut tokio::net::TcpStream,
     content: &str,
+    reasoning: Option<&str>,
     usage: MockUsage,
 ) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
@@ -506,11 +508,19 @@ async fn write_sse_text_response(
     let escaped = serde_json::to_string(content).unwrap_or_else(|_| "\"\"".to_string());
     let escaped = &escaped[1..escaped.len() - 1];
 
+    let reasoning_event = if let Some(r) = reasoning {
+        let escaped_r = serde_json::to_string(r).unwrap_or_else(|_| "\"\"".to_string());
+        let escaped_r = &escaped_r[1..escaped_r.len() - 1];
+        format!("data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"reasoning_content\":\"{}\"}},\"finish_reason\":null}}]}}\n\n", escaped_r)
+    } else {
+        String::new()
+    };
+
     let events = format!(
-        "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{}\"}},\"finish_reason\":null}}]}}\n\n\
+        "{}data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{}\"}},\"finish_reason\":null}}]}}\n\n\
          data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":{},\"completion_tokens\":{},\"total_tokens\":{}}}}}\n\n\
          data: [DONE]\n\n",
-        escaped, usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
+        reasoning_event, escaped, usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
     );
     let chunk = format!("{:X}\r\n{}\r\n", events.len(), events);
     let response = format!(

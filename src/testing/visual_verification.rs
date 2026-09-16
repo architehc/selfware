@@ -474,7 +474,12 @@ impl VisualVerifier {
         let Some(extra_body) = &self.extra_body else {
             return Ok(());
         };
-        crate::api::merge_extra_body(body, Some(extra_body), "visual verification request")
+        crate::api::merge_extra_body(
+            body,
+            Some(extra_body),
+            "visual verification request",
+            Some(&self.endpoint),
+        )
     }
 
     /// Send a request to the VLM endpoint and extract the response text.

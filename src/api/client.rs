@@ -931,6 +931,7 @@ impl ApiClient {
             } else {
                 "default chat request"
             },
+            Some(&self.config.endpoint),
         )?;
 
         if !self.effective_native_fc() {
@@ -1276,6 +1277,15 @@ impl ApiClient {
     }
     pub(crate) fn take_pending_usage(&self) -> Usage {
         self.usage_ledger.take_pending()
+    }
+    #[cfg(test)]
+    pub(crate) fn record_with_coverage(
+        &self,
+        usage: &Usage,
+        coverage: super::usage::UsageCoverage,
+    ) {
+        let attempt = self.usage_ledger.begin(&self.config.model);
+        attempt.record_with_coverage(usage, coverage);
     }
     pub(crate) fn ensure_budget_floor(&self, tokens: usize, cost: f64) {
         self.usage_ledger.ensure_budget_floor(tokens, cost);
@@ -1690,10 +1700,23 @@ impl ApiClient {
                         let _ = attempt_usage.record_json(&body_text);
                         let mut chat_response: ChatResponse = serde_json::from_str(&body_text)
                             .context("Failed to parse response JSON")?;
-                        if let Err(e) = chat_response.usage.validate() {
+                        if chat_response.usage.total_tokens == 0
+                            && (chat_response.usage.prompt_tokens > 0
+                                || chat_response.usage.completion_tokens > 0)
+                        {
+                            chat_response.usage.total_tokens = chat_response
+                                .usage
+                                .prompt_tokens
+                                .saturating_add(chat_response.usage.completion_tokens);
+                        }
+                        if chat_response.usage.total_tokens != 0
+                            && !chat_response.usage.is_reconciled()
+                        {
                             warn!(
-                                "API returned inconsistent token usage: {}. Using response anyway.",
-                                e
+                                "API returned inconsistent token usage: prompt={} + completion={} != total={}. Using response anyway.",
+                                chat_response.usage.prompt_tokens,
+                                chat_response.usage.completion_tokens,
+                                chat_response.usage.total_tokens,
                             );
                         }
                         // Feed the observed effective speed back into the
@@ -1906,6 +1929,7 @@ impl ApiClient {
             &mut body,
             profile.extra_body.as_ref(),
             "model profile chat request",
+            Some(&profile.endpoint),
         )?;
 
         if !native_fc || self.tool_mode_latched(&profile.endpoint, &profile.model) {

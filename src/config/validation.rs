@@ -1,9 +1,36 @@
-//! Configuration validation logic.
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{bail, Result};
 
 use super::api_key::is_local_endpoint;
 use super::Config;
+
+static SGLANG_CAPABILITY_CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+
+fn sglang_cache() -> &'static Mutex<HashMap<String, bool>> {
+    SGLANG_CAPABILITY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Query the capability cache for an endpoint.
+pub fn get_sglang_capability(endpoint: &str) -> Option<bool> {
+    let base = normalize_endpoint_base(endpoint);
+    sglang_cache().lock().ok()?.get(&base).copied()
+}
+
+/// Explicitly cache the SGLang capability for an endpoint.
+pub fn set_sglang_capability(endpoint: &str, is_sglang: bool) {
+    let base = normalize_endpoint_base(endpoint);
+    if let Ok(mut cache) = sglang_cache().lock() {
+        cache.insert(base, is_sglang);
+    }
+}
+
+/// Normalize an endpoint URL to its base host/root path (stripping /v1 and trailing slashes).
+pub fn normalize_endpoint_base(endpoint: &str) -> String {
+    let trimmed = endpoint.trim().trim_end_matches('/');
+    trimmed.strip_suffix("/v1").unwrap_or(trimmed).to_string()
+}
 
 impl Config {
     /// Validate configuration values, returning an error for truly invalid
@@ -255,55 +282,81 @@ impl Config {
             }
         }
 
-        let is_sglang_top = is_sglang_serving_deployment(&self.endpoint);
-        let is_qwen_top = self.model.to_ascii_lowercase().contains("qwen");
-        if is_sglang_top && is_qwen_top {
-            if let Some(extra) = &self.extra_body {
-                if let Some(val_raw) = extra.get("reasoning_effort") {
-                    let Some(val) = val_raw.as_str() else {
-                        bail!(
-                            "Config error: extra_body.reasoning_effort must be a string ('low' or 'medium'), got: {}",
-                            val_raw
-                        );
-                    };
-                    if !val.eq_ignore_ascii_case("low") && !val.eq_ignore_ascii_case("medium") {
-                        bail!(
-                            "Config error: extra_body.reasoning_effort cannot be '{}' at top-level for Qwen models on SGLang serving deployments. \
-                             Top-level reasoning_effort only accepts 'low' or 'medium' ('high' is rejected by the model template, \
-                             and 'xhigh' is rejected by the endpoint schema). \
-                             For xhigh reasoning, place it under [extra_body.chat_template_kwargs.reasoning_effort] \
-                             or omit the field (default is xhigh).",
-                            val
-                        );
-                    }
+        // Reasoning effort validation:
+        // Top-level extra_body reasoning_effort
+        if let Some(extra) = &self.extra_body {
+            if let Some(val_raw) = extra.get("reasoning_effort") {
+                let Some(val) = val_raw.as_str() else {
+                    bail!(
+                        "Config error: extra_body.reasoning_effort must be a string, got: {}",
+                        val_raw
+                    );
+                };
+                let val_lower = val.to_ascii_lowercase();
+                if !matches!(val_lower.as_str(), "low" | "medium" | "high" | "xhigh") {
+                    bail!(
+                        "Config error: extra_body.reasoning_effort must be one of 'low', 'medium', 'high', 'xhigh', got: '{}'",
+                        val
+                    );
+                }
+
+                // 1. Unconditional check for Qwen: 'high' is refused by the Qwen chat template on any serving stack
+                if self.model.to_ascii_lowercase().contains("qwen") && val_lower == "high" {
+                    bail!(
+                        "Config error: extra_body.reasoning_effort cannot be 'high' for Qwen models. \
+                         The Qwen chat template refuses 'high' on all serving stacks (accepted values: 'low', 'medium', or default/xhigh via chat_template_kwargs)."
+                    );
+                }
+
+                // 2. Behavioral SGLang check: 'xhigh' is rejected by SGLang schema at top-level
+                if val_lower == "xhigh" && is_sglang_backend(&self.endpoint) {
+                    bail!(
+                        "Config error: extra_body.reasoning_effort cannot be 'xhigh' at top-level on SGLang serving deployments. \
+                         Top-level reasoning_effort only accepts 'low' or 'medium' ('xhigh' is rejected by the endpoint schema). \
+                         For xhigh reasoning, place it under [extra_body.chat_template_kwargs.reasoning_effort] \
+                         or omit the field (default is xhigh)."
+                    );
                 }
             }
         }
 
-        // Validate model profile extra_body reasoning_effort for Qwen models on SGLang deployments
+        // Validate model profile extra_body reasoning_effort
         for (name, profile) in &self.models {
-            let is_sglang_profile = is_sglang_serving_deployment(&profile.endpoint);
-            let is_qwen_profile = profile.model.to_ascii_lowercase().contains("qwen");
-            if is_sglang_profile && is_qwen_profile {
-                if let Some(extra) = &profile.extra_body {
-                    if let Some(val_raw) = extra.get("reasoning_effort") {
-                        let Some(val) = val_raw.as_str() else {
-                            bail!(
-                                "Config error: models.{}.extra_body.reasoning_effort must be a string ('low' or 'medium'), got: {}",
-                                name,
-                                val_raw
-                            );
-                        };
-                        if !val.eq_ignore_ascii_case("low") && !val.eq_ignore_ascii_case("medium") {
-                            bail!(
-                                "Config error: models.{}.extra_body.reasoning_effort cannot be '{}' at top-level for Qwen models on SGLang serving deployments. \
-                                 Top-level reasoning_effort only accepts 'low' or 'medium' ('high' is rejected by the model template, \
-                                 and 'xhigh' is rejected by the endpoint schema). \
-                                 For xhigh reasoning, place it under [models.{}.extra_body.chat_template_kwargs.reasoning_effort] \
-                                 or omit the field (default is xhigh).",
-                                name, val, name
-                            );
-                        }
+            if let Some(extra) = &profile.extra_body {
+                if let Some(val_raw) = extra.get("reasoning_effort") {
+                    let Some(val) = val_raw.as_str() else {
+                        bail!(
+                            "Config error: models.{}.extra_body.reasoning_effort must be a string, got: {}",
+                            name,
+                            val_raw
+                        );
+                    };
+                    let val_lower = val.to_ascii_lowercase();
+                    if !matches!(val_lower.as_str(), "low" | "medium" | "high" | "xhigh") {
+                        bail!(
+                            "Config error: models.{}.extra_body.reasoning_effort must be one of 'low', 'medium', 'high', 'xhigh', got: '{}'",
+                            name,
+                            val
+                        );
+                    }
+
+                    let is_qwen_profile = profile.model.to_ascii_lowercase().contains("qwen");
+                    if is_qwen_profile && val_lower == "high" {
+                        bail!(
+                            "Config error: models.{}.extra_body.reasoning_effort cannot be 'high' for Qwen models. \
+                             The Qwen chat template refuses 'high' on all serving stacks (accepted values: 'low', 'medium', or default/xhigh via chat_template_kwargs).",
+                            name
+                        );
+                    }
+
+                    if val_lower == "xhigh" && is_sglang_backend(&profile.endpoint) {
+                        bail!(
+                            "Config error: models.{}.extra_body.reasoning_effort cannot be 'xhigh' at top-level on SGLang serving deployments. \
+                             Top-level reasoning_effort only accepts 'low' or 'medium' ('xhigh' is rejected by the endpoint schema). \
+                             For xhigh reasoning, place it under [models.{}.extra_body.chat_template_kwargs.reasoning_effort] \
+                             or omit the field (default is xhigh).",
+                            name, name
+                        );
                     }
                 }
             }
@@ -311,13 +364,146 @@ impl Config {
 
         Ok(())
     }
+
+    /// Bounded async discovery of backend capabilities for all endpoints
+    /// where `reasoning_effort == "xhigh"`.
+    pub async fn discover_sglang_capabilities(&self) {
+        let mut endpoints_to_probe = Vec::new();
+
+        if let Some(extra) = &self.extra_body {
+            if let Some(val) = extra.get("reasoning_effort").and_then(|v| v.as_str()) {
+                if val.eq_ignore_ascii_case("xhigh") {
+                    endpoints_to_probe.push(&self.endpoint);
+                }
+            }
+        }
+
+        for profile in self.models.values() {
+            if let Some(extra) = &profile.extra_body {
+                if let Some(val) = extra.get("reasoning_effort").and_then(|v| v.as_str()) {
+                    if val.eq_ignore_ascii_case("xhigh") {
+                        endpoints_to_probe.push(&profile.endpoint);
+                    }
+                }
+            }
+        }
+
+        for ep in endpoints_to_probe {
+            probe_sglang_backend_async(ep).await;
+        }
+    }
+
+    /// Async validation step: runs bounded capability discovery before validating invariants.
+    pub async fn validate_async(&self) -> Result<()> {
+        self.discover_sglang_capabilities().await;
+        self.validate()
+    }
+}
+
+/// Validates whether the response body from /get_server_info corresponds to an SGLang deployment.
+pub fn is_sglang_server_info_body(body: &str) -> bool {
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
+        if json.get("version").is_some()
+            || json.get("tool_call_parser").is_some()
+            || json.get("reasoning_parser").is_some()
+            || json.get("sglang_version").is_some()
+        {
+            return true;
+        }
+    }
+    let lower = body.to_ascii_lowercase();
+    lower.contains("\"version\"") && (lower.contains("sglang") || lower.contains("qwen"))
+}
+
+/// Bounded async discovery for SGLang backend via `/get_server_info`.
+/// Probes both HTTP and HTTPS, validates the response body, and caches the result.
+pub async fn probe_sglang_backend_async(endpoint: &str) -> bool {
+    let base = normalize_endpoint_base(endpoint);
+
+    // 1. Check cache
+    if let Some(cached) = get_sglang_capability(&base) {
+        return cached;
+    }
+
+    // 2. Fast hostname heuristic
+    if is_sglang_serving_deployment(&base) {
+        set_sglang_capability(&base, true);
+        return true;
+    }
+
+    // 3. Bounded HTTP/HTTPS probe
+    let url = format!("{}/get_server_info", base);
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(500))
+        .connect_timeout(std::time::Duration::from_millis(300))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    let is_sglang = match client.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => match resp.text().await {
+            Ok(body) => is_sglang_server_info_body(&body),
+            Err(_) => false,
+        },
+        _ => false,
+    };
+
+    set_sglang_capability(&base, is_sglang);
+    is_sglang
+}
+
+/// Detects if an endpoint is an SGLang deployment behaviourally via `/get_server_info`,
+/// falling back to hostname/port heuristics when offline or when probing cannot be performed.
+pub fn is_sglang_backend(endpoint: &str) -> bool {
+    let base = normalize_endpoint_base(endpoint);
+
+    // 1. Cached capability
+    if let Some(cached) = get_sglang_capability(&base) {
+        return cached;
+    }
+
+    // 2. Fast hostname / known deployment heuristic
+    if is_sglang_serving_deployment(&base) {
+        return true;
+    }
+
+    // 3. For sync contexts outside an active Tokio runtime, probe via blocking client
+    if tokio::runtime::Handle::try_current().is_err() {
+        if let Ok(client) = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_millis(300))
+            .connect_timeout(std::time::Duration::from_millis(200))
+            .build()
+        {
+            let url = format!("{}/get_server_info", base);
+            if let Ok(resp) = client.get(&url).send() {
+                if resp.status().is_success() {
+                    if let Ok(body) = resp.text() {
+                        let is_sg = is_sglang_server_info_body(&body);
+                        set_sglang_capability(&base, is_sg);
+                        return is_sg;
+                    }
+                }
+            }
+        }
+        set_sglang_capability(&base, false);
+        return false;
+    }
+
+    // Inside Tokio when not pre-cached, rely on heuristic to avoid blocking async workers
+    false
 }
 
 /// Returns true if the endpoint URL indicates an SGLang serving deployment
 /// where OpenAI schema enforcement and SGLang chat templates diverge on top-level `reasoning_effort`.
 pub fn is_sglang_serving_deployment(endpoint: &str) -> bool {
     let lower = endpoint.to_ascii_lowercase();
-    lower.contains("sglang") || lower.contains("selfware.design") || lower.contains(":30000")
+    lower.contains("sglang")
+        || lower.contains("selfware.design")
+        || lower.contains(":30000")
+        || lower.contains("localhost:8000")
+        || lower.contains("127.0.0.1:8000")
 }
 
 #[cfg(test)]

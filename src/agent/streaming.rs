@@ -30,48 +30,14 @@ fn streaming_usage_delta(
         (Some(a), Some(b)) => Some(a.max(b)),
         (a, b) => a.or(b),
     };
-    previous.completion_tokens_details = match (
-        &previous.completion_tokens_details,
-        &current.completion_tokens_details,
-    ) {
-        (Some(p), Some(c)) => Some(crate::api::types::CompletionTokensDetails {
-            reasoning_tokens: match (p.reasoning_tokens, c.reasoning_tokens) {
-                (Some(a), Some(b)) => Some(a.max(b)),
-                (a, b) => a.or(b),
-            },
-            accepted_prediction_tokens: match (
-                p.accepted_prediction_tokens,
-                c.accepted_prediction_tokens,
-            ) {
-                (Some(a), Some(b)) => Some(a.max(b)),
-                (a, b) => a.or(b),
-            },
-            rejected_prediction_tokens: match (
-                p.rejected_prediction_tokens,
-                c.rejected_prediction_tokens,
-            ) {
-                (Some(a), Some(b)) => Some(a.max(b)),
-                (a, b) => a.or(b),
-            },
-        }),
-        (Some(p), None) => Some(p.clone()),
-        (None, Some(c)) => Some(c.clone()),
-        (None, None) => None,
-    };
-    previous.prompt_tokens_details = match (
-        &previous.prompt_tokens_details,
-        &current.prompt_tokens_details,
-    ) {
-        (Some(p), Some(c)) => Some(crate::api::types::PromptTokensDetails {
-            cached_tokens: match (p.cached_tokens, c.cached_tokens) {
-                (Some(a), Some(b)) => Some(a.max(b)),
-                (a, b) => a.or(b),
-            },
-        }),
-        (Some(p), None) => Some(p.clone()),
-        (None, Some(c)) => Some(c.clone()),
-        (None, None) => None,
-    };
+    previous.completion_tokens_details = crate::api::types::merge_completion_details_max(
+        previous.completion_tokens_details.as_ref(),
+        current.completion_tokens_details.as_ref(),
+    );
+    previous.prompt_tokens_details = crate::api::types::merge_prompt_details_max(
+        previous.prompt_tokens_details.as_ref(),
+        current.prompt_tokens_details.as_ref(),
+    );
     (prompt, completion)
 }
 
@@ -655,7 +621,7 @@ impl Agent {
                 StreamChunk::ToolCall(call) => {
                     tool_calls.push(call);
                 }
-                StreamChunk::Usage(u) => {
+                StreamChunk::Usage(u, coverage) => {
                     debug!(
                         "Token usage: {} prompt, {} completion",
                         u.prompt_tokens, u.completion_tokens
@@ -669,10 +635,18 @@ impl Agent {
                         reported_usage.completion_tokens as u64,
                     );
 
-                    captured_prompt_tokens = Some(reported_usage.prompt_tokens as u32);
-                    captured_completion_tokens = Some(reported_usage.completion_tokens as u32);
-                    captured_total_tokens = Some(reported_usage.total_tokens as u32);
-                    captured_cost = reported_usage.cost;
+                    if coverage.prompt {
+                        captured_prompt_tokens = Some(reported_usage.prompt_tokens as u32);
+                    }
+                    if coverage.completion {
+                        captured_completion_tokens = Some(reported_usage.completion_tokens as u32);
+                    }
+                    if coverage.total {
+                        captured_total_tokens = Some(reported_usage.total_tokens as u32);
+                    }
+                    if u.cost.is_some() {
+                        captured_cost = reported_usage.cost;
+                    }
 
                     self.emit_event(AgentEvent::TokenUsage {
                         prompt_tokens: prompt_delta,

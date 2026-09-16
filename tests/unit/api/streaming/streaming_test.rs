@@ -78,7 +78,7 @@ fn parse_sse_event_joins_multiline_data_field_per_sse_spec() {
     let chunks = parse_sse_event(event, &mut acc);
     assert_eq!(chunks.len(), 2);
     assert!(matches!(&chunks[0], StreamChunk::Content(text) if text == "hello"));
-    assert!(matches!(&chunks[1], StreamChunk::Usage(u) if u.total_tokens == 7));
+    assert!(matches!(&chunks[1], StreamChunk::Usage(u, _) if u.total_tokens == 7));
 }
 
 #[test]
@@ -97,7 +97,7 @@ fn parse_sse_event_preserves_logprobs_and_flat_reasoning_tokens() {
                 assert_eq!(lp["tokens"][0], "yes");
                 found_logprobs = true;
             }
-            StreamChunk::Usage(u) => {
+            StreamChunk::Usage(u, _) => {
                 assert_eq!(u.reasoning_tokens, Some(5));
                 assert_eq!(u.reasoning_tokens(), Some(5));
                 found_usage = true;
@@ -163,4 +163,128 @@ async fn multi_token_stream_collection_merges_logprobs() {
     );
     assert_eq!(content_tokens[0]["token"], "Hello");
     assert_eq!(content_tokens[1]["token"], " world");
+}
+
+#[tokio::test]
+async fn test_stream_collection_merges_complete_then_partial() {
+    use super::StreamingResponse;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let sse_data = "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":50,\"total_tokens\":150,\"reasoning_tokens\":30,\"completion_tokens_details\":{\"reasoning_tokens\":30}}}\n\n\
+                    data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}],\"usage\":{\"prompt_tokens\":100}}\n\n\
+                    data: [DONE]\n\n";
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 1024];
+        let _ = socket.read(&mut buf).await.unwrap();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{}",
+            sse_data
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{}/stream", addr))
+        .send()
+        .await
+        .unwrap();
+
+    let streaming_resp = StreamingResponse::new(resp, std::time::Duration::from_secs(5), None);
+    let chat_resp = streaming_resp.collect().await.unwrap();
+    server.await.unwrap();
+
+    // Earlier complete snapshot must not be wiped out by subsequent partial snapshot
+    assert_eq!(chat_resp.usage.prompt_tokens, 100);
+    assert_eq!(chat_resp.usage.completion_tokens, 50);
+    assert_eq!(chat_resp.usage.total_tokens, 150);
+    assert_eq!(chat_resp.usage.reasoning_tokens(), Some(30));
+    assert!(chat_resp.usage.completion_tokens_details.is_some());
+}
+
+#[tokio::test]
+async fn test_stream_collection_handles_total_only_and_partial_sequences() {
+    use super::StreamingResponse;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    // Emits prompt_tokens first, then total_tokens without completion_tokens
+    let sse_data = "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}],\"usage\":{\"prompt_tokens\":100}}\n\n\
+                    data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}],\"usage\":{\"total_tokens\":150}}\n\n\
+                    data: [DONE]\n\n";
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 1024];
+        let _ = socket.read(&mut buf).await.unwrap();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{}",
+            sse_data
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{}/stream", addr))
+        .send()
+        .await
+        .unwrap();
+
+    let streaming_resp = StreamingResponse::new(resp, std::time::Duration::from_secs(5), None);
+    let chat_resp = streaming_resp.collect().await.unwrap();
+    server.await.unwrap();
+
+    // Both partial snapshots must be merged without being rejected or zeroed out
+    assert_eq!(chat_resp.usage.prompt_tokens, 100);
+    assert_eq!(chat_resp.usage.total_tokens, 150);
+}
+
+#[tokio::test]
+async fn test_stream_collection_retains_reported_components_on_inconsistent_total() {
+    use super::StreamingResponse;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    // Emits a chunk with prompt=100, completion=20, total=0, reasoning=10
+    // Total is inconsistent with prompt+completion, but components and details must NOT be discarded.
+    let sse_data = "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":20,\"total_tokens\":0,\"completion_tokens_details\":{\"reasoning_tokens\":10}}}\n\n\
+                    data: [DONE]\n\n";
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 1024];
+        let _ = socket.read(&mut buf).await.unwrap();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{}",
+            sse_data
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{}/stream", addr))
+        .send()
+        .await
+        .unwrap();
+
+    let streaming_resp = StreamingResponse::new(resp, std::time::Duration::from_secs(5), None);
+    let chat_resp = streaming_resp.collect().await.unwrap();
+    server.await.unwrap();
+
+    assert_eq!(chat_resp.usage.prompt_tokens, 100);
+    assert_eq!(chat_resp.usage.completion_tokens, 20);
+    assert_eq!(chat_resp.usage.reasoning_tokens(), Some(10));
+    // Derived total should reconcile to prompt + completion (120)
+    assert_eq!(chat_resp.usage.total_tokens, 120);
 }

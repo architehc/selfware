@@ -388,7 +388,13 @@ impl Agent {
         // Reconstruct a minimal response_body from what we have. Streaming
         // never gives us back the original JSON — we build a faithful shape
         // that includes the assembled assistant message + reasoning_content
-        // + parsed tool calls so the artifact mirrors the on-the-wire format.
+        // + parsed tool calls + reconciled usage so the artifact mirrors the on-the-wire format.
+        let total_tokens = match (meta.prompt_tokens, meta.completion_tokens) {
+            (Some(p), Some(c)) => Some(p.saturating_add(c)),
+            (Some(p), None) => Some(p),
+            (None, Some(c)) => Some(c),
+            (None, None) => None,
+        };
         let response_body = serde_json::json!({
             "choices": [{
                 "index": 0,
@@ -399,11 +405,11 @@ impl Agent {
                     "tool_calls": parsed_tool_calls,
                 },
                 "finish_reason": meta.finish_reason,
-                "logprobs": meta.logprobs,
             }],
             "usage": {
                 "prompt_tokens": meta.prompt_tokens,
                 "completion_tokens": meta.completion_tokens,
+                "total_tokens": total_tokens,
             },
         });
 

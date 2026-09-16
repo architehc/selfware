@@ -66,13 +66,15 @@ fn build_role_swarm(roles: &[AgentRole]) -> (Swarm, Vec<String>) {
 /// Print an honest per-agent results summary: what each agent actually
 /// returned, how long it took, provider-reported token usage and cost when
 /// available, and the error for failed agents.
-fn print_agent_summary(results: &[AgentResult]) {
+pub fn print_agent_summary(results: &[AgentResult]) {
     println!("\n{}", "Agent Results:".bright_cyan().bold());
 
     let mut any_usage = false;
     let mut total_tokens = 0usize;
     let mut total_cost = 0.0f64;
     let mut any_cost = false;
+    let mut total_reasoning = 0usize;
+    let mut any_reasoning = false;
 
     for result in results {
         let status = if result.success {
@@ -90,19 +92,34 @@ fn print_agent_summary(results: &[AgentResult]) {
         if let Some(usage) = &result.usage {
             any_usage = true;
             total_tokens += usage.total_tokens;
+            if let Some(r) = usage.reasoning_tokens() {
+                any_reasoning = true;
+                total_reasoning = total_reasoning.saturating_add(r);
+            }
+            let reasoning_str = usage
+                .reasoning_tokens()
+                .map(|r| format!(", {} reasoning", r))
+                .unwrap_or_default();
             match usage.cost {
                 Some(cost) => {
                     any_cost = true;
                     total_cost += cost;
                     println!(
-                        "    {} tokens ({} prompt + {} completion), ${:.6}",
-                        usage.total_tokens, usage.prompt_tokens, usage.completion_tokens, cost
+                        "    {} tokens ({} prompt + {} completion{}), ${:.6}",
+                        usage.total_tokens,
+                        usage.prompt_tokens,
+                        usage.completion_tokens,
+                        reasoning_str,
+                        cost
                     );
                 }
                 None => {
                     println!(
-                        "    {} tokens ({} prompt + {} completion)",
-                        usage.total_tokens, usage.prompt_tokens, usage.completion_tokens
+                        "    {} tokens ({} prompt + {} completion{})",
+                        usage.total_tokens,
+                        usage.prompt_tokens,
+                        usage.completion_tokens,
+                        reasoning_str
                     );
                 }
             }
@@ -115,10 +132,18 @@ fn print_agent_summary(results: &[AgentResult]) {
     }
 
     if any_usage {
-        if any_cost {
-            println!("  Total: {} tokens, ${:.6}", total_tokens, total_cost);
+        let reasoning_str = if any_reasoning {
+            format!(" ({} reasoning)", total_reasoning)
         } else {
-            println!("  Total: {} tokens", total_tokens);
+            String::new()
+        };
+        if any_cost {
+            println!(
+                "  Total: {} tokens{}, ${:.6}",
+                total_tokens, reasoning_str, total_cost
+            );
+        } else {
+            println!("  Total: {} tokens{}", total_tokens, reasoning_str);
         }
     }
 }

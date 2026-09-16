@@ -2449,6 +2449,14 @@ To call a tool, use this EXACT XML structure:
             .cumulative_token_usage
             .total
             .saturating_add(usage.total_tokens);
+        if let Some(r) = usage.reasoning_tokens() {
+            self.cumulative_token_usage.reasoning = Some(
+                self.cumulative_token_usage
+                    .reasoning
+                    .unwrap_or(0)
+                    .saturating_add(r),
+            );
+        }
         self.cumulative_cost_usd += usage.cost.unwrap_or(0.0);
         self.client
             .ensure_budget_floor(self.cumulative_token_usage.total, self.cumulative_cost_usd);

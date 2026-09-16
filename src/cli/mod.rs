@@ -1616,7 +1616,7 @@ async fn run_multi_chat_one_shot(
             println!("{}", serde_json::to_string_pretty(&json)?);
         }
     } else if !quiet {
-        print_multi_agent_summary(&results);
+        multiagent::print_agent_summary(&results);
 
         let summary = multiagent::MultiAgentChat::aggregate_results(&results);
         println!("\n{}", "Aggregated Result:".bright_cyan().bold());
@@ -1747,68 +1747,6 @@ fn multi_agent_result_json(result: &multiagent::AgentResult) -> serde_json::Valu
         "error": result.error,
         "usage": result.usage,
     })
-}
-
-/// Honest per-agent summary for the one-shot text output: what each agent
-/// actually returned, provider-reported usage/cost when available, the error
-/// for failed agents, and a totals line. (Mirror of the interactive loop's
-/// summary, kept local because that helper is private to the orchestration
-/// module.)
-fn print_multi_agent_summary(results: &[multiagent::AgentResult]) {
-    println!("\n{}", "Agent Results:".bright_cyan().bold());
-
-    let mut any_usage = false;
-    let mut total_tokens = 0usize;
-    let mut total_cost = 0.0f64;
-    let mut any_cost = false;
-
-    for result in results {
-        let status = if result.success {
-            "✓".bright_green()
-        } else {
-            "✗".bright_red()
-        };
-        println!(
-            "  {} {} ({}) — {:.2}s",
-            status,
-            result.agent_name,
-            result.role.name(),
-            result.duration.as_secs_f64()
-        );
-        if let Some(usage) = &result.usage {
-            any_usage = true;
-            total_tokens += usage.total_tokens;
-            match usage.cost {
-                Some(cost) => {
-                    any_cost = true;
-                    total_cost += cost;
-                    println!(
-                        "    {} tokens ({} prompt + {} completion), ${:.6}",
-                        usage.total_tokens, usage.prompt_tokens, usage.completion_tokens, cost
-                    );
-                }
-                None => {
-                    println!(
-                        "    {} tokens ({} prompt + {} completion)",
-                        usage.total_tokens, usage.prompt_tokens, usage.completion_tokens
-                    );
-                }
-            }
-        }
-        if !result.success {
-            if let Some(error) = &result.error {
-                println!("    error: {}", error);
-            }
-        }
-    }
-
-    if any_usage {
-        if any_cost {
-            println!("  Total: {} tokens, ${:.6}", total_tokens, total_cost);
-        } else {
-            println!("  Total: {} tokens", total_tokens);
-        }
-    }
 }
 
 async fn handle_command(

@@ -20,6 +20,7 @@ pub use tool_calling::{
     attach_tools, extract_tool_calls, extract_tool_calls_from_text, parsed_to_tool_call,
 };
 pub use types::*;
+pub use usage::UsageCoverage;
 
 const DISABLED_THINKING_SYSTEM_MESSAGE: &str =
     "CRITICAL INSTRUCTION: DO NOT use <think> blocks or any thinking process in your response. Output your final response directly and immediately.";
@@ -190,6 +191,7 @@ pub(crate) fn merge_extra_body(
     body: &mut serde_json::Value,
     extra_body: Option<&serde_json::Map<String, serde_json::Value>>,
     context: &str,
+    endpoint: Option<&str>,
 ) -> Result<()> {
     let Some(extra_body) = extra_body else {
         return Ok(());
@@ -215,24 +217,39 @@ pub(crate) fn merge_extra_body(
             );
         }
         if k == "reasoning_effort" {
-            let model_name = body_obj.get("model").and_then(|v| v.as_str()).unwrap_or("");
-            let is_qwen = model_name.to_ascii_lowercase().contains("qwen");
             let Some(val) = value.as_str() else {
                 bail!(
-                    "{} extra_body.reasoning_effort must be a string ('low' or 'medium'), got: {}",
+                    "{} extra_body.reasoning_effort must be a string, got: {}",
                     context,
                     value
                 );
             };
-            if is_qwen && !val.eq_ignore_ascii_case("low") && !val.eq_ignore_ascii_case("medium") {
+            let model_name = body_obj.get("model").and_then(|v| v.as_str()).unwrap_or("");
+            let is_qwen = model_name.to_ascii_lowercase().contains("qwen");
+
+            // 1. High rejected for Qwen everywhere: Qwen chat template refuses "high" on all serving stacks
+            if is_qwen && val.eq_ignore_ascii_case("high") {
                 bail!(
-                    "{} extra_body cannot set reasoning_effort to '{}' at top-level for Qwen models. \
-                     Top-level reasoning_effort only accepts 'low' or 'medium' ('high' is rejected by the model template, \
-                     and 'xhigh' is rejected by the endpoint schema). \
-                     For xhigh reasoning, place it in chat_template_kwargs.reasoning_effort \
-                     or omit the field (default is xhigh).",
-                    context, val
+                    "{} extra_body cannot set reasoning_effort to 'high' for Qwen models. \
+                     The Qwen chat template refuses 'high' on all serving stacks (accepted values: 'low', 'medium', or default/xhigh in chat_template_kwargs).",
+                    context
                 );
+            }
+
+            // 2. xhigh rejected on SGLang detected behaviourally
+            if val.eq_ignore_ascii_case("xhigh") {
+                let is_sglang = endpoint
+                    .map(crate::config::is_sglang_backend)
+                    .unwrap_or(false);
+                if is_sglang {
+                    bail!(
+                        "{} extra_body cannot set reasoning_effort to 'xhigh' at top-level on SGLang. \
+                         Top-level reasoning_effort only accepts 'low' or 'medium' ('xhigh' is rejected by SGLang schema). \
+                         For xhigh reasoning, place it in chat_template_kwargs.reasoning_effort \
+                         or omit the field (default is xhigh).",
+                        context
+                    );
+                }
             }
         }
     }

@@ -452,6 +452,19 @@ pub async fn auto_calibrate(config: &mut Config) -> Result<bool> {
         config.max_tokens = detected.max_tokens;
         config.context_length = detected.context_length;
         config.temperature = detected.temperature;
+
+        // Respect user-set concurrency provenance rather than wholesale overwrite
+        let user_set_concurrency = provenance_is_user_set(config, "concurrency");
+        if !user_set_concurrency && !provenance_is_user_set(config, "concurrency.max_streams") {
+            config.concurrency.max_streams = detected.concurrency.max_streams;
+        }
+        if !user_set_concurrency && !provenance_is_user_set(config, "concurrency.max_tools") {
+            config.concurrency.max_tools = detected.concurrency.max_tools;
+        }
+        if !user_set_concurrency && !provenance_is_user_set(config, "concurrency.max_global") {
+            config.concurrency.max_global = detected.concurrency.max_global;
+        }
+
         config.agent.native_function_calling = detected.agent.native_function_calling;
         config.agent.streaming = detected.agent.streaming;
         config.agent.token_budget = detected.agent.token_budget;
@@ -474,6 +487,15 @@ pub async fn auto_calibrate(config: &mut Config) -> Result<bool> {
                 .sources
                 .set(key, super::provenance::ConfigSource::AutoConfig);
         }
+        let any_concurrency_user_set = user_set_concurrency
+            || provenance_is_user_set(config, "concurrency.max_streams")
+            || provenance_is_user_set(config, "concurrency.max_tools")
+            || provenance_is_user_set(config, "concurrency.max_global");
+        if !any_concurrency_user_set {
+            config
+                .sources
+                .set("concurrency", super::provenance::ConfigSource::AutoConfig);
+        }
 
         if let Some(profile) = config.models.get_mut("default") {
             profile.endpoint = config.endpoint.clone();
@@ -490,7 +512,7 @@ pub async fn auto_calibrate(config: &mut Config) -> Result<bool> {
         println!(
             "  {} Context: {} tokens | Multimodal: {} | Tools: {} | Streaming: {}",
             "ℹ".cyan(),
-            best.context_length.to_string().bright_white(),
+            config.context_length.to_string().bright_white(),
             if best.multimodal {
                 "yes".green()
             } else {

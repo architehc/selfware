@@ -629,3 +629,177 @@ fn test_evaluate_vision_responses_distinguishes_inconclusive_empty_from_uncondit
         VisionProbeOutcome::Inconclusive
     );
 }
+
+#[test]
+fn test_is_vision_configured_and_target_resolution() {
+    let mut config = Config::default();
+    assert!(!is_vision_configured("qwen3-coder", &config));
+
+    // When a vision model profile is configured with modalities = ["text", "vision"]
+    let profile = crate::config::ModelProfile {
+        endpoint: "http://127.0.0.1:1234/v1".to_string(),
+        model: "qwen-vl".to_string(),
+        api_key: None,
+        max_tokens: 4096,
+        temperature: 0.0,
+        modalities: vec!["text".to_string(), "vision".to_string()],
+        context_length: 32768,
+        extra_body: None,
+        native_function_calling: None,
+        max_retries: None,
+        response_timeout_floor_secs: None,
+    };
+    config.models.insert("vision".to_string(), profile);
+
+    // Only the model or profile with vision configured reports true
+    assert!(is_vision_configured("qwen-vl", &config));
+    assert!(is_vision_configured("vision", &config));
+    assert!(
+        !is_vision_configured("other-model", &config),
+        "unrelated text models must NOT be treated as vision configured"
+    );
+
+    // Target resolution tests
+    let target_vl = resolve_vision_target("qwen-vl", &config).expect("should resolve target");
+    assert_eq!(target_vl.model, "qwen-vl");
+
+    let target_text = resolve_vision_target("other-model", &config);
+    assert!(
+        target_text.is_none(),
+        "text model with no vision config must resolve to None"
+    );
+}
+
+#[test]
+fn test_map_vision_status_and_detail_all_variants() {
+    // 1. Pure text model, probe not run -> Ok "no vision modality configured"
+    let (status, detail, fix) = map_vision_status_and_detail(None, None, false);
+    assert_eq!(status, DoctorCheckStatus::Ok);
+    assert!(detail.contains("no vision modality configured"));
+    assert!(fix.is_none());
+
+    // 2. Vision expected, probe not completed -> Warning
+    let (status, detail, fix) =
+        map_vision_status_and_detail(None, Some("primary model (qwen-vl)"), true);
+    assert_eq!(status, DoctorCheckStatus::Warning);
+    assert!(detail.contains("vision suggested"));
+    assert!(fix.is_some());
+
+    // 3. Unauthorized HTTP 401/403 -> Warning with auth-specific fix hint (not color tokens!)
+    let (status, detail, fix) = map_vision_status_and_detail(
+        Some(VisionProbeOutcome::Unauthorized),
+        Some("model profile 'vision' (qwen-vl)"),
+        true,
+    );
+    assert_eq!(status, DoctorCheckStatus::Warning);
+    assert!(detail.contains("authentication error"));
+    assert!(fix.unwrap().contains("API key"));
+
+    // 4. Conditioned -> Ok
+    let (status, detail, fix) = map_vision_status_and_detail(
+        Some(VisionProbeOutcome::Conditioned),
+        Some("primary model (qwen-vl)"),
+        true,
+    );
+    assert_eq!(status, DoctorCheckStatus::Ok);
+    assert!(detail.contains("conditioned"));
+    assert!(fix.is_none());
+
+    // 5. Unconditioned -> Warning
+    let (status, detail, fix) = map_vision_status_and_detail(
+        Some(VisionProbeOutcome::Unconditioned),
+        Some("primary model (qwen-vl)"),
+        true,
+    );
+    assert_eq!(status, DoctorCheckStatus::Warning);
+    assert!(detail.contains("failed image conditioning"));
+    assert!(fix.is_some());
+
+    // 6. Inconclusive -> Warning
+    let (status, detail, fix) = map_vision_status_and_detail(
+        Some(VisionProbeOutcome::Inconclusive),
+        Some("primary model (qwen-vl)"),
+        true,
+    );
+    assert_eq!(status, DoctorCheckStatus::Warning);
+    assert!(detail.contains("unknown"));
+    assert!(fix.is_some());
+}
+
+#[tokio::test]
+async fn test_probe_vision_conditioning_401_returns_unauthorized_without_second_probe() {
+    let server = crate::testing::mock_api::MockLlmServer::builder()
+        .with_error(401, "{\"error\": \"Unauthorized\"}")
+        .build()
+        .await;
+
+    let client = reqwest::Client::new();
+    let url = format!("{}/v1/chat/completions", server.url());
+    let outcome = probe_vision_conditioning(&client, &url, "qwen-vl", Some("invalid-key")).await;
+
+    assert_eq!(outcome, VisionProbeOutcome::Unauthorized);
+    assert_eq!(
+        server.captured_request_bodies().await.len(),
+        1,
+        "must not send second (blue) probe after red probe 401"
+    );
+    server.stop().await;
+}
+
+#[test]
+fn test_resolve_vision_target_precedence_and_credential_scoping() {
+    let mut config = Config::default();
+    config.endpoint = "https://primary-llm.example.com/v1".to_string();
+    config.model = "qwen-vl".to_string();
+    config.api_key = Some(crate::config::RedactedString::new("primary-secret-key"));
+
+    // Case 1: Explicit profile takes precedence over looks_multimodal(model)
+    let mut profile1 = crate::config::ModelProfile {
+        endpoint: "https://custom-vision.example.com/v1".to_string(),
+        model: "qwen-vl".to_string(),
+        api_key: None,
+        max_tokens: 4096,
+        temperature: 0.0,
+        modalities: vec!["text".to_string(), "vision".to_string()],
+        context_length: 32768,
+        extra_body: None,
+        native_function_calling: None,
+        max_retries: None,
+        response_timeout_floor_secs: None,
+    };
+    config.models.insert("vision".to_string(), profile1.clone());
+
+    let target = resolve_vision_target("qwen-vl", &config).expect("must resolve target");
+    assert_eq!(target.endpoint, "https://custom-vision.example.com/v1");
+    // Case 2: Endpoint on different host must NOT inherit primary API key!
+    assert!(
+        target.api_key.is_none(),
+        "profile on different endpoint must not inherit primary API key"
+    );
+
+    // Case 3: Explicit profile with its own API key uses its own key
+    profile1.api_key = Some(crate::config::RedactedString::new("profile-secret-key"));
+    config.models.insert("vision".to_string(), profile1);
+    let target_with_key = resolve_vision_target("qwen-vl", &config).expect("must resolve target");
+    assert_eq!(target_with_key.api_key, Some("profile-secret-key"));
+
+    // Case 4: Profile on SAME host inherits primary key when profile key is None
+    let profile_same_host = crate::config::ModelProfile {
+        endpoint: "https://primary-llm.example.com/v2".to_string(),
+        model: "qwen-vl-fast".to_string(),
+        api_key: None,
+        max_tokens: 4096,
+        temperature: 0.0,
+        modalities: vec!["vision".to_string()],
+        context_length: 32768,
+        extra_body: None,
+        native_function_calling: None,
+        max_retries: None,
+        response_timeout_floor_secs: None,
+    };
+    config
+        .models
+        .insert("same-host".to_string(), profile_same_host);
+    let target_same = resolve_vision_target("qwen-vl-fast", &config).expect("must resolve target");
+    assert_eq!(target_same.api_key, Some("primary-secret-key"));
+}

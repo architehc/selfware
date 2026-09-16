@@ -16,7 +16,7 @@ static STREAM_SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(100));
 fn observe_attempt(attempt: &Option<super::usage::AttemptGuard>, chunk: &StreamChunk) {
     if let Some(attempt) = attempt {
         match chunk {
-            StreamChunk::Usage(usage) => attempt.record(usage),
+            StreamChunk::Usage(usage, coverage) => attempt.record_with_coverage(usage, *coverage),
             StreamChunk::Done => attempt.complete(),
             StreamChunk::Error(_) => attempt.fail(),
             _ => {}
@@ -183,7 +183,7 @@ impl StreamingResponse {
                             for mut chunk in parse_sse_event(&event, &mut accumulator) {
                                 saw_valid_event = true;
                                 observe_attempt(&attempt, &chunk);
-                                if let StreamChunk::Usage(usage) = &mut chunk {
+                                if let StreamChunk::Usage(usage, _) = &mut chunk {
                                     super::usage::add_response_usage(usage, &prior_usage);
                                 }
                                 if tx.send(Ok(chunk)).await.is_err() {
@@ -226,7 +226,7 @@ impl StreamingResponse {
                 for mut chunk in parse_sse_event(&remaining, &mut accumulator) {
                     saw_valid_event = true;
                     observe_attempt(&attempt, &chunk);
-                    if let StreamChunk::Usage(usage) = &mut chunk {
+                    if let StreamChunk::Usage(usage, _) = &mut chunk {
                         super::usage::add_response_usage(usage, &prior_usage);
                     }
                     if tx.send(Ok(chunk)).await.is_err() {
@@ -263,6 +263,8 @@ impl StreamingResponse {
         let mut reasoning = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut usage = Usage::default();
+        let mut cumulative_coverage = super::usage::UsageCoverage::default();
+        let mut raw_reported_total: usize = 0;
         let mut finish_reason: Option<String> = None;
         let mut logprobs: Option<serde_json::Value> = None;
         let mut saw_events = false;
@@ -284,15 +286,42 @@ impl StreamingResponse {
                     saw_events = true;
                     tool_calls.push(call);
                 }
-                StreamChunk::Usage(u) => {
+                StreamChunk::Usage(u, coverage) => {
                     saw_events = true;
-                    if let Err(e) = u.validate() {
-                        tracing::warn!(
-                            "Streaming usage chunk has inconsistent token counts: {}. Ignoring chunk.",
-                            e
+                    if coverage.prompt && coverage.completion && coverage.total {
+                        if let Err(e) = u.validate() {
+                            tracing::warn!(
+                                "Streaming usage chunk has inconsistent token counts: {}. Retaining reported components.",
+                                e
+                            );
+                        }
+                    }
+                    if coverage.prompt {
+                        usage.prompt_tokens = usage.prompt_tokens.max(u.prompt_tokens);
+                        cumulative_coverage.prompt = true;
+                    }
+                    if coverage.completion {
+                        usage.completion_tokens = usage.completion_tokens.max(u.completion_tokens);
+                        cumulative_coverage.completion = true;
+                    }
+                    if coverage.total {
+                        raw_reported_total = raw_reported_total.max(u.total_tokens);
+                        cumulative_coverage.total = true;
+                    }
+                    if let Some(r) = u.reasoning_tokens {
+                        usage.reasoning_tokens = Some(usage.reasoning_tokens.unwrap_or(0).max(r));
+                    }
+                    usage.completion_tokens_details =
+                        crate::api::types::merge_completion_details_max(
+                            usage.completion_tokens_details.as_ref(),
+                            u.completion_tokens_details.as_ref(),
                         );
-                    } else {
-                        usage = u;
+                    usage.prompt_tokens_details = crate::api::types::merge_prompt_details_max(
+                        usage.prompt_tokens_details.as_ref(),
+                        u.prompt_tokens_details.as_ref(),
+                    );
+                    if let Some(c) = u.cost.filter(|c| c.is_finite() && *c >= 0.0) {
+                        usage.cost = Some(usage.cost.unwrap_or(0.0).max(c));
                     }
                 }
                 StreamChunk::Logprobs(lp) => {
@@ -336,12 +365,21 @@ impl StreamingResponse {
             .into());
         }
 
-        if let Err(e) = usage.validate() {
-            tracing::warn!(
-                "Final streamed usage has inconsistent token counts: {}. Using zeroed usage.",
-                e
-            );
-            usage = Usage::default();
+        let component_total = usage.prompt_tokens.saturating_add(usage.completion_tokens);
+        usage.total_tokens = if cumulative_coverage.total {
+            raw_reported_total.max(component_total)
+        } else {
+            component_total
+        };
+
+        if cumulative_coverage.prompt && cumulative_coverage.completion && cumulative_coverage.total
+        {
+            if let Err(e) = usage.validate() {
+                tracing::warn!(
+                    "Final streamed usage has inconsistent token counts: {}. Retaining reported components.",
+                    e
+                );
+            }
         }
 
         Ok(ChatResponse {
@@ -422,8 +460,8 @@ pub enum StreamChunk {
     Reasoning(String),
     /// A tool call
     ToolCall(ToolCall),
-    /// Token usage information
-    Usage(Usage),
+    /// Token usage information and its field coverage
+    Usage(Usage, super::usage::UsageCoverage),
     /// Log probabilities information for choice tokens
     Logprobs(serde_json::Value),
     /// The model's reported finish reason for this turn (e.g. `"stop"`,
@@ -605,11 +643,11 @@ pub(crate) fn parse_sse_event(
         if let Some(err) = json.get("error") {
             // Gateways can include billable usage with their terminal error.
             // Preserve it before the error causes collection to stop.
-            if let Some(usage) = json
-                .get("usage")
-                .and_then(|value| serde_json::from_value::<Usage>(value.clone()).ok())
-            {
-                chunks.push(StreamChunk::Usage(usage));
+            if let Some(usage_val) = json.get("usage") {
+                let coverage = super::usage::UsageCoverage::from_json(usage_val);
+                if let Ok(usage) = serde_json::from_value::<Usage>(usage_val.clone()) {
+                    chunks.push(StreamChunk::Usage(usage, coverage));
+                }
             }
             let msg = err
                 .get("message")
@@ -670,12 +708,13 @@ pub(crate) fn parse_sse_event(
             }
         }
 
-        if let Some(usage) = json.get("usage") {
-            match serde_json::from_value::<Usage>(usage.clone()) {
-                Ok(u) => chunks.push(StreamChunk::Usage(u)),
+        if let Some(usage_val) = json.get("usage") {
+            let coverage = super::usage::UsageCoverage::from_json(usage_val);
+            match serde_json::from_value::<Usage>(usage_val.clone()) {
+                Ok(u) => chunks.push(StreamChunk::Usage(u, coverage)),
                 Err(e) => warn!(
                     "Failed to parse streamed usage ({}); token counts for this stream will be underreported (raw: {})",
-                    e, usage
+                    e, usage_val
                 ),
             }
         }
