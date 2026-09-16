@@ -34,13 +34,14 @@ fn test_file_killswitch_trips_and_removes() {
     assert!(check_killswitch(Some(project_root)).is_ok());
 
     // Trip file killswitch
-    let path = trip_file_killswitch(project_root, "RSI stability check").unwrap();
-    assert!(path.exists());
+    let outcome = trip_file_killswitch(project_root, "RSI stability check").unwrap();
+    assert!(outcome.path().exists());
+    assert!(matches!(outcome, TripFileOutcome::Written { .. }));
 
     // Now active
     match check_killswitch(Some(project_root)) {
         Err(KillswitchError::File { path: p, reason }) => {
-            assert_eq!(p, path);
+            assert_eq!(p, outcome.path());
             assert!(reason.contains("RSI stability check"));
         }
         other => panic!("Expected File killswitch error, got: {:?}", other),
@@ -49,7 +50,7 @@ fn test_file_killswitch_trips_and_removes() {
     // Remove file killswitch
     let removed = remove_file_killswitch(project_root).unwrap();
     assert!(removed);
-    assert!(!path.exists());
+    assert!(!outcome.path().exists());
 
     // Now inactive again
     assert!(check_killswitch(Some(project_root)).is_ok());
@@ -214,6 +215,10 @@ fn test_trip_file_killswitch_fifo_preservation_and_bounded_completion() {
             let trip_res = trip_file_killswitch(project_root, "Emergency halt on FIFO");
             assert!(start.elapsed() < std::time::Duration::from_millis(500));
             assert!(trip_res.is_ok());
+            assert!(matches!(
+                trip_res.as_ref().unwrap(),
+                TripFileOutcome::PreservedExisting { .. }
+            ));
 
             // The FIFO must be preserved as a special file (not overwritten by a regular file)
             let meta = fifo_path.symlink_metadata().unwrap();
@@ -251,6 +256,10 @@ fn test_trip_file_killswitch_symlink_preservation() {
     // Tripping over an existing symlink must NOT overwrite the symlink target
     let trip_res = trip_file_killswitch(project_root, "Emergency halt on symlink");
     assert!(trip_res.is_ok());
+    assert!(matches!(
+        trip_res.as_ref().unwrap(),
+        TripFileOutcome::PreservedExisting { .. }
+    ));
 
     let target_content = std::fs::read_to_string(&target_file).unwrap();
     assert_eq!(

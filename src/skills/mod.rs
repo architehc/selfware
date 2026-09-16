@@ -611,7 +611,6 @@ impl SkillRegistry {
         // 1. Validate and load ledger FIRST before any file modifications.
         // A corrupt or unreadable ledger fails fast, preserving existing file state untouched.
         let mut ledger = AdmissionLedger::load_from_dir(target_skills_dir)?;
-        let previous_ledger_entry = ledger.entries.get(&safe_name).cloned();
 
         skill.name = safe_name.clone();
         skill.candidate = true;
@@ -744,15 +743,6 @@ impl SkillRegistry {
                 Some(prev_bytes) => std::fs::write(&target_file, prev_bytes).err(),
                 None => std::fs::remove_file(&target_file).err(),
             };
-            // Restore ledger entry in-memory
-            match previous_ledger_entry {
-                Some(entry) => {
-                    ledger.entries.insert(safe_name, entry);
-                }
-                None => {
-                    ledger.entries.remove(&safe_name);
-                }
-            }
             if let Some(r_err) = rollback_err {
                 return Err(format!(
                     "Failed to persist admission ledger: {e}; ROLLBACK FAILED: {r_err}"

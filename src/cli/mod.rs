@@ -4293,9 +4293,23 @@ max_recovery_attempts = 3
                     } else {
                         std::env::current_dir()?
                     };
-                    let ks_path =
+                    let outcome =
                         crate::safety::killswitch::trip_file_killswitch(&target_root, &reason)?;
-                    println!("🛑 Killswitch TRIPPED at {}: {reason}", ks_path.display());
+                    match outcome {
+                        crate::safety::killswitch::TripFileOutcome::Written { path } => {
+                            println!("🛑 Killswitch TRIPPED at {}: {reason}", path.display());
+                        }
+                        crate::safety::killswitch::TripFileOutcome::PreservedExisting {
+                            path,
+                            description,
+                        } => {
+                            println!(
+                                "🛑 Killswitch already ACTIVE via existing sentinel at {} ({}); operator reason not written to disk: {reason}",
+                                path.display(),
+                                description
+                            );
+                        }
+                    }
                 }
                 KillswitchCommands::Reset { global } => {
                     let target_root = if global {

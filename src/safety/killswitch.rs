@@ -288,8 +288,48 @@ pub fn get_killswitch_status(project_root: Option<&Path>) -> KillswitchStatus {
     }
 }
 
+/// Outcome of tripping a file-based killswitch sentinel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TripFileOutcome {
+    /// Sentinel file was created or updated with the specified reason.
+    Written { path: PathBuf },
+    /// Sentinel already existed as a special file (symlink, FIFO, socket, device, directory)
+    /// and is already active; the sentinel was preserved without opening, and the reason was
+    /// not written to disk.
+    PreservedExisting { path: PathBuf, description: String },
+}
+
+impl TripFileOutcome {
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Written { path } => path,
+            Self::PreservedExisting { path, .. } => path,
+        }
+    }
+
+    pub fn into_path(self) -> PathBuf {
+        match self {
+            Self::Written { path } => path,
+            Self::PreservedExisting { path, .. } => path,
+        }
+    }
+}
+
+impl std::ops::Deref for TripFileOutcome {
+    type Target = Path;
+    fn deref(&self) -> &Self::Target {
+        self.path()
+    }
+}
+
+impl AsRef<Path> for TripFileOutcome {
+    fn as_ref(&self) -> &Path {
+        self.path()
+    }
+}
+
 /// Create a `.selfware/KILLSWITCH` file in the given directory with the provided reason.
-pub fn trip_file_killswitch(project_root: &Path, reason: &str) -> std::io::Result<PathBuf> {
+pub fn trip_file_killswitch(project_root: &Path, reason: &str) -> std::io::Result<TripFileOutcome> {
     let selfware_dir = project_root.join(".selfware");
     std::fs::create_dir_all(&selfware_dir)?;
     let killswitch_path = selfware_dir.join(KILLSWITCH_FILE_NAME);
@@ -303,11 +343,21 @@ pub fn trip_file_killswitch(project_root: &Path, reason: &str) -> std::io::Resul
                 // Do NOT open, write, or replace it — doing so could block indefinitely on
                 // a FIFO or overwrite a symlink target outside the workspace.
                 // Preserve the existing sentinel node and return immediately.
+                let description = if meta.file_type().is_symlink() {
+                    "symlink present".to_string()
+                } else if meta.is_dir() {
+                    "directory present".to_string()
+                } else {
+                    format!("special file present ({:?})", meta.file_type())
+                };
                 tracing::info!(
-                    "Killswitch sentinel already exists as special file or symlink at {:?}; treating as active without opening",
+                    "Killswitch sentinel already exists ({description}) at {:?}; treating as active without opening",
                     killswitch_path
                 );
-                return Ok(killswitch_path);
+                return Ok(TripFileOutcome::PreservedExisting {
+                    path: killswitch_path,
+                    description,
+                });
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -339,7 +389,9 @@ pub fn trip_file_killswitch(project_root: &Path, reason: &str) -> std::io::Resul
     let mut file = open_opts.open(&killswitch_path)?;
     file.write_all(content.as_bytes())?;
     file.sync_all()?;
-    Ok(killswitch_path)
+    Ok(TripFileOutcome::Written {
+        path: killswitch_path,
+    })
 }
 
 /// Remove a `.selfware/KILLSWITCH` file in the given directory if it exists.
