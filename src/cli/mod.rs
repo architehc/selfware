@@ -2330,7 +2330,11 @@ async fn handle_command(
             }
 
             let project_root = std::env::current_dir()?;
-            let orchestrator = SelfEditOrchestrator::new(project_root);
+            if let Err(e) = crate::safety::killswitch::check_killswitch(Some(&project_root)) {
+                eprintln!("Killswitch active: autonomous improvement disabled ({e})");
+                return Err(anyhow::anyhow!("Killswitch active: {e}"));
+            }
+            let orchestrator = SelfEditOrchestrator::new(project_root.clone());
             let targets = orchestrator.analyze_self();
 
             if targets.is_empty() {
@@ -2372,6 +2376,10 @@ async fn handle_command(
             let mut agent = Agent::new(config).await?;
 
             for cycle in 0..cycles {
+                if let Err(e) = crate::safety::killswitch::check_killswitch(Some(&project_root)) {
+                    eprintln!("Killswitch tripped during improvement loop: {e}");
+                    return Err(anyhow::anyhow!("Killswitch active: {e}"));
+                }
                 let targets = orchestrator.analyze_self();
                 let Some(target) = orchestrator.select_target(&targets) else {
                     println!(
@@ -2414,6 +2422,10 @@ async fn handle_command(
             }
 
             let repo_root = std::env::current_dir()?;
+            if let Err(e) = crate::safety::killswitch::check_killswitch(Some(&repo_root)) {
+                eprintln!("Killswitch active: evolution disabled ({e})");
+                return Err(anyhow::anyhow!("Killswitch active: {e}"));
+            }
 
             if workflow == "rsi" {
                 // RSI Orchestrator workflow: recursive self-improvement with
@@ -4254,6 +4266,122 @@ max_recovery_attempts = 3
                              left unchanged.",
                             id, pid, err
                         ),
+                    }
+                }
+            }
+        }
+
+        Commands::Killswitch { command } => {
+            use args::KillswitchCommands;
+            match command {
+                KillswitchCommands::Status => {
+                    let status = crate::safety::killswitch::get_killswitch_status(None);
+                    if status.is_active {
+                        if let Some(err) = status.error {
+                            println!("🛑 Killswitch is ACTIVE: {err}");
+                        } else {
+                            println!("🛑 Killswitch is ACTIVE");
+                        }
+                    } else {
+                        println!("✅ Killswitch is INACTIVE");
+                    }
+                }
+                KillswitchCommands::Trip { reason, global } => {
+                    let target_dir = if global {
+                        dirs::home_dir()
+                            .map(|h| h.join(".selfware"))
+                            .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
+                    } else {
+                        let cwd = std::env::current_dir()?;
+                        cwd.join(".selfware")
+                    };
+                    std::fs::create_dir_all(&target_dir)?;
+                    let ks_path = target_dir.join(crate::safety::killswitch::KILLSWITCH_FILE_NAME);
+                    std::fs::write(&ks_path, format!("{reason}\n"))?;
+                    println!("🛑 Killswitch TRIPPED at {}: {reason}", ks_path.display());
+                }
+                KillswitchCommands::Reset { global } => {
+                    let target_dir = if global {
+                        dirs::home_dir()
+                            .map(|h| h.join(".selfware"))
+                            .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
+                    } else {
+                        let cwd = std::env::current_dir()?;
+                        cwd.join(".selfware")
+                    };
+                    let ks_path = target_dir.join(crate::safety::killswitch::KILLSWITCH_FILE_NAME);
+                    if ks_path.exists() {
+                        std::fs::remove_file(&ks_path)?;
+                        println!("✅ Killswitch file removed: {}", ks_path.display());
+                    } else {
+                        println!("Killswitch file not present at {}", ks_path.display());
+                    }
+                }
+            }
+        }
+
+        Commands::Skill { command } => {
+            use crate::skills::SkillRegistry;
+            use args::SkillCommands;
+            match command {
+                SkillCommands::List => {
+                    let registry = SkillRegistry::discover();
+                    println!("Discovered skills ({}):", registry.len());
+                    for skill in registry.list() {
+                        let badge = skill.trust_badge();
+                        let origin = skill.origin.as_deref().unwrap_or("user");
+                        let tools = if skill.tools.is_empty() {
+                            "-".to_string()
+                        } else {
+                            skill.tools.join(", ")
+                        };
+                        println!(
+                            "  • {:<20} {:<35} (origin: {:<10}, tools: [{}])",
+                            skill.name, badge, origin, tools
+                        );
+                    }
+
+                    // Check candidates in candidate directory
+                    if let Ok(cwd) = std::env::current_dir() {
+                        let candidate_dir = cwd.join(".selfware").join("skill-candidates");
+                        let candidates = SkillRegistry::discover_candidates(&candidate_dir);
+                        if !candidates.is_empty() {
+                            println!("\nUnadmitted skill candidates ({}):", candidates.len());
+                            for c in candidates {
+                                println!(
+                                    "  ? {:<20} {} (path: .selfware/skill-candidates/{}.md)",
+                                    c.name, c.description, c.name
+                                );
+                            }
+                        }
+                    }
+                }
+                SkillCommands::Admit {
+                    candidate_path,
+                    target_dir,
+                } => {
+                    let c_path = std::path::PathBuf::from(candidate_path);
+                    let t_dir = if let Some(td) = target_dir {
+                        std::path::PathBuf::from(td)
+                    } else {
+                        let cwd = std::env::current_dir()?;
+                        cwd.join(".selfware").join("skills")
+                    };
+
+                    match SkillRegistry::admit_candidate(&c_path, &t_dir) {
+                        Ok(admitted) => {
+                            println!(
+                                "✅ Candidate skill '{}' admitted successfully into {}",
+                                admitted.name,
+                                t_dir.display()
+                            );
+                            if let Some(hash) = admitted.content_hash {
+                                println!("   SHA-256 integrity digest: {}", hash);
+                            }
+                        }
+                        Err(e) => {
+                            anyhow::bail!("Failed to admit candidate: {e}");
+                        }
                     }
                 }
             }

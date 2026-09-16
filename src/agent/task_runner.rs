@@ -36,6 +36,9 @@ pub(super) fn is_fatal_loop_error(error: &anyhow::Error) -> bool {
         // this list nor matched by is_no_action_error, so self-healing "recovered"
         // it and retried at the same frozen step ~7× (LOOP-NONTERM-NOTFATAL).
         || msg.contains("NONTERM_PROSE_NO_TOOL")
+        // Killswitch active is an absolute fatal stop across all autonomous agent runs.
+        || msg.contains("Killswitch active")
+        || msg.contains("KILLSWITCH")
 }
 
 /// Human-facing end-of-run summary (headless text mode). Every field comes

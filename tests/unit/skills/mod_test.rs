@@ -391,3 +391,134 @@ fn test_admit_candidate_rejects_symlink_destination() {
         assert_eq!(std::fs::read_to_string(&escape_target).unwrap(), "safe");
     }
 }
+
+#[test]
+fn test_admit_candidate_rejects_symlink_ledger() {
+    let _lock = crate::safety::killswitch::KILLSWITCH_TEST_LOCK.lock();
+    crate::safety::killswitch::reset_in_process();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let active_skills = temp.path().join("skills");
+    let candidate_dir = temp.path().join("skill-candidates");
+    std::fs::create_dir_all(&active_skills).expect("mkdir skills");
+    std::fs::create_dir_all(&candidate_dir).expect("mkdir candidates");
+
+    let candidate_file = candidate_dir.join("ledger_sym_test.md");
+    std::fs::write(
+        &candidate_file,
+        "---\nname: ledger_sym_test\ndescription: Ledger symlink attack\ncandidate: true\nadmitted: false\n---\nPayload.",
+    )
+    .unwrap();
+
+    // Sentinel file outside skills directory
+    let sentinel = temp.path().join("sentinel.txt");
+    std::fs::write(&sentinel, "original sentinel content").unwrap();
+
+    // Create a symlink at .admitted_ledger.json pointing to sentinel
+    let ledger_symlink = active_skills.join(".admitted_ledger.json");
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&sentinel, &ledger_symlink).unwrap();
+        let result = SkillRegistry::admit_candidate(&candidate_file, &active_skills);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("symlink"),
+            "Expected symlink error, got: {err}"
+        );
+        // Sentinel must remain completely untouched!
+        assert_eq!(
+            std::fs::read_to_string(&sentinel).unwrap(),
+            "original sentinel content"
+        );
+    }
+}
+
+#[test]
+fn test_metadata_tampering_detection() {
+    let _lock = crate::safety::killswitch::KILLSWITCH_TEST_LOCK.lock();
+    crate::safety::killswitch::reset_in_process();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let active_skills = temp.path().join("skills");
+    let candidate_dir = temp.path().join("skill-candidates");
+    std::fs::create_dir_all(&active_skills).expect("mkdir skills");
+    std::fs::create_dir_all(&candidate_dir).expect("mkdir candidates");
+
+    let candidate_file = candidate_dir.join("meta_test.md");
+    std::fs::write(
+        &candidate_file,
+        "---\nname: meta_test\ndescription: Legitimate description\ntools: [file_read]\ncandidate: true\nadmitted: false\n---\nLegitimate instructions.",
+    )
+    .unwrap();
+
+    // Admit candidate
+    let admitted = SkillRegistry::admit_candidate(&candidate_file, &active_skills)
+        .expect("admission should succeed");
+    assert!(admitted.admitted);
+
+    // Tamper with metadata only: elevate tools to include shell_exec and declare verified: true
+    let active_file = active_skills.join("meta_test.md");
+    std::fs::write(
+        &active_file,
+        "---\nname: meta_test\ndescription: Legitimate description\ntools: [file_read, shell_exec]\nverified: true\ncandidate: true\nadmitted: true\n---\nLegitimate instructions.",
+    )
+    .unwrap();
+
+    // Discovery must reject because metadata hash does not match ledger record!
+    let mut registry = SkillRegistry::new();
+    registry.discover_dir(&active_skills);
+    assert!(
+        registry.get("meta_test").is_none(),
+        "Tampering with metadata must be detected and rejected by admission ledger"
+    );
+}
+
+#[test]
+fn test_stripped_provenance_flags_with_changed_body_rejected() {
+    let _lock = crate::safety::killswitch::KILLSWITCH_TEST_LOCK.lock();
+    crate::safety::killswitch::reset_in_process();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let active_skills = temp.path().join("skills");
+    let candidate_dir = temp.path().join("skill-candidates");
+    std::fs::create_dir_all(&active_skills).expect("mkdir skills");
+    std::fs::create_dir_all(&candidate_dir).expect("mkdir candidates");
+
+    let candidate_file = candidate_dir.join("prov_test.md");
+    std::fs::write(
+        &candidate_file,
+        "---\nname: prov_test\ndescription: Provenance test\ncandidate: true\nadmitted: false\n---\nOriginal body.",
+    )
+    .unwrap();
+
+    // Admit candidate
+    SkillRegistry::admit_candidate(&candidate_file, &active_skills)
+        .expect("admission should succeed");
+
+    // Rewrite skill file stripping all provenance flags AND changing body
+    let active_file = active_skills.join("prov_test.md");
+    std::fs::write(
+        &active_file,
+        "---\nname: prov_test\ndescription: Provenance test\n---\nChanged backdoor body without provenance flags.",
+    )
+    .unwrap();
+
+    // Discovery must check the ledger, see prov_test was an admitted skill, and reject due to hash mismatch!
+    let mut registry = SkillRegistry::new();
+    registry.discover_dir(&active_skills);
+    assert!(
+        registry.get("prov_test").is_none(),
+        "Stripping provenance flags while modifying body must still be rejected via ledger index"
+    );
+}
+
+#[test]
+fn test_corrupt_ledger_fails_closed() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let active_skills = temp.path().join("skills");
+    std::fs::create_dir_all(&active_skills).unwrap();
+
+    let ledger_file = active_skills.join(".admitted_ledger.json");
+    std::fs::write(&ledger_file, "{ not valid json").unwrap();
+
+    let res = AdmissionLedger::load_from_dir(&active_skills);
+    assert!(res.is_err(), "Corrupt ledger must return Err (fail closed)");
+}

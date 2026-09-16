@@ -1582,6 +1582,9 @@ impl Agent {
                 .await;
                 self.log_tool_call(&name, &args_str, &error_msg, false, start_time, false);
                 self.record_failed_tool_attempt(&name, &args_str, "safety", &error_msg);
+                if error_msg.contains("Killswitch active") || error_msg.contains("KILLSWITCH") {
+                    return Err(anyhow::anyhow!("Killswitch active: {error_msg}"));
+                }
                 continue;
             }
 
@@ -2073,6 +2076,9 @@ impl Agent {
                 None,
             );
             self.record_failed_tool_attempt(&name, &args_str, "safety", &error_msg);
+            if error_msg.contains("Killswitch active") || error_msg.contains("KILLSWITCH") {
+                return Err(anyhow::anyhow!("Killswitch active: {error_msg}"));
+            }
             return Ok(());
         }
 

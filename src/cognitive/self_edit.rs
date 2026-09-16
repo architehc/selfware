@@ -534,6 +534,16 @@ impl SelfEditOrchestrator {
                 return true;
             }
 
+            let file_str = file_path.to_string_lossy();
+            if file_str.contains(".admitted_ledger.json")
+                || file_str.contains(".selfware/skills")
+                || file_str.contains(".selfware/commands")
+                || file_str.contains(".selfware/skill-candidates")
+                || file_str.contains(".selfware/KILLSWITCH")
+            {
+                return true;
+            }
+
             // Direct check against PROTECTED_PATHS (also testing with src/ prefix if omitted)
             if crate::evolution::is_protected(file_path)
                 || crate::evolution::is_protected(&Path::new("src").join(file_path))
@@ -581,7 +591,12 @@ impl SelfEditOrchestrator {
             .iter()
             .rev()
             .take(n)
-            .filter(|r| r.rolled_back || r.effectiveness_score < 0.0)
+            .filter(|r| {
+                if r.status == ProposalStatus::SkippedTrivial {
+                    return false;
+                }
+                r.rolled_back || r.effectiveness_score < 0.0
+            })
             .map(|r| r.category.clone())
             .collect()
     }

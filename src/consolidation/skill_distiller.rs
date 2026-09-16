@@ -578,31 +578,6 @@ impl SkillDistiller {
                 safe_name
             };
 
-            // Candidate protection: never overwrite an existing user-authored skill
-            if let Ok(cwd) = std::env::current_dir() {
-                let user_skill_path = cwd
-                    .join(".selfware")
-                    .join("skills")
-                    .join(format!("{safe_name}.md"));
-                if user_skill_path.exists() {
-                    if let Ok(existing_skill) = Skill::from_file(&user_skill_path) {
-                        let is_user_skill = !existing_skill.candidate
-                            && !matches!(
-                                existing_skill.origin.as_deref(),
-                                Some("distilled" | "generated")
-                            );
-                        if is_user_skill {
-                            tracing::warn!(
-                                "Candidate skill '{}' would shadow user skill at {}; skipping",
-                                safe_name,
-                                user_skill_path.display()
-                            );
-                            continue;
-                        }
-                    }
-                }
-            }
-
             let skill_path = self.skills_dir.join(format!("{}.md", safe_name));
             if !skill_path.starts_with(&self.skills_dir) {
                 return Err(anyhow!(
@@ -617,6 +592,61 @@ impl SkillDistiller {
                         skill_path
                     ));
                 }
+            }
+
+            // Candidate protection: never overwrite an existing user-authored skill
+            let target_paths = [
+                self.skills_dir.join(format!("{safe_name}.md")),
+                if let Ok(cwd) = std::env::current_dir() {
+                    cwd.join(".selfware")
+                        .join("skills")
+                        .join(format!("{safe_name}.md"))
+                } else {
+                    self.skills_dir.join(format!("{safe_name}.md"))
+                },
+            ];
+            let mut shadow_user_skill = false;
+            for user_skill_path in &target_paths {
+                if let Ok(meta) = user_skill_path.symlink_metadata() {
+                    if meta.file_type().is_symlink() {
+                        return Err(anyhow!(
+                            "Destination skill path is a symlink: {:?}",
+                            user_skill_path
+                        ));
+                    }
+                }
+                if user_skill_path.exists() {
+                    match Skill::from_file(user_skill_path) {
+                        Ok(existing_skill) => {
+                            let is_user_skill = !existing_skill.candidate
+                                && !matches!(
+                                    existing_skill.origin.as_deref(),
+                                    Some("distilled" | "generated")
+                                );
+                            if is_user_skill {
+                                shadow_user_skill = true;
+                                tracing::warn!(
+                                    "Candidate skill '{}' would shadow user skill at {}; skipping",
+                                    safe_name,
+                                    user_skill_path.display()
+                                );
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            // Fail closed: existing file cannot be parsed, treat as protected to prevent overwrite
+                            shadow_user_skill = true;
+                            tracing::warn!(
+                                "Existing skill file at {} cannot be parsed ({e}); failing closed and skipping to avoid overwrite",
+                                user_skill_path.display()
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+            if shadow_user_skill {
+                continue;
             }
             let is_new = !skill_path.exists();
 
@@ -695,6 +725,32 @@ impl SkillDistiller {
                 .collect();
             let skill_file = self.skills_dir.join(format!("{}.md", safe_name));
             if skill_file.starts_with(&self.skills_dir) && skill_file.exists() {
+                // Never evict or delete a user-authored skill
+                match Skill::from_file(&skill_file) {
+                    Ok(existing) => {
+                        let is_user = !existing.candidate
+                            && !matches!(
+                                existing.origin.as_deref(),
+                                Some("distilled" | "generated")
+                            );
+                        if is_user {
+                            tracing::warn!(
+                                "Skipping eviction for user-authored skill '{}' at {:?}",
+                                entry.name,
+                                skill_file
+                            );
+                            continue;
+                        }
+                    }
+                    Err(e) => {
+                        // Fail closed: if existing file has unparseable frontmatter, do not delete it
+                        tracing::warn!(
+                            "Refusing to evict unparseable skill file {:?} (failing closed): {e}",
+                            skill_file
+                        );
+                        continue;
+                    }
+                }
                 if let Err(e) = fs::remove_file(&skill_file) {
                     tracing::warn!(
                         "Failed to remove evicted skill file {:?}: {}",

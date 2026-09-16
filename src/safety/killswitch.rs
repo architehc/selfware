@@ -52,6 +52,7 @@ impl KillswitchStatus {
     }
 }
 
+#[cfg(test)]
 pub static KILLSWITCH_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 /// Trip the in-process killswitch with an explanatory reason.
@@ -65,6 +66,22 @@ pub fn trip_in_process(reason: impl Into<String>) {
 pub fn reset_in_process() {
     IN_PROCESS_KILLSWITCH.store(false, Ordering::SeqCst);
     *IN_PROCESS_REASON.write() = None;
+}
+
+/// Parse an environment variable value to determine if it activates the killswitch.
+/// Returns Some(reason) if active, or None if inactive/falsy.
+pub fn parse_env_killswitch_value(val: &str) -> Option<String> {
+    let trimmed = val.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.is_empty() && lower != "0" && lower != "false" && lower != "no" && lower != "off" {
+        Some(if trimmed.is_empty() {
+            "env var present".to_string()
+        } else {
+            trimmed.to_string()
+        })
+    } else {
+        None
+    }
 }
 
 /// Check if the killswitch is currently active anywhere (in-process, env, or default paths).
@@ -86,17 +103,8 @@ pub fn check_killswitch(project_root: Option<&Path>) -> Result<(), KillswitchErr
 
     // 2. Environment variable check
     if let Ok(val) = std::env::var(KILLSWITCH_ENV_VAR) {
-        let trimmed = val.trim();
-        let lower = trimmed.to_ascii_lowercase();
-        if !lower.is_empty() && lower != "0" && lower != "false" && lower != "no" && lower != "off"
-        {
-            return Err(KillswitchError::Environment {
-                reason: if trimmed.is_empty() {
-                    "env var present".to_string()
-                } else {
-                    trimmed.to_string()
-                },
-            });
+        if let Some(reason) = parse_env_killswitch_value(&val) {
+            return Err(KillswitchError::Environment { reason });
         }
     }
 
@@ -113,11 +121,25 @@ pub fn check_killswitch(project_root: Option<&Path>) -> Result<(), KillswitchErr
         }
     }
 
-    // User home directory
-    if let Some(home) = dirs::home_dir() {
-        let home_ks = home.join(".selfware").join(KILLSWITCH_FILE_NAME);
-        if !check_paths.contains(&home_ks) {
-            check_paths.push(home_ks);
+    // User home directory (can be bypassed via SELFWARE_KILLSWITCH_IGNORE_HOME)
+    let ignore_home = std::env::var("SELFWARE_KILLSWITCH_IGNORE_HOME")
+        .map(|v| {
+            let lower = v.trim().to_ascii_lowercase();
+            !lower.is_empty() && lower != "0" && lower != "false" && lower != "no" && lower != "off"
+        })
+        .unwrap_or(false);
+
+    if !ignore_home {
+        if let Some(home) = dirs::home_dir() {
+            // Check if home directory itself is accessible before probing inside it
+            if let Ok(home_meta) = home.symlink_metadata() {
+                if home_meta.is_dir() {
+                    let home_ks = home.join(".selfware").join(KILLSWITCH_FILE_NAME);
+                    if !check_paths.contains(&home_ks) {
+                        check_paths.push(home_ks);
+                    }
+                }
+            }
         }
     }
 
@@ -128,17 +150,29 @@ pub fn check_killswitch(project_root: Option<&Path>) -> Result<(), KillswitchErr
                     "Killswitch symlink present".to_string()
                 } else if meta.is_dir() {
                     "Killswitch directory present".to_string()
+                } else if !meta.file_type().is_file() {
+                    // FIFO, socket, char/block device: fail closed immediately WITHOUT opening or reading!
+                    format!("Killswitch special file present ({:?})", meta.file_type())
                 } else {
-                    std::fs::read_to_string(&path)
-                        .map(|s| {
-                            let trimmed = s.trim();
-                            if trimmed.is_empty() {
-                                "Killswitch file present".to_string()
-                            } else {
-                                trimmed.to_string()
+                    // Regular file: bounded read to avoid memory exhaustion or stalls
+                    use std::io::Read;
+                    match std::fs::File::open(&path) {
+                        Ok(file) => {
+                            let mut buf = String::new();
+                            match file.take(4096).read_to_string(&mut buf) {
+                                Ok(_) => {
+                                    let trimmed = buf.trim();
+                                    if trimmed.is_empty() {
+                                        "Killswitch file present".to_string()
+                                    } else {
+                                        trimmed.to_string()
+                                    }
+                                }
+                                Err(_) => "Killswitch file present (unreadable)".to_string(),
                             }
-                        })
-                        .unwrap_or_else(|_| "Killswitch file present (unreadable)".to_string())
+                        }
+                        Err(_) => "Killswitch file present (unreadable)".to_string(),
+                    }
                 };
                 return Err(KillswitchError::File { path, reason });
             }

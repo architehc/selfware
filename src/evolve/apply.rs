@@ -825,6 +825,8 @@ pub enum CommitError {
     NotStaged(ApplyStatus),
     #[error("base_moved: staged at {base} but live HEAD is {head}; rebase required")]
     BaseMoved { base: String, head: String },
+    #[error("killswitch active: {0}")]
+    Killswitch(String),
     #[error("merge failed: {0}")]
     Git(String),
 }
@@ -879,7 +881,7 @@ pub async fn commit_staged(
 
     // Fail-closed killswitch check before promoting/merging to project root
     if let Err(err) = crate::safety::killswitch::check_killswitch(Some(project_root)) {
-        return Err(CommitError::Git(format!(
+        return Err(CommitError::Killswitch(format!(
             "Killswitch active before promote: {err}"
         )));
     }
@@ -900,6 +902,9 @@ pub async fn commit_staged(
         .map_err(|e| CommitError::Git(format!("failed to re-verify staged diff: {e}")))?;
     let (recomputed_digest, recomputed_tree_oid) = match &recomputed {
         Ok(staged) => (staged.digest.clone(), staged.tree_oid.clone()),
+        Err(RejectReason::Killswitch(reason)) => {
+            return Err(CommitError::Killswitch(reason.clone()))
+        }
         Err(rejection) => {
             return Err(CommitError::Git(format!(
                 "staged diff no longer verifies: {rejection}"
@@ -1226,5 +1231,47 @@ mod tests {
                 matches!(res_sym, Err(RejectReason::OutOfScope(s)) if s.contains(".selfware/skills/sop.md"))
             );
         }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_commit_staged_returns_typed_killswitch_error() {
+        let _lock = crate::safety::killswitch::KILLSWITCH_TEST_LOCK.lock();
+        crate::safety::killswitch::reset_in_process();
+        let registry = new_registry();
+        let run_id = "test-ks-run";
+        let diff = StagedDiff {
+            digest: "valid-digest".to_string(),
+            files_changed: 1,
+            insertions: 1,
+            deletions: 0,
+            preview: "diff".to_string(),
+            tree_oid: Some("0000000000000000000000000000000000000000".to_string()),
+        };
+        let run = ApplyRun {
+            id: run_id.to_string(),
+            prompt: "fix".to_string(),
+            status: ApplyStatus::Staged,
+            output: "".to_string(),
+            exit_code: Some(0),
+            shadow_path: Some(PathBuf::from("/tmp/nonexistent-shadow")),
+            base_revision: Some("0000000000000000000000000000000000000000".to_string()),
+            diff: Some(diff),
+        };
+        registry.lock().await.insert(run_id.to_string(), run);
+
+        let tmp = tempfile::tempdir().unwrap();
+        crate::safety::killswitch::trip_in_process("Halt evolution promote");
+
+        let res = commit_staged(&registry, run_id, "valid-digest", tmp.path()).await;
+        assert!(res.is_err());
+        match res.unwrap_err() {
+            CommitError::Killswitch(msg) => {
+                assert!(msg.contains("Halt evolution promote"));
+            }
+            other => panic!("Expected CommitError::Killswitch, got: {:?}", other),
+        }
+
+        crate::safety::killswitch::reset_in_process();
     }
 }

@@ -253,6 +253,11 @@ impl Drop for DreamState {
 /// 2. Minimum sessions since last dream
 /// 3. Consolidation lock available
 pub fn should_run_dream(state: &mut DreamState, trigger: &DreamTrigger) -> bool {
+    if crate::safety::killswitch::is_killswitch_active() {
+        debug!("Dream gate failed: killswitch is active");
+        return false;
+    }
+
     // Check gates 1 and 2
     if !state.should_run_dream_check_gates(trigger) {
         return false;

@@ -83,6 +83,15 @@ pub fn default_denied_paths() -> Vec<String> {
         // Block writing/modifying the fail-closed killswitch file via agent tools
         "**/.selfware/KILLSWITCH".to_string(),
         "**/.selfware/KILLSWITCH/**".to_string(),
+        // Block writing/modifying skills, commands, candidates, and admission ledgers via agent tools
+        "**/.selfware/skills".to_string(),
+        "**/.selfware/skills/**".to_string(),
+        "**/.selfware/commands".to_string(),
+        "**/.selfware/commands/**".to_string(),
+        "**/.selfware/skill-candidates".to_string(),
+        "**/.selfware/skill-candidates/**".to_string(),
+        "**/.admitted_ledger.json".to_string(),
+        "**/.*ledger*.json".to_string(),
     ]
 }
 

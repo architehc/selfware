@@ -591,7 +591,9 @@ fn profile_floor_raises_nonstreaming_response_timeout() {
 /// Regression: a profile with `max_retries = 0` fails fast on BOTH paths —
 /// one billable attempt each, even when the global retry budget is larger.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn profile_max_retries_zero_fails_fast_on_both_paths() {
+    let _g = crate::test_support::ExecGuard::hold();
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;

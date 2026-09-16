@@ -56,30 +56,67 @@ fn test_file_killswitch_trips_and_removes() {
 }
 
 #[test]
-fn test_env_killswitch_values() {
-    let _lock = KILLSWITCH_TEST_LOCK.lock();
-    std::env::remove_var(KILLSWITCH_ENV_VAR);
-    reset_in_process();
+fn test_env_killswitch_parser() {
+    assert!(parse_env_killswitch_value("1").is_some());
+    assert!(parse_env_killswitch_value("true").is_some());
+    assert!(parse_env_killswitch_value("yes").is_some());
+    assert!(parse_env_killswitch_value("on").is_some());
+    assert!(parse_env_killswitch_value("emergency").is_some());
 
-    // 1 triggers
-    std::env::set_var(KILLSWITCH_ENV_VAR, "1");
-    assert!(check_killswitch(None).is_err());
+    assert!(parse_env_killswitch_value("0").is_none());
+    assert!(parse_env_killswitch_value("false").is_none());
+    assert!(parse_env_killswitch_value("no").is_none());
+    assert!(parse_env_killswitch_value("off").is_none());
+    assert!(parse_env_killswitch_value("").is_none());
+    assert!(parse_env_killswitch_value("   ").is_none());
+}
 
-    // "true" triggers
-    std::env::set_var(KILLSWITCH_ENV_VAR, "true");
-    assert!(check_killswitch(None).is_err());
-
-    // "0" does NOT trigger
-    std::env::set_var(KILLSWITCH_ENV_VAR, "0");
-    // Unless file exists
+#[test]
+#[cfg(unix)]
+fn test_fifo_killswitch_fails_closed_without_blocking() {
     let tmp = tempdir().unwrap();
-    assert!(check_killswitch(Some(tmp.path())).is_ok());
+    let project_root = tmp.path();
+    let ks_dir = project_root.join(".selfware");
+    std::fs::create_dir_all(&ks_dir).unwrap();
+    let fifo_path = ks_dir.join("KILLSWITCH");
 
-    // "false" does NOT trigger
-    std::env::set_var(KILLSWITCH_ENV_VAR, "false");
-    assert!(check_killswitch(Some(tmp.path())).is_ok());
+    // Create a FIFO
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo_path)
+        .status();
+    if let Ok(st) = status {
+        if st.success() {
+            // Must fail closed immediately without hanging on open()
+            let res = check_killswitch(Some(project_root));
+            assert!(res.is_err());
+            let err = res.unwrap_err();
+            assert!(err.to_string().contains("special file present"));
+        }
+    }
+}
 
-    std::env::remove_var(KILLSWITCH_ENV_VAR);
+#[test]
+fn test_file_killswitch_bounded_read() {
+    let tmp = tempdir().unwrap();
+    let project_root = tmp.path();
+    let ks_dir = project_root.join(".selfware");
+    std::fs::create_dir_all(&ks_dir).unwrap();
+    let ks_file = ks_dir.join("KILLSWITCH");
+
+    // Write a large message (8KB)
+    let large_msg = "x".repeat(8192);
+    std::fs::write(&ks_file, &large_msg).unwrap();
+
+    let res = check_killswitch(Some(project_root));
+    assert!(res.is_err());
+    let err = res.unwrap_err();
+    match err {
+        KillswitchError::File { reason, .. } => {
+            // Must be bounded to at most 4096 chars
+            assert!(reason.len() <= 4096);
+        }
+        other => panic!("Expected File killswitch error, got: {:?}", other),
+    }
 }
 
 #[test]

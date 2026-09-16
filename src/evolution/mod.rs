@@ -67,6 +67,10 @@ pub const PROTECTED_PATHS: &[&str] = &[
     ".github/",
     "src/main.rs",
     ".selfware/KILLSWITCH",
+    ".selfware/skills/",
+    ".selfware/commands/",
+    ".selfware/skill-candidates/",
+    ".admitted_ledger.json",
 ];
 
 /// LLM endpoint configuration for hypothesis generation

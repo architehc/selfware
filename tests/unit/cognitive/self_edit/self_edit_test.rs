@@ -48,6 +48,11 @@ fn test_deny_list() {
         "Cargo.lock",
         ".github/workflows/ci.yml",
         "src/main.rs",
+        ".selfware/KILLSWITCH",
+        ".selfware/skills/sop.md",
+        ".selfware/commands/cmd.md",
+        ".selfware/skill-candidates/candidate.md",
+        ".admitted_ledger.json",
     ];
 
     for path in denied_paths {
@@ -73,6 +78,48 @@ fn test_deny_list() {
     )
     .with_file("src/tools/file_ops.rs");
     assert!(!orchestrator.is_denied(&safe_target));
+}
+
+#[test]
+fn test_recently_failed_categories_ignores_skipped_trivial() {
+    let mut orchestrator = SelfEditOrchestrator::new(PathBuf::from("/tmp/selfware_test"));
+    orchestrator.history.clear();
+    let trivial_record = ImprovementRecord {
+        target_id: "imp-1".to_string(),
+        category: ImprovementCategory::CodeQuality,
+        description: "trivial".to_string(),
+        before_metrics: None,
+        after_metrics: None,
+        git_commits: vec![],
+        verified: false,
+        rolled_back: true,
+        effectiveness_score: -1.0,
+        completed_at: 100,
+        status: ProposalStatus::SkippedTrivial,
+    };
+    orchestrator.history.push(trivial_record);
+    let failed = orchestrator.recently_failed_categories(5);
+    assert!(
+        failed.is_empty(),
+        "SkippedTrivial must be neutral and never penalized as a failed category"
+    );
+
+    let regressed_record = ImprovementRecord {
+        target_id: "imp-2".to_string(),
+        category: ImprovementCategory::ErrorHandling,
+        description: "regression".to_string(),
+        before_metrics: None,
+        after_metrics: None,
+        git_commits: vec![],
+        verified: false,
+        rolled_back: true,
+        effectiveness_score: -0.5,
+        completed_at: 101,
+        status: ProposalStatus::EvaluatedRegression,
+    };
+    orchestrator.history.push(regressed_record);
+    let failed = orchestrator.recently_failed_categories(5);
+    assert_eq!(failed, vec![ImprovementCategory::ErrorHandling]);
 }
 
 #[test]

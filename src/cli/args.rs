@@ -592,6 +592,57 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: RunsCommand,
     },
+
+    /// Manage the fail-closed emergency killswitch
+    #[command(display_order = 10)]
+    Killswitch {
+        #[command(subcommand)]
+        command: KillswitchCommands,
+    },
+
+    /// Manage user and admitted skills
+    #[command(display_order = 10)]
+    Skill {
+        #[command(subcommand)]
+        command: SkillCommands,
+    },
+}
+
+/// Subcommands of `selfware killswitch`.
+#[derive(Subcommand, Clone, Debug)]
+pub(crate) enum KillswitchCommands {
+    /// Check whether the killswitch is currently active
+    Status,
+    /// Trip the killswitch with an explanatory reason
+    Trip {
+        /// Reason for tripping the killswitch
+        #[arg(short, long, default_value = "Manual trip by operator")]
+        reason: String,
+        /// Trip globally in ~/.selfware/KILLSWITCH instead of local .selfware/KILLSWITCH
+        #[arg(short, long)]
+        global: bool,
+    },
+    /// Reset/clear the killswitch file
+    Reset {
+        /// Reset global ~/.selfware/KILLSWITCH
+        #[arg(short, long)]
+        global: bool,
+    },
+}
+
+/// Subcommands of `selfware skill`.
+#[derive(Subcommand, Clone, Debug)]
+pub(crate) enum SkillCommands {
+    /// List all discovered skills and candidate skills
+    List,
+    /// Explicitly admit a candidate skill into the active skills directory
+    Admit {
+        /// Path to the candidate skill markdown file
+        candidate_path: String,
+        /// Target skills directory (defaults to .selfware/skills)
+        #[arg(short, long)]
+        target_dir: Option<String>,
+    },
 }
 
 /// Subcommands of `selfware swebench`.
