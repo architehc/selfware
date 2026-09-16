@@ -182,3 +182,12 @@ async fn existing_web_dir_is_served_from_disk_dev_override() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, "disk only\n");
 }
+
+#[test]
+fn test_commit_error_killswitch_maps_to_typed_conflict() {
+    let err = super::super::apply::CommitError::Killswitch("Killswitch active".to_string());
+    let (status, Json(body)) = commit_error(err);
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "killswitch_active");
+    assert_eq!(body["reason"], "Killswitch active");
+}

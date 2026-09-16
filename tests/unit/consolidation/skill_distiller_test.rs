@@ -192,6 +192,9 @@ fn test_metis_pattern_miner_mines_frequent_sequences() {
 
 #[test]
 fn test_distill_from_session_events_and_ledger_persistence() {
+    let _lock = crate::safety::killswitch::KILLSWITCH_TEST_LOCK.lock();
+    crate::safety::killswitch::reset_in_process();
+
     let tmp = tempdir().unwrap();
     let skills_dir = tmp.path().join("skills");
     let ledger_file = tmp.path().join("ledger.json");
@@ -257,6 +260,9 @@ fn test_distill_from_session_events_and_ledger_persistence() {
 
 #[test]
 fn test_capacity_cap_enforcement_and_eviction() {
+    let _lock = crate::safety::killswitch::KILLSWITCH_TEST_LOCK.lock();
+    crate::safety::killswitch::reset_in_process();
+
     let tmp = tempdir().unwrap();
     let skills_dir = tmp.path().join("skills");
     let ledger_file = tmp.path().join("ledger.json");
@@ -296,6 +302,9 @@ fn test_capacity_cap_enforcement_and_eviction() {
 
 #[test]
 fn test_distill_from_collected_items() {
+    let _lock = crate::safety::killswitch::KILLSWITCH_TEST_LOCK.lock();
+    crate::safety::killswitch::reset_in_process();
+
     let tmp = tempdir().unwrap();
     let skills_dir = tmp.path().join("skills");
     let ledger_file = tmp.path().join("ledger.json");
@@ -350,6 +359,9 @@ fn test_skill_distiller_getters_and_builders() {
 
 #[test]
 fn test_commit_distilled_skills_updates_existing_skill() {
+    let _lock = crate::safety::killswitch::KILLSWITCH_TEST_LOCK.lock();
+    crate::safety::killswitch::reset_in_process();
+
     let tmp = tempdir().unwrap();
     let skills_dir = tmp.path().join("skills");
     let ledger_file = tmp.path().join("ledger.json");
@@ -506,6 +518,9 @@ fn test_load_and_save_ledger_reject_symlinks() {
 
 #[test]
 fn test_commit_distilled_skills_rejects_destination_symlink() {
+    let _lock = crate::safety::killswitch::KILLSWITCH_TEST_LOCK.lock();
+    crate::safety::killswitch::reset_in_process();
+
     let tmp = tempdir().unwrap();
     let skills_dir = tmp.path().join("skills");
     fs::create_dir_all(&skills_dir).unwrap();
@@ -541,4 +556,24 @@ fn test_commit_distilled_skills_rejects_destination_symlink() {
             "outside target must not be overwritten"
         );
     }
+}
+
+#[test]
+fn test_killswitch_blocks_distillation_and_usage_recording() {
+    let _lock = crate::safety::killswitch::KILLSWITCH_TEST_LOCK.lock();
+    crate::safety::killswitch::reset_in_process();
+
+    let tmp = tempdir().unwrap();
+    let mut distiller =
+        SkillDistiller::new(tmp.path().join("skills"), tmp.path().join("ledger.json"));
+
+    // Trip killswitch
+    crate::safety::killswitch::trip_in_process("Distiller test killswitch");
+
+    assert!(distiller.distill_from_session_events(&[]).is_err());
+    assert!(distiller.distill_from_collected_items(&[]).is_err());
+    assert!(distiller.record_skill_usage("test_skill", true).is_err());
+
+    // Reset cleanly
+    crate::safety::killswitch::reset_in_process();
 }

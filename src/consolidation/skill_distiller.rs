@@ -457,6 +457,12 @@ impl SkillDistiller {
         &mut self,
         events: &[SessionLogEvent],
     ) -> Result<SkillDistillationReport> {
+        if let Err(err) = crate::safety::killswitch::check_killswitch(None) {
+            return Err(anyhow!(
+                "Killswitch active: {err} - refusing to distill skills"
+            ));
+        }
+
         let mut candidates = Vec::new();
         let mut tool_sequences: Vec<Vec<String>> = Vec::new();
         let mut current_seq: Vec<String> = Vec::new();
@@ -510,6 +516,12 @@ impl SkillDistiller {
         &mut self,
         items: &[CollectedItem],
     ) -> Result<SkillDistillationReport> {
+        if let Err(err) = crate::safety::killswitch::check_killswitch(None) {
+            return Err(anyhow!(
+                "Killswitch active: {err} - refusing to distill skills"
+            ));
+        }
+
         let mut candidates = Vec::new();
 
         for item in items {
@@ -676,6 +688,12 @@ impl SkillDistiller {
 
     /// Record a skill invocation event (hit or miss) in the drift ledger.
     pub fn record_skill_usage(&mut self, skill_name: &str, success: bool) -> Result<()> {
+        if let Err(err) = crate::safety::killswitch::check_killswitch(None) {
+            return Err(anyhow!(
+                "Killswitch active: {err} - refusing to record skill usage"
+            ));
+        }
+
         let mut ledger = self.load_ledger()?;
         let now = Utc::now();
 

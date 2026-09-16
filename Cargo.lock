@@ -4418,6 +4418,7 @@ dependencies = [
  "hnsw_rs",
  "image",
  "keyring",
+ "libc",
  "libloading 0.9.0",
  "llmfit-core",
  "metrics",

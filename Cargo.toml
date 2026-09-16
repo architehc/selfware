@@ -125,6 +125,7 @@ tree-sitter = "0.22"
 tree-sitter-rust = "0.21"
 
 [target.'cfg(unix)'.dependencies]
+libc = "0.2"
 nix = { version = "0.29", features = ["signal"] }
 
 [features]

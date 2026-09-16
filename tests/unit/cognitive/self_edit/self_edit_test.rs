@@ -848,3 +848,61 @@ fn test_apply_target_in_sandbox_containment_and_deny_list() {
     assert!(content.contains("Resolved: implement"));
     assert!(!content.contains("TODO"));
 }
+
+#[test]
+fn test_killswitch_blocks_self_edit_operations() {
+    let _lock = crate::safety::killswitch::KILLSWITCH_TEST_LOCK.lock();
+    crate::safety::killswitch::reset_in_process();
+
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().to_path_buf();
+    let src_dir = project_root.join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::write(src_dir.join("pipeline.rs"), "// TODO: implement\n").unwrap();
+
+    let run_git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&project_root)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {:?} should succeed", args);
+    };
+    run_git(&["init"]);
+    run_git(&["config", "user.email", "test@example.com"]);
+    run_git(&["config", "user.name", "Test"]);
+    run_git(&["add", "."]);
+    run_git(&["commit", "-m", "initial"]);
+
+    let sandbox = CompilationSandbox::new(&project_root).unwrap();
+    let orchestrator = SelfEditOrchestrator::new(project_root);
+
+    let target = ImprovementTarget::new(
+        ImprovementCategory::CodeQuality,
+        "Address TODO at src/pipeline.rs:1: // TODO: implement",
+        "Resolve TODO",
+        ImprovementSource::TechDebt,
+    )
+    .with_file("src/pipeline.rs");
+
+    // Before trip: is_denied is false
+    assert!(!orchestrator.is_denied(&target));
+
+    // Trip killswitch
+    crate::safety::killswitch::trip_in_process("Self-edit killswitch test");
+
+    // All operations must be blocked/denied
+    assert!(orchestrator.is_denied(&target));
+    assert!(orchestrator.analyze_self().is_empty());
+    assert!(orchestrator
+        .select_target(std::slice::from_ref(&target))
+        .is_none());
+    let err = orchestrator
+        .apply_target_in_sandbox(&target, &sandbox)
+        .unwrap_err();
+    assert!(err.to_string().contains("Killswitch is active"));
+
+    // Reset cleanly
+    crate::safety::killswitch::reset_in_process();
+    assert!(!orchestrator.is_denied(&target));
+}

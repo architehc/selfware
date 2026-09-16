@@ -118,12 +118,28 @@ impl AdmissionLedger {
                         ledger_path.display()
                     ));
                 }
-                let content = std::fs::read_to_string(&ledger_path).map_err(|e| {
+                if !meta.file_type().is_file() {
+                    return Err(format!(
+                        "Admission ledger is not a regular file: {}",
+                        ledger_path.display()
+                    ));
+                }
+                use std::io::Read;
+                let file = std::fs::File::open(&ledger_path).map_err(|e| {
                     format!(
-                        "Failed to read admission ledger {}: {e}",
+                        "Failed to open admission ledger {}: {e}",
                         ledger_path.display()
                     )
                 })?;
+                let mut content = String::new();
+                file.take(1_048_576)
+                    .read_to_string(&mut content)
+                    .map_err(|e| {
+                        format!(
+                            "Failed to read admission ledger {}: {e}",
+                            ledger_path.display()
+                        )
+                    })?;
                 serde_json::from_str(&content).map_err(|e| {
                     format!(
                         "Admission ledger {} is corrupt (invalid JSON): {e} — failing closed to prevent tamper bypass",
@@ -154,15 +170,43 @@ impl AdmissionLedger {
                     ledger_path.display()
                 ));
             }
+            if !meta.file_type().is_file() {
+                return Err(format!(
+                    "Admission ledger target is not a regular file: {}",
+                    ledger_path.display()
+                ));
+            }
         }
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Failed to serialize admission ledger: {e}"))?;
-        std::fs::write(&ledger_path, json).map_err(|e| {
+
+        let mut open_opts = std::fs::OpenOptions::new();
+        open_opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            open_opts.custom_flags(libc::O_NOFOLLOW);
+        }
+        use std::io::Write;
+        let mut file = open_opts.open(&ledger_path).map_err(|e| {
+            format!(
+                "Failed to open admission ledger for writing at {}: {e}",
+                ledger_path.display()
+            )
+        })?;
+        file.write_all(json.as_bytes()).map_err(|e| {
             format!(
                 "Failed to write admission ledger to {}: {e}",
                 ledger_path.display()
             )
-        })
+        })?;
+        file.sync_all().map_err(|e| {
+            format!(
+                "Failed to sync admission ledger at {}: {e}",
+                ledger_path.display()
+            )
+        })?;
+        Ok(())
     }
 }
 
@@ -233,8 +277,27 @@ impl Skill {
 
     /// Load a skill from a file path.
     pub fn from_file(path: &Path) -> Result<Self, String> {
-        let source =
-            std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {e}"))?;
+        let meta = path
+            .symlink_metadata()
+            .map_err(|e| format!("Failed to read metadata for {}: {e}", path.display()))?;
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "Skill file cannot be a symlink: {}",
+                path.display()
+            ));
+        }
+        if !meta.file_type().is_file() {
+            return Err(format!(
+                "Skill file must be a regular file: {}",
+                path.display()
+            ));
+        }
+        use std::io::Read;
+        let file = std::fs::File::open(path).map_err(|e| format!("Failed to open file: {e}"))?;
+        let mut source = String::new();
+        file.take(1_048_576)
+            .read_to_string(&mut source)
+            .map_err(|e| format!("Failed to read file: {e}"))?;
         let mut skill = Self::from_markdown(&source)?;
         skill.source = Some(path.to_path_buf());
         Ok(skill)
@@ -248,11 +311,17 @@ impl Skill {
             format!("[Skill: {} (CANDIDATE - Unadmitted)]", self.name)
         } else if self.verified {
             format!("[Skill: {}]", self.name)
-        } else {
+        } else if self.candidate
+            || self.admitted
+            || matches!(self.origin.as_deref(), Some("distilled" | "generated"))
+        {
             format!(
                 "[Skill: {} (UNVERIFIED - Distilled from unverified execution trace)]",
                 self.name
             )
+        } else {
+            // Hand-written user-authored skill: not distilled from execution traces
+            format!("[Skill: {}]", self.name)
         }
     }
 
@@ -299,7 +368,7 @@ impl SkillRegistry {
             return;
         }
 
-        let ledger = match AdmissionLedger::load_from_dir(dir) {
+        let mut ledger = match AdmissionLedger::load_from_dir(dir) {
             Ok(l) => l,
             Err(e) => {
                 warn!(
@@ -309,6 +378,7 @@ impl SkillRegistry {
                 return;
             }
         };
+        let mut ledger_modified = false;
 
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
@@ -331,6 +401,9 @@ impl SkillRegistry {
                         .and_then(|f| f.to_str())
                         .unwrap_or_default();
 
+                    let actual_hash =
+                        format!("{:x}", sha2::Sha256::digest(skill.content.as_bytes()));
+
                     // Consult ledger by skill name OR file name
                     let ledger_entry = ledger.entries.get(&skill.name).or_else(|| {
                         ledger
@@ -346,8 +419,6 @@ impl SkillRegistry {
                     if let Some(entry) = ledger_entry {
                         // This skill is registered in the ledger!
                         // Content hash verification:
-                        let actual_hash =
-                            format!("{:x}", sha2::Sha256::digest(skill.content.as_bytes()));
                         if actual_hash != entry.content_hash {
                             warn!(
                                 "Ignoring admitted skill '{}' in {}: content hash mismatch (expected {}, computed {}) — candidate tampered after admission",
@@ -389,6 +460,41 @@ impl SkillRegistry {
                         if entry.source_origin.is_some() {
                             skill.origin = entry.source_origin.clone();
                         }
+                    } else if skill.admitted && skill.content_hash.as_deref() == Some(&actual_hash)
+                    {
+                        // Backfill legacy admitted skill whose content_hash matches actual content
+                        let metadata_hash = compute_metadata_hash(
+                            &skill.description,
+                            &skill.tools,
+                            skill.scope.as_deref(),
+                            skill.origin.as_deref(),
+                        );
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        tracing::info!(
+                            "Backfilling legacy admitted skill '{}' ({}) into admission ledger",
+                            skill.name,
+                            path.display()
+                        );
+                        ledger.entries.insert(
+                            skill.name.clone(),
+                            AdmittedSkillEntry {
+                                name: skill.name.clone(),
+                                file_name: file_name_str.to_string(),
+                                content_hash: actual_hash.clone(),
+                                metadata_hash: Some(metadata_hash),
+                                admitted_at: now,
+                                source_origin: skill.origin.clone(),
+                                verified: skill.verified,
+                                tools: skill.tools.clone(),
+                                scope: skill.scope.clone(),
+                            },
+                        );
+                        ledger_modified = true;
+                        skill.candidate = true;
+                        skill.admitted = true;
                     } else if is_candidate {
                         // Candidate/generated skill with NO ledger entry is rejected!
                         warn!(
@@ -427,6 +533,15 @@ impl SkillRegistry {
                 Err(e) => {
                     warn!("Failed to load skill from {}: {e}", path.display());
                 }
+            }
+        }
+
+        if ledger_modified {
+            if let Err(e) = ledger.save_to_dir(dir) {
+                warn!(
+                    "Failed to persist backfilled admission ledger to {}: {e}",
+                    dir.display()
+                );
             }
         }
     }
@@ -585,8 +700,28 @@ impl SkillRegistry {
         let rendered = format!("---\n{}---\n\n{}", yaml, skill.content);
 
         // Safe write: write the admitted skill file BEFORE updating the ledger
-        std::fs::write(&target_file, rendered)
+        let mut open_opts = std::fs::OpenOptions::new();
+        open_opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            open_opts.custom_flags(libc::O_NOFOLLOW);
+        }
+        use std::io::Write;
+        let mut file = open_opts.open(&target_file).map_err(|e| {
+            format!(
+                "Failed to open admitted skill target for writing at {}: {e}",
+                target_file.display()
+            )
+        })?;
+        file.write_all(rendered.as_bytes())
             .map_err(|e| format!("Failed to write admitted skill: {e}"))?;
+        file.sync_all().map_err(|e| {
+            format!(
+                "Failed to sync admitted skill at {}: {e}",
+                target_file.display()
+            )
+        })?;
 
         // Update external admission ledger
         let mut ledger = AdmissionLedger::load_from_dir(target_skills_dir)?;
@@ -615,21 +750,13 @@ impl SkillRegistry {
         Ok(skill)
     }
 
-    /// Get a skill by name. If the killswitch is active, candidate/admitted/distilled skills are blocked.
+    /// Get a skill by name. If the killswitch is active, all skills are blocked.
     pub fn get(&self, name: &str) -> Option<&Skill> {
-        let skill = self.skills.get(name)?;
-        if (skill.candidate
-            || skill.admitted
-            || matches!(skill.origin.as_deref(), Some("distilled" | "generated")))
-            && crate::safety::killswitch::is_killswitch_active()
-        {
-            warn!(
-                "Killswitch active; blocking candidate/admitted skill '{}'",
-                name
-            );
+        if crate::safety::killswitch::is_killswitch_active() {
+            warn!("Killswitch active; blocking skill retrieval for '{name}'");
             return None;
         }
-        Some(skill)
+        self.skills.get(name)
     }
 
     /// Return all discovered skills, sorted by name.

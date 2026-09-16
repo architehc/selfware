@@ -53,7 +53,7 @@ impl KillswitchStatus {
 }
 
 #[cfg(test)]
-pub static KILLSWITCH_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+pub(crate) static KILLSWITCH_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 /// Trip the in-process killswitch with an explanatory reason.
 pub fn trip_in_process(reason: impl Into<String>) {
@@ -108,21 +108,22 @@ pub fn check_killswitch(project_root: Option<&Path>) -> Result<(), KillswitchErr
         }
     }
 
-    // 3. File existence checks (fail-closed)
+    // 3. File existence checks (fail-closed for project root / cwd)
     let mut check_paths = Vec::new();
 
     // Specific project root if provided, otherwise check current working directory
     if let Some(root) = project_root {
-        check_paths.push(root.join(".selfware").join(KILLSWITCH_FILE_NAME));
+        check_paths.push((root.join(".selfware").join(KILLSWITCH_FILE_NAME), true));
     } else if let Ok(cwd) = std::env::current_dir() {
         let cwd_ks = cwd.join(".selfware").join(KILLSWITCH_FILE_NAME);
-        if !check_paths.contains(&cwd_ks) {
-            check_paths.push(cwd_ks);
-        }
+        check_paths.push((cwd_ks, true));
     }
 
-    // User home directory (can be bypassed via SELFWARE_KILLSWITCH_IGNORE_HOME)
+    // User home directory (can be bypassed via escape hatches:
+    // SELFWARE_KILLSWITCH_IGNORE_HOME, SELFWARE_NO_HOME_KILLSWITCH, SELFWARE_DISABLE_HOME_KILLSWITCH)
     let ignore_home = std::env::var("SELFWARE_KILLSWITCH_IGNORE_HOME")
+        .or_else(|_| std::env::var("SELFWARE_NO_HOME_KILLSWITCH"))
+        .or_else(|_| std::env::var("SELFWARE_DISABLE_HOME_KILLSWITCH"))
         .map(|v| {
             let lower = v.trim().to_ascii_lowercase();
             !lower.is_empty() && lower != "0" && lower != "false" && lower != "no" && lower != "off"
@@ -131,19 +132,37 @@ pub fn check_killswitch(project_root: Option<&Path>) -> Result<(), KillswitchErr
 
     if !ignore_home {
         if let Some(home) = dirs::home_dir() {
-            // Check if home directory itself is accessible before probing inside it
-            if let Ok(home_meta) = home.symlink_metadata() {
-                if home_meta.is_dir() {
-                    let home_ks = home.join(".selfware").join(KILLSWITCH_FILE_NAME);
-                    if !check_paths.contains(&home_ks) {
-                        check_paths.push(home_ks);
+            let home_selfware = home.join(".selfware");
+            // Only probe home killswitch if home and home/.selfware are accessible directories
+            match home_selfware.symlink_metadata() {
+                Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+                    let home_ks = home_selfware.join(KILLSWITCH_FILE_NAME);
+                    // Check home killswitch file metadata without bricking process if home has EACCES
+                    match home_ks.symlink_metadata() {
+                        Ok(_) => {
+                            // File exists or is a special node — inspect it (fail_closed = false for home EACCES)
+                            check_paths.push((home_ks, false));
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            // Genuinely absent
+                        }
+                        Err(e) => {
+                            // PermissionDenied or I/O error in home: do NOT brick process-wide tool execution
+                            tracing::debug!(
+                                "Home killswitch path {:?} inaccessible ({e}); skipping",
+                                home_ks
+                            );
+                        }
                     }
+                }
+                _ => {
+                    // Home or home/.selfware is not an accessible directory (or is a symlink); skip cleanly
                 }
             }
         }
     }
 
-    for path in check_paths {
+    for (path, fail_closed) in check_paths {
         match path.symlink_metadata() {
             Ok(meta) => {
                 let reason = if meta.file_type().is_symlink() {
@@ -154,10 +173,30 @@ pub fn check_killswitch(project_root: Option<&Path>) -> Result<(), KillswitchErr
                     // FIFO, socket, char/block device: fail closed immediately WITHOUT opening or reading!
                     format!("Killswitch special file present ({:?})", meta.file_type())
                 } else {
-                    // Regular file: bounded read to avoid memory exhaustion or stalls
+                    // Regular file: safe bounded read with O_NONBLOCK to prevent FIFO/device open hangs
                     use std::io::Read;
-                    match std::fs::File::open(&path) {
+                    let mut open_opts = std::fs::OpenOptions::new();
+                    open_opts.read(true);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        open_opts.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+                    }
+
+                    match open_opts.open(&path) {
                         Ok(file) => {
+                            // Verify opened descriptor is indeed a regular file
+                            if let Ok(stat) = file.metadata() {
+                                if !stat.file_type().is_file() {
+                                    return Err(KillswitchError::File {
+                                        path: path.clone(),
+                                        reason: format!(
+                                            "Killswitch special file present ({:?})",
+                                            stat.file_type()
+                                        ),
+                                    });
+                                }
+                            }
                             let mut buf = String::new();
                             match file.take(4096).read_to_string(&mut buf) {
                                 Ok(_) => {
@@ -180,11 +219,18 @@ pub fn check_killswitch(project_root: Option<&Path>) -> Result<(), KillswitchErr
                 // Genuinely absent, continue to next path
             }
             Err(e) => {
-                // Unreadable ancestor, permission denied, or IO error: FAIL CLOSED
-                return Err(KillswitchError::File {
-                    path: path.clone(),
-                    reason: format!("Cannot verify killswitch path ({e}): failing closed"),
-                });
+                if fail_closed {
+                    // Project root / cwd unreadable ancestor or permission denied: FAIL CLOSED
+                    return Err(KillswitchError::File {
+                        path: path.clone(),
+                        reason: format!("Cannot verify killswitch path ({e}): failing closed"),
+                    });
+                } else {
+                    tracing::debug!(
+                        "Non-critical killswitch path {:?} inaccessible ({e}); ignoring",
+                        path
+                    );
+                }
             }
         }
     }

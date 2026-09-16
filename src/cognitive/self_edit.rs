@@ -332,6 +332,11 @@ impl SelfEditOrchestrator {
     }
 
     pub fn analyze_self(&self) -> Vec<ImprovementTarget> {
+        if crate::safety::killswitch::is_killswitch_active() {
+            tracing::warn!("Killswitch active; skipping self analysis");
+            return Vec::new();
+        }
+
         let mut targets = Vec::new();
 
         // Check for recurring error patterns in improvement history
@@ -372,6 +377,10 @@ impl SelfEditOrchestrator {
         &self,
         targets: &'a [ImprovementTarget],
     ) -> Option<&'a ImprovementTarget> {
+        if crate::safety::killswitch::is_killswitch_active() {
+            tracing::warn!("Killswitch active; blocking target selection");
+            return None;
+        }
         targets.iter().find(|target| self.supports_target(target))
     }
 
@@ -399,6 +408,9 @@ impl SelfEditOrchestrator {
         target: &ImprovementTarget,
         sandbox: &CompilationSandbox,
     ) -> Result<AppliedMutation> {
+        if crate::safety::killswitch::is_killswitch_active() {
+            return Err(anyhow!("Killswitch is active: mutation blocked in sandbox"));
+        }
         if !self.supports_target(target) {
             return Err(anyhow!(
                 "No concrete mutation strategy available for target '{}'",
@@ -522,6 +534,10 @@ impl SelfEditOrchestrator {
     /// paths (common in tests and for proposed-but-not-yet-created files)
     /// fall through to substring matching.
     pub(crate) fn is_denied(&self, target: &ImprovementTarget) -> bool {
+        if crate::safety::killswitch::is_killswitch_active() {
+            return true;
+        }
+
         if let Some(ref file) = target.file {
             let file_path = Path::new(file);
 

@@ -896,9 +896,15 @@ fn commit_error(error: super::apply::CommitError) -> ApiError {
     use super::apply::CommitError;
     match &error {
         CommitError::UnknownRun(_) => not_found(error.to_string()),
-        CommitError::NotStaged(_) | CommitError::BaseMoved { .. } | CommitError::Killswitch(_) => {
-            conflict(error.to_string())
-        }
+        CommitError::NotStaged(_) | CommitError::BaseMoved { .. } => conflict(error.to_string()),
+        CommitError::Killswitch(reason) => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": error.to_string(),
+                "reason": reason,
+                "code": "killswitch_active",
+            })),
+        ),
         CommitError::Git(_) => internal_error(error),
     }
 }

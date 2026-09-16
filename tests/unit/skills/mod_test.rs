@@ -71,6 +71,8 @@ fn test_wrap_task_with_skill() {
             description: "Distilled procedure".to_string(),
             tools: vec![],
             verified: false,
+            admitted: true,
+            origin: Some("distilled".to_string()),
             content: "Some raw distilled instructions.".to_string(),
             source: None,
             ..Default::default()
@@ -173,12 +175,27 @@ fn test_render_with_trust_gate_verified_and_unverified() {
         source: None,
         ..Default::default()
     };
-    let unverified_skill = Skill {
+    let unverified_distilled_skill = Skill {
         name: "test_unverified".to_string(),
         description: "An unverified distilled skill".to_string(),
         tools: vec![],
         verified: false,
+        candidate: true,
+        admitted: true,
+        origin: Some("distilled".to_string()),
         content: "Run unverified $ARGUMENTS.".to_string(),
+        source: None,
+        ..Default::default()
+    };
+    let user_skill = Skill {
+        name: "test_user".to_string(),
+        description: "A user-authored skill".to_string(),
+        tools: vec![],
+        verified: false,
+        candidate: false,
+        admitted: false,
+        origin: None,
+        content: "Run user $ARGUMENTS.".to_string(),
         source: None,
         ..Default::default()
     };
@@ -186,11 +203,15 @@ fn test_render_with_trust_gate_verified_and_unverified() {
     let rendered_verified = verified_skill.render_with_trust_gate("unit");
     assert_eq!(rendered_verified, "[Skill: test_verified]\nRun test unit.");
 
-    let rendered_unverified = unverified_skill.render_with_trust_gate("e2e");
+    let rendered_unverified = unverified_distilled_skill.render_with_trust_gate("e2e");
     assert_eq!(
         rendered_unverified,
         "[Skill: test_unverified (UNVERIFIED - Distilled from unverified execution trace)]\nRun unverified e2e."
     );
+
+    // Hand-written user skill must render clean badge without false unverified claims (Rule 3)
+    let rendered_user = user_skill.render_with_trust_gate("direct");
+    assert_eq!(rendered_user, "[Skill: test_user]\nRun user direct.");
 }
 
 #[test]
@@ -291,12 +312,14 @@ fn test_killswitch_blocks_candidate_skill_access() {
     // Trip killswitch
     crate::safety::killswitch::trip_in_process("Unit test stop");
 
-    // Candidate skill access blocked by killswitch
+    // All skill access blocked by killswitch
     assert!(registry.get("candidate_skill").is_none());
+    assert!(registry.get("user_skill").is_none());
 
     // Clean reset
     crate::safety::killswitch::reset_in_process();
     assert!(registry.get("candidate_skill").is_some());
+    assert!(registry.get("user_skill").is_some());
 }
 
 #[test]
@@ -521,4 +544,108 @@ fn test_corrupt_ledger_fails_closed() {
 
     let res = AdmissionLedger::load_from_dir(&active_skills);
     assert!(res.is_err(), "Corrupt ledger must return Err (fail closed)");
+}
+
+#[test]
+fn test_legacy_admitted_skill_backfill() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let active_skills = temp.path().join("skills");
+    std::fs::create_dir_all(&active_skills).unwrap();
+
+    let content = "Legacy admitted skill instructions.";
+    let content_hash = format!("{:x}", sha2::Sha256::digest(content.as_bytes()));
+
+    // Write a skill with admitted: true and matching content_hash, without an .admitted_ledger.json file
+    let legacy_file = active_skills.join("legacy_skill.md");
+    let markdown = format!(
+        "---\nname: legacy_skill\ndescription: Legacy skill\nadmitted: true\ncontent_hash: {content_hash}\n---\n{content}"
+    );
+    std::fs::write(&legacy_file, markdown).unwrap();
+
+    let mut registry = SkillRegistry::new();
+    registry.discover_dir(&active_skills);
+
+    // Skill should be discovered and admitted
+    let skill = registry
+        .get("legacy_skill")
+        .expect("Legacy skill should be discovered and backfilled");
+    assert!(skill.admitted);
+
+    // .admitted_ledger.json should now exist and contain legacy_skill
+    let ledger =
+        AdmissionLedger::load_from_dir(&active_skills).expect("Ledger should have been persisted");
+    let entry = ledger
+        .entries
+        .get("legacy_skill")
+        .expect("Entry should be present in ledger");
+    assert_eq!(entry.content_hash, content_hash);
+
+    // Subsequent discovery should load from ledger
+    let mut fresh_registry = SkillRegistry::new();
+    fresh_registry.discover_dir(&active_skills);
+    assert!(fresh_registry.get("legacy_skill").is_some());
+}
+
+#[test]
+fn test_tampered_legacy_skill_rejected_no_backfill() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let active_skills = temp.path().join("skills");
+    std::fs::create_dir_all(&active_skills).unwrap();
+
+    let content = "Tampered legacy instructions.";
+    let wrong_hash = "0000000000000000000000000000000000000000000000000000000000000000";
+
+    // Write a skill claiming admitted: true but with a mismatched content_hash
+    let legacy_file = active_skills.join("tampered_legacy.md");
+    let markdown = format!(
+        "---\nname: tampered_legacy\ndescription: Tampered legacy\nadmitted: true\ncontent_hash: {wrong_hash}\n---\n{content}"
+    );
+    std::fs::write(&legacy_file, markdown).unwrap();
+
+    let mut registry = SkillRegistry::new();
+    registry.discover_dir(&active_skills);
+
+    // Tampered legacy skill must NOT be discovered
+    assert!(
+        registry.get("tampered_legacy").is_none(),
+        "Tampered legacy skill must be rejected"
+    );
+
+    // Ledger should NOT contain tampered_legacy
+    let ledger = AdmissionLedger::load_from_dir(&active_skills).unwrap();
+    assert!(!ledger.entries.contains_key("tampered_legacy"));
+}
+
+#[test]
+fn test_corrupt_ledger_blocks_discovery_and_cannot_be_overwritten() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let active_skills = temp.path().join("skills");
+    std::fs::create_dir_all(&active_skills).unwrap();
+
+    let ledger_file = active_skills.join(".admitted_ledger.json");
+    let corrupt_payload = "{ not valid json";
+    std::fs::write(&ledger_file, corrupt_payload).unwrap();
+
+    // Also place a valid user skill in the directory
+    std::fs::write(
+        active_skills.join("user_skill.md"),
+        "---\nname: user_skill\ndescription: User skill\n---\nSome instructions.",
+    )
+    .unwrap();
+
+    let mut registry = SkillRegistry::new();
+    registry.discover_dir(&active_skills);
+
+    // Corrupt ledger should cause discover_dir to abort immediately (fail closed)
+    assert!(
+        registry.is_empty(),
+        "Discovery must fail closed on corrupt ledger"
+    );
+
+    // Corrupt ledger must NOT have been overwritten
+    let current_content = std::fs::read_to_string(&ledger_file).unwrap();
+    assert_eq!(
+        current_content, corrupt_payload,
+        "Corrupt ledger must never be overwritten"
+    );
 }
