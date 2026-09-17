@@ -866,3 +866,50 @@ fn test_failed_admission_ledger_save_failure_rolls_back_skill() {
         "Skill file must be rolled back to previous content when ledger save fails"
     );
 }
+
+#[test]
+fn test_detect_unadmitted_in_dir() {
+    let _lock = crate::safety::killswitch::KILLSWITCH_TEST_LOCK.lock();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let skills_dir = temp.path().join("skills");
+    std::fs::create_dir_all(&skills_dir).unwrap();
+
+    // 1. Write an admitted skill with a matching ledger entry
+    let admitted_content = "Admitted content.";
+    let admitted_hash = format!("{:x}", sha2::Sha256::digest(admitted_content.as_bytes()));
+    std::fs::write(
+        skills_dir.join("admitted.md"),
+        format!("---\nname: admitted\ndescription: Admitted\n---\n{admitted_content}"),
+    )
+    .unwrap();
+
+    let mut ledger = AdmissionLedger::default();
+    ledger.entries.insert(
+        "admitted".to_string(),
+        crate::skills::AdmittedSkillEntry {
+            name: "admitted".to_string(),
+            file_name: "admitted.md".to_string(),
+            content_hash: admitted_hash,
+            metadata_hash: None,
+            verified: true,
+            tools: vec![],
+            source_origin: None,
+            scope: None,
+            admitted_at: 1726500000,
+        },
+    );
+    ledger.save_to_dir(&skills_dir).unwrap();
+
+    // 2. Write an unadmitted skill with NO ledger entry
+    let unadmitted_file = skills_dir.join("unadmitted.md");
+    std::fs::write(
+        &unadmitted_file,
+        "---\nname: unadmitted\ndescription: Unadmitted\n---\nUnadmitted content.",
+    )
+    .unwrap();
+
+    // 3. detect_unadmitted_in_dir must return exactly unadmitted.md
+    let unadmitted = SkillRegistry::detect_unadmitted_in_dir(&skills_dir);
+    assert_eq!(unadmitted.len(), 1);
+    assert_eq!(unadmitted[0], unadmitted_file);
+}

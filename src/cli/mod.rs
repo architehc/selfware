@@ -4439,8 +4439,8 @@ max_recovery_attempts = 3
                         );
                     }
 
-                    // Check candidates in candidate directory
                     if let Ok(cwd) = std::env::current_dir() {
+                        // Check candidates in candidate directory
                         let candidate_dir = cwd.join(".selfware").join("skill-candidates");
                         let candidates = SkillRegistry::discover_candidates(&candidate_dir);
                         if !candidates.is_empty() {
@@ -4449,6 +4449,40 @@ max_recovery_attempts = 3
                                 println!(
                                     "  ? {:<20} {} (path: .selfware/skill-candidates/{}.md)",
                                     c.name, c.description, c.name
+                                );
+                            }
+                        }
+
+                        // Check refused files in project discovery directories
+                        let project_skills = cwd.join(".selfware").join("skills");
+                        let unadmitted_skills =
+                            SkillRegistry::detect_unadmitted_in_dir(&project_skills);
+                        let project_commands = cwd.join(".selfware").join("commands");
+                        let unadmitted_commands =
+                            SkillRegistry::detect_unadmitted_in_dir(&project_commands);
+                        let total_unadmitted: Vec<_> = unadmitted_skills
+                            .into_iter()
+                            .chain(unadmitted_commands)
+                            .collect();
+
+                        if !total_unadmitted.is_empty() {
+                            println!(
+                                "\n⚠️  Refused unadmitted files in project directory ({}):",
+                                total_unadmitted.len()
+                            );
+                            for p in total_unadmitted {
+                                let rel = p.strip_prefix(&cwd).unwrap_or(&p);
+                                println!(
+                                    "   • {} (missing from .admitted_ledger.json)",
+                                    rel.display()
+                                );
+                                println!(
+                                    "     To admit into project: selfware skill admit {}",
+                                    rel.display()
+                                );
+                                println!(
+                                    "     To treat as user tool: mv {} ~/.selfware/skills/",
+                                    rel.display()
                                 );
                             }
                         }

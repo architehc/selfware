@@ -631,6 +631,48 @@ impl SkillRegistry {
         registry
     }
 
+    /// Detect any skill or command `.md` files in a project discovery directory that lack
+    /// an admission ledger entry, returning their paths for actionable operator diagnostics.
+    pub fn detect_unadmitted_in_dir(dir: &Path) -> Vec<PathBuf> {
+        let mut unadmitted = Vec::new();
+        if !dir.is_dir() {
+            return unadmitted;
+        }
+
+        let ledger = AdmissionLedger::load_from_dir(dir).unwrap_or_default();
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return unadmitted,
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("md") {
+                continue;
+            }
+
+            let file_name_str = path
+                .file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or_default();
+
+            if let Ok(skill) = Skill::from_file(&path) {
+                let has_ledger_entry = ledger.entries.contains_key(&skill.name)
+                    || ledger
+                        .entries
+                        .values()
+                        .any(|e| !e.file_name.is_empty() && e.file_name == file_name_str);
+                if !has_ledger_entry {
+                    unadmitted.push(path);
+                }
+            } else {
+                unadmitted.push(path);
+            }
+        }
+        unadmitted.sort();
+        unadmitted
+    }
+
     /// Discover unadmitted skill candidates in the candidate directory (e.g. `.selfware/skill-candidates/`).
     pub fn discover_candidates(candidates_dir: &Path) -> Vec<Skill> {
         let mut candidates = Vec::new();
