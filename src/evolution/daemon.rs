@@ -373,6 +373,7 @@ pub(crate) struct EvaluatedCandidate {
     pub(crate) metrics: FitnessMetrics,
     pub(crate) sab_result: Option<fitness::SabResult>,
     pub(crate) tested_diff: String,
+    pub(crate) evaluated_tree: Option<String>,
     pub(crate) composite: f64,
     pub(crate) attempt_id: String,
     pub(crate) branch_id: String,
@@ -386,6 +387,7 @@ pub const SAB_NOISE_MARGIN: f64 = DEFAULT_SAB_NOISE_MARGIN;
 /// When paired scenario scores are available from benchmark runs, calculates the
 /// standard error of the mean scenario score delta across the benchmark suite.
 /// Falls back to [`DEFAULT_SAB_NOISE_MARGIN`] when unmeasured.
+#[allow(dead_code)]
 pub(crate) fn compute_empirical_noise_margin(
     base_sab: Option<&SabResult>,
     cand_sab: Option<&SabResult>,
@@ -474,7 +476,7 @@ pub(crate) fn evaluate_candidate_promotion(
     base_metrics: &FitnessMetrics,
     winner_metrics: &FitnessMetrics,
 ) -> PromotionDecision {
-    let noise_margin = compute_empirical_noise_margin(base_sab, cand_sab);
+    let noise_margin = DEFAULT_SAB_NOISE_MARGIN;
     if winner_metrics.sab_score < base_metrics.sab_score - noise_margin {
         return PromotionDecision::Reject(format!(
             "winner SAB score ({:.2}) regressed below baseline ({:.2}) beyond noise margin ({:.2})",
@@ -607,38 +609,53 @@ pub struct LoadedActivePolicy {
     pub beta: f64,
     pub evidence_hash: Option<String>,
     pub policy_name: String,
+    pub fallback_reason: Option<String>,
 }
 
 /// Loads and validates the promoted search policy from `.selfware/active_policy.json`.
 pub fn load_active_policy(active_policy_path: &Path, population_size: usize) -> LoadedActivePolicy {
-    let fallback = || LoadedActivePolicy {
+    let fallback = |reason: Option<String>| LoadedActivePolicy {
         policy: Box::new(FixedPopulationPolicy::for_daemon(population_size)),
         beta: 1.0,
         evidence_hash: None,
         policy_name: "FixedPopulation (Incumbent)".to_string(),
+        fallback_reason: reason,
     };
 
     if !active_policy_path.exists() {
-        return fallback();
+        return fallback(Some("Active policy file does not exist".to_string()));
     }
 
     let Ok(content) = std::fs::read_to_string(active_policy_path) else {
-        return fallback();
+        return fallback(Some("Failed to read active policy file".to_string()));
     };
 
     let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) else {
-        return fallback();
+        return fallback(Some("Failed to parse active policy JSON".to_string()));
     };
 
     let Some(raw_name) = val.get("policy_name").and_then(|v| v.as_str()) else {
-        return fallback();
+        return fallback(Some(
+            "Missing policy_name in active policy file".to_string(),
+        ));
     };
+
+    let is_incumbent = raw_name == "FixedPopulation (Incumbent)" || raw_name == "FixedPopulation";
 
     let beta = val.get("beta").and_then(|v| v.as_f64()).unwrap_or(0.2);
     let evidence_hash = val
         .get("evidence_hash")
         .and_then(|v| v.as_str())
         .map(str::to_string);
+
+    // Mandatory provenance: non-incumbent policies must carry a valid evidence_hash
+    if !is_incumbent && evidence_hash.is_none() {
+        let msg = format!(
+            "Promoted non-incumbent policy '{raw_name}' lacks required cryptographic evidence_hash"
+        );
+        tracing::warn!("{msg}; falling back to incumbent");
+        return fallback(Some(msg));
+    }
 
     // Verify cryptographic evidence binding if hash is present
     if let Some(ref expected_hash) = evidence_hash {
@@ -664,6 +681,39 @@ pub fn load_active_policy(active_policy_path: &Path, population_size: usize) -> 
             .get("report_digest")
             .and_then(|v| v.as_str())
             .unwrap_or("");
+
+        // If tree_files are provided, verify each on disk against its expected digest
+        if let Some(tree_files_arr) = val.get("tree_files").and_then(|v| v.as_array()) {
+            for (i, tf_val) in tree_files_arr.iter().enumerate() {
+                if let Some(tf_str) = tf_val.as_str() {
+                    let tf_path = Path::new(tf_str);
+                    match std::fs::read(tf_path) {
+                        Ok(bytes) => {
+                            let disk_sha = crate::evolution::tree_log::compute_sha256(&bytes);
+                            if let Some(expected_digest) = tree_digests.get(i) {
+                                if &disk_sha != expected_digest {
+                                    let msg = format!(
+                                        "Tree file on disk '{}' digest mismatch: expected {expected_digest}, found {disk_sha}",
+                                        tf_path.display()
+                                    );
+                                    tracing::warn!("{msg}; falling back to incumbent");
+                                    return fallback(Some(msg));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let msg = format!(
+                                "Cannot read tree file on disk '{}': {e}",
+                                tf_path.display()
+                            );
+                            tracing::warn!("{msg}; falling back to incumbent");
+                            return fallback(Some(msg));
+                        }
+                    }
+                }
+            }
+        }
+
         let computed = crate::evolution::replay::compute_policy_evidence_hash(
             raw_name,
             val_obj,
@@ -674,13 +724,11 @@ pub fn load_active_policy(active_policy_path: &Path, population_size: usize) -> 
             report_digest,
         );
         if computed != *expected_hash {
-            tracing::warn!(
-                "Active policy evidence hash mismatch for '{}'! Expected '{}', got '{}'; falling back to incumbent FixedPopulationPolicy",
-                raw_name,
-                expected_hash,
-                computed
+            let msg = format!(
+                "Active policy evidence hash mismatch for '{raw_name}'! Expected '{expected_hash}', got '{computed}'"
             );
-            return fallback();
+            tracing::warn!("{msg}; falling back to incumbent FixedPopulationPolicy");
+            return fallback(Some(msg));
         }
     }
 
@@ -697,6 +745,7 @@ pub fn load_active_policy(active_policy_path: &Path, population_size: usize) -> 
         beta,
         evidence_hash,
         policy_name,
+        fallback_reason: None,
     }
 }
 
@@ -1077,6 +1126,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             .as_ref()
             .map(|r| r.binary_sha256.clone()),
         base_commit: ast_tools::get_git_head_commit(repo_root),
+        committed_commit: None,
         created_at: chrono_now(),
     };
     if let Err(err) = log_and_append_attempt(&attempts_file, &baseline_node, repo_root, 0, start) {
@@ -1136,35 +1186,30 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         let mut active_actions = match policy_decision {
             PolicyDecision::Stop { reason } => {
                 log_phase(&format!(
-                    "Search policy '{}' requested stop: {reason}; falling back to generation exploration",
+                    "🛑 Active search policy '{}' terminated search: {reason}",
                     search_policy.name()
                 ));
                 log_event(
                     repo_root,
                     &serde_json::json!({
-                        "event": "policy_stop_fallback",
+                        "event": "policy_stop",
                         "policy": search_policy.name(),
                         "reason": &reason,
                         "generation": generation,
                         "timestamp": chrono_now(),
                     }),
                 );
-                // Gated: do not abort the daemon run before config.generations completes.
-                // Explore new roots for this generation as fallback.
-                vec![LegalAction::OpenRoot {
-                    branch_id: format!("branch-g{}-0", generation),
-                    node_id: format!("root-g{}-0", generation),
-                }]
+                break;
             }
             PolicyDecision::SelectBatch(actions) => {
                 if actions.is_empty() {
-                    vec![LegalAction::OpenRoot {
-                        branch_id: format!("branch-g{}-0", generation),
-                        node_id: format!("root-g{}-0", generation),
-                    }]
-                } else {
-                    actions
+                    log_phase(&format!(
+                        "🛑 Active search policy '{}' returned empty action batch; terminating search",
+                        search_policy.name()
+                    ));
+                    break;
                 }
+                actions
             }
         };
 
@@ -1191,56 +1236,173 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         // ─── Step 2: Generate hypotheses via agent swarm (1 per active action) ───
         let llm_start = Instant::now();
         let mut hypotheses_with_actions = Vec::new();
+        const MAX_EMPTY_LLM_RETRIES: usize = 3;
 
-        for (action_idx, action) in active_actions.into_iter().enumerate() {
-            let (h_parent_id, h_branch_id) = match &action {
-                LegalAction::RefineFrontier {
-                    branch_id,
-                    parent_id,
-                    ..
-                } => (Some(parent_id.clone()), branch_id.clone()),
-                LegalAction::OpenRoot { branch_id, .. } => {
-                    (Some(baseline_node.id.clone()), branch_id.clone())
-                }
-            };
-
-            // Restore parent worktree to inspect exact source state if refining
-            let (source_context, parent_context, temp_worktree) = match &action {
-                LegalAction::RefineFrontier { parent_id, .. } => {
-                    let worktree = ast_tools::create_shadow_worktree_for_parent(
-                        repo_root,
-                        &attempts_file,
-                        Some(parent_id),
-                    )
-                    .ok();
-                    let source_dir = worktree.as_deref().unwrap_or(repo_root);
-                    let source = read_mutation_targets(&config.mutation_targets, source_dir);
-                    let parent_info = format_parent_refinement_context(&attempts_file, parent_id);
-                    (source, parent_info, worktree)
-                }
-                LegalAction::OpenRoot { .. } => {
-                    let source = read_mutation_targets(&config.mutation_targets, repo_root);
-                    (source, String::new(), None)
-                }
-            };
-
-            let hyp = generate_single_action_hypothesis(
-                &config,
-                &telemetry_prompt,
-                &history_prompt,
-                &source_context,
-                &parent_context,
-                temp_worktree.as_deref().unwrap_or(repo_root),
-            )
-            .await;
-
-            if let Some(ref w) = temp_worktree {
-                let _ = ast_tools::cleanup_worktree(repo_root, w);
+        for retry_idx in 0..MAX_EMPTY_LLM_RETRIES {
+            if retry_idx > 0 {
+                log_warning(&format!(
+                    "No valid hypotheses generated, retrying generation {generation} (attempt {}/{MAX_EMPTY_LLM_RETRIES})...",
+                    retry_idx + 1
+                ));
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
 
-            if let Some(mut h) = hyp {
-                h.id = format!("g{}-hyp{}", generation, action_idx);
-                hypotheses_with_actions.push((h, h_parent_id, h_branch_id));
+            for (action_idx, action) in active_actions.iter().enumerate() {
+                let (h_parent_id, h_branch_id) = match action {
+                    LegalAction::RefineFrontier {
+                        branch_id,
+                        parent_id,
+                        ..
+                    } => (Some(parent_id.clone()), branch_id.clone()),
+                    LegalAction::OpenRoot { branch_id, .. } => {
+                        (Some(baseline_node.id.clone()), branch_id.clone())
+                    }
+                };
+
+                // Restore parent/root worktree to inspect exact source state.
+                // Read root context from the same immutable baseline checkout used for testing.
+                // Restoration errors produce a recorded failure instead of silently falling back to repo_root.
+                let (source_context, parent_context, temp_worktree) = match action {
+                    LegalAction::RefineFrontier { parent_id, .. } => {
+                        let worktree = match ast_tools::create_shadow_worktree_for_parent(
+                            repo_root,
+                            &attempts_file,
+                            Some(parent_id),
+                        ) {
+                            Ok(w) => w,
+                            Err(e) => {
+                                log_warning(&format!(
+                                    "Refinement worktree restoration failed for parent '{parent_id}': {e}"
+                                ));
+                                let node = AttemptNode {
+                                    id: format!(
+                                        "att-g{generation}-refine-restoration-fail-{action_idx}"
+                                    ),
+                                    parent_id: Some(parent_id.clone()),
+                                    generation,
+                                    branch_id: h_branch_id.clone(),
+                                    hypothesis_id: format!("hyp-restore-fail-{action_idx}"),
+                                    description: format!(
+                                        "Refinement restoration failed for parent {parent_id}"
+                                    ),
+                                    diff_sha256: compute_sha256(b""),
+                                    patch: None,
+                                    sab_report_path: None,
+                                    metrics: None,
+                                    composite_score: None,
+                                    tokens_used: None,
+                                    wall_time_ms: 0,
+                                    status: AttemptStatus::InternalError,
+                                    failure_class: Some(FailureClass::EnvironmentError),
+                                    failure_reason: Some(format!(
+                                        "Refinement worktree restoration failed: {e}"
+                                    )),
+                                    output_tail: None,
+                                    binary_sha256: None,
+                                    base_commit: resolve_attempt_base_commit(
+                                        &attempts_file,
+                                        Some(parent_id),
+                                        repo_root,
+                                    ),
+                                    committed_commit: None,
+                                    created_at: chrono_now(),
+                                };
+                                let _ = log_and_append_attempt(
+                                    &attempts_file,
+                                    &node,
+                                    repo_root,
+                                    generation,
+                                    gen_start,
+                                );
+                                continue;
+                            }
+                        };
+                        let source = read_mutation_targets(&config.mutation_targets, &worktree);
+                        let parent_info =
+                            format_parent_refinement_context(&attempts_file, parent_id);
+                        (source, parent_info, Some(worktree))
+                    }
+                    LegalAction::OpenRoot { .. } => {
+                        let worktree = match ast_tools::create_shadow_worktree_for_parent(
+                            repo_root,
+                            &attempts_file,
+                            Some("att-baseline"),
+                        ) {
+                            Ok(w) => w,
+                            Err(e) => {
+                                log_warning(&format!(
+                                    "Root worktree restoration failed for baseline: {e}"
+                                ));
+                                let node = AttemptNode {
+                                    id: format!(
+                                        "att-g{generation}-root-restoration-fail-{action_idx}"
+                                    ),
+                                    parent_id: Some(baseline_node.id.clone()),
+                                    generation,
+                                    branch_id: h_branch_id.clone(),
+                                    hypothesis_id: format!("hyp-root-restore-fail-{action_idx}"),
+                                    description: "Root worktree restoration failed for baseline"
+                                        .to_string(),
+                                    diff_sha256: compute_sha256(b""),
+                                    patch: None,
+                                    sab_report_path: None,
+                                    metrics: None,
+                                    composite_score: None,
+                                    tokens_used: None,
+                                    wall_time_ms: 0,
+                                    status: AttemptStatus::InternalError,
+                                    failure_class: Some(FailureClass::EnvironmentError),
+                                    failure_reason: Some(format!(
+                                        "Root worktree restoration failed: {e}"
+                                    )),
+                                    output_tail: None,
+                                    binary_sha256: None,
+                                    base_commit: resolve_attempt_base_commit(
+                                        &attempts_file,
+                                        Some(&baseline_node.id),
+                                        repo_root,
+                                    ),
+                                    committed_commit: None,
+                                    created_at: chrono_now(),
+                                };
+                                let _ = log_and_append_attempt(
+                                    &attempts_file,
+                                    &node,
+                                    repo_root,
+                                    generation,
+                                    gen_start,
+                                );
+                                continue;
+                            }
+                        };
+                        let source = read_mutation_targets(&config.mutation_targets, &worktree);
+                        (source, String::new(), Some(worktree))
+                    }
+                };
+
+                let source_dir = temp_worktree.as_deref().unwrap_or(repo_root);
+                let hyp = generate_single_action_hypothesis(
+                    &config,
+                    &telemetry_prompt,
+                    &history_prompt,
+                    &source_context,
+                    &parent_context,
+                    source_dir,
+                )
+                .await;
+
+                if let Some(ref w) = temp_worktree {
+                    let _ = ast_tools::cleanup_worktree(repo_root, w);
+                }
+
+                if let Some(mut h) = hyp {
+                    h.id = format!("g{}-hyp{}", generation, action_idx);
+                    hypotheses_with_actions.push((h, h_parent_id, h_branch_id));
+                }
+            }
+
+            if !hypotheses_with_actions.is_empty() {
+                break;
             }
         }
 
@@ -1257,9 +1419,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         );
 
         if hypotheses_with_actions.is_empty() {
-            log_warning("No valid hypotheses generated, retrying...");
-            // Backoff to avoid 100% CPU busy-loop when the LLM returns nothing.
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            log_warning(
+                "No valid hypotheses generated after retries, continuing to next generation",
+            );
             continue;
         }
 
@@ -1271,8 +1433,6 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         let prior_failed_diffs = load_failed_diff_shas(&attempts_file);
         let mut valid = Vec::new();
         for (h, h_parent_id, h_branch_id) in hypotheses_with_actions {
-            let attempt_base_commit =
-                resolve_attempt_base_commit(&attempts_file, h_parent_id.as_deref(), repo_root);
             let diff_sha256 = compute_sha256(h.patch.as_bytes());
             if hypothesis_touches_protected(&h) {
                 log_warning(&format!(
@@ -1298,7 +1458,8 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     failure_reason: Some("Touches protected paths".into()),
                     output_tail: None,
                     binary_sha256: None,
-                    base_commit: attempt_base_commit,
+                    base_commit: None,
+                    committed_commit: None,
                     created_at: chrono_now(),
                 };
                 if let Err(err) =
@@ -1341,7 +1502,8 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     )),
                     output_tail: None,
                     binary_sha256: None,
-                    base_commit: attempt_base_commit,
+                    base_commit: None,
+                    committed_commit: None,
                     created_at: chrono_now(),
                 };
                 if let Err(err) =
@@ -1375,6 +1537,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         // build harness or environment is compromised (e.g. toolchain, port lock, resource exhaustion).
         // Aborting the generation prevents misclassifying harness failures as mutant slips.
         let control_start = Instant::now();
+        let control_base_commit = ast_tools::get_git_head_commit(repo_root);
         let control_worktree = match ast_tools::create_shadow_worktree(repo_root) {
             Ok(w) => w,
             Err(e) => {
@@ -1400,11 +1563,8 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     failure_reason: Some(format!("Control worktree failed: {e}")),
                     output_tail: None,
                     binary_sha256: None,
-                    base_commit: resolve_attempt_base_commit(
-                        &attempts_file,
-                        active_parent_id.as_deref(),
-                        repo_root,
-                    ),
+                    base_commit: control_base_commit.clone(),
+                    committed_commit: None,
                     created_at: chrono_now(),
                 };
                 if let Err(err) =
@@ -1471,11 +1631,8 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 failure_reason: Some("Control compile check failed in clean worktree".to_string()),
                 output_tail: tail,
                 binary_sha256: None,
-                base_commit: resolve_attempt_base_commit(
-                    &attempts_file,
-                    active_parent_id.as_deref(),
-                    repo_root,
-                ),
+                base_commit: control_base_commit.clone(),
+                committed_commit: None,
                 created_at: chrono_now(),
             };
             if let Err(err) =
@@ -1549,11 +1706,8 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 ),
                 output_tail: tail,
                 binary_sha256: None,
-                base_commit: resolve_attempt_base_commit(
-                    &attempts_file,
-                    active_parent_id.as_deref(),
-                    repo_root,
-                ),
+                base_commit: control_base_commit,
+                committed_commit: None,
                 created_at: chrono_now(),
             };
             if let Err(err) =
@@ -1618,6 +1772,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         output_tail: None,
                         binary_sha256: None,
                         base_commit: attempt_base_commit.clone(),
+                        committed_commit: None,
                         created_at: chrono_now(),
                     };
                     if let Err(err) = log_and_append_attempt(
@@ -1662,6 +1817,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     output_tail: None,
                     binary_sha256: None,
                     base_commit: attempt_base_commit.clone(),
+                    committed_commit: None,
                     created_at: chrono_now(),
                 };
                 if let Err(err) =
@@ -1726,6 +1882,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         output_tail: fmt_tail,
                         binary_sha256: None,
                         base_commit: attempt_base_commit.clone(),
+                        committed_commit: None,
                         created_at: chrono_now(),
                     };
                     if let Err(err) = log_and_append_attempt(
@@ -1793,6 +1950,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     output_tail: check_tail,
                     binary_sha256: None,
                     base_commit: attempt_base_commit.clone(),
+                    committed_commit: None,
                     created_at: chrono_now(),
                 };
                 if let Err(err) =
@@ -1845,6 +2003,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         output_tail: None,
                         binary_sha256: None,
                         base_commit: attempt_base_commit.clone(),
+                        committed_commit: None,
                         created_at: chrono_now(),
                     };
                     if let Err(err) = log_and_append_attempt(
@@ -1924,6 +2083,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     output_tail: Some(tail),
                     binary_sha256: None,
                     base_commit: attempt_base_commit.clone(),
+                    committed_commit: None,
                     created_at: chrono_now(),
                 };
                 if let Err(err) =
@@ -1987,6 +2147,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     output_tail: clippy_tail,
                     binary_sha256: None,
                     base_commit: attempt_base_commit.clone(),
+                    committed_commit: None,
                     created_at: chrono_now(),
                 };
                 if let Err(err) =
@@ -2049,6 +2210,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         output_tail: build_tail,
                         binary_sha256: None,
                         base_commit: attempt_base_commit.clone(),
+                        committed_commit: None,
                         created_at: chrono_now(),
                     };
                     if let Err(err) = log_and_append_attempt(
@@ -2100,6 +2262,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             output_tail: None,
                             binary_sha256: None,
                             base_commit: attempt_base_commit.clone(),
+                            committed_commit: None,
                             created_at: chrono_now(),
                         };
                         if let Err(err) = log_and_append_attempt(
@@ -2153,6 +2316,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             output_tail: None,
                             binary_sha256: None,
                             base_commit: attempt_base_commit.clone(),
+                            committed_commit: None,
                             created_at: chrono_now(),
                         };
                         if let Err(err) = log_and_append_attempt(
@@ -2201,12 +2365,13 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         composite_score: None,
                         tokens_used: None,
                         wall_time_ms: attempt_start.elapsed().as_millis() as u64,
-                        status: AttemptStatus::Evaluated,
-                        failure_class: None,
+                        status: AttemptStatus::PatchFailed,
+                        failure_class: Some(FailureClass::Unclassified),
                         failure_reason: Some("No effective diff after evaluation".into()),
                         output_tail: None,
                         binary_sha256: None,
                         base_commit: attempt_base_commit.clone(),
+                        committed_commit: None,
                         created_at: chrono_now(),
                     };
                     if let Err(err) = log_and_append_attempt(
@@ -2250,6 +2415,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 output_tail: None,
                 binary_sha256: winner_sab.as_ref().map(|s| s.binary_sha256.clone()),
                 base_commit: attempt_base_commit.clone(),
+                committed_commit: None,
                 created_at: chrono_now(),
             };
             if let Err(err) =
@@ -2271,11 +2437,14 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 winner_metrics.wall_clock_secs
             ));
 
+            let evaluated_tree = capture_worktree_tree_id(&worktree);
+
             evaluated_candidates.push(EvaluatedCandidate {
                 hypothesis: hypothesis.clone(),
                 metrics: winner_metrics,
                 sab_result: winner_sab,
                 tested_diff,
+                evaluated_tree,
                 composite: candidate_composite,
                 attempt_id: attempt_id.clone(),
                 branch_id: hyp_branch_id.clone(),
@@ -2371,8 +2540,23 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 // ONLY the paths it edits — never `git add -A`, which swept every
                 // dirty edit and untracked file (.env, scratch, credentials) into
                 // the BLOOM commit on whatever branch was checked out.
-                if commit_winner_to_repo(repo_root, &winner.tested_diff, &commit_msg) {
+                // Require the promoted tree to match the evaluated benchmark tree exactly.
+                if commit_winner_to_repo(
+                    repo_root,
+                    &winner.tested_diff,
+                    winner.evaluated_tree.as_deref(),
+                    &commit_msg,
+                ) {
                     active_parent_id = Some(winner.attempt_id.clone());
+
+                    let new_head = ast_tools::get_git_head_commit(repo_root);
+                    if let Some(ref head_sha) = new_head {
+                        let _ = AttemptTree::record_committed_commit(
+                            &attempts_file,
+                            &winner.attempt_id,
+                            head_sha,
+                        );
+                    }
 
                     let git_tag = if generation.is_multiple_of(config.checkpoint_interval) {
                         let tag = format!("evolve-gen-{}", generation);
@@ -3656,11 +3840,36 @@ fn capture_tested_diff(worktree: &Path) -> Option<String> {
     Some(String::from_utf8_lossy(&diff.stdout).into_owned())
 }
 
+/// Capture the git tree object ID of the staged files in a worktree or repository.
+pub(crate) fn capture_worktree_tree_id(worktree: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .env_remove("GIT_INDEX_FILE")
+        .args(["write-tree"])
+        .current_dir(worktree)
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !s.is_empty() {
+            return Some(s);
+        }
+    }
+    None
+}
+
 /// Apply the tested diff to the repo and commit ONLY the paths it edits.
 /// On commit failure the apply is reverted so the user's worktree returns to
 /// its pre-apply state instead of being left half-winner'd. Returns true only
 /// when the winner is fully applied AND committed.
-fn commit_winner_to_repo(repo_root: &Path, tested_diff: &str, commit_msg: &str) -> bool {
+///
+/// If `expected_tree` is supplied, the promoted tree must match the evaluated
+/// benchmark tree exactly, preventing committing unbenchmarked code combinations.
+pub(crate) fn commit_winner_to_repo(
+    repo_root: &Path,
+    tested_diff: &str,
+    expected_tree: Option<&str>,
+    commit_msg: &str,
+) -> bool {
     // Re-check killswitch immediately before applying and committing:
     // even if the cycle started green, a trip during in-flight evaluation must halt mutation.
     if let Err(err) = crate::safety::killswitch::check_killswitch(Some(repo_root)) {
@@ -3675,10 +3884,74 @@ fn commit_winner_to_repo(repo_root: &Path, tested_diff: &str, commit_msg: &str) 
     }
     let edited = patch_edited_paths(tested_diff);
     warn_unrelated_dirty_paths(repo_root, &edited);
+
+    // If an expected evaluated tree is supplied, require the staged tree in repo_root
+    // to match the evaluated tree byte-for-byte before committing. This prevents committing
+    // untested code combinations when HEAD has moved since the candidate was evaluated.
+    if let Some(expected) = expected_tree {
+        let mut add = Command::new("git");
+        add.env_remove("GIT_INDEX_FILE");
+        add.arg("add").arg("--");
+        for p in &edited {
+            add.arg(p);
+        }
+        let add_ok = add
+            .current_dir(repo_root)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !add_ok {
+            log_error(
+                "Failed to stage edited paths for tree verification — reverting applied diff",
+            );
+            revert_applied_diff(repo_root, tested_diff);
+            return false;
+        }
+
+        let promoted_tree = capture_worktree_tree_id(repo_root);
+        match promoted_tree {
+            Some(ref actual) if actual == expected => {
+                // Exact match: promoted tree is identical to the evaluated benchmark tree
+            }
+            Some(ref actual) => {
+                log_error(&format!(
+                    "Promoted tree mismatch: evaluated benchmark tree is {expected}, but applying diff to HEAD produced {actual} (untested code combination from divergent HEAD) — refusing to commit unbenchmarked code"
+                ));
+                let _ = Command::new("git")
+                    .env_remove("GIT_INDEX_FILE")
+                    .args(["reset", "HEAD", "--"])
+                    .args(&edited)
+                    .current_dir(repo_root)
+                    .output();
+                revert_applied_diff(repo_root, tested_diff);
+                return false;
+            }
+            None => {
+                log_error(
+                    "Failed to capture promoted git tree — refusing to commit unbenchmarked code",
+                );
+                let _ = Command::new("git")
+                    .env_remove("GIT_INDEX_FILE")
+                    .args(["reset", "HEAD", "--"])
+                    .args(&edited)
+                    .current_dir(repo_root)
+                    .output();
+                revert_applied_diff(repo_root, tested_diff);
+                return false;
+            }
+        }
+    }
+
     if commit_scoped_paths(repo_root, &edited, commit_msg) {
         return true;
     }
     log_error("Winner commit failed — reverting the applied diff to keep the worktree clean");
+    let _ = Command::new("git")
+        .env_remove("GIT_INDEX_FILE")
+        .args(["reset", "HEAD", "--"])
+        .args(&edited)
+        .current_dir(repo_root)
+        .output();
     revert_applied_diff(repo_root, tested_diff);
     false
 }

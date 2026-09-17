@@ -53,6 +53,7 @@ fn sample_node(
         output_tail: None,
         binary_sha256: None,
         base_commit: None,
+        committed_commit: None,
         created_at: "2026-09-16T12:00:00Z".to_string(),
     }
 }
@@ -416,4 +417,63 @@ fn test_split_held_out_excludes_control_anchors() {
         val_exploratory,
         "Validation tree must contain an exploratory branch"
     );
+}
+
+#[test]
+fn test_record_committed_commit_updates_attempts_file() {
+    let dir = tempdir().unwrap();
+    let attempts_file = dir.path().join("attempts.jsonl");
+
+    let mut tree = AttemptTree::new();
+    tree.add_node(sample_node(
+        "att-baseline",
+        None,
+        "baseline",
+        Some(50.0),
+        AttemptStatus::Baseline,
+    ))
+    .unwrap();
+    tree.add_node(sample_node(
+        "att-winner-1",
+        Some("att-baseline"),
+        "branch-1",
+        Some(75.0),
+        AttemptStatus::Evaluated,
+    ))
+    .unwrap();
+    tree.save_to_jsonl(&attempts_file).unwrap();
+
+    // Record committed commit for winner
+    AttemptTree::record_committed_commit(&attempts_file, "att-winner-1", "commit-sha-abc1234")
+        .expect("must record committed commit");
+
+    // Reload tree and check
+    let reloaded = AttemptTree::load_from_jsonl(&attempts_file).unwrap();
+    let winner = reloaded.get("att-winner-1").unwrap();
+    assert_eq!(
+        winner.committed_commit.as_deref(),
+        Some("commit-sha-abc1234")
+    );
+
+    let baseline = reloaded.get("att-baseline").unwrap();
+    assert_eq!(baseline.committed_commit, None);
+
+    // Non-existent node is a safe no-op
+    AttemptTree::record_committed_commit(&attempts_file, "non-existent", "commit-sha-xyz")
+        .expect("must succeed as no-op");
+}
+
+#[test]
+fn test_find_lineage_root_branch_cycle_guard() {
+    let mut tree = AttemptTree::new();
+    let mut n1 = sample_node("c1", Some("c2"), "b1", Some(10.0), AttemptStatus::Evaluated);
+    let mut n2 = sample_node("c2", Some("c1"), "b2", Some(10.0), AttemptStatus::Evaluated);
+    n1.parent_id = Some("c2".to_string());
+    n2.parent_id = Some("c1".to_string());
+    tree.add_node(n1).unwrap();
+    tree.add_node(n2).unwrap();
+
+    // Cycle must be detected and return None instead of hanging
+    let root_branch = tree.find_lineage_root_branch("c1", "root");
+    assert_eq!(root_branch, None);
 }

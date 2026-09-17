@@ -2700,14 +2700,26 @@ async fn handle_command(
                         );
                         let active_policy_path =
                             repo_root.join(".selfware").join("active_policy.json");
-                        let tree_digests: Vec<String> = loaded_trees
-                            .iter()
-                            .map(|(p, _)| {
-                                std::fs::read(p)
-                                    .map(|bytes| crate::evolution::tree_log::compute_sha256(&bytes))
-                                    .unwrap_or_else(|_| "unreadable".to_string())
-                            })
-                            .collect();
+                        let mut tree_digests = Vec::new();
+                        let mut tree_files = Vec::new();
+                        for (p, _) in &loaded_trees {
+                            match std::fs::read(p) {
+                                Ok(bytes) => {
+                                    tree_digests
+                                        .push(crate::evolution::tree_log::compute_sha256(&bytes));
+                                    tree_files.push(p.to_string_lossy().to_string());
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "   {} Promotion aborted: cannot read tree file {}: {}",
+                                        Glyphs::frost(),
+                                        p.display(),
+                                        e
+                                    );
+                                    return Ok(());
+                                }
+                            }
+                        }
                         let report_digest = outcome.report_digest();
                         let evidence_hash = crate::evolution::replay::compute_policy_evidence_hash(
                             &winner_name,
@@ -2728,6 +2740,7 @@ async fn handle_command(
                             "incumbent_objective": incumbent_objective,
                             "kendall_w": kendall_w,
                             "beta": beta,
+                            "tree_files": tree_files,
                             "tree_digests": tree_digests,
                             "report_digest": report_digest,
                             "evidence_hash": evidence_hash,

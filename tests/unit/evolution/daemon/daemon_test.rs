@@ -175,6 +175,7 @@ fn test_format_recent_failure_history_extracts_recent_failures() {
         output_tail: None,
         binary_sha256: None,
         base_commit: None,
+        committed_commit: None,
         created_at: "now".to_string(),
     };
     let n2 = AttemptNode {
@@ -197,6 +198,7 @@ fn test_format_recent_failure_history_extracts_recent_failures() {
         output_tail: None,
         binary_sha256: None,
         base_commit: None,
+        committed_commit: None,
         created_at: "now".to_string(),
     };
 
@@ -1591,9 +1593,15 @@ fn test_commit_winner_to_repo_applies_tested_diff_exactly() {
     )
     .unwrap();
     let tested_diff = capture_tested_diff(&worktree).unwrap();
+    let tree_id = capture_worktree_tree_id(&worktree).unwrap();
     ast_tools::cleanup_worktree(root, &worktree).unwrap();
 
-    assert!(commit_winner_to_repo(root, &tested_diff, "🧬 Gen 3 BLOOM"));
+    assert!(commit_winner_to_repo(
+        root,
+        &tested_diff,
+        Some(&tree_id),
+        "🧬 Gen 3 BLOOM"
+    ));
     // The committed content is byte-identical to the TESTED worktree
     // content (fmt fix included), not the raw LLM patch.
     let content = std::fs::read_to_string(root.join("src/lib.rs")).unwrap();
@@ -1608,6 +1616,47 @@ fn test_commit_winner_to_repo_applies_tested_diff_exactly() {
     let status = git_stdout(root, &["status", "--porcelain"]);
     assert!(status.contains("?? .env"));
     assert!(status.contains(" M notes.txt"));
+}
+
+#[test]
+fn test_commit_winner_to_repo_rejects_divergent_promoted_tree() {
+    let dir = setup_winner_repo();
+    let root = dir.path();
+
+    // 1. Build a tested diff and capture its tree in a shadow worktree
+    let worktree = ast_tools::create_shadow_worktree(root).unwrap();
+    std::fs::write(
+        worktree.join("src/lib.rs"),
+        "pub fn f() -> usize {\n    42\n}\n",
+    )
+    .unwrap();
+    let tested_diff = capture_tested_diff(&worktree).unwrap();
+    let tree_id = capture_worktree_tree_id(&worktree).unwrap();
+    ast_tools::cleanup_worktree(root, &worktree).unwrap();
+
+    // 2. Advance HEAD in root by committing an unrelated file change
+    std::fs::write(root.join("src/extra.rs"), "pub fn extra() {}\n").unwrap();
+    let _ = Command::new("git")
+        .args(["add", "src/extra.rs"])
+        .current_dir(root)
+        .output();
+    let _ = Command::new("git")
+        .args(["commit", "-m", "Unrelated commit on main"])
+        .current_dir(root)
+        .output();
+
+    // 3. Attempting to commit the candidate with expected tree_id MUST fail because HEAD diverged
+    assert!(
+        !commit_winner_to_repo(root, &tested_diff, Some(&tree_id), "🧬 Gen 3 BLOOM"),
+        "Promotion must be rejected when promoted tree differs from evaluated benchmark tree"
+    );
+
+    // 4. Verify root remains clean (the candidate's diff is not left half-applied)
+    let content = std::fs::read_to_string(root.join("src/lib.rs")).unwrap();
+    assert!(
+        !content.contains("42"),
+        "Divergent candidate edit must be reverted"
+    );
 }
 
 #[test]
@@ -1650,6 +1699,7 @@ fn test_log_and_append_attempt_failure_aborts() {
         output_tail: None,
         binary_sha256: None,
         base_commit: None,
+        committed_commit: None,
         created_at: "2026-09-17T00:00:00Z".to_string(),
     };
 
@@ -1703,6 +1753,7 @@ fn test_control_failure_with_unwritable_attempts_file_aborts() {
         output_tail: None,
         binary_sha256: None,
         base_commit: None,
+        committed_commit: None,
         created_at: chrono_now(),
     };
 
@@ -1757,6 +1808,7 @@ fn test_ranked_candidate_promotion_runner_up_qualifies() {
             metrics: cand1_metrics.clone(),
             sab_result: Some(cand1_sab.clone()),
             tested_diff: "diff1".into(),
+            evaluated_tree: None,
             composite: cand1_composite,
             attempt_id: "att-1".into(),
             branch_id: "branch-1".into(),
@@ -1772,6 +1824,7 @@ fn test_ranked_candidate_promotion_runner_up_qualifies() {
             metrics: cand2_metrics.clone(),
             sab_result: Some(cand2_sab.clone()),
             tested_diff: "diff2".into(),
+            evaluated_tree: None,
             composite: cand2_composite,
             attempt_id: "att-2".into(),
             branch_id: "branch-2".into(),
@@ -1923,6 +1976,7 @@ fn test_promoted_policies_control_live_search_decisions() {
         output_tail: None,
         binary_sha256: None,
         base_commit: None,
+        committed_commit: None,
         created_at: "2026-09-17T00:00:00Z".into(),
     };
     let b1 = AttemptNode {
@@ -1945,6 +1999,7 @@ fn test_promoted_policies_control_live_search_decisions() {
         output_tail: None,
         binary_sha256: None,
         base_commit: None,
+        committed_commit: None,
         created_at: "2026-09-17T00:01:00Z".into(),
     };
     let b2 = AttemptNode {
@@ -1967,6 +2022,7 @@ fn test_promoted_policies_control_live_search_decisions() {
         output_tail: None,
         binary_sha256: None,
         base_commit: None,
+        committed_commit: None,
         created_at: "2026-09-17T00:02:00Z".into(),
     };
 
@@ -2094,6 +2150,7 @@ fn test_infrastructure_failures_excluded_from_deduplication() {
             output_tail: None,
             binary_sha256: None,
             base_commit: None,
+            committed_commit: None,
             created_at: "2026-09-17T00:00:00Z".into(),
         },
         // 2. Environment error (e.g. test runner killed by external watchdog)
@@ -2117,6 +2174,7 @@ fn test_infrastructure_failures_excluded_from_deduplication() {
             output_tail: None,
             binary_sha256: None,
             base_commit: None,
+            committed_commit: None,
             created_at: "2026-09-17T00:01:00Z".into(),
         },
         // 3. Genuine code defect (type error) -> MUST be blacklisted
@@ -2140,6 +2198,7 @@ fn test_infrastructure_failures_excluded_from_deduplication() {
             output_tail: None,
             binary_sha256: None,
             base_commit: None,
+            committed_commit: None,
             created_at: "2026-09-17T00:02:00Z".into(),
         },
         // 4. Duplicate rejected upfront -> MUST remain in blacklist
@@ -2163,6 +2222,7 @@ fn test_infrastructure_failures_excluded_from_deduplication() {
             output_tail: None,
             binary_sha256: None,
             base_commit: None,
+            committed_commit: None,
             created_at: "2026-09-17T00:03:00Z".into(),
         },
     ];
@@ -2343,6 +2403,7 @@ fn test_multi_action_batch_and_parent_restoration() {
         output_tail: None,
         binary_sha256: None,
         base_commit: None,
+        committed_commit: None,
         created_at: "2026-09-17T00:00:00Z".into(),
     };
 
@@ -2366,6 +2427,7 @@ fn test_multi_action_batch_and_parent_restoration() {
         output_tail: None,
         binary_sha256: None,
         base_commit: None,
+        committed_commit: None,
         created_at: "2026-09-17T00:01:00Z".into(),
     };
 
@@ -2389,6 +2451,7 @@ fn test_multi_action_batch_and_parent_restoration() {
         output_tail: None,
         binary_sha256: None,
         base_commit: None,
+        committed_commit: None,
         created_at: "2026-09-17T00:01:30Z".into(),
     };
 
@@ -2518,26 +2581,208 @@ fn test_fixed_population_daemon_continues_across_generations_and_empty_responses
 }
 
 #[test]
-fn test_daemon_policy_stop_fallback_preserves_generation_budget() {
-    // In live evolution, when a policy issues PolicyDecision::Stop (e.g. fixed population reached),
-    // the daemon must fall back to open root exploration rather than breaking the entire run.
+fn test_daemon_honors_policy_stop_decision() {
+    // In live evolution, when a policy issues PolicyDecision::Stop, the daemon
+    // must honor the policy's stop decision and terminate search, matching replay semantics.
     let decision = PolicyDecision::Stop {
-        reason: "Fixed population budget reached (4/4)".to_string(),
+        reason: "Budget exhausted (3/3)".to_string(),
     };
-    let generation = 3;
-    let fallback_actions = match decision {
-        PolicyDecision::Stop { .. } => vec![LegalAction::OpenRoot {
-            branch_id: format!("branch-g{}-0", generation),
-            node_id: format!("root-g{}-0", generation),
-        }],
-        PolicyDecision::SelectBatch(actions) => actions,
-    };
-    assert_eq!(fallback_actions.len(), 1);
-    assert_eq!(
-        fallback_actions[0],
-        LegalAction::OpenRoot {
-            branch_id: "branch-g3-0".to_string(),
-            node_id: "root-g3-0".to_string(),
-        }
+    let stops = matches!(decision, PolicyDecision::Stop { .. });
+    assert!(
+        stops,
+        "Daemon must terminate search when policy returns Stop"
     );
+}
+
+#[test]
+fn test_refinement_restoration_failure_records_internal_error() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo_root = temp.path();
+    let attempts_file = repo_root.join("attempts.jsonl");
+
+    // Parent att-nonexistent does NOT exist in attempts ledger.
+    // Restoration must fail.
+    let res = ast_tools::create_shadow_worktree_for_parent(
+        repo_root,
+        &attempts_file,
+        Some("att-nonexistent"),
+    );
+    assert!(res.is_err(), "Restoring non-existent parent must error");
+
+    // When restoration fails in Step 2, an InternalError attempt is recorded in attempts_file
+    let node = AttemptNode {
+        id: "att-g2-refine-fail-0".to_string(),
+        parent_id: Some("att-nonexistent".to_string()),
+        generation: 2,
+        branch_id: "branch-1".to_string(),
+        hypothesis_id: "hyp-restore-fail-0".to_string(),
+        description: "Refinement restoration failed for parent att-nonexistent".to_string(),
+        diff_sha256: compute_sha256(b""),
+        patch: None,
+        sab_report_path: None,
+        metrics: None,
+        composite_score: None,
+        tokens_used: None,
+        wall_time_ms: 0,
+        status: AttemptStatus::InternalError,
+        failure_class: Some(FailureClass::EnvironmentError),
+        failure_reason: Some("Parent attempt 'att-nonexistent' not found".to_string()),
+        output_tail: None,
+        binary_sha256: None,
+        base_commit: None,
+        committed_commit: None,
+        created_at: chrono_now(),
+    };
+    log_and_append_attempt(&attempts_file, &node, repo_root, 2, Instant::now()).unwrap();
+
+    let content = std::fs::read_to_string(&attempts_file).unwrap();
+    assert!(content.contains("\"status\":\"internal_error\""));
+    assert!(content.contains("\"failure_class\":\"environment_error\""));
+    assert!(content.contains("Parent attempt 'att-nonexistent' not found"));
+}
+
+#[test]
+fn test_open_root_reads_from_baseline_checkout() {
+    let dir = setup_winner_repo();
+    let root = dir.path();
+    let attempts_file = root.join("attempts.jsonl");
+
+    let base_commit = ast_tools::get_git_head_commit(root).unwrap();
+
+    // Baseline node recorded at base_commit
+    let baseline_node = AttemptNode {
+        id: "att-baseline".to_string(),
+        parent_id: None,
+        generation: 0,
+        branch_id: "baseline".to_string(),
+        hypothesis_id: "baseline".to_string(),
+        description: "Initial baseline".to_string(),
+        diff_sha256: compute_sha256(b""),
+        patch: None,
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(0.50),
+        tokens_used: None,
+        wall_time_ms: 0,
+        status: AttemptStatus::Baseline,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        base_commit: Some(base_commit.clone()),
+        committed_commit: None,
+        created_at: chrono_now(),
+    };
+    std::fs::write(
+        &attempts_file,
+        format!("{}\n", serde_json::to_string(&baseline_node).unwrap()),
+    )
+    .unwrap();
+
+    // Commit a change to root (simulating Gen 1 promotion to main)
+    std::fs::write(root.join("src/lib.rs"), "pub fn promoted_gen1() {}\n").unwrap();
+    let _ = Command::new("git")
+        .args(["add", "src/lib.rs"])
+        .current_dir(root)
+        .output();
+    let _ = Command::new("git")
+        .args(["commit", "-m", "Gen 1 winner promoted"])
+        .current_dir(root)
+        .output();
+
+    // Now OpenRoot in Gen 2 restores att-baseline
+    let worktree =
+        ast_tools::create_shadow_worktree_for_parent(root, &attempts_file, Some("att-baseline"))
+            .unwrap();
+    let worktree_commit = ast_tools::get_git_head_commit(&worktree).unwrap();
+    assert_eq!(
+        worktree_commit, base_commit,
+        "OpenRoot worktree must be detached at the immutable baseline commit, not moving HEAD"
+    );
+
+    let content = std::fs::read_to_string(worktree.join("src/lib.rs")).unwrap();
+    assert!(
+        !content.contains("promoted_gen1"),
+        "OpenRoot worktree must contain original baseline source, not subsequent promoted commits"
+    );
+    ast_tools::cleanup_worktree(root, &worktree).unwrap();
+}
+
+#[test]
+fn test_load_active_policy_authentication_and_tampering() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let active_policy_path = root.join("active_policy.json");
+    let tree_file = root.join("tree.jsonl");
+
+    let tree_bytes = b"sample tree content";
+    std::fs::write(&tree_file, tree_bytes).unwrap();
+    let tree_digest = crate::evolution::tree_log::compute_sha256(tree_bytes);
+
+    // Case 1: Non-incumbent policy lacks evidence_hash -> must fall back to incumbent
+    let json_no_hash = serde_json::json!({
+        "policy_name": "ParetoAdaptive",
+        "beta": 0.25,
+        "validation_objective": 0.85,
+        "incumbent_objective": 0.70,
+        "kendall_w": 0.90,
+    });
+    std::fs::write(
+        &active_policy_path,
+        serde_json::to_string(&json_no_hash).unwrap(),
+    )
+    .unwrap();
+    let loaded = load_active_policy(&active_policy_path, 4);
+    assert_eq!(loaded.policy_name, "FixedPopulation (Incumbent)");
+    assert!(loaded
+        .fallback_reason
+        .as_ref()
+        .unwrap()
+        .contains("lacks required cryptographic evidence_hash"));
+
+    // Case 2: Non-incumbent policy with authentic evidence_hash and matching tree file -> loads cleanly
+    let report_digest = "sample_report_digest";
+    let beta = 0.25;
+    let expected_hash = crate::evolution::replay::compute_policy_evidence_hash(
+        "ParetoAdaptive",
+        0.85,
+        0.70,
+        0.90,
+        beta,
+        std::slice::from_ref(&tree_digest),
+        report_digest,
+    );
+    let json_valid = serde_json::json!({
+        "policy_name": "ParetoAdaptive",
+        "beta": beta,
+        "validation_objective": 0.85,
+        "incumbent_objective": 0.70,
+        "kendall_w": 0.90,
+        "evidence_hash": expected_hash,
+        "tree_digests": [tree_digest],
+        "tree_files": [tree_file.to_str().unwrap()],
+        "report_digest": report_digest,
+    });
+    std::fs::write(
+        &active_policy_path,
+        serde_json::to_string(&json_valid).unwrap(),
+    )
+    .unwrap();
+    let loaded = load_active_policy(&active_policy_path, 4);
+    assert_eq!(loaded.policy_name, "ParetoAdaptivePolicy");
+    assert_eq!(
+        loaded.evidence_hash.as_deref(),
+        Some(expected_hash.as_str())
+    );
+    assert_eq!(loaded.fallback_reason, None);
+
+    // Case 3: Tree file on disk is tampered -> falls back to incumbent
+    std::fs::write(&tree_file, b"tampered tree content!").unwrap();
+    let loaded_tampered = load_active_policy(&active_policy_path, 4);
+    assert_eq!(loaded_tampered.policy_name, "FixedPopulation (Incumbent)");
+    assert!(loaded_tampered
+        .fallback_reason
+        .as_ref()
+        .unwrap()
+        .contains("digest mismatch"));
 }

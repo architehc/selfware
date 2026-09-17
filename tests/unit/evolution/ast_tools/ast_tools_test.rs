@@ -177,6 +177,7 @@ fn test_restore_worktree_parent_state() {
         output_tail: None,
         binary_sha256: None,
         base_commit: None,
+        committed_commit: None,
         created_at: "2026-09-17T00:00:00Z".into(),
     };
 
@@ -200,6 +201,7 @@ fn test_restore_worktree_parent_state() {
         output_tail: None,
         binary_sha256: None,
         base_commit: None,
+        committed_commit: None,
         created_at: "2026-09-17T00:01:00Z".into(),
     };
 
@@ -223,6 +225,7 @@ fn test_restore_worktree_parent_state() {
         output_tail: None,
         binary_sha256: None,
         base_commit: None,
+        committed_commit: None,
         created_at: "2026-09-17T00:02:00Z".into(),
     };
 
@@ -335,6 +338,7 @@ fn test_sibling_restoration_after_another_branch_committed() {
         output_tail: None,
         binary_sha256: None,
         base_commit: Some(c0.clone()),
+        committed_commit: None,
         created_at: "2026-09-17T00:00:00Z".into(),
     };
 
@@ -358,6 +362,7 @@ fn test_sibling_restoration_after_another_branch_committed() {
         output_tail: None,
         binary_sha256: None,
         base_commit: Some(c0.clone()),
+        committed_commit: None,
         created_at: "2026-09-17T00:01:00Z".into(),
     };
 
@@ -381,6 +386,7 @@ fn test_sibling_restoration_after_another_branch_committed() {
         output_tail: None,
         binary_sha256: None,
         base_commit: Some(c0.clone()),
+        committed_commit: None,
         created_at: "2026-09-17T00:02:00Z".into(),
     };
 
@@ -422,4 +428,177 @@ fn test_sibling_restoration_after_another_branch_committed() {
 
     // 6. Cleanup worktree
     cleanup_worktree(repo_root, &worktree_b).unwrap();
+}
+
+#[test]
+fn test_restore_worktree_promoted_parent_short_circuit() {
+    // Verify that when a parent has committed_commit: Some(C1),
+    // restoring the parent checks out C1 directly and does not re-apply the diff.
+    let temp_repo = tempfile::tempdir().unwrap();
+    let repo_root = temp_repo.path();
+
+    let run_git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo_root)
+            .output()
+            .expect("git cmd failed");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+
+    run_git(&["init", "-b", "main"]);
+    run_git(&["config", "user.email", "test@example.com"]);
+    run_git(&["config", "user.name", "Test Runner"]);
+
+    std::fs::create_dir_all(repo_root.join("src")).unwrap();
+    let lib_rs = repo_root.join("src").join("lib.rs");
+    std::fs::write(&lib_rs, "pub fn v0() -> i32 { 0 }\n").unwrap();
+    run_git(&["add", "src/lib.rs"]);
+    run_git(&["commit", "-m", "C0: Baseline"]);
+    let c0 = run_git(&["rev-parse", "HEAD"]);
+
+    let patch_a = r#"[{"path": "src/lib.rs", "search": "pub fn v0() -> i32 { 0 }", "replace": "pub fn v0() -> i32 { 0 }\npub fn v1() -> i32 { 1 }"}]"#.to_string();
+
+    // Now promote A to repo_root, advancing HEAD to C1
+    std::fs::write(
+        &lib_rs,
+        "pub fn v0() -> i32 { 0 }\npub fn v1() -> i32 { 1 }\n",
+    )
+    .unwrap();
+    run_git(&["add", "src/lib.rs"]);
+    run_git(&["commit", "-m", "C1: Promoted A"]);
+    let c1 = run_git(&["rev-parse", "HEAD"]);
+    assert_ne!(c0, c1);
+
+    let attempts_file = repo_root.join("attempts.jsonl");
+    let node_baseline = crate::evolution::tree_log::AttemptNode {
+        id: "att-baseline".into(),
+        parent_id: None,
+        generation: 0,
+        branch_id: "baseline".into(),
+        hypothesis_id: "baseline".into(),
+        description: "Baseline".into(),
+        diff_sha256: "0".into(),
+        patch: None,
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(0.50),
+        tokens_used: None,
+        wall_time_ms: 0,
+        status: crate::evolution::tree_log::AttemptStatus::Baseline,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        base_commit: Some(c0.clone()),
+        committed_commit: None,
+        created_at: "2026-09-17T00:00:00Z".into(),
+    };
+    // Node A records committed_commit: Some(c1)
+    let node_a = crate::evolution::tree_log::AttemptNode {
+        id: "att-a".into(),
+        parent_id: Some("att-baseline".into()),
+        generation: 1,
+        branch_id: "branch-a".into(),
+        hypothesis_id: "hyp-a".into(),
+        description: "Branch A (promoted)".into(),
+        diff_sha256: "sha-a".into(),
+        patch: Some(patch_a),
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(0.80),
+        tokens_used: None,
+        wall_time_ms: 10,
+        status: crate::evolution::tree_log::AttemptStatus::Evaluated,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        base_commit: Some(c0.clone()),
+        committed_commit: Some(c1.clone()),
+        created_at: "2026-09-17T00:01:00Z".into(),
+    };
+
+    let lines = format!(
+        "{}\n{}\n",
+        serde_json::to_string(&node_baseline).unwrap(),
+        serde_json::to_string(&node_a).unwrap(),
+    );
+    std::fs::write(&attempts_file, lines).unwrap();
+
+    // Now restore a shadow worktree for parent "att-a" (as would be done for a refinement of A)
+    let worktree_refine =
+        create_shadow_worktree_for_parent(repo_root, &attempts_file, Some("att-a"))
+            .expect("Parent A must restore cleanly via committed_commit short-circuit");
+
+    // The worktree HEAD must be exactly C1
+    let wt_head = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&worktree_refine)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap();
+    assert_eq!(wt_head, c1);
+
+    // The working copy must be clean (no unstaged changes, diff should be empty)
+    let diff_output = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&worktree_refine)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap();
+    assert!(
+        diff_output.is_empty(),
+        "Restored worktree must be clean at C1: {}",
+        diff_output
+    );
+
+    cleanup_worktree(repo_root, &worktree_refine).unwrap();
+}
+
+#[test]
+fn test_strict_patch_fails_on_divergent_code() {
+    let temp_repo = tempfile::tempdir().unwrap();
+    let repo_root = temp_repo.path();
+
+    let run_git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo_root)
+            .output()
+            .expect("git cmd failed");
+        assert!(output.status.success());
+    };
+
+    run_git(&["init", "-b", "main"]);
+    run_git(&["config", "user.email", "test@example.com"]);
+    run_git(&["config", "user.name", "Test Runner"]);
+
+    std::fs::create_dir_all(repo_root.join("src")).unwrap();
+    std::fs::write(
+        repo_root.join("src/lib.rs"),
+        "pub fn completely_different() {}\n",
+    )
+    .unwrap();
+    run_git(&["add", "src/lib.rs"]);
+    run_git(&["commit", "-m", "initial"]);
+
+    // A unified diff expecting entirely different context lines
+    let bad_patch = r#"--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,3 +1,3 @@
+-pub fn expected_function() {
++pub fn modified_function() {
+     println!("hello");
+ }
+"#;
+
+    let res = apply_strict_patch(repo_root, bad_patch);
+    assert!(!res, "apply_strict_patch must fail on divergent context");
 }

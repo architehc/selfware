@@ -149,6 +149,9 @@ pub fn resolve_parent_base_commit(attempts_file: &Path, parent_id: Option<&str>)
         if !visited.insert(current.clone()) {
             break; // cycle protection
         }
+        if let Some(ref cc) = node.committed_commit {
+            return Some(cc.clone());
+        }
         if let Some(ref bc) = node.base_commit {
             return Some(bc.clone());
         }
@@ -234,6 +237,31 @@ impl std::fmt::Display for WorktreeError {
 
 impl std::error::Error for WorktreeError {}
 
+/// Apply a patch strictly: supports JSON search-replace edits and strict `git apply`.
+/// Does not fall back to fuzzy patching with `patch -p1 -F3`.
+pub fn apply_strict_patch(dir: &Path, patch: &str) -> bool {
+    // Check JSON search-replace format first
+    if let Ok(edits) = serde_json::from_str::<Vec<serde_json::Value>>(patch) {
+        if !edits.is_empty() && edits[0].get("search").is_some() {
+            return crate::evolution::daemon::apply_edits(dir, patch);
+        }
+    }
+
+    // Unified diff format: strict git apply
+    let patch_file = dir.join(format!(".restore-patch-{}", uuid_short()));
+    if std::fs::write(&patch_file, patch).is_err() {
+        return false;
+    }
+    let status = Command::new("git")
+        .env_remove("GIT_INDEX_FILE")
+        .args(["apply", "--whitespace=nowarn"])
+        .arg(&patch_file)
+        .current_dir(dir)
+        .output();
+    let _ = std::fs::remove_file(&patch_file);
+    status.map(|o| o.status.success()).unwrap_or(false)
+}
+
 /// Restore a shadow worktree to the exact source state of a parent attempt
 /// by looking up its ancestor chain in the attempts file and sequentially
 /// applying their patches in forward chronological order.
@@ -253,11 +281,18 @@ pub fn restore_worktree_parent_state(
     // ensure the worktree is detached at that base commit so today's HEAD commits do not bleed in.
     if worktree.join(".git").exists() {
         if let Some(ref bc) = resolve_parent_base_commit(attempts_file, parent_id) {
-            let _ = Command::new("git")
+            let out = Command::new("git")
                 .env_remove("GIT_INDEX_FILE")
                 .args(["checkout", "--detach", bc])
                 .current_dir(worktree)
-                .output();
+                .output()
+                .map_err(|e| WorktreeError::GitFailed(e.to_string()))?;
+            if !out.status.success() {
+                return Err(WorktreeError::GitFailed(format!(
+                    "Failed to checkout base commit {bc}: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                )));
+            }
         }
     }
 
@@ -269,6 +304,18 @@ pub fn restore_worktree_parent_state(
         }
     }
 
+    let Some(parent_node) = nodes_by_id.get(pid) else {
+        return Err(WorktreeError::GitFailed(format!(
+            "Parent attempt '{pid}' not found in attempts ledger"
+        )));
+    };
+
+    // If parent was already committed to the base repository, the worktree detached at its commit
+    // already contains all its code cleanly in the commit history.
+    if parent_node.committed_commit.is_some() {
+        return Ok(vec![pid.to_string()]);
+    }
+
     let mut ancestor_chain = Vec::new();
     let mut current = pid.to_string();
     let mut visited = std::collections::HashSet::new();
@@ -276,6 +323,10 @@ pub fn restore_worktree_parent_state(
     while let Some(node) = nodes_by_id.get(&current) {
         if !visited.insert(current.clone()) {
             break; // cycle protection
+        }
+        if node.committed_commit.is_some() {
+            // This ancestor was committed to the repository, so everything up to here is in git history
+            break;
         }
         ancestor_chain.push(node.clone());
         match node.parent_id.as_deref() {
@@ -287,18 +338,16 @@ pub fn restore_worktree_parent_state(
     }
 
     if ancestor_chain.is_empty() {
-        return Err(WorktreeError::GitFailed(format!(
-            "Parent attempt '{pid}' not found in attempts ledger"
-        )));
+        return Ok(vec![pid.to_string()]);
     }
 
     // ancestor_chain is [pid, parent, ..., root_ancestor].
-    // If any node in the chain has status AttemptStatus::Evaluated, its patch is tested_diff
-    // relative to HEAD, which already incorporates all its prior ancestors.
-    // Prune ancestors older than the latest Evaluated attempt.
+    // If any node in the chain has a successful evaluation, its patch is tested_diff
+    // relative to its base commit, which already incorporates all its prior ancestors.
+    // Prune ancestors older than the latest successfully evaluated attempt.
     let prune_idx = ancestor_chain
         .iter()
-        .position(|n| n.status == crate::evolution::tree_log::AttemptStatus::Evaluated);
+        .position(|n| n.is_successful_evaluation());
 
     if let Some(idx) = prune_idx {
         ancestor_chain.truncate(idx + 1);
@@ -308,10 +357,10 @@ pub fn restore_worktree_parent_state(
     ancestor_chain.reverse();
     let mut restored_ids = Vec::new();
 
-    for ancestor in ancestor_chain {
+    for ancestor in &ancestor_chain {
         if let Some(ref patch) = ancestor.patch {
             if !patch.trim().is_empty() {
-                let ok = crate::evolution::daemon::apply_edits(worktree, patch);
+                let ok = apply_strict_patch(worktree, patch);
                 if !ok && !is_patch_already_applied(worktree, patch) {
                     return Err(WorktreeError::PatchApplicationFailed(format!(
                         "Failed to apply ancestor patch from attempt '{}' while restoring parent '{pid}'",
@@ -320,7 +369,30 @@ pub fn restore_worktree_parent_state(
                 }
             }
         }
-        restored_ids.push(ancestor.id);
+        restored_ids.push(ancestor.id.clone());
+    }
+
+    // Verify cryptographic diff fidelity against parent's expected diff if in a git repository
+    if worktree.join(".git").exists()
+        && parent_node.status == crate::evolution::tree_log::AttemptStatus::Evaluated
+        && parent_node.diff_sha256.len() == 64
+    {
+        let diff_out = Command::new("git")
+            .env_remove("GIT_INDEX_FILE")
+            .args(["diff"])
+            .current_dir(worktree)
+            .output()
+            .map_err(|e| WorktreeError::GitFailed(e.to_string()))?;
+        if diff_out.status.success() {
+            let actual_diff = String::from_utf8_lossy(&diff_out.stdout);
+            let actual_sha = crate::evolution::tree_log::compute_sha256(actual_diff.as_bytes());
+            if actual_sha != parent_node.diff_sha256 {
+                return Err(WorktreeError::PatchApplicationFailed(format!(
+                    "Restored worktree diff sha256 ({actual_sha}) does not match parent expected diff sha256 ({})",
+                    parent_node.diff_sha256
+                )));
+            }
+        }
     }
 
     Ok(restored_ids)

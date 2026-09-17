@@ -168,6 +168,9 @@ pub struct AttemptNode {
     /// Base git commit hash when this attempt was made or detached from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_commit: Option<String>,
+    /// Git commit hash created if this attempt was successfully promoted and committed to repo_root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committed_commit: Option<String>,
     /// ISO 8601 / RFC 3339 creation timestamp.
     pub created_at: String,
 }
@@ -426,7 +429,11 @@ impl AttemptTree {
     /// Traces a node up to the first child below common_root (the lineage root branch).
     fn find_lineage_root_branch(&self, start_id: &str, common_root_id: &str) -> Option<String> {
         let mut curr_id = start_id.to_string();
+        let mut visited = HashSet::new();
         loop {
+            if !visited.insert(curr_id.clone()) {
+                return None;
+            }
             let &idx = self.id_to_index.get(&curr_id)?;
             let node = &self.nodes[idx];
             match &node.parent_id {
@@ -474,7 +481,12 @@ impl AttemptTree {
                     continue;
                 }
                 let mut curr = node;
+                let mut visited = HashSet::new();
+                visited.insert(curr.id.clone());
                 while let Some(ref pid) = curr.parent_id {
+                    if !visited.insert(pid.clone()) {
+                        break;
+                    }
                     if let Some(&idx) = self.id_to_index.get(pid) {
                         curr = &self.nodes[idx];
                     } else {
@@ -621,6 +633,50 @@ impl AttemptTree {
         let serialized = serde_json::to_string(node)?;
         writeln!(file, "{}", serialized)?;
         file.sync_data()?;
+        Ok(())
+    }
+
+    /// Update the committed git commit hash of a node in the durable log.
+    pub fn record_committed_commit(
+        path: &Path,
+        id: &str,
+        commit_hash: &str,
+    ) -> Result<(), TreeLogError> {
+        if !path.exists() {
+            return Ok(());
+        }
+        let content = std::fs::read_to_string(path)?;
+        let mut updated_lines = Vec::new();
+        let mut modified = false;
+
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Ok(mut node) = serde_json::from_str::<AttemptNode>(trimmed) {
+                if node.id == id {
+                    node.committed_commit = Some(commit_hash.to_string());
+                    updated_lines.push(serde_json::to_string(&node)?);
+                    modified = true;
+                    continue;
+                }
+            }
+            updated_lines.push(trimmed.to_string());
+        }
+
+        if modified {
+            let tmp_path = path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
+            {
+                let mut file = File::create(&tmp_path)?;
+                for line in updated_lines {
+                    writeln!(file, "{}", line)?;
+                }
+                file.sync_all()?;
+            }
+            std::fs::rename(&tmp_path, path)?;
+        }
+
         Ok(())
     }
 }
