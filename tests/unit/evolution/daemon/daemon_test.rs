@@ -151,6 +151,67 @@ fn test_format_history_caps_at_10() {
 }
 
 #[test]
+fn test_format_recent_failure_history_extracts_recent_failures() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file_path = tmp.path().join("attempts.jsonl");
+
+    let n1 = AttemptNode {
+        id: "att-1".to_string(),
+        parent_id: None,
+        generation: 1,
+        branch_id: "b1".to_string(),
+        hypothesis_id: "h1".to_string(),
+        description: "Patch calculate_complexity in code_metrics.rs".to_string(),
+        diff_sha256: "sha1".to_string(),
+        patch: None,
+        sab_report_path: None,
+        metrics: None,
+        composite_score: None,
+        tokens_used: None,
+        wall_time_ms: 100,
+        status: AttemptStatus::TestFailed,
+        failure_class: Some(FailureClass::RepairableTestFailure),
+        failure_reason: Some("cargo test failed".to_string()),
+        output_tail: None,
+        binary_sha256: None,
+        created_at: "now".to_string(),
+    };
+    let n2 = AttemptNode {
+        id: "att-2".to_string(),
+        parent_id: None,
+        generation: 1,
+        branch_id: "b2".to_string(),
+        hypothesis_id: "h2".to_string(),
+        description: "Evaluated mutation".to_string(),
+        diff_sha256: "sha2".to_string(),
+        patch: None,
+        sab_report_path: None,
+        metrics: None,
+        composite_score: None,
+        tokens_used: None,
+        wall_time_ms: 100,
+        status: AttemptStatus::Evaluated,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        created_at: "now".to_string(),
+    };
+
+    let content = format!(
+        "{}\n{}\n",
+        serde_json::to_string(&n1).unwrap(),
+        serde_json::to_string(&n2).unwrap()
+    );
+    std::fs::write(&file_path, content).unwrap();
+
+    let history = format_recent_failure_history(&file_path, 5);
+    assert!(history.contains("Previous Failed Hypotheses"));
+    assert!(history.contains("calculate_complexity"));
+    assert!(!history.contains("Evaluated mutation"));
+}
+
+#[test]
 fn test_apply_patch_to_worktree_nonexistent_dir() {
     let result = apply_patch_to_worktree(Path::new("/nonexistent/dir/12345"), "some patch");
     assert!(!result, "Should fail gracefully for nonexistent directory");

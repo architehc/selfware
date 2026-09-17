@@ -4556,7 +4556,7 @@ macro_rules! reasoning_mock_server {
                     .unwrap()
                     .push(String::from_utf8_lossy(&buf[..n]).to_string());
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                     resp_body.len(),
                     resp_body
                 );

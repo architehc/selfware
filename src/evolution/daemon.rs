@@ -737,15 +737,14 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             .map(telemetry::to_agent_prompt)
             .unwrap_or_default();
 
-        // Dream-RSI (arXiv:2609.14858) established that injecting unstructured narrative
-        // history degrades mutation quality by ~7% due to prompt distraction.
-        // Prompt capacity is reserved strictly for current telemetry and precise source code.
-        let history_prompt = "";
+        // Concise structured failure history (Promptbreeder / AlphaEvolve):
+        // Tell the model what failed recently so it does not loop on the same target.
+        let history_prompt = format_recent_failure_history(&attempts_file, 5);
 
         // ─── Step 2: Generate hypotheses via agent swarm ───
         let llm_start = Instant::now();
         let hypotheses =
-            generate_hypotheses(&config, &telemetry_prompt, history_prompt, repo_root).await;
+            generate_hypotheses(&config, &telemetry_prompt, &history_prompt, repo_root).await;
 
         log_event(
             repo_root,
@@ -870,6 +869,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             .arg("check")
             .arg("--features")
             .arg(features_arg(EVOLVE_FEATURES))
+            .env("CARGO_TARGET_DIR", evolution_target_dir(repo_root))
             .stdin(std::process::Stdio::null())
             .current_dir(&control_worktree);
         let ctrl_check = ctrl_check_cmd.output();
@@ -924,6 +924,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             .arg("--lib")
             .arg("--features")
             .arg(features_arg(EVOLVE_FEATURES))
+            .env("CARGO_TARGET_DIR", evolution_target_dir(repo_root))
             .stdin(std::process::Stdio::null())
             .current_dir(&control_worktree);
         let ctrl_test = ctrl_test_cmd.output();
@@ -1166,6 +1167,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 .arg("check")
                 .arg("--features")
                 .arg(features_arg(EVOLVE_FEATURES))
+                .env("CARGO_TARGET_DIR", evolution_target_dir(repo_root))
                 .current_dir(&worktree);
             let check = check_cmd.output();
             let (check_failed, check_tail) = match &check {
@@ -1229,6 +1231,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 .arg("--lib")
                 .arg("--features")
                 .arg(features_arg(EVOLVE_FEATURES))
+                .env("CARGO_TARGET_DIR", evolution_target_dir(repo_root))
                 .stdin(std::process::Stdio::null())
                 .current_dir(&worktree);
             let test = test_cmd.output();
@@ -1359,6 +1362,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 .arg("clippy")
                 .arg("--features")
                 .arg(features_arg(EVOLVE_FEATURES))
+                .env("CARGO_TARGET_DIR", evolution_target_dir(repo_root))
                 .current_dir(&worktree);
             clippy_cmd.args(["--", "-D", "warnings"]);
             let clippy = clippy_cmd.output();
@@ -2119,6 +2123,47 @@ fn contained_path(base: &Path, candidate: &Path) -> Option<PathBuf> {
         }
     }
     result.starts_with(base).then_some(result)
+}
+
+/// Returns the dedicated target directory used for evolution sandbox evaluations.
+/// Reusing this directory allows all candidates to share pre-compiled dependencies,
+/// dropping incremental test compilation times from minutes to seconds while
+/// remaining fully isolated from the main repo's `target/debug`.
+pub fn evolution_target_dir(repo_root: &Path) -> PathBuf {
+    repo_root.join("target").join("evolution")
+}
+
+/// Build a concise negative-history prompt listing recently failed mutations.
+/// Prevents the hypothesis generator from getting trapped in local loops
+/// (e.g. repeatedly attempting the same failing patch across multiple generations).
+pub fn format_recent_failure_history(attempts_file: &Path, max_entries: usize) -> String {
+    let Ok(content) = std::fs::read_to_string(attempts_file) else {
+        return String::new();
+    };
+    let mut failures = Vec::new();
+    for line in content.lines().rev() {
+        if let Ok(node) = serde_json::from_str::<AttemptNode>(line) {
+            if node.status != AttemptStatus::Evaluated && node.status != AttemptStatus::Baseline {
+                let desc = node.description.trim();
+                let reason = node.failure_reason.as_deref().unwrap_or("failed");
+                failures.push(format!(
+                    "- Attempted: \"{desc}\" -> FAILED ({reason}). Do not repeat."
+                ));
+                if failures.len() >= max_entries {
+                    break;
+                }
+            }
+        }
+    }
+    if failures.is_empty() {
+        String::new()
+    } else {
+        failures.reverse();
+        format!(
+            "## Previous Failed Hypotheses (DO NOT REPEAT)\n{}\nExplore different functions, files, or optimization approaches.\n",
+            failures.join("\n")
+        )
+    }
 }
 
 pub fn read_mutation_targets(targets: &super::MutationTargets, repo_root: &Path) -> String {
