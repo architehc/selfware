@@ -31,6 +31,7 @@ fn make_node(
         status,
         failure_class,
         failure_reason: None,
+        output_tail: None,
         binary_sha256: None,
         created_at: "2026-09-16T12:00:00Z".into(),
     }
@@ -475,4 +476,156 @@ fn test_dependent_attempts_cannot_be_reached_before_parent() {
         crate::evolution::policy::LegalAction::RefineFrontier { node_id, parent_id, .. }
             if node_id == "gen2_child" && parent_id == "gen1_winner"
     ));
+}
+
+#[test]
+fn test_validation_set_with_reachable_root_and_orphaned_child_fails_closed() {
+    let mut tree = AttemptTree::new();
+    // Valid reachable root
+    tree.add_node(make_node(
+        "reachable_root",
+        None,
+        "branch_a",
+        Some(0.70),
+        AttemptStatus::Evaluated,
+        None,
+    ))
+    .unwrap();
+
+    // Orphaned child with missing parent
+    tree.add_node(make_node(
+        "orphaned_child",
+        Some("missing_parent_id"),
+        "branch_b",
+        Some(0.85),
+        AttemptStatus::Evaluated,
+        None,
+    ))
+    .unwrap();
+
+    // 1. validate_ancestry must explicitly fail closed
+    let val_res = tree.validate_ancestry();
+    assert!(matches!(
+        val_res,
+        Err(TreeLogError::OrphanedNode { ref node_id, ref parent_id })
+            if node_id == "orphaned_child" && parent_id == "missing_parent_id"
+    ));
+
+    // 2. Replay evaluation must fail closed rather than silently ignoring the orphan
+    let sim = ReplaySimulator::new(tree, 0.5);
+    let mut policy = BreadthFirstPolicy::new(2);
+    let res = sim.evaluate_policy(&mut policy, 0.1);
+    assert!(matches!(
+        res,
+        Err(ReplayError::ValidationSetEmptyOrUnreachable(msg)) if msg.contains("missing_parent_id")
+    ));
+}
+
+fn dummy_eval(name: &str, obj1: f64, obj2: f64) -> MultiTreeEvaluation {
+    let make_rep = |obj: f64| ReplayReport {
+        policy_name: name.to_string(),
+        beta: 0.1,
+        baseline_score: 0.5,
+        terminal_score: 0.5,
+        score_improvement: 0.0,
+        total_probes: 1,
+        decision_rounds: 1,
+        effective_sequential_rounds: 1,
+        parallel_penalty: 1.0,
+        total_wall_time_ms: 100,
+        total_tokens: 500,
+        objective_value: obj,
+        pareto_reward: 0.0,
+        stop_reason: "done".to_string(),
+        revealed_node_ids: vec!["n".to_string()],
+    };
+
+    MultiTreeEvaluation {
+        policy_name: name.to_string(),
+        beta: 0.1,
+        tree_count: 2,
+        mean_terminal_score: 0.5,
+        mean_improvement: 0.0,
+        mean_probes: 1.0,
+        mean_objective_value: (obj1 + obj2) / 2.0,
+        mean_pareto_reward: 0.0,
+        cumulative_tokens: 1000,
+        cumulative_wall_time_ms: 200,
+        per_tree_reports: vec![make_rep(obj1), make_rep(obj2)],
+    }
+}
+
+#[test]
+fn test_ranking_stability_tied_scores_and_renaming_invariance() {
+    // Two policies with identical scores on every tree (Tree 1: 0.50, 0.50; Tree 2: 0.50, 0.50)
+    let evals_orig = vec![
+        dummy_eval("AlphaPolicy", 0.50, 0.50),
+        dummy_eval("BetaPolicy", 0.50, 0.50),
+    ];
+
+    let stab1 = ReplaySimulator::compute_ranking_stability(&evals_orig).expect("stability");
+    // Tied scores must NOT manufacture a "stable" W = 1.0 ranking; W must be 0.0!
+    assert_eq!(
+        stab1.kendall_w, 0.0,
+        "Tied scores across all trees must evaluate to W = 0.0 (no evidence of preference)"
+    );
+    assert!(!stab1.is_stable);
+
+    // Renaming AlphaPolicy to ZetaPolicy (swapping alphabetical tie-break order) must NOT change W
+    let evals_renamed = vec![
+        dummy_eval("ZetaPolicy", 0.50, 0.50),
+        dummy_eval("BetaPolicy", 0.50, 0.50),
+    ];
+    let stab2 = ReplaySimulator::compute_ranking_stability(&evals_renamed).expect("stability");
+    assert_eq!(
+        stab2.kendall_w, 0.0,
+        "Policy renaming must leave Kendall's W invariant at 0.0"
+    );
+}
+
+#[test]
+fn test_higher_mean_score_with_volatile_rankings_blocks_promotion() {
+    let outcome = ReplayValidationOutcome {
+        summaries: vec![
+            PolicyValidationSummary {
+                policy_name: "VolatileWinner".to_string(),
+                discovery_probes: 2,
+                discovery_tokens: 500,
+                discovery_objective: 0.90,
+                validation_terminal_score: 0.85,
+                validation_objective: 0.85,
+                beats_incumbent: true,
+            },
+            PolicyValidationSummary {
+                policy_name: "FixedPopulation (Incumbent)".to_string(),
+                discovery_probes: 2,
+                discovery_tokens: 500,
+                discovery_objective: 0.70,
+                validation_terminal_score: 0.70,
+                validation_objective: 0.70,
+                beats_incumbent: false,
+            },
+        ],
+        discovery_stability: None,
+        validation_stability: Some(RankingStability {
+            kendall_w: 0.35, // Volatile! Below 0.70
+            is_stable: false,
+            tree_count: 3,
+            policy_count: 2,
+            per_tree_rankings: vec![],
+        }),
+    };
+
+    let readiness = outcome.promotion_readiness();
+    assert!(
+        matches!(
+            readiness,
+            PromotionReadiness::BlockedByInstability {
+                ref winner_name,
+                kendall_w,
+                ..
+            } if winner_name == "VolatileWinner" && (kendall_w - 0.35).abs() < 1e-6
+        ),
+        "Promotion must be explicitly blocked when rankings are volatile (W < 0.70)"
+    );
 }

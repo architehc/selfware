@@ -290,7 +290,6 @@ fn test_trip_file_killswitch_symlink_preservation() {
 #[cfg(unix)]
 fn test_global_killswitch_symlinked_home_detection() {
     let _lock = KILLSWITCH_TEST_LOCK.lock();
-    let _env = crate::test_support::EnvGuard::capture(&["HOME"]);
     let tmp = tempdir().unwrap();
 
     // Create real home directory with .selfware/KILLSWITCH
@@ -304,11 +303,8 @@ fn test_global_killswitch_symlinked_home_detection() {
     let symlinked_home = tmp.path().join("symlinked_home");
     std::os::unix::fs::symlink(&real_home, &symlinked_home).unwrap();
 
-    // Set HOME to the symlinked directory
-    std::env::set_var("HOME", &symlinked_home);
-
-    // check_killswitch must follow symlinks through home and detect the global killswitch
-    let res = check_killswitch(None);
+    // check_killswitch_with_home must follow symlinks through home and detect the global killswitch
+    let res = check_killswitch_with_home(None, Some(&symlinked_home));
     assert!(
         res.is_err(),
         "Global killswitch in symlinked home must be detected"
@@ -321,22 +317,21 @@ fn test_global_killswitch_symlinked_home_detection() {
 #[cfg(unix)]
 fn test_global_killswitch_inspection_error_fails_closed() {
     let _lock = KILLSWITCH_TEST_LOCK.lock();
-    let _env = crate::test_support::EnvGuard::capture(&["HOME"]);
     use std::os::unix::fs::PermissionsExt;
 
     let tmp = tempdir().unwrap();
     let fake_home = tmp.path().join("inaccessible_home");
     let selfware_dir = fake_home.join(".selfware");
     std::fs::create_dir_all(&selfware_dir).unwrap();
+    let ks_file = selfware_dir.join("KILLSWITCH");
+    std::fs::write(&ks_file, "failsafe").unwrap();
 
     // Inaccessible permissions (000) simulate EACCES / permission denied inspection failure
     let mut perms = std::fs::metadata(&selfware_dir).unwrap().permissions();
     perms.set_mode(0o000);
     let _ = std::fs::set_permissions(&selfware_dir, perms);
 
-    std::env::set_var("HOME", &fake_home);
-
-    let res = check_killswitch(None);
+    let res = check_killswitch_with_home(None, Some(&fake_home));
     assert!(
         res.is_err(),
         "Inspection error on home killswitch must fail closed"

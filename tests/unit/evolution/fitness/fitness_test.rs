@@ -14,6 +14,8 @@ fn test_rating_thresholds() {
             _ => GenerationRating::Frost,
         },
         binary_sha256: "test".to_string(),
+        model: None,
+        endpoint: None,
         run_id: "test".to_string(),
         report_path: PathBuf::from("reports/sab-test/sab_report.json"),
     };
@@ -142,6 +144,8 @@ fn test_build_fitness_metrics_missing_binary() {
         wall_clock: Duration::from_secs(600),
         rating: GenerationRating::Grow,
         binary_sha256: "test".to_string(),
+        model: None,
+        endpoint: None,
         run_id: "test".to_string(),
         report_path: PathBuf::from("reports/sab-test/sab_report.json"),
     };
@@ -408,6 +412,8 @@ fn test_darwinx_non_regression_passes_when_all_baseline_passed_scenarios_pass() 
         wall_clock: Duration::from_secs(2),
         rating: GenerationRating::Wilt,
         binary_sha256: "hash".to_string(),
+        model: Some("qwen".to_string()),
+        endpoint: Some("http://localhost:11434".to_string()),
         run_id: "r1".to_string(),
         report_path: PathBuf::from("reports/sab-r1/sab_report.json"),
     };
@@ -420,6 +426,8 @@ fn test_darwinx_non_regression_passes_when_all_baseline_passed_scenarios_pass() 
         wall_clock: Duration::from_secs(2),
         rating: GenerationRating::Bloom,
         binary_sha256: "hash".to_string(),
+        model: Some("qwen".to_string()),
+        endpoint: Some("http://localhost:11434".to_string()),
         run_id: "r2".to_string(),
         report_path: PathBuf::from("reports/sab-r2/sab_report.json"),
     };
@@ -449,6 +457,8 @@ fn test_darwinx_non_regression_rejects_candidate_when_previously_passing_scenari
         wall_clock: Duration::from_secs(2),
         rating: GenerationRating::Wilt,
         binary_sha256: "hash".to_string(),
+        model: None,
+        endpoint: None,
         run_id: "r1".to_string(),
         report_path: PathBuf::from("reports/sab-r1/sab_report.json"),
     };
@@ -461,6 +471,8 @@ fn test_darwinx_non_regression_rejects_candidate_when_previously_passing_scenari
         wall_clock: Duration::from_secs(2),
         rating: GenerationRating::Wilt,
         binary_sha256: "hash".to_string(),
+        model: None,
+        endpoint: None,
         run_id: "r2".to_string(),
         report_path: PathBuf::from("reports/sab-r2/sab_report.json"),
     };
@@ -497,6 +509,8 @@ fn test_darwinx_non_regression_rejects_candidate_when_baseline_passed_scenario_m
         wall_clock: Duration::from_secs(2),
         rating: GenerationRating::Bloom,
         binary_sha256: "hash".to_string(),
+        model: None,
+        endpoint: None,
         run_id: "r1".to_string(),
         report_path: PathBuf::from("reports/sab-r1/sab_report.json"),
     };
@@ -509,6 +523,8 @@ fn test_darwinx_non_regression_rejects_candidate_when_baseline_passed_scenario_m
         wall_clock: Duration::from_secs(1),
         rating: GenerationRating::Bloom,
         binary_sha256: "hash".to_string(),
+        model: None,
+        endpoint: None,
         run_id: "r2".to_string(),
         report_path: PathBuf::from("reports/sab-r2/sab_report.json"),
     };
@@ -521,6 +537,65 @@ fn test_darwinx_non_regression_rejects_candidate_when_baseline_passed_scenario_m
         DarwinXViolation::SuiteMismatch {
             missing_in_candidate: vec!["sc2".to_string()],
             unexpected_in_candidate: vec![],
+        }
+    );
+}
+
+#[test]
+fn test_darwinx_non_regression_rejects_model_or_endpoint_mismatch() {
+    let make_scenario = |name: &str| ScenarioScore {
+        name: name.to_string(),
+        difficulty: Difficulty::Medium,
+        score: 100.0,
+        tests_passed: true,
+        broken_tests_fixed: false,
+        clean_exit: true,
+        tokens_used: Some(1000),
+        duration: Duration::from_secs(1),
+    };
+
+    let baseline = SabResult {
+        aggregate_score: 100.0,
+        scenario_scores: vec![make_scenario("sc1")],
+        total_tokens_used: Some(1000),
+        wall_clock: Duration::from_secs(1),
+        rating: GenerationRating::Bloom,
+        binary_sha256: "hash".to_string(),
+        model: Some("qwen-2.5-coder-32b".to_string()),
+        endpoint: Some("http://localhost:11434/v1".to_string()),
+        run_id: "r1".to_string(),
+        report_path: PathBuf::from("reports/sab-r1/sab_report.json"),
+    };
+
+    // Candidate evaluated against a different model
+    let mut candidate_diff_model = baseline.clone();
+    candidate_diff_model.model = Some("claude-3-5-sonnet".to_string());
+    let err_model = baseline
+        .check_darwinx_non_regression(&candidate_diff_model)
+        .expect_err("model mismatch must violate DarwinX identity");
+    assert_eq!(
+        err_model,
+        DarwinXViolation::IdentityMismatch {
+            baseline_model: Some("qwen-2.5-coder-32b".to_string()),
+            candidate_model: Some("claude-3-5-sonnet".to_string()),
+            baseline_endpoint: Some("http://localhost:11434/v1".to_string()),
+            candidate_endpoint: Some("http://localhost:11434/v1".to_string()),
+        }
+    );
+
+    // Candidate evaluated against a different endpoint
+    let mut candidate_diff_endpoint = baseline.clone();
+    candidate_diff_endpoint.endpoint = Some("https://api.openai.com/v1".to_string());
+    let err_endpoint = baseline
+        .check_darwinx_non_regression(&candidate_diff_endpoint)
+        .expect_err("endpoint mismatch must violate DarwinX identity");
+    assert_eq!(
+        err_endpoint,
+        DarwinXViolation::IdentityMismatch {
+            baseline_model: Some("qwen-2.5-coder-32b".to_string()),
+            candidate_model: Some("qwen-2.5-coder-32b".to_string()),
+            baseline_endpoint: Some("http://localhost:11434/v1".to_string()),
+            candidate_endpoint: Some("https://api.openai.com/v1".to_string()),
         }
     );
 }

@@ -50,6 +50,7 @@ fn sample_node(
         } else {
             Some("expected semicolon".into())
         },
+        output_tail: None,
         binary_sha256: None,
         created_at: "2026-09-16T12:00:00Z".to_string(),
     }
@@ -226,4 +227,55 @@ fn test_corrupt_line_handling() {
         TreeLogError::CorruptLine(msg) => assert!(msg.contains("line 1")),
         other => panic!("Unexpected error: {:?}", other),
     }
+}
+
+#[test]
+fn test_tail_lines_preserves_trailing_lines() {
+    let empty = "";
+    assert_eq!(tail_lines(empty, 5), "");
+
+    let short = "line1\nline2\nline3";
+    assert_eq!(tail_lines(short, 5), short);
+    assert_eq!(tail_lines(short, 2), "line2\nline3");
+    assert_eq!(tail_lines(short, 1), "line3");
+
+    let exact = "a\nb\nc";
+    assert_eq!(tail_lines(exact, 3), exact);
+
+    let many: String = (0..100).map(|i| format!("line {i}\n")).collect();
+    let tail = tail_lines(&many, 5);
+    let tail_lines_vec: Vec<&str> = tail.lines().collect();
+    assert_eq!(tail_lines_vec.len(), 5);
+    assert_eq!(tail_lines_vec[0], "line 95");
+    assert_eq!(tail_lines_vec[4], "line 99");
+}
+
+#[test]
+fn test_output_tail_serde_backwards_compatible() {
+    // Older attempt node JSON without output_tail should deserialize with None
+    let json_legacy = r#"{
+        "id": "att-legacy",
+        "parent_id": null,
+        "generation": 1,
+        "branch_id": "b1",
+        "hypothesis_id": "h1",
+        "description": "legacy attempt",
+        "diff_sha256": "abcdef",
+        "wall_time_ms": 100,
+        "status": "internal_error",
+        "created_at": "2026-09-17T00:00:00Z"
+    }"#;
+    let node: AttemptNode = serde_json::from_str(json_legacy).expect("deserialize legacy node");
+    assert!(node.output_tail.is_none());
+
+    // New node with output_tail roundtrips
+    let mut with_tail = node.clone();
+    with_tail.output_tail = Some("cargo test error: timeout".to_string());
+    let serialized = serde_json::to_string(&with_tail).expect("serialize with tail");
+    let roundtripped: AttemptNode =
+        serde_json::from_str(&serialized).expect("deserialize with tail");
+    assert_eq!(
+        roundtripped.output_tail.as_deref(),
+        Some("cargo test error: timeout")
+    );
 }

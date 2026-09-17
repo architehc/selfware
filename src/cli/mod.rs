@@ -2487,7 +2487,9 @@ async fn handle_command(
                     BreadthFirstPolicy, FixedPopulationPolicy, ParetoAdaptivePolicy,
                     RefineTop1Policy,
                 };
-                use crate::evolution::replay::{ReplaySimulator, SearchPolicyFactory};
+                use crate::evolution::replay::{
+                    PromotionReadiness, ReplaySimulator, SearchPolicyFactory,
+                };
                 use crate::evolution::tree_log::AttemptTree;
 
                 if !quiet {
@@ -2677,25 +2679,64 @@ async fn handle_command(
                     );
                 }
 
-                if let Some(winner) = summaries.first() {
-                    if winner.beats_incumbent {
+                match outcome.promotion_readiness() {
+                    PromotionReadiness::Ready {
+                        winner_name,
+                        validation_objective,
+                        incumbent_objective,
+                        kendall_w,
+                    } => {
                         println!(
-                            "\n   {} Policy '{}' won on held-out validation (Val Obj: {:.4} vs Incumbent). Ready for promotion.",
+                            "\n   {} Policy '{}' won on held-out validation (Val Obj: {:.4} vs Incumbent {:.4}, W = {:.4}). Ready for promotion.",
                             Glyphs::bloom(),
-                            winner.policy_name,
-                            winner.validation_objective
+                            winner_name,
+                            validation_objective,
+                            incumbent_objective,
+                            kendall_w,
                         );
-                    } else if winner.policy_name.contains("Incumbent") {
+                    }
+                    PromotionReadiness::BlockedByInstability {
+                        winner_name,
+                        validation_objective,
+                        incumbent_objective,
+                        kendall_w,
+                    } => {
                         println!(
-                            "\n   {} Incumbent policy remains optimal on held-out validation (Val Obj: {:.4}). Retaining incumbent.",
-                            Glyphs::bloom(),
-                            winner.validation_objective
+                            "\n   {} Promotion BLOCKED by ranking instability: Candidate '{}' has higher mean score ({:.4} vs {:.4}) but volatile rankings across validation trees (Kendall's W = {:.4} < 0.70). Retaining incumbent.",
+                            Glyphs::frost(),
+                            winner_name,
+                            validation_objective,
+                            incumbent_objective,
+                            kendall_w,
                         );
-                    } else {
+                    }
+                    PromotionReadiness::RetainIncumbent {
+                        incumbent_objective,
+                        best_candidate_name,
+                        best_candidate_objective,
+                    } => {
+                        if let (Some(name), Some(score)) =
+                            (best_candidate_name, best_candidate_objective)
+                        {
+                            println!(
+                                "\n   {} Top candidate '{}' ({:.4}) did not beat incumbent baseline ({:.4}) on held-out validation. Retaining incumbent.",
+                                Glyphs::leaf(),
+                                name,
+                                score,
+                                incumbent_objective
+                            );
+                        } else {
+                            println!(
+                                "\n   {} Incumbent policy remains optimal on held-out validation (Val Obj: {:.4}). Retaining incumbent.",
+                                Glyphs::bloom(),
+                                incumbent_objective
+                            );
+                        }
+                    }
+                    PromotionReadiness::InsufficientEvidence { reason } => {
                         println!(
-                            "\n   {} Top candidate '{}' did not beat incumbent baseline on held-out validation. Retaining incumbent.",
-                            Glyphs::leaf(),
-                            winner.policy_name
+                            "\n   {} Insufficient evidence for promotion: {reason}. Retaining incumbent.",
+                            Glyphs::leaf()
                         );
                     }
                 }

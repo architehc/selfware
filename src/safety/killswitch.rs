@@ -120,6 +120,17 @@ pub fn is_killswitch_active() -> bool {
 /// Detailed killswitch check against a specific or default project root.
 /// Returns `Ok(())` if safe to proceed, or `Err(KillswitchError)` if tripped.
 pub fn check_killswitch(project_root: Option<&Path>) -> Result<(), KillswitchError> {
+    check_killswitch_with_home(project_root, None)
+}
+
+/// Detailed killswitch check against a specific or default project root,
+/// with an optional home directory override (enables thread-safe test isolation
+/// without mutating process-global `HOME`).
+/// Returns `Ok(())` if safe to proceed, or `Err(KillswitchError)` if tripped.
+pub fn check_killswitch_with_home(
+    project_root: Option<&Path>,
+    home_override: Option<&Path>,
+) -> Result<(), KillswitchError> {
     // 1. In-process atomic check (fastest, zero allocation)
     if IN_PROCESS_KILLSWITCH.load(Ordering::SeqCst) {
         let reason = IN_PROCESS_REASON
@@ -161,7 +172,8 @@ pub fn check_killswitch(project_root: Option<&Path>) -> Result<(), KillswitchErr
     let ignore_home = false;
 
     if !ignore_home {
-        if let Some(home) = dirs::home_dir() {
+        let home_path = home_override.map(PathBuf::from).or_else(dirs::home_dir);
+        if let Some(home) = home_path {
             let home_selfware = home.join(".selfware");
             // Inspect home/.selfware directory: use std::fs::metadata to resolve symlinks
             match std::fs::metadata(&home_selfware) {

@@ -149,6 +149,98 @@ pub struct ReplayValidationOutcome {
     pub validation_stability: Option<RankingStability>,
 }
 
+/// Explicit promotion readiness decision incorporating required evidence,
+/// ranking stability across validation trees, and objective improvement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum PromotionReadiness {
+    /// Candidate has demonstrated verified improvement, satisfies required evidence,
+    /// and exhibits ranking stability across validation trees (Kendall's W >= 0.70).
+    Ready {
+        winner_name: String,
+        validation_objective: f64,
+        incumbent_objective: f64,
+        kendall_w: f64,
+    },
+    /// Candidate has higher mean objective than incumbent, but ranking across validation
+    /// trees is volatile (Kendall's W < 0.70). Promotion is strictly blocked.
+    BlockedByInstability {
+        winner_name: String,
+        validation_objective: f64,
+        incumbent_objective: f64,
+        kendall_w: f64,
+    },
+    /// Incumbent policy remains optimal; top candidate did not beat incumbent baseline.
+    RetainIncumbent {
+        incumbent_objective: f64,
+        best_candidate_name: Option<String>,
+        best_candidate_objective: Option<f64>,
+    },
+    /// Insufficient evidence to decide (e.g. fewer than 2 validation trees to assess stability).
+    InsufficientEvidence { reason: String },
+}
+
+impl ReplayValidationOutcome {
+    /// Explicitly determines whether the top candidate policy qualifies for promotion.
+    pub fn promotion_readiness(&self) -> PromotionReadiness {
+        let incumbent_summary = self
+            .summaries
+            .iter()
+            .find(|s| s.policy_name.contains("Incumbent"));
+        let incumbent_obj = incumbent_summary
+            .map(|s| s.validation_objective)
+            .unwrap_or(0.0);
+
+        let top_candidate = self
+            .summaries
+            .iter()
+            .find(|s| !s.policy_name.contains("Incumbent"));
+
+        let top = match top_candidate {
+            Some(t) => t,
+            None => {
+                return PromotionReadiness::RetainIncumbent {
+                    incumbent_objective: incumbent_obj,
+                    best_candidate_name: None,
+                    best_candidate_objective: None,
+                };
+            }
+        };
+
+        if !top.beats_incumbent || top.validation_objective <= incumbent_obj {
+            return PromotionReadiness::RetainIncumbent {
+                incumbent_objective: incumbent_obj,
+                best_candidate_name: Some(top.policy_name.clone()),
+                best_candidate_objective: Some(top.validation_objective),
+            };
+        }
+
+        // Top candidate beats incumbent. Check ranking stability evidence.
+        match &self.validation_stability {
+            Some(stability) => {
+                if stability.is_stable {
+                    PromotionReadiness::Ready {
+                        winner_name: top.policy_name.clone(),
+                        validation_objective: top.validation_objective,
+                        incumbent_objective: incumbent_obj,
+                        kendall_w: stability.kendall_w,
+                    }
+                } else {
+                    PromotionReadiness::BlockedByInstability {
+                        winner_name: top.policy_name.clone(),
+                        validation_objective: top.validation_objective,
+                        incumbent_objective: incumbent_obj,
+                        kendall_w: stability.kendall_w,
+                    }
+                }
+            }
+            None => PromotionReadiness::InsufficientEvidence {
+                reason: "ranking stability evaluation requires at least 2 validation trees"
+                    .to_string(),
+            },
+        }
+    }
+}
+
 /// Deterministic replay simulator executing search policies over an `AttemptTree`.
 #[derive(Debug, Clone)]
 pub struct ReplaySimulator {
@@ -195,6 +287,12 @@ impl ReplaySimulator {
         policy: &mut dyn SearchPolicy,
         beta: f64,
     ) -> Result<ReplayReport, ReplayError> {
+        if let Err(e) = self.tree.validate_ancestry() {
+            return Err(ReplayError::ValidationSetEmptyOrUnreachable(format!(
+                "tree has invalid ancestry: {e}"
+            )));
+        }
+
         let mut revealed_ids: HashSet<String> = HashSet::new();
         let mut revealed_order: Vec<String> = Vec::new();
         let mut decision_rounds = 0;
@@ -588,6 +686,8 @@ impl ReplaySimulator {
         let mut per_tree_rankings: Vec<Vec<(String, usize, f64)>> = Vec::with_capacity(tree_count);
         let mut rank_sums = vec![0.0; policy_count];
 
+        let mut total_tie_correction = 0.0;
+
         for t in 0..tree_count {
             let mut scored_policies: Vec<(usize, String, f64)> = evaluations
                 .iter()
@@ -601,6 +701,9 @@ impl ReplaySimulator {
                 })
                 .collect();
 
+            // Sort by score descending. For presentation order, use policy name as secondary,
+            // but assign IDENTICAL fractional mid-ranks to tied policies so ties do not manufacture
+            // artificial variance or stability.
             scored_policies.sort_by(|a, b| {
                 b.2.partial_cmp(&a.2)
                     .unwrap_or(std::cmp::Ordering::Equal)
@@ -608,22 +711,44 @@ impl ReplaySimulator {
             });
 
             let mut tree_ranking = Vec::with_capacity(policy_count);
-            for (rank_minus_1, (p_idx, name, score)) in scored_policies.into_iter().enumerate() {
-                let rank = rank_minus_1 + 1;
-                rank_sums[p_idx] += rank as f64;
-                tree_ranking.push((name, rank, score));
+            let mut tree_tie_correction = 0.0;
+            let mut i = 0;
+
+            while i < policy_count {
+                let mut j = i + 1;
+                while j < policy_count && (scored_policies[j].2 - scored_policies[i].2).abs() < 1e-9
+                {
+                    j += 1;
+                }
+                let tie_size = (j - i) as f64;
+                if tie_size > 1.0 {
+                    tree_tie_correction += tie_size.powi(3) - tie_size;
+                }
+
+                // Fractional mid-rank: arithmetic mean of positions [i + 1, ..., j]
+                let mid_rank = (i + 1 + j) as f64 / 2.0;
+
+                for &(p_idx, ref name, score) in &scored_policies[i..j] {
+                    rank_sums[p_idx] += mid_rank;
+                    tree_ranking.push((name.clone(), mid_rank.round() as usize, score));
+                }
+                i = j;
             }
+
+            total_tie_correction += tree_tie_correction;
             per_tree_rankings.push(tree_ranking);
         }
 
         let r_bar = n * (m + 1.0) / 2.0;
         let s: f64 = rank_sums.iter().map(|r| (r - r_bar).powi(2)).sum();
-        let max_s = (n.powi(2) * (m.powi(3) - m)) / 12.0;
+        let max_s = ((n.powi(2) * (m.powi(3) - m)) - (n * total_tie_correction)) / 12.0;
 
-        let kendall_w = if max_s > 0.0 {
+        let kendall_w = if max_s > 1e-9 {
             (s / max_s).clamp(0.0, 1.0)
         } else {
-            1.0
+            // When all policies have identical scores on every tree, there is zero
+            // evidence of ranking preference (distinguishable variance = 0). W is 0.0.
+            0.0
         };
 
         let is_stable = kendall_w >= 0.70;

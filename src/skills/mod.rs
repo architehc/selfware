@@ -582,20 +582,22 @@ impl SkillRegistry {
                         .and_then(|f| f.to_str())
                         .unwrap_or_default();
 
-                    let is_candidate = skill.candidate
+                    // Consult ledger FIRST: check if file has known admission provenance
+                    // even if markdown flags (candidate, origin, admitted) were stripped.
+                    let ledger_entry = ledger.as_ref().and_then(|l| {
+                        l.entries.get(&skill.name).or_else(|| {
+                            l.entries
+                                .values()
+                                .find(|e| !e.file_name.is_empty() && e.file_name == file_name_str)
+                        })
+                    });
+
+                    let is_candidate = ledger_entry.is_some()
+                        || skill.candidate
                         || matches!(skill.origin.as_deref(), Some("distilled" | "generated"))
                         || skill.admitted;
 
                     if is_candidate {
-                        // Candidate files in user directory must have a valid ledger entry
-                        let ledger_entry = ledger.as_ref().and_then(|l| {
-                            l.entries.get(&skill.name).or_else(|| {
-                                l.entries.values().find(|e| {
-                                    !e.file_name.is_empty() && e.file_name == file_name_str
-                                })
-                            })
-                        });
-
                         if let Some(entry) = ledger_entry {
                             let actual_hash =
                                 format!("{:x}", sha2::Sha256::digest(skill.content.as_bytes()));

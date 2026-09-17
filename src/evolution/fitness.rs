@@ -57,6 +57,10 @@ pub struct SabResult {
     pub rating: GenerationRating,
     /// SHA-256 of the executable the runner actually ran.
     pub binary_sha256: String,
+    /// Target model identifier reported by the benchmark runner.
+    pub model: Option<String>,
+    /// Target endpoint URL reported by the benchmark runner.
+    pub endpoint: Option<String>,
     pub run_id: String,
     pub report_path: PathBuf,
 }
@@ -538,6 +542,15 @@ fn parse_sab_output(
         _ => GenerationRating::Frost,
     };
 
+    let model = json
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let endpoint = json
+        .get("endpoint")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     Ok(SabResult {
         aggregate_score: aggregate,
         scenario_scores,
@@ -545,6 +558,8 @@ fn parse_sab_output(
         wall_clock,
         rating,
         binary_sha256: evaluated.to_string(),
+        model,
+        endpoint,
         run_id: json["run_id"].as_str().unwrap_or("unknown").to_string(),
         report_path: PathBuf::from(report_path),
     })
@@ -553,6 +568,12 @@ fn parse_sab_output(
 /// DarwinX Non-Regression Invariant Violation
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DarwinXViolation {
+    IdentityMismatch {
+        baseline_model: Option<String>,
+        candidate_model: Option<String>,
+        baseline_endpoint: Option<String>,
+        candidate_endpoint: Option<String>,
+    },
     SuiteMismatch {
         missing_in_candidate: Vec<String>,
         unexpected_in_candidate: Vec<String>,
@@ -565,6 +586,16 @@ pub enum DarwinXViolation {
 impl std::fmt::Display for DarwinXViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            DarwinXViolation::IdentityMismatch {
+                baseline_model,
+                candidate_model,
+                baseline_endpoint,
+                candidate_endpoint,
+            } => write!(
+                f,
+                "DarwinX Evaluation Identity violated: model/endpoint mismatch between baseline ({:?}, {:?}) and candidate ({:?}, {:?})",
+                baseline_model, baseline_endpoint, candidate_model, candidate_endpoint
+            ),
             DarwinXViolation::SuiteMismatch {
                 missing_in_candidate,
                 unexpected_in_candidate,
@@ -592,11 +623,20 @@ impl SabResult {
     /// Passed(baseline) ∩ Failed(candidate) = ∅
     ///
     /// Any scenario that passed in the baseline MUST NOT fail in the candidate,
-    /// and the suite of scenarios evaluated must be identical.
+    /// the suite of scenarios evaluated must be identical, and the evaluation
+    /// target identity (model and endpoint) must match.
     pub fn check_darwinx_non_regression(
         &self,
         candidate: &SabResult,
     ) -> Result<(), DarwinXViolation> {
+        if self.model != candidate.model || self.endpoint != candidate.endpoint {
+            return Err(DarwinXViolation::IdentityMismatch {
+                baseline_model: self.model.clone(),
+                candidate_model: candidate.model.clone(),
+                baseline_endpoint: self.endpoint.clone(),
+                candidate_endpoint: candidate.endpoint.clone(),
+            });
+        }
         let baseline_names: std::collections::HashSet<&str> = self
             .scenario_scores
             .iter()

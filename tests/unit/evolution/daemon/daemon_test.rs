@@ -113,6 +113,8 @@ fn test_metrics_from_sab_result() {
         wall_clock: std::time::Duration::from_secs(1200),
         rating: GenerationRating::Bloom,
         binary_sha256: "test".to_string(),
+        model: None,
+        endpoint: None,
         run_id: "test".to_string(),
         report_path: PathBuf::from("reports/sab-test/sab_report.json"),
     };
@@ -381,6 +383,8 @@ fn make_sab(scores: Vec<(&str, f64, bool)>) -> crate::evolution::fitness::SabRes
         wall_clock: Duration::from_secs(1),
         rating: GenerationRating::Grow,
         binary_sha256: "dummy".to_string(),
+        model: None,
+        endpoint: None,
         run_id: "test".to_string(),
         report_path: std::path::PathBuf::from("reports/sab-test/sab_report.json"),
     }
@@ -1580,6 +1584,7 @@ fn test_log_and_append_attempt_failure_aborts() {
         status: AttemptStatus::InternalError,
         failure_class: Some(FailureClass::EnvironmentError),
         failure_reason: Some("test".into()),
+        output_tail: None,
         binary_sha256: None,
         created_at: "2026-09-17T00:00:00Z".to_string(),
     };
@@ -1711,4 +1716,63 @@ fn test_ranked_candidate_promotion_runner_up_qualifies() {
         promoted_candidate.hypothesis.description,
         "Clean verified improvement"
     );
+}
+
+#[test]
+fn test_candidate_ranking_transitivity_all_permutations() {
+    // Candidates from review finding:
+    // A: SAB 90.0, composite 0.90
+    // B: SAB 90.4, composite 0.80
+    // C: SAB 90.8, composite 0.70
+    //
+    // Under transitive ranking (SAB tiers of 0.5):
+    // C has SAB 90.8 -> tier 181
+    // A has SAB 90.0 -> tier 180, composite 0.90
+    // B has SAB 90.4 -> tier 180, composite 0.80
+    //
+    // Therefore C > A > B consistently across every permutation.
+
+    struct Cand {
+        id: &'static str,
+        sab: f64,
+        composite: f64,
+    }
+
+    let a = Cand {
+        id: "A",
+        sab: 90.0,
+        composite: 0.90,
+    };
+    let b = Cand {
+        id: "B",
+        sab: 90.4,
+        composite: 0.80,
+    };
+    let c = Cand {
+        id: "C",
+        sab: 90.8,
+        composite: 0.70,
+    };
+
+    let permutations = [
+        vec![&a, &b, &c],
+        vec![&a, &c, &b],
+        vec![&b, &a, &c],
+        vec![&b, &c, &a],
+        vec![&c, &a, &b],
+        vec![&c, &b, &a],
+    ];
+
+    for perm in permutations {
+        let mut list = perm;
+        list.sort_by(|x, y| {
+            candidate_rank_cmp(y.sab, y.composite, x.sab, x.composite).then_with(|| x.id.cmp(y.id))
+        });
+        let ordered_ids: Vec<&str> = list.iter().map(|cand| cand.id).collect();
+        assert_eq!(
+            ordered_ids,
+            vec!["C", "A", "B"],
+            "Sorting must produce consistent, cycle-free ranking regardless of input permutation"
+        );
+    }
 }

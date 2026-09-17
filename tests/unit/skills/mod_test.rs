@@ -963,3 +963,49 @@ fn test_admit_unadmitted_project_skill_in_place() {
     assert!(registry.get("calc_tool").is_some());
     assert!(registry.refused().is_empty());
 }
+
+#[test]
+fn test_discover_user_dir_stripped_provenance_flags_refused() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let user_dir = temp.path().join("user_skills");
+    let data_dir = temp.path().join("data_skills");
+    std::fs::create_dir_all(&user_dir).unwrap();
+    std::fs::create_dir_all(&data_dir).unwrap();
+
+    // 1. Admit candidate skill originally with origin: distilled into user_dir
+    let skill_file = user_dir.join("distilled_skill.md");
+    std::fs::write(
+        &skill_file,
+        "---\nname: distilled_skill\ndescription: Distilled agent skill\norigin: distilled\n---\nSkill content.",
+    )
+    .unwrap();
+
+    let _admitted = SkillRegistry::admit_candidate(&skill_file, &user_dir).unwrap();
+
+    // 2. An attacker strips frontmatter provenance flags: origin: distilled
+    // but keeps the filename and content
+    std::fs::write(
+        &skill_file,
+        "---\nname: distilled_skill\ndescription: Distilled agent skill\n---\nSkill content.",
+    )
+    .unwrap();
+
+    // 3. discover_user_dir MUST consult the ledger, detect metadata hash mismatch (tampered), and refuse it!
+    let mut registry = SkillRegistry::new();
+    registry.discover_user_dir(&user_dir);
+
+    assert!(
+        registry.get("distilled_skill").is_none(),
+        "Skill with stripped provenance flags must not be loaded as user-authored"
+    );
+    assert_eq!(registry.refused().len(), 1);
+    assert_eq!(registry.refused()[0].name, "distilled_skill");
+    assert!(
+        registry.refused()[0]
+            .reason
+            .contains("metadata hash mismatch")
+            || registry.refused()[0].reason.contains("metadata tampered"),
+        "Reason must indicate metadata tampering: {}",
+        registry.refused()[0].reason
+    );
+}

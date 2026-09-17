@@ -10,7 +10,7 @@ use super::fitness::{self, SabConfig, SabResult};
 use super::telemetry;
 use super::tournament::Hypothesis;
 use super::tree_log::{
-    compute_sha256, AttemptNode, AttemptStatus, AttemptTree, FailureClass, TreeLogError,
+    compute_sha256, tail_lines, AttemptNode, AttemptStatus, AttemptTree, FailureClass, TreeLogError,
 };
 use super::{is_protected, EvolutionConfig, FitnessMetrics, GenerationRating, LlmConfig};
 use std::path::{Path, PathBuf};
@@ -372,24 +372,52 @@ pub(crate) struct EvaluatedCandidate {
 /// Minimum SAB score margin (epsilon) to consider a capability delta real rather than noise.
 pub const SAB_NOISE_MARGIN: f64 = 0.5;
 
-/// Decide whether a candidate is better than the current best in the generation.
-/// SAB score acts as the primary gate; when SAB scores are tied within the noise
-/// margin (0.5), composite score (latency, token efficiency, pass rate, binary size)
-/// acts as the secondary tie-breaker.
+/// Compare two candidates using a consistent, transitive ranking rule (total order):
+/// 1. Primary: SAB score discretized into noise-margin tiers (`(sab / SAB_NOISE_MARGIN).floor() as i64`).
+///    A candidate in a higher tier is strictly superior.
+/// 2. Secondary: Composite fitness score within the same SAB tier.
+/// 3. Tertiary: Raw continuous SAB score as tie-breaker.
+pub(crate) fn candidate_rank_cmp(
+    a_sab: f64,
+    a_composite: f64,
+    b_sab: f64,
+    b_composite: f64,
+) -> std::cmp::Ordering {
+    let a_tier = (a_sab / SAB_NOISE_MARGIN).floor() as i64;
+    let b_tier = (b_sab / SAB_NOISE_MARGIN).floor() as i64;
+
+    match a_tier.cmp(&b_tier) {
+        std::cmp::Ordering::Equal => {}
+        ord => return ord,
+    }
+
+    match a_composite
+        .partial_cmp(&b_composite)
+        .unwrap_or(std::cmp::Ordering::Equal)
+    {
+        std::cmp::Ordering::Equal => {}
+        ord => return ord,
+    }
+
+    a_sab
+        .partial_cmp(&b_sab)
+        .unwrap_or(std::cmp::Ordering::Equal)
+}
+
+/// Decide whether candidate A is better than candidate B under the transitive ranking rule.
+#[allow(dead_code)]
 pub(crate) fn is_candidate_better(
     cand_metrics: &FitnessMetrics,
     cand_composite: f64,
     best_metrics: &FitnessMetrics,
     best_composite: f64,
 ) -> bool {
-    if cand_metrics.sab_score > best_metrics.sab_score + SAB_NOISE_MARGIN {
-        return true;
-    }
-    if cand_metrics.sab_score < best_metrics.sab_score - SAB_NOISE_MARGIN {
-        return false;
-    }
-    // Within noise margin: secondary metrics / composite score acts as tie-breaker
-    cand_composite > best_composite
+    candidate_rank_cmp(
+        cand_metrics.sab_score,
+        cand_composite,
+        best_metrics.sab_score,
+        best_composite,
+    ) == std::cmp::Ordering::Greater
 }
 
 /// Evaluates whether a candidate winner should be promoted to baseline:
@@ -628,7 +656,41 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         log_phase("  ℹ Baseline compile+test suite is 100% green. Without SELFWARE_EVOLVE_SAB=1, fitness scores are capped at 100.0 with unmeasured tokens. Evolution will operate in tree data-collection mode for offline Dream-RSI policy replay.");
     }
 
-    let mut active_parent_id: Option<String> = None;
+    let initial_baseline_composite = config.fitness_weights.composite(&current_baseline_metrics);
+    let baseline_node = AttemptNode {
+        id: "att-baseline".to_string(),
+        parent_id: None,
+        generation: 0,
+        branch_id: "baseline".to_string(),
+        hypothesis_id: "baseline".to_string(),
+        description: "Initial baseline capability measurement".to_string(),
+        diff_sha256: compute_sha256(b""),
+        patch: None,
+        sab_report_path: current_baseline_sab.as_ref().map(|r| r.report_path.clone()),
+        metrics: Some(current_baseline_metrics.clone()),
+        composite_score: Some(initial_baseline_composite),
+        tokens_used: current_baseline_metrics.tokens_used,
+        wall_time_ms: 0,
+        status: AttemptStatus::Baseline,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: current_baseline_sab
+            .as_ref()
+            .map(|r| r.binary_sha256.clone()),
+        created_at: chrono_now(),
+    };
+    if let Err(err) = log_and_append_attempt(&attempts_file, &baseline_node, repo_root, 0, start) {
+        return EvolutionResult {
+            generations_run: 0,
+            improvements: Vec::new(),
+            final_sab_score: current_baseline_metrics.sab_score,
+            initial_sab_score: initial_sab,
+            total_duration: start.elapsed(),
+            aborted: Some(format!("initial baseline logging failed: {err}")),
+        };
+    }
+    let mut active_parent_id: Option<String> = Some(baseline_node.id.clone());
 
     // ═══════════════════════════════════════════════════════
     // MAIN EVOLUTIONARY LOOP
@@ -732,6 +794,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     status: AttemptStatus::SafetyRejected,
                     failure_class: Some(FailureClass::SafetyViolation),
                     failure_reason: Some("Touches protected paths".into()),
+                    output_tail: None,
                     binary_sha256: None,
                     created_at: chrono_now(),
                 };
@@ -760,6 +823,164 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         }
 
         log_phase(&format!("Evaluating {} hypotheses...", valid.len()));
+
+        // ─── Step 3.5: Control anchor check (verify sandbox viability) ───
+        // Before running mutant evaluations, verify that an unpatched worktree
+        // compiles and passes tests cleanly. If the clean sandbox fails, the
+        // build harness or environment is compromised (e.g. toolchain, port lock, resource exhaustion).
+        // Aborting the generation prevents misclassifying harness failures as mutant slips.
+        let control_start = Instant::now();
+        let control_worktree = match ast_tools::create_shadow_worktree(repo_root) {
+            Ok(w) => w,
+            Err(e) => {
+                log_warning(&format!(
+                    "Control worktree creation failed: {e}; aborting generation {generation}"
+                ));
+                let node = AttemptNode {
+                    id: format!("att-g{}-control", generation),
+                    parent_id: active_parent_id.clone(),
+                    generation,
+                    branch_id: "control".to_string(),
+                    hypothesis_id: "control".to_string(),
+                    description: "Unpatched control anchor".to_string(),
+                    diff_sha256: compute_sha256(b""),
+                    patch: None,
+                    sab_report_path: None,
+                    metrics: None,
+                    composite_score: None,
+                    tokens_used: None,
+                    wall_time_ms: control_start.elapsed().as_millis() as u64,
+                    status: AttemptStatus::InternalError,
+                    failure_class: Some(FailureClass::EnvironmentError),
+                    failure_reason: Some(format!("Control worktree failed: {e}")),
+                    output_tail: None,
+                    binary_sha256: None,
+                    created_at: chrono_now(),
+                };
+                let _ =
+                    log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start);
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+        let _ctrl_guard = WorktreeGuard::new(repo_root, control_worktree.clone());
+
+        let mut ctrl_check_cmd = Command::new("cargo");
+        ctrl_check_cmd
+            .arg("check")
+            .arg("--features")
+            .arg(features_arg(EVOLVE_FEATURES))
+            .stdin(std::process::Stdio::null())
+            .current_dir(&control_worktree);
+        let ctrl_check = ctrl_check_cmd.output();
+        let ctrl_check_failed = match &ctrl_check {
+            Ok(o) => !o.status.success(),
+            Err(_) => true,
+        };
+
+        if ctrl_check_failed {
+            let tail = ctrl_check.ok().map(|o| {
+                tail_lines(
+                    &format!(
+                        "{}\n{}",
+                        String::from_utf8_lossy(&o.stdout),
+                        String::from_utf8_lossy(&o.stderr)
+                    ),
+                    50,
+                )
+            });
+            log_warning(&format!(
+                "Sandbox control compile check failed at generation {generation}; skipping mutant evaluations"
+            ));
+            let node = AttemptNode {
+                id: format!("att-g{}-control", generation),
+                parent_id: active_parent_id.clone(),
+                generation,
+                branch_id: "control".to_string(),
+                hypothesis_id: "control".to_string(),
+                description: "Unpatched control anchor compile check".to_string(),
+                diff_sha256: compute_sha256(b""),
+                patch: None,
+                sab_report_path: None,
+                metrics: None,
+                composite_score: None,
+                tokens_used: None,
+                wall_time_ms: control_start.elapsed().as_millis() as u64,
+                status: AttemptStatus::InternalError,
+                failure_class: Some(FailureClass::EnvironmentError),
+                failure_reason: Some("Control compile check failed in clean worktree".to_string()),
+                output_tail: tail,
+                binary_sha256: None,
+                created_at: chrono_now(),
+            };
+            let _ = log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start);
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            continue;
+        }
+
+        let mut ctrl_test_cmd = Command::new("cargo");
+        ctrl_test_cmd
+            .arg("test")
+            .arg("--lib")
+            .arg("--features")
+            .arg(features_arg(EVOLVE_FEATURES))
+            .stdin(std::process::Stdio::null())
+            .current_dir(&control_worktree);
+        let ctrl_test = ctrl_test_cmd.output();
+        let ctrl_test_passed = match &ctrl_test {
+            Ok(o) => {
+                let combined = format!(
+                    "{}\n{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                );
+                o.status.success() && combined.lines().any(|l| l.contains("test result:"))
+            }
+            Err(_) => false,
+        };
+
+        if !ctrl_test_passed {
+            let tail = ctrl_test.ok().map(|o| {
+                tail_lines(
+                    &format!(
+                        "{}\n{}",
+                        String::from_utf8_lossy(&o.stdout),
+                        String::from_utf8_lossy(&o.stderr)
+                    ),
+                    50,
+                )
+            });
+            log_warning(&format!(
+                "Sandbox control test failed or missing summary at generation {generation}; skipping mutant evaluations"
+            ));
+            let node = AttemptNode {
+                id: format!("att-g{}-control", generation),
+                parent_id: active_parent_id.clone(),
+                generation,
+                branch_id: "control".to_string(),
+                hypothesis_id: "control".to_string(),
+                description: "Unpatched control anchor test suite".to_string(),
+                diff_sha256: compute_sha256(b""),
+                patch: None,
+                sab_report_path: None,
+                metrics: None,
+                composite_score: None,
+                tokens_used: None,
+                wall_time_ms: control_start.elapsed().as_millis() as u64,
+                status: AttemptStatus::InternalError,
+                failure_class: Some(FailureClass::EnvironmentError),
+                failure_reason: Some(
+                    "Control test suite failed or had no summary in clean worktree".to_string(),
+                ),
+                output_tail: tail,
+                binary_sha256: None,
+                created_at: chrono_now(),
+            };
+            let _ = log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start);
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            continue;
+        }
+        drop(_ctrl_guard);
 
         // ─── Step 4: Evaluate each hypothesis (apply → check → test) ───
         let sab_available =
@@ -802,6 +1023,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         status: AttemptStatus::InternalError,
                         failure_class: Some(FailureClass::EnvironmentError),
                         failure_reason: Some(format!("Worktree creation failed: {e}")),
+                        output_tail: None,
                         binary_sha256: None,
                         created_at: chrono_now(),
                     };
@@ -849,6 +1071,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     status: AttemptStatus::PatchFailed,
                     failure_class: Some(FailureClass::Unclassified),
                     failure_reason: Some("Patch failed to apply cleanly".into()),
+                    output_tail: None,
                     binary_sha256: None,
                     created_at: chrono_now(),
                 };
@@ -880,7 +1103,21 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     .arg("fmt")
                     .current_dir(&worktree)
                     .output();
-                if fmt_fix.map(|o| !o.status.success()).unwrap_or(true) {
+                let (fmt_failed, fmt_tail) = match &fmt_fix {
+                    Ok(o) => (
+                        !o.status.success(),
+                        Some(tail_lines(
+                            &format!(
+                                "{}\n{}",
+                                String::from_utf8_lossy(&o.stdout),
+                                String::from_utf8_lossy(&o.stderr)
+                            ),
+                            50,
+                        )),
+                    ),
+                    Err(_) => (true, None),
+                };
+                if fmt_failed {
                     log_frost(generation, &format!("cargo fmt failed: {}", hypothesis.id));
                     let node = AttemptNode {
                         id: attempt_id.clone(),
@@ -899,6 +1136,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         status: AttemptStatus::FormatFailed,
                         failure_class: Some(FailureClass::RepairableSyntax),
                         failure_reason: Some("cargo fmt failed".into()),
+                        output_tail: fmt_tail,
                         binary_sha256: None,
                         created_at: chrono_now(),
                     };
@@ -930,8 +1168,22 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 .arg(features_arg(EVOLVE_FEATURES))
                 .current_dir(&worktree);
             let check = check_cmd.output();
+            let (check_failed, check_tail) = match &check {
+                Ok(o) => (
+                    !o.status.success(),
+                    Some(tail_lines(
+                        &format!(
+                            "{}\n{}",
+                            String::from_utf8_lossy(&o.stdout),
+                            String::from_utf8_lossy(&o.stderr)
+                        ),
+                        50,
+                    )),
+                ),
+                Err(_) => (true, None),
+            };
 
-            if check.map(|o| !o.status.success()).unwrap_or(true) {
+            if check_failed {
                 log_frost(generation, &format!("Compile failed: {}", hypothesis.id));
                 let node = AttemptNode {
                     id: attempt_id.clone(),
@@ -950,6 +1202,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     status: AttemptStatus::CompileFailed,
                     failure_class: Some(FailureClass::RepairableSyntax),
                     failure_reason: Some("cargo check failed".into()),
+                    output_tail: check_tail,
                     binary_sha256: None,
                     created_at: chrono_now(),
                 };
@@ -1001,6 +1254,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         status: AttemptStatus::InternalError,
                         failure_class: Some(FailureClass::EnvironmentError),
                         failure_reason: Some(format!("Test execution failed: {e}")),
+                        output_tail: None,
                         binary_sha256: None,
                         created_at: chrono_now(),
                     };
@@ -1031,14 +1285,38 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 let stdout = String::from_utf8_lossy(&test_output.stdout);
                 let stderr = String::from_utf8_lossy(&test_output.stderr);
                 let combined = format!("{}\n{}", stdout, stderr);
+                let has_test_summary = combined.lines().any(|l| l.contains("test result:"));
                 let fail_count = combined
                     .lines()
                     .find(|l| l.contains("test result:"))
                     .unwrap_or("unknown");
-                log_frost(
-                    generation,
-                    &format!("Tests failed: {} — {}", hypothesis.id, fail_count),
-                );
+                let tail = tail_lines(&combined, 50);
+
+                let (status, failure_class, failure_reason) = if has_test_summary {
+                    log_frost(
+                        generation,
+                        &format!("Tests failed: {} — {}", hypothesis.id, fail_count),
+                    );
+                    (
+                        AttemptStatus::TestFailed,
+                        Some(FailureClass::RepairableTestFailure),
+                        Some(format!("Tests failed: {fail_count}")),
+                    )
+                } else {
+                    log_warning(&format!(
+                        "Tests failed without summary (harness/environment failure): {}",
+                        hypothesis.id
+                    ));
+                    (
+                        AttemptStatus::InternalError,
+                        Some(FailureClass::EnvironmentError),
+                        Some(
+                            "Tests failed without summary (harness/environment failure)"
+                                .to_string(),
+                        ),
+                    )
+                };
+
                 let node = AttemptNode {
                     id: attempt_id.clone(),
                     parent_id: active_parent_id.clone(),
@@ -1053,9 +1331,10 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     composite_score: None,
                     tokens_used: None,
                     wall_time_ms: attempt_start.elapsed().as_millis() as u64,
-                    status: AttemptStatus::TestFailed,
-                    failure_class: Some(FailureClass::RepairableTestFailure),
-                    failure_reason: Some(format!("Tests failed: {fail_count}")),
+                    status,
+                    failure_class,
+                    failure_reason,
+                    output_tail: Some(tail),
                     binary_sha256: None,
                     created_at: chrono_now(),
                 };
@@ -1083,8 +1362,22 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 .current_dir(&worktree);
             clippy_cmd.args(["--", "-D", "warnings"]);
             let clippy = clippy_cmd.output();
+            let (clippy_failed, clippy_tail) = match &clippy {
+                Ok(o) => (
+                    !o.status.success(),
+                    Some(tail_lines(
+                        &format!(
+                            "{}\n{}",
+                            String::from_utf8_lossy(&o.stdout),
+                            String::from_utf8_lossy(&o.stderr)
+                        ),
+                        50,
+                    )),
+                ),
+                Err(_) => (true, None),
+            };
 
-            if clippy.map(|o| !o.status.success()).unwrap_or(true) {
+            if clippy_failed {
                 log_frost(generation, &format!("Clippy failed: {}", hypothesis.id));
                 let node = AttemptNode {
                     id: attempt_id.clone(),
@@ -1103,6 +1396,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     status: AttemptStatus::ClippyFailed,
                     failure_class: Some(FailureClass::RepairableClippy),
                     failure_reason: Some("cargo clippy warnings detected".into()),
+                    output_tail: clippy_tail,
                     binary_sha256: None,
                     created_at: chrono_now(),
                 };
@@ -1128,8 +1422,22 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     .args(["build", "--release", "--features", "self-improvement"])
                     .current_dir(&worktree)
                     .output();
+                let (build_failed, build_tail) = match &build {
+                    Ok(o) => (
+                        !o.status.success(),
+                        Some(tail_lines(
+                            &format!(
+                                "{}\n{}",
+                                String::from_utf8_lossy(&o.stdout),
+                                String::from_utf8_lossy(&o.stderr)
+                            ),
+                            50,
+                        )),
+                    ),
+                    Err(_) => (true, None),
+                };
 
-                if build.map(|o| !o.status.success()).unwrap_or(true) {
+                if build_failed {
                     log_frost(
                         generation,
                         &format!("Release build failed: {}", hypothesis.id),
@@ -1151,6 +1459,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         status: AttemptStatus::BuildFailed,
                         failure_class: Some(FailureClass::Unclassified),
                         failure_reason: Some("Release build failed".into()),
+                        output_tail: build_tail,
                         binary_sha256: None,
                         created_at: chrono_now(),
                     };
@@ -1202,6 +1511,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             status: AttemptStatus::InternalError,
                             failure_class: Some(FailureClass::EnvironmentError),
                             failure_reason: Some(format!("SAB execution failed: {e}")),
+                            output_tail: None,
                             binary_sha256: None,
                             created_at: chrono_now(),
                         };
@@ -1255,6 +1565,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             status: AttemptStatus::BuildFailed,
                             failure_class: Some(FailureClass::Unclassified),
                             failure_reason: Some("Candidate build failed".into()),
+                            output_tail: None,
                             binary_sha256: None,
                             created_at: chrono_now(),
                         };
@@ -1309,6 +1620,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         status: AttemptStatus::Evaluated,
                         failure_class: None,
                         failure_reason: Some("No effective diff after evaluation".into()),
+                        output_tail: None,
                         binary_sha256: None,
                         created_at: chrono_now(),
                     };
@@ -1352,6 +1664,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 status: AttemptStatus::Evaluated,
                 failure_class: None,
                 failure_reason: None,
+                output_tail: None,
                 binary_sha256: winner_sab.as_ref().map(|s| s.binary_sha256.clone()),
                 created_at: chrono_now(),
             };
@@ -1403,17 +1716,15 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             continue;
         }
 
-        // Rank evaluated candidates best-first using noise-aware comparison
+        // Rank evaluated candidates best-first using consistent transitive comparison
         evaluated_candidates.sort_by(|a, b| {
-            if is_candidate_better(&a.metrics, a.composite, &b.metrics, b.composite) {
-                std::cmp::Ordering::Less
-            } else if is_candidate_better(&b.metrics, b.composite, &a.metrics, a.composite) {
-                std::cmp::Ordering::Greater
-            } else {
-                b.composite
-                    .partial_cmp(&a.composite)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            }
+            candidate_rank_cmp(
+                b.metrics.sab_score,
+                b.composite,
+                a.metrics.sab_score,
+                a.composite,
+            )
+            .then_with(|| a.attempt_id.cmp(&b.attempt_id))
         });
 
         let mut promoted_winner = None;

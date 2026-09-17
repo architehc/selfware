@@ -10,7 +10,7 @@
 use super::FitnessMetrics;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttemptStatus {
+    /// Baseline capability measurement.
+    Baseline,
     /// Fully evaluated and scored.
     Evaluated,
     /// Failed compilation (`cargo check`).
@@ -44,6 +46,7 @@ pub enum AttemptStatus {
 impl std::fmt::Display for AttemptStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Baseline => write!(f, "baseline"),
             Self::Evaluated => write!(f, "evaluated"),
             Self::CompileFailed => write!(f, "compile_failed"),
             Self::TestFailed => write!(f, "test_failed"),
@@ -100,6 +103,17 @@ pub fn compute_sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+/// Extracts the last `n` lines of a string, useful for preserving diagnostic
+/// tails without exploding serialized log sizes.
+pub fn tail_lines(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= n {
+        text.to_string()
+    } else {
+        lines[lines.len() - n..].join("\n")
+    }
+}
+
 /// A single node in the evolutionary attempt tree.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AttemptNode {
@@ -142,6 +156,9 @@ pub struct AttemptNode {
     /// Failure reason or error snippet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_reason: Option<String>,
+    /// Last N lines of execution output (stdout/stderr) for post-mortem analysis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tail: Option<String>,
     /// SHA256 of the compiled binary, if built.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub binary_sha256: Option<String>,
@@ -181,6 +198,10 @@ pub enum TreeLogError {
     CorruptLine(String),
     #[error("Insufficient independent branches for held-out validation: {0} branch(es) found (minimum 2 required)")]
     InsufficientBranchesForHeldOut(usize),
+    #[error("Tree has orphaned node '{node_id}' referencing missing parent '{parent_id}'")]
+    OrphanedNode { node_id: String, parent_id: String },
+    #[error("Insufficient independent ancestry groups for held-out validation: {0} group(s) found (minimum 2 required)")]
+    InsufficientAncestryGroupsForHeldOut(usize),
 }
 
 /// In-memory indexed collection of evolutionary attempts forming a tree/forest.
@@ -311,34 +332,112 @@ impl AttemptTree {
             })
     }
 
-    /// Partition the tree into (discovery_tree, held_out_tree) by splitting semantic branches.
-    /// Ensures that discovery and held-out validation never share branches or nodes,
+    /// Check if a node with `id` exists in the tree.
+    pub fn has_node(&self, id: &str) -> bool {
+        self.id_to_index.contains_key(id)
+    }
+
+    /// Validates that every non-root node in the tree has its parent present in the tree.
+    /// Fails closed if any node is orphaned.
+    pub fn validate_ancestry(&self) -> Result<(), TreeLogError> {
+        for node in &self.nodes {
+            if let Some(ref pid) = node.parent_id {
+                if !self.has_node(pid) {
+                    return Err(TreeLogError::OrphanedNode {
+                        node_id: node.id.clone(),
+                        parent_id: pid.clone(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Partitions all nodes into disjoint connected components (independent ancestry groups)
+    /// based on parent-child edges. Whole lineages stay strictly together.
+    pub fn ancestry_groups(&self) -> Vec<Vec<String>> {
+        let mut adj: HashMap<String, Vec<String>> = HashMap::new();
+        for node in &self.nodes {
+            adj.entry(node.id.clone()).or_default();
+            if let Some(ref pid) = node.parent_id {
+                if self.has_node(pid) {
+                    adj.entry(node.id.clone()).or_default().push(pid.clone());
+                    adj.entry(pid.clone()).or_default().push(node.id.clone());
+                }
+            }
+        }
+
+        let mut visited = HashSet::new();
+        let mut groups = Vec::new();
+
+        for node in &self.nodes {
+            if visited.insert(node.id.clone()) {
+                let mut component = Vec::new();
+                let mut queue = std::collections::VecDeque::new();
+                queue.push_back(node.id.clone());
+                component.push(node.id.clone());
+
+                while let Some(curr) = queue.pop_front() {
+                    if let Some(neighbors) = adj.get(&curr) {
+                        for neighbor in neighbors {
+                            if visited.insert(neighbor.clone()) {
+                                component.push(neighbor.clone());
+                                queue.push_back(neighbor.clone());
+                            }
+                        }
+                    }
+                }
+                groups.push(component);
+            }
+        }
+
+        groups
+    }
+
+    /// Partition the tree into (discovery_tree, held_out_tree) by splitting independent ancestry groups.
+    /// Ensures that discovery and held-out validation never share lineages or nodes,
     /// and that all validation nodes have valid, reachable root ancestors within their tree.
     pub fn split_held_out(&self, validation_fraction: f64) -> Result<(Self, Self), TreeLogError> {
-        let frac = validation_fraction.clamp(0.05, 0.50);
+        self.validate_ancestry()?;
+
+        let groups = self.ancestry_groups();
         let branches = self.branches();
         if branches.len() < 2 {
             return Err(TreeLogError::InsufficientBranchesForHeldOut(branches.len()));
         }
+        if groups.len() < 2 {
+            return Err(TreeLogError::InsufficientAncestryGroupsForHeldOut(
+                groups.len(),
+            ));
+        }
 
-        let val_count =
-            ((branches.len() as f64 * frac).round() as usize).clamp(1, branches.len() - 1);
-        let split_idx = branches.len() - val_count;
-        let disc_branches: std::collections::HashSet<String> =
-            branches[..split_idx].iter().cloned().collect();
-        let val_branches: std::collections::HashSet<String> =
-            branches[split_idx..].iter().cloned().collect();
+        let frac = validation_fraction.clamp(0.05, 0.50);
+        let val_count = ((groups.len() as f64 * frac).round() as usize).clamp(1, groups.len() - 1);
+        let split_idx = groups.len() - val_count;
+
+        let disc_node_ids: HashSet<String> = groups[..split_idx]
+            .iter()
+            .flat_map(|g| g.iter().cloned())
+            .collect();
+        let val_node_ids: HashSet<String> = groups[split_idx..]
+            .iter()
+            .flat_map(|g| g.iter().cloned())
+            .collect();
 
         let mut disc_tree = Self::new();
         let mut val_tree = Self::new();
 
         for node in &self.nodes {
-            if disc_branches.contains(&node.branch_id) {
+            if disc_node_ids.contains(&node.id) {
                 let _ = disc_tree.add_node(node.clone());
-            } else if val_branches.contains(&node.branch_id) {
+            } else if val_node_ids.contains(&node.id) {
                 let _ = val_tree.add_node(node.clone());
             }
         }
+
+        disc_tree.validate_ancestry()?;
+        val_tree.validate_ancestry()?;
+
         Ok((disc_tree, val_tree))
     }
 

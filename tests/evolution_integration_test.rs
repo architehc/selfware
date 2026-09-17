@@ -123,6 +123,8 @@ fn test_fitness_pipeline_end_to_end() {
         wall_clock: Duration::from_secs(1200),
         rating: GenerationRating::Grow,
         binary_sha256: "test".to_string(),
+        model: Some("qwen".to_string()),
+        endpoint: Some("http://localhost:11434".to_string()),
         run_id: "test".to_string(),
         report_path: std::path::PathBuf::from("reports/sab-test/sab_report.json"),
     };
@@ -699,6 +701,7 @@ fn test_dream_rsi_end_to_end_replay_integration() {
         status: AttemptStatus::Evaluated,
         failure_class: None,
         failure_reason: None,
+        output_tail: None,
         binary_sha256: None,
         created_at: "2026-09-16T12:00:00Z".into(),
     };
@@ -719,6 +722,7 @@ fn test_dream_rsi_end_to_end_replay_integration() {
         status: AttemptStatus::CompileFailed,
         failure_class: Some(FailureClass::RepairableSyntax),
         failure_reason: Some("missing semicolon".into()),
+        output_tail: None,
         binary_sha256: None,
         created_at: "2026-09-16T12:05:00Z".into(),
     };
@@ -739,6 +743,7 @@ fn test_dream_rsi_end_to_end_replay_integration() {
         status: AttemptStatus::Evaluated,
         failure_class: None,
         failure_reason: None,
+        output_tail: None,
         binary_sha256: None,
         created_at: "2026-09-16T12:10:00Z".into(),
     };
@@ -761,6 +766,7 @@ fn test_dream_rsi_end_to_end_replay_integration() {
         status: AttemptStatus::Evaluated,
         failure_class: None,
         failure_reason: None,
+        output_tail: None,
         binary_sha256: None,
         created_at: "2026-09-16T12:00:00Z".into(),
     };
@@ -781,6 +787,7 @@ fn test_dream_rsi_end_to_end_replay_integration() {
         status: AttemptStatus::Evaluated,
         failure_class: None,
         failure_reason: None,
+        output_tail: None,
         binary_sha256: None,
         created_at: "2026-09-16T12:05:00Z".into(),
     };
