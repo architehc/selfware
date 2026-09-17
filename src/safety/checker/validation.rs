@@ -1223,6 +1223,48 @@ impl SafetyChecker {
                         }
                     } else if matches!(
                         key_lower.as_str(),
+                        "args" | "arguments" | "argv" | "parameters" | "params" | "cmd_args"
+                    ) {
+                        if let Some(arr) = value.as_array() {
+                            let mut str_tokens = Vec::new();
+                            for item in arr {
+                                if let Some(s) = item.as_str() {
+                                    str_tokens.push(s);
+                                    if looks_like_explicit_path(s)
+                                        || s.starts_with('.')
+                                        || s.contains('/')
+                                        || s.contains('\\')
+                                    {
+                                        self.check_path(s)?;
+                                    }
+                                    self.check_content_for_secrets(s)?;
+                                } else {
+                                    self.check_generic_mcp_arguments(item)?;
+                                }
+                            }
+                            // Check for shell command flags (e.g. ["bash", "-c", "cat .env"])
+                            for (idx, &tok) in str_tokens.iter().enumerate() {
+                                if is_shell_command_flag(tok) {
+                                    if let Some(&cmd_payload) = str_tokens.get(idx + 1) {
+                                        self.check_shell_command(cmd_payload)?;
+                                        self.check_shell_command_paths(cmd_payload)?;
+                                    }
+                                }
+                            }
+                            // Check reconstructed command line
+                            if !str_tokens.is_empty() {
+                                let joined = str_tokens.join(" ");
+                                self.check_shell_command(&joined)?;
+                                self.check_shell_command_paths(&joined)?;
+                            }
+                        } else if let Some(s) = value.as_str() {
+                            self.check_shell_command(s)?;
+                            self.check_shell_command_paths(s)?;
+                        } else {
+                            self.check_generic_mcp_arguments(value)?;
+                        }
+                    } else if matches!(
+                        key_lower.as_str(),
                         "content"
                             | "contents"
                             | "text"
@@ -1256,6 +1298,13 @@ impl SafetyChecker {
                 for item in arr {
                     if let Some(s) = item.as_str() {
                         self.check_content_for_secrets(s)?;
+                        if looks_like_explicit_path(s)
+                            || s.starts_with('.')
+                            || s.contains('/')
+                            || s.contains('\\')
+                        {
+                            self.check_path(s)?;
+                        }
                     } else {
                         self.check_generic_mcp_arguments(item)?;
                     }

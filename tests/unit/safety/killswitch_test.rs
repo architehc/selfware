@@ -306,7 +306,7 @@ fn test_global_killswitch_symlinked_home_detection() {
     std::os::unix::fs::symlink(&real_home, &symlinked_home).unwrap();
 
     // check_killswitch_with_home must follow symlinks through home and detect the global killswitch
-    let res = check_killswitch_with_home(None, Some(&symlinked_home));
+    let res = check_killswitch_with_home(Some(tmp.path()), Some(&symlinked_home));
     assert!(
         res.is_err(),
         "Global killswitch in symlinked home must be detected"
@@ -333,7 +333,7 @@ fn test_global_killswitch_inspection_error_fails_closed() {
     perms.set_mode(0o000);
     let _ = std::fs::set_permissions(&selfware_dir, perms);
 
-    let res = check_killswitch_with_home(None, Some(&fake_home));
+    let res = check_killswitch_with_home(Some(tmp.path()), Some(&fake_home));
     assert!(
         res.is_err(),
         "Inspection error on home killswitch must fail closed"

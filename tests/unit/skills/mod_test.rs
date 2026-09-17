@@ -1038,3 +1038,37 @@ fn test_admit_candidate_rejects_attempts_directory() {
         result
     );
 }
+
+#[test]
+fn test_admit_candidate_rejects_operator_denied_paths() {
+    let _lock = crate::safety::killswitch::KILLSWITCH_TEST_LOCK.lock();
+    crate::safety::killswitch::reset_in_process();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let custom_denied_dir = temp.path().join("restricted_data");
+    let active_skills = temp.path().join(".selfware").join("skills");
+    std::fs::create_dir_all(&custom_denied_dir).expect("mkdir restricted");
+    std::fs::create_dir_all(&active_skills).expect("mkdir skills");
+
+    let candidate_file = custom_denied_dir.join("restricted_skill.md");
+    std::fs::write(
+        &candidate_file,
+        "---\nname: restricted_skill\ndescription: Candidate in restricted dir\ncandidate: true\nadmitted: false\n---\nPayload.",
+    )
+    .unwrap();
+
+    let extra_denied = vec!["**/restricted_data/**".to_string()];
+    let result = SkillRegistry::admit_candidate_with_denied(
+        &candidate_file,
+        &active_skills,
+        Some(&extra_denied),
+    );
+    assert!(
+        result.is_err(),
+        "Candidate matching operator denied pattern must be rejected"
+    );
+    assert!(
+        result.as_ref().unwrap_err().contains("denied pattern"),
+        "Error message must indicate match with operator denied pattern: {:?}",
+        result
+    );
+}

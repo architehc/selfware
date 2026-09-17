@@ -279,3 +279,140 @@ fn test_output_tail_serde_backwards_compatible() {
         Some("cargo test error: timeout")
     );
 }
+
+#[test]
+fn test_ancestry_groups_partitions_connected_components() {
+    let mut tree = AttemptTree::new();
+    // Tree A: root-a -> child-a1 -> child-a2
+    tree.add_node(sample_node(
+        "root-a",
+        None,
+        "branch-a",
+        Some(50.0),
+        AttemptStatus::Evaluated,
+    ))
+    .unwrap();
+    tree.add_node(sample_node(
+        "child-a1",
+        Some("root-a"),
+        "branch-a",
+        Some(55.0),
+        AttemptStatus::Evaluated,
+    ))
+    .unwrap();
+    tree.add_node(sample_node(
+        "child-a2",
+        Some("child-a1"),
+        "branch-a",
+        Some(60.0),
+        AttemptStatus::Evaluated,
+    ))
+    .unwrap();
+
+    // Tree B: root-b -> child-b1
+    tree.add_node(sample_node(
+        "root-b",
+        None,
+        "branch-b",
+        Some(40.0),
+        AttemptStatus::Evaluated,
+    ))
+    .unwrap();
+    tree.add_node(sample_node(
+        "child-b1",
+        Some("root-b"),
+        "branch-b",
+        Some(45.0),
+        AttemptStatus::Evaluated,
+    ))
+    .unwrap();
+
+    let groups = tree.ancestry_groups();
+    assert_eq!(
+        groups.len(),
+        2,
+        "Must identify exactly 2 connected components"
+    );
+
+    let group_a = groups
+        .iter()
+        .find(|g| g.contains(&"root-a".to_string()))
+        .unwrap();
+    assert!(group_a.contains(&"child-a1".to_string()));
+    assert!(group_a.contains(&"child-a2".to_string()));
+    assert_eq!(group_a.len(), 3);
+
+    let group_b = groups
+        .iter()
+        .find(|g| g.contains(&"root-b".to_string()))
+        .unwrap();
+    assert!(group_b.contains(&"child-b1".to_string()));
+    assert_eq!(group_b.len(), 2);
+}
+
+#[test]
+fn test_split_held_out_excludes_control_anchors() {
+    let mut tree = AttemptTree::new();
+    // Common baseline root
+    tree.add_node(sample_node(
+        "baseline",
+        None,
+        "baseline",
+        Some(50.0),
+        AttemptStatus::Baseline,
+    ))
+    .unwrap();
+    // Exploratory branch 1
+    tree.add_node(sample_node(
+        "hyp0",
+        Some("baseline"),
+        "branch-g1-hyp0",
+        Some(60.0),
+        AttemptStatus::Evaluated,
+    ))
+    .unwrap();
+    // Exploratory branch 2
+    tree.add_node(sample_node(
+        "hyp1",
+        Some("baseline"),
+        "branch-g1-hyp1",
+        Some(70.0),
+        AttemptStatus::Evaluated,
+    ))
+    .unwrap();
+    // Control anchor branch
+    tree.add_node(sample_node(
+        "ctrl",
+        Some("baseline"),
+        "control",
+        Some(50.0),
+        AttemptStatus::Evaluated,
+    ))
+    .unwrap();
+
+    let (disc, val) = tree.split_held_out(0.40).expect("split must succeed");
+
+    // Neither partition must contain the control anchor
+    assert!(
+        !disc.has_node("ctrl"),
+        "Discovery tree must not contain control anchor"
+    );
+    assert!(
+        !val.has_node("ctrl"),
+        "Validation tree must not contain control anchor"
+    );
+
+    // Both partitions must contain the common baseline root
+    assert!(disc.has_node("baseline"));
+    assert!(val.has_node("baseline"));
+
+    // Validation tree must contain an exploratory branch, not be empty or control-only
+    let val_exploratory = val
+        .nodes
+        .iter()
+        .any(|n| n.branch_id == "branch-g1-hyp0" || n.branch_id == "branch-g1-hyp1");
+    assert!(
+        val_exploratory,
+        "Validation tree must contain an exploratory branch"
+    );
+}

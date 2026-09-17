@@ -3744,6 +3744,18 @@ fn test_mcp_and_computer_tools_validation() {
         .check_tool_call(&create_test_call("mcp_batch_exec", &mcp_cmds_args))
         .is_err());
 
+    // MCP args array with -c command payload
+    let mcp_args_payload = serde_json::json!({ "args": ["bash", "-c", "cat .env"] }).to_string();
+    assert!(checker
+        .check_tool_call(&create_test_call("mcp_server_exec", &mcp_args_payload))
+        .is_err());
+
+    // MCP args array with denied path
+    let mcp_args_path = serde_json::json!({ "args": [".env"] }).to_string();
+    assert!(checker
+        .check_tool_call(&create_test_call("mcp_fs_tool", &mcp_args_path))
+        .is_err());
+
     // Computer window tool
     let win_args = serde_json::json!({ "action": "launch", "app_name": "rm -rf /" }).to_string();
     assert!(checker

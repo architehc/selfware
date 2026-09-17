@@ -420,13 +420,37 @@ impl AttemptTree {
         reachable
     }
 
+    /// Traces a node up to the first child below common_root (the lineage root branch).
+    fn find_lineage_root_branch(&self, start_id: &str, common_root_id: &str) -> Option<String> {
+        let mut curr_id = start_id.to_string();
+        loop {
+            let &idx = self.id_to_index.get(&curr_id)?;
+            let node = &self.nodes[idx];
+            match &node.parent_id {
+                Some(pid) if pid == common_root_id => {
+                    return Some(node.branch_id.clone());
+                }
+                Some(pid) => {
+                    curr_id = pid.clone();
+                }
+                None => {
+                    return Some(node.branch_id.clone());
+                }
+            }
+        }
+    }
+
     /// Partition the tree into (discovery_tree, held_out_tree) ensuring that each partition
     /// forms a valid, fully connected tree/forest where every node is reachable from a root node
-    /// within that tree.
+    /// within that tree. Whole lineages stay strictly together, and control anchors are excluded.
     pub fn split_held_out(&self, validation_fraction: f64) -> Result<(Self, Self), TreeLogError> {
         self.validate_ancestry()?;
 
-        let roots = self.roots();
+        let roots: Vec<&AttemptNode> = self
+            .roots()
+            .into_iter()
+            .filter(|r| r.branch_id != "control")
+            .collect();
         let frac = validation_fraction.clamp(0.05, 0.50);
 
         if roots.len() >= 2 {
@@ -443,6 +467,9 @@ impl AttemptTree {
             let mut val_tree = Self::new();
 
             for node in &self.nodes {
+                if node.branch_id == "control" {
+                    continue;
+                }
                 let mut curr = node;
                 while let Some(ref pid) = curr.parent_id {
                     if let Some(&idx) = self.id_to_index.get(pid) {
@@ -465,30 +492,34 @@ impl AttemptTree {
 
         // Case 2: Single common root (e.g. baseline node) with multiple exploratory branches
         if let Some(common_root) = roots.first() {
-            let mut non_root_branches: Vec<String> = self
-                .nodes
-                .iter()
-                .filter(|n| n.parent_id.is_some())
-                .map(|n| n.branch_id.clone())
-                .collect::<HashSet<_>>()
-                .into_iter()
-                .collect();
-            non_root_branches.sort();
+            let mut branch_to_lineage: HashMap<String, String> = HashMap::new();
+            let mut lineages: Vec<String> = Vec::new();
 
-            if non_root_branches.len() < 2 {
-                return Err(TreeLogError::InsufficientBranchesForHeldOut(
-                    non_root_branches.len(),
-                ));
+            for node in &self.nodes {
+                if node.id == common_root.id || node.branch_id == "control" {
+                    continue;
+                }
+                if !branch_to_lineage.contains_key(&node.branch_id) {
+                    if let Some(l_root) = self.find_lineage_root_branch(&node.id, &common_root.id) {
+                        branch_to_lineage.insert(node.branch_id.clone(), l_root.clone());
+                        if !lineages.contains(&l_root) {
+                            lineages.push(l_root);
+                        }
+                    }
+                }
+            }
+            lineages.sort();
+
+            if lineages.len() < 2 {
+                return Err(TreeLogError::InsufficientBranchesForHeldOut(lineages.len()));
             }
 
-            let val_count = ((non_root_branches.len() as f64 * frac).round() as usize)
-                .clamp(1, non_root_branches.len() - 1);
-            let split_idx = non_root_branches.len() - val_count;
+            let val_count =
+                ((lineages.len() as f64 * frac).round() as usize).clamp(1, lineages.len() - 1);
+            let split_idx = lineages.len() - val_count;
 
-            let disc_branches: HashSet<String> =
-                non_root_branches[..split_idx].iter().cloned().collect();
-            let val_branches: HashSet<String> =
-                non_root_branches[split_idx..].iter().cloned().collect();
+            let disc_lineages: HashSet<String> = lineages[..split_idx].iter().cloned().collect();
+            let val_lineages: HashSet<String> = lineages[split_idx..].iter().cloned().collect();
 
             let mut disc_tree = Self::new();
             let mut val_tree = Self::new();
@@ -498,13 +529,15 @@ impl AttemptTree {
             val_tree.add_node((*common_root).clone())?;
 
             for node in &self.nodes {
-                if node.id == common_root.id {
+                if node.id == common_root.id || node.branch_id == "control" {
                     continue;
                 }
-                if disc_branches.contains(&node.branch_id) {
-                    let _ = disc_tree.add_node(node.clone());
-                } else if val_branches.contains(&node.branch_id) {
-                    let _ = val_tree.add_node(node.clone());
+                if let Some(l_root) = branch_to_lineage.get(&node.branch_id) {
+                    if disc_lineages.contains(l_root) {
+                        let _ = disc_tree.add_node(node.clone());
+                    } else if val_lineages.contains(l_root) {
+                        let _ = val_tree.add_node(node.clone());
+                    }
                 }
             }
 

@@ -688,9 +688,13 @@ pub fn decide_next_search_action(
     attempts_file: &Path,
     baseline_score: f64,
     max_parallelism: usize,
+    generation: usize,
     beta: f64,
 ) -> PolicyDecision {
-    let mut observations = Vec::new();
+    let mut raw_nodes: Vec<AttemptNode> = Vec::new();
+    let mut id_to_node: std::collections::HashMap<String, AttemptNode> =
+        std::collections::HashMap::new();
+
     if let Ok(content) = std::fs::read_to_string(attempts_file) {
         for line in content.lines() {
             if let Ok(node) = serde_json::from_str::<AttemptNode>(line) {
@@ -698,22 +702,49 @@ pub fn decide_next_search_action(
                 if node.branch_id == "control" {
                     continue;
                 }
-                observations.push(PrefixObservation {
-                    id: node.id,
-                    branch_id: node.branch_id,
-                    attempt_depth: node.generation,
-                    parent_id: node.parent_id,
-                    score: node.composite_score,
-                    status: node.status,
-                    failure_class: node.failure_class,
-                    failure_reason: node.failure_reason,
-                    delta_vs_baseline: node.composite_score.map(|s| s - baseline_score),
-                    delta_vs_parent: None,
-                    tokens_used: node.tokens_used,
-                    wall_time_ms: node.wall_time_ms,
-                });
+                id_to_node.insert(node.id.clone(), node.clone());
+                raw_nodes.push(node);
             }
         }
+    }
+
+    let mut observations = Vec::new();
+    for node in &raw_nodes {
+        let parent_score = node
+            .parent_id
+            .as_ref()
+            .and_then(|pid| id_to_node.get(pid))
+            .and_then(|p| p.composite_score);
+
+        let delta_vs_parent = match (node.composite_score, parent_score) {
+            (Some(curr), Some(par)) => Some(curr - par),
+            _ => None,
+        };
+
+        let delta_vs_baseline = node.composite_score.map(|s| s - baseline_score);
+
+        // Calculate depth within branch based on parent chain (matches replay.rs)
+        let mut depth = 0;
+        let mut curr_pid = node.parent_id.clone();
+        while let Some(ref pid) = curr_pid {
+            depth += 1;
+            curr_pid = id_to_node.get(pid).and_then(|p| p.parent_id.clone());
+        }
+
+        observations.push(PrefixObservation {
+            id: node.id.clone(),
+            branch_id: node.branch_id.clone(),
+            attempt_depth: depth,
+            parent_id: node.parent_id.clone(),
+            score: node.composite_score,
+            status: node.status,
+            failure_class: node.failure_class,
+            failure_reason: node.failure_reason.clone(),
+            delta_vs_baseline,
+            delta_vs_parent,
+            tokens_used: node.tokens_used,
+            wall_time_ms: node.wall_time_ms,
+        });
     }
 
     let prefix = PrefixView::new(observations, baseline_score, max_parallelism);
@@ -739,11 +770,11 @@ pub fn decide_next_search_action(
         }
     }
 
-    // Candidate root actions to explore new branches
+    // Candidate root actions to explore new branches for this generation
     for idx in 0..max_parallelism {
         legal_actions.push(LegalAction::OpenRoot {
-            branch_id: format!("branch-root-{}", idx),
-            node_id: format!("root-hyp-{}", idx),
+            branch_id: format!("branch-g{}-r{}", generation, idx),
+            node_id: format!("root-g{}-r{}", generation, idx),
         });
     }
 
@@ -1028,28 +1059,34 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         let policy_decision = decide_next_search_action(
             &mut *search_policy,
             &attempts_file,
-            current_baseline_metrics.sab_score,
+            initial_baseline_composite,
             config.population_size,
+            generation,
             active_policy_beta,
         );
 
         let active_actions = match policy_decision {
             PolicyDecision::Stop { reason } => {
                 log_phase(&format!(
-                    "Search policy '{}' requested stop: {reason}",
+                    "Search policy '{}' requested stop: {reason}; falling back to generation exploration",
                     search_policy.name()
                 ));
                 log_event(
                     repo_root,
                     &serde_json::json!({
-                        "event": "policy_stop",
+                        "event": "policy_stop_fallback",
                         "policy": search_policy.name(),
                         "reason": &reason,
                         "generation": generation,
                         "timestamp": chrono_now(),
                     }),
                 );
-                break;
+                // Gated: do not abort the daemon run before config.generations completes.
+                // Explore new roots for this generation as fallback.
+                vec![LegalAction::OpenRoot {
+                    branch_id: format!("branch-g{}-0", generation),
+                    node_id: format!("root-g{}-0", generation),
+                }]
             }
             PolicyDecision::SelectBatch(actions) => {
                 if actions.is_empty() {

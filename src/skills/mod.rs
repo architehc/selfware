@@ -770,16 +770,19 @@ impl SkillRegistry {
         candidates
     }
 
-    /// Validate whether a path matches any denied pattern (credentials, git internals, killswitch, system dirs).
+    /// Validate whether a path matches any denied pattern (credentials, git internals, killswitch, system dirs, or operator-configured denylist).
     /// Prevents plant-then-admit attacks from using sensitive directories or files as candidates or targets.
-    fn is_admission_denied(path: &Path) -> Option<String> {
+    fn is_admission_denied(path: &Path, extra_denied: Option<&[String]>) -> Option<String> {
         let path_str = path.to_string_lossy().replace('\\', "/");
         let canonical = std::fs::canonicalize(path).ok();
         let canonical_str = canonical
             .as_ref()
             .map(|p| p.to_string_lossy().replace('\\', "/"));
 
-        let denied = crate::config::default_denied_paths();
+        let mut denied = crate::config::default_denied_paths();
+        if let Some(extras) = extra_denied {
+            denied.extend(extras.iter().cloned());
+        }
         for pattern in &denied {
             // Exclude allowed skill directories from the denylist for admission
             if pattern.contains(".selfware/skills")
@@ -834,6 +837,15 @@ impl SkillRegistry {
         candidate_path: &Path,
         target_skills_dir: &Path,
     ) -> Result<Skill, String> {
+        Self::admit_candidate_with_denied(candidate_path, target_skills_dir, None)
+    }
+
+    /// Explicit admission gate with operator-configured denied paths.
+    pub fn admit_candidate_with_denied(
+        candidate_path: &Path,
+        target_skills_dir: &Path,
+        extra_denied: Option<&[String]>,
+    ) -> Result<Skill, String> {
         static ADMISSION_MUTEX: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
         let _guard = ADMISSION_MUTEX.lock();
 
@@ -841,10 +853,10 @@ impl SkillRegistry {
             return Err("Killswitch is active: candidate admission blocked".to_string());
         }
 
-        if let Some(pat) = Self::is_admission_denied(candidate_path) {
+        if let Some(pat) = Self::is_admission_denied(candidate_path, extra_denied) {
             return Err(format!("Candidate path matches denied pattern: {pat}"));
         }
-        if let Some(pat) = Self::is_admission_denied(target_skills_dir) {
+        if let Some(pat) = Self::is_admission_denied(target_skills_dir, extra_denied) {
             return Err(format!(
                 "Target skills directory matches denied pattern: {pat}"
             ));
@@ -857,7 +869,7 @@ impl SkillRegistry {
             .map_err(|e| format!("Failed to create target skills dir: {e}"))?;
 
         let target_file = target_skills_dir.join(format!("{safe_name}.md"));
-        if let Some(pat) = Self::is_admission_denied(&target_file) {
+        if let Some(pat) = Self::is_admission_denied(&target_file, extra_denied) {
             return Err(format!("Target file matches denied pattern: {pat}"));
         }
         if !target_file.starts_with(target_skills_dir) {

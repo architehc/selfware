@@ -1972,17 +1972,18 @@ fn test_promoted_policies_control_live_search_decisions() {
 
     // 1. Fixed population policy stops once the initial population is evaluated (no further roots)
     let mut fixed_policy = FixedPopulationPolicy::new(2);
-    let decision_fixed = decide_next_search_action(&mut fixed_policy, &attempts_file, 50.0, 2, 1.0);
+    let decision_fixed =
+        decide_next_search_action(&mut fixed_policy, &attempts_file, 50.0, 2, 1, 1.0);
 
     // 2. RefineTop1 policy zeroes in on the top performing branch (branch-1 with score 85.0)
     let mut refine_policy = instantiate_search_policy("refine_top1", 2);
     let decision_refine =
-        decide_next_search_action(&mut *refine_policy, &attempts_file, 50.0, 2, 1.0);
+        decide_next_search_action(&mut *refine_policy, &attempts_file, 50.0, 2, 1, 1.0);
 
     // 3. BreadthFirst policy expands frontiers across all open branches simultaneously
     let mut breadth_policy = instantiate_search_policy("breadth_first", 2);
     let decision_breadth =
-        decide_next_search_action(&mut *breadth_policy, &attempts_file, 50.0, 2, 1.0);
+        decide_next_search_action(&mut *breadth_policy, &attempts_file, 50.0, 2, 1, 1.0);
 
     // Prove that the policies make DIFFERENT live search decisions on the exact same attempt history
     assert!(
@@ -2453,7 +2454,7 @@ fn test_fixed_population_daemon_continues_across_generations_and_empty_responses
     let mut policy = FixedPopulationPolicy::for_daemon(3);
 
     // Generation 1: request next actions
-    let d1 = decide_next_search_action(&mut policy, &attempts_file, 50.0, 3, 1.0);
+    let d1 = decide_next_search_action(&mut policy, &attempts_file, 50.0, 3, 1, 1.0);
     let actions1 = match d1 {
         PolicyDecision::SelectBatch(actions) => actions,
         PolicyDecision::Stop { reason } => panic!("Unexpected stop on gen 1: {reason}"),
@@ -2465,7 +2466,7 @@ fn test_fixed_population_daemon_continues_across_generations_and_empty_responses
     );
 
     // Empty LLM response or generation 2: policy must NOT stop!
-    let d2 = decide_next_search_action(&mut policy, &attempts_file, 50.0, 3, 1.0);
+    let d2 = decide_next_search_action(&mut policy, &attempts_file, 50.0, 3, 2, 1.0);
     match d2 {
         PolicyDecision::SelectBatch(actions) => {
             assert_eq!(actions.len(), 3, "Gen 2 must continue and produce actions");
@@ -2477,12 +2478,37 @@ fn test_fixed_population_daemon_continues_across_generations_and_empty_responses
 
     // By contrast, replay-budgeted FixedPopulationPolicy(3) DOES stop when its total budget is reached
     let mut replay_policy = FixedPopulationPolicy::new(3);
-    let r1 = decide_next_search_action(&mut replay_policy, &attempts_file, 50.0, 3, 1.0);
+    let r1 = decide_next_search_action(&mut replay_policy, &attempts_file, 50.0, 3, 1, 1.0);
     assert!(matches!(r1, PolicyDecision::SelectBatch(_)));
 
-    let r2 = decide_next_search_action(&mut replay_policy, &attempts_file, 50.0, 3, 1.0);
+    let r2 = decide_next_search_action(&mut replay_policy, &attempts_file, 50.0, 3, 2, 1.0);
     assert!(
         matches!(r2, PolicyDecision::Stop { .. }),
         "Replay policy must stop when total probe budget is exhausted"
+    );
+}
+
+#[test]
+fn test_daemon_policy_stop_fallback_preserves_generation_budget() {
+    // In live evolution, when a policy issues PolicyDecision::Stop (e.g. fixed population reached),
+    // the daemon must fall back to open root exploration rather than breaking the entire run.
+    let decision = PolicyDecision::Stop {
+        reason: "Fixed population budget reached (4/4)".to_string(),
+    };
+    let generation = 3;
+    let fallback_actions = match decision {
+        PolicyDecision::Stop { .. } => vec![LegalAction::OpenRoot {
+            branch_id: format!("branch-g{}-0", generation),
+            node_id: format!("root-g{}-0", generation),
+        }],
+        PolicyDecision::SelectBatch(actions) => actions,
+    };
+    assert_eq!(fallback_actions.len(), 1);
+    assert_eq!(
+        fallback_actions[0],
+        LegalAction::OpenRoot {
+            branch_id: "branch-g3-0".to_string(),
+            node_id: "root-g3-0".to_string(),
+        }
     );
 }

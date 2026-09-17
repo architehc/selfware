@@ -563,9 +563,10 @@ pub fn check_sglang_backend(endpoint: &str) -> Option<bool> {
     }
 }
 
-/// Detects if an endpoint is an SGLang deployment behaviourally via `/get_server_info`,
-/// falling back to hostname/port heuristics when offline or when probing cannot be performed.
-/// Transient failures preserve an unknown state and are not cached as negative results.
+/// Convenience boolean helper for SGLang detection.
+/// Evaluates `check_sglang_backend(endpoint)` and defaults unknown or inconclusive states (`None`) to `false`.
+/// Note: Hostname/port deployment heuristics are evaluated upfront in `check_sglang_backend`;
+/// when probing is unavailable or inconclusive without matching heuristics, this helper conservatively returns false.
 pub fn is_sglang_backend(endpoint: &str) -> bool {
     check_sglang_backend(endpoint).unwrap_or(false)
 }

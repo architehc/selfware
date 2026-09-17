@@ -316,10 +316,17 @@ impl YoloManager {
             return YoloDecision::Block("Operation is in forbidden list".to_string());
         }
 
-        // Check protected paths
-        if let Some(path) = extract_path(args) {
+        // Check protected paths across all extracted paths
+        for path in extract_all_paths(args) {
             if self.config.is_protected_path(&path) {
                 return YoloDecision::Block(format!("Path '{}' is protected", path));
+            }
+        }
+
+        // Check command arguments against protected paths
+        for cmd in extract_all_command_strings(args) {
+            if let Some(p) = targets_protected_path(&cmd, &self.config.protected_paths) {
+                return YoloDecision::Block(format!("Command targets protected path '{p}'"));
             }
         }
 
@@ -565,32 +572,170 @@ impl std::fmt::Display for AuditSummary {
     }
 }
 
-/// Extract path from tool arguments (recursively)
-fn extract_path(args: &serde_json::Value) -> Option<String> {
+fn is_path_like_key(key: &str) -> bool {
+    let k = key.to_ascii_lowercase();
+    matches!(
+        k.as_str(),
+        "path"
+            | "paths"
+            | "file_path"
+            | "file_paths"
+            | "filepath"
+            | "filepaths"
+            | "file"
+            | "files"
+            | "target"
+            | "targets"
+            | "target_path"
+            | "target_paths"
+            | "targetpath"
+            | "targetpaths"
+            | "destination"
+            | "destinations"
+            | "dest"
+            | "dests"
+            | "dest_path"
+            | "dest_paths"
+            | "source"
+            | "sources"
+            | "src"
+            | "srcs"
+            | "dir"
+            | "dirs"
+            | "directory"
+            | "directories"
+            | "folder"
+            | "folders"
+            | "location"
+            | "locations"
+            | "uri"
+            | "uris"
+            | "file_uri"
+            | "file_uris"
+            | "fileuri"
+            | "fileuris"
+    )
+}
+
+fn is_command_like_key(key: &str) -> bool {
+    let k = key.to_ascii_lowercase();
+    matches!(
+        k.as_str(),
+        "command"
+            | "commands"
+            | "cmd"
+            | "cmds"
+            | "script"
+            | "scripts"
+            | "exec"
+            | "execs"
+            | "shell_command"
+            | "shell_commands"
+            | "bash_command"
+            | "bash_commands"
+            | "args"
+            | "arguments"
+            | "argv"
+            | "parameters"
+            | "params"
+    )
+}
+
+/// Extract all paths from tool arguments (recursively), inspecting all path-like keys and array elements.
+fn extract_all_paths(args: &serde_json::Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    collect_all_paths(args, &mut paths);
+    paths
+}
+
+fn collect_all_paths(args: &serde_json::Value, paths: &mut Vec<String>) {
     match args {
         serde_json::Value::Object(map) => {
             for (k, v) in map {
-                if k == "path" || k == "file" || k == "directory" {
+                if is_path_like_key(k) {
                     if let Some(s) = v.as_str() {
-                        return Some(s.to_string());
+                        paths.push(s.to_string());
+                    } else if let Some(arr) = v.as_array() {
+                        for item in arr {
+                            if let Some(s) = item.as_str() {
+                                paths.push(s.to_string());
+                            } else {
+                                collect_all_paths(item, paths);
+                            }
+                        }
+                    } else {
+                        collect_all_paths(v, paths);
                     }
-                }
-                if let Some(res) = extract_path(v) {
-                    return Some(res);
+                } else if let Some(arr) = v.as_array() {
+                    for item in arr {
+                        if let Some(s) = item.as_str() {
+                            if s.contains('/') || s.contains('\\') || s.starts_with('.') {
+                                paths.push(s.to_string());
+                            }
+                        } else {
+                            collect_all_paths(item, paths);
+                        }
+                    }
+                } else if v.is_object() {
+                    collect_all_paths(v, paths);
                 }
             }
-            None
         }
         serde_json::Value::Array(arr) => {
-            for v in arr {
-                if let Some(res) = extract_path(v) {
-                    return Some(res);
+            for item in arr {
+                if let Some(s) = item.as_str() {
+                    if s.contains('/') || s.contains('\\') || s.starts_with('.') {
+                        paths.push(s.to_string());
+                    }
+                } else {
+                    collect_all_paths(item, paths);
                 }
             }
-            None
         }
-        _ => None,
+        _ => {}
     }
+}
+
+/// Extract all command strings from tool arguments (recursively).
+fn extract_all_command_strings(args: &serde_json::Value) -> Vec<String> {
+    let mut cmds = Vec::new();
+    collect_all_commands(args, &mut cmds);
+    cmds
+}
+
+fn collect_all_commands(args: &serde_json::Value, cmds: &mut Vec<String>) {
+    match args {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                if is_command_like_key(k) {
+                    if let Some(s) = v.as_str() {
+                        cmds.push(s.to_string());
+                    } else if let Some(arr) = v.as_array() {
+                        let str_items: Vec<&str> = arr.iter().filter_map(|i| i.as_str()).collect();
+                        if !str_items.is_empty() {
+                            cmds.push(str_items.join(" "));
+                        }
+                    }
+                } else if v.is_object() || v.is_array() {
+                    collect_all_commands(v, cmds);
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                if item.is_object() || item.is_array() {
+                    collect_all_commands(item, cmds);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Extract path from tool arguments (recursively)
+#[allow(dead_code)]
+fn extract_path(args: &serde_json::Value) -> Option<String> {
+    extract_all_paths(args).into_iter().next()
 }
 
 /// Check a container volume mount for dangerous host paths.

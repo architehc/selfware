@@ -672,3 +672,34 @@ fn test_yolo_attached_flags_and_subshells_blocked() {
         );
     }
 }
+
+#[test]
+fn test_yolo_mcp_arguments_blocked() {
+    let config = YoloConfig::fully_autonomous();
+    let manager = YoloManager::new(config);
+
+    // MCP plural path array targeting protected paths must be BLOCKED
+    let mcp_paths = serde_json::json!({ "paths": ["src/main.rs", ".admitted_ledger.json"] });
+    let decision = manager.should_auto_approve("mcp_fs_tool", &mcp_paths);
+    assert!(
+        matches!(decision, YoloDecision::Block(_)),
+        "MCP paths array containing protected path must be blocked by YOLO"
+    );
+
+    // MCP target_paths targeting active policy must be BLOCKED
+    let mcp_target_paths = serde_json::json!({ "target_paths": [".selfware/active_policy.json"] });
+    let decision = manager.should_auto_approve("mcp_fs_tool", &mcp_target_paths);
+    assert!(
+        matches!(decision, YoloDecision::Block(_)),
+        "MCP target_paths containing protected path must be blocked by YOLO"
+    );
+
+    // MCP args array command targeting protected path must be BLOCKED
+    let mcp_cmd_args =
+        serde_json::json!({ "args": ["bash", "-c", "rm -f .selfware/active_policy.json"] });
+    let decision = manager.should_auto_approve("mcp_server_exec", &mcp_cmd_args);
+    assert!(
+        matches!(decision, YoloDecision::Block(_)),
+        "MCP command args targeting protected path must be blocked by YOLO"
+    );
+}

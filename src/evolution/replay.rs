@@ -546,7 +546,14 @@ impl ReplaySimulator {
                 .with_max_parallelism(max_parallelism);
             let mut policy = make_policy();
             policy_name = policy.name().to_string();
-            let report = sim.evaluate_policy(policy.as_mut(), beta)?;
+            let report = match sim.evaluate_policy(policy.as_mut(), beta) {
+                Ok(r) => r,
+                Err(ReplayError::ValidationSetEmptyOrUnreachable(msg)) => {
+                    tracing::warn!("Replay tree has no reachable actions ({msg}); skipping tree");
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             cumulative_tokens += report.total_tokens;
             cumulative_wall_time_ms += report.total_wall_time_ms;
             reports.push(report);
