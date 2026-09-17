@@ -29,6 +29,9 @@ pub enum ReplayError {
     PolicyLoopExceeded(usize),
 }
 
+/// Factory producing boxed search policies for replay simulation.
+pub type SearchPolicyFactory = Box<dyn Fn() -> Box<dyn SearchPolicy>>;
+
 /// Comprehensive outcome report from an offline replay evaluation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReplayReport {
@@ -62,6 +65,52 @@ pub struct ReplayReport {
     pub stop_reason: String,
     /// Ordered list of node IDs revealed during the replay.
     pub revealed_node_ids: Vec<String>,
+}
+
+/// Comprehensive outcome report from an offline replay evaluation across multiple attempt trees.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MultiTreeEvaluation {
+    /// Policy name.
+    pub policy_name: String,
+    /// Exploration trade-off knob (beta).
+    pub beta: f64,
+    /// Number of trees evaluated.
+    pub tree_count: usize,
+    /// Average terminal score across trees.
+    pub mean_terminal_score: f64,
+    /// Average score improvement over baseline.
+    pub mean_improvement: f64,
+    /// Average probe count per tree.
+    pub mean_probes: f64,
+    /// Average objective value J(π) across trees.
+    pub mean_objective_value: f64,
+    /// Average Pareto reward across trees.
+    pub mean_pareto_reward: f64,
+    /// Cumulative tokens consumed across all trees.
+    pub cumulative_tokens: u64,
+    /// Cumulative simulated wall time in ms across all trees.
+    pub cumulative_wall_time_ms: u64,
+    /// Per-tree replay reports.
+    pub per_tree_reports: Vec<ReplayReport>,
+}
+
+/// Outcome report comparing candidate policies on held-out validation data vs discovery cost.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicyValidationSummary {
+    /// Name of the search policy.
+    pub policy_name: String,
+    /// Cumulative probes expended during discovery.
+    pub discovery_probes: usize,
+    /// Cumulative tokens expended during discovery.
+    pub discovery_tokens: u64,
+    /// Discovery objective value J.
+    pub discovery_objective: f64,
+    /// Held-out validation mean terminal score.
+    pub validation_terminal_score: f64,
+    /// Held-out validation objective value J.
+    pub validation_objective: f64,
+    /// Whether this policy outperformed the incumbent baseline on held-out validation.
+    pub beats_incumbent: bool,
 }
 
 /// Deterministic replay simulator executing search policies over an `AttemptTree`.
@@ -276,6 +325,131 @@ impl ReplaySimulator {
         });
 
         Ok(reports)
+    }
+
+    /// Evaluates a policy across multiple attempt trees using a policy factory closure.
+    pub fn evaluate_policy_across_trees<F>(
+        trees: &[AttemptTree],
+        baseline_score: f64,
+        max_parallelism: usize,
+        make_policy: &F,
+        beta: f64,
+    ) -> Result<MultiTreeEvaluation, ReplayError>
+    where
+        F: Fn() -> Box<dyn SearchPolicy>,
+    {
+        let mut reports = Vec::new();
+        let mut cumulative_tokens = 0;
+        let mut cumulative_wall_time_ms = 0;
+        let mut policy_name = String::new();
+
+        for tree in trees {
+            let sim = ReplaySimulator::new(tree.clone(), baseline_score)
+                .with_max_parallelism(max_parallelism);
+            let mut policy = make_policy();
+            policy_name = policy.name().to_string();
+            let report = sim.evaluate_policy(policy.as_mut(), beta)?;
+            cumulative_tokens += report.total_tokens;
+            cumulative_wall_time_ms += report.total_wall_time_ms;
+            reports.push(report);
+        }
+
+        let n = reports.len().max(1) as f64;
+        let mean_terminal_score = reports.iter().map(|r| r.terminal_score).sum::<f64>() / n;
+        let mean_improvement = reports.iter().map(|r| r.score_improvement).sum::<f64>() / n;
+        let mean_probes = reports.iter().map(|r| r.total_probes as f64).sum::<f64>() / n;
+        let mean_objective_value = reports.iter().map(|r| r.objective_value).sum::<f64>() / n;
+        let mean_pareto_reward = reports.iter().map(|r| r.pareto_reward).sum::<f64>() / n;
+
+        Ok(MultiTreeEvaluation {
+            policy_name,
+            beta,
+            tree_count: reports.len(),
+            mean_terminal_score,
+            mean_improvement,
+            mean_probes,
+            mean_objective_value,
+            mean_pareto_reward,
+            cumulative_tokens,
+            cumulative_wall_time_ms,
+            per_tree_reports: reports,
+        })
+    }
+
+    /// Evaluates candidate policies against discovery trees and held-out validation trees,
+    /// measuring discovery costs vs validation quality, and judging candidates against the incumbent.
+    pub fn evaluate_candidates_with_validation(
+        discovery_trees: &[AttemptTree],
+        validation_trees: &[AttemptTree],
+        baseline_score: f64,
+        max_parallelism: usize,
+        candidate_factories: &[(&'static str, SearchPolicyFactory)],
+        beta: f64,
+    ) -> Result<Vec<PolicyValidationSummary>, ReplayError> {
+        let mut summaries = Vec::new();
+        let mut incumbent_validation_obj = 0.0;
+        let mut found_incumbent = false;
+
+        // First pass: evaluate on discovery and validation
+        for (label, make_policy) in candidate_factories {
+            let disc_eval = Self::evaluate_policy_across_trees(
+                discovery_trees,
+                baseline_score,
+                max_parallelism,
+                make_policy,
+                beta,
+            )?;
+            let val_eval = Self::evaluate_policy_across_trees(
+                validation_trees,
+                baseline_score,
+                max_parallelism,
+                make_policy,
+                beta,
+            )?;
+
+            let is_incumbent =
+                label.contains("Incumbent") || disc_eval.policy_name.contains("Incumbent");
+            if is_incumbent {
+                incumbent_validation_obj = val_eval.mean_objective_value;
+                found_incumbent = true;
+            }
+
+            let disc_probes: usize = disc_eval
+                .per_tree_reports
+                .iter()
+                .map(|r| r.total_probes)
+                .sum();
+
+            summaries.push(PolicyValidationSummary {
+                policy_name: disc_eval.policy_name,
+                discovery_probes: disc_probes,
+                discovery_tokens: disc_eval.cumulative_tokens,
+                discovery_objective: disc_eval.mean_objective_value,
+                validation_terminal_score: val_eval.mean_terminal_score,
+                validation_objective: val_eval.mean_objective_value,
+                beats_incumbent: false,
+            });
+        }
+
+        // Second pass: mark beats_incumbent
+        if found_incumbent {
+            for summary in &mut summaries {
+                if !summary.policy_name.contains("Incumbent")
+                    && summary.validation_objective > incumbent_validation_obj
+                {
+                    summary.beats_incumbent = true;
+                }
+            }
+        }
+
+        // Sort by validation objective descending
+        summaries.sort_by(|a, b| {
+            b.validation_objective
+                .partial_cmp(&a.validation_objective)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        Ok(summaries)
     }
 
     /// Helper to find legal roots and legal frontiers given the set of revealed node IDs.

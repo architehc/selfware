@@ -309,6 +309,49 @@ impl AttemptTree {
             })
     }
 
+    /// Partition the tree into (discovery_tree, held_out_tree) by splitting semantic branches.
+    /// Ensures that discovery and held-out validation never share branches or nodes.
+    pub fn split_held_out(&self, validation_fraction: f64) -> (Self, Self) {
+        let frac = validation_fraction.clamp(0.0, 1.0);
+        let branches = self.branches();
+        if branches.len() > 1 {
+            let val_count =
+                ((branches.len() as f64 * frac).round() as usize).clamp(1, branches.len() - 1);
+            let split_idx = branches.len() - val_count;
+            let disc_branches: std::collections::HashSet<String> =
+                branches[..split_idx].iter().cloned().collect();
+            let val_branches: std::collections::HashSet<String> =
+                branches[split_idx..].iter().cloned().collect();
+
+            let mut disc_tree = Self::new();
+            let mut val_tree = Self::new();
+
+            for node in &self.nodes {
+                if disc_branches.contains(&node.branch_id) {
+                    let _ = disc_tree.add_node(node.clone());
+                } else if val_branches.contains(&node.branch_id) {
+                    let _ = val_tree.add_node(node.clone());
+                }
+            }
+            (disc_tree, val_tree)
+        } else {
+            let val_count =
+                ((self.nodes.len() as f64 * frac).round() as usize).min(self.nodes.len());
+            let split_idx = self.nodes.len().saturating_sub(val_count);
+
+            let mut disc_tree = Self::new();
+            let mut val_tree = Self::new();
+
+            for node in &self.nodes[..split_idx] {
+                let _ = disc_tree.add_node(node.clone());
+            }
+            for node in &self.nodes[split_idx..] {
+                let _ = val_tree.add_node(node.clone());
+            }
+            (disc_tree, val_tree)
+        }
+    }
+
     /// Load an attempt tree from a JSONL file.
     pub fn load_from_jsonl(path: &Path) -> Result<Self, TreeLogError> {
         let file = File::open(path)?;

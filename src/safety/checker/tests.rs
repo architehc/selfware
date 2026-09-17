@@ -2083,6 +2083,34 @@ fn test_shell_exec_redirect_to_denied_path_blocked() {
 }
 
 #[test]
+fn test_shell_exec_nested_subshell_denied_path_blocked() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+
+    for cmd in [
+        "sh -c 'echo x > .admitted_ledger.json'",
+        "bash -c 'echo x > .env'",
+        "sh -c \"echo x > .selfware/skills/evil.md\"",
+        "bash -c 'rm -f .admitted_ledger.json'",
+        "sh -c 'touch .selfware/skills/evil.md'",
+        "eval 'echo x > .admitted_ledger.json'",
+    ] {
+        let args = serde_json::json!({"command": cmd}).to_string();
+        let call = create_test_call("shell_exec", &args);
+        let result = checker.check_tool_call(&call);
+        assert!(
+            result.is_err(),
+            "nested subshell command targeting denied path must be blocked: {cmd}"
+        );
+        let err_str = result.unwrap_err().to_string();
+        assert!(
+            err_str.contains("denied pattern") || err_str.contains("blocked"),
+            "expected denied-pattern or blocked error for: {cmd}, got {err_str}"
+        );
+    }
+}
+
+#[test]
 fn test_shell_exec_redirect_to_allowed_path_works() {
     let config = SafetyConfig::default();
     let checker = SafetyChecker::new(&config);

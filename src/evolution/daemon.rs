@@ -496,13 +496,36 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
     log_phase("Measuring baseline fitness...");
     let mut sab_config = SabConfig::default();
+    if !config.llm.endpoint.is_empty() {
+        sab_config.endpoint = config.llm.endpoint.clone();
+    }
+    if !config.llm.model.is_empty() {
+        sab_config.model = config.llm.model.clone();
+    }
+    if let Ok(endpoint) = std::env::var("ENDPOINT") {
+        sab_config.endpoint = endpoint;
+    }
+    if let Ok(model) = std::env::var("MODEL") {
+        sab_config.model = model;
+    }
+    if let Ok(filter) = std::env::var("SAB_FILTER") {
+        sab_config.scenario_filter = Some(
+            filter
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+        );
+    }
     let sab_mode = std::env::var("SELFWARE_EVOLVE_SAB").is_ok();
 
     // Only run SAB baseline if explicitly requested via env var
     // (SAB runs all 12 scenarios and takes 30+ minutes). Otherwise use real
     // compile / test / fmt / clippy / binary-size metrics.
     let (baseline_metrics, mut current_baseline_sab) = if sab_mode {
-        let selfware_binary = repo_root.join("target/release/selfware");
+        let selfware_binary = std::env::var("SELFWARE_BINARY")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| repo_root.join("target/release/selfware"));
         match fitness::run_sab(&selfware_binary, &sab_config) {
             Ok(r) => {
                 sab_config.exempt_reports.push(r.report_path.clone());

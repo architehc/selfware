@@ -86,15 +86,20 @@ else
   exit 1
 fi
 
-# Filter scenarios if argument given
-if [[ $# -gt 0 ]]; then
-  FILTER="$1"
+# Filter scenarios if argument or SAB_FILTER given
+FILTER="${1:-${SAB_FILTER:-}}"
+if [[ -n "${FILTER}" ]]; then
   FILTERED=()
+  IFS=',' read -ra FILTER_PARTS <<< "${FILTER}"
   for spec in "${ALL_SCENARIOS[@]}"; do
     name="${spec%%:*}"
-    if [[ "${name}" == *"${FILTER}"* ]]; then
-      FILTERED+=("${spec}")
-    fi
+    for part in "${FILTER_PARTS[@]}"; do
+      part="$(echo "${part}" | xargs)"
+      if [[ -n "${part}" && "${name}" == *"${part}"* ]]; then
+        FILTERED+=("${spec}")
+        break
+      fi
+    done
   done
   if [[ ${#FILTERED[@]} -eq 0 ]]; then
     echo "No scenarios matched filter: ${FILTER}" >&2
@@ -222,8 +227,8 @@ except Exception as e:
 fi
 
 # ── Connectivity check ──────────────────────────────────────────────
-ENDPOINT="$(grep '^endpoint' "${CONFIG_FILE}" | head -1 | sed 's/.*= *"//;s/".*//')"
-MODEL_NAME="$(grep '^model' "${CONFIG_FILE}" | head -1 | sed 's/.*= *"//;s/".*//')"
+ENDPOINT="${ENDPOINT:-$(grep '^endpoint' "${CONFIG_FILE}" | head -1 | sed 's/.*= *"//;s/".*//')}"
+MODEL_NAME="${MODEL:-${MODEL_NAME:-$(grep '^model' "${CONFIG_FILE}" | head -1 | sed 's/.*= *"//;s/".*//')}}"
 echo "Checking endpoint: ${ENDPOINT}/models"
 if ! curl -fsS --connect-timeout 15 "${ENDPOINT}/models" >/dev/null 2>&1; then
   echo "ERROR: Endpoint unreachable at ${ENDPOINT}/models" >&2

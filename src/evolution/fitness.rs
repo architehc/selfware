@@ -334,8 +334,8 @@ pub fn run_sab(selfware_binary: &Path, config: &SabConfig) -> Result<SabResult, 
     };
 
     // Set up environment for SAB runner
-    let output = Command::new("bash")
-        .arg(&config.runner_script)
+    let mut cmd = Command::new("bash");
+    cmd.arg(&config.runner_script)
         .env("OUT_DIR", &unique_out_dir)
         .env("SELFWARE_LEASE_HELD", "1")
         .env("ENDPOINT", &config.endpoint)
@@ -345,7 +345,15 @@ pub fn run_sab(selfware_binary: &Path, config: &SabConfig) -> Result<SabResult, 
             "SELFWARE_BINARY",
             selfware_binary.to_string_lossy().as_ref(),
         )
-        .env("TIMEOUT", config.scenario_timeout.as_secs().to_string())
+        .env("TIMEOUT", config.scenario_timeout.as_secs().to_string());
+    if let Some(ref filter) = config.scenario_filter {
+        if !filter.is_empty() {
+            let filter_str = filter.join(",");
+            cmd.env("SAB_FILTER", &filter_str);
+            cmd.arg(&filter_str);
+        }
+    }
+    let output = cmd
         .output()
         .map_err(|e| FitnessError::SabRunFailed(e.to_string()))?;
 

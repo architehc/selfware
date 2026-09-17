@@ -233,3 +233,98 @@ fn test_early_stop_plateau() {
         _ => panic!("Expected early stop"),
     }
 }
+
+#[test]
+fn test_refine_top1_policy_deterministic_tie_breaking() {
+    // Both b1 and b2 have identical anchor scores (0.8)
+    let obs = vec![
+        make_obs(
+            "r1",
+            "branch_b",
+            0,
+            None,
+            Some(0.8),
+            AttemptStatus::Evaluated,
+            None,
+        ),
+        make_obs(
+            "r2",
+            "branch_a",
+            0,
+            None,
+            Some(0.8),
+            AttemptStatus::Evaluated,
+            None,
+        ),
+    ];
+    let prefix = PrefixView::new(obs, 0.5, 2);
+    let actions = vec![
+        LegalAction::RefineFrontier {
+            branch_id: "branch_b".into(),
+            parent_id: "r1".into(),
+            node_id: "n_b".into(),
+        },
+        LegalAction::RefineFrontier {
+            branch_id: "branch_a".into(),
+            parent_id: "r2".into(),
+            node_id: "n_a".into(),
+        },
+    ];
+
+    // Run same policy twice from scratch: both MUST choose the exact same branch (branch_a by tie-break)
+    let mut policy1 = RefineTop1Policy::new(3);
+    let dec1 = policy1.decide(&prefix, &actions, 0.5);
+
+    let mut policy2 = RefineTop1Policy::new(3);
+    let dec2 = policy2.decide(&prefix, &actions, 0.5);
+
+    match (dec1, dec2) {
+        (PolicyDecision::SelectBatch(b1), PolicyDecision::SelectBatch(b2)) => {
+            assert_eq!(b1.len(), 1);
+            assert_eq!(b2.len(), 1);
+            assert_eq!(b1[0].branch_id(), "branch_a");
+            assert_eq!(b2[0].branch_id(), "branch_a");
+            assert_eq!(b1[0], b2[0]);
+        }
+        _ => panic!("Expected SelectBatch"),
+    }
+}
+
+#[test]
+fn test_fixed_population_policy_stops_at_limit() {
+    let mut policy = FixedPopulationPolicy::new(2);
+    let prefix = PrefixView::new(Vec::new(), 0.0, 2);
+
+    let actions = vec![
+        LegalAction::OpenRoot {
+            branch_id: "b1".into(),
+            node_id: "r1".into(),
+        },
+        LegalAction::OpenRoot {
+            branch_id: "b2".into(),
+            node_id: "r2".into(),
+        },
+        LegalAction::OpenRoot {
+            branch_id: "b3".into(),
+            node_id: "r3".into(),
+        },
+    ];
+
+    // First batch: takes up to 2 (the population cap)
+    let dec = policy.decide(&prefix, &actions, 0.2);
+    match dec {
+        PolicyDecision::SelectBatch(batch) => {
+            assert_eq!(batch.len(), 2);
+        }
+        _ => panic!("Expected SelectBatch"),
+    }
+
+    // Second decision: already opened 2/2, must stop
+    let dec2 = policy.decide(&prefix, &actions, 0.2);
+    match dec2 {
+        PolicyDecision::Stop { reason } => {
+            assert!(reason.contains("Incumbent fixed population reached (2/2)"));
+        }
+        _ => panic!("Expected Stop"),
+    }
+}

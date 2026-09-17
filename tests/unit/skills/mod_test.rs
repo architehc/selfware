@@ -913,3 +913,53 @@ fn test_detect_unadmitted_in_dir() {
     assert_eq!(unadmitted.len(), 1);
     assert_eq!(unadmitted[0], unadmitted_file);
 }
+
+#[test]
+fn test_discover_tracks_refused_skills() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let skills_dir = temp.path().join("skills");
+    std::fs::create_dir_all(&skills_dir).unwrap();
+
+    let unadmitted_file = skills_dir.join("legacy_tool.md");
+    std::fs::write(
+        &unadmitted_file,
+        "---\nname: legacy_tool\ndescription: A legacy unadmitted tool\n---\nExecute logic here.",
+    )
+    .unwrap();
+
+    let mut registry = SkillRegistry::new();
+    registry.discover_dir(&skills_dir);
+
+    assert!(registry.get("legacy_tool").is_none());
+    assert_eq!(registry.refused().len(), 1);
+    assert_eq!(registry.refused()[0].name, "legacy_tool");
+    assert_eq!(registry.refused()[0].path, unadmitted_file);
+    assert!(registry.refused()[0]
+        .reason
+        .contains("missing from .admitted_ledger.json"));
+}
+
+#[test]
+fn test_admit_unadmitted_project_skill_in_place() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let skills_dir = temp.path().join("skills");
+    std::fs::create_dir_all(&skills_dir).unwrap();
+
+    let skill_file = skills_dir.join("calc_tool.md");
+    std::fs::write(
+        &skill_file,
+        "---\nname: calc_tool\ndescription: Calculation tool\n---\nPerform calculations.",
+    )
+    .unwrap();
+
+    // Admitting the file in-place into its own directory must succeed
+    let admitted = SkillRegistry::admit_candidate(&skill_file, &skills_dir).unwrap();
+    assert_eq!(admitted.name, "calc_tool");
+    assert!(admitted.admitted);
+
+    // Ledger must be created and skill must be discoverable now
+    let mut registry = SkillRegistry::new();
+    registry.discover_dir(&skills_dir);
+    assert!(registry.get("calc_tool").is_some());
+    assert!(registry.refused().is_empty());
+}

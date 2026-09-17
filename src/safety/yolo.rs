@@ -70,6 +70,9 @@ impl Default for YoloConfig {
                 "/root".to_string(),
                 "~/.ssh".to_string(),
                 "~/.gnupg".to_string(),
+                ".selfware".to_string(),
+                "~/.selfware".to_string(),
+                ".admitted_ledger.json".to_string(),
             ],
             denied_paths: Vec::new(),
             allow_git_push: true,
@@ -148,9 +151,14 @@ impl YoloConfig {
     /// Check if a path is protected
     pub fn is_protected_path(&self, path: &str) -> bool {
         let expanded = expand_home(path);
+        let normalized = path.trim_start_matches("./");
         self.protected_paths.iter().any(|p| {
             let protected = expand_home(p);
-            expanded.starts_with(&protected) || expanded == protected
+            let protected_norm = p.trim_start_matches("./");
+            expanded == protected
+                || expanded.starts_with(&format!("{protected}/"))
+                || normalized == protected_norm
+                || normalized.starts_with(&format!("{protected_norm}/"))
         })
     }
 }
@@ -333,9 +341,14 @@ impl YoloManager {
             return YoloDecision::RequireConfirmation("Git push requires confirmation".to_string());
         }
 
-        // Check destructive shell commands + best-effort sensitive-path reads.
+        // Check destructive shell commands + protected-path targets + sensitive-path reads.
         if tool_name == "shell_exec" {
             if let Some(cmd) = args.get("command").and_then(|c| c.as_str()) {
+                if let Some(p) = targets_protected_path(cmd, &self.config.protected_paths) {
+                    return YoloDecision::Block(format!(
+                        "Shell command targets protected path '{p}'"
+                    ));
+                }
                 if !self.config.allow_destructive_shell {
                     if is_destructive_command(cmd) {
                         return YoloDecision::RequireConfirmation(
@@ -647,7 +660,7 @@ fn is_destructive_command(cmd: &str) -> bool {
 }
 
 /// Best-effort detection of a shell command that READS a sensitive path
-/// (SSH/private keys, cloud/git credentials, .env). Defense-in-depth only — a
+/// (SSH/private keys, cloud/git credentials, .env, .admitted_ledger.json, .selfware). Defense-in-depth only — a
 /// determined command can evade this; see docs/limitations.md. Returns the
 /// matched sensitive token so the confirmation reason can name it.
 fn reads_sensitive_path(cmd: &str) -> Option<&'static str> {
@@ -665,6 +678,10 @@ fn reads_sensitive_path(cmd: &str) -> Option<&'static str> {
         ".pem",
         "/secrets/",
         ".env",
+        ".admitted_ledger.json",
+        ".selfware/skills",
+        ".selfware/commands",
+        ".selfware/killswitch",
     ];
     // Commands that read file contents (as opposed to merely listing).
     const READERS: &[&str] = &[
@@ -742,6 +759,99 @@ fn reads_denied_path(cmd: &str, denied_paths: &[String]) -> Option<String> {
                     }
                 }
             }
+        }
+    }
+    None
+}
+
+/// Check whether a shell command targets a protected path for modification or deletion.
+fn targets_protected_path(cmd: &str, protected_paths: &[String]) -> Option<String> {
+    if protected_paths.is_empty() {
+        return None;
+    }
+
+    // 1. Check direct output redirects and tee targets
+    let mut redirect_targets =
+        crate::safety::checker::validation::shell_output_redirect_targets(cmd);
+    redirect_targets.extend(crate::safety::checker::validation::shell_tee_write_targets(
+        cmd,
+    ));
+
+    for target in &redirect_targets {
+        if let Some(p) = path_matches_protected(target, protected_paths) {
+            return Some(p);
+        }
+    }
+
+    // 2. Check for mutating / destructive commands targeting protected paths
+    const MUTATING_COMMANDS: &[&str] = &[
+        "rm", "unlink", "rmdir", "mv", "cp", "touch", "truncate", "chmod", "chown", "shred",
+    ];
+
+    let tokens = shell_path_tokens(cmd);
+    let has_mutating_verb = tokens.iter().any(|t| MUTATING_COMMANDS.contains(t))
+        || is_destructive_command(cmd)
+        || cmd.contains("git checkout")
+        || cmd.contains("git restore")
+        || cmd.contains("git clean");
+
+    if has_mutating_verb {
+        for tok in &tokens {
+            if let Some(p) = path_matches_protected(tok, protected_paths) {
+                return Some(p);
+            }
+        }
+    }
+
+    // 3. Inspect nested subshell invocations (sh -c '...', bash -c "...", eval ...)
+    if cmd.contains("sh") || cmd.contains("eval") {
+        let parts = crate::safety::checker::validation::split_shell_commands(cmd);
+        for part in parts {
+            let sub_tokens: Vec<&str> = part.split_whitespace().collect();
+            if let Some(c_pos) = sub_tokens.iter().position(|t| *t == "-c") {
+                if let Some(nested) = sub_tokens.get(c_pos + 1..) {
+                    let nested_cmd = nested.join(" ");
+                    let nested_trimmed = nested_cmd.trim_matches(|c| c == '\'' || c == '"');
+                    if let Some(p) = targets_protected_path(nested_trimmed, protected_paths) {
+                        return Some(p);
+                    }
+                }
+            } else if sub_tokens.first() == Some(&"eval") && sub_tokens.len() > 1 {
+                let nested_cmd = sub_tokens[1..].join(" ");
+                let nested_trimmed = nested_cmd.trim_matches(|c| c == '\'' || c == '"');
+                if let Some(p) = targets_protected_path(nested_trimmed, protected_paths) {
+                    return Some(p);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn path_matches_protected(path_str: &str, protected_paths: &[String]) -> Option<String> {
+    let norm = path_str
+        .trim_matches(|c| c == '\'' || c == '"' || c == '`')
+        .trim_start_matches("./")
+        .trim_start_matches("~/")
+        .to_lowercase();
+    if norm.is_empty() {
+        return None;
+    }
+    for p in protected_paths {
+        let p_norm = p
+            .trim_start_matches("./")
+            .trim_start_matches("~/")
+            .to_lowercase();
+        if p_norm.is_empty() {
+            continue;
+        }
+        if norm == p_norm
+            || norm.starts_with(&format!("{p_norm}/"))
+            || norm.ends_with(&format!("/{p_norm}"))
+            || norm.contains(&format!("/{p_norm}/"))
+        {
+            return Some(p.clone());
         }
     }
     None

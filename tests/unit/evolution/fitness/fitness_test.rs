@@ -172,6 +172,18 @@ fn test_sab_config_default() {
 }
 
 #[test]
+fn test_sab_config_with_filter() {
+    let cfg = SabConfig {
+        scenario_filter: Some(vec!["easy_calculator".to_string()]),
+        ..Default::default()
+    };
+    assert_eq!(
+        cfg.scenario_filter.as_deref(),
+        Some(&["easy_calculator".to_string()][..])
+    );
+}
+
+#[test]
 fn test_parse_sab_output_empty_is_an_error_not_a_frost_score() {
     // This used to produce a Frost RATING from empty output, because the text
     // fallback returned zero scenarios and zero averaged to 0.0. A run that

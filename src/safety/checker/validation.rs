@@ -1641,6 +1641,64 @@ impl SafetyChecker {
                 continue;
             };
             let verb = command_basename(&tokens[cmd_idx]);
+
+            // Recursively inspect nested shell invocations: sh -c "...", bash -c '...', eval "..."
+            // Closes the nested-sh -c gap for denied paths, output redirects, and tee writes.
+            if matches!(verb, "sh" | "bash" | "zsh" | "dash" | "ksh") {
+                if let Some(c_pos) = tokens.iter().position(|t| t == "-c") {
+                    if let Some(nested_cmd) = tokens.get(c_pos + 1) {
+                        for target in shell_output_redirect_targets(nested_cmd) {
+                            if let Some(pattern) = redirect_target_matches_denied(
+                                &target,
+                                &self.working_dir,
+                                &self.config.denied_paths,
+                            ) {
+                                return Err(SelfwareError::Safety(
+                                    SafetyError::PathDeniedPattern { pattern },
+                                ));
+                            }
+                        }
+                        for target in shell_tee_write_targets(nested_cmd) {
+                            if let Some(pattern) = redirect_target_matches_denied(
+                                &target,
+                                &self.working_dir,
+                                &self.config.denied_paths,
+                            ) {
+                                return Err(SelfwareError::Safety(
+                                    SafetyError::PathDeniedPattern { pattern },
+                                ));
+                            }
+                        }
+                        self.check_shell_command_paths(nested_cmd)?;
+                    }
+                }
+            } else if verb == "eval" && tokens.len() > cmd_idx + 1 {
+                let nested_cmd = tokens[cmd_idx + 1..].join(" ");
+                for target in shell_output_redirect_targets(&nested_cmd) {
+                    if let Some(pattern) = redirect_target_matches_denied(
+                        &target,
+                        &self.working_dir,
+                        &self.config.denied_paths,
+                    ) {
+                        return Err(SelfwareError::Safety(SafetyError::PathDeniedPattern {
+                            pattern,
+                        }));
+                    }
+                }
+                for target in shell_tee_write_targets(&nested_cmd) {
+                    if let Some(pattern) = redirect_target_matches_denied(
+                        &target,
+                        &self.working_dir,
+                        &self.config.denied_paths,
+                    ) {
+                        return Err(SelfwareError::Safety(SafetyError::PathDeniedPattern {
+                            pattern,
+                        }));
+                    }
+                }
+                self.check_shell_command_paths(&nested_cmd)?;
+            }
+
             // tee/sponge operands are write targets owned by the tee guard
             // (denied-only semantics, same as redirects) — skip them here.
             if verb == "tee" || verb == "sponge" {

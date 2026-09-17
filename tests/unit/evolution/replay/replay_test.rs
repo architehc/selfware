@@ -1,5 +1,7 @@
 use super::*;
-use crate::evolution::policy::{BreadthFirstPolicy, ParetoAdaptivePolicy, RefineTop1Policy};
+use crate::evolution::policy::{
+    BreadthFirstPolicy, FixedPopulationPolicy, ParetoAdaptivePolicy, RefineTop1Policy,
+};
 use crate::evolution::tree_log::{compute_sha256, AttemptNode, AttemptStatus, FailureClass};
 
 fn make_node(
@@ -248,4 +250,61 @@ fn test_batch_exceeds_parallelism_error() {
         res,
         Err(ReplayError::BatchExceedsParallelism { size: 3, max: 2 })
     ));
+}
+
+#[test]
+fn test_evaluate_across_multiple_trees() {
+    let tree1 = build_test_tree();
+    let tree2 = build_test_tree();
+    let trees = vec![tree1, tree2];
+
+    let eval = ReplaySimulator::evaluate_policy_across_trees(
+        &trees,
+        0.50,
+        2,
+        &|| Box::new(BreadthFirstPolicy::new(2)),
+        0.2,
+    )
+    .expect("multi-tree evaluation");
+
+    assert_eq!(eval.tree_count, 2);
+    assert_eq!(eval.per_tree_reports.len(), 2);
+    assert!(eval.mean_terminal_score >= 0.80);
+    assert!(eval.cumulative_tokens > 0);
+}
+
+#[test]
+fn test_evaluate_candidates_with_held_out_validation() {
+    let tree = build_test_tree();
+    let (disc_tree, val_tree) = tree.split_held_out(0.33);
+
+    let candidate_factories: Vec<(&'static str, SearchPolicyFactory)> = vec![
+        (
+            "FixedPopulation (Incumbent)",
+            Box::new(|| Box::new(FixedPopulationPolicy::new(2))),
+        ),
+        (
+            "RefineTop1Policy",
+            Box::new(|| Box::new(RefineTop1Policy::new(2))),
+        ),
+        (
+            "ParetoAdaptivePolicy",
+            Box::new(|| Box::new(ParetoAdaptivePolicy::new())),
+        ),
+    ];
+
+    let summaries = ReplaySimulator::evaluate_candidates_with_validation(
+        &[disc_tree],
+        &[val_tree],
+        0.50,
+        2,
+        &candidate_factories,
+        0.2,
+    )
+    .expect("validation comparison");
+
+    assert_eq!(summaries.len(), 3);
+    // Verification: ranked descending by validation objective
+    assert!(summaries[0].validation_objective >= summaries[1].validation_objective);
+    assert!(summaries[1].validation_objective >= summaries[2].validation_objective);
 }

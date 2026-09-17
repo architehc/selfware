@@ -350,16 +350,30 @@ impl Skill {
     }
 }
 
+/// A skill or command file that was refused during discovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusedSkill {
+    pub name: String,
+    pub path: PathBuf,
+    pub reason: String,
+}
+
 /// Registry of discovered skills.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SkillRegistry {
     skills: HashMap<String, Skill>,
+    refused: Vec<RefusedSkill>,
 }
 
 impl SkillRegistry {
     /// Create an empty registry.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Refused skills that failed admission or validation during discovery.
+    pub fn refused(&self) -> &[RefusedSkill] {
+        &self.refused
     }
 
     /// Discover skills in the given directory.
@@ -426,6 +440,12 @@ impl SkillRegistry {
                                 entry.content_hash,
                                 actual_hash
                             );
+                            self.refused.push(RefusedSkill {
+                                name: skill.name.clone(),
+                                path: path.clone(),
+                                reason: "content hash mismatch (file modified after admission)"
+                                    .to_string(),
+                            });
                             continue;
                         }
 
@@ -445,6 +465,13 @@ impl SkillRegistry {
                                     expected_meta_hash,
                                     actual_meta_hash
                                 );
+                                self.refused.push(RefusedSkill {
+                                    name: skill.name.clone(),
+                                    path: path.clone(),
+                                    reason:
+                                        "metadata hash mismatch (metadata tampered after admission)"
+                                            .to_string(),
+                                });
                                 continue;
                             }
                         }
@@ -472,6 +499,11 @@ impl SkillRegistry {
                             skill.name,
                             path.display()
                         );
+                        self.refused.push(RefusedSkill {
+                            name: skill.name.clone(),
+                            path: path.clone(),
+                            reason: "missing from .admitted_ledger.json".to_string(),
+                        });
                         continue;
                     }
 
@@ -573,6 +605,11 @@ impl SkillRegistry {
                                     skill.name,
                                     path.display()
                                 );
+                                self.refused.push(RefusedSkill {
+                                    name: skill.name.clone(),
+                                    path: path.clone(),
+                                    reason: "content hash mismatch".to_string(),
+                                });
                                 continue;
                             }
                             skill.candidate = true;
@@ -584,6 +621,13 @@ impl SkillRegistry {
                                 skill.name,
                                 path.display()
                             );
+                            self.refused.push(RefusedSkill {
+                                name: skill.name.clone(),
+                                path: path.clone(),
+                                reason:
+                                    "unadmitted candidate in user directory missing ledger entry"
+                                        .to_string(),
+                            });
                             continue;
                         }
                     } else {
@@ -730,12 +774,15 @@ impl SkillRegistry {
             }
         }
 
+        let is_self_admission = target_file == candidate_path
+            || std::fs::canonicalize(&target_file).ok()
+                == std::fs::canonicalize(candidate_path).ok();
         let previous_file_content: Option<Vec<u8>> = if target_file.exists() {
             let existing = Skill::from_file(&target_file)?;
             let existing_is_user = !existing.candidate
                 && !existing.admitted
                 && !matches!(existing.origin.as_deref(), Some("distilled" | "generated"));
-            if existing_is_user {
+            if existing_is_user && !is_self_admission {
                 return Err(format!(
                     "Cannot admit candidate '{}': shadows existing user skill",
                     safe_name

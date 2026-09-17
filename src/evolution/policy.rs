@@ -263,6 +263,78 @@ pub trait SearchPolicy: std::fmt::Debug + Send + Sync {
 // BASELINE POLICIES
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Fixed Population Policy (Incumbent Daemon Baseline):
+/// Evaluates up to `population_size` roots in the initial generation,
+/// without exploring deeper branch refinements.
+#[derive(Debug, Clone)]
+pub struct FixedPopulationPolicy {
+    pub population_size: usize,
+    opened_count: usize,
+}
+
+impl FixedPopulationPolicy {
+    pub fn new(population_size: usize) -> Self {
+        Self {
+            population_size,
+            opened_count: 0,
+        }
+    }
+}
+
+impl Default for FixedPopulationPolicy {
+    fn default() -> Self {
+        Self::new(3)
+    }
+}
+
+impl SearchPolicy for FixedPopulationPolicy {
+    fn name(&self) -> &str {
+        "FixedPopulation (Incumbent)"
+    }
+
+    fn decide(
+        &mut self,
+        prefix: &PrefixView,
+        legal_actions: &[LegalAction],
+        _beta: f64,
+    ) -> PolicyDecision {
+        if self.opened_count >= self.population_size || legal_actions.is_empty() {
+            return PolicyDecision::Stop {
+                reason: format!(
+                    "Incumbent fixed population reached ({}/{})",
+                    self.opened_count, self.population_size
+                ),
+            };
+        }
+
+        let mut batch = Vec::new();
+        let mut selected_branches = HashSet::new();
+
+        for action in legal_actions {
+            if !action.is_root() {
+                continue;
+            }
+            if batch.len() >= prefix.max_parallelism
+                || self.opened_count + batch.len() >= self.population_size
+            {
+                break;
+            }
+            if selected_branches.insert(action.branch_id().to_string()) {
+                batch.push(action.clone());
+            }
+        }
+
+        if batch.is_empty() {
+            PolicyDecision::Stop {
+                reason: "No further unrevealed roots available".into(),
+            }
+        } else {
+            self.opened_count += batch.len();
+            PolicyDecision::SelectBatch(batch)
+        }
+    }
+}
+
 /// Breadth-First Policy:
 /// Exhaustively opens roots first up to `max_parallelism`, then expands shallow
 /// single-step refinements across each branch up to `max_depth`.
@@ -412,10 +484,17 @@ impl SearchPolicy for RefineTop1Policy {
 
             // Roots are done: find the top branch by successful anchor
             let trajs = prefix.all_branch_trajectories();
-            let best_branch = trajs
+            let mut candidates: Vec<(String, f64)> = trajs
                 .into_iter()
                 .filter_map(|(bid, t)| t.successful_anchor.map(|a| (bid, a)))
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                .collect();
+            // Deterministic ordering: highest score first, then lexicographical branch_id ascending for tie-breaks
+            candidates.sort_by(|(bid_a, a), (bid_b, b)| {
+                b.partial_cmp(a)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| bid_a.cmp(bid_b))
+            });
+            let best_branch = candidates.into_iter().next();
 
             match best_branch {
                 Some((bid, score)) => {
@@ -585,9 +664,13 @@ impl SearchPolicy for ParetoAdaptivePolicy {
             }
         }
 
-        // Sort by anchor descending
-        exploit_candidates
-            .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Sort by anchor descending, breaking ties deterministically by branch_id and node_id
+        exploit_candidates.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.branch_id().cmp(b.0.branch_id()))
+                .then_with(|| a.0.node_id().cmp(b.0.node_id()))
+        });
 
         for (action, _) in exploit_candidates {
             if batch.len() >= prefix.max_parallelism {
@@ -612,8 +695,15 @@ impl SearchPolicy for ParetoAdaptivePolicy {
             })
             .collect();
 
-        // Sort roots first
-        explore_candidates.sort_by_key(|a| if a.is_root() { 0 } else { 1 });
+        // Sort roots first, breaking ties deterministically by branch_id and node_id
+        explore_candidates.sort_by(|a, b| {
+            let root_a = if a.is_root() { 0 } else { 1 };
+            let root_b = if b.is_root() { 0 } else { 1 };
+            root_a
+                .cmp(&root_b)
+                .then_with(|| a.branch_id().cmp(b.branch_id()))
+                .then_with(|| a.node_id().cmp(b.node_id()))
+        });
 
         for action in explore_candidates {
             if batch.len() >= prefix.max_parallelism {

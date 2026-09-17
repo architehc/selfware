@@ -27,7 +27,23 @@ fn test_is_protected_path() {
     let config = YoloConfig::default();
     assert!(config.is_protected_path("/etc/passwd"));
     assert!(config.is_protected_path("/usr/bin/bash"));
+    assert!(config.is_protected_path(".selfware/skills/foo.md"));
+    assert!(config.is_protected_path(".admitted_ledger.json"));
     assert!(!config.is_protected_path("/home/user/project"));
+}
+
+#[test]
+fn test_shell_exec_targeting_protected_path_blocked() {
+    let config = YoloConfig::fully_autonomous();
+    let manager = YoloManager::new(config);
+
+    let args = serde_json::json!({"command": "rm -f .admitted_ledger.json"});
+    let decision = manager.should_auto_approve("shell_exec", &args);
+    assert!(matches!(decision, YoloDecision::Block(_)));
+
+    let args_nested = serde_json::json!({"command": "sh -c 'echo evil > .admitted_ledger.json'"});
+    let decision_nested = manager.should_auto_approve("shell_exec", &args_nested);
+    assert!(matches!(decision_nested, YoloDecision::Block(_)));
 }
 
 #[test]

@@ -1874,11 +1874,37 @@ async fn handle_command(
 
             // Wrap the task with the requested skill's instructions, if any.
             let task = match skill.as_deref() {
-                Some(name) => crate::skills::SkillRegistry::discover()
-                    .wrap_task_with_skill(&task, name)
-                    .ok_or_else(|| anyhow::anyhow!(
-                        "unknown skill '{name}' (looked in ~/.selfware/skills and ./.selfware/skills)"
-                    ))?,
+                Some(name) => {
+                    let registry = crate::skills::SkillRegistry::discover();
+                    if let Some(wrapped) = registry.wrap_task_with_skill(&task, name) {
+                        wrapped
+                    } else if let Some(refused) = registry.refused().iter().find(|r| r.name == name)
+                    {
+                        let rel = std::env::current_dir()
+                            .ok()
+                            .and_then(|cwd| {
+                                refused
+                                    .path
+                                    .strip_prefix(&cwd)
+                                    .ok()
+                                    .map(|p| p.to_path_buf())
+                            })
+                            .unwrap_or_else(|| refused.path.clone());
+                        anyhow::bail!(
+                            "skill '{name}' was refused from {}: {}\n\
+                             To admit into project: selfware skill admit {}\n\
+                             To treat as user tool: mv {} ~/.selfware/skills/",
+                            rel.display(),
+                            refused.reason,
+                            rel.display(),
+                            rel.display()
+                        );
+                    } else {
+                        anyhow::bail!(
+                            "unknown skill '{name}' (looked in ~/.selfware/skills, ~/.selfware/commands, ./.selfware/skills, and ./.selfware/commands)"
+                        );
+                    }
+                }
                 None => task,
             };
 
@@ -2458,16 +2484,17 @@ async fn handle_command(
                 }
             } else if workflow == "replay" {
                 use crate::evolution::policy::{
-                    BreadthFirstPolicy, ParetoAdaptivePolicy, RefineTop1Policy, SearchPolicy,
+                    BreadthFirstPolicy, FixedPopulationPolicy, ParetoAdaptivePolicy,
+                    RefineTop1Policy,
                 };
-                use crate::evolution::replay::ReplaySimulator;
+                use crate::evolution::replay::{ReplaySimulator, SearchPolicyFactory};
                 use crate::evolution::tree_log::AttemptTree;
 
                 if !quiet {
                     println!(
                         "\n{} {}\n",
                         Glyphs::gear(),
-                        "Dream-RSI Offline Policy Replay".workshop_title()
+                        "Dream-RSI Offline Policy Replay & Held-Out Validation".workshop_title()
                     );
                 }
 
@@ -2486,47 +2513,160 @@ async fn handle_command(
                     .collect();
                 log_files.sort();
 
-                let latest_log = match log_files.last() {
-                    Some(f) => f,
-                    None => {
-                        println!(
-                            "   {} No JSONL attempt trees found in .selfware/attempts/",
-                            Glyphs::leaf()
-                        );
-                        return Ok(());
-                    }
-                };
+                if log_files.is_empty() {
+                    println!(
+                        "   {} No JSONL attempt trees found in .selfware/attempts/",
+                        Glyphs::leaf()
+                    );
+                    return Ok(());
+                }
 
-                println!("   Loading attempt tree from: {}", latest_log.display());
-                let tree = AttemptTree::load_from_jsonl(latest_log)?;
+                let mut loaded_trees = Vec::new();
+                for f in &log_files {
+                    match AttemptTree::load_from_jsonl(f) {
+                        Ok(t) if !t.is_empty() => loaded_trees.push((f.clone(), t)),
+                        Ok(_) => {}
+                        Err(e) => {
+                            eprintln!(
+                                "   Warning: skipping corrupted attempt tree {}: {}",
+                                f.display(),
+                                e
+                            );
+                        }
+                    }
+                }
+
+                if loaded_trees.is_empty() {
+                    println!(
+                        "   {} All JSONL attempt trees in .selfware/attempts/ were empty or corrupt",
+                        Glyphs::leaf()
+                    );
+                    return Ok(());
+                }
+
+                let total_attempts: usize = loaded_trees.iter().map(|(_, t)| t.len()).sum();
                 println!(
-                    "   Tree contains {} total attempts across {} branches\n",
-                    tree.len(),
-                    tree.branches().len()
+                    "   Loaded {} attempt tree(s) with {} total attempts across {}\n",
+                    loaded_trees.len(),
+                    total_attempts,
+                    attempts_dir.display()
                 );
 
-                let sim = ReplaySimulator::new(tree, 0.0).with_max_parallelism(parallel);
-                let mut policies: Vec<Box<dyn SearchPolicy>> = vec![
-                    Box::new(BreadthFirstPolicy::new(3)),
-                    Box::new(RefineTop1Policy::new(3)),
-                    Box::new(ParetoAdaptivePolicy::new()),
+                // Partition into discovery and held-out validation sets:
+                // - If multiple trees exist: partition trees (70% discovery, 30% held-out validation).
+                // - If 1 tree exists: partition tree branches into strictly disjoint discovery and validation sets.
+                let (discovery_trees, validation_trees) = if loaded_trees.len() > 1 {
+                    let val_count = ((loaded_trees.len() as f64 * 0.30).round() as usize)
+                        .clamp(1, loaded_trees.len() - 1);
+                    let split_idx = loaded_trees.len() - val_count;
+                    let disc: Vec<AttemptTree> = loaded_trees[..split_idx]
+                        .iter()
+                        .map(|(_, t)| t.clone())
+                        .collect();
+                    let val: Vec<AttemptTree> = loaded_trees[split_idx..]
+                        .iter()
+                        .map(|(_, t)| t.clone())
+                        .collect();
+                    (disc, val)
+                } else {
+                    let (_, single_tree) = &loaded_trees[0];
+                    let (disc, val) = single_tree.split_held_out(0.40);
+                    (vec![disc], vec![val])
+                };
+
+                let disc_nodes: usize = discovery_trees.iter().map(|t| t.len()).sum();
+                let val_nodes: usize = validation_trees.iter().map(|t| t.len()).sum();
+                println!(
+                    "   Split: {} discovery attempts ({} trees) | {} held-out validation attempts ({} trees)\n",
+                    disc_nodes,
+                    discovery_trees.len(),
+                    val_nodes,
+                    validation_trees.len()
+                );
+
+                let pop_size = population.max(2);
+                let candidate_factories: Vec<(&'static str, SearchPolicyFactory)> = vec![
+                    (
+                        "FixedPopulation (Incumbent)",
+                        Box::new(move || Box::new(FixedPopulationPolicy::new(pop_size))),
+                    ),
+                    (
+                        "BreadthFirstPolicy",
+                        Box::new(|| Box::new(BreadthFirstPolicy::new(3))),
+                    ),
+                    (
+                        "RefineTop1Policy",
+                        Box::new(|| Box::new(RefineTop1Policy::new(3))),
+                    ),
+                    (
+                        "ParetoAdaptivePolicy",
+                        Box::new(|| Box::new(ParetoAdaptivePolicy::new())),
+                    ),
                 ];
 
-                let reports = sim.compare_policies(&mut policies, 0.2)?;
-                println!("┌───────────────────────┬──────────────┬──────────────┬──────────────┬────────────────┐");
-                println!("│ Policy                │ Score (V)    │ Probes (C)   │ Parallel Pen │ Objective J    │");
-                println!("├───────────────────────┼──────────────┼──────────────┼──────────────┼────────────────┤");
-                for r in reports {
+                let summaries = ReplaySimulator::evaluate_candidates_with_validation(
+                    &discovery_trees,
+                    &validation_trees,
+                    0.0,
+                    parallel,
+                    &candidate_factories,
+                    0.2,
+                )?;
+
+                println!("┌─────────────────────────────┬──────────────┬──────────────┬──────────────┬──────────────┬─────────────┐");
+                println!("│ Policy                      │ Disc Probes  │ Disc Tokens  │ Val Score    │ Val Obj J    │ Incumbent?  │");
+                println!("├─────────────────────────────┼──────────────┼──────────────┼──────────────┼──────────────┼─────────────┤");
+                for s in &summaries {
+                    let status = if s.policy_name.contains("Incumbent") {
+                        "Baseline"
+                    } else if s.beats_incumbent {
+                        "★ Beats Inc"
+                    } else {
+                        "Sub-optimal"
+                    };
+
                     println!(
-                        "│ {:<21} │ {:>12.4} │ {:>12} │ {:>12.2} │ {:>14.4} │",
-                        r.policy_name,
-                        r.terminal_score,
-                        r.total_probes,
-                        r.parallel_penalty,
-                        r.objective_value
+                        "│ {:<27} │ {:>12} │ {:>12} │ {:>12.4} │ {:>12.4} │ {:<11} │",
+                        s.policy_name,
+                        s.discovery_probes,
+                        s.discovery_tokens,
+                        s.validation_terminal_score,
+                        s.validation_objective,
+                        status
                     );
                 }
-                println!("└───────────────────────┴──────────────┴──────────────┴──────────────┴────────────────┘");
+                println!("└─────────────────────────────┴──────────────┴──────────────┴──────────────┴──────────────┴─────────────┘");
+
+                if let Some(winner) = summaries.first() {
+                    if winner.beats_incumbent {
+                        println!(
+                            "\n   {} Policy '{}' won on held-out validation (Val Obj: {:.4} vs Incumbent). Ready for promotion.",
+                            Glyphs::bloom(),
+                            winner.policy_name,
+                            winner.validation_objective
+                        );
+                    } else if winner.policy_name.contains("Incumbent") {
+                        println!(
+                            "\n   {} Incumbent policy remains optimal on held-out validation (Val Obj: {:.4}). Retaining incumbent.",
+                            Glyphs::bloom(),
+                            winner.validation_objective
+                        );
+                    } else {
+                        println!(
+                            "\n   {} Top candidate '{}' did not beat incumbent baseline on held-out validation. Retaining incumbent.",
+                            Glyphs::leaf(),
+                            winner.policy_name
+                        );
+                    }
+                }
+
+                // Persist evaluation outcome to .selfware/replay_validation_latest.json
+                let report_path = repo_root
+                    .join(".selfware")
+                    .join("replay_validation_latest.json");
+                let report_json = serde_json::to_string_pretty(&summaries).unwrap_or_default();
+                let _ = std::fs::write(&report_path, report_json);
+
                 return Ok(());
             } else {
                 // Default evolution daemon workflow
@@ -4495,6 +4635,13 @@ max_recovery_attempts = 3
                     let c_path = std::path::PathBuf::from(candidate_path);
                     let t_dir = if let Some(td) = target_dir {
                         std::path::PathBuf::from(td)
+                    } else if let Some(parent) = c_path.parent() {
+                        if parent.ends_with("skills") || parent.ends_with("commands") {
+                            parent.to_path_buf()
+                        } else {
+                            let cwd = std::env::current_dir()?;
+                            cwd.join(".selfware").join("skills")
+                        }
                     } else {
                         let cwd = std::env::current_dir()?;
                         cwd.join(".selfware").join("skills")
