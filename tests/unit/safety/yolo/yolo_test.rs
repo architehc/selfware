@@ -627,3 +627,48 @@ fn test_yolo_cp_operands_and_substitutions_blocked() {
         );
     }
 }
+
+#[test]
+fn test_yolo_attached_flags_and_subshells_blocked() {
+    let config = YoloConfig::fully_autonomous();
+    let manager = YoloManager::new(config);
+
+    // Protected path mutations with attached flags must be BLOCKED
+    for cmd in [
+        "sh -c'rm -f .selfware/active_policy.json'",
+        "sh -c\"rm -f .selfware/active_policy.json\"",
+        "sh -xc'rm -f .selfware/active_policy.json'",
+        "sh -lc'rm -f .selfware/active_policy.json'",
+        "sh -ec'rm -f .selfware/active_policy.json'",
+        "sh -c=rm -f .selfware/active_policy.json",
+        "bash -c=rm -f .selfware/active_policy.json",
+        "bash --command='rm -f .selfware/active_policy.json'",
+        "sh -c'echo evil > .admitted_ledger.json'",
+        "sh -c'cp /tmp/evil .admitted_ledger.json'",
+    ] {
+        let args = serde_json::json!({ "command": cmd });
+        let decision = manager.should_auto_approve("shell_exec", &args);
+        assert!(
+            matches!(decision, YoloDecision::Block(_)),
+            "attached flag mutation command should be blocked by YOLO: {cmd}"
+        );
+    }
+
+    // Sensitive path reads with attached flags must require confirmation
+    for cmd in [
+        "sh -c'cat .env'",
+        "sh -c\"cat .env\"",
+        "sh -xc'cat .env'",
+        "sh -lc'cat .env'",
+        "sh -c=cat .env",
+        "bash -c=cat .env",
+        "bash --command='cat .env'",
+    ] {
+        let args = serde_json::json!({ "command": cmd });
+        let decision = manager.should_auto_approve("shell_exec", &args);
+        assert!(
+            matches!(decision, YoloDecision::RequireConfirmation(_)),
+            "attached flag read command should require confirmation in YOLO: {cmd}"
+        );
+    }
+}

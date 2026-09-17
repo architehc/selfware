@@ -3626,10 +3626,20 @@ fn test_wrapper_prefixes_and_command_substitutions_blocked() {
         "doas cat .env",
         "env FOO=bar cat .env",
         "env -i cat .env",
+        "env - cat .env",
+        "env -- cat .env",
+        "sudo -- cat .env",
         "nohup cat .env",
         "nice -n 10 cat .env",
         "time cat .env",
         "stdbuf -oL cat .env",
+        "exec cat .env",
+        "command cat .env",
+        "command -p cat .env",
+        "setsid cat .env",
+        "chroot / cat .env",
+        "taskset -c 0 cat .env",
+        "ionice -c 3 cat .env",
         "sudo env VAR=1 nice time nohup cat .env",
     ] {
         let result = checker.check_tool_call(&shell_call(cmd));
@@ -3661,7 +3671,14 @@ fn test_wrapper_prefixes_and_command_substitutions_blocked() {
         "bash --command='cat .env'",
         "bash -c=cat .env",
         "sh -c'cat .env'",
+        "sh -c\"cat .env\"",
+        "sh -xc'cat .env'",
+        "sh -lc'cat .env'",
+        "sh -ec'cat .env'",
+        "dash -c'cat .env'",
+        "zsh -c'cat .env'",
         "bash -lc 'cat .env'",
+        "sh -c'rm -rf /'",
     ] {
         let result = checker.check_tool_call(&shell_call(cmd));
         assert!(
@@ -3675,7 +3692,7 @@ fn test_wrapper_prefixes_and_command_substitutions_blocked() {
 fn test_mcp_and_computer_tools_validation() {
     let checker = SafetyChecker::new(&SafetyConfig::default());
 
-    // MCP generic path-like keys
+    // MCP generic path-like keys (singular and plural)
     for key in [
         "file_path",
         "filePath",
@@ -3683,6 +3700,9 @@ fn test_mcp_and_computer_tools_validation() {
         "uri",
         "destination",
         "dest_path",
+        "paths",
+        "files",
+        "targets",
     ] {
         let args = serde_json::json!({ key: ".env" }).to_string();
         let result = checker.check_tool_call(&create_test_call("mcp_server_test", &args));
@@ -3692,7 +3712,24 @@ fn test_mcp_and_computer_tools_validation() {
         );
     }
 
-    // MCP command-like keys
+    // MCP array arguments targeting denied paths
+    for (key, val) in [
+        ("paths", serde_json::json!([".env"])),
+        ("files", serde_json::json!(["/etc/shadow", ".env"])),
+        (
+            "target_paths",
+            serde_json::json!([".selfware/attempts/run.json"]),
+        ),
+    ] {
+        let args = serde_json::json!({ key: val }).to_string();
+        let result = checker.check_tool_call(&create_test_call("mcp_fs_tool", &args));
+        assert!(
+            result.is_err(),
+            "MCP array argument for key '{key}' must be blocked"
+        );
+    }
+
+    // MCP command-like keys (singular and array)
     for key in ["command", "cmd", "script", "shell_command"] {
         let args = serde_json::json!({ key: "cat .env" }).to_string();
         let result = checker.check_tool_call(&create_test_call("mcp_server_exec", &args));
@@ -3702,16 +3739,52 @@ fn test_mcp_and_computer_tools_validation() {
         );
     }
 
+    let mcp_cmds_args = serde_json::json!({ "commands": ["cat .env", "echo ok"] }).to_string();
+    assert!(checker
+        .check_tool_call(&create_test_call("mcp_batch_exec", &mcp_cmds_args))
+        .is_err());
+
     // Computer window tool
     let win_args = serde_json::json!({ "action": "launch", "app_name": "rm -rf /" }).to_string();
     assert!(checker
         .check_tool_call(&create_test_call("computer_window", &win_args))
         .is_err());
 
-    // Computer keyboard tool secret scanning
-    let kb_args =
+    // Computer keyboard tool secret scanning and command validation
+    let kb_secret =
         serde_json::json!({ "action": "type", "text": "AKIA7H3M9Q2V6N8C4R5T" }).to_string();
     assert!(checker
-        .check_tool_call(&create_test_call("computer_keyboard", &kb_args))
+        .check_tool_call(&create_test_call("computer_keyboard", &kb_secret))
         .is_err());
+
+    let kb_cmd = serde_json::json!({ "action": "type", "text": "cat .env\n" }).to_string();
+    assert!(checker
+        .check_tool_call(&create_test_call("computer_keyboard", &kb_cmd))
+        .is_err());
+
+    let kb_dangerous = serde_json::json!({ "action": "type", "text": "rm -rf /" }).to_string();
+    assert!(checker
+        .check_tool_call(&create_test_call("computer_keyboard", &kb_dangerous))
+        .is_err());
+
+    let kb_key_denied = serde_json::json!({ "action": "press", "key": "cat .env" }).to_string();
+    assert!(checker
+        .check_tool_call(&create_test_call("computer_keyboard", &kb_key_denied))
+        .is_err());
+
+    // Benign typing and shortcuts are allowed
+    let kb_safe_type = serde_json::json!({ "action": "type", "text": "cargo test" }).to_string();
+    assert!(checker
+        .check_tool_call(&create_test_call("computer_keyboard", &kb_safe_type))
+        .is_ok());
+
+    let kb_safe_press = serde_json::json!({ "action": "press", "key": "Return" }).to_string();
+    assert!(checker
+        .check_tool_call(&create_test_call("computer_keyboard", &kb_safe_press))
+        .is_ok());
+
+    let kb_safe_combo = serde_json::json!({ "action": "combo", "keys": "ctrl+c" }).to_string();
+    assert!(checker
+        .check_tool_call(&create_test_call("computer_keyboard", &kb_safe_combo))
+        .is_ok());
 }

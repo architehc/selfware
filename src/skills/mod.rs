@@ -784,7 +784,6 @@ impl SkillRegistry {
             // Exclude allowed skill directories from the denylist for admission
             if pattern.contains(".selfware/skills")
                 || pattern.contains(".selfware/skill-candidates")
-                || pattern.contains(".selfware/attempts")
             {
                 continue;
             }

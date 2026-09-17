@@ -1891,3 +1891,315 @@ fn test_candidate_ranking_transitivity_all_permutations() {
         );
     }
 }
+
+#[test]
+fn test_promoted_policies_control_live_search_decisions() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let attempts_file = temp.path().join("attempts.jsonl");
+
+    // Seed attempts with a baseline and two evaluated branches:
+    // branch-1 (score 85.0 - strong improvement) and branch-2 (score 40.0 - below baseline)
+    let baseline = AttemptNode {
+        id: "att-baseline".into(),
+        parent_id: None,
+        generation: 0,
+        branch_id: "baseline".into(),
+        hypothesis_id: "baseline".into(),
+        description: "Baseline measurement".into(),
+        diff_sha256: "sha-base".into(),
+        patch: None,
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(50.0),
+        tokens_used: Some(1000),
+        wall_time_ms: 100,
+        status: AttemptStatus::Baseline,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        created_at: "2026-09-17T00:00:00Z".into(),
+    };
+    let b1 = AttemptNode {
+        id: "att-b1-1".into(),
+        parent_id: Some("att-baseline".into()),
+        generation: 1,
+        branch_id: "branch-1".into(),
+        hypothesis_id: "hyp-1".into(),
+        description: "Branch 1 winner".into(),
+        diff_sha256: "sha-b1".into(),
+        patch: Some("diff1".into()),
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(85.0),
+        tokens_used: Some(2000),
+        wall_time_ms: 200,
+        status: AttemptStatus::Evaluated,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        created_at: "2026-09-17T00:01:00Z".into(),
+    };
+    let b2 = AttemptNode {
+        id: "att-b2-1".into(),
+        parent_id: Some("att-baseline".into()),
+        generation: 1,
+        branch_id: "branch-2".into(),
+        hypothesis_id: "hyp-2".into(),
+        description: "Branch 2 weak".into(),
+        diff_sha256: "sha-b2".into(),
+        patch: Some("diff2".into()),
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(40.0),
+        tokens_used: Some(2000),
+        wall_time_ms: 200,
+        status: AttemptStatus::Evaluated,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        created_at: "2026-09-17T00:02:00Z".into(),
+    };
+
+    let mut file_content = String::new();
+    for node in &[&baseline, &b1, &b2] {
+        file_content.push_str(&serde_json::to_string(node).unwrap());
+        file_content.push('\n');
+    }
+    std::fs::write(&attempts_file, file_content).unwrap();
+
+    // 1. Fixed population policy stops once the initial population is evaluated (no further roots)
+    let mut fixed_policy = instantiate_search_policy("fixed_population", 2);
+    let decision_fixed = decide_next_search_action(
+        &mut *fixed_policy,
+        &attempts_file,
+        50.0,
+        2,
+        Some("att-baseline"),
+        "baseline",
+    );
+
+    // 2. RefineTop1 policy zeroes in on the top performing branch (branch-1 with score 85.0)
+    let mut refine_policy = instantiate_search_policy("refine_top1", 2);
+    let decision_refine = decide_next_search_action(
+        &mut *refine_policy,
+        &attempts_file,
+        50.0,
+        2,
+        Some("att-baseline"),
+        "baseline",
+    );
+
+    // 3. BreadthFirst policy expands frontiers across all open branches simultaneously
+    let mut breadth_policy = instantiate_search_policy("breadth_first", 2);
+    let decision_breadth = decide_next_search_action(
+        &mut *breadth_policy,
+        &attempts_file,
+        50.0,
+        2,
+        Some("att-baseline"),
+        "baseline",
+    );
+
+    // Prove that the policies make DIFFERENT live search decisions on the exact same attempt history
+    assert!(
+        decision_fixed != decision_refine,
+        "FixedPopulationPolicy and RefineTop1Policy must make distinct live decisions"
+    );
+    assert!(
+        decision_refine != decision_breadth,
+        "RefineTop1Policy and BreadthFirstPolicy must make distinct live decisions"
+    );
+    assert!(
+        decision_fixed != decision_breadth,
+        "FixedPopulationPolicy and BreadthFirstPolicy must make distinct live decisions"
+    );
+
+    // Verify FixedPopulationPolicy stops once population limit is reached
+    match decision_fixed {
+        PolicyDecision::Stop { reason } => {
+            assert!(
+                reason.contains("No further unrevealed roots available")
+                    || reason.contains("population reached"),
+                "FixedPopulation stop reason: {reason}"
+            );
+        }
+        other => panic!(
+            "Expected Stop from FixedPopulation once population saturated, got {:?}",
+            other
+        ),
+    }
+
+    // Verify RefineTop1 specifically selected only the top branch
+    match decision_refine {
+        PolicyDecision::SelectBatch(actions) => {
+            assert_eq!(
+                actions.len(),
+                1,
+                "RefineTop1 must select exactly 1 branch to refine"
+            );
+            match &actions[0] {
+                LegalAction::RefineFrontier {
+                    branch_id,
+                    parent_id,
+                    ..
+                } => {
+                    assert_eq!(
+                        branch_id, "branch-1",
+                        "RefineTop1Policy must target top branch-1"
+                    );
+                    assert_eq!(
+                        parent_id, "att-b1-1",
+                        "RefineTop1Policy must refine att-b1-1 frontier"
+                    );
+                }
+                other => panic!("Expected RefineFrontier, got {:?}", other),
+            }
+        }
+        other => panic!("Expected SelectBatch from RefineTop1, got {:?}", other),
+    }
+
+    // Verify BreadthFirstPolicy selected both open branches
+    match decision_breadth {
+        PolicyDecision::SelectBatch(actions) => {
+            assert_eq!(
+                actions.len(),
+                2,
+                "BreadthFirst must expand both open branches"
+            );
+            let branch_ids: std::collections::HashSet<_> =
+                actions.iter().map(|a| a.branch_id()).collect();
+            assert!(branch_ids.contains("branch-1"));
+            assert!(branch_ids.contains("branch-2"));
+        }
+        other => panic!("Expected SelectBatch from BreadthFirst, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_infrastructure_failures_excluded_from_deduplication() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let attempts_file = temp.path().join("attempts.jsonl");
+
+    let nodes = [
+        // 1. Internal error (e.g. shadow worktree lock collision, disk full)
+        AttemptNode {
+            id: "att-1".into(),
+            parent_id: Some("att-baseline".into()),
+            generation: 1,
+            branch_id: "branch-1".into(),
+            hypothesis_id: "hyp-1".into(),
+            description: "Worktree lock failure".into(),
+            diff_sha256: "sha-internal-error-1".into(),
+            patch: Some("patch1".into()),
+            sab_report_path: None,
+            metrics: None,
+            composite_score: None,
+            tokens_used: None,
+            wall_time_ms: 5,
+            status: AttemptStatus::InternalError,
+            failure_class: Some(FailureClass::Unclassified),
+            failure_reason: Some("Failed to create shadow worktree".into()),
+            output_tail: None,
+            binary_sha256: None,
+            created_at: "2026-09-17T00:00:00Z".into(),
+        },
+        // 2. Environment error (e.g. test runner killed by external watchdog)
+        AttemptNode {
+            id: "att-2".into(),
+            parent_id: Some("att-baseline".into()),
+            generation: 1,
+            branch_id: "branch-2".into(),
+            hypothesis_id: "hyp-2".into(),
+            description: "Environment timeout".into(),
+            diff_sha256: "sha-env-error-2".into(),
+            patch: Some("patch2".into()),
+            sab_report_path: None,
+            metrics: None,
+            composite_score: None,
+            tokens_used: None,
+            wall_time_ms: 10,
+            status: AttemptStatus::CompileFailed,
+            failure_class: Some(FailureClass::EnvironmentError),
+            failure_reason: Some("External environment unreachable".into()),
+            output_tail: None,
+            binary_sha256: None,
+            created_at: "2026-09-17T00:01:00Z".into(),
+        },
+        // 3. Genuine code defect (type error) -> MUST be blacklisted
+        AttemptNode {
+            id: "att-3".into(),
+            parent_id: Some("att-baseline".into()),
+            generation: 1,
+            branch_id: "branch-3".into(),
+            hypothesis_id: "hyp-3".into(),
+            description: "Real compiler failure".into(),
+            diff_sha256: "sha-real-defect-3".into(),
+            patch: Some("patch3".into()),
+            sab_report_path: None,
+            metrics: None,
+            composite_score: None,
+            tokens_used: None,
+            wall_time_ms: 50,
+            status: AttemptStatus::CompileFailed,
+            failure_class: Some(FailureClass::RepairableTypeError),
+            failure_reason: Some("mismatched types".into()),
+            output_tail: None,
+            binary_sha256: None,
+            created_at: "2026-09-17T00:02:00Z".into(),
+        },
+        // 4. Duplicate rejected upfront -> MUST remain in blacklist
+        AttemptNode {
+            id: "att-4".into(),
+            parent_id: Some("att-baseline".into()),
+            generation: 1,
+            branch_id: "branch-4".into(),
+            hypothesis_id: "hyp-4".into(),
+            description: "Duplicate rejected".into(),
+            diff_sha256: "sha-dup-rejected-4".into(),
+            patch: Some("patch4".into()),
+            sab_report_path: None,
+            metrics: None,
+            composite_score: None,
+            tokens_used: None,
+            wall_time_ms: 0,
+            status: AttemptStatus::DuplicateRejected,
+            failure_class: Some(FailureClass::Unclassified),
+            failure_reason: Some("Duplicate of failed diff".into()),
+            output_tail: None,
+            binary_sha256: None,
+            created_at: "2026-09-17T00:03:00Z".into(),
+        },
+    ];
+
+    let mut content = String::new();
+    for node in &nodes {
+        content.push_str(&serde_json::to_string(node).unwrap());
+        content.push('\n');
+    }
+    std::fs::write(&attempts_file, content).unwrap();
+
+    let blacklisted = load_failed_diff_shas(&attempts_file);
+
+    // Infrastructure failures MUST NOT be blacklisted, allowing retries after recovery
+    assert!(
+        !blacklisted.contains("sha-internal-error-1"),
+        "InternalError must be excluded from deduplication blacklist"
+    );
+    assert!(
+        !blacklisted.contains("sha-env-error-2"),
+        "EnvironmentError must be excluded from deduplication blacklist"
+    );
+
+    // Genuine code defects and duplicate rejections MUST be blacklisted
+    assert!(
+        blacklisted.contains("sha-real-defect-3"),
+        "Real compile failures must be blacklisted from deduplication"
+    );
+    assert!(
+        blacklisted.contains("sha-dup-rejected-4"),
+        "Duplicate rejected diffs must be blacklisted"
+    );
+}

@@ -7,6 +7,11 @@
 
 use super::ast_tools;
 use super::fitness::{self, SabConfig, SabResult};
+use super::policy::{
+    BreadthFirstPolicy, EarlyStopPlateauPolicy, FixedPopulationPolicy, LegalAction,
+    ParetoAdaptivePolicy, PolicyDecision, PrefixObservation, PrefixView, RefineTop1Policy,
+    SearchPolicy,
+};
 use super::telemetry;
 use super::tournament::Hypothesis;
 use super::tree_log::{
@@ -518,6 +523,110 @@ pub(crate) fn evaluate_candidate_promotion(
     PromotionDecision::Promote
 }
 
+/// Instantiates a named search policy, falling back to [`FixedPopulationPolicy`].
+pub fn instantiate_search_policy(
+    policy_name: &str,
+    population_size: usize,
+) -> Box<dyn SearchPolicy> {
+    let normalized = policy_name.to_ascii_lowercase().replace('-', "_");
+    match normalized.as_str() {
+        "fixed_population" | "fixed_population_policy" | "fixed" => {
+            Box::new(FixedPopulationPolicy::new(population_size))
+        }
+        "breadth_first" | "breadth_first_policy" | "bfs" => Box::new(BreadthFirstPolicy::new(3)),
+        "refine_top1" | "refine_top1_policy" | "refine_top" => Box::new(RefineTop1Policy::new(3)),
+        "pareto_adaptive" | "pareto_adaptive_policy" | "pareto" => {
+            Box::new(ParetoAdaptivePolicy::new())
+        }
+        "early_stop_plateau" | "early_stop_plateau_policy" | "early_stop" => {
+            Box::new(EarlyStopPlateauPolicy::new(
+                Box::new(FixedPopulationPolicy::new(population_size)),
+                3,
+                0.01,
+            ))
+        }
+        _ => {
+            tracing::warn!(
+                "Unknown search policy '{}', defaulting to FixedPopulationPolicy",
+                policy_name
+            );
+            Box::new(FixedPopulationPolicy::new(population_size))
+        }
+    }
+}
+
+/// Helper to construct a PrefixView and legal actions from the attempts file
+/// and invoke the active search policy to select the next exploration/refinement action.
+pub fn decide_next_search_action(
+    policy: &mut dyn SearchPolicy,
+    attempts_file: &Path,
+    baseline_score: f64,
+    max_parallelism: usize,
+    _active_parent_id: Option<&str>,
+    _active_parent_branch_id: &str,
+) -> PolicyDecision {
+    let mut observations = Vec::new();
+    if let Ok(content) = std::fs::read_to_string(attempts_file) {
+        for line in content.lines() {
+            if let Ok(node) = serde_json::from_str::<AttemptNode>(line) {
+                // Control anchors are excluded from search policy prefix
+                if node.branch_id == "control" {
+                    continue;
+                }
+                observations.push(PrefixObservation {
+                    id: node.id,
+                    branch_id: node.branch_id,
+                    attempt_depth: node.generation,
+                    parent_id: node.parent_id,
+                    score: node.composite_score,
+                    status: node.status,
+                    failure_class: node.failure_class,
+                    failure_reason: node.failure_reason,
+                    delta_vs_baseline: node.composite_score.map(|s| s - baseline_score),
+                    delta_vs_parent: None,
+                    tokens_used: node.tokens_used,
+                    wall_time_ms: node.wall_time_ms,
+                });
+            }
+        }
+    }
+
+    let prefix = PrefixView::new(observations, baseline_score, max_parallelism);
+
+    // Compute legal actions
+    let mut legal_actions = Vec::new();
+    let mut open_branches = std::collections::HashSet::new();
+    for o in &prefix.observations {
+        if o.branch_id != "baseline" && o.id != "att-baseline" {
+            open_branches.insert(o.branch_id.clone());
+        }
+    }
+
+    // Existing open frontiers that can be refined
+    for bid in &open_branches {
+        let traj = prefix.branch_trajectory(bid);
+        if let Some(frontier_node) = traj.observations.last() {
+            legal_actions.push(LegalAction::RefineFrontier {
+                branch_id: bid.clone(),
+                parent_id: frontier_node.id.clone(),
+                node_id: format!("{}-next", frontier_node.id),
+            });
+        }
+    }
+
+    // Candidate root actions to explore new branches if we haven't reached initial population limit
+    if open_branches.len() < max_parallelism {
+        for idx in open_branches.len()..max_parallelism {
+            legal_actions.push(LegalAction::OpenRoot {
+                branch_id: format!("branch-root-{}", idx),
+                node_id: format!("root-hyp-{}", idx),
+            });
+        }
+    }
+
+    policy.decide(&prefix, &legal_actions, 1.0)
+}
+
 /// Densely log an attempt node to JSONL, aborting generation if write fails.
 fn log_and_append_attempt(
     attempts_file: &Path,
@@ -566,15 +675,24 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
     // Load promoted search policy if available from offline held-out replay validation
     let active_policy_file = repo_root.join(".selfware").join("active_policy.json");
-    if active_policy_file.exists() {
-        if let Ok(content) = std::fs::read_to_string(&active_policy_file) {
-            if let Ok(policy_val) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(p_name) = policy_val.get("policy_name").and_then(|v| v.as_str()) {
-                    tracing::info!("Evolution daemon loaded active search policy: {}", p_name);
-                }
-            }
+    let mut search_policy: Box<dyn SearchPolicy> = if active_policy_file.exists() {
+        let loaded_name = std::fs::read_to_string(&active_policy_file)
+            .ok()
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+            .and_then(|val| {
+                val.get("policy_name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            });
+        if let Some(p_name) = loaded_name {
+            tracing::info!("Evolution daemon loaded active search policy: {}", p_name);
+            instantiate_search_policy(&p_name, config.population_size)
+        } else {
+            instantiate_search_policy("fixed_population", config.population_size)
         }
-    }
+    } else {
+        instantiate_search_policy("fixed_population", config.population_size)
+    };
 
     let mut initial_sab = 0.0;
 
@@ -794,6 +912,54 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             }),
         );
 
+        // ─── Step 0: Consult active search policy ───
+        let policy_decision = decide_next_search_action(
+            &mut *search_policy,
+            &attempts_file,
+            current_baseline_metrics.sab_score,
+            config.population_size,
+            active_parent_id.as_deref(),
+            &active_parent_branch_id,
+        );
+
+        match policy_decision {
+            PolicyDecision::Stop { reason } => {
+                log_phase(&format!(
+                    "Search policy '{}' requested stop: {reason}",
+                    search_policy.name()
+                ));
+                log_event(
+                    repo_root,
+                    &serde_json::json!({
+                        "event": "policy_stop",
+                        "policy": search_policy.name(),
+                        "reason": &reason,
+                        "generation": generation,
+                        "timestamp": chrono_now(),
+                    }),
+                );
+                break;
+            }
+            PolicyDecision::SelectBatch(actions) => {
+                if let Some(action) = actions.first() {
+                    match action {
+                        LegalAction::RefineFrontier {
+                            branch_id,
+                            parent_id,
+                            ..
+                        } => {
+                            active_parent_id = Some(parent_id.clone());
+                            active_parent_branch_id = branch_id.clone();
+                        }
+                        LegalAction::OpenRoot { branch_id, .. } => {
+                            active_parent_id = Some(baseline_node.id.clone());
+                            active_parent_branch_id = branch_id.clone();
+                        }
+                    }
+                }
+            }
+        }
+
         // ─── Step 1: Capture telemetry (sensory data for the agent) ───
         let telemetry_snapshot = telemetry::capture(repo_root, "sab_full").ok();
         let telemetry_prompt = telemetry_snapshot
@@ -840,9 +1006,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         // Also detect and reject duplicate patches matching previously failed diffs.
         let prior_failed_diffs = load_failed_diff_shas(&attempts_file);
         let mut valid = Vec::new();
-        for (h_idx, h) in hypotheses.into_iter().enumerate() {
+        for h in hypotheses {
             let h_branch_id = if active_parent_id.as_deref() == Some("att-baseline") {
-                format!("branch-g{}-h{}", generation, h_idx)
+                format!("branch-g{}-{}", generation, h.id)
             } else {
                 active_parent_branch_id.clone()
             };
@@ -905,7 +1071,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     composite_score: None,
                     tokens_used: None,
                     wall_time_ms: 0,
-                    status: AttemptStatus::CompileFailed,
+                    status: AttemptStatus::DuplicateRejected,
                     failure_class: Some(FailureClass::Unclassified),
                     failure_reason: Some(format!(
                         "Duplicate of previously failed patch diff (sha256: {})",
@@ -1132,12 +1298,12 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             sab_config.runner_script.exists() && std::env::var("SELFWARE_EVOLVE_SAB").is_ok();
         let mut evaluated_candidates: Vec<EvaluatedCandidate> = Vec::new();
 
-        for (h_idx, hypothesis) in valid.iter().enumerate() {
+        for hypothesis in &valid {
             let attempt_start = Instant::now();
             let attempt_id = format!("att-g{}-{}", generation, hypothesis.id);
             let raw_diff_sha256 = compute_sha256(hypothesis.patch.as_bytes());
             let hypothesis_branch_id = if active_parent_id.as_deref() == Some("att-baseline") {
-                format!("branch-g{}-h{}", generation, h_idx)
+                format!("branch-g{}-{}", generation, hypothesis.id)
             } else {
                 active_parent_branch_id.clone()
             };
@@ -2341,7 +2507,8 @@ pub fn format_recent_failure_history(attempts_file: &Path, max_entries: usize) -
     }
 }
 
-/// Loads SHA-256 hashes of patches from attempts that previously failed.
+/// Loads SHA-256 hashes of patches from attempts that previously failed due to code defects.
+/// Excludes environment/infrastructure failures and control anchors so transient errors can be retried.
 pub(crate) fn load_failed_diff_shas(attempts_file: &Path) -> std::collections::HashSet<String> {
     let mut failed = std::collections::HashSet::new();
     let Ok(content) = std::fs::read_to_string(attempts_file) else {
@@ -2351,6 +2518,8 @@ pub(crate) fn load_failed_diff_shas(attempts_file: &Path) -> std::collections::H
         if let Ok(node) = serde_json::from_str::<AttemptNode>(line) {
             if node.status != AttemptStatus::Evaluated
                 && node.status != AttemptStatus::Baseline
+                && node.status != AttemptStatus::InternalError
+                && node.failure_class != Some(FailureClass::EnvironmentError)
                 && node.branch_id != "control"
                 && !node.diff_sha256.is_empty()
             {

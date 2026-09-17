@@ -972,9 +972,16 @@ impl SafetyChecker {
                 if let Some(text) = args
                     .get("text")
                     .or_else(|| args.get("keys"))
+                    .or_else(|| args.get("key"))
                     .and_then(|v| v.as_str())
                 {
                     self.check_content_for_secrets(text)?;
+                    for line in text.lines() {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            self.check_shell_command(trimmed)?;
+                        }
+                    }
                 }
             }
             "page_control" => {
@@ -1123,52 +1130,122 @@ impl SafetyChecker {
         Ok(())
     }
 
-    /// Recursively scan MCP tool arguments for path-like and command-like parameters.
+    /// Recursively scan MCP tool arguments for path-like, command-like, and secret-bearing parameters,
+    /// including array values and plural key variants.
     fn check_generic_mcp_arguments(&self, val: &serde_json::Value) -> Result<()> {
         match val {
             serde_json::Value::Object(map) => {
                 for (key, value) in map {
                     let key_lower = key.to_ascii_lowercase();
-                    if let Some(s) = value.as_str() {
-                        if matches!(
-                            key_lower.as_str(),
-                            "path"
-                                | "file_path"
-                                | "filepath"
-                                | "file"
-                                | "target"
-                                | "target_path"
-                                | "targetpath"
-                                | "uri"
-                                | "file_uri"
-                                | "fileuri"
-                                | "destination"
-                                | "dest"
-                                | "dest_path"
-                                | "source"
-                                | "src"
-                                | "dir"
-                                | "directory"
-                                | "folder"
-                                | "location"
-                        ) {
+                    if matches!(
+                        key_lower.as_str(),
+                        "path"
+                            | "paths"
+                            | "file_path"
+                            | "file_paths"
+                            | "filepath"
+                            | "filepaths"
+                            | "file"
+                            | "files"
+                            | "target"
+                            | "targets"
+                            | "target_path"
+                            | "target_paths"
+                            | "targetpath"
+                            | "targetpaths"
+                            | "uri"
+                            | "uris"
+                            | "file_uri"
+                            | "file_uris"
+                            | "fileuri"
+                            | "fileuris"
+                            | "destination"
+                            | "destinations"
+                            | "dest"
+                            | "dests"
+                            | "dest_path"
+                            | "dest_paths"
+                            | "source"
+                            | "sources"
+                            | "src"
+                            | "srcs"
+                            | "dir"
+                            | "dirs"
+                            | "directory"
+                            | "directories"
+                            | "folder"
+                            | "folders"
+                            | "location"
+                            | "locations"
+                    ) {
+                        if let Some(s) = value.as_str() {
                             self.check_path(s)?;
-                        } else if matches!(
-                            key_lower.as_str(),
-                            "command"
-                                | "cmd"
-                                | "script"
-                                | "exec"
-                                | "shell_command"
-                                | "bash_command"
-                        ) {
+                        } else if let Some(arr) = value.as_array() {
+                            for item in arr {
+                                if let Some(s) = item.as_str() {
+                                    self.check_path(s)?;
+                                } else {
+                                    self.check_generic_mcp_arguments(item)?;
+                                }
+                            }
+                        } else {
+                            self.check_generic_mcp_arguments(value)?;
+                        }
+                    } else if matches!(
+                        key_lower.as_str(),
+                        "command"
+                            | "commands"
+                            | "cmd"
+                            | "cmds"
+                            | "script"
+                            | "scripts"
+                            | "exec"
+                            | "execs"
+                            | "shell_command"
+                            | "shell_commands"
+                            | "bash_command"
+                            | "bash_commands"
+                    ) {
+                        if let Some(s) = value.as_str() {
                             self.check_shell_command(s)?;
                             self.check_shell_command_paths(s)?;
-                        } else if matches!(
-                            key_lower.as_str(),
-                            "content" | "text" | "body" | "payload" | "data" | "code"
-                        ) {
+                        } else if let Some(arr) = value.as_array() {
+                            for item in arr {
+                                if let Some(s) = item.as_str() {
+                                    self.check_shell_command(s)?;
+                                    self.check_shell_command_paths(s)?;
+                                } else {
+                                    self.check_generic_mcp_arguments(item)?;
+                                }
+                            }
+                        } else {
+                            self.check_generic_mcp_arguments(value)?;
+                        }
+                    } else if matches!(
+                        key_lower.as_str(),
+                        "content"
+                            | "contents"
+                            | "text"
+                            | "texts"
+                            | "body"
+                            | "bodies"
+                            | "payload"
+                            | "payloads"
+                            | "data"
+                            | "code"
+                    ) {
+                        if let Some(s) = value.as_str() {
                             self.check_content_for_secrets(s)?;
+                        } else if let Some(arr) = value.as_array() {
+                            for item in arr {
+                                if let Some(s) = item.as_str() {
+                                    self.check_content_for_secrets(s)?;
+                                } else {
+                                    self.check_generic_mcp_arguments(item)?;
+                                }
+                            }
+                        } else {
+                            self.check_generic_mcp_arguments(value)?;
                         }
                     } else if value.is_object() || value.is_array() {
                         self.check_generic_mcp_arguments(value)?;
@@ -1177,7 +1254,11 @@ impl SafetyChecker {
             }
             serde_json::Value::Array(arr) => {
                 for item in arr {
-                    self.check_generic_mcp_arguments(item)?;
+                    if let Some(s) = item.as_str() {
+                        self.check_content_for_secrets(s)?;
+                    } else {
+                        self.check_generic_mcp_arguments(item)?;
+                    }
                 }
             }
             _ => {}
@@ -1727,6 +1808,7 @@ impl SafetyChecker {
             ) {
                 if let Some(c_pos) = tokens.iter().position(|t| is_shell_command_flag(t)) {
                     if let Some(nested_cmd) = extract_nested_shell_command(&tokens, c_pos) {
+                        self.check_shell_command(&nested_cmd)?;
                         for target in shell_output_redirect_targets(&nested_cmd) {
                             if let Some(pattern) = redirect_target_matches_denied(
                                 &target,
@@ -1754,6 +1836,7 @@ impl SafetyChecker {
                 }
             } else if verb == "eval" && tokens.len() > cmd_idx + 1 {
                 let nested_cmd = tokens[cmd_idx + 1..].join(" ");
+                self.check_shell_command(&nested_cmd)?;
                 for target in shell_output_redirect_targets(&nested_cmd) {
                     if let Some(pattern) = redirect_target_matches_denied(
                         &target,
@@ -3579,63 +3662,76 @@ pub(crate) fn command_basename(word: &str) -> &str {
     word.rsplit(['/', '\\']).next().unwrap_or(word)
 }
 
-/// Returns true if a shell token represents a command-string flag (e.g. `-c`, `--command`, `-lc`, `-ec`, `--command=...`, `-c=...`).
+/// Returns true if a shell token represents a command-string flag (e.g. `-c`, `--command`, `-lc`, `-ec`, `--command=...`, `-c=...`, `-c'...'`, `-lc'...'`).
 #[inline]
 pub(crate) fn is_shell_command_flag(token: &str) -> bool {
-    token == "-c"
-        || (token.starts_with("-c") && !token.starts_with("--"))
-        || token == "--command"
-        || token.starts_with("--command=")
-        || token.starts_with("-c=")
-        || (token.starts_with('-')
-            && !token.starts_with("--")
-            && (token.ends_with('c') || token.contains("c=")))
+    if token == "-c" || token == "--command" || token.starts_with("--command=") {
+        return true;
+    }
+    if token.starts_with('-') && !token.starts_with("--") {
+        if let Some(c_pos) = token.find('c') {
+            // Check that all characters between the leading '-' and 'c' are single-letter option flags (e.g. -x, -l, -e)
+            if token[1..c_pos].chars().all(|ch| ch.is_ascii_alphabetic()) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
-/// Extract the nested shell command string from either an inline value (`--command=...`, `-c=...`, `-c...`)
-/// or the adjacent token (`-c "..."`).
+/// Extract the nested shell command string from either an inline value (`--command=...`, `-c=...`, `-c...`, `-lc...`)
+/// or the adjacent token (`-c "..."`, `-lc "..."`).
 pub(crate) fn extract_nested_shell_command<T: AsRef<str>>(
     tokens: &[T],
     flag_idx: usize,
 ) -> Option<String> {
     let tok = tokens.get(flag_idx)?.as_ref();
-    let inline_val = if let Some(val) = tok.strip_prefix("--command=") {
-        Some(val)
-    } else if let Some(val) = tok.strip_prefix("-c=") {
-        Some(val)
-    } else if tok.starts_with('-') && !tok.starts_with("--") {
-        if let Some(eq_pos) = tok.find("c=") {
-            Some(&tok[eq_pos + 2..])
-        } else if tok.len() > 2 && tok.starts_with("-c") && !tok[2..].starts_with('-') {
-            Some(&tok[2..])
-        } else {
-            None
+    if let Some(val) = tok.strip_prefix("--command=") {
+        let mut res = val.to_string();
+        for t in &tokens[flag_idx + 1..] {
+            res.push(' ');
+            res.push_str(t.as_ref());
         }
-    } else {
-        None
-    };
-
-    if let Some(val) = inline_val {
-        if flag_idx + 1 < tokens.len() {
-            let mut res = val.to_string();
-            for t in &tokens[flag_idx + 1..] {
-                res.push(' ');
-                res.push_str(t.as_ref());
-            }
-            Some(res)
-        } else {
-            Some(val.to_string())
-        }
-    } else if flag_idx + 1 < tokens.len() {
-        let joined = tokens[flag_idx + 1..]
-            .iter()
-            .map(|t| t.as_ref())
-            .collect::<Vec<_>>()
-            .join(" ");
-        Some(joined)
-    } else {
-        None
+        return Some(res);
     }
+    if tok == "--command" || tok == "-c" {
+        if flag_idx + 1 < tokens.len() {
+            let joined = tokens[flag_idx + 1..]
+                .iter()
+                .map(|t| t.as_ref())
+                .collect::<Vec<_>>()
+                .join(" ");
+            return Some(joined);
+        }
+        return None;
+    }
+    if tok.starts_with('-') && !tok.starts_with("--") {
+        if let Some(c_pos) = tok.find('c') {
+            if tok[1..c_pos].chars().all(|ch| ch.is_ascii_alphabetic()) {
+                let after_c = &tok[c_pos + 1..];
+                if after_c.is_empty() {
+                    // e.g. -lc "command" or -c "command"
+                    if flag_idx + 1 < tokens.len() {
+                        let joined = tokens[flag_idx + 1..]
+                            .iter()
+                            .map(|t| t.as_ref())
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        return Some(joined);
+                    }
+                    return None;
+                }
+                let payload = after_c.strip_prefix('=').unwrap_or(after_c);
+                let mut res = payload.to_string();
+                for t in &tokens[flag_idx + 1..] {
+                    res.push(' ');
+                    res.push_str(t.as_ref());
+                }
+                return Some(res);
+            }
+        }
+    }
+    tokens.get(flag_idx + 1).map(|t| t.as_ref().to_string())
 }
 
 /// Extract all command substitutions `$(...)` and backtick expressions `...` from a shell command.
@@ -3738,7 +3834,8 @@ pub(crate) fn extract_command_substitutions(cmd: &str) -> Vec<String> {
 }
 
 /// Locate the command word of one pipeline segment: looking through leading
-/// `VAR=value` prefixes, wrapper prefixes (`sudo`, `doas`, `env`, `nohup`, `nice`, `time`, `stdbuf`),
+/// `VAR=value` prefixes, wrapper prefixes (`sudo`, `doas`, `env`, `nohup`, `nice`, `time`, `stdbuf`,
+/// `exec`, `command`, `builtin`, `setsid`, `chroot`, `ionice`, `taskset`, `bundle exec`, `xargs`),
 /// and subsequent `VAR=val` assignments in a loop.
 fn command_word_index(tokens: &[String]) -> Option<usize> {
     let mut idx = 0;
@@ -3754,6 +3851,10 @@ fn command_word_index(tokens: &[String]) -> Option<usize> {
             "sudo" | "doas" => {
                 idx += 1;
                 while let Some(t) = tokens.get(idx) {
+                    if t.as_str() == "--" {
+                        idx += 1;
+                        break;
+                    }
                     if !t.starts_with('-') || t.as_str() == "-" {
                         break;
                     }
@@ -3785,7 +3886,15 @@ fn command_word_index(tokens: &[String]) -> Option<usize> {
                         idx += 1;
                         continue;
                     }
-                    if !t.starts_with('-') || t.as_str() == "-" {
+                    if t.as_str() == "--" {
+                        idx += 1;
+                        break;
+                    }
+                    if t.as_str() == "-" {
+                        idx += 1;
+                        continue;
+                    }
+                    if !t.starts_with('-') {
                         break;
                     }
                     let flag = t.as_str();
@@ -3798,9 +3907,142 @@ fn command_word_index(tokens: &[String]) -> Option<usize> {
                     }
                 }
             }
+            "exec" => {
+                idx += 1;
+                while let Some(t) = tokens.get(idx) {
+                    if is_env_assignment(t) {
+                        idx += 1;
+                        continue;
+                    }
+                    if t.as_str() == "--" {
+                        idx += 1;
+                        break;
+                    }
+                    if !t.starts_with('-') || t.as_str() == "-" {
+                        break;
+                    }
+                    let flag = t.as_str();
+                    idx += 1;
+                    if flag == "-a" {
+                        idx += 1;
+                    }
+                }
+            }
+            "command" => {
+                idx += 1;
+                while let Some(t) = tokens.get(idx) {
+                    if t.as_str() == "--" {
+                        idx += 1;
+                        break;
+                    }
+                    if !t.starts_with('-') || t.as_str() == "-" {
+                        break;
+                    }
+                    idx += 1;
+                }
+            }
+            "builtin" => {
+                idx += 1;
+            }
+            "setsid" => {
+                idx += 1;
+                while let Some(t) = tokens.get(idx) {
+                    if t.as_str() == "--" {
+                        idx += 1;
+                        break;
+                    }
+                    if !t.starts_with('-') || t.as_str() == "-" {
+                        break;
+                    }
+                    idx += 1;
+                }
+            }
+            "chroot" => {
+                idx += 1;
+                while let Some(t) = tokens.get(idx) {
+                    if t.as_str() == "--" {
+                        idx += 1;
+                        break;
+                    }
+                    if !t.starts_with('-') || t.as_str() == "-" {
+                        break;
+                    }
+                    let flag = t.as_str();
+                    idx += 1;
+                    if matches!(flag, "--userspec" | "--groups") {
+                        idx += 1;
+                    }
+                }
+                // Skip the NEWROOT operand
+                if idx < tokens.len() {
+                    idx += 1;
+                }
+            }
+            "ionice" => {
+                idx += 1;
+                while let Some(t) = tokens.get(idx) {
+                    if t.as_str() == "--" {
+                        idx += 1;
+                        break;
+                    }
+                    if !t.starts_with('-') || t.as_str() == "-" {
+                        break;
+                    }
+                    let flag = t.as_str();
+                    idx += 1;
+                    if matches!(flag, "-c" | "-n" | "-p") {
+                        idx += 1;
+                    }
+                }
+            }
+            "taskset" => {
+                idx += 1;
+                while let Some(t) = tokens.get(idx) {
+                    if t.as_str() == "--" {
+                        idx += 1;
+                        break;
+                    }
+                    if !t.starts_with('-') || t.as_str() == "-" {
+                        break;
+                    }
+                    idx += 1;
+                }
+                // Skip the CPU mask/list operand
+                if idx < tokens.len() {
+                    idx += 1;
+                }
+            }
+            "bundle" => {
+                if tokens.get(idx + 1).map(|t| t.as_str()) == Some("exec") {
+                    idx += 2;
+                } else {
+                    break;
+                }
+            }
+            "xargs" => {
+                idx += 1;
+                while let Some(t) = tokens.get(idx) {
+                    if t.as_str() == "--" {
+                        idx += 1;
+                        break;
+                    }
+                    if !t.starts_with('-') || t.as_str() == "-" {
+                        break;
+                    }
+                    let flag = t.as_str();
+                    idx += 1;
+                    if matches!(flag, "-I" | "-n" | "-L" | "-P" | "-s" | "-E" | "-d" | "-a") {
+                        idx += 1;
+                    }
+                }
+            }
             "nice" => {
                 idx += 1;
                 while let Some(t) = tokens.get(idx) {
+                    if t.as_str() == "--" {
+                        idx += 1;
+                        break;
+                    }
                     if !t.starts_with('-') || t.as_str() == "-" {
                         break;
                     }
@@ -3814,6 +4056,10 @@ fn command_word_index(tokens: &[String]) -> Option<usize> {
             "time" => {
                 idx += 1;
                 while let Some(t) = tokens.get(idx) {
+                    if t.as_str() == "--" {
+                        idx += 1;
+                        break;
+                    }
                     if !t.starts_with('-') || t.as_str() == "-" {
                         break;
                     }
@@ -3827,6 +4073,10 @@ fn command_word_index(tokens: &[String]) -> Option<usize> {
             "stdbuf" => {
                 idx += 1;
                 while let Some(t) = tokens.get(idx) {
+                    if t.as_str() == "--" {
+                        idx += 1;
+                        break;
+                    }
                     if !t.starts_with('-') || t.as_str() == "-" {
                         break;
                     }
@@ -3843,6 +4093,10 @@ fn command_word_index(tokens: &[String]) -> Option<usize> {
             "nohup" => {
                 idx += 1;
                 while let Some(t) = tokens.get(idx) {
+                    if t.as_str() == "--" {
+                        idx += 1;
+                        break;
+                    }
                     if !t.starts_with('-') || t.as_str() == "-" {
                         break;
                     }
@@ -3852,6 +4106,10 @@ fn command_word_index(tokens: &[String]) -> Option<usize> {
             "timeout" => {
                 idx += 1;
                 while let Some(t) = tokens.get(idx) {
+                    if t.as_str() == "--" {
+                        idx += 1;
+                        break;
+                    }
                     if !t.starts_with('-') || t.as_str() == "-" {
                         break;
                     }

@@ -136,9 +136,12 @@ impl PrefixView {
         }
     }
 
-    /// Total probes revealed so far.
+    /// Total probes revealed so far (excludes synthetic root baseline observation).
     pub fn total_probes(&self) -> usize {
-        self.observations.len()
+        self.observations
+            .iter()
+            .filter(|o| o.branch_id != "baseline" && o.id != "att-baseline")
+            .count()
     }
 
     /// Highest composite score observed among all revealed nodes.
@@ -160,10 +163,13 @@ impl PrefixView {
         BranchTrajectory::from_observations(branch_id.to_string(), branch_obs)
     }
 
-    /// Reconstruct trajectories for all opened branches.
+    /// Reconstruct trajectories for all opened branches (excludes synthetic root baseline).
     pub fn all_branch_trajectories(&self) -> HashMap<String, BranchTrajectory> {
         let mut grouped: HashMap<String, Vec<PrefixObservation>> = HashMap::new();
         for o in &self.observations {
+            if o.branch_id == "baseline" || o.id == "att-baseline" {
+                continue;
+            }
             grouped
                 .entry(o.branch_id.clone())
                 .or_default()
@@ -487,6 +493,7 @@ impl SearchPolicy for RefineTop1Policy {
             let trajs = prefix.all_branch_trajectories();
             let mut candidates: Vec<(String, f64)> = trajs
                 .into_iter()
+                .filter(|(bid, _)| bid != "baseline")
                 .filter_map(|(bid, t)| t.successful_anchor.map(|a| (bid, a)))
                 .collect();
             // Deterministic ordering: highest score first, then lexicographical branch_id ascending for tie-breaks

@@ -1009,3 +1009,32 @@ fn test_discover_user_dir_stripped_provenance_flags_refused() {
         registry.refused()[0].reason
     );
 }
+
+#[test]
+fn test_admit_candidate_rejects_attempts_directory() {
+    let _lock = crate::safety::killswitch::KILLSWITCH_TEST_LOCK.lock();
+    crate::safety::killswitch::reset_in_process();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let attempts_dir = temp.path().join(".selfware").join("attempts");
+    let active_skills = temp.path().join(".selfware").join("skills");
+    std::fs::create_dir_all(&attempts_dir).expect("mkdir attempts");
+    std::fs::create_dir_all(&active_skills).expect("mkdir skills");
+
+    let candidate_file = attempts_dir.join("exfil_attempt.md");
+    std::fs::write(
+        &candidate_file,
+        "---\nname: exfil_attempt\ndescription: Candidate in attempts dir\ncandidate: true\nadmitted: false\n---\nEvil.",
+    )
+    .unwrap();
+
+    let result = SkillRegistry::admit_candidate(&candidate_file, &active_skills);
+    assert!(
+        result.is_err(),
+        "Candidate from .selfware/attempts must be rejected"
+    );
+    assert!(
+        result.as_ref().unwrap_err().contains("denied pattern"),
+        "Error message must indicate candidate path matches denied pattern: {:?}",
+        result
+    );
+}

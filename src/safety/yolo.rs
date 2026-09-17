@@ -814,7 +814,8 @@ fn targets_protected_path(cmd: &str, protected_paths: &[String]) -> Option<Strin
     if cmd.contains("sh") || cmd.contains("eval") || cmd.contains("fish") || cmd.contains("csh") {
         let parts = crate::safety::checker::validation::split_shell_commands(cmd);
         for part in parts {
-            let sub_tokens: Vec<&str> = part.split_whitespace().collect();
+            let sub_tokens: Vec<String> = shlex::split(part)
+                .unwrap_or_else(|| part.split_whitespace().map(|s| s.to_string()).collect());
             if let Some(c_pos) = sub_tokens
                 .iter()
                 .position(|t| crate::safety::checker::validation::is_shell_command_flag(t))
@@ -832,7 +833,8 @@ fn targets_protected_path(cmd: &str, protected_paths: &[String]) -> Option<Strin
                 if let Some(p) = targets_protected_path(nested_trimmed, protected_paths) {
                     return Some(p);
                 }
-            } else if sub_tokens.first() == Some(&"eval") && sub_tokens.len() > 1 {
+            } else if sub_tokens.first().map(|s| s.as_str()) == Some("eval") && sub_tokens.len() > 1
+            {
                 let nested_cmd = sub_tokens[1..].join(" ");
                 let nested_trimmed = nested_cmd.trim_matches(|c| c == '\'' || c == '"');
                 if let Some(p) = targets_protected_path(nested_trimmed, protected_paths) {
