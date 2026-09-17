@@ -2569,9 +2569,19 @@ async fn handle_command(
                         .collect();
                     (disc, val)
                 } else {
-                    let (_, single_tree) = &loaded_trees[0];
-                    let (disc, val) = single_tree.split_held_out(0.40);
-                    (vec![disc], vec![val])
+                    let (path, single_tree) = &loaded_trees[0];
+                    match single_tree.split_held_out(0.40) {
+                        Ok((disc, val)) => (vec![disc], vec![val]),
+                        Err(e) => {
+                            println!(
+                                "   {} Attempt history in {} cannot be partitioned for held-out validation: {}. Replay requires at least 2 independent branches or multiple trees.",
+                                Glyphs::leaf(),
+                                path.display(),
+                                e
+                            );
+                            return Ok(());
+                        }
+                    }
                 };
 
                 let disc_nodes: usize = discovery_trees.iter().map(|t| t.len()).sum();
@@ -2604,7 +2614,7 @@ async fn handle_command(
                     ),
                 ];
 
-                let summaries = ReplaySimulator::evaluate_candidates_with_validation(
+                let outcome = ReplaySimulator::evaluate_candidates_full(
                     &discovery_trees,
                     &validation_trees,
                     0.0,
@@ -2612,11 +2622,12 @@ async fn handle_command(
                     &candidate_factories,
                     0.2,
                 )?;
+                let summaries = &outcome.summaries;
 
                 println!("┌─────────────────────────────┬──────────────┬──────────────┬──────────────┬──────────────┬─────────────┐");
                 println!("│ Policy                      │ Disc Probes  │ Disc Tokens  │ Val Score    │ Val Obj J    │ Incumbent?  │");
                 println!("├─────────────────────────────┼──────────────┼──────────────┼──────────────┼──────────────┼─────────────┤");
-                for s in &summaries {
+                for s in summaries {
                     let status = if s.policy_name.contains("Incumbent") {
                         "Baseline"
                     } else if s.beats_incumbent {
@@ -2636,6 +2647,35 @@ async fn handle_command(
                     );
                 }
                 println!("└─────────────────────────────┴──────────────┴──────────────┴──────────────┴──────────────┴─────────────┘");
+
+                if let Some(ref stab) = outcome.discovery_stability {
+                    let status_str = if stab.is_stable {
+                        "STABLE (W >= 0.70)"
+                    } else {
+                        "VOLATILE (W < 0.70)"
+                    };
+                    println!(
+                        "\n   {} Ranking Concordance across {} discovery tree(s): Kendall's W = {:.4} [{}]",
+                        if stab.is_stable { Glyphs::bloom() } else { Glyphs::frost() },
+                        stab.tree_count,
+                        stab.kendall_w,
+                        status_str
+                    );
+                }
+                if let Some(ref stab) = outcome.validation_stability {
+                    let status_str = if stab.is_stable {
+                        "STABLE (W >= 0.70)"
+                    } else {
+                        "VOLATILE (W < 0.70)"
+                    };
+                    println!(
+                        "   {} Ranking Concordance across {} validation tree(s): Kendall's W = {:.4} [{}]",
+                        if stab.is_stable { Glyphs::bloom() } else { Glyphs::frost() },
+                        stab.tree_count,
+                        stab.kendall_w,
+                        status_str
+                    );
+                }
 
                 if let Some(winner) = summaries.first() {
                     if winner.beats_incumbent {
@@ -2664,7 +2704,7 @@ async fn handle_command(
                 let report_path = repo_root
                     .join(".selfware")
                     .join("replay_validation_latest.json");
-                let report_json = serde_json::to_string_pretty(&summaries).unwrap_or_default();
+                let report_json = serde_json::to_string_pretty(&outcome).unwrap_or_default();
                 let _ = std::fs::write(&report_path, report_json);
 
                 return Ok(());
@@ -2783,6 +2823,15 @@ async fn handle_command(
                         anyhow::bail!("Evolution daemon panicked: {}", msg);
                     }
                 };
+
+                if let Some(ref abort_reason) = result.aborted {
+                    eprintln!(
+                        "\n   {} Evolution aborted: {}",
+                        Glyphs::frost(),
+                        abort_reason
+                    );
+                    anyhow::bail!("Evolution aborted: {}", abort_reason);
+                }
 
                 println!(
                     "\n   {} Evolution complete: {} generations, {} improvements",

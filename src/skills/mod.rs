@@ -612,6 +612,34 @@ impl SkillRegistry {
                                 });
                                 continue;
                             }
+
+                            // Metadata hash verification:
+                            if let Some(ref expected_meta_hash) = entry.metadata_hash {
+                                let actual_meta_hash = compute_metadata_hash(
+                                    &skill.description,
+                                    &skill.tools,
+                                    skill.scope.as_deref(),
+                                    skill.origin.as_deref(),
+                                );
+                                if &actual_meta_hash != expected_meta_hash {
+                                    warn!(
+                                        "Ignoring admitted candidate skill '{}' in user dir {}: metadata hash mismatch (expected {}, computed {}) — metadata tampered after admission",
+                                        skill.name,
+                                        path.display(),
+                                        expected_meta_hash,
+                                        actual_meta_hash
+                                    );
+                                    self.refused.push(RefusedSkill {
+                                        name: skill.name.clone(),
+                                        path: path.clone(),
+                                        reason:
+                                            "metadata hash mismatch (metadata tampered after admission)"
+                                                .to_string(),
+                                    });
+                                    continue;
+                                }
+                            }
+
                             skill.candidate = true;
                             skill.admitted = true;
                             skill.verified = entry.verified;
@@ -813,95 +841,97 @@ impl SkillRegistry {
             skill.origin.as_deref(),
         );
 
-        // Format updated markdown frontmatter preserving all metadata (including scope & trace_ids)
-        let mut frontmatter_map = serde_yaml::Mapping::new();
-        frontmatter_map.insert(
-            serde_yaml::Value::String("name".to_string()),
-            serde_yaml::Value::String(skill.name.clone()),
-        );
-        frontmatter_map.insert(
-            serde_yaml::Value::String("description".to_string()),
-            serde_yaml::Value::String(skill.description.clone()),
-        );
-        if !skill.tools.is_empty() {
-            let tools_val: Vec<serde_yaml::Value> = skill
-                .tools
-                .iter()
-                .map(|t| serde_yaml::Value::String(t.clone()))
-                .collect();
+        if !is_self_admission {
+            // Format updated markdown frontmatter preserving all metadata (including scope & trace_ids)
+            let mut frontmatter_map = serde_yaml::Mapping::new();
             frontmatter_map.insert(
-                serde_yaml::Value::String("tools".to_string()),
-                serde_yaml::Value::Sequence(tools_val),
+                serde_yaml::Value::String("name".to_string()),
+                serde_yaml::Value::String(skill.name.clone()),
             );
-        }
-        frontmatter_map.insert(
-            serde_yaml::Value::String("verified".to_string()),
-            serde_yaml::Value::Bool(skill.verified),
-        );
-        frontmatter_map.insert(
-            serde_yaml::Value::String("candidate".to_string()),
-            serde_yaml::Value::Bool(true),
-        );
-        frontmatter_map.insert(
-            serde_yaml::Value::String("admitted".to_string()),
-            serde_yaml::Value::Bool(true),
-        );
-        if let Some(ref orig) = skill.origin {
             frontmatter_map.insert(
-                serde_yaml::Value::String("origin".to_string()),
-                serde_yaml::Value::String(orig.clone()),
+                serde_yaml::Value::String("description".to_string()),
+                serde_yaml::Value::String(skill.description.clone()),
             );
-        }
-        if let Some(ref sc) = skill.scope {
-            frontmatter_map.insert(
-                serde_yaml::Value::String("scope".to_string()),
-                serde_yaml::Value::String(sc.clone()),
-            );
-        }
-        if !skill.trace_ids.is_empty() {
-            let trace_val: Vec<serde_yaml::Value> = skill
-                .trace_ids
-                .iter()
-                .map(|t| serde_yaml::Value::String(t.clone()))
-                .collect();
-            frontmatter_map.insert(
-                serde_yaml::Value::String("trace_ids".to_string()),
-                serde_yaml::Value::Sequence(trace_val),
-            );
-        }
-        if let Some(ref ch) = skill.content_hash {
-            frontmatter_map.insert(
-                serde_yaml::Value::String("content_hash".to_string()),
-                serde_yaml::Value::String(ch.clone()),
-            );
-        }
-
-        let yaml = serde_yaml::to_string(&frontmatter_map)
-            .map_err(|e| format!("Failed to serialize admitted frontmatter: {e}"))?;
-        let rendered = format!("---\n{}---\n\n{}", yaml, skill.content);
-
-        // 2. Stage candidate file write via temporary file + atomic rename
-        let temp_file_path =
-            target_skills_dir.join(format!(".{safe_name}.md.tmp.{}", uuid::Uuid::new_v4()));
-        let write_res = (|| -> std::io::Result<()> {
-            let mut open_opts = std::fs::OpenOptions::new();
-            open_opts.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                open_opts.custom_flags(libc::O_NOFOLLOW);
+            if !skill.tools.is_empty() {
+                let tools_val: Vec<serde_yaml::Value> = skill
+                    .tools
+                    .iter()
+                    .map(|t| serde_yaml::Value::String(t.clone()))
+                    .collect();
+                frontmatter_map.insert(
+                    serde_yaml::Value::String("tools".to_string()),
+                    serde_yaml::Value::Sequence(tools_val),
+                );
             }
-            use std::io::Write;
-            let mut file = open_opts.open(&temp_file_path)?;
-            file.write_all(rendered.as_bytes())?;
-            file.sync_all()?;
-            std::fs::rename(&temp_file_path, &target_file)?;
-            Ok(())
-        })();
+            frontmatter_map.insert(
+                serde_yaml::Value::String("verified".to_string()),
+                serde_yaml::Value::Bool(skill.verified),
+            );
+            frontmatter_map.insert(
+                serde_yaml::Value::String("candidate".to_string()),
+                serde_yaml::Value::Bool(true),
+            );
+            frontmatter_map.insert(
+                serde_yaml::Value::String("admitted".to_string()),
+                serde_yaml::Value::Bool(true),
+            );
+            if let Some(ref orig) = skill.origin {
+                frontmatter_map.insert(
+                    serde_yaml::Value::String("origin".to_string()),
+                    serde_yaml::Value::String(orig.clone()),
+                );
+            }
+            if let Some(ref sc) = skill.scope {
+                frontmatter_map.insert(
+                    serde_yaml::Value::String("scope".to_string()),
+                    serde_yaml::Value::String(sc.clone()),
+                );
+            }
+            if !skill.trace_ids.is_empty() {
+                let trace_val: Vec<serde_yaml::Value> = skill
+                    .trace_ids
+                    .iter()
+                    .map(|t| serde_yaml::Value::String(t.clone()))
+                    .collect();
+                frontmatter_map.insert(
+                    serde_yaml::Value::String("trace_ids".to_string()),
+                    serde_yaml::Value::Sequence(trace_val),
+                );
+            }
+            if let Some(ref ch) = skill.content_hash {
+                frontmatter_map.insert(
+                    serde_yaml::Value::String("content_hash".to_string()),
+                    serde_yaml::Value::String(ch.clone()),
+                );
+            }
 
-        if let Err(e) = write_res {
-            let _ = std::fs::remove_file(&temp_file_path);
-            return Err(format!("Failed to stage admitted skill file: {e}"));
+            let yaml = serde_yaml::to_string(&frontmatter_map)
+                .map_err(|e| format!("Failed to serialize admitted frontmatter: {e}"))?;
+            let rendered = format!("---\n{}---\n\n{}", yaml, skill.content);
+
+            // 2. Stage candidate file write via temporary file + atomic rename
+            let temp_file_path =
+                target_skills_dir.join(format!(".{safe_name}.md.tmp.{}", uuid::Uuid::new_v4()));
+            let write_res = (|| -> std::io::Result<()> {
+                let mut open_opts = std::fs::OpenOptions::new();
+                open_opts.write(true).create_new(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    open_opts.custom_flags(libc::O_NOFOLLOW);
+                }
+                use std::io::Write;
+                let mut file = open_opts.open(&temp_file_path)?;
+                file.write_all(rendered.as_bytes())?;
+                file.sync_all()?;
+                std::fs::rename(&temp_file_path, &target_file)?;
+                Ok(())
+            })();
+
+            if let Err(e) = write_res {
+                let _ = std::fs::remove_file(&temp_file_path);
+                return Err(format!("Failed to stage admitted skill file: {e}"));
+            }
         }
 
         // 3. Update and persist external admission ledger

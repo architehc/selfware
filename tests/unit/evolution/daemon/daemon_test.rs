@@ -1604,3 +1604,111 @@ fn test_log_and_append_attempt_failure_aborts() {
     assert!(events_content.contains("\"outcome\":\"aborted\""));
     assert!(events_content.contains("attempt logging failed"));
 }
+
+#[test]
+fn test_ranked_candidate_promotion_runner_up_qualifies() {
+    let base_metrics = make_metrics(100, 100);
+    let base_sab = make_sab(vec![("sc1", 90.0, true), ("sc2", 80.0, true)]);
+    let baseline_composite = 0.80;
+
+    // Candidate 1: High composite, but regresses scenario 1 in DarwinX
+    let mut cand1_metrics = make_metrics(100, 100);
+    cand1_metrics.sab_score = 110.0;
+    let cand1_sab = make_sab(vec![("sc1", 70.0, false), ("sc2", 95.0, true)]);
+    let cand1_composite = 0.95;
+
+    // Candidate 2 (Runner-up): Lower composite than candidate 1, but strictly improves and passes DarwinX
+    let mut cand2_metrics = make_metrics(100, 100);
+    cand2_metrics.sab_score = 105.0; // capability gain > SAB_NOISE_MARGIN
+    let cand2_sab = make_sab(vec![("sc1", 92.0, true), ("sc2", 88.0, true)]);
+    let cand2_composite = 0.88;
+
+    let mut evaluated_candidates = vec![
+        EvaluatedCandidate {
+            hypothesis: Hypothesis {
+                id: "hyp-1".into(),
+                description: "Aggressive optimization with regression".into(),
+                target_files: vec![],
+                patch: "patch1".into(),
+                property_test: None,
+            },
+            metrics: cand1_metrics.clone(),
+            sab_result: Some(cand1_sab.clone()),
+            tested_diff: "diff1".into(),
+            composite: cand1_composite,
+            attempt_id: "att-1".into(),
+        },
+        EvaluatedCandidate {
+            hypothesis: Hypothesis {
+                id: "hyp-2".into(),
+                description: "Clean verified improvement".into(),
+                target_files: vec![],
+                patch: "patch2".into(),
+                property_test: None,
+            },
+            metrics: cand2_metrics.clone(),
+            sab_result: Some(cand2_sab.clone()),
+            tested_diff: "diff2".into(),
+            composite: cand2_composite,
+            attempt_id: "att-2".into(),
+        },
+    ];
+
+    // Sort descending by composite (best-first ranking)
+    evaluated_candidates.sort_by(|a, b| {
+        b.composite
+            .partial_cmp(&a.composite)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    assert_eq!(evaluated_candidates[0].attempt_id, "att-1");
+    assert_eq!(evaluated_candidates[1].attempt_id, "att-2");
+
+    // Under single-winner selection (the old buggy pattern):
+    // only the highest-scoring candidate is evaluated against promotion gates.
+    let single_winner_decision = evaluate_candidate_promotion(
+        baseline_composite,
+        evaluated_candidates[0].composite,
+        Some(&base_sab),
+        evaluated_candidates[0].sab_result.as_ref(),
+        &base_metrics,
+        &evaluated_candidates[0].metrics,
+    );
+    assert!(matches!(
+        single_winner_decision,
+        PromotionDecision::Reject(r) if r.contains("DarwinX non-regression check failed")
+    ));
+
+    // Under ranked promotion (the fix):
+    // We iterate through ranked candidates. If candidate #1 fails, candidate #2 is evaluated.
+    let mut promoted_winner = None;
+    for (rank_idx, candidate) in evaluated_candidates.into_iter().enumerate() {
+        let rank = rank_idx + 1;
+        match evaluate_candidate_promotion(
+            baseline_composite,
+            candidate.composite,
+            Some(&base_sab),
+            candidate.sab_result.as_ref(),
+            &base_metrics,
+            &candidate.metrics,
+        ) {
+            PromotionDecision::Promote => {
+                promoted_winner = Some((rank, candidate));
+                break;
+            }
+            PromotionDecision::Reject(_) => {}
+        }
+    }
+
+    assert!(
+        promoted_winner.is_some(),
+        "Ranked promotion must promote the qualifying runner-up"
+    );
+    let (promoted_rank, promoted_candidate) = promoted_winner.unwrap();
+    assert_eq!(promoted_rank, 2);
+    assert_eq!(promoted_candidate.attempt_id, "att-2");
+    assert_eq!(
+        promoted_candidate.hypothesis.description,
+        "Clean verified improvement"
+    );
+}

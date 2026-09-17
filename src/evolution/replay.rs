@@ -27,6 +27,10 @@ pub enum ReplayError {
     DuplicateBranchInBatch(String),
     #[error("Replay exceeded maximum round cap of {0}")]
     PolicyLoopExceeded(usize),
+    #[error("Validation set is empty or unreachable (no legal starting actions): {0}")]
+    ValidationSetEmptyOrUnreachable(String),
+    #[error("Evaluation set is empty: {0}")]
+    EvaluationEmpty(String),
 }
 
 /// Factory producing boxed search policies for replay simulation.
@@ -113,6 +117,38 @@ pub struct PolicyValidationSummary {
     pub beats_incumbent: bool,
 }
 
+/// Measures the ranking concordance of search policies across multiple attempt trees.
+///
+/// Uses Kendall's coefficient of concordance (W) to determine whether the relative
+/// ranking of policies is mathematically consistent across diverse attempt trees
+/// (W in [0, 1]). W >= 0.70 indicates high concordance; W < 0.70 indicates
+/// tree-dependent volatility where policy promotion should be held.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RankingStability {
+    /// Kendall's W coefficient of concordance [0.0, 1.0].
+    pub kendall_w: f64,
+    /// Whether Kendall's W meets or exceeds the stability threshold (0.70).
+    pub is_stable: bool,
+    /// Number of attempt trees evaluated.
+    pub tree_count: usize,
+    /// Number of search policies compared.
+    pub policy_count: usize,
+    /// Per-tree rankings: for each tree index, a list of (policy_name, rank, objective_value).
+    pub per_tree_rankings: Vec<Vec<(String, usize, f64)>>,
+}
+
+/// Outcome of candidate evaluation across discovery and validation trees,
+/// including cross-tree ranking stability analysis.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReplayValidationOutcome {
+    /// Candidate summaries ranked descending by validation objective.
+    pub summaries: Vec<PolicyValidationSummary>,
+    /// Ranking stability across discovery trees, if >= 2 discovery trees.
+    pub discovery_stability: Option<RankingStability>,
+    /// Ranking stability across validation trees, if >= 2 validation trees.
+    pub validation_stability: Option<RankingStability>,
+}
+
 /// Deterministic replay simulator executing search policies over an `AttemptTree`.
 #[derive(Debug, Clone)]
 pub struct ReplaySimulator {
@@ -171,6 +207,12 @@ impl ReplaySimulator {
             // Determine legal actions strictly from revealed prefix
             let legal_actions = self.compute_legal_actions(&revealed_ids);
             if legal_actions.is_empty() {
+                if decision_rounds == 0 {
+                    return Err(ReplayError::ValidationSetEmptyOrUnreachable(
+                        "tree has zero reachable root nodes (all attempts depend on unrevealed parents)"
+                            .into(),
+                    ));
+                }
                 stop_reason = "No legal actions remaining in tree".into();
                 break;
             }
@@ -377,18 +419,20 @@ impl ReplaySimulator {
     }
 
     /// Evaluates candidate policies against discovery trees and held-out validation trees,
-    /// measuring discovery costs vs validation quality, and judging candidates against the incumbent.
-    pub fn evaluate_candidates_with_validation(
+    /// measuring discovery costs vs validation quality, cross-tree ranking stability, and judging candidates against the incumbent.
+    pub fn evaluate_candidates_full(
         discovery_trees: &[AttemptTree],
         validation_trees: &[AttemptTree],
         baseline_score: f64,
         max_parallelism: usize,
         candidate_factories: &[(&'static str, SearchPolicyFactory)],
         beta: f64,
-    ) -> Result<Vec<PolicyValidationSummary>, ReplayError> {
+    ) -> Result<ReplayValidationOutcome, ReplayError> {
         let mut summaries = Vec::new();
         let mut incumbent_validation_obj = 0.0;
         let mut found_incumbent = false;
+        let mut disc_evals = Vec::new();
+        let mut val_evals = Vec::new();
 
         // First pass: evaluate on discovery and validation
         for (label, make_policy) in candidate_factories {
@@ -421,7 +465,7 @@ impl ReplaySimulator {
                 .sum();
 
             summaries.push(PolicyValidationSummary {
-                policy_name: disc_eval.policy_name,
+                policy_name: disc_eval.policy_name.clone(),
                 discovery_probes: disc_probes,
                 discovery_tokens: disc_eval.cumulative_tokens,
                 discovery_objective: disc_eval.mean_objective_value,
@@ -429,6 +473,9 @@ impl ReplaySimulator {
                 validation_objective: val_eval.mean_objective_value,
                 beats_incumbent: false,
             });
+
+            disc_evals.push(disc_eval);
+            val_evals.push(val_eval);
         }
 
         // Second pass: mark beats_incumbent
@@ -449,7 +496,145 @@ impl ReplaySimulator {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        Ok(summaries)
+        let discovery_stability = if discovery_trees.len() > 1 && candidate_factories.len() > 1 {
+            Self::compute_ranking_stability(&disc_evals).ok()
+        } else {
+            None
+        };
+
+        let validation_stability = if validation_trees.len() > 1 && candidate_factories.len() > 1 {
+            Self::compute_ranking_stability(&val_evals).ok()
+        } else {
+            None
+        };
+
+        Ok(ReplayValidationOutcome {
+            summaries,
+            discovery_stability,
+            validation_stability,
+        })
+    }
+
+    /// Evaluates candidate policies against discovery trees and held-out validation trees,
+    /// returning only the ranked summaries for backwards compatibility.
+    pub fn evaluate_candidates_with_validation(
+        discovery_trees: &[AttemptTree],
+        validation_trees: &[AttemptTree],
+        baseline_score: f64,
+        max_parallelism: usize,
+        candidate_factories: &[(&'static str, SearchPolicyFactory)],
+        beta: f64,
+    ) -> Result<Vec<PolicyValidationSummary>, ReplayError> {
+        Self::evaluate_candidates_full(
+            discovery_trees,
+            validation_trees,
+            baseline_score,
+            max_parallelism,
+            candidate_factories,
+            beta,
+        )
+        .map(|outcome| outcome.summaries)
+    }
+
+    /// Computes Kendall's W coefficient of concordance across multiple attempt trees for a set of policies.
+    pub fn compute_ranking_stability(
+        evaluations: &[MultiTreeEvaluation],
+    ) -> Result<RankingStability, ReplayError> {
+        let policy_count = evaluations.len();
+        if policy_count == 0 {
+            return Err(ReplayError::EvaluationEmpty(
+                "no policy evaluations provided".into(),
+            ));
+        }
+
+        let tree_count = evaluations[0].tree_count;
+        if tree_count == 0 {
+            return Err(ReplayError::EvaluationEmpty("tree count is zero".into()));
+        }
+
+        for eval in evaluations {
+            if eval.tree_count != tree_count || eval.per_tree_reports.len() != tree_count {
+                return Err(ReplayError::EvaluationEmpty(
+                    "mismatched tree counts across evaluations".into(),
+                ));
+            }
+        }
+
+        if tree_count < 2 || policy_count < 2 {
+            let mut per_tree_rankings = Vec::with_capacity(tree_count);
+            for t in 0..tree_count {
+                let mut tree_ranks = Vec::with_capacity(policy_count);
+                for (p_idx, eval) in evaluations.iter().enumerate() {
+                    tree_ranks.push((
+                        eval.policy_name.clone(),
+                        p_idx + 1,
+                        eval.per_tree_reports[t].objective_value,
+                    ));
+                }
+                per_tree_rankings.push(tree_ranks);
+            }
+            return Ok(RankingStability {
+                kendall_w: 1.0,
+                is_stable: true,
+                tree_count,
+                policy_count,
+                per_tree_rankings,
+            });
+        }
+
+        let m = policy_count as f64;
+        let n = tree_count as f64;
+
+        let mut per_tree_rankings: Vec<Vec<(String, usize, f64)>> = Vec::with_capacity(tree_count);
+        let mut rank_sums = vec![0.0; policy_count];
+
+        for t in 0..tree_count {
+            let mut scored_policies: Vec<(usize, String, f64)> = evaluations
+                .iter()
+                .enumerate()
+                .map(|(idx, eval)| {
+                    (
+                        idx,
+                        eval.policy_name.clone(),
+                        eval.per_tree_reports[t].objective_value,
+                    )
+                })
+                .collect();
+
+            scored_policies.sort_by(|a, b| {
+                b.2.partial_cmp(&a.2)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.1.cmp(&b.1))
+            });
+
+            let mut tree_ranking = Vec::with_capacity(policy_count);
+            for (rank_minus_1, (p_idx, name, score)) in scored_policies.into_iter().enumerate() {
+                let rank = rank_minus_1 + 1;
+                rank_sums[p_idx] += rank as f64;
+                tree_ranking.push((name, rank, score));
+            }
+            per_tree_rankings.push(tree_ranking);
+        }
+
+        let r_bar = n * (m + 1.0) / 2.0;
+        let s: f64 = rank_sums.iter().map(|r| (r - r_bar).powi(2)).sum();
+        let max_s = (n.powi(2) * (m.powi(3) - m)) / 12.0;
+
+        let kendall_w = if max_s > 0.0 {
+            (s / max_s).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+
+        let is_stable = kendall_w >= 0.70;
+
+        Ok(RankingStability {
+            kendall_w,
+            is_stable,
+            tree_count,
+            policy_count,
+            per_tree_rankings,
+        })
     }
 
     /// Helper to find legal roots and legal frontiers given the set of revealed node IDs.

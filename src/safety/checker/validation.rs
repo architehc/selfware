@@ -1644,8 +1644,11 @@ impl SafetyChecker {
 
             // Recursively inspect nested shell invocations: sh -c "...", bash -c '...', eval "..."
             // Closes the nested-sh -c gap for denied paths, output redirects, and tee writes.
-            if matches!(verb, "sh" | "bash" | "zsh" | "dash" | "ksh") {
-                if let Some(c_pos) = tokens.iter().position(|t| t == "-c") {
+            if matches!(
+                verb,
+                "sh" | "bash" | "zsh" | "dash" | "ksh" | "fish" | "csh" | "tcsh"
+            ) {
+                if let Some(c_pos) = tokens.iter().position(|t| is_shell_command_flag(t)) {
                     if let Some(nested_cmd) = tokens.get(c_pos + 1) {
                         for target in shell_output_redirect_targets(nested_cmd) {
                             if let Some(pattern) = redirect_target_matches_denied(
@@ -3466,8 +3469,16 @@ fn is_env_assignment(tok: &str) -> bool {
 }
 
 /// The basename of a command word (`/usr/bin/tee` → `tee`).
-fn command_basename(word: &str) -> &str {
+pub(crate) fn command_basename(word: &str) -> &str {
     word.rsplit(['/', '\\']).next().unwrap_or(word)
+}
+
+/// Returns true if a shell token represents a command-string flag (e.g. `-c`, `--command`, `-lc`, `-ec`).
+#[inline]
+pub(crate) fn is_shell_command_flag(token: &str) -> bool {
+    token == "-c"
+        || token == "--command"
+        || (token.starts_with('-') && !token.starts_with("--") && token.ends_with('c'))
 }
 
 /// Locate the command word of one pipeline segment: the first token after

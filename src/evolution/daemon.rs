@@ -355,6 +355,16 @@ pub(crate) enum PromotionDecision {
     Reject(String),
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct EvaluatedCandidate {
+    pub(crate) hypothesis: Hypothesis,
+    pub(crate) metrics: FitnessMetrics,
+    pub(crate) sab_result: Option<fitness::SabResult>,
+    pub(crate) tested_diff: String,
+    pub(crate) composite: f64,
+    pub(crate) attempt_id: String,
+}
+
 /// Minimum SAB score margin (epsilon) to consider a capability delta real rather than noise.
 pub const SAB_NOISE_MARGIN: f64 = 0.5;
 
@@ -610,6 +620,12 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
     log_baseline(&current_baseline_metrics, sab_mode);
 
+    if !sab_mode && current_baseline_metrics.sab_score >= 100.0 {
+        log_phase("  ℹ Baseline compile+test suite is 100% green. Without SELFWARE_EVOLVE_SAB=1, fitness scores are capped at 100.0 with unmeasured tokens. Evolution will operate in tree data-collection mode for offline Dream-RSI policy replay.");
+    }
+
+    let mut active_parent_id: Option<String> = None;
+
     // ═══════════════════════════════════════════════════════
     // MAIN EVOLUTIONARY LOOP
     // ═══════════════════════════════════════════════════════
@@ -689,7 +705,6 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         // target_files metadata (free-form JSON, never cross-checked — an
         // empty array passed trivially). See hypothesis_touches_protected.
         let mut valid = Vec::new();
-        let mut filter_aborted = false;
         for h in hypotheses {
             if hypothesis_touches_protected(&h) {
                 log_warning(&format!(
@@ -698,7 +713,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 ));
                 let node = AttemptNode {
                     id: format!("att-g{}-{}", generation, h.id),
-                    parent_id: None,
+                    parent_id: active_parent_id.clone(),
                     generation,
                     branch_id: h.id.clone(),
                     hypothesis_id: h.id.clone(),
@@ -716,19 +731,21 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     binary_sha256: None,
                     created_at: chrono_now(),
                 };
-                if log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start)
-                    .is_err()
+                if let Err(err) =
+                    log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start)
                 {
-                    filter_aborted = true;
-                    break;
+                    return EvolutionResult {
+                        generations_run: generation.saturating_sub(1),
+                        improvements: hall_of_fame,
+                        final_sab_score: current_baseline_metrics.sab_score,
+                        initial_sab_score: initial_sab,
+                        total_duration: start.elapsed(),
+                        aborted: Some(format!("attempt logging failed: {err}")),
+                    };
                 }
                 continue;
             }
             valid.push(h);
-        }
-
-        if filter_aborted {
-            continue;
         }
 
         if valid.is_empty() {
@@ -743,12 +760,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         // ─── Step 4: Evaluate each hypothesis (apply → check → test) ───
         let sab_available =
             sab_config.runner_script.exists() && std::env::var("SELFWARE_EVOLVE_SAB").is_ok();
-        let mut generation_winner: Option<(
-            Hypothesis,
-            FitnessMetrics,
-            Option<fitness::SabResult>,
-            String,
-        )> = None;
+        let mut evaluated_candidates: Vec<EvaluatedCandidate> = Vec::new();
 
         for hypothesis in &valid {
             let attempt_start = Instant::now();
@@ -771,7 +783,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     log_warning(&format!("  Worktree failed: {}", e));
                     let node = AttemptNode {
                         id: attempt_id.clone(),
-                        parent_id: None,
+                        parent_id: active_parent_id.clone(),
                         generation,
                         branch_id: hypothesis.id.clone(),
                         hypothesis_id: hypothesis.id.clone(),
@@ -789,17 +801,21 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         binary_sha256: None,
                         created_at: chrono_now(),
                     };
-                    if log_and_append_attempt(
+                    if let Err(err) = log_and_append_attempt(
                         &attempts_file,
                         &node,
                         repo_root,
                         generation,
                         gen_start,
-                    )
-                    .is_err()
-                    {
-                        generation_winner = None;
-                        break;
+                    ) {
+                        return EvolutionResult {
+                            generations_run: generation.saturating_sub(1),
+                            improvements: hall_of_fame,
+                            final_sab_score: current_baseline_metrics.sab_score,
+                            initial_sab_score: initial_sab,
+                            total_duration: start.elapsed(),
+                            aborted: Some(format!("attempt logging failed: {err}")),
+                        };
                     }
                     continue;
                 }
@@ -814,7 +830,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 log_warning(&format!("  Edit preview:\n{}", preview));
                 let node = AttemptNode {
                     id: attempt_id.clone(),
-                    parent_id: None,
+                    parent_id: active_parent_id.clone(),
                     generation,
                     branch_id: hypothesis.id.clone(),
                     hypothesis_id: hypothesis.id.clone(),
@@ -832,11 +848,17 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     binary_sha256: None,
                     created_at: chrono_now(),
                 };
-                if log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start)
-                    .is_err()
+                if let Err(err) =
+                    log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start)
                 {
-                    generation_winner = None;
-                    break;
+                    return EvolutionResult {
+                        generations_run: generation.saturating_sub(1),
+                        improvements: hall_of_fame,
+                        final_sab_score: current_baseline_metrics.sab_score,
+                        initial_sab_score: initial_sab,
+                        total_duration: start.elapsed(),
+                        aborted: Some(format!("attempt logging failed: {err}")),
+                    };
                 }
                 continue;
             }
@@ -858,7 +880,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     log_frost(generation, &format!("cargo fmt failed: {}", hypothesis.id));
                     let node = AttemptNode {
                         id: attempt_id.clone(),
-                        parent_id: None,
+                        parent_id: active_parent_id.clone(),
                         generation,
                         branch_id: hypothesis.id.clone(),
                         hypothesis_id: hypothesis.id.clone(),
@@ -876,17 +898,21 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         binary_sha256: None,
                         created_at: chrono_now(),
                     };
-                    if log_and_append_attempt(
+                    if let Err(err) = log_and_append_attempt(
                         &attempts_file,
                         &node,
                         repo_root,
                         generation,
                         gen_start,
-                    )
-                    .is_err()
-                    {
-                        generation_winner = None;
-                        break;
+                    ) {
+                        return EvolutionResult {
+                            generations_run: generation.saturating_sub(1),
+                            improvements: hall_of_fame,
+                            final_sab_score: current_baseline_metrics.sab_score,
+                            initial_sab_score: initial_sab,
+                            total_duration: start.elapsed(),
+                            aborted: Some(format!("attempt logging failed: {err}")),
+                        };
                     }
                     continue;
                 }
@@ -905,7 +931,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 log_frost(generation, &format!("Compile failed: {}", hypothesis.id));
                 let node = AttemptNode {
                     id: attempt_id.clone(),
-                    parent_id: None,
+                    parent_id: active_parent_id.clone(),
                     generation,
                     branch_id: hypothesis.id.clone(),
                     hypothesis_id: hypothesis.id.clone(),
@@ -923,11 +949,17 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     binary_sha256: None,
                     created_at: chrono_now(),
                 };
-                if log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start)
-                    .is_err()
+                if let Err(err) =
+                    log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start)
                 {
-                    generation_winner = None;
-                    break;
+                    return EvolutionResult {
+                        generations_run: generation.saturating_sub(1),
+                        improvements: hall_of_fame,
+                        final_sab_score: current_baseline_metrics.sab_score,
+                        initial_sab_score: initial_sab,
+                        total_duration: start.elapsed(),
+                        aborted: Some(format!("attempt logging failed: {err}")),
+                    };
                 }
                 continue;
             }
@@ -948,7 +980,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     log_warning(&format!("  Test execution failed: {}", e));
                     let node = AttemptNode {
                         id: attempt_id.clone(),
-                        parent_id: None,
+                        parent_id: active_parent_id.clone(),
                         generation,
                         branch_id: hypothesis.id.clone(),
                         hypothesis_id: hypothesis.id.clone(),
@@ -966,17 +998,21 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         binary_sha256: None,
                         created_at: chrono_now(),
                     };
-                    if log_and_append_attempt(
+                    if let Err(err) = log_and_append_attempt(
                         &attempts_file,
                         &node,
                         repo_root,
                         generation,
                         gen_start,
-                    )
-                    .is_err()
-                    {
-                        generation_winner = None;
-                        break;
+                    ) {
+                        return EvolutionResult {
+                            generations_run: generation.saturating_sub(1),
+                            improvements: hall_of_fame,
+                            final_sab_score: current_baseline_metrics.sab_score,
+                            initial_sab_score: initial_sab,
+                            total_duration: start.elapsed(),
+                            aborted: Some(format!("attempt logging failed: {err}")),
+                        };
                     }
                     continue;
                 }
@@ -997,7 +1033,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 );
                 let node = AttemptNode {
                     id: attempt_id.clone(),
-                    parent_id: None,
+                    parent_id: active_parent_id.clone(),
                     generation,
                     branch_id: hypothesis.id.clone(),
                     hypothesis_id: hypothesis.id.clone(),
@@ -1015,11 +1051,17 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     binary_sha256: None,
                     created_at: chrono_now(),
                 };
-                if log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start)
-                    .is_err()
+                if let Err(err) =
+                    log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start)
                 {
-                    generation_winner = None;
-                    break;
+                    return EvolutionResult {
+                        generations_run: generation.saturating_sub(1),
+                        improvements: hall_of_fame,
+                        final_sab_score: current_baseline_metrics.sab_score,
+                        initial_sab_score: initial_sab,
+                        total_duration: start.elapsed(),
+                        aborted: Some(format!("attempt logging failed: {err}")),
+                    };
                 }
                 continue;
             }
@@ -1038,7 +1080,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 log_frost(generation, &format!("Clippy failed: {}", hypothesis.id));
                 let node = AttemptNode {
                     id: attempt_id.clone(),
-                    parent_id: None,
+                    parent_id: active_parent_id.clone(),
                     generation,
                     branch_id: hypothesis.id.clone(),
                     hypothesis_id: hypothesis.id.clone(),
@@ -1056,11 +1098,17 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     binary_sha256: None,
                     created_at: chrono_now(),
                 };
-                if log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start)
-                    .is_err()
+                if let Err(err) =
+                    log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start)
                 {
-                    generation_winner = None;
-                    break;
+                    return EvolutionResult {
+                        generations_run: generation.saturating_sub(1),
+                        improvements: hall_of_fame,
+                        final_sab_score: current_baseline_metrics.sab_score,
+                        initial_sab_score: initial_sab,
+                        total_duration: start.elapsed(),
+                        aborted: Some(format!("attempt logging failed: {err}")),
+                    };
                 }
                 continue;
             }
@@ -1080,7 +1128,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     );
                     let node = AttemptNode {
                         id: attempt_id.clone(),
-                        parent_id: None,
+                        parent_id: active_parent_id.clone(),
                         generation,
                         branch_id: hypothesis.id.clone(),
                         hypothesis_id: hypothesis.id.clone(),
@@ -1098,17 +1146,21 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         binary_sha256: None,
                         created_at: chrono_now(),
                     };
-                    if log_and_append_attempt(
+                    if let Err(err) = log_and_append_attempt(
                         &attempts_file,
                         &node,
                         repo_root,
                         generation,
                         gen_start,
-                    )
-                    .is_err()
-                    {
-                        generation_winner = None;
-                        break;
+                    ) {
+                        return EvolutionResult {
+                            generations_run: generation.saturating_sub(1),
+                            improvements: hall_of_fame,
+                            final_sab_score: current_baseline_metrics.sab_score,
+                            initial_sab_score: initial_sab,
+                            total_duration: start.elapsed(),
+                            aborted: Some(format!("attempt logging failed: {err}")),
+                        };
                     }
                     continue;
                 }
@@ -1127,7 +1179,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         log_warning(&format!("  SAB failed: {}", e));
                         let node = AttemptNode {
                             id: attempt_id.clone(),
-                            parent_id: None,
+                            parent_id: active_parent_id.clone(),
                             generation,
                             branch_id: hypothesis.id.clone(),
                             hypothesis_id: hypothesis.id.clone(),
@@ -1145,17 +1197,21 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             binary_sha256: None,
                             created_at: chrono_now(),
                         };
-                        if log_and_append_attempt(
+                        if let Err(err) = log_and_append_attempt(
                             &attempts_file,
                             &node,
                             repo_root,
                             generation,
                             gen_start,
-                        )
-                        .is_err()
-                        {
-                            generation_winner = None;
-                            break;
+                        ) {
+                            return EvolutionResult {
+                                generations_run: generation.saturating_sub(1),
+                                improvements: hall_of_fame,
+                                final_sab_score: current_baseline_metrics.sab_score,
+                                initial_sab_score: initial_sab,
+                                total_duration: start.elapsed(),
+                                aborted: Some(format!("attempt logging failed: {err}")),
+                            };
                         }
                         continue;
                     }
@@ -1176,7 +1232,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         );
                         let node = AttemptNode {
                             id: attempt_id.clone(),
-                            parent_id: None,
+                            parent_id: active_parent_id.clone(),
                             generation,
                             branch_id: hypothesis.id.clone(),
                             hypothesis_id: hypothesis.id.clone(),
@@ -1194,17 +1250,21 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             binary_sha256: None,
                             created_at: chrono_now(),
                         };
-                        if log_and_append_attempt(
+                        if let Err(err) = log_and_append_attempt(
                             &attempts_file,
                             &node,
                             repo_root,
                             generation,
                             gen_start,
-                        )
-                        .is_err()
-                        {
-                            generation_winner = None;
-                            break;
+                        ) {
+                            return EvolutionResult {
+                                generations_run: generation.saturating_sub(1),
+                                improvements: hall_of_fame,
+                                final_sab_score: current_baseline_metrics.sab_score,
+                                initial_sab_score: initial_sab,
+                                total_duration: start.elapsed(),
+                                aborted: Some(format!("attempt logging failed: {err}")),
+                            };
                         }
                         continue;
                     }
@@ -1226,7 +1286,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     );
                     let node = AttemptNode {
                         id: attempt_id.clone(),
-                        parent_id: None,
+                        parent_id: active_parent_id.clone(),
                         generation,
                         branch_id: hypothesis.id.clone(),
                         hypothesis_id: hypothesis.id.clone(),
@@ -1244,17 +1304,21 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         binary_sha256: None,
                         created_at: chrono_now(),
                     };
-                    if log_and_append_attempt(
+                    if let Err(err) = log_and_append_attempt(
                         &attempts_file,
                         &node,
                         repo_root,
                         generation,
                         gen_start,
-                    )
-                    .is_err()
-                    {
-                        generation_winner = None;
-                        break;
+                    ) {
+                        return EvolutionResult {
+                            generations_run: generation.saturating_sub(1),
+                            improvements: hall_of_fame,
+                            final_sab_score: current_baseline_metrics.sab_score,
+                            initial_sab_score: initial_sab,
+                            total_duration: start.elapsed(),
+                            aborted: Some(format!("attempt logging failed: {err}")),
+                        };
                     }
                     continue;
                 }
@@ -1265,7 +1329,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
             let node = AttemptNode {
                 id: attempt_id.clone(),
-                parent_id: None,
+                parent_id: active_parent_id.clone(),
                 generation,
                 branch_id: hypothesis.id.clone(),
                 hypothesis_id: hypothesis.id.clone(),
@@ -1283,11 +1347,17 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 binary_sha256: winner_sab.as_ref().map(|s| s.binary_sha256.clone()),
                 created_at: chrono_now(),
             };
-            if log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start)
-                .is_err()
+            if let Err(err) =
+                log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start)
             {
-                generation_winner = None;
-                break;
+                return EvolutionResult {
+                    generations_run: generation.saturating_sub(1),
+                    improvements: hall_of_fame,
+                    final_sab_score: current_baseline_metrics.sab_score,
+                    initial_sab_score: initial_sab,
+                    total_duration: start.elapsed(),
+                    aborted: Some(format!("attempt logging failed: {err}")),
+                };
             }
 
             log_phase(&format!(
@@ -1298,76 +1368,108 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 winner_metrics.wall_clock_secs
             ));
 
-            // Noise-aware best-of-generation selection
-            let is_better = match &generation_winner {
-                None => true,
-                Some((_, best_metrics, _, _)) => {
-                    let best_composite = config.fitness_weights.composite(best_metrics);
-                    is_candidate_better(
-                        &winner_metrics,
-                        candidate_composite,
-                        best_metrics,
-                        best_composite,
-                    )
+            evaluated_candidates.push(EvaluatedCandidate {
+                hypothesis: hypothesis.clone(),
+                metrics: winner_metrics,
+                sab_result: winner_sab,
+                tested_diff,
+                composite: candidate_composite,
+                attempt_id: attempt_id.clone(),
+            });
+        }
+
+        // ─── Step 5: EMERGE OR DIE (Ranked Promotion) ───
+        if evaluated_candidates.is_empty() {
+            log_frost(generation, "No hypotheses survived evaluation");
+            log_event(
+                repo_root,
+                &serde_json::json!({
+                    "event": "generation_end",
+                    "timestamp": chrono_now(),
+                    "generation": generation,
+                    "outcome": "frost",
+                    "reason": "no hypotheses survived",
+                    "duration_secs": gen_start.elapsed().as_secs_f64(),
+                }),
+            );
+            continue;
+        }
+
+        // Rank evaluated candidates best-first using noise-aware comparison
+        evaluated_candidates.sort_by(|a, b| {
+            if is_candidate_better(&a.metrics, a.composite, &b.metrics, b.composite) {
+                std::cmp::Ordering::Less
+            } else if is_candidate_better(&b.metrics, b.composite, &a.metrics, a.composite) {
+                std::cmp::Ordering::Greater
+            } else {
+                b.composite
+                    .partial_cmp(&a.composite)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }
+        });
+
+        let mut promoted_winner = None;
+        let baseline_composite = config.fitness_weights.composite(&current_baseline_metrics);
+
+        for (rank_idx, candidate) in evaluated_candidates.into_iter().enumerate() {
+            let rank = rank_idx + 1;
+            match evaluate_candidate_promotion(
+                baseline_composite,
+                candidate.composite,
+                current_baseline_sab.as_ref(),
+                candidate.sab_result.as_ref(),
+                &current_baseline_metrics,
+                &candidate.metrics,
+            ) {
+                PromotionDecision::Promote => {
+                    promoted_winner = Some((rank, candidate));
+                    break;
                 }
-            };
-            if is_better {
-                generation_winner =
-                    Some((hypothesis.clone(), winner_metrics, winner_sab, tested_diff));
+                PromotionDecision::Reject(reason) => {
+                    log_phase(&format!(
+                        "  Candidate #{} '{}' (composite: {:.4}) rejected by gate: {reason}; evaluating runner-up",
+                        rank, candidate.hypothesis.description, candidate.composite
+                    ));
+                    log_event(
+                        repo_root,
+                        &serde_json::json!({
+                            "event": "candidate_rejected",
+                            "timestamp": chrono_now(),
+                            "generation": generation,
+                            "rank": rank,
+                            "description": candidate.hypothesis.description,
+                            "composite": candidate.composite,
+                            "reason": reason,
+                        }),
+                    );
+                }
             }
         }
 
-        // ─── Step 5: EMERGE OR DIE ───
-        let (winner, winner_metrics, winner_sab, tested_diff) = match generation_winner {
-            Some(w) => w,
-            None => {
-                log_frost(generation, "No hypotheses survived evaluation");
-                log_event(
-                    repo_root,
-                    &serde_json::json!({
-                        "event": "generation_end",
-                        "timestamp": chrono_now(),
-                        "generation": generation,
-                        "outcome": "frost",
-                        "reason": "no hypotheses survived",
-                        "duration_secs": gen_start.elapsed().as_secs_f64(),
-                    }),
-                );
-                continue;
-            }
-        };
-
-        let baseline_composite = config.fitness_weights.composite(&current_baseline_metrics);
-        let winner_composite = config.fitness_weights.composite(&winner_metrics);
-
-        match evaluate_candidate_promotion(
-            baseline_composite,
-            winner_composite,
-            current_baseline_sab.as_ref(),
-            winner_sab.as_ref(),
-            &current_baseline_metrics,
-            &winner_metrics,
-        ) {
-            PromotionDecision::Promote => {
+        match promoted_winner {
+            Some((rank, winner)) => {
                 log_bloom(
                     generation,
-                    &winner.description,
+                    &winner.hypothesis.description,
                     current_baseline_metrics.sab_score,
-                    winner_metrics.sab_score,
+                    winner.metrics.sab_score,
                 );
 
                 let commit_msg = format!(
-                    "🧬 Gen {} BLOOM: {:.0} → {:.0} | {}",
+                    "🧬 Gen {} BLOOM (Rank {}): {:.0} → {:.0} | {}",
                     generation,
+                    rank,
                     current_baseline_metrics.sab_score,
-                    winner_metrics.sab_score,
-                    winner.description
+                    winner.metrics.sab_score,
+                    winner.hypothesis.description
                 );
                 // Apply the EXACT tested diff (not the raw LLM patch) and commit
                 // ONLY the paths it edits — never `git add -A`, which swept every
                 // dirty edit and untracked file (.env, scratch, credentials) into
                 // the BLOOM commit on whatever branch was checked out.
-                if commit_winner_to_repo(repo_root, &tested_diff, &commit_msg) {
+                if commit_winner_to_repo(repo_root, &winner.tested_diff, &commit_msg) {
+                    active_parent_id = Some(winner.attempt_id.clone());
+
                     let git_tag = if generation.is_multiple_of(config.checkpoint_interval) {
                         let tag = format!("evolve-gen-{}", generation);
                         let _ = Command::new("git")
@@ -1382,7 +1484,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     let mut run_id = None;
                     let mut binary_sha256 = None;
                     let mut report_path = None;
-                    if let Some(ref sab) = winner_sab {
+                    if let Some(ref sab) = winner.sab_result {
                         sab_config.exempt_reports.push(sab.report_path.clone());
                         if sab_config.exempt_reports.len() > 10 {
                             let excess = sab_config.exempt_reports.len() - 10;
@@ -1395,11 +1497,11 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
                     hall_of_fame.push(GenerationWinner {
                         generation,
-                        description: winner.description.clone(),
-                        composite_score: winner_composite,
-                        sab_delta: winner_metrics.sab_score - current_baseline_metrics.sab_score,
+                        description: winner.hypothesis.description.clone(),
+                        composite_score: winner.composite,
+                        sab_delta: winner.metrics.sab_score - current_baseline_metrics.sab_score,
                         token_delta: match (
-                            winner_metrics.tokens_used,
+                            winner.metrics.tokens_used,
                             current_baseline_metrics.tokens_used,
                         ) {
                             (Some(w), Some(b)) => Some(w as f64 - b as f64),
@@ -1407,7 +1509,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         },
                         // The tested diff actually committed (incl. fmt fixes),
                         // not the raw LLM patch.
-                        patch: tested_diff.clone(),
+                        patch: winner.tested_diff.clone(),
                         git_tag,
                         run_id: run_id.clone(),
                         binary_sha256: binary_sha256.clone(),
@@ -1421,10 +1523,11 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             "timestamp": chrono_now(),
                             "generation": generation,
                             "outcome": "bloom",
-                            "description": winner.description,
+                            "rank": rank,
+                            "description": winner.hypothesis.description,
                             "score_before": current_baseline_metrics.sab_score,
-                            "score_after": winner_metrics.sab_score,
-                            "composite": winner_composite,
+                            "score_after": winner.metrics.sab_score,
+                            "composite": winner.composite,
                             "duration_secs": gen_start.elapsed().as_secs_f64(),
                             "improvements_total": hall_of_fame.len(),
                             "run_id": run_id,
@@ -1433,9 +1536,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         }),
                     );
 
-                    current_baseline_metrics = winner_metrics;
-                    if winner_sab.is_some() {
-                        current_baseline_sab = winner_sab;
+                    current_baseline_metrics = winner.metrics;
+                    if winner.sab_result.is_some() {
+                        current_baseline_sab = winner.sab_result;
                     }
                 } else {
                     log_warning("Failed to commit winner diff to repository");
@@ -1447,37 +1550,26 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             "reason": "git commit or tag creation failed",
                             "timestamp": chrono_now(),
                             "generation": generation,
-                            "description": winner.description,
-                            "composite": winner_composite,
+                            "description": winner.hypothesis.description,
+                            "composite": winner.composite,
                             "duration_secs": gen_start.elapsed().as_secs_f64(),
                         }),
                     );
                 }
             }
-            PromotionDecision::Reject(reason) => {
-                let rating = if winner_composite < baseline_composite * 0.9 {
-                    GenerationRating::Frost
-                } else {
-                    GenerationRating::Wilt
-                };
-                log_reject(
+            None => {
+                log_frost(
                     generation,
-                    &rating,
-                    winner_metrics.sab_score,
-                    current_baseline_metrics.sab_score,
+                    "All evaluated candidates were rejected by non-regression or promotion gates",
                 );
-                log_warning(&reason);
                 log_event(
                     repo_root,
                     &serde_json::json!({
                         "event": "generation_end",
                         "timestamp": chrono_now(),
                         "generation": generation,
-                        "outcome": format!("{}", rating),
-                        "reason": reason,
-                        "description": winner.description,
-                        "winner_score": winner_metrics.sab_score,
-                        "baseline_score": current_baseline_metrics.sab_score,
+                        "outcome": "frost",
+                        "reason": "all evaluated candidates rejected by promotion gates",
                         "duration_secs": gen_start.elapsed().as_secs_f64(),
                     }),
                 );
@@ -2804,14 +2896,6 @@ fn log_event(repo_root: &Path, event: &serde_json::Value) {
 
 fn log_frost(_gen: usize, reason: &str) {
     eprintln!("│  ❄️  FROST: {}", reason);
-    eprintln!("╰────────────────────────────────────────────────────╯");
-}
-
-fn log_reject(_gen: usize, rating: &GenerationRating, winner_sab: f64, baseline_sab: f64) {
-    eprintln!(
-        "│  {} SAB {:.0} vs baseline {:.0} — rejected",
-        rating, winner_sab, baseline_sab
-    );
     eprintln!("╰────────────────────────────────────────────────────╯");
 }
 

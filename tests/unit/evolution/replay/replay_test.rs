@@ -2,7 +2,9 @@ use super::*;
 use crate::evolution::policy::{
     BreadthFirstPolicy, FixedPopulationPolicy, ParetoAdaptivePolicy, RefineTop1Policy,
 };
-use crate::evolution::tree_log::{compute_sha256, AttemptNode, AttemptStatus, FailureClass};
+use crate::evolution::tree_log::{
+    compute_sha256, AttemptNode, AttemptStatus, FailureClass, TreeLogError,
+};
 
 fn make_node(
     id: &str,
@@ -276,7 +278,7 @@ fn test_evaluate_across_multiple_trees() {
 #[test]
 fn test_evaluate_candidates_with_held_out_validation() {
     let tree = build_test_tree();
-    let (disc_tree, val_tree) = tree.split_held_out(0.33);
+    let (disc_tree, val_tree) = tree.split_held_out(0.33).expect("split held out");
 
     let candidate_factories: Vec<(&'static str, SearchPolicyFactory)> = vec![
         (
@@ -307,4 +309,170 @@ fn test_evaluate_candidates_with_held_out_validation() {
     // Verification: ranked descending by validation objective
     assert!(summaries[0].validation_objective >= summaries[1].validation_objective);
     assert!(summaries[1].validation_objective >= summaries[2].validation_objective);
+}
+
+#[test]
+fn test_evaluate_candidates_full_with_stability() {
+    let tree1 = build_test_tree();
+    let tree2 = build_test_tree();
+    let val_tree1 = build_test_tree();
+    let val_tree2 = build_test_tree();
+
+    let candidate_factories: Vec<(&'static str, SearchPolicyFactory)> = vec![
+        (
+            "FixedPopulation (Incumbent)",
+            Box::new(|| Box::new(FixedPopulationPolicy::new(2))),
+        ),
+        (
+            "RefineTop1Policy",
+            Box::new(|| Box::new(RefineTop1Policy::new(2))),
+        ),
+        (
+            "ParetoAdaptivePolicy",
+            Box::new(|| Box::new(ParetoAdaptivePolicy::new())),
+        ),
+    ];
+
+    let outcome = ReplaySimulator::evaluate_candidates_full(
+        &[tree1, tree2],
+        &[val_tree1, val_tree2],
+        0.50,
+        2,
+        &candidate_factories,
+        0.2,
+    )
+    .expect("full evaluation with stability");
+
+    assert_eq!(outcome.summaries.len(), 3);
+    assert!(outcome.discovery_stability.is_some());
+    let disc_stab = outcome.discovery_stability.unwrap();
+    assert_eq!(disc_stab.tree_count, 2);
+    assert_eq!(disc_stab.policy_count, 3);
+    // When trees are identical, concordance is perfect (W = 1.0)
+    assert_eq!(disc_stab.kendall_w, 1.0);
+    assert!(disc_stab.is_stable);
+
+    assert!(outcome.validation_stability.is_some());
+    let val_stab = outcome.validation_stability.unwrap();
+    assert_eq!(val_stab.tree_count, 2);
+    assert_eq!(val_stab.kendall_w, 1.0);
+    assert!(val_stab.is_stable);
+}
+
+#[test]
+fn test_single_chain_held_out_fails_closed() {
+    let mut tree = AttemptTree::new();
+    tree.add_node(make_node(
+        "root",
+        None,
+        "single_branch",
+        Some(0.5),
+        AttemptStatus::Evaluated,
+        None,
+    ))
+    .unwrap();
+    tree.add_node(make_node(
+        "child",
+        Some("root"),
+        "single_branch",
+        Some(0.6),
+        AttemptStatus::Evaluated,
+        None,
+    ))
+    .unwrap();
+
+    // 1. split_held_out rejects single branch
+    let split_res = tree.split_held_out(0.5);
+    assert!(matches!(
+        split_res,
+        Err(TreeLogError::InsufficientBranchesForHeldOut(1))
+    ));
+
+    // 2. An un-rooted tree with orphaned children fails closed in replay
+    let mut orphaned_tree = AttemptTree::new();
+    orphaned_tree
+        .add_node(make_node(
+            "child_orphan",
+            Some("nonexistent_parent"),
+            "orphan_branch",
+            Some(0.6),
+            AttemptStatus::Evaluated,
+            None,
+        ))
+        .unwrap();
+
+    let sim = ReplaySimulator::new(orphaned_tree, 0.5);
+    let mut policy = BreadthFirstPolicy::new(2);
+    let replay_res = sim.evaluate_policy(&mut policy, 0.1);
+    assert!(matches!(
+        replay_res,
+        Err(ReplayError::ValidationSetEmptyOrUnreachable(_))
+    ));
+}
+
+#[test]
+fn test_dependent_attempts_cannot_be_reached_before_parent() {
+    let mut tree = AttemptTree::new();
+    // Gen 1 attempts (roots)
+    tree.add_node(make_node(
+        "gen1_winner",
+        None,
+        "branch_a",
+        Some(0.70),
+        AttemptStatus::Evaluated,
+        None,
+    ))
+    .unwrap();
+    tree.add_node(make_node(
+        "gen1_loser",
+        None,
+        "branch_b",
+        Some(0.40),
+        AttemptStatus::Evaluated,
+        None,
+    ))
+    .unwrap();
+
+    // Gen 2 attempt depending on gen1_winner
+    tree.add_node(make_node(
+        "gen2_child",
+        Some("gen1_winner"),
+        "branch_a",
+        Some(0.85),
+        AttemptStatus::Evaluated,
+        None,
+    ))
+    .unwrap();
+
+    let sim = ReplaySimulator::new(tree, 0.5);
+
+    // Initial state (step 0): only roots are legal actions
+    let mut revealed = std::collections::HashSet::new();
+    let actions_init = sim.compute_legal_actions(&revealed);
+    assert_eq!(actions_init.len(), 2);
+    assert!(actions_init.iter().all(|a| match a {
+        crate::evolution::policy::LegalAction::OpenRoot { node_id, .. } => {
+            node_id == "gen1_winner" || node_id == "gen1_loser"
+        }
+        _ => false,
+    }));
+
+    // If only gen1_loser is revealed, gen2_child is still NOT legal
+    revealed.insert("gen1_loser".to_string());
+    let actions_step1 = sim.compute_legal_actions(&revealed);
+    assert_eq!(actions_step1.len(), 1);
+    assert!(matches!(
+        &actions_step1[0],
+        crate::evolution::policy::LegalAction::OpenRoot { node_id, .. } if node_id == "gen1_winner"
+    ));
+
+    // Only once gen1_winner is revealed does gen2_child become legal as RefineFrontier
+    revealed.insert("gen1_winner".to_string());
+    let actions_step2 = sim.compute_legal_actions(&revealed);
+    assert_eq!(actions_step2.len(), 1);
+    assert!(matches!(
+        &actions_step2[0],
+        crate::evolution::policy::LegalAction::RefineFrontier { node_id, parent_id, .. }
+            if node_id == "gen2_child" && parent_id == "gen1_winner"
+    ));
 }
