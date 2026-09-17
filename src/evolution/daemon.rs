@@ -132,7 +132,11 @@ fn measure_compile_test_baseline(
     // Two arms must measure the same boundary or the comparison is not one.
     let test_start = Instant::now();
     let mut test_cmd = Command::new("cargo");
-    test_cmd.arg("test").current_dir(dir);
+    test_cmd
+        .arg("test")
+        .arg("--lib")
+        .stdin(std::process::Stdio::null())
+        .current_dir(dir);
     if !features.is_empty() {
         test_cmd.arg("--features").arg(&feat);
     }
@@ -969,8 +973,10 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             let mut test_cmd = Command::new("cargo");
             test_cmd
                 .arg("test")
+                .arg("--lib")
                 .arg("--features")
                 .arg(features_arg(EVOLVE_FEATURES))
+                .stdin(std::process::Stdio::null())
                 .current_dir(&worktree);
             let test = test_cmd.output();
 
@@ -1022,8 +1028,10 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             let test_duration = test_start.elapsed();
 
             if !test_passed {
+                let stdout = String::from_utf8_lossy(&test_output.stdout);
                 let stderr = String::from_utf8_lossy(&test_output.stderr);
-                let fail_count = stderr
+                let combined = format!("{}\n{}", stdout, stderr);
+                let fail_count = combined
                     .lines()
                     .find(|l| l.contains("test result:"))
                     .unwrap_or("unknown");

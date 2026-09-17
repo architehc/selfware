@@ -81,7 +81,7 @@ pub struct MockLlmServer {
     /// Sender half of a shutdown signal.
     shutdown_tx: watch::Sender<bool>,
     /// Join handle for the background accept loop.
-    handle: tokio::task::JoinHandle<()>,
+    handle: Option<tokio::task::JoinHandle<()>>,
     /// Captured request bodies for assertion in tests.
     captured_requests: Arc<Mutex<Vec<String>>>,
 }
@@ -118,7 +118,7 @@ impl MockLlmServer {
         Self {
             url,
             shutdown_tx,
-            handle,
+            handle: Some(handle),
             captured_requests,
         }
     }
@@ -135,9 +135,20 @@ impl MockLlmServer {
 
     /// Signal the server to stop accepting new connections and wait for the
     /// background task to finish.
-    pub async fn stop(self) {
+    pub async fn stop(mut self) {
         let _ = self.shutdown_tx.send(true);
-        let _ = self.handle.await;
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.await;
+        }
+    }
+}
+
+impl Drop for MockLlmServer {
+    fn drop(&mut self) {
+        let _ = self.shutdown_tx.send(true);
+        if let Some(handle) = self.handle.as_ref() {
+            handle.abort();
+        }
     }
 }
 
@@ -288,8 +299,8 @@ async fn accept_loop(
 
     loop {
         tokio::select! {
-            _ = shutdown_rx.changed() => {
-                if *shutdown_rx.borrow() {
+            res = shutdown_rx.changed() => {
+                if res.is_err() || *shutdown_rx.borrow() {
                     break;
                 }
             }
