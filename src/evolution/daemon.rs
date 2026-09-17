@@ -408,11 +408,33 @@ pub(crate) fn evaluate_candidate_promotion(
     }
 
     let sab_delta = winner_metrics.sab_score - base_metrics.sab_score;
-    if sab_delta <= SAB_NOISE_MARGIN && winner_composite <= baseline_composite {
-        return PromotionDecision::Reject(format!(
-            "winner composite ({:.4}) does not exceed baseline ({:.4})",
-            winner_composite, baseline_composite
-        ));
+
+    // Latency and binary size are tie-breakers within a generation, not promotion
+    // drivers over baseline. Promotion requires either:
+    // 1. A genuine SAB capability improvement beyond the noise margin (sab_delta > SAB_NOISE_MARGIN).
+    // 2. Or, if SAB capability is within noise margin, a significant measured token efficiency
+    //    improvement (> 5% reduction, with both arms measured), and higher composite.
+    if sab_delta <= SAB_NOISE_MARGIN {
+        if winner_composite <= baseline_composite {
+            return PromotionDecision::Reject(format!(
+                "winner composite ({:.4}) does not exceed baseline ({:.4})",
+                winner_composite, baseline_composite
+            ));
+        }
+
+        let has_token_improvement = match (winner_metrics.tokens_used, base_metrics.tokens_used) {
+            (Some(w_tok), Some(b_tok)) if b_tok > 0 => {
+                (b_tok as f64 - w_tok as f64) / b_tok as f64 > 0.05
+            }
+            _ => false,
+        };
+
+        if !has_token_improvement {
+            return PromotionDecision::Reject(format!(
+                "winner SAB delta ({:.2}) is within noise margin ({:.2}) and has no measured token efficiency improvement; latency and binary size are tie-breakers, not promotion drivers",
+                sab_delta, SAB_NOISE_MARGIN
+            ));
+        }
     }
 
     PromotionDecision::Promote

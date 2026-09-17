@@ -470,20 +470,41 @@ fn test_evaluate_candidate_promotion_gates() {
         PromotionDecision::Reject(r) if r.contains("test count regressed")
     ));
 
-    // 4. Valid winner -> Promote
+    // 4. Valid winner with capability gain -> Promote
+    let mut cand_metrics_capability = cand_metrics_ok.clone();
+    cand_metrics_capability.sab_score = 102.0; // capability gain exceeds SAB_NOISE_MARGIN
     let decision = evaluate_candidate_promotion(
         0.8,
         0.85,
         Some(&base_sab),
         Some(&cand_sab_ok),
         &base_metrics,
-        &cand_metrics_ok,
+        &cand_metrics_capability,
     );
     assert_eq!(decision, PromotionDecision::Promote);
 
-    // 5. Compile-only mode (both None) -> Promote if score and tests ok
+    // 5a. Tied SAB and no token improvement -> Reject (noise-aware: latency cannot drive promotion)
+    let cand_metrics_tied_sab = make_metrics(100, 100);
     let decision =
-        evaluate_candidate_promotion(0.8, 0.85, None, None, &base_metrics, &cand_metrics_ok);
+        evaluate_candidate_promotion(0.8, 0.85, None, None, &base_metrics, &cand_metrics_tied_sab);
+    assert!(matches!(
+        decision,
+        PromotionDecision::Reject(r) if r.contains("latency and binary size are tie-breakers")
+    ));
+
+    // 5b. Tied SAB with measured token efficiency gain -> Promote
+    let mut cand_metrics_token_gain = make_metrics(100, 100);
+    cand_metrics_token_gain.tokens_used = Some(800);
+    let mut base_metrics_tokens = make_metrics(100, 100);
+    base_metrics_tokens.tokens_used = Some(1000);
+    let decision = evaluate_candidate_promotion(
+        0.8,
+        0.85,
+        None,
+        None,
+        &base_metrics_tokens,
+        &cand_metrics_token_gain,
+    );
     assert_eq!(decision, PromotionDecision::Promote);
 
     // 6. Asymmetric SAB evidence -> Reject
