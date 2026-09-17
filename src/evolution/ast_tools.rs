@@ -83,21 +83,20 @@ pub fn create_shadow_worktree(repo_root: &Path) -> Result<PathBuf, WorktreeError
     create_shadow_worktree_named(repo_root, &worktree_name)
 }
 
-/// Create an isolated git worktree with an explicit name. Callers that share
-/// the `.worktrees/` namespace with other features (e.g. apply staging vs.
-/// mutation testing) MUST use a distinguishing prefix so lifecycle pruning
-/// never reaps another feature's live worktree.
-pub fn create_shadow_worktree_named(
+/// Create an isolated git worktree with an explicit name at a specific commit or ref.
+pub fn create_shadow_worktree_named_at(
     repo_root: &Path,
     worktree_name: &str,
+    commit_or_ref: Option<&str>,
 ) -> Result<PathBuf, WorktreeError> {
     let worktree_path = repo_root.join(".worktrees").join(worktree_name);
+    let target_ref = commit_or_ref.unwrap_or("HEAD");
 
     let output = Command::new("git")
         .env_remove("GIT_INDEX_FILE")
         .args(["worktree", "add", "--detach"])
         .arg(&worktree_path)
-        .arg("HEAD")
+        .arg(target_ref)
         .current_dir(repo_root)
         .output()
         .map_err(|e| WorktreeError::GitFailed(e.to_string()))?;
@@ -109,6 +108,79 @@ pub fn create_shadow_worktree_named(
     }
 
     Ok(worktree_path)
+}
+
+/// Create an isolated git worktree with an explicit name. Callers that share
+/// the `.worktrees/` namespace with other features (e.g. apply staging vs.
+/// mutation testing) MUST use a distinguishing prefix so lifecycle pruning
+/// never reaps another feature's live worktree.
+pub fn create_shadow_worktree_named(
+    repo_root: &Path,
+    worktree_name: &str,
+) -> Result<PathBuf, WorktreeError> {
+    create_shadow_worktree_named_at(repo_root, worktree_name, None)
+}
+
+/// Resolves the immutable base git commit associated with a parent attempt or baseline.
+/// Returns None if the attempts file is absent or the parent does not define a base commit.
+pub fn resolve_parent_base_commit(attempts_file: &Path, parent_id: Option<&str>) -> Option<String> {
+    let pid = parent_id?;
+    if pid.is_empty() {
+        return None;
+    }
+
+    let content = std::fs::read_to_string(attempts_file).ok()?;
+    let mut nodes_by_id = std::collections::HashMap::new();
+    for line in content.lines() {
+        if let Ok(node) = serde_json::from_str::<crate::evolution::tree_log::AttemptNode>(line) {
+            nodes_by_id.insert(node.id.clone(), node);
+        }
+    }
+
+    if pid == "att-baseline" {
+        return nodes_by_id
+            .get("att-baseline")
+            .and_then(|n| n.base_commit.clone());
+    }
+
+    let mut current = pid.to_string();
+    let mut visited = std::collections::HashSet::new();
+    while let Some(node) = nodes_by_id.get(&current) {
+        if !visited.insert(current.clone()) {
+            break; // cycle protection
+        }
+        if let Some(ref bc) = node.base_commit {
+            return Some(bc.clone());
+        }
+        match node.parent_id.as_deref() {
+            None | Some("") => break,
+            Some("att-baseline") => {
+                return nodes_by_id
+                    .get("att-baseline")
+                    .and_then(|n| n.base_commit.clone());
+            }
+            Some(parent) => current = parent.to_string(),
+        }
+    }
+
+    None
+}
+
+/// Returns the current git HEAD commit hash of the repository.
+pub fn get_git_head_commit(repo_root: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .env_remove("GIT_INDEX_FILE")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !commit.is_empty() {
+            return Some(commit);
+        }
+    }
+    None
 }
 
 /// Remove a git worktree after evaluation
@@ -175,6 +247,18 @@ pub fn restore_worktree_parent_state(
     };
     if pid.is_empty() || pid == "att-baseline" {
         return Ok(Vec::new());
+    }
+
+    // If this worktree is a git repository/worktree and an immutable base commit is recorded,
+    // ensure the worktree is detached at that base commit so today's HEAD commits do not bleed in.
+    if worktree.join(".git").exists() {
+        if let Some(ref bc) = resolve_parent_base_commit(attempts_file, parent_id) {
+            let _ = Command::new("git")
+                .env_remove("GIT_INDEX_FILE")
+                .args(["checkout", "--detach", bc])
+                .current_dir(worktree)
+                .output();
+        }
     }
 
     let content = std::fs::read_to_string(attempts_file).map_err(WorktreeError::IoError)?;
@@ -291,8 +375,10 @@ pub fn create_shadow_worktree_for_parent(
     attempts_file: &Path,
     parent_id: Option<&str>,
 ) -> Result<PathBuf, WorktreeError> {
+    let base_commit = resolve_parent_base_commit(attempts_file, parent_id);
     let worktree_name = format!("evolution-{}", uuid_short());
-    let worktree_path = create_shadow_worktree_named(repo_root, &worktree_name)?;
+    let worktree_path =
+        create_shadow_worktree_named_at(repo_root, &worktree_name, base_commit.as_deref())?;
 
     if let Err(e) = restore_worktree_parent_state(&worktree_path, attempts_file, parent_id) {
         let _ = cleanup_worktree(repo_root, &worktree_path);

@@ -174,6 +174,7 @@ fn test_format_recent_failure_history_extracts_recent_failures() {
         failure_reason: Some("cargo test failed".to_string()),
         output_tail: None,
         binary_sha256: None,
+        base_commit: None,
         created_at: "now".to_string(),
     };
     let n2 = AttemptNode {
@@ -195,6 +196,7 @@ fn test_format_recent_failure_history_extracts_recent_failures() {
         failure_reason: None,
         output_tail: None,
         binary_sha256: None,
+        base_commit: None,
         created_at: "now".to_string(),
     };
 
@@ -1647,6 +1649,7 @@ fn test_log_and_append_attempt_failure_aborts() {
         failure_reason: Some("test".into()),
         output_tail: None,
         binary_sha256: None,
+        base_commit: None,
         created_at: "2026-09-17T00:00:00Z".to_string(),
     };
 
@@ -1699,6 +1702,7 @@ fn test_control_failure_with_unwritable_attempts_file_aborts() {
         failure_reason: Some("Control worktree failed".to_string()),
         output_tail: None,
         binary_sha256: None,
+        base_commit: None,
         created_at: chrono_now(),
     };
 
@@ -1898,7 +1902,7 @@ fn test_promoted_policies_control_live_search_decisions() {
     let attempts_file = temp.path().join("attempts.jsonl");
 
     // Seed attempts with a baseline and two evaluated branches:
-    // branch-1 (score 85.0 - strong improvement) and branch-2 (score 40.0 - below baseline)
+    // branch-1 (score 0.85 - strong improvement) and branch-2 (score 0.40 - below baseline)
     let baseline = AttemptNode {
         id: "att-baseline".into(),
         parent_id: None,
@@ -1910,7 +1914,7 @@ fn test_promoted_policies_control_live_search_decisions() {
         patch: None,
         sab_report_path: None,
         metrics: None,
-        composite_score: Some(50.0),
+        composite_score: Some(0.50),
         tokens_used: Some(1000),
         wall_time_ms: 100,
         status: AttemptStatus::Baseline,
@@ -1918,6 +1922,7 @@ fn test_promoted_policies_control_live_search_decisions() {
         failure_reason: None,
         output_tail: None,
         binary_sha256: None,
+        base_commit: None,
         created_at: "2026-09-17T00:00:00Z".into(),
     };
     let b1 = AttemptNode {
@@ -1931,7 +1936,7 @@ fn test_promoted_policies_control_live_search_decisions() {
         patch: Some("diff1".into()),
         sab_report_path: None,
         metrics: None,
-        composite_score: Some(85.0),
+        composite_score: Some(0.85),
         tokens_used: Some(2000),
         wall_time_ms: 200,
         status: AttemptStatus::Evaluated,
@@ -1939,6 +1944,7 @@ fn test_promoted_policies_control_live_search_decisions() {
         failure_reason: None,
         output_tail: None,
         binary_sha256: None,
+        base_commit: None,
         created_at: "2026-09-17T00:01:00Z".into(),
     };
     let b2 = AttemptNode {
@@ -1952,7 +1958,7 @@ fn test_promoted_policies_control_live_search_decisions() {
         patch: Some("diff2".into()),
         sab_report_path: None,
         metrics: None,
-        composite_score: Some(40.0),
+        composite_score: Some(0.40),
         tokens_used: Some(2000),
         wall_time_ms: 200,
         status: AttemptStatus::Evaluated,
@@ -1960,6 +1966,7 @@ fn test_promoted_policies_control_live_search_decisions() {
         failure_reason: None,
         output_tail: None,
         binary_sha256: None,
+        base_commit: None,
         created_at: "2026-09-17T00:02:00Z".into(),
     };
 
@@ -1973,17 +1980,17 @@ fn test_promoted_policies_control_live_search_decisions() {
     // 1. Fixed population policy stops once the initial population is evaluated (no further roots)
     let mut fixed_policy = FixedPopulationPolicy::new(2);
     let decision_fixed =
-        decide_next_search_action(&mut fixed_policy, &attempts_file, 50.0, 2, 1, 1.0);
+        decide_next_search_action(&mut fixed_policy, &attempts_file, 0.50, 2, 1, 1.0);
 
-    // 2. RefineTop1 policy zeroes in on the top performing branch (branch-1 with score 85.0)
+    // 2. RefineTop1 policy zeroes in on the top performing branch (branch-1 with score 0.85)
     let mut refine_policy = instantiate_search_policy("refine_top1", 2);
     let decision_refine =
-        decide_next_search_action(&mut *refine_policy, &attempts_file, 50.0, 2, 1, 1.0);
+        decide_next_search_action(&mut *refine_policy, &attempts_file, 0.50, 2, 1, 1.0);
 
     // 3. BreadthFirst policy expands frontiers across all open branches simultaneously
     let mut breadth_policy = instantiate_search_policy("breadth_first", 2);
     let decision_breadth =
-        decide_next_search_action(&mut *breadth_policy, &attempts_file, 50.0, 2, 1, 1.0);
+        decide_next_search_action(&mut *breadth_policy, &attempts_file, 0.50, 2, 1, 1.0);
 
     // Prove that the policies make DIFFERENT live search decisions on the exact same attempt history
     assert!(
@@ -2086,6 +2093,7 @@ fn test_infrastructure_failures_excluded_from_deduplication() {
             failure_reason: Some("Failed to create shadow worktree".into()),
             output_tail: None,
             binary_sha256: None,
+            base_commit: None,
             created_at: "2026-09-17T00:00:00Z".into(),
         },
         // 2. Environment error (e.g. test runner killed by external watchdog)
@@ -2108,6 +2116,7 @@ fn test_infrastructure_failures_excluded_from_deduplication() {
             failure_reason: Some("External environment unreachable".into()),
             output_tail: None,
             binary_sha256: None,
+            base_commit: None,
             created_at: "2026-09-17T00:01:00Z".into(),
         },
         // 3. Genuine code defect (type error) -> MUST be blacklisted
@@ -2130,6 +2139,7 @@ fn test_infrastructure_failures_excluded_from_deduplication() {
             failure_reason: Some("mismatched types".into()),
             output_tail: None,
             binary_sha256: None,
+            base_commit: None,
             created_at: "2026-09-17T00:02:00Z".into(),
         },
         // 4. Duplicate rejected upfront -> MUST remain in blacklist
@@ -2152,6 +2162,7 @@ fn test_infrastructure_failures_excluded_from_deduplication() {
             failure_reason: Some("Duplicate of failed diff".into()),
             output_tail: None,
             binary_sha256: None,
+            base_commit: None,
             created_at: "2026-09-17T00:03:00Z".into(),
         },
     ];
@@ -2198,12 +2209,16 @@ fn test_promoted_policy_name_round_trip() {
     let inc_obj = 0.7210;
     let kendall_w = 0.8123;
     let beta = 0.35;
+    let tree_digests = vec!["tree-digest-1".to_string(), "tree-digest-2".to_string()];
+    let report_digest = "report-digest-123";
     let evidence_hash = crate::evolution::replay::compute_policy_evidence_hash(
         winner_name,
         val_obj,
         inc_obj,
         kendall_w,
         beta,
+        &tree_digests,
+        report_digest,
     );
 
     let cli_payload = serde_json::json!({
@@ -2213,6 +2228,8 @@ fn test_promoted_policy_name_round_trip() {
         "incumbent_objective": inc_obj,
         "kendall_w": kendall_w,
         "beta": beta,
+        "tree_digests": tree_digests,
+        "report_digest": report_digest,
         "evidence_hash": evidence_hash,
     });
     std::fs::write(
@@ -2232,8 +2249,15 @@ fn test_promoted_policy_name_round_trip() {
 
     // 2. Exact CLI-generated payload with FixedPopulation (Incumbent)
     let winner_name = "FixedPopulation (Incumbent)";
-    let hash2 =
-        crate::evolution::replay::compute_policy_evidence_hash(winner_name, 0.70, 0.70, 1.0, 0.2);
+    let hash2 = crate::evolution::replay::compute_policy_evidence_hash(
+        winner_name,
+        0.70,
+        0.70,
+        1.0,
+        0.2,
+        &[],
+        "",
+    );
     let cli_payload2 = serde_json::json!({
         "policy_name": winner_name,
         "promoted_at": "2026-09-17T12:00:00Z",
@@ -2261,6 +2285,8 @@ fn test_promoted_policy_name_round_trip() {
         "incumbent_objective": inc_obj,
         "kendall_w": kendall_w,
         "beta": beta,
+        "tree_digests": tree_digests,
+        "report_digest": report_digest,
         "evidence_hash": evidence_hash, // hash does not match tampered parameters
     });
     std::fs::write(
@@ -2308,7 +2334,7 @@ fn test_multi_action_batch_and_parent_restoration() {
         patch: None,
         sab_report_path: None,
         metrics: None,
-        composite_score: Some(50.0),
+        composite_score: Some(0.50),
         tokens_used: None,
         wall_time_ms: 0,
         status: crate::evolution::tree_log::AttemptStatus::Baseline,
@@ -2316,6 +2342,7 @@ fn test_multi_action_batch_and_parent_restoration() {
         failure_reason: None,
         output_tail: None,
         binary_sha256: None,
+        base_commit: None,
         created_at: "2026-09-17T00:00:00Z".into(),
     };
 
@@ -2330,7 +2357,7 @@ fn test_multi_action_batch_and_parent_restoration() {
         patch: Some(patch_a),
         sab_report_path: None,
         metrics: None,
-        composite_score: Some(60.0),
+        composite_score: Some(0.60),
         tokens_used: None,
         wall_time_ms: 10,
         status: crate::evolution::tree_log::AttemptStatus::Evaluated,
@@ -2338,6 +2365,7 @@ fn test_multi_action_batch_and_parent_restoration() {
         failure_reason: None,
         output_tail: None,
         binary_sha256: None,
+        base_commit: None,
         created_at: "2026-09-17T00:01:00Z".into(),
     };
 
@@ -2352,7 +2380,7 @@ fn test_multi_action_batch_and_parent_restoration() {
         patch: Some(patch_b),
         sab_report_path: None,
         metrics: None,
-        composite_score: Some(70.0),
+        composite_score: Some(0.70),
         tokens_used: None,
         wall_time_ms: 10,
         status: crate::evolution::tree_log::AttemptStatus::Evaluated,
@@ -2360,6 +2388,7 @@ fn test_multi_action_batch_and_parent_restoration() {
         failure_reason: None,
         output_tail: None,
         binary_sha256: None,
+        base_commit: None,
         created_at: "2026-09-17T00:01:30Z".into(),
     };
 
@@ -2454,7 +2483,7 @@ fn test_fixed_population_daemon_continues_across_generations_and_empty_responses
     let mut policy = FixedPopulationPolicy::for_daemon(3);
 
     // Generation 1: request next actions
-    let d1 = decide_next_search_action(&mut policy, &attempts_file, 50.0, 3, 1, 1.0);
+    let d1 = decide_next_search_action(&mut policy, &attempts_file, 0.50, 3, 1, 1.0);
     let actions1 = match d1 {
         PolicyDecision::SelectBatch(actions) => actions,
         PolicyDecision::Stop { reason } => panic!("Unexpected stop on gen 1: {reason}"),
@@ -2466,7 +2495,7 @@ fn test_fixed_population_daemon_continues_across_generations_and_empty_responses
     );
 
     // Empty LLM response or generation 2: policy must NOT stop!
-    let d2 = decide_next_search_action(&mut policy, &attempts_file, 50.0, 3, 2, 1.0);
+    let d2 = decide_next_search_action(&mut policy, &attempts_file, 0.50, 3, 2, 1.0);
     match d2 {
         PolicyDecision::SelectBatch(actions) => {
             assert_eq!(actions.len(), 3, "Gen 2 must continue and produce actions");
@@ -2478,10 +2507,10 @@ fn test_fixed_population_daemon_continues_across_generations_and_empty_responses
 
     // By contrast, replay-budgeted FixedPopulationPolicy(3) DOES stop when its total budget is reached
     let mut replay_policy = FixedPopulationPolicy::new(3);
-    let r1 = decide_next_search_action(&mut replay_policy, &attempts_file, 50.0, 3, 1, 1.0);
+    let r1 = decide_next_search_action(&mut replay_policy, &attempts_file, 0.50, 3, 1, 1.0);
     assert!(matches!(r1, PolicyDecision::SelectBatch(_)));
 
-    let r2 = decide_next_search_action(&mut replay_policy, &attempts_file, 50.0, 3, 2, 1.0);
+    let r2 = decide_next_search_action(&mut replay_policy, &attempts_file, 0.50, 3, 2, 1.0);
     assert!(
         matches!(r2, PolicyDecision::Stop { .. }),
         "Replay policy must stop when total probe budget is exhausted"

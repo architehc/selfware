@@ -651,8 +651,27 @@ pub fn load_active_policy(active_policy_path: &Path, population_size: usize) -> 
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0);
         let w = val.get("kendall_w").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let tree_digests: Vec<String> = val
+            .get("tree_digests")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| item.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let report_digest = val
+            .get("report_digest")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let computed = crate::evolution::replay::compute_policy_evidence_hash(
-            raw_name, val_obj, inc_obj, w, beta,
+            raw_name,
+            val_obj,
+            inc_obj,
+            w,
+            beta,
+            &tree_digests,
+            report_digest,
         );
         if computed != *expected_hash {
             tracing::warn!(
@@ -779,6 +798,54 @@ pub fn decide_next_search_action(
     }
 
     policy.decide(&prefix, &legal_actions, beta)
+}
+
+/// Resolve the immutable base git commit for an attempt, looking up the parent's base commit
+/// or falling back to the current repository HEAD.
+fn resolve_attempt_base_commit(
+    attempts_file: &Path,
+    parent_id: Option<&str>,
+    repo_root: &Path,
+) -> Option<String> {
+    ast_tools::resolve_parent_base_commit(attempts_file, parent_id)
+        .or_else(|| ast_tools::get_git_head_commit(repo_root))
+}
+
+/// Format the structured failure history and context of a specific parent attempt
+/// to instruct the LLM on its refinement/repair task.
+fn format_parent_refinement_context(attempts_file: &Path, parent_id: &str) -> String {
+    let content = match std::fs::read_to_string(attempts_file) {
+        Ok(c) => c,
+        Err(_) => return format!("Parent Attempt ID: {parent_id}\n"),
+    };
+    for line in content.lines() {
+        if let Ok(node) = serde_json::from_str::<AttemptNode>(line) {
+            if node.id == parent_id {
+                let mut out = format!(
+                    "Parent Attempt ID: {}\nBranch ID: {}\nStatus: {}\nDescription: {}\n",
+                    node.id, node.branch_id, node.status, node.description
+                );
+                if let Some(ref fc) = node.failure_class {
+                    out.push_str(&format!("Failure Class: {:?}\n", fc));
+                }
+                if let Some(ref fr) = node.failure_reason {
+                    out.push_str(&format!("Failure Reason: {}\n", fr));
+                }
+                if let Some(ref tail) = node.output_tail {
+                    out.push_str(&format!(
+                        "Failure Diagnostic Output Tail:\n```\n{}\n```\n",
+                        tail
+                    ));
+                }
+                if let Some(score) = node.composite_score {
+                    out.push_str(&format!("Parent Composite Score: {:.4}\n", score));
+                }
+                out.push_str("Task: Specifically repair and refine this parent attempt state so that it passes compiler checks, test suites, and improves composite score.\n");
+                return out;
+            }
+        }
+    }
+    format!("Parent Attempt ID: {parent_id}\n")
 }
 
 /// Densely log an attempt node to JSONL, aborting generation if write fails.
@@ -1009,6 +1076,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         binary_sha256: current_baseline_sab
             .as_ref()
             .map(|r| r.binary_sha256.clone()),
+        base_commit: ast_tools::get_git_head_commit(repo_root),
         created_at: chrono_now(),
     };
     if let Err(err) = log_and_append_attempt(&attempts_file, &baseline_node, repo_root, 0, start) {
@@ -1065,7 +1133,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             active_policy_beta,
         );
 
-        let active_actions = match policy_decision {
+        let mut active_actions = match policy_decision {
             PolicyDecision::Stop { reason } => {
                 log_phase(&format!(
                     "Search policy '{}' requested stop: {reason}; falling back to generation exploration",
@@ -1100,6 +1168,15 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             }
         };
 
+        if active_actions.len() > config.population_size {
+            log_phase(&format!(
+                "Search policy proposed {} actions; capping to population_size {}",
+                active_actions.len(),
+                config.population_size
+            ));
+            active_actions.truncate(config.population_size);
+        }
+
         // ─── Step 1: Capture telemetry (sensory data for the agent) ───
         let telemetry_snapshot = telemetry::capture(repo_root, "sab_full").ok();
         let telemetry_prompt = telemetry_snapshot
@@ -1111,13 +1188,60 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         // Tell the model what failed recently so it does not loop on the same target.
         let history_prompt = format_recent_failure_history(&attempts_file, 5);
 
-        // ─── Step 2: Generate hypotheses via agent swarm ───
+        // ─── Step 2: Generate hypotheses via agent swarm (1 per active action) ───
         let llm_start = Instant::now();
-        let mut hypotheses =
-            generate_hypotheses(&config, &telemetry_prompt, &history_prompt, repo_root).await;
+        let mut hypotheses_with_actions = Vec::new();
 
-        for (h_idx, h) in hypotheses.iter_mut().enumerate() {
-            h.id = format!("g{}-hyp{}", generation, h_idx);
+        for (action_idx, action) in active_actions.into_iter().enumerate() {
+            let (h_parent_id, h_branch_id) = match &action {
+                LegalAction::RefineFrontier {
+                    branch_id,
+                    parent_id,
+                    ..
+                } => (Some(parent_id.clone()), branch_id.clone()),
+                LegalAction::OpenRoot { branch_id, .. } => {
+                    (Some(baseline_node.id.clone()), branch_id.clone())
+                }
+            };
+
+            // Restore parent worktree to inspect exact source state if refining
+            let (source_context, parent_context, temp_worktree) = match &action {
+                LegalAction::RefineFrontier { parent_id, .. } => {
+                    let worktree = ast_tools::create_shadow_worktree_for_parent(
+                        repo_root,
+                        &attempts_file,
+                        Some(parent_id),
+                    )
+                    .ok();
+                    let source_dir = worktree.as_deref().unwrap_or(repo_root);
+                    let source = read_mutation_targets(&config.mutation_targets, source_dir);
+                    let parent_info = format_parent_refinement_context(&attempts_file, parent_id);
+                    (source, parent_info, worktree)
+                }
+                LegalAction::OpenRoot { .. } => {
+                    let source = read_mutation_targets(&config.mutation_targets, repo_root);
+                    (source, String::new(), None)
+                }
+            };
+
+            let hyp = generate_single_action_hypothesis(
+                &config,
+                &telemetry_prompt,
+                &history_prompt,
+                &source_context,
+                &parent_context,
+                temp_worktree.as_deref().unwrap_or(repo_root),
+            )
+            .await;
+
+            if let Some(ref w) = temp_worktree {
+                let _ = ast_tools::cleanup_worktree(repo_root, w);
+            }
+
+            if let Some(mut h) = hyp {
+                h.id = format!("g{}-hyp{}", generation, action_idx);
+                hypotheses_with_actions.push((h, h_parent_id, h_branch_id));
+            }
         }
 
         log_event(
@@ -1126,13 +1250,13 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 "event": "hypotheses_generated",
                 "timestamp": chrono_now(),
                 "generation": generation,
-                "count": hypotheses.len(),
-                "descriptions": hypotheses.iter().map(|h| &h.description).collect::<Vec<_>>(),
+                "count": hypotheses_with_actions.len(),
+                "descriptions": hypotheses_with_actions.iter().map(|(h, _, _)| &h.description).collect::<Vec<_>>(),
                 "llm_duration_secs": llm_start.elapsed().as_secs_f64(),
             }),
         );
 
-        if hypotheses.is_empty() {
+        if hypotheses_with_actions.is_empty() {
             log_warning("No valid hypotheses generated, retrying...");
             // Backoff to avoid 100% CPU busy-loop when the LLM returns nothing.
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -1146,18 +1270,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         // Also detect and reject duplicate patches matching previously failed diffs.
         let prior_failed_diffs = load_failed_diff_shas(&attempts_file);
         let mut valid = Vec::new();
-        for (h_idx, h) in hypotheses.into_iter().enumerate() {
-            let action = &active_actions[h_idx % active_actions.len()];
-            let (h_parent_id, h_branch_id) = match action {
-                LegalAction::RefineFrontier {
-                    branch_id,
-                    parent_id,
-                    ..
-                } => (Some(parent_id.clone()), branch_id.clone()),
-                LegalAction::OpenRoot { branch_id, .. } => {
-                    (Some(baseline_node.id.clone()), branch_id.clone())
-                }
-            };
+        for (h, h_parent_id, h_branch_id) in hypotheses_with_actions {
+            let attempt_base_commit =
+                resolve_attempt_base_commit(&attempts_file, h_parent_id.as_deref(), repo_root);
             let diff_sha256 = compute_sha256(h.patch.as_bytes());
             if hypothesis_touches_protected(&h) {
                 log_warning(&format!(
@@ -1183,6 +1298,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     failure_reason: Some("Touches protected paths".into()),
                     output_tail: None,
                     binary_sha256: None,
+                    base_commit: attempt_base_commit,
                     created_at: chrono_now(),
                 };
                 if let Err(err) =
@@ -1225,6 +1341,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     )),
                     output_tail: None,
                     binary_sha256: None,
+                    base_commit: attempt_base_commit,
                     created_at: chrono_now(),
                 };
                 if let Err(err) =
@@ -1283,6 +1400,11 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     failure_reason: Some(format!("Control worktree failed: {e}")),
                     output_tail: None,
                     binary_sha256: None,
+                    base_commit: resolve_attempt_base_commit(
+                        &attempts_file,
+                        active_parent_id.as_deref(),
+                        repo_root,
+                    ),
                     created_at: chrono_now(),
                 };
                 if let Err(err) =
@@ -1349,6 +1471,11 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 failure_reason: Some("Control compile check failed in clean worktree".to_string()),
                 output_tail: tail,
                 binary_sha256: None,
+                base_commit: resolve_attempt_base_commit(
+                    &attempts_file,
+                    active_parent_id.as_deref(),
+                    repo_root,
+                ),
                 created_at: chrono_now(),
             };
             if let Err(err) =
@@ -1422,6 +1549,11 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 ),
                 output_tail: tail,
                 binary_sha256: None,
+                base_commit: resolve_attempt_base_commit(
+                    &attempts_file,
+                    active_parent_id.as_deref(),
+                    repo_root,
+                ),
                 created_at: chrono_now(),
             };
             if let Err(err) =
@@ -1447,6 +1579,8 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         for (hypothesis, hyp_parent_id, hyp_branch_id) in &valid {
             let attempt_start = Instant::now();
             let attempt_id = format!("att-g{}-{}", generation, hypothesis.id);
+            let attempt_base_commit =
+                resolve_attempt_base_commit(&attempts_file, hyp_parent_id.as_deref(), repo_root);
             let raw_diff_sha256 = compute_sha256(hypothesis.patch.as_bytes());
 
             log_phase(&format!(
@@ -1483,6 +1617,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         failure_reason: Some(format!("Worktree creation failed: {e}")),
                         output_tail: None,
                         binary_sha256: None,
+                        base_commit: attempt_base_commit.clone(),
                         created_at: chrono_now(),
                     };
                     if let Err(err) = log_and_append_attempt(
@@ -1526,6 +1661,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     failure_reason: Some("Patch failed to apply cleanly".into()),
                     output_tail: None,
                     binary_sha256: None,
+                    base_commit: attempt_base_commit.clone(),
                     created_at: chrono_now(),
                 };
                 if let Err(err) =
@@ -1589,6 +1725,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         failure_reason: Some("cargo fmt failed".into()),
                         output_tail: fmt_tail,
                         binary_sha256: None,
+                        base_commit: attempt_base_commit.clone(),
                         created_at: chrono_now(),
                     };
                     if let Err(err) = log_and_append_attempt(
@@ -1655,6 +1792,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     failure_reason: Some("cargo check failed".into()),
                     output_tail: check_tail,
                     binary_sha256: None,
+                    base_commit: attempt_base_commit.clone(),
                     created_at: chrono_now(),
                 };
                 if let Err(err) =
@@ -1706,6 +1844,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         failure_reason: Some(format!("Test execution failed: {e}")),
                         output_tail: None,
                         binary_sha256: None,
+                        base_commit: attempt_base_commit.clone(),
                         created_at: chrono_now(),
                     };
                     if let Err(err) = log_and_append_attempt(
@@ -1784,6 +1923,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     failure_reason,
                     output_tail: Some(tail),
                     binary_sha256: None,
+                    base_commit: attempt_base_commit.clone(),
                     created_at: chrono_now(),
                 };
                 if let Err(err) =
@@ -1846,6 +1986,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     failure_reason: Some("cargo clippy warnings detected".into()),
                     output_tail: clippy_tail,
                     binary_sha256: None,
+                    base_commit: attempt_base_commit.clone(),
                     created_at: chrono_now(),
                 };
                 if let Err(err) =
@@ -1907,6 +2048,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         failure_reason: Some("Release build failed".into()),
                         output_tail: build_tail,
                         binary_sha256: None,
+                        base_commit: attempt_base_commit.clone(),
                         created_at: chrono_now(),
                     };
                     if let Err(err) = log_and_append_attempt(
@@ -1957,6 +2099,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             failure_reason: Some(format!("SAB execution failed: {e}")),
                             output_tail: None,
                             binary_sha256: None,
+                            base_commit: attempt_base_commit.clone(),
                             created_at: chrono_now(),
                         };
                         if let Err(err) = log_and_append_attempt(
@@ -2009,6 +2152,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             failure_reason: Some("Candidate build failed".into()),
                             output_tail: None,
                             binary_sha256: None,
+                            base_commit: attempt_base_commit.clone(),
                             created_at: chrono_now(),
                         };
                         if let Err(err) = log_and_append_attempt(
@@ -2062,6 +2206,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         failure_reason: Some("No effective diff after evaluation".into()),
                         output_tail: None,
                         binary_sha256: None,
+                        base_commit: attempt_base_commit.clone(),
                         created_at: chrono_now(),
                     };
                     if let Err(err) = log_and_append_attempt(
@@ -2104,6 +2249,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 failure_reason: None,
                 output_tail: None,
                 binary_sha256: winner_sab.as_ref().map(|s| s.binary_sha256.clone()),
+                base_commit: attempt_base_commit.clone(),
                 created_at: chrono_now(),
             };
             if let Err(err) =
@@ -2382,115 +2528,79 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 // HELPER FUNCTIONS
 // ═══════════════════════════════════════════════════════
 
-async fn generate_hypotheses(
+async fn generate_single_action_hypothesis(
     config: &EvolutionConfig,
     telemetry_prompt: &str,
     history_prompt: &str,
-    repo_root: &Path,
-) -> Vec<Hypothesis> {
-    // Check if we should use micro mode for small models
-    let use_micro_mode = super::micro_mode::is_micro_model(&config.llm.model);
-
-    if use_micro_mode {
-        log_phase("Micro mode: Using simplified prompts for small model");
-        generate_micro_hypotheses(config, telemetry_prompt, history_prompt, repo_root).await
-    } else {
-        generate_standard_hypotheses(config, telemetry_prompt, history_prompt, repo_root).await
-    }
-}
-
-async fn generate_standard_hypotheses(
-    config: &EvolutionConfig,
-    telemetry_prompt: &str,
-    history_prompt: &str,
-    repo_root: &Path,
-) -> Vec<Hypothesis> {
-    let source_context = read_mutation_targets(&config.mutation_targets, repo_root);
+    source_context: &str,
+    parent_context: &str,
+    source_dir: &Path,
+) -> Option<Hypothesis> {
     if source_context.is_empty() {
-        log_warning("No mutation target files found or readable");
-        return vec![];
+        log_warning("No mutation target files found or readable for action");
+        return None;
     }
 
-    let system_prompt = build_system_prompt(config.population_size);
-    let user_prompt = build_user_prompt(telemetry_prompt, history_prompt, &source_context);
+    let use_micro_mode = super::micro_mode::is_micro_model(&config.llm.model);
+    if use_micro_mode {
+        use super::micro_mode;
+        let all_paths: Vec<PathBuf> = config
+            .mutation_targets
+            .prompt_logic
+            .iter()
+            .chain(config.mutation_targets.tool_code.iter())
+            .chain(config.mutation_targets.cognitive.iter())
+            .cloned()
+            .collect();
+        let selected = micro_mode::select_micro_targets(&all_paths, source_dir);
+        let micro_context = if !selected.is_empty() {
+            micro_mode::build_micro_context(&selected)
+        } else {
+            source_context.to_string()
+        };
 
-    match call_llm(&config.llm, &system_prompt, &user_prompt).await {
-        Ok(response) => {
-            log_phase(&format!(
-                "LLM response ({} chars): {}",
-                response.len(),
-                truncate_char_boundary(&response, 200)
-            ));
-            parse_hypotheses_response(&response)
+        let system_prompt = micro_mode::build_micro_system_prompt(1);
+        let user_prompt = build_action_user_prompt(
+            telemetry_prompt,
+            history_prompt,
+            &micro_context,
+            parent_context,
+        );
+        match call_llm(&config.llm, &system_prompt, &user_prompt).await {
+            Ok(response) => {
+                let hypotheses = parse_hypotheses_response(&response);
+                hypotheses
+                    .into_iter()
+                    .find(|h| match micro_mode::validate_micro_hypothesis(h) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            log_warning(&format!("Micro mode: Rejected hypothesis: {}", e));
+                            false
+                        }
+                    })
+            }
+            Err(e) => {
+                log_warning(&format!("Micro mode LLM call failed for action: {}", e));
+                None
+            }
         }
-        Err(e) => {
-            log_warning(&format!("LLM call failed: {}", e));
-            vec![]
-        }
-    }
-}
-
-async fn generate_micro_hypotheses(
-    config: &EvolutionConfig,
-    telemetry_prompt: &str,
-    history_prompt: &str,
-    repo_root: &Path,
-) -> Vec<Hypothesis> {
-    use super::micro_mode;
-
-    // Collect all target paths
-    let all_paths: Vec<PathBuf> = config
-        .mutation_targets
-        .prompt_logic
-        .iter()
-        .chain(config.mutation_targets.tool_code.iter())
-        .chain(config.mutation_targets.cognitive.iter())
-        .cloned()
-        .collect();
-
-    // Select small subset of files
-    let selected = micro_mode::select_micro_targets(&all_paths, repo_root);
-    if selected.is_empty() {
-        log_warning("Micro mode: No suitable target files found");
-        return vec![];
-    }
-
-    log_phase(&format!(
-        "Micro mode: Using {} files ({} chars)",
-        selected.len(),
-        selected.iter().map(|(_, c)| c.len()).sum::<usize>()
-    ));
-
-    let source_context = micro_mode::build_micro_context(&selected);
-    let micro_population = config.population_size.min(3); // Clamp for micro mode
-
-    let system_prompt = micro_mode::build_micro_system_prompt(micro_population);
-    let user_prompt = build_user_prompt(telemetry_prompt, history_prompt, &source_context);
-
-    match call_llm(&config.llm, &system_prompt, &user_prompt).await {
-        Ok(response) => {
-            log_phase(&format!(
-                "Micro mode: LLM response ({} chars)",
-                response.len()
-            ));
-            let hypotheses = parse_hypotheses_response(&response);
-
-            // Validate micro-safety
-            hypotheses
-                .into_iter()
-                .filter(|h| match micro_mode::validate_micro_hypothesis(h) {
-                    Ok(()) => true,
-                    Err(e) => {
-                        log_warning(&format!("Micro mode: Rejected hypothesis: {}", e));
-                        false
-                    }
-                })
-                .take(micro_population)
-                .collect()
-        }
-        Err(e) => {
-            log_warning(&format!("Micro mode: LLM call failed: {}", e));
-            vec![]
+    } else {
+        let system_prompt = build_system_prompt(1);
+        let user_prompt = build_action_user_prompt(
+            telemetry_prompt,
+            history_prompt,
+            source_context,
+            parent_context,
+        );
+        match call_llm(&config.llm, &system_prompt, &user_prompt).await {
+            Ok(response) => {
+                let hypotheses = parse_hypotheses_response(&response);
+                hypotheses.into_iter().next()
+            }
+            Err(e) => {
+                log_warning(&format!("LLM call failed for action: {}", e));
+                None
+            }
         }
     }
 }
@@ -2907,6 +3017,20 @@ pub fn build_user_prompt(telemetry: &str, history: &str, source_context: &str) -
     prompt.push_str("## Source Code (mutation targets)\n");
     prompt.push_str(source_context);
 
+    prompt
+}
+
+pub fn build_action_user_prompt(
+    telemetry: &str,
+    history: &str,
+    source_context: &str,
+    parent_context: &str,
+) -> String {
+    let mut prompt = build_user_prompt(telemetry, history, source_context);
+    if !parent_context.trim().is_empty() {
+        prompt.push_str("\n\n## Parent Refinement Context & Task\n");
+        prompt.push_str(parent_context);
+    }
     prompt
 }
 

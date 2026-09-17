@@ -2700,12 +2700,23 @@ async fn handle_command(
                         );
                         let active_policy_path =
                             repo_root.join(".selfware").join("active_policy.json");
+                        let tree_digests: Vec<String> = loaded_trees
+                            .iter()
+                            .map(|(p, _)| {
+                                std::fs::read(p)
+                                    .map(|bytes| crate::evolution::tree_log::compute_sha256(&bytes))
+                                    .unwrap_or_else(|_| "unreadable".to_string())
+                            })
+                            .collect();
+                        let report_digest = outcome.report_digest();
                         let evidence_hash = crate::evolution::replay::compute_policy_evidence_hash(
                             &winner_name,
                             validation_objective,
                             incumbent_objective,
                             kendall_w,
                             beta,
+                            &tree_digests,
+                            &report_digest,
                         );
                         let payload = serde_json::json!({
                             "policy_name": winner_name,
@@ -2717,6 +2728,8 @@ async fn handle_command(
                             "incumbent_objective": incumbent_objective,
                             "kendall_w": kendall_w,
                             "beta": beta,
+                            "tree_digests": tree_digests,
+                            "report_digest": report_digest,
                             "evidence_hash": evidence_hash,
                         });
                         if let Ok(json_str) = serde_json::to_string_pretty(&payload) {

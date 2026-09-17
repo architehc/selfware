@@ -33,6 +33,7 @@ fn make_node(
         failure_reason: None,
         output_tail: None,
         binary_sha256: None,
+        base_commit: None,
         created_at: "2026-09-16T12:00:00Z".into(),
     }
 }
@@ -710,6 +711,7 @@ fn test_replay_daemon_tree_shape_with_baseline_root_and_control_anchors() {
         failure_reason: None,
         output_tail: None,
         binary_sha256: None,
+        base_commit: None,
         created_at: "2026-09-17T00:00:00Z".to_string(),
     };
     tree.add_node(baseline_node).unwrap();
@@ -734,6 +736,7 @@ fn test_replay_daemon_tree_shape_with_baseline_root_and_control_anchors() {
         failure_reason: Some("Control clean check".to_string()),
         output_tail: None,
         binary_sha256: None,
+        base_commit: None,
         created_at: "2026-09-17T00:01:00Z".to_string(),
     };
     tree.add_node(ctrl_node).unwrap();
@@ -758,6 +761,7 @@ fn test_replay_daemon_tree_shape_with_baseline_root_and_control_anchors() {
         failure_reason: None,
         output_tail: None,
         binary_sha256: None,
+        base_commit: None,
         created_at: "2026-09-17T00:02:00Z".to_string(),
     };
     tree.add_node(hyp1_node).unwrap();
@@ -781,6 +785,7 @@ fn test_replay_daemon_tree_shape_with_baseline_root_and_control_anchors() {
         failure_reason: None,
         output_tail: None,
         binary_sha256: None,
+        base_commit: None,
         created_at: "2026-09-17T00:03:00Z".to_string(),
     };
     tree.add_node(hyp2_node).unwrap();

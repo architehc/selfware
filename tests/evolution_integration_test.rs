@@ -703,6 +703,7 @@ fn test_dream_rsi_end_to_end_replay_integration() {
         failure_reason: None,
         output_tail: None,
         binary_sha256: None,
+        base_commit: None,
         created_at: "2026-09-16T12:00:00Z".into(),
     };
     let a1 = AttemptNode {
@@ -724,6 +725,7 @@ fn test_dream_rsi_end_to_end_replay_integration() {
         failure_reason: Some("missing semicolon".into()),
         output_tail: None,
         binary_sha256: None,
+        base_commit: None,
         created_at: "2026-09-16T12:05:00Z".into(),
     };
     let a2 = AttemptNode {
@@ -745,6 +747,7 @@ fn test_dream_rsi_end_to_end_replay_integration() {
         failure_reason: None,
         output_tail: None,
         binary_sha256: None,
+        base_commit: None,
         created_at: "2026-09-16T12:10:00Z".into(),
     };
 
@@ -768,6 +771,7 @@ fn test_dream_rsi_end_to_end_replay_integration() {
         failure_reason: None,
         output_tail: None,
         binary_sha256: None,
+        base_commit: None,
         created_at: "2026-09-16T12:00:00Z".into(),
     };
     let b1 = AttemptNode {
@@ -789,6 +793,7 @@ fn test_dream_rsi_end_to_end_replay_integration() {
         failure_reason: None,
         output_tail: None,
         binary_sha256: None,
+        base_commit: None,
         created_at: "2026-09-16T12:05:00Z".into(),
     };
 

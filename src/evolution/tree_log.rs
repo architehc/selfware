@@ -165,6 +165,9 @@ pub struct AttemptNode {
     /// SHA256 of the compiled binary, if built.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub binary_sha256: Option<String>,
+    /// Base git commit hash when this attempt was made or detached from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_commit: Option<String>,
     /// ISO 8601 / RFC 3339 creation timestamp.
     pub created_at: String,
 }

@@ -52,6 +52,7 @@ fn sample_node(
         },
         output_tail: None,
         binary_sha256: None,
+        base_commit: None,
         created_at: "2026-09-16T12:00:00Z".to_string(),
     }
 }

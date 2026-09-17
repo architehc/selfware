@@ -156,13 +156,16 @@ pub struct ReplayValidationOutcome {
     pub beta: f64,
 }
 
-/// Computes the canonical SHA-256 evidence hash binding a promoted policy to its replay evaluation outcome.
+/// Computes the canonical SHA-256 evidence hash binding a promoted policy to its replay evaluation outcome
+/// and the provenance of its inputs (attempt-tree file digests and replay report digest).
 pub fn compute_policy_evidence_hash(
     winner_name: &str,
     validation_objective: f64,
     incumbent_objective: f64,
     kendall_w: f64,
     beta: f64,
+    tree_digests: &[String],
+    report_digest: &str,
 ) -> String {
     use sha2::Digest;
     let mut hasher = sha2::Sha256::new();
@@ -174,6 +177,14 @@ pub fn compute_policy_evidence_hash(
         )
         .as_bytes(),
     );
+    for digest in tree_digests {
+        hasher.update(b":tree:");
+        hasher.update(digest.as_bytes());
+    }
+    if !report_digest.is_empty() {
+        hasher.update(b":report:");
+        hasher.update(report_digest.as_bytes());
+    }
     format!("{:x}", hasher.finalize())
 }
 
@@ -210,6 +221,39 @@ pub enum PromotionReadiness {
 }
 
 impl ReplayValidationOutcome {
+    /// Computes a canonical SHA-256 digest over all replay evaluation outcome metrics,
+    /// ensuring cryptographic provenance for policy promotion.
+    pub fn report_digest(&self) -> String {
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        for s in &self.summaries {
+            hasher.update(
+                format!(
+                    "{}:{}:{}:{:.6}:{:.6}:{};",
+                    s.policy_name,
+                    s.discovery_probes,
+                    s.discovery_tokens,
+                    s.validation_terminal_score,
+                    s.validation_objective,
+                    s.beats_incumbent
+                )
+                .as_bytes(),
+            );
+        }
+        if let Some(ref d) = self.discovery_stability {
+            hasher.update(
+                format!("disc:{:.6}:{}:{};", d.kendall_w, d.tree_count, d.is_stable).as_bytes(),
+            );
+        }
+        if let Some(ref v) = self.validation_stability {
+            hasher.update(
+                format!("val:{:.6}:{}:{};", v.kendall_w, v.tree_count, v.is_stable).as_bytes(),
+            );
+        }
+        hasher.update(format!("beta:{:.6}", self.beta).as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
+
     /// Explicitly determines whether the top candidate policy qualifies for promotion.
     pub fn promotion_readiness(&self) -> PromotionReadiness {
         let incumbent_summary = self
