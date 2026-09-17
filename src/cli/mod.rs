@@ -2687,17 +2687,26 @@ async fn handle_command(
                         validation_objective,
                         incumbent_objective,
                         kendall_w,
+                        beta,
                     } => {
                         println!(
-                            "\n   {} Policy '{}' won on held-out validation (Val Obj: {:.4} vs Incumbent {:.4}, W = {:.4}). Ready for promotion.",
+                            "\n   {} Policy '{}' won on held-out validation (Val Obj: {:.4} vs Incumbent {:.4}, W = {:.4}, Beta = {:.2}). Ready for promotion.",
                             Glyphs::bloom(),
                             winner_name,
                             validation_objective,
                             incumbent_objective,
                             kendall_w,
+                            beta,
                         );
                         let active_policy_path =
                             repo_root.join(".selfware").join("active_policy.json");
+                        let evidence_hash = crate::evolution::replay::compute_policy_evidence_hash(
+                            &winner_name,
+                            validation_objective,
+                            incumbent_objective,
+                            kendall_w,
+                            beta,
+                        );
                         let payload = serde_json::json!({
                             "policy_name": winner_name,
                             "promoted_at": std::time::SystemTime::now()
@@ -2707,6 +2716,8 @@ async fn handle_command(
                             "validation_objective": validation_objective,
                             "incumbent_objective": incumbent_objective,
                             "kendall_w": kendall_w,
+                            "beta": beta,
+                            "evidence_hash": evidence_hash,
                         });
                         if let Ok(json_str) = serde_json::to_string_pretty(&payload) {
                             if let Err(e) = std::fs::write(&active_policy_path, json_str) {

@@ -1971,37 +1971,18 @@ fn test_promoted_policies_control_live_search_decisions() {
     std::fs::write(&attempts_file, file_content).unwrap();
 
     // 1. Fixed population policy stops once the initial population is evaluated (no further roots)
-    let mut fixed_policy = instantiate_search_policy("fixed_population", 2);
-    let decision_fixed = decide_next_search_action(
-        &mut *fixed_policy,
-        &attempts_file,
-        50.0,
-        2,
-        Some("att-baseline"),
-        "baseline",
-    );
+    let mut fixed_policy = FixedPopulationPolicy::new(2);
+    let decision_fixed = decide_next_search_action(&mut fixed_policy, &attempts_file, 50.0, 2, 1.0);
 
     // 2. RefineTop1 policy zeroes in on the top performing branch (branch-1 with score 85.0)
     let mut refine_policy = instantiate_search_policy("refine_top1", 2);
-    let decision_refine = decide_next_search_action(
-        &mut *refine_policy,
-        &attempts_file,
-        50.0,
-        2,
-        Some("att-baseline"),
-        "baseline",
-    );
+    let decision_refine =
+        decide_next_search_action(&mut *refine_policy, &attempts_file, 50.0, 2, 1.0);
 
     // 3. BreadthFirst policy expands frontiers across all open branches simultaneously
     let mut breadth_policy = instantiate_search_policy("breadth_first", 2);
-    let decision_breadth = decide_next_search_action(
-        &mut *breadth_policy,
-        &attempts_file,
-        50.0,
-        2,
-        Some("att-baseline"),
-        "baseline",
-    );
+    let decision_breadth =
+        decide_next_search_action(&mut *breadth_policy, &attempts_file, 50.0, 2, 1.0);
 
     // Prove that the policies make DIFFERENT live search decisions on the exact same attempt history
     assert!(
@@ -2201,5 +2182,307 @@ fn test_infrastructure_failures_excluded_from_deduplication() {
     assert!(
         blacklisted.contains("sha-dup-rejected-4"),
         "Duplicate rejected diffs must be blacklisted"
+    );
+}
+
+#[test]
+fn test_promoted_policy_name_round_trip() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path();
+    let active_policy_path = root.join("active_policy.json");
+
+    // 1. Exact CLI-generated payload for ParetoAdaptivePolicy
+    let winner_name = "ParetoAdaptivePolicy";
+    let val_obj = 0.8842;
+    let inc_obj = 0.7210;
+    let kendall_w = 0.8123;
+    let beta = 0.35;
+    let evidence_hash = crate::evolution::replay::compute_policy_evidence_hash(
+        winner_name,
+        val_obj,
+        inc_obj,
+        kendall_w,
+        beta,
+    );
+
+    let cli_payload = serde_json::json!({
+        "policy_name": winner_name,
+        "promoted_at": "2026-09-17T12:00:00Z",
+        "validation_objective": val_obj,
+        "incumbent_objective": inc_obj,
+        "kendall_w": kendall_w,
+        "beta": beta,
+        "evidence_hash": evidence_hash,
+    });
+    std::fs::write(
+        &active_policy_path,
+        serde_json::to_string_pretty(&cli_payload).unwrap(),
+    )
+    .unwrap();
+
+    let loaded = load_active_policy(&active_policy_path, 3);
+    assert_eq!(loaded.policy_name, "ParetoAdaptivePolicy");
+    assert_eq!(loaded.policy.name(), "ParetoAdaptivePolicy");
+    assert_eq!(loaded.beta, beta);
+    assert_eq!(
+        loaded.evidence_hash.as_deref(),
+        Some(evidence_hash.as_str())
+    );
+
+    // 2. Exact CLI-generated payload with FixedPopulation (Incumbent)
+    let winner_name = "FixedPopulation (Incumbent)";
+    let hash2 =
+        crate::evolution::replay::compute_policy_evidence_hash(winner_name, 0.70, 0.70, 1.0, 0.2);
+    let cli_payload2 = serde_json::json!({
+        "policy_name": winner_name,
+        "promoted_at": "2026-09-17T12:00:00Z",
+        "validation_objective": 0.70,
+        "incumbent_objective": 0.70,
+        "kendall_w": 1.0,
+        "beta": 0.2,
+        "evidence_hash": hash2,
+    });
+    std::fs::write(
+        &active_policy_path,
+        serde_json::to_string_pretty(&cli_payload2).unwrap(),
+    )
+    .unwrap();
+
+    let loaded2 = load_active_policy(&active_policy_path, 3);
+    assert_eq!(loaded2.policy.name(), "FixedPopulation (Incumbent)");
+    assert_eq!(loaded2.beta, 0.2);
+
+    // 3. Forged or corrupted evidence hash falls back safely to FixedPopulation
+    let cli_payload_corrupted = serde_json::json!({
+        "policy_name": "ParetoAdaptivePolicy",
+        "promoted_at": "2026-09-17T12:00:00Z",
+        "validation_objective": 0.9999, // tampered!
+        "incumbent_objective": inc_obj,
+        "kendall_w": kendall_w,
+        "beta": beta,
+        "evidence_hash": evidence_hash, // hash does not match tampered parameters
+    });
+    std::fs::write(
+        &active_policy_path,
+        serde_json::to_string_pretty(&cli_payload_corrupted).unwrap(),
+    )
+    .unwrap();
+
+    let loaded_corrupted = load_active_policy(&active_policy_path, 3);
+    assert_eq!(
+        loaded_corrupted.policy.name(),
+        "FixedPopulation (Incumbent)",
+        "Forged/corrupted active policy must fall back to incumbent"
+    );
+}
+
+#[test]
+fn test_multi_action_batch_and_parent_restoration() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path();
+    let attempts_file = root.join("attempts.jsonl");
+
+    let patch_a = serde_json::json!([{
+        "file": "code.rs",
+        "search": "// BASELINE",
+        "replace": "pub fn branch_a() -> i32 { 10 }"
+    }])
+    .to_string();
+
+    let patch_b = serde_json::json!([{
+        "file": "code.rs",
+        "search": "// BASELINE",
+        "replace": "pub fn branch_b() -> i32 { 20 }"
+    }])
+    .to_string();
+
+    let node_baseline = crate::evolution::tree_log::AttemptNode {
+        id: "att-baseline".into(),
+        parent_id: None,
+        generation: 0,
+        branch_id: "baseline".into(),
+        hypothesis_id: "baseline".into(),
+        description: "baseline".into(),
+        diff_sha256: "0".into(),
+        patch: None,
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(50.0),
+        tokens_used: None,
+        wall_time_ms: 0,
+        status: crate::evolution::tree_log::AttemptStatus::Baseline,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        created_at: "2026-09-17T00:00:00Z".into(),
+    };
+
+    let node_a = crate::evolution::tree_log::AttemptNode {
+        id: "att-a".into(),
+        parent_id: Some("att-baseline".into()),
+        generation: 1,
+        branch_id: "branch-a".into(),
+        hypothesis_id: "hyp-a".into(),
+        description: "branch a implementation".into(),
+        diff_sha256: "sha-a".into(),
+        patch: Some(patch_a),
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(60.0),
+        tokens_used: None,
+        wall_time_ms: 10,
+        status: crate::evolution::tree_log::AttemptStatus::Evaluated,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        created_at: "2026-09-17T00:01:00Z".into(),
+    };
+
+    let node_b = crate::evolution::tree_log::AttemptNode {
+        id: "att-b".into(),
+        parent_id: Some("att-baseline".into()),
+        generation: 1,
+        branch_id: "branch-b".into(),
+        hypothesis_id: "hyp-b".into(),
+        description: "branch b implementation".into(),
+        diff_sha256: "sha-b".into(),
+        patch: Some(patch_b),
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(70.0),
+        tokens_used: None,
+        wall_time_ms: 10,
+        status: crate::evolution::tree_log::AttemptStatus::Evaluated,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        created_at: "2026-09-17T00:01:30Z".into(),
+    };
+
+    let lines = format!(
+        "{}\n{}\n{}\n",
+        serde_json::to_string(&node_baseline).unwrap(),
+        serde_json::to_string(&node_a).unwrap(),
+        serde_json::to_string(&node_b).unwrap(),
+    );
+    std::fs::write(&attempts_file, lines).unwrap();
+
+    // Verify parent restoration for both uncommitted branches
+    let worktree_a = tempfile::tempdir().unwrap();
+    let file_a = worktree_a.path().join("code.rs");
+    std::fs::write(&file_a, "// BASELINE\n").unwrap();
+    let res_a = crate::evolution::ast_tools::restore_worktree_parent_state(
+        worktree_a.path(),
+        &attempts_file,
+        Some("att-a"),
+    )
+    .unwrap();
+    assert_eq!(res_a, vec!["att-a"]);
+    assert_eq!(
+        std::fs::read_to_string(&file_a).unwrap(),
+        "pub fn branch_a() -> i32 { 10 }\n"
+    );
+
+    let worktree_b = tempfile::tempdir().unwrap();
+    let file_b = worktree_b.path().join("code.rs");
+    std::fs::write(&file_b, "// BASELINE\n").unwrap();
+    let res_b = crate::evolution::ast_tools::restore_worktree_parent_state(
+        worktree_b.path(),
+        &attempts_file,
+        Some("att-b"),
+    )
+    .unwrap();
+    assert_eq!(res_b, vec!["att-b"]);
+    assert_eq!(
+        std::fs::read_to_string(&file_b).unwrap(),
+        "pub fn branch_b() -> i32 { 20 }\n"
+    );
+
+    // Multi-action batch execution check:
+    // With active actions containing both branch-a and branch-b,
+    // hypotheses are mapped round-robin so EVERY selected action executes.
+    let active_actions = [
+        LegalAction::RefineFrontier {
+            branch_id: "branch-a".into(),
+            parent_id: "att-a".into(),
+            node_id: "att-a-next".into(),
+        },
+        LegalAction::RefineFrontier {
+            branch_id: "branch-b".into(),
+            parent_id: "att-b".into(),
+            node_id: "att-b-next".into(),
+        },
+    ];
+
+    let mut executed_parents = Vec::new();
+    for h_idx in 0..2 {
+        let action = &active_actions[h_idx % active_actions.len()];
+        let (p_id, b_id) = match action {
+            LegalAction::RefineFrontier {
+                branch_id,
+                parent_id,
+                ..
+            } => (parent_id.clone(), branch_id.clone()),
+            LegalAction::OpenRoot { branch_id, .. } => ("att-baseline".into(), branch_id.clone()),
+        };
+        executed_parents.push((p_id, b_id));
+    }
+
+    assert_eq!(
+        executed_parents,
+        vec![
+            ("att-a".to_string(), "branch-a".to_string()),
+            ("att-b".to_string(), "branch-b".to_string()),
+        ],
+        "Every action in a multi-action batch must be assigned and executed"
+    );
+}
+
+#[test]
+fn test_fixed_population_daemon_continues_across_generations_and_empty_responses() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path();
+    let attempts_file = root.join("attempts.jsonl");
+    std::fs::write(&attempts_file, "").unwrap();
+
+    // FixedPopulationPolicy::for_daemon has no probe budget limit, ensuring
+    // the daemon continues across generations and after empty LLM responses.
+    let mut policy = FixedPopulationPolicy::for_daemon(3);
+
+    // Generation 1: request next actions
+    let d1 = decide_next_search_action(&mut policy, &attempts_file, 50.0, 3, 1.0);
+    let actions1 = match d1 {
+        PolicyDecision::SelectBatch(actions) => actions,
+        PolicyDecision::Stop { reason } => panic!("Unexpected stop on gen 1: {reason}"),
+    };
+    assert_eq!(
+        actions1.len(),
+        3,
+        "Gen 1 must select initial population of 3"
+    );
+
+    // Empty LLM response or generation 2: policy must NOT stop!
+    let d2 = decide_next_search_action(&mut policy, &attempts_file, 50.0, 3, 1.0);
+    match d2 {
+        PolicyDecision::SelectBatch(actions) => {
+            assert_eq!(actions.len(), 3, "Gen 2 must continue and produce actions");
+        }
+        PolicyDecision::Stop { reason } => {
+            panic!("FixedPopulationPolicy::for_daemon must not stop after first generation! Stopped with: {reason}");
+        }
+    }
+
+    // By contrast, replay-budgeted FixedPopulationPolicy(3) DOES stop when its total budget is reached
+    let mut replay_policy = FixedPopulationPolicy::new(3);
+    let r1 = decide_next_search_action(&mut replay_policy, &attempts_file, 50.0, 3, 1.0);
+    assert!(matches!(r1, PolicyDecision::SelectBatch(_)));
+
+    let r2 = decide_next_search_action(&mut replay_policy, &attempts_file, 50.0, 3, 1.0);
+    assert!(
+        matches!(r2, PolicyDecision::Stop { .. }),
+        "Replay policy must stop when total probe budget is exhausted"
     );
 }

@@ -134,3 +134,131 @@ fn test_worktree_error_display() {
     ));
     assert!(format!("{}", io_err).contains("IO error"));
 }
+
+#[test]
+fn test_restore_worktree_parent_state() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path();
+    let test_file = root.join("lib.rs");
+    std::fs::write(&test_file, "fn initial() {}\n").unwrap();
+
+    let patch1 = serde_json::json!([{
+        "file": "lib.rs",
+        "search": "fn initial() {}",
+        "replace": "fn step_one() {}"
+    }])
+    .to_string();
+
+    let patch2 = serde_json::json!([{
+        "file": "lib.rs",
+        "search": "fn step_one() {}",
+        "replace": "fn step_two() {}"
+    }])
+    .to_string();
+
+    let attempts_file = root.join("attempts.jsonl");
+    let node_baseline = crate::evolution::tree_log::AttemptNode {
+        id: "att-baseline".into(),
+        parent_id: None,
+        generation: 0,
+        branch_id: "baseline".into(),
+        hypothesis_id: "baseline".into(),
+        description: "baseline".into(),
+        diff_sha256: "0".into(),
+        patch: None,
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(50.0),
+        tokens_used: None,
+        wall_time_ms: 0,
+        status: crate::evolution::tree_log::AttemptStatus::Baseline,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        created_at: "2026-09-17T00:00:00Z".into(),
+    };
+
+    let node_1 = crate::evolution::tree_log::AttemptNode {
+        id: "att-1".into(),
+        parent_id: Some("att-baseline".into()),
+        generation: 1,
+        branch_id: "branch-1".into(),
+        hypothesis_id: "hyp-1".into(),
+        description: "step 1".into(),
+        diff_sha256: "1".into(),
+        patch: Some(patch1),
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(60.0),
+        tokens_used: None,
+        wall_time_ms: 10,
+        status: crate::evolution::tree_log::AttemptStatus::Evaluated,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        created_at: "2026-09-17T00:01:00Z".into(),
+    };
+
+    let node_2 = crate::evolution::tree_log::AttemptNode {
+        id: "att-2".into(),
+        parent_id: Some("att-1".into()),
+        generation: 2,
+        branch_id: "branch-1".into(),
+        hypothesis_id: "hyp-2".into(),
+        description: "step 2".into(),
+        diff_sha256: "2".into(),
+        patch: Some(patch2),
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(70.0),
+        tokens_used: None,
+        wall_time_ms: 10,
+        status: crate::evolution::tree_log::AttemptStatus::Evaluated,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        created_at: "2026-09-17T00:02:00Z".into(),
+    };
+
+    let lines = format!(
+        "{}\n{}\n{}\n",
+        serde_json::to_string(&node_baseline).unwrap(),
+        serde_json::to_string(&node_1).unwrap(),
+        serde_json::to_string(&node_2).unwrap(),
+    );
+    std::fs::write(&attempts_file, lines).unwrap();
+
+    // 1. None or att-baseline returns Ok(empty) without touching files
+    let res_none = restore_worktree_parent_state(root, &attempts_file, None).unwrap();
+    assert!(res_none.is_empty());
+    let res_base =
+        restore_worktree_parent_state(root, &attempts_file, Some("att-baseline")).unwrap();
+    assert!(res_base.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(&test_file).unwrap(),
+        "fn initial() {}\n"
+    );
+
+    // 2. Restoring att-1 applies patch1
+    let res_1 = restore_worktree_parent_state(root, &attempts_file, Some("att-1")).unwrap();
+    assert_eq!(res_1, vec!["att-1"]);
+    assert_eq!(
+        std::fs::read_to_string(&test_file).unwrap(),
+        "fn step_one() {}\n"
+    );
+
+    // 3. Restoring att-2 from att-1 state applies patch2
+    let res_2 = restore_worktree_parent_state(root, &attempts_file, Some("att-2")).unwrap();
+    assert_eq!(res_2, vec!["att-2"]);
+    assert_eq!(
+        std::fs::read_to_string(&test_file).unwrap(),
+        "fn step_two() {}\n"
+    );
+
+    // 4. Unknown parent error
+    let res_err = restore_worktree_parent_state(root, &attempts_file, Some("att-unknown"));
+    assert!(res_err.is_err());
+}

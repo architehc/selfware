@@ -638,9 +638,7 @@ fn test_credential_reload_non_auth_escalates() {
 /// (which may or may not have a key — either way it must not panic).
 #[test]
 fn test_credential_reload_find_available_key_with_env() {
-    // Save and restore the env var to avoid cross-test flakiness.
-    let saved = std::env::var("SELFWARE_API_KEY").ok();
-    // Set a unique value that won't collide with keyring entries.
+    let _env = crate::test_support::EnvGuard::capture(&["SELFWARE_API_KEY"]);
     std::env::set_var("SELFWARE_API_KEY", "test-credential-reload-finder-key-xyz");
     let key = CredentialReload::find_available_key("https://example.test/v1");
     assert!(
@@ -648,11 +646,6 @@ fn test_credential_reload_find_available_key_with_env() {
         "find_available_key should return Some when SELFWARE_API_KEY is set"
     );
     assert_eq!(key.unwrap(), "test-credential-reload-finder-key-xyz");
-    // Restore.
-    match saved {
-        Some(v) => std::env::set_var("SELFWARE_API_KEY", v),
-        None => std::env::remove_var("SELFWARE_API_KEY"),
-    }
 }
 
 /// When no env var is set, the helper falls through to the keyring.
@@ -660,19 +653,16 @@ fn test_credential_reload_find_available_key_with_env() {
 /// never panic.  We just assert it completes.
 #[test]
 fn test_credential_reload_find_available_key_without_env() {
-    let saved = std::env::var("SELFWARE_API_KEY").ok();
+    let _env = crate::test_support::EnvGuard::capture(&["SELFWARE_API_KEY"]);
     std::env::remove_var("SELFWARE_API_KEY");
     // This call may hit the OS keyring — that's fine, it must not panic.
     let _ = CredentialReload::find_available_key("https://example.test/v1");
-    if let Some(v) = saved {
-        std::env::set_var("SELFWARE_API_KEY", v)
-    }
 }
 
 /// When a key source is present, the resolver produces ReloadCredentials.
 #[test]
 fn test_credential_reload_resolves_when_key_present() {
-    let saved = std::env::var("SELFWARE_API_KEY").ok();
+    let _env = crate::test_support::EnvGuard::capture(&["SELFWARE_API_KEY"]);
     std::env::set_var(
         "SELFWARE_API_KEY",
         "test-credential-reload-resolves-key-abc",
@@ -687,9 +677,5 @@ fn test_credential_reload_resolves_when_key_present() {
     match outcome {
         ResolutionOutcome::Resolved(RecoveryDirective::ReloadCredentials) => {}
         other => panic!("expected Resolved(ReloadCredentials), got {:?}", other),
-    }
-    match saved {
-        Some(v) => std::env::set_var("SELFWARE_API_KEY", v),
-        None => std::env::remove_var("SELFWARE_API_KEY"),
     }
 }

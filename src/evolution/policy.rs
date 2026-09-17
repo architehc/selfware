@@ -271,18 +271,38 @@ pub trait SearchPolicy: std::fmt::Debug + Send + Sync {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Fixed Population Policy (Incumbent Daemon Baseline):
-/// Evaluates up to `population_size` roots in the initial generation,
-/// without exploring deeper branch refinements.
+/// Evaluates up to `population_size` roots per generation (or up to `total_probe_budget`
+/// during replay simulation), without exploring deeper branch refinements.
 #[derive(Debug, Clone)]
 pub struct FixedPopulationPolicy {
     pub population_size: usize,
+    pub total_probe_budget: Option<usize>,
     opened_count: usize,
 }
 
 impl FixedPopulationPolicy {
-    pub fn new(population_size: usize) -> Self {
+    /// Replay constructor with total probe budget.
+    pub fn new(total_probe_budget: usize) -> Self {
         Self {
-            population_size,
+            population_size: total_probe_budget,
+            total_probe_budget: Some(total_probe_budget),
+            opened_count: 0,
+        }
+    }
+
+    /// Daemon constructor with per-generation population size and no artificial total budget limit.
+    pub fn for_daemon(generation_population: usize) -> Self {
+        Self {
+            population_size: generation_population,
+            total_probe_budget: None,
+            opened_count: 0,
+        }
+    }
+
+    pub fn with_budget(generation_population: usize, total_probe_budget: Option<usize>) -> Self {
+        Self {
+            population_size: generation_population,
+            total_probe_budget,
             opened_count: 0,
         }
     }
@@ -305,12 +325,21 @@ impl SearchPolicy for FixedPopulationPolicy {
         legal_actions: &[LegalAction],
         _beta: f64,
     ) -> PolicyDecision {
-        if self.opened_count >= self.population_size || legal_actions.is_empty() {
+        let current_probes = self.opened_count.max(prefix.total_probes());
+        if let Some(budget) = self.total_probe_budget {
+            if current_probes >= budget {
+                return PolicyDecision::Stop {
+                    reason: format!(
+                        "Incumbent fixed population reached ({}/{})",
+                        current_probes, budget
+                    ),
+                };
+            }
+        }
+
+        if legal_actions.is_empty() {
             return PolicyDecision::Stop {
-                reason: format!(
-                    "Incumbent fixed population reached ({}/{})",
-                    self.opened_count, self.population_size
-                ),
+                reason: "No legal actions available".into(),
             };
         }
 
@@ -321,9 +350,14 @@ impl SearchPolicy for FixedPopulationPolicy {
             if !action.is_root() {
                 continue;
             }
-            if batch.len() >= prefix.max_parallelism
-                || self.opened_count + batch.len() >= self.population_size
-            {
+            if batch.len() >= prefix.max_parallelism {
+                break;
+            }
+            if let Some(budget) = self.total_probe_budget {
+                if current_probes + batch.len() >= budget {
+                    break;
+                }
+            } else if batch.len() >= self.population_size {
                 break;
             }
             if selected_branches.insert(action.branch_id().to_string()) {
@@ -336,7 +370,7 @@ impl SearchPolicy for FixedPopulationPolicy {
                 reason: "No further unrevealed roots available".into(),
             }
         } else {
-            self.opened_count += batch.len();
+            self.opened_count = current_probes + batch.len();
             PolicyDecision::SelectBatch(batch)
         }
     }
@@ -379,28 +413,31 @@ impl SearchPolicy for BreadthFirstPolicy {
             };
         }
 
-        // Prefer unopened roots first
-        let roots: Vec<LegalAction> = legal_actions
-            .iter()
-            .filter(|a| a.is_root())
-            .cloned()
-            .collect();
+        // Prefer unopened roots first if fewer than max_parallelism branches have been seeded
+        let trajs = prefix.all_branch_trajectories();
+        if trajs.len() < prefix.max_parallelism {
+            let roots: Vec<LegalAction> = legal_actions
+                .iter()
+                .filter(|a| a.is_root())
+                .cloned()
+                .collect();
 
-        if !roots.is_empty() {
-            let mut batch = Vec::new();
-            let mut selected_branches = HashSet::new();
+            if !roots.is_empty() {
+                let mut batch = Vec::new();
+                let mut selected_branches = HashSet::new();
 
-            for action in roots {
-                if batch.len() >= prefix.max_parallelism {
-                    break;
+                for action in roots {
+                    if batch.len() >= prefix.max_parallelism {
+                        break;
+                    }
+                    if selected_branches.insert(action.branch_id().to_string()) {
+                        batch.push(action);
+                    }
                 }
-                if selected_branches.insert(action.branch_id().to_string()) {
-                    batch.push(action);
-                }
-            }
 
-            if !batch.is_empty() {
-                return PolicyDecision::SelectBatch(batch);
+                if !batch.is_empty() {
+                    return PolicyDecision::SelectBatch(batch);
+                }
             }
         }
 
@@ -409,6 +446,9 @@ impl SearchPolicy for BreadthFirstPolicy {
         let mut selected_branches = HashSet::new();
 
         for action in legal_actions {
+            if action.is_root() {
+                continue;
+            }
             if batch.len() >= prefix.max_parallelism {
                 break;
             }
@@ -475,46 +515,43 @@ impl SearchPolicy for RefineTop1Policy {
             };
         }
 
-        // If target branch is not yet selected, explore roots
+        // If target branch is not yet selected, lock onto top candidate or explore roots
         if self.target_branch.is_none() {
-            let roots: Vec<LegalAction> = legal_actions
-                .iter()
-                .filter(|a| a.is_root())
-                .cloned()
-                .collect();
-
-            if !roots.is_empty() {
-                let batch: Vec<LegalAction> =
-                    roots.into_iter().take(prefix.max_parallelism).collect();
-                return PolicyDecision::SelectBatch(batch);
-            }
-
-            // Roots are done: find the top branch by successful anchor
             let trajs = prefix.all_branch_trajectories();
             let mut candidates: Vec<(String, f64)> = trajs
                 .into_iter()
                 .filter(|(bid, _)| bid != "baseline")
                 .filter_map(|(bid, t)| t.successful_anchor.map(|a| (bid, a)))
                 .collect();
+
+            if candidates.is_empty() {
+                let roots: Vec<LegalAction> = legal_actions
+                    .iter()
+                    .filter(|a| a.is_root())
+                    .cloned()
+                    .collect();
+
+                if !roots.is_empty() {
+                    let batch: Vec<LegalAction> =
+                        roots.into_iter().take(prefix.max_parallelism).collect();
+                    return PolicyDecision::SelectBatch(batch);
+                }
+
+                return PolicyDecision::Stop {
+                    reason: "No legal actions available".into(),
+                };
+            }
+
+            // Candidates exist: find the top branch by successful anchor
             // Deterministic ordering: highest score first, then lexicographical branch_id ascending for tie-breaks
             candidates.sort_by(|(bid_a, a), (bid_b, b)| {
                 b.partial_cmp(a)
                     .unwrap_or(std::cmp::Ordering::Equal)
                     .then_with(|| bid_a.cmp(bid_b))
             });
-            let best_branch = candidates.into_iter().next();
-
-            match best_branch {
-                Some((bid, score)) => {
-                    self.target_branch = Some(bid.clone());
-                    self.last_best_score = score;
-                }
-                None => {
-                    return PolicyDecision::Stop {
-                        reason: "No branch achieved a successful evaluation".into(),
-                    };
-                }
-            }
+            let (bid, score) = candidates.remove(0);
+            self.target_branch = Some(bid);
+            self.last_best_score = score;
         }
 
         // Refine the chosen target branch

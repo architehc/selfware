@@ -523,35 +523,161 @@ pub(crate) fn evaluate_candidate_promotion(
     PromotionDecision::Promote
 }
 
+/// Canonical normalization for search policy names.
+/// Handles PascalCase (e.g. `ParetoAdaptivePolicy`), snake_case (`pareto_adaptive_policy`),
+/// kebab-case (`pareto-adaptive`), aliases (`bfs`, `fixed`, `pareto`), and names with comments
+/// or qualifiers (`FixedPopulation (Incumbent)`).
+pub fn normalize_policy_name(raw: &str) -> String {
+    let clean = raw.split('(').next().unwrap_or(raw).trim();
+    let mut snake = String::new();
+    let chars: Vec<char> = clean.chars().collect();
+    for i in 0..chars.len() {
+        let c = chars[i];
+        if c.is_ascii_uppercase() {
+            if i > 0
+                && !chars[i - 1].is_ascii_uppercase()
+                && chars[i - 1] != '_'
+                && chars[i - 1] != '-'
+            {
+                snake.push('_');
+            }
+            snake.push(c.to_ascii_lowercase());
+        } else if c == '-' || c == ' ' {
+            snake.push('_');
+        } else {
+            snake.push(c);
+        }
+    }
+    snake
+}
+
 /// Instantiates a named search policy, falling back to [`FixedPopulationPolicy`].
 pub fn instantiate_search_policy(
     policy_name: &str,
     population_size: usize,
 ) -> Box<dyn SearchPolicy> {
-    let normalized = policy_name.to_ascii_lowercase().replace('-', "_");
+    let normalized = normalize_policy_name(policy_name);
     match normalized.as_str() {
-        "fixed_population" | "fixed_population_policy" | "fixed" => {
-            Box::new(FixedPopulationPolicy::new(population_size))
+        "fixed_population"
+        | "fixed_population_policy"
+        | "fixed"
+        | "fixedpopulation"
+        | "fixedpopulationpolicy" => Box::new(FixedPopulationPolicy::for_daemon(population_size)),
+
+        "breadth_first"
+        | "breadth_first_policy"
+        | "breadthfirst"
+        | "breadthfirstpolicy"
+        | "bfs" => Box::new(BreadthFirstPolicy::new(3)),
+
+        "refine_top1" | "refine_top1_policy" | "refine_top" | "refinetop1" | "refinetop1policy" => {
+            Box::new(RefineTop1Policy::new(3))
         }
-        "breadth_first" | "breadth_first_policy" | "bfs" => Box::new(BreadthFirstPolicy::new(3)),
-        "refine_top1" | "refine_top1_policy" | "refine_top" => Box::new(RefineTop1Policy::new(3)),
-        "pareto_adaptive" | "pareto_adaptive_policy" | "pareto" => {
-            Box::new(ParetoAdaptivePolicy::new())
-        }
-        "early_stop_plateau" | "early_stop_plateau_policy" | "early_stop" => {
-            Box::new(EarlyStopPlateauPolicy::new(
-                Box::new(FixedPopulationPolicy::new(population_size)),
-                3,
-                0.01,
-            ))
-        }
+
+        "pareto_adaptive"
+        | "pareto_adaptive_policy"
+        | "paretoadaptive"
+        | "paretoadaptivepolicy"
+        | "pareto" => Box::new(ParetoAdaptivePolicy::new()),
+
+        "early_stop_plateau"
+        | "early_stop_plateau_policy"
+        | "earlystopplateau"
+        | "earlystopplateaupolicy"
+        | "early_stop" => Box::new(EarlyStopPlateauPolicy::new(
+            Box::new(FixedPopulationPolicy::for_daemon(population_size)),
+            3,
+            0.01,
+        )),
+
         _ => {
             tracing::warn!(
-                "Unknown search policy '{}', defaulting to FixedPopulationPolicy",
-                policy_name
+                "Unknown search policy '{}' (normalized: '{}'), defaulting to FixedPopulationPolicy",
+                policy_name,
+                normalized
             );
-            Box::new(FixedPopulationPolicy::new(population_size))
+            Box::new(FixedPopulationPolicy::for_daemon(population_size))
         }
+    }
+}
+
+/// Metadata and instantiated policy loaded from `.selfware/active_policy.json`.
+pub struct LoadedActivePolicy {
+    pub policy: Box<dyn SearchPolicy>,
+    pub beta: f64,
+    pub evidence_hash: Option<String>,
+    pub policy_name: String,
+}
+
+/// Loads and validates the promoted search policy from `.selfware/active_policy.json`.
+pub fn load_active_policy(active_policy_path: &Path, population_size: usize) -> LoadedActivePolicy {
+    let fallback = || LoadedActivePolicy {
+        policy: Box::new(FixedPopulationPolicy::for_daemon(population_size)),
+        beta: 1.0,
+        evidence_hash: None,
+        policy_name: "FixedPopulation (Incumbent)".to_string(),
+    };
+
+    if !active_policy_path.exists() {
+        return fallback();
+    }
+
+    let Ok(content) = std::fs::read_to_string(active_policy_path) else {
+        return fallback();
+    };
+
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return fallback();
+    };
+
+    let Some(raw_name) = val.get("policy_name").and_then(|v| v.as_str()) else {
+        return fallback();
+    };
+
+    let beta = val.get("beta").and_then(|v| v.as_f64()).unwrap_or(0.2);
+    let evidence_hash = val
+        .get("evidence_hash")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    // Verify cryptographic evidence binding if hash is present
+    if let Some(ref expected_hash) = evidence_hash {
+        let val_obj = val
+            .get("validation_objective")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let inc_obj = val
+            .get("incumbent_objective")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let w = val.get("kendall_w").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let computed = crate::evolution::replay::compute_policy_evidence_hash(
+            raw_name, val_obj, inc_obj, w, beta,
+        );
+        if computed != *expected_hash {
+            tracing::warn!(
+                "Active policy evidence hash mismatch for '{}'! Expected '{}', got '{}'; falling back to incumbent FixedPopulationPolicy",
+                raw_name,
+                expected_hash,
+                computed
+            );
+            return fallback();
+        }
+    }
+
+    let policy = instantiate_search_policy(raw_name, population_size);
+    let policy_name = policy.name().to_string();
+    tracing::info!(
+        "Evolution daemon loaded active search policy: {} (beta: {:.2})",
+        policy_name,
+        beta
+    );
+
+    LoadedActivePolicy {
+        policy,
+        beta,
+        evidence_hash,
+        policy_name,
     }
 }
 
@@ -562,8 +688,7 @@ pub fn decide_next_search_action(
     attempts_file: &Path,
     baseline_score: f64,
     max_parallelism: usize,
-    _active_parent_id: Option<&str>,
-    _active_parent_branch_id: &str,
+    beta: f64,
 ) -> PolicyDecision {
     let mut observations = Vec::new();
     if let Ok(content) = std::fs::read_to_string(attempts_file) {
@@ -614,17 +739,15 @@ pub fn decide_next_search_action(
         }
     }
 
-    // Candidate root actions to explore new branches if we haven't reached initial population limit
-    if open_branches.len() < max_parallelism {
-        for idx in open_branches.len()..max_parallelism {
-            legal_actions.push(LegalAction::OpenRoot {
-                branch_id: format!("branch-root-{}", idx),
-                node_id: format!("root-hyp-{}", idx),
-            });
-        }
+    // Candidate root actions to explore new branches
+    for idx in 0..max_parallelism {
+        legal_actions.push(LegalAction::OpenRoot {
+            branch_id: format!("branch-root-{}", idx),
+            node_id: format!("root-hyp-{}", idx),
+        });
     }
 
-    policy.decide(&prefix, &legal_actions, 1.0)
+    policy.decide(&prefix, &legal_actions, beta)
 }
 
 /// Densely log an attempt node to JSONL, aborting generation if write fails.
@@ -675,24 +798,11 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
     // Load promoted search policy if available from offline held-out replay validation
     let active_policy_file = repo_root.join(".selfware").join("active_policy.json");
-    let mut search_policy: Box<dyn SearchPolicy> = if active_policy_file.exists() {
-        let loaded_name = std::fs::read_to_string(&active_policy_file)
-            .ok()
-            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
-            .and_then(|val| {
-                val.get("policy_name")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-            });
-        if let Some(p_name) = loaded_name {
-            tracing::info!("Evolution daemon loaded active search policy: {}", p_name);
-            instantiate_search_policy(&p_name, config.population_size)
-        } else {
-            instantiate_search_policy("fixed_population", config.population_size)
-        }
-    } else {
-        instantiate_search_policy("fixed_population", config.population_size)
-    };
+    let loaded_active_policy = load_active_policy(&active_policy_file, config.population_size);
+    let mut search_policy = loaded_active_policy.policy;
+    let active_policy_name = loaded_active_policy.policy_name;
+    let active_policy_beta = loaded_active_policy.beta;
+    let active_policy_evidence_hash = loaded_active_policy.evidence_hash;
 
     let mut initial_sab = 0.0;
 
@@ -742,6 +852,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             "model": config.llm.model,
             "negative_feedback_history": true,
             "sab_noise_margin": DEFAULT_SAB_NOISE_MARGIN,
+            "active_policy": active_policy_name,
+            "active_policy_beta": active_policy_beta,
+            "active_policy_evidence_hash": active_policy_evidence_hash,
         }),
     );
 
@@ -876,7 +989,6 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         );
     }
     let mut active_parent_id: Option<String> = Some(baseline_node.id.clone());
-    let mut active_parent_branch_id: String = baseline_node.branch_id.clone();
 
     // ═══════════════════════════════════════════════════════
     // MAIN EVOLUTIONARY LOOP
@@ -918,11 +1030,10 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             &attempts_file,
             current_baseline_metrics.sab_score,
             config.population_size,
-            active_parent_id.as_deref(),
-            &active_parent_branch_id,
+            active_policy_beta,
         );
 
-        match policy_decision {
+        let active_actions = match policy_decision {
             PolicyDecision::Stop { reason } => {
                 log_phase(&format!(
                     "Search policy '{}' requested stop: {reason}",
@@ -941,24 +1052,16 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 break;
             }
             PolicyDecision::SelectBatch(actions) => {
-                if let Some(action) = actions.first() {
-                    match action {
-                        LegalAction::RefineFrontier {
-                            branch_id,
-                            parent_id,
-                            ..
-                        } => {
-                            active_parent_id = Some(parent_id.clone());
-                            active_parent_branch_id = branch_id.clone();
-                        }
-                        LegalAction::OpenRoot { branch_id, .. } => {
-                            active_parent_id = Some(baseline_node.id.clone());
-                            active_parent_branch_id = branch_id.clone();
-                        }
-                    }
+                if actions.is_empty() {
+                    vec![LegalAction::OpenRoot {
+                        branch_id: format!("branch-g{}-0", generation),
+                        node_id: format!("root-g{}-0", generation),
+                    }]
+                } else {
+                    actions
                 }
             }
-        }
+        };
 
         // ─── Step 1: Capture telemetry (sensory data for the agent) ───
         let telemetry_snapshot = telemetry::capture(repo_root, "sab_full").ok();
@@ -1006,11 +1109,17 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         // Also detect and reject duplicate patches matching previously failed diffs.
         let prior_failed_diffs = load_failed_diff_shas(&attempts_file);
         let mut valid = Vec::new();
-        for h in hypotheses {
-            let h_branch_id = if active_parent_id.as_deref() == Some("att-baseline") {
-                format!("branch-g{}-{}", generation, h.id)
-            } else {
-                active_parent_branch_id.clone()
+        for (h_idx, h) in hypotheses.into_iter().enumerate() {
+            let action = &active_actions[h_idx % active_actions.len()];
+            let (h_parent_id, h_branch_id) = match action {
+                LegalAction::RefineFrontier {
+                    branch_id,
+                    parent_id,
+                    ..
+                } => (Some(parent_id.clone()), branch_id.clone()),
+                LegalAction::OpenRoot { branch_id, .. } => {
+                    (Some(baseline_node.id.clone()), branch_id.clone())
+                }
             };
             let diff_sha256 = compute_sha256(h.patch.as_bytes());
             if hypothesis_touches_protected(&h) {
@@ -1020,9 +1129,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 ));
                 let node = AttemptNode {
                     id: format!("att-g{}-{}", generation, h.id),
-                    parent_id: active_parent_id.clone(),
+                    parent_id: h_parent_id.clone(),
                     generation,
-                    branch_id: h_branch_id,
+                    branch_id: h_branch_id.clone(),
                     hypothesis_id: h.id.clone(),
                     description: h.description.clone(),
                     diff_sha256,
@@ -1059,9 +1168,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 ));
                 let node = AttemptNode {
                     id: format!("att-g{}-{}", generation, h.id),
-                    parent_id: active_parent_id.clone(),
+                    parent_id: h_parent_id.clone(),
                     generation,
-                    branch_id: h_branch_id,
+                    branch_id: h_branch_id.clone(),
                     hypothesis_id: h.id.clone(),
                     description: h.description.clone(),
                     diff_sha256: diff_sha256.clone(),
@@ -1094,7 +1203,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 continue;
             }
 
-            valid.push(h);
+            valid.push((h, h_parent_id, h_branch_id));
         }
 
         if valid.is_empty() {
@@ -1298,35 +1407,31 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             sab_config.runner_script.exists() && std::env::var("SELFWARE_EVOLVE_SAB").is_ok();
         let mut evaluated_candidates: Vec<EvaluatedCandidate> = Vec::new();
 
-        for hypothesis in &valid {
+        for (hypothesis, hyp_parent_id, hyp_branch_id) in &valid {
             let attempt_start = Instant::now();
             let attempt_id = format!("att-g{}-{}", generation, hypothesis.id);
             let raw_diff_sha256 = compute_sha256(hypothesis.patch.as_bytes());
-            let hypothesis_branch_id = if active_parent_id.as_deref() == Some("att-baseline") {
-                format!("branch-g{}-{}", generation, hypothesis.id)
-            } else {
-                active_parent_branch_id.clone()
-            };
 
             log_phase(&format!(
                 "  Testing '{}' [{}]...",
                 hypothesis.description, hypothesis.id
             ));
 
-            // Create worktree. The guard removes it on EVERY exit path from
-            // this iteration — success, early `continue`, and panic unwind —
-            // where the old manual `cleanup_worktree` calls leaked worktrees
-            // under `.worktrees/` whenever a panic (e.g. the UTF-8 byte-slice
-            // panics) aborted the iteration.
-            let worktree = match ast_tools::create_shadow_worktree(repo_root) {
+            // Create worktree restored to the selected parent's exact source state.
+            // The guard removes it on EVERY exit path from this iteration.
+            let worktree = match ast_tools::create_shadow_worktree_for_parent(
+                repo_root,
+                &attempts_file,
+                hyp_parent_id.as_deref(),
+            ) {
                 Ok(w) => w,
                 Err(e) => {
                     log_warning(&format!("  Worktree failed: {}", e));
                     let node = AttemptNode {
                         id: attempt_id.clone(),
-                        parent_id: active_parent_id.clone(),
+                        parent_id: hyp_parent_id.clone(),
                         generation,
-                        branch_id: hypothesis_branch_id.clone(),
+                        branch_id: hyp_branch_id.clone(),
                         hypothesis_id: hypothesis.id.clone(),
                         description: hypothesis.description.clone(),
                         diff_sha256: raw_diff_sha256.clone(),
@@ -1367,9 +1472,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 log_frost(generation, &format!("Patch failed: {}", hypothesis.id));
                 let node = AttemptNode {
                     id: attempt_id.clone(),
-                    parent_id: active_parent_id.clone(),
+                    parent_id: hyp_parent_id.clone(),
                     generation,
-                    branch_id: hypothesis_branch_id.clone(),
+                    branch_id: hyp_branch_id.clone(),
                     hypothesis_id: hypothesis.id.clone(),
                     description: hypothesis.description.clone(),
                     diff_sha256: raw_diff_sha256.clone(),
@@ -1430,9 +1535,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     log_frost(generation, &format!("cargo fmt failed: {}", hypothesis.id));
                     let node = AttemptNode {
                         id: attempt_id.clone(),
-                        parent_id: active_parent_id.clone(),
+                        parent_id: hyp_parent_id.clone(),
                         generation,
-                        branch_id: hypothesis_branch_id.clone(),
+                        branch_id: hyp_branch_id.clone(),
                         hypothesis_id: hypothesis.id.clone(),
                         description: hypothesis.description.clone(),
                         diff_sha256: raw_diff_sha256.clone(),
@@ -1496,9 +1601,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 log_frost(generation, &format!("Compile failed: {}", hypothesis.id));
                 let node = AttemptNode {
                     id: attempt_id.clone(),
-                    parent_id: active_parent_id.clone(),
+                    parent_id: hyp_parent_id.clone(),
                     generation,
-                    branch_id: hypothesis_branch_id.clone(),
+                    branch_id: hyp_branch_id.clone(),
                     hypothesis_id: hypothesis.id.clone(),
                     description: hypothesis.description.clone(),
                     diff_sha256: raw_diff_sha256.clone(),
@@ -1547,9 +1652,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     log_warning(&format!("  Test execution failed: {}", e));
                     let node = AttemptNode {
                         id: attempt_id.clone(),
-                        parent_id: active_parent_id.clone(),
+                        parent_id: hyp_parent_id.clone(),
                         generation,
-                        branch_id: hypothesis_branch_id.clone(),
+                        branch_id: hyp_branch_id.clone(),
                         hypothesis_id: hypothesis.id.clone(),
                         description: hypothesis.description.clone(),
                         diff_sha256: raw_diff_sha256.clone(),
@@ -1625,9 +1730,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
                 let node = AttemptNode {
                     id: attempt_id.clone(),
-                    parent_id: active_parent_id.clone(),
+                    parent_id: hyp_parent_id.clone(),
                     generation,
-                    branch_id: hypothesis_branch_id.clone(),
+                    branch_id: hyp_branch_id.clone(),
                     hypothesis_id: hypothesis.id.clone(),
                     description: hypothesis.description.clone(),
                     diff_sha256: raw_diff_sha256.clone(),
@@ -1687,9 +1792,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 log_frost(generation, &format!("Clippy failed: {}", hypothesis.id));
                 let node = AttemptNode {
                     id: attempt_id.clone(),
-                    parent_id: active_parent_id.clone(),
+                    parent_id: hyp_parent_id.clone(),
                     generation,
-                    branch_id: hypothesis_branch_id.clone(),
+                    branch_id: hyp_branch_id.clone(),
                     hypothesis_id: hypothesis.id.clone(),
                     description: hypothesis.description.clone(),
                     diff_sha256: raw_diff_sha256.clone(),
@@ -1748,9 +1853,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     );
                     let node = AttemptNode {
                         id: attempt_id.clone(),
-                        parent_id: active_parent_id.clone(),
+                        parent_id: hyp_parent_id.clone(),
                         generation,
-                        branch_id: hypothesis_branch_id.clone(),
+                        branch_id: hyp_branch_id.clone(),
                         hypothesis_id: hypothesis.id.clone(),
                         description: hypothesis.description.clone(),
                         diff_sha256: raw_diff_sha256.clone(),
@@ -1798,9 +1903,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         log_warning(&format!("  SAB failed: {}", e));
                         let node = AttemptNode {
                             id: attempt_id.clone(),
-                            parent_id: active_parent_id.clone(),
+                            parent_id: hyp_parent_id.clone(),
                             generation,
-                            branch_id: hypothesis_branch_id.clone(),
+                            branch_id: hyp_branch_id.clone(),
                             hypothesis_id: hypothesis.id.clone(),
                             description: hypothesis.description.clone(),
                             diff_sha256: raw_diff_sha256.clone(),
@@ -1850,9 +1955,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         );
                         let node = AttemptNode {
                             id: attempt_id.clone(),
-                            parent_id: active_parent_id.clone(),
+                            parent_id: hyp_parent_id.clone(),
                             generation,
-                            branch_id: hypothesis_branch_id.clone(),
+                            branch_id: hyp_branch_id.clone(),
                             hypothesis_id: hypothesis.id.clone(),
                             description: hypothesis.description.clone(),
                             diff_sha256: raw_diff_sha256.clone(),
@@ -1903,9 +2008,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     );
                     let node = AttemptNode {
                         id: attempt_id.clone(),
-                        parent_id: active_parent_id.clone(),
+                        parent_id: hyp_parent_id.clone(),
                         generation,
-                        branch_id: hypothesis_branch_id.clone(),
+                        branch_id: hyp_branch_id.clone(),
                         hypothesis_id: hypothesis.id.clone(),
                         description: hypothesis.description.clone(),
                         diff_sha256: raw_diff_sha256.clone(),
@@ -1945,9 +2050,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
             let node = AttemptNode {
                 id: attempt_id.clone(),
-                parent_id: active_parent_id.clone(),
+                parent_id: hyp_parent_id.clone(),
                 generation,
-                branch_id: hypothesis_branch_id.clone(),
+                branch_id: hyp_branch_id.clone(),
                 hypothesis_id: hypothesis.id.clone(),
                 description: hypothesis.description.clone(),
                 diff_sha256: tested_diff_sha256,
@@ -1990,7 +2095,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 tested_diff,
                 composite: candidate_composite,
                 attempt_id: attempt_id.clone(),
-                branch_id: hypothesis_branch_id.clone(),
+                branch_id: hyp_branch_id.clone(),
             });
         }
 
@@ -2054,6 +2159,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             "rank": rank,
                             "description": candidate.hypothesis.description,
                             "composite": candidate.composite,
+                            "branch_id": candidate.branch_id,
                             "reason": reason,
                         }),
                     );
@@ -2084,7 +2190,6 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 // the BLOOM commit on whatever branch was checked out.
                 if commit_winner_to_repo(repo_root, &winner.tested_diff, &commit_msg) {
                     active_parent_id = Some(winner.attempt_id.clone());
-                    active_parent_branch_id = winner.branch_id.clone();
 
                     let git_tag = if generation.is_multiple_of(config.checkpoint_interval) {
                         let tag = format!("evolve-gen-{}", generation);
@@ -2141,6 +2246,8 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             "outcome": "bloom",
                             "rank": rank,
                             "description": winner.hypothesis.description,
+                            "branch_id": winner.branch_id,
+                            "attempt_id": winner.attempt_id,
                             "score_before": current_baseline_metrics.sab_score,
                             "score_after": winner.metrics.sab_score,
                             "composite": winner.composite,

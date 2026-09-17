@@ -137,6 +137,10 @@ pub struct RankingStability {
     pub per_tree_rankings: Vec<Vec<(String, usize, f64)>>,
 }
 
+fn default_beta() -> f64 {
+    0.2
+}
+
 /// Outcome of candidate evaluation across discovery and validation trees,
 /// including cross-tree ranking stability analysis.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -147,6 +151,30 @@ pub struct ReplayValidationOutcome {
     pub discovery_stability: Option<RankingStability>,
     /// Ranking stability across validation trees, if >= 2 validation trees.
     pub validation_stability: Option<RankingStability>,
+    /// Exploration/exploitation trade-off factor beta used during evaluation.
+    #[serde(default = "default_beta")]
+    pub beta: f64,
+}
+
+/// Computes the canonical SHA-256 evidence hash binding a promoted policy to its replay evaluation outcome.
+pub fn compute_policy_evidence_hash(
+    winner_name: &str,
+    validation_objective: f64,
+    incumbent_objective: f64,
+    kendall_w: f64,
+    beta: f64,
+) -> String {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(winner_name.trim().as_bytes());
+    hasher.update(
+        format!(
+            ":{:.6}:{:.6}:{:.6}:{:.6}",
+            validation_objective, incumbent_objective, kendall_w, beta
+        )
+        .as_bytes(),
+    );
+    format!("{:x}", hasher.finalize())
 }
 
 /// Explicit promotion readiness decision incorporating required evidence,
@@ -160,6 +188,8 @@ pub enum PromotionReadiness {
         validation_objective: f64,
         incumbent_objective: f64,
         kendall_w: f64,
+        #[serde(default = "default_beta")]
+        beta: f64,
     },
     /// Candidate has higher mean objective than incumbent, but ranking across validation
     /// trees is volatile (Kendall's W < 0.70). Promotion is strictly blocked.
@@ -223,6 +253,7 @@ impl ReplayValidationOutcome {
                         validation_objective: top.validation_objective,
                         incumbent_objective: incumbent_obj,
                         kendall_w: stability.kendall_w,
+                        beta: self.beta,
                     }
                 } else {
                     PromotionReadiness::BlockedByInstability {
@@ -649,6 +680,7 @@ impl ReplaySimulator {
             summaries,
             discovery_stability,
             validation_stability,
+            beta,
         })
     }
 

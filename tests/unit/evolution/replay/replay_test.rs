@@ -614,6 +614,7 @@ fn test_higher_mean_score_with_volatile_rankings_blocks_promotion() {
             policy_count: 2,
             per_tree_rankings: vec![],
         }),
+        beta: 0.2,
     };
 
     let readiness = outcome.promotion_readiness();

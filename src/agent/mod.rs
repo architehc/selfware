@@ -2263,6 +2263,9 @@ To call a tool, use this EXACT XML structure:
     /// Check if running in non-interactive mode (piped stdin)
     #[inline]
     pub fn is_interactive(&self) -> bool {
+        if cfg!(test) {
+            return false;
+        }
         use std::io::IsTerminal;
         std::io::stdin().is_terminal()
     }
