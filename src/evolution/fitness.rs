@@ -662,8 +662,8 @@ pub fn build_fitness_metrics(
         .map(|m| m.len() as f64 / (1024.0 * 1024.0))
         .unwrap_or(0.0);
 
-    // Approximate test coverage from pass rate
-    let test_coverage_pct = if total_tests > 0 {
+    // Test pass percentage from pass rate
+    let test_pass_pct = if total_tests > 0 {
         (test_count as f64 / total_tests as f64) * 100.0
     } else {
         0.0
@@ -676,7 +676,7 @@ pub fn build_fitness_metrics(
         wall_clock_secs: sab.wall_clock.as_secs_f64(),
         full_evaluation_secs: Some(sab.wall_clock.as_secs_f64()),
         timeout_secs,
-        test_coverage_pct,
+        test_pass_pct,
         binary_size_mb,
         max_binary_size_mb: max_binary_mb,
         tests_passed: test_count,

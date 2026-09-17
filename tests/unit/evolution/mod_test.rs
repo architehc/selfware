@@ -54,7 +54,7 @@ fn test_fitness_weights_default() {
     let total = w.sab_score
         + w.token_efficiency
         + w.latency
-        + w.test_coverage
+        + w.test_pass_rate
         + w.binary_size
         + w.visual_quality;
     assert!(
@@ -73,7 +73,7 @@ fn test_composite_score_perfect() {
         wall_clock_secs: 0.0,
         full_evaluation_secs: None,
         timeout_secs: 3600.0,
-        test_coverage_pct: 100.0,
+        test_pass_pct: 100.0,
         binary_size_mb: 0.0,
         max_binary_size_mb: 50.0,
         tests_passed: 5200,
@@ -97,7 +97,7 @@ fn test_composite_score_ordering() {
         wall_clock_secs: 60.0,
         full_evaluation_secs: None,
         timeout_secs: 3600.0,
-        test_coverage_pct: 85.0,
+        test_pass_pct: 85.0,
         binary_size_mb: 10.0,
         max_binary_size_mb: 50.0,
         tests_passed: 5200,
@@ -111,7 +111,7 @@ fn test_composite_score_ordering() {
         wall_clock_secs: 3000.0,
         full_evaluation_secs: None,
         timeout_secs: 3600.0,
-        test_coverage_pct: 50.0,
+        test_pass_pct: 50.0,
         binary_size_mb: 40.0,
         max_binary_size_mb: 50.0,
         tests_passed: 4000,
@@ -137,7 +137,7 @@ fn test_composite_score_zero_budget() {
         wall_clock_secs: 100.0,
         full_evaluation_secs: None,
         timeout_secs: 3600.0,
-        test_coverage_pct: 80.0,
+        test_pass_pct: 80.0,
         binary_size_mb: 10.0,
         max_binary_size_mb: 50.0,
         tests_passed: 100,
@@ -156,7 +156,7 @@ fn test_composite_score_custom_weights() {
         sab_score: 1.0,
         token_efficiency: 0.0,
         latency: 0.0,
-        test_coverage: 0.0,
+        test_pass_rate: 0.0,
         binary_size: 0.0,
         visual_quality: 0.0,
     };
@@ -167,7 +167,7 @@ fn test_composite_score_custom_weights() {
         wall_clock_secs: 99999.0,
         full_evaluation_secs: None,
         timeout_secs: 1.0,
-        test_coverage_pct: 0.0,
+        test_pass_pct: 0.0,
         binary_size_mb: 999.0,
         max_binary_size_mb: 1.0,
         tests_passed: 0,
@@ -233,7 +233,7 @@ fn test_composite_score_worst_case() {
         wall_clock_secs: 3600.0,
         full_evaluation_secs: None,
         timeout_secs: 3600.0,
-        test_coverage_pct: 0.0,
+        test_pass_pct: 0.0,
         binary_size_mb: 50.0,
         max_binary_size_mb: 50.0,
         tests_passed: 0,
@@ -246,4 +246,40 @@ fn test_composite_score_worst_case() {
         "Worst metrics should yield 0.0, got {}",
         score
     );
+}
+
+#[test]
+fn test_is_candidate_better_noise_aware() {
+    use crate::evolution::daemon::{is_candidate_better, SAB_NOISE_MARGIN};
+
+    let base = FitnessMetrics {
+        sab_score: 80.0,
+        tokens_used: Some(10_000),
+        token_budget: 500_000,
+        wall_clock_secs: 100.0,
+        full_evaluation_secs: None,
+        timeout_secs: 3600.0,
+        test_pass_pct: 80.0,
+        binary_size_mb: 20.0,
+        max_binary_size_mb: 50.0,
+        tests_passed: 80,
+        tests_total: 100,
+        visual_score: 0.0,
+    };
+
+    // 1. Candidate with SAB improvement beyond noise margin beats base even with lower composite
+    let mut cand_higher_sab = base.clone();
+    cand_higher_sab.sab_score = 80.0 + SAB_NOISE_MARGIN + 0.1;
+    assert!(is_candidate_better(&cand_higher_sab, 0.70, &base, 0.75));
+
+    // 2. Candidate with SAB regression beyond noise margin is worse even with higher composite
+    let mut cand_lower_sab = base.clone();
+    cand_lower_sab.sab_score = 80.0 - SAB_NOISE_MARGIN - 0.1;
+    assert!(!is_candidate_better(&cand_lower_sab, 0.85, &base, 0.75));
+
+    // 3. Within noise margin, composite score serves as secondary tie-breaker
+    let mut cand_tied_sab = base.clone();
+    cand_tied_sab.sab_score = 80.0 + 0.2; // within 0.5 noise margin
+    assert!(is_candidate_better(&cand_tied_sab, 0.80, &base, 0.75));
+    assert!(!is_candidate_better(&cand_tied_sab, 0.70, &base, 0.75));
 }

@@ -160,8 +160,9 @@ pub struct FitnessWeights {
     pub token_efficiency: f64,
     /// Weight for wall-clock execution time
     pub latency: f64,
-    /// Weight for maintaining/improving test coverage
-    pub test_coverage: f64,
+    /// Weight for maintaining/improving test pass rate
+    #[serde(alias = "test_coverage")]
+    pub test_pass_rate: f64,
     /// Weight for preventing binary bloat
     pub binary_size: f64,
     /// Weight for visual quality (Visual-SAB scenarios).
@@ -193,18 +194,18 @@ impl FitnessWeights {
     /// [`FitnessMetrics::is_complete`], which promotion should gate on.
     pub fn composite(&self, metrics: &FitnessMetrics) -> f64 {
         let normalized_latency = 1.0 - (metrics.wall_clock_secs / metrics.timeout_secs).min(1.0);
-        let normalized_coverage = metrics.test_coverage_pct / 100.0;
+        let normalized_pass_rate = metrics.test_pass_pct / 100.0;
         let normalized_size = 1.0 - (metrics.binary_size_mb / metrics.max_binary_size_mb).min(1.0);
         let normalized_visual = metrics.visual_score / 100.0;
 
         let mut score = self.sab_score * (metrics.sab_score / 100.0)
             + self.latency * normalized_latency
-            + self.test_coverage * normalized_coverage
+            + self.test_pass_rate * normalized_pass_rate
             + self.binary_size * normalized_size
             + self.visual_quality * normalized_visual;
         let mut weight_total = self.sab_score
             + self.latency
-            + self.test_coverage
+            + self.test_pass_rate
             + self.binary_size
             + self.visual_quality;
 
@@ -229,7 +230,7 @@ impl Default for FitnessWeights {
             sab_score: 0.50,
             token_efficiency: 0.25,
             latency: 0.15,
-            test_coverage: 0.05,
+            test_pass_rate: 0.05,
             binary_size: 0.05,
             // Default 0.0 — visual quality is opt-in until visual
             // scenarios exist. Weights still sum to 1.0.
@@ -256,7 +257,11 @@ pub struct FitnessMetrics {
     /// into it: the baseline used to include four phases the candidate never
     /// timed, which made every candidate look faster.
     pub full_evaluation_secs: Option<f64>,
-    pub test_coverage_pct: f64,
+    /// Test pass percentage (tests passed / tests total * 100.0).
+    /// Named test_pass_pct rather than test_coverage_pct to honestly reflect
+    /// what is measured (test outcome ratio, not branch/line coverage).
+    #[serde(alias = "test_coverage_pct")]
+    pub test_pass_pct: f64,
     pub binary_size_mb: f64,
     pub max_binary_size_mb: f64,
     pub tests_passed: usize,

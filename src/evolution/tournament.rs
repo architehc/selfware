@@ -221,13 +221,13 @@ fn evaluate_hypothesis(
     // Full SAB runs separately for winners, so sab_result stays None here.
     let timeout_secs = config.timeout.as_secs() as f64;
     let wall_clock_secs = (compile_duration + test_duration).as_secs_f64();
-    let test_coverage_pct = if tests_total > 0 {
+    let test_pass_pct = if tests_total > 0 {
         (tests_passed as f64 / tests_total as f64) * 100.0
     } else {
         0.0
     };
     // Derive a provisional SAB score from the test pass ratio (0–100).
-    let sab_score = if compiled { test_coverage_pct } else { 0.0 };
+    let sab_score = if compiled { test_pass_pct } else { 0.0 };
     let fitness = FitnessMetrics {
         sab_score,
         tokens_used: None,
@@ -235,7 +235,7 @@ fn evaluate_hypothesis(
         token_budget: 0,
         wall_clock_secs,
         timeout_secs,
-        test_coverage_pct,
+        test_pass_pct,
         binary_size_mb: (peak_memory_bytes as f64) / (1024.0 * 1024.0),
         max_binary_size_mb: 1024.0,
         tests_passed,

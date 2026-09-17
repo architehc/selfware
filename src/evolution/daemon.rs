@@ -9,7 +9,9 @@ use super::ast_tools;
 use super::fitness::{self, SabConfig, SabResult};
 use super::telemetry;
 use super::tournament::Hypothesis;
-use super::tree_log::{compute_sha256, AttemptNode, AttemptStatus, AttemptTree, FailureClass};
+use super::tree_log::{
+    compute_sha256, AttemptNode, AttemptStatus, AttemptTree, FailureClass, TreeLogError,
+};
 use super::{is_protected, EvolutionConfig, FitnessMetrics, GenerationRating, LlmConfig};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -199,7 +201,7 @@ fn measure_compile_test_baseline(
         wall_clock_secs: test_duration.as_secs_f64(),
         timeout_secs,
         full_evaluation_secs: Some(start.elapsed().as_secs_f64()),
-        test_coverage_pct: pass_ratio * 100.0,
+        test_pass_pct: pass_ratio * 100.0,
         binary_size_mb,
         max_binary_size_mb: 50.0,
         tests_passed,
@@ -251,7 +253,7 @@ fn build_candidate_metrics(
         timeout_secs: DEFAULT_TIMEOUT_SECS,
         // The candidate arm does not time its own build phase separately.
         full_evaluation_secs: None,
-        test_coverage_pct: pass_ratio * 100.0,
+        test_pass_pct: pass_ratio * 100.0,
         binary_size_mb,
         max_binary_size_mb: config.safety.max_binary_size_mb,
         tests_passed,
@@ -353,10 +355,35 @@ pub(crate) enum PromotionDecision {
     Reject(String),
 }
 
+/// Minimum SAB score margin (epsilon) to consider a capability delta real rather than noise.
+pub const SAB_NOISE_MARGIN: f64 = 0.5;
+
+/// Decide whether a candidate is better than the current best in the generation.
+/// SAB score acts as the primary gate; when SAB scores are tied within the noise
+/// margin (0.5), composite score (latency, token efficiency, pass rate, binary size)
+/// acts as the secondary tie-breaker.
+pub(crate) fn is_candidate_better(
+    cand_metrics: &FitnessMetrics,
+    cand_composite: f64,
+    best_metrics: &FitnessMetrics,
+    best_composite: f64,
+) -> bool {
+    if cand_metrics.sab_score > best_metrics.sab_score + SAB_NOISE_MARGIN {
+        return true;
+    }
+    if cand_metrics.sab_score < best_metrics.sab_score - SAB_NOISE_MARGIN {
+        return false;
+    }
+    // Within noise margin: secondary metrics / composite score acts as tie-breaker
+    cand_composite > best_composite
+}
+
 /// Evaluates whether a candidate winner should be promoted to baseline:
-/// 1. Composite score must strictly exceed baseline.
+/// 1. Must not regress SAB capability beyond the noise margin (0.5).
 /// 2. Must pass the DarwinX non-regression gate over SAB results.
 /// 3. Must not regress total test count relative to baseline.
+/// 4. When SAB improvement is within noise margin (0.5), composite score
+///    must strictly exceed baseline (secondary metrics: latency, pass rate, etc.).
 pub(crate) fn evaluate_candidate_promotion(
     baseline_composite: f64,
     winner_composite: f64,
@@ -365,10 +392,10 @@ pub(crate) fn evaluate_candidate_promotion(
     base_metrics: &FitnessMetrics,
     winner_metrics: &FitnessMetrics,
 ) -> PromotionDecision {
-    if winner_composite <= baseline_composite {
+    if winner_metrics.sab_score < base_metrics.sab_score - SAB_NOISE_MARGIN {
         return PromotionDecision::Reject(format!(
-            "winner composite ({:.4}) does not exceed baseline ({:.4})",
-            winner_composite, baseline_composite
+            "winner SAB score ({:.2}) regressed below baseline ({:.2}) beyond noise margin ({:.2})",
+            winner_metrics.sab_score, base_metrics.sab_score, SAB_NOISE_MARGIN
         ));
     }
 
@@ -380,7 +407,45 @@ pub(crate) fn evaluate_candidate_promotion(
         return PromotionDecision::Reject(reason);
     }
 
+    let sab_delta = winner_metrics.sab_score - base_metrics.sab_score;
+    if sab_delta <= SAB_NOISE_MARGIN && winner_composite <= baseline_composite {
+        return PromotionDecision::Reject(format!(
+            "winner composite ({:.4}) does not exceed baseline ({:.4})",
+            winner_composite, baseline_composite
+        ));
+    }
+
     PromotionDecision::Promote
+}
+
+/// Densely log an attempt node to JSONL, aborting generation if write fails.
+fn log_and_append_attempt(
+    attempts_file: &Path,
+    node: &AttemptNode,
+    repo_root: &Path,
+    generation: usize,
+    gen_start: Instant,
+) -> Result<(), TreeLogError> {
+    if let Err(err) = AttemptTree::append_node_to_jsonl(attempts_file, node) {
+        log_warning(&format!(
+            "CRITICAL: Failed to append attempt node '{}' to {}: {err}; aborting generation",
+            node.id,
+            attempts_file.display()
+        ));
+        log_event(
+            repo_root,
+            &serde_json::json!({
+                "event": "generation_end",
+                "timestamp": chrono_now(),
+                "generation": generation,
+                "outcome": "aborted",
+                "reason": format!("attempt logging failed: {err}"),
+                "duration_secs": gen_start.elapsed().as_secs_f64(),
+            }),
+        );
+        return Err(err);
+    }
+    Ok(())
 }
 
 /// Run the evolution daemon
@@ -578,42 +643,48 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         // Gate on the paths the patch ACTUALLY edits, not the LLM-declared
         // target_files metadata (free-form JSON, never cross-checked — an
         // empty array passed trivially). See hypothesis_touches_protected.
-        let valid: Vec<_> = hypotheses
-            .into_iter()
-            .filter(|h| {
-                if hypothesis_touches_protected(h) {
-                    log_warning(&format!(
-                        "Hypothesis '{}' touches protected files, rejected",
-                        h.id
-                    ));
-                    let _ = AttemptTree::append_node_to_jsonl(
-                        &attempts_file,
-                        &AttemptNode {
-                            id: format!("att-g{}-{}", generation, h.id),
-                            parent_id: None,
-                            generation,
-                            branch_id: h.id.clone(),
-                            hypothesis_id: h.id.clone(),
-                            description: h.description.clone(),
-                            diff_sha256: compute_sha256(h.patch.as_bytes()),
-                            patch: Some(h.patch.clone()),
-                            sab_report_path: None,
-                            metrics: None,
-                            composite_score: None,
-                            tokens_used: None,
-                            wall_time_ms: 0,
-                            status: AttemptStatus::SafetyRejected,
-                            failure_class: Some(FailureClass::SafetyViolation),
-                            failure_reason: Some("Touches protected paths".into()),
-                            binary_sha256: None,
-                            created_at: chrono_now(),
-                        },
-                    );
-                    return false;
+        let mut valid = Vec::new();
+        let mut filter_aborted = false;
+        for h in hypotheses {
+            if hypothesis_touches_protected(&h) {
+                log_warning(&format!(
+                    "Hypothesis '{}' touches protected files, rejected",
+                    h.id
+                ));
+                let node = AttemptNode {
+                    id: format!("att-g{}-{}", generation, h.id),
+                    parent_id: None,
+                    generation,
+                    branch_id: h.id.clone(),
+                    hypothesis_id: h.id.clone(),
+                    description: h.description.clone(),
+                    diff_sha256: compute_sha256(h.patch.as_bytes()),
+                    patch: Some(h.patch.clone()),
+                    sab_report_path: None,
+                    metrics: None,
+                    composite_score: None,
+                    tokens_used: None,
+                    wall_time_ms: 0,
+                    status: AttemptStatus::SafetyRejected,
+                    failure_class: Some(FailureClass::SafetyViolation),
+                    failure_reason: Some("Touches protected paths".into()),
+                    binary_sha256: None,
+                    created_at: chrono_now(),
+                };
+                if log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start)
+                    .is_err()
+                {
+                    filter_aborted = true;
+                    break;
                 }
-                true
-            })
-            .collect();
+                continue;
+            }
+            valid.push(h);
+        }
+
+        if filter_aborted {
+            continue;
+        }
 
         if valid.is_empty() {
             log_warning("All hypotheses rejected by safety filter");
@@ -653,43 +724,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 Ok(w) => w,
                 Err(e) => {
                     log_warning(&format!("  Worktree failed: {}", e));
-                    let _ = AttemptTree::append_node_to_jsonl(
-                        &attempts_file,
-                        &AttemptNode {
-                            id: attempt_id.clone(),
-                            parent_id: None,
-                            generation,
-                            branch_id: hypothesis.id.clone(),
-                            hypothesis_id: hypothesis.id.clone(),
-                            description: hypothesis.description.clone(),
-                            diff_sha256: raw_diff_sha256.clone(),
-                            patch: Some(hypothesis.patch.clone()),
-                            sab_report_path: None,
-                            metrics: None,
-                            composite_score: None,
-                            tokens_used: None,
-                            wall_time_ms: attempt_start.elapsed().as_millis() as u64,
-                            status: AttemptStatus::InternalError,
-                            failure_class: Some(FailureClass::EnvironmentError),
-                            failure_reason: Some(format!("Worktree creation failed: {e}")),
-                            binary_sha256: None,
-                            created_at: chrono_now(),
-                        },
-                    );
-                    continue;
-                }
-            };
-            let _worktree_guard = WorktreeGuard::new(repo_root, worktree.clone());
-
-            // Apply edits (search-and-replace or unified diff)
-            if !apply_patch_to_worktree(&worktree, &hypothesis.patch) {
-                log_frost(generation, &format!("Patch failed: {}", hypothesis.id));
-                // Log the first 500 chars of the edit data for debugging
-                let preview = truncate_char_boundary(&hypothesis.patch, 500);
-                log_warning(&format!("  Edit preview:\n{}", preview));
-                let _ = AttemptTree::append_node_to_jsonl(
-                    &attempts_file,
-                    &AttemptNode {
+                    let node = AttemptNode {
                         id: attempt_id.clone(),
                         parent_id: None,
                         generation,
@@ -703,13 +738,61 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         composite_score: None,
                         tokens_used: None,
                         wall_time_ms: attempt_start.elapsed().as_millis() as u64,
-                        status: AttemptStatus::PatchFailed,
-                        failure_class: Some(FailureClass::Unclassified),
-                        failure_reason: Some("Patch failed to apply cleanly".into()),
+                        status: AttemptStatus::InternalError,
+                        failure_class: Some(FailureClass::EnvironmentError),
+                        failure_reason: Some(format!("Worktree creation failed: {e}")),
                         binary_sha256: None,
                         created_at: chrono_now(),
-                    },
-                );
+                    };
+                    if log_and_append_attempt(
+                        &attempts_file,
+                        &node,
+                        repo_root,
+                        generation,
+                        gen_start,
+                    )
+                    .is_err()
+                    {
+                        generation_winner = None;
+                        break;
+                    }
+                    continue;
+                }
+            };
+            let _worktree_guard = WorktreeGuard::new(repo_root, worktree.clone());
+
+            // Apply edits (search-and-replace or unified diff)
+            if !apply_patch_to_worktree(&worktree, &hypothesis.patch) {
+                log_frost(generation, &format!("Patch failed: {}", hypothesis.id));
+                // Log the first 500 chars of the edit data for debugging
+                let preview = truncate_char_boundary(&hypothesis.patch, 500);
+                log_warning(&format!("  Edit preview:\n{}", preview));
+                let node = AttemptNode {
+                    id: attempt_id.clone(),
+                    parent_id: None,
+                    generation,
+                    branch_id: hypothesis.id.clone(),
+                    hypothesis_id: hypothesis.id.clone(),
+                    description: hypothesis.description.clone(),
+                    diff_sha256: raw_diff_sha256.clone(),
+                    patch: Some(hypothesis.patch.clone()),
+                    sab_report_path: None,
+                    metrics: None,
+                    composite_score: None,
+                    tokens_used: None,
+                    wall_time_ms: attempt_start.elapsed().as_millis() as u64,
+                    status: AttemptStatus::PatchFailed,
+                    failure_class: Some(FailureClass::Unclassified),
+                    failure_reason: Some("Patch failed to apply cleanly".into()),
+                    binary_sha256: None,
+                    created_at: chrono_now(),
+                };
+                if log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start)
+                    .is_err()
+                {
+                    generation_winner = None;
+                    break;
+                }
                 continue;
             }
 
@@ -728,29 +811,38 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     .output();
                 if fmt_fix.map(|o| !o.status.success()).unwrap_or(true) {
                     log_frost(generation, &format!("cargo fmt failed: {}", hypothesis.id));
-                    let _ = AttemptTree::append_node_to_jsonl(
+                    let node = AttemptNode {
+                        id: attempt_id.clone(),
+                        parent_id: None,
+                        generation,
+                        branch_id: hypothesis.id.clone(),
+                        hypothesis_id: hypothesis.id.clone(),
+                        description: hypothesis.description.clone(),
+                        diff_sha256: raw_diff_sha256.clone(),
+                        patch: Some(hypothesis.patch.clone()),
+                        sab_report_path: None,
+                        metrics: None,
+                        composite_score: None,
+                        tokens_used: None,
+                        wall_time_ms: attempt_start.elapsed().as_millis() as u64,
+                        status: AttemptStatus::FormatFailed,
+                        failure_class: Some(FailureClass::RepairableSyntax),
+                        failure_reason: Some("cargo fmt failed".into()),
+                        binary_sha256: None,
+                        created_at: chrono_now(),
+                    };
+                    if log_and_append_attempt(
                         &attempts_file,
-                        &AttemptNode {
-                            id: attempt_id.clone(),
-                            parent_id: None,
-                            generation,
-                            branch_id: hypothesis.id.clone(),
-                            hypothesis_id: hypothesis.id.clone(),
-                            description: hypothesis.description.clone(),
-                            diff_sha256: raw_diff_sha256.clone(),
-                            patch: Some(hypothesis.patch.clone()),
-                            sab_report_path: None,
-                            metrics: None,
-                            composite_score: None,
-                            tokens_used: None,
-                            wall_time_ms: attempt_start.elapsed().as_millis() as u64,
-                            status: AttemptStatus::FormatFailed,
-                            failure_class: Some(FailureClass::RepairableSyntax),
-                            failure_reason: Some("cargo fmt failed".into()),
-                            binary_sha256: None,
-                            created_at: chrono_now(),
-                        },
-                    );
+                        &node,
+                        repo_root,
+                        generation,
+                        gen_start,
+                    )
+                    .is_err()
+                    {
+                        generation_winner = None;
+                        break;
+                    }
                     continue;
                 }
             }
@@ -766,29 +858,32 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
             if check.map(|o| !o.status.success()).unwrap_or(true) {
                 log_frost(generation, &format!("Compile failed: {}", hypothesis.id));
-                let _ = AttemptTree::append_node_to_jsonl(
-                    &attempts_file,
-                    &AttemptNode {
-                        id: attempt_id.clone(),
-                        parent_id: None,
-                        generation,
-                        branch_id: hypothesis.id.clone(),
-                        hypothesis_id: hypothesis.id.clone(),
-                        description: hypothesis.description.clone(),
-                        diff_sha256: raw_diff_sha256.clone(),
-                        patch: Some(hypothesis.patch.clone()),
-                        sab_report_path: None,
-                        metrics: None,
-                        composite_score: None,
-                        tokens_used: None,
-                        wall_time_ms: attempt_start.elapsed().as_millis() as u64,
-                        status: AttemptStatus::CompileFailed,
-                        failure_class: Some(FailureClass::RepairableSyntax),
-                        failure_reason: Some("cargo check failed".into()),
-                        binary_sha256: None,
-                        created_at: chrono_now(),
-                    },
-                );
+                let node = AttemptNode {
+                    id: attempt_id.clone(),
+                    parent_id: None,
+                    generation,
+                    branch_id: hypothesis.id.clone(),
+                    hypothesis_id: hypothesis.id.clone(),
+                    description: hypothesis.description.clone(),
+                    diff_sha256: raw_diff_sha256.clone(),
+                    patch: Some(hypothesis.patch.clone()),
+                    sab_report_path: None,
+                    metrics: None,
+                    composite_score: None,
+                    tokens_used: None,
+                    wall_time_ms: attempt_start.elapsed().as_millis() as u64,
+                    status: AttemptStatus::CompileFailed,
+                    failure_class: Some(FailureClass::RepairableSyntax),
+                    failure_reason: Some("cargo check failed".into()),
+                    binary_sha256: None,
+                    created_at: chrono_now(),
+                };
+                if log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start)
+                    .is_err()
+                {
+                    generation_winner = None;
+                    break;
+                }
                 continue;
             }
 
@@ -806,29 +901,38 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 Ok(o) => o,
                 Err(e) => {
                     log_warning(&format!("  Test execution failed: {}", e));
-                    let _ = AttemptTree::append_node_to_jsonl(
+                    let node = AttemptNode {
+                        id: attempt_id.clone(),
+                        parent_id: None,
+                        generation,
+                        branch_id: hypothesis.id.clone(),
+                        hypothesis_id: hypothesis.id.clone(),
+                        description: hypothesis.description.clone(),
+                        diff_sha256: raw_diff_sha256.clone(),
+                        patch: Some(hypothesis.patch.clone()),
+                        sab_report_path: None,
+                        metrics: None,
+                        composite_score: None,
+                        tokens_used: None,
+                        wall_time_ms: attempt_start.elapsed().as_millis() as u64,
+                        status: AttemptStatus::InternalError,
+                        failure_class: Some(FailureClass::EnvironmentError),
+                        failure_reason: Some(format!("Test execution failed: {e}")),
+                        binary_sha256: None,
+                        created_at: chrono_now(),
+                    };
+                    if log_and_append_attempt(
                         &attempts_file,
-                        &AttemptNode {
-                            id: attempt_id.clone(),
-                            parent_id: None,
-                            generation,
-                            branch_id: hypothesis.id.clone(),
-                            hypothesis_id: hypothesis.id.clone(),
-                            description: hypothesis.description.clone(),
-                            diff_sha256: raw_diff_sha256.clone(),
-                            patch: Some(hypothesis.patch.clone()),
-                            sab_report_path: None,
-                            metrics: None,
-                            composite_score: None,
-                            tokens_used: None,
-                            wall_time_ms: attempt_start.elapsed().as_millis() as u64,
-                            status: AttemptStatus::InternalError,
-                            failure_class: Some(FailureClass::EnvironmentError),
-                            failure_reason: Some(format!("Test execution failed: {e}")),
-                            binary_sha256: None,
-                            created_at: chrono_now(),
-                        },
-                    );
+                        &node,
+                        repo_root,
+                        generation,
+                        gen_start,
+                    )
+                    .is_err()
+                    {
+                        generation_winner = None;
+                        break;
+                    }
                     continue;
                 }
             };
@@ -846,29 +950,32 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     generation,
                     &format!("Tests failed: {} — {}", hypothesis.id, fail_count),
                 );
-                let _ = AttemptTree::append_node_to_jsonl(
-                    &attempts_file,
-                    &AttemptNode {
-                        id: attempt_id.clone(),
-                        parent_id: None,
-                        generation,
-                        branch_id: hypothesis.id.clone(),
-                        hypothesis_id: hypothesis.id.clone(),
-                        description: hypothesis.description.clone(),
-                        diff_sha256: raw_diff_sha256.clone(),
-                        patch: Some(hypothesis.patch.clone()),
-                        sab_report_path: None,
-                        metrics: None,
-                        composite_score: None,
-                        tokens_used: None,
-                        wall_time_ms: attempt_start.elapsed().as_millis() as u64,
-                        status: AttemptStatus::TestFailed,
-                        failure_class: Some(FailureClass::RepairableTestFailure),
-                        failure_reason: Some(format!("Tests failed: {fail_count}")),
-                        binary_sha256: None,
-                        created_at: chrono_now(),
-                    },
-                );
+                let node = AttemptNode {
+                    id: attempt_id.clone(),
+                    parent_id: None,
+                    generation,
+                    branch_id: hypothesis.id.clone(),
+                    hypothesis_id: hypothesis.id.clone(),
+                    description: hypothesis.description.clone(),
+                    diff_sha256: raw_diff_sha256.clone(),
+                    patch: Some(hypothesis.patch.clone()),
+                    sab_report_path: None,
+                    metrics: None,
+                    composite_score: None,
+                    tokens_used: None,
+                    wall_time_ms: attempt_start.elapsed().as_millis() as u64,
+                    status: AttemptStatus::TestFailed,
+                    failure_class: Some(FailureClass::RepairableTestFailure),
+                    failure_reason: Some(format!("Tests failed: {fail_count}")),
+                    binary_sha256: None,
+                    created_at: chrono_now(),
+                };
+                if log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start)
+                    .is_err()
+                {
+                    generation_winner = None;
+                    break;
+                }
                 continue;
             }
 
@@ -884,29 +991,32 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
             if clippy.map(|o| !o.status.success()).unwrap_or(true) {
                 log_frost(generation, &format!("Clippy failed: {}", hypothesis.id));
-                let _ = AttemptTree::append_node_to_jsonl(
-                    &attempts_file,
-                    &AttemptNode {
-                        id: attempt_id.clone(),
-                        parent_id: None,
-                        generation,
-                        branch_id: hypothesis.id.clone(),
-                        hypothesis_id: hypothesis.id.clone(),
-                        description: hypothesis.description.clone(),
-                        diff_sha256: raw_diff_sha256.clone(),
-                        patch: Some(hypothesis.patch.clone()),
-                        sab_report_path: None,
-                        metrics: None,
-                        composite_score: None,
-                        tokens_used: None,
-                        wall_time_ms: attempt_start.elapsed().as_millis() as u64,
-                        status: AttemptStatus::ClippyFailed,
-                        failure_class: Some(FailureClass::RepairableClippy),
-                        failure_reason: Some("cargo clippy warnings detected".into()),
-                        binary_sha256: None,
-                        created_at: chrono_now(),
-                    },
-                );
+                let node = AttemptNode {
+                    id: attempt_id.clone(),
+                    parent_id: None,
+                    generation,
+                    branch_id: hypothesis.id.clone(),
+                    hypothesis_id: hypothesis.id.clone(),
+                    description: hypothesis.description.clone(),
+                    diff_sha256: raw_diff_sha256.clone(),
+                    patch: Some(hypothesis.patch.clone()),
+                    sab_report_path: None,
+                    metrics: None,
+                    composite_score: None,
+                    tokens_used: None,
+                    wall_time_ms: attempt_start.elapsed().as_millis() as u64,
+                    status: AttemptStatus::ClippyFailed,
+                    failure_class: Some(FailureClass::RepairableClippy),
+                    failure_reason: Some("cargo clippy warnings detected".into()),
+                    binary_sha256: None,
+                    created_at: chrono_now(),
+                };
+                if log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start)
+                    .is_err()
+                {
+                    generation_winner = None;
+                    break;
+                }
                 continue;
             }
 
@@ -923,29 +1033,38 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         generation,
                         &format!("Release build failed: {}", hypothesis.id),
                     );
-                    let _ = AttemptTree::append_node_to_jsonl(
+                    let node = AttemptNode {
+                        id: attempt_id.clone(),
+                        parent_id: None,
+                        generation,
+                        branch_id: hypothesis.id.clone(),
+                        hypothesis_id: hypothesis.id.clone(),
+                        description: hypothesis.description.clone(),
+                        diff_sha256: raw_diff_sha256.clone(),
+                        patch: Some(hypothesis.patch.clone()),
+                        sab_report_path: None,
+                        metrics: None,
+                        composite_score: None,
+                        tokens_used: None,
+                        wall_time_ms: attempt_start.elapsed().as_millis() as u64,
+                        status: AttemptStatus::BuildFailed,
+                        failure_class: Some(FailureClass::Unclassified),
+                        failure_reason: Some("Release build failed".into()),
+                        binary_sha256: None,
+                        created_at: chrono_now(),
+                    };
+                    if log_and_append_attempt(
                         &attempts_file,
-                        &AttemptNode {
-                            id: attempt_id.clone(),
-                            parent_id: None,
-                            generation,
-                            branch_id: hypothesis.id.clone(),
-                            hypothesis_id: hypothesis.id.clone(),
-                            description: hypothesis.description.clone(),
-                            diff_sha256: raw_diff_sha256.clone(),
-                            patch: Some(hypothesis.patch.clone()),
-                            sab_report_path: None,
-                            metrics: None,
-                            composite_score: None,
-                            tokens_used: None,
-                            wall_time_ms: attempt_start.elapsed().as_millis() as u64,
-                            status: AttemptStatus::BuildFailed,
-                            failure_class: Some(FailureClass::Unclassified),
-                            failure_reason: Some("Release build failed".into()),
-                            binary_sha256: None,
-                            created_at: chrono_now(),
-                        },
-                    );
+                        &node,
+                        repo_root,
+                        generation,
+                        gen_start,
+                    )
+                    .is_err()
+                    {
+                        generation_winner = None;
+                        break;
+                    }
                     continue;
                 }
 
@@ -961,29 +1080,38 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     ),
                     Err(e) => {
                         log_warning(&format!("  SAB failed: {}", e));
-                        let _ = AttemptTree::append_node_to_jsonl(
+                        let node = AttemptNode {
+                            id: attempt_id.clone(),
+                            parent_id: None,
+                            generation,
+                            branch_id: hypothesis.id.clone(),
+                            hypothesis_id: hypothesis.id.clone(),
+                            description: hypothesis.description.clone(),
+                            diff_sha256: raw_diff_sha256.clone(),
+                            patch: Some(hypothesis.patch.clone()),
+                            sab_report_path: None,
+                            metrics: None,
+                            composite_score: None,
+                            tokens_used: None,
+                            wall_time_ms: attempt_start.elapsed().as_millis() as u64,
+                            status: AttemptStatus::InternalError,
+                            failure_class: Some(FailureClass::EnvironmentError),
+                            failure_reason: Some(format!("SAB execution failed: {e}")),
+                            binary_sha256: None,
+                            created_at: chrono_now(),
+                        };
+                        if log_and_append_attempt(
                             &attempts_file,
-                            &AttemptNode {
-                                id: attempt_id.clone(),
-                                parent_id: None,
-                                generation,
-                                branch_id: hypothesis.id.clone(),
-                                hypothesis_id: hypothesis.id.clone(),
-                                description: hypothesis.description.clone(),
-                                diff_sha256: raw_diff_sha256.clone(),
-                                patch: Some(hypothesis.patch.clone()),
-                                sab_report_path: None,
-                                metrics: None,
-                                composite_score: None,
-                                tokens_used: None,
-                                wall_time_ms: attempt_start.elapsed().as_millis() as u64,
-                                status: AttemptStatus::InternalError,
-                                failure_class: Some(FailureClass::EnvironmentError),
-                                failure_reason: Some(format!("SAB execution failed: {e}")),
-                                binary_sha256: None,
-                                created_at: chrono_now(),
-                            },
-                        );
+                            &node,
+                            repo_root,
+                            generation,
+                            gen_start,
+                        )
+                        .is_err()
+                        {
+                            generation_winner = None;
+                            break;
+                        }
                         continue;
                     }
                 }
@@ -1001,29 +1129,38 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             generation,
                             &format!("Release build failed: {}", hypothesis.id),
                         );
-                        let _ = AttemptTree::append_node_to_jsonl(
+                        let node = AttemptNode {
+                            id: attempt_id.clone(),
+                            parent_id: None,
+                            generation,
+                            branch_id: hypothesis.id.clone(),
+                            hypothesis_id: hypothesis.id.clone(),
+                            description: hypothesis.description.clone(),
+                            diff_sha256: raw_diff_sha256.clone(),
+                            patch: Some(hypothesis.patch.clone()),
+                            sab_report_path: None,
+                            metrics: None,
+                            composite_score: None,
+                            tokens_used: None,
+                            wall_time_ms: attempt_start.elapsed().as_millis() as u64,
+                            status: AttemptStatus::BuildFailed,
+                            failure_class: Some(FailureClass::Unclassified),
+                            failure_reason: Some("Candidate build failed".into()),
+                            binary_sha256: None,
+                            created_at: chrono_now(),
+                        };
+                        if log_and_append_attempt(
                             &attempts_file,
-                            &AttemptNode {
-                                id: attempt_id.clone(),
-                                parent_id: None,
-                                generation,
-                                branch_id: hypothesis.id.clone(),
-                                hypothesis_id: hypothesis.id.clone(),
-                                description: hypothesis.description.clone(),
-                                diff_sha256: raw_diff_sha256.clone(),
-                                patch: Some(hypothesis.patch.clone()),
-                                sab_report_path: None,
-                                metrics: None,
-                                composite_score: None,
-                                tokens_used: None,
-                                wall_time_ms: attempt_start.elapsed().as_millis() as u64,
-                                status: AttemptStatus::BuildFailed,
-                                failure_class: Some(FailureClass::Unclassified),
-                                failure_reason: Some("Candidate build failed".into()),
-                                binary_sha256: None,
-                                created_at: chrono_now(),
-                            },
-                        );
+                            &node,
+                            repo_root,
+                            generation,
+                            gen_start,
+                        )
+                        .is_err()
+                        {
+                            generation_winner = None;
+                            break;
+                        }
                         continue;
                     }
                 }
@@ -1042,29 +1179,38 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         generation,
                         &format!("No effective diff after evaluation: {}", hypothesis.id),
                     );
-                    let _ = AttemptTree::append_node_to_jsonl(
+                    let node = AttemptNode {
+                        id: attempt_id.clone(),
+                        parent_id: None,
+                        generation,
+                        branch_id: hypothesis.id.clone(),
+                        hypothesis_id: hypothesis.id.clone(),
+                        description: hypothesis.description.clone(),
+                        diff_sha256: raw_diff_sha256.clone(),
+                        patch: Some(hypothesis.patch.clone()),
+                        sab_report_path: None,
+                        metrics: None,
+                        composite_score: None,
+                        tokens_used: None,
+                        wall_time_ms: attempt_start.elapsed().as_millis() as u64,
+                        status: AttemptStatus::Evaluated,
+                        failure_class: None,
+                        failure_reason: Some("No effective diff after evaluation".into()),
+                        binary_sha256: None,
+                        created_at: chrono_now(),
+                    };
+                    if log_and_append_attempt(
                         &attempts_file,
-                        &AttemptNode {
-                            id: attempt_id.clone(),
-                            parent_id: None,
-                            generation,
-                            branch_id: hypothesis.id.clone(),
-                            hypothesis_id: hypothesis.id.clone(),
-                            description: hypothesis.description.clone(),
-                            diff_sha256: raw_diff_sha256.clone(),
-                            patch: Some(hypothesis.patch.clone()),
-                            sab_report_path: None,
-                            metrics: None,
-                            composite_score: None,
-                            tokens_used: None,
-                            wall_time_ms: attempt_start.elapsed().as_millis() as u64,
-                            status: AttemptStatus::Evaluated,
-                            failure_class: None,
-                            failure_reason: Some("No effective diff after evaluation".into()),
-                            binary_sha256: None,
-                            created_at: chrono_now(),
-                        },
-                    );
+                        &node,
+                        repo_root,
+                        generation,
+                        gen_start,
+                    )
+                    .is_err()
+                    {
+                        generation_winner = None;
+                        break;
+                    }
                     continue;
                 }
             };
@@ -1072,29 +1218,32 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             let candidate_composite = config.fitness_weights.composite(&winner_metrics);
             let tested_diff_sha256 = compute_sha256(tested_diff.as_bytes());
 
-            let _ = AttemptTree::append_node_to_jsonl(
-                &attempts_file,
-                &AttemptNode {
-                    id: attempt_id.clone(),
-                    parent_id: None,
-                    generation,
-                    branch_id: hypothesis.id.clone(),
-                    hypothesis_id: hypothesis.id.clone(),
-                    description: hypothesis.description.clone(),
-                    diff_sha256: tested_diff_sha256,
-                    patch: Some(tested_diff.clone()),
-                    sab_report_path: winner_sab.as_ref().map(|s| s.report_path.clone()),
-                    metrics: Some(winner_metrics.clone()),
-                    composite_score: Some(candidate_composite),
-                    tokens_used: winner_metrics.tokens_used,
-                    wall_time_ms: attempt_start.elapsed().as_millis() as u64,
-                    status: AttemptStatus::Evaluated,
-                    failure_class: None,
-                    failure_reason: None,
-                    binary_sha256: winner_sab.as_ref().map(|s| s.binary_sha256.clone()),
-                    created_at: chrono_now(),
-                },
-            );
+            let node = AttemptNode {
+                id: attempt_id.clone(),
+                parent_id: None,
+                generation,
+                branch_id: hypothesis.id.clone(),
+                hypothesis_id: hypothesis.id.clone(),
+                description: hypothesis.description.clone(),
+                diff_sha256: tested_diff_sha256,
+                patch: Some(tested_diff.clone()),
+                sab_report_path: winner_sab.as_ref().map(|s| s.report_path.clone()),
+                metrics: Some(winner_metrics.clone()),
+                composite_score: Some(candidate_composite),
+                tokens_used: winner_metrics.tokens_used,
+                wall_time_ms: attempt_start.elapsed().as_millis() as u64,
+                status: AttemptStatus::Evaluated,
+                failure_class: None,
+                failure_reason: None,
+                binary_sha256: winner_sab.as_ref().map(|s| s.binary_sha256.clone()),
+                created_at: chrono_now(),
+            };
+            if log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start)
+                .is_err()
+            {
+                generation_winner = None;
+                break;
+            }
 
             log_phase(&format!(
                 "  ✓ '{}' passed (score: {:.0}, composite: {:.4}, {:.1}s)",
@@ -1104,11 +1253,17 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 winner_metrics.wall_clock_secs
             ));
 
-            // Best-of-generation selection under composite score
+            // Noise-aware best-of-generation selection
             let is_better = match &generation_winner {
                 None => true,
                 Some((_, best_metrics, _, _)) => {
-                    candidate_composite > config.fitness_weights.composite(best_metrics)
+                    let best_composite = config.fitness_weights.composite(best_metrics);
+                    is_candidate_better(
+                        &winner_metrics,
+                        candidate_composite,
+                        best_metrics,
+                        best_composite,
+                    )
                 }
             };
             if is_better {

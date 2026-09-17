@@ -9,7 +9,7 @@ fn sample_metrics(sab_score: f64) -> FitnessMetrics {
         wall_clock_secs: 14.2,
         timeout_secs: 60.0,
         full_evaluation_secs: Some(18.5),
-        test_coverage_pct: 88.5,
+        test_pass_pct: 88.5,
         binary_size_mb: 12.4,
         max_binary_size_mb: 50.0,
         tests_passed: 120,

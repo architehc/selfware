@@ -325,7 +325,7 @@ fn make_metrics(tests_passed: usize, tests_total: usize) -> FitnessMetrics {
         wall_clock_secs: 1.0,
         full_evaluation_secs: None,
         timeout_secs: DEFAULT_TIMEOUT_SECS,
-        test_coverage_pct: 100.0,
+        test_pass_pct: 100.0,
         binary_size_mb: 10.0,
         max_binary_size_mb: 50.0,
         tests_passed,
@@ -499,6 +499,35 @@ fn test_evaluate_candidate_promotion_gates() {
         decision,
         PromotionDecision::Reject(r) if r.contains("baseline has SAB benchmark evidence but candidate has none")
     ));
+
+    // 7. SAB regression beyond noise margin -> Reject even if composite score is higher
+    let mut cand_metrics_sab_regressed = cand_metrics_ok.clone();
+    cand_metrics_sab_regressed.sab_score = 99.0; // regressed from 100 by 1.0 (> 0.5 margin)
+    let decision = evaluate_candidate_promotion(
+        0.80,
+        0.95, // higher composite
+        None,
+        None,
+        &base_metrics,
+        &cand_metrics_sab_regressed,
+    );
+    assert!(matches!(
+        decision,
+        PromotionDecision::Reject(r) if r.contains("regressed below baseline")
+    ));
+
+    // 8. SAB improvement beyond noise margin -> Promote even if composite score is slightly lower
+    let mut cand_metrics_sab_improved = cand_metrics_ok.clone();
+    cand_metrics_sab_improved.sab_score = 105.0; // improved by 5.0 (> 0.5 margin)
+    let decision = evaluate_candidate_promotion(
+        0.85,
+        0.80, // slightly lower composite due to running more tests
+        None,
+        None,
+        &base_metrics,
+        &cand_metrics_sab_improved,
+    );
+    assert_eq!(decision, PromotionDecision::Promote);
 }
 
 #[test]
@@ -1502,4 +1531,55 @@ fn test_apply_tested_diff_refuses_protected_paths() {
         "--- a/src/evolution/daemon.rs\n+++ b/src/evolution/daemon.rs\n@@ -1 +1 @@\n-old\n+new\n";
     assert!(!apply_tested_diff_to_repo(root, diff));
     assert!(!root.join("src/evolution/daemon.rs").exists());
+}
+
+#[test]
+fn test_log_and_append_attempt_failure_aborts() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo_root = temp.path();
+
+    // Create a directory where the attempts file should be, causing File::open to fail
+    let attempts_file = repo_root.join("unwritable_attempts_dir");
+    std::fs::create_dir_all(&attempts_file).unwrap();
+
+    let node = AttemptNode {
+        id: "att-test-fail".to_string(),
+        parent_id: None,
+        generation: 1,
+        branch_id: "test-branch".to_string(),
+        hypothesis_id: "hyp-fail".to_string(),
+        description: "Test attempt logging failure".to_string(),
+        diff_sha256: "deadbeef".to_string(),
+        patch: None,
+        sab_report_path: None,
+        metrics: None,
+        composite_score: None,
+        tokens_used: None,
+        wall_time_ms: 10,
+        status: AttemptStatus::InternalError,
+        failure_class: Some(FailureClass::EnvironmentError),
+        failure_reason: Some("test".into()),
+        binary_sha256: None,
+        created_at: "2026-09-17T00:00:00Z".to_string(),
+    };
+
+    let result = log_and_append_attempt(
+        &attempts_file,
+        &node,
+        repo_root,
+        1,
+        std::time::Instant::now(),
+    );
+
+    assert!(
+        result.is_err(),
+        "log_and_append_attempt must return Err on I/O failure"
+    );
+
+    // Verify aborted event was written to repo_root/.evolution-log.jsonl
+    let events_file = repo_root.join(".evolution-log.jsonl");
+    assert!(events_file.exists(), "Event log must be created");
+    let events_content = std::fs::read_to_string(&events_file).unwrap();
+    assert!(events_content.contains("\"outcome\":\"aborted\""));
+    assert!(events_content.contains("attempt logging failed"));
 }

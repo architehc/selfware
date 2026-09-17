@@ -48,7 +48,7 @@ fn test_evolution_config_construction() {
 
     // Verify fitness weights sum to 1.0
     let w = &config.fitness_weights;
-    let total = w.sab_score + w.token_efficiency + w.latency + w.test_coverage + w.binary_size;
+    let total = w.sab_score + w.token_efficiency + w.latency + w.test_pass_rate + w.binary_size;
     assert!((total - 1.0).abs() < f64::EPSILON);
 }
 
@@ -273,7 +273,7 @@ fn test_all_configs_have_sane_defaults() {
     assert!(w.sab_score >= 0.0);
     assert!(w.token_efficiency >= 0.0);
     assert!(w.latency >= 0.0);
-    assert!(w.test_coverage >= 0.0);
+    assert!(w.test_pass_rate >= 0.0);
     assert!(w.binary_size >= 0.0);
 }
 
