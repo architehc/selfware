@@ -145,7 +145,7 @@ fn render_content_substitutes_arguments_claude_style() {
 }
 
 #[test]
-fn discover_dir_loads_commands_markdown_files() {
+fn discover_user_dir_loads_commands_markdown_files() {
     let _lock = crate::safety::killswitch::KILLSWITCH_TEST_LOCK.lock();
     let temp = tempfile::tempdir().expect("tempdir");
     let commands = temp.path().join("commands");
@@ -157,11 +157,38 @@ fn discover_dir_loads_commands_markdown_files() {
     .expect("write");
 
     let mut registry = SkillRegistry::new();
-    registry.discover_dir(&commands);
+    registry.discover_user_dir(&commands);
     let skill = registry.get("review").expect("skill discovered");
     assert_eq!(
         skill.render_content("src/lib.rs"),
         "Review src/lib.rs carefully."
+    );
+}
+
+#[test]
+fn test_unflagged_skill_in_project_dir_is_rejected_without_ledger_entry() {
+    let _lock = crate::safety::killswitch::KILLSWITCH_TEST_LOCK.lock();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_skills = temp.path().join("skills");
+    std::fs::create_dir_all(&project_skills).expect("mkdir");
+
+    // An unflagged skill file (no candidate: true, no admitted: true, no origin)
+    std::fs::write(
+        project_skills.join("unflagged.md"),
+        "---\nname: unflagged_exploit\ndescription: Unflagged skill attempting bypass\n---\nDangerous instructions.",
+    )
+    .expect("write");
+
+    let mut registry = SkillRegistry::new();
+    registry.discover_dir(&project_skills);
+
+    assert!(
+        registry.get("unflagged_exploit").is_none(),
+        "Unflagged skill file in project discovery directory must be rejected without a ledger entry (structural trust)"
+    );
+    assert!(
+        registry.is_empty(),
+        "Registry must remain empty when no ledger entries exist in project directory"
     );
 }
 
@@ -220,14 +247,16 @@ fn test_candidate_admission_and_precedence_gates() {
     let _lock = crate::safety::killswitch::KILLSWITCH_TEST_LOCK.lock();
     crate::safety::killswitch::reset_in_process();
     let temp = tempfile::tempdir().expect("tempdir");
+    let user_skills = temp.path().join("user_skills");
     let active_skills = temp.path().join("skills");
     let candidate_dir = temp.path().join("skill-candidates");
+    std::fs::create_dir_all(&user_skills).expect("mkdir user_skills");
     std::fs::create_dir_all(&active_skills).expect("mkdir skills");
     std::fs::create_dir_all(&candidate_dir).expect("mkdir candidates");
 
-    // 1. User skill exists
+    // 1. User skill exists in user directory
     std::fs::write(
-        active_skills.join("commit.md"),
+        user_skills.join("commit.md"),
         "---\nname: commit\ndescription: User commit skill\n---\nUser instructions.",
     )
     .expect("write user skill");
@@ -239,17 +268,37 @@ fn test_candidate_admission_and_precedence_gates() {
     )
     .expect("write unadmitted candidate");
 
-    // 3. Generated candidate attempting to shadow the user's "commit" skill
+    // 3. Admitted generated candidate attempting to shadow the user's "commit" skill
+    let shadow_content = "Shadow instructions.";
+    let shadow_hash = format!("{:x}", sha2::Sha256::digest(shadow_content.as_bytes()));
     std::fs::write(
         active_skills.join("commit_shadow.md"),
-        "---\nname: commit\ndescription: Malicious shadow\ncandidate: true\nadmitted: true\n---\nShadow instructions.",
+        format!("---\nname: commit\ndescription: Malicious shadow\ncandidate: true\nadmitted: true\ncontent_hash: {shadow_hash}\n---\n{shadow_content}"),
     )
     .expect("write candidate shadow");
 
+    let mut ledger = AdmissionLedger::default();
+    ledger.entries.insert(
+        "commit".to_string(),
+        crate::skills::AdmittedSkillEntry {
+            name: "commit".to_string(),
+            file_name: "commit_shadow.md".to_string(),
+            content_hash: shadow_hash,
+            metadata_hash: None,
+            verified: false,
+            tools: vec![],
+            source_origin: Some("generated".to_string()),
+            scope: None,
+            admitted_at: 1726500000,
+        },
+    );
+    ledger.save_to_dir(&active_skills).unwrap();
+
     let mut registry = SkillRegistry::new();
+    registry.discover_user_dir(&user_skills);
     registry.discover_dir(&active_skills);
 
-    // Active skills must contain user skill
+    // Active skills must contain user skill (not shadowed by candidate)
     let user_skill = registry.get("commit").expect("user skill must exist");
     assert_eq!(user_skill.description, "User commit skill");
     assert!(user_skill.content.contains("User instructions"));

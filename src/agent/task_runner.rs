@@ -25,6 +25,12 @@ enum LoopMode {
 }
 
 pub(super) fn is_fatal_loop_error(error: &anyhow::Error) -> bool {
+    if error
+        .downcast_ref::<crate::safety::killswitch::KillswitchError>()
+        .is_some()
+    {
+        return true;
+    }
     let msg = error.to_string();
     msg.contains("READ_LOOP_NO_EDIT")
         || msg.contains("EDIT_FAILURE_LOOP_AFTER_EDIT")
@@ -38,6 +44,7 @@ pub(super) fn is_fatal_loop_error(error: &anyhow::Error) -> bool {
         || msg.contains("NONTERM_PROSE_NO_TOOL")
         // Killswitch active is an absolute fatal stop across all autonomous agent runs.
         || msg.contains("Killswitch active")
+        || msg.contains("killswitch")
 }
 
 /// Human-facing end-of-run summary (headless text mode). Every field comes

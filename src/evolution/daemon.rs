@@ -545,12 +545,15 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             .map(telemetry::to_agent_prompt)
             .unwrap_or_default();
 
-        let history_prompt = format_evolution_history(&hall_of_fame);
+        // Dream-RSI (arXiv:2609.14858) established that injecting unstructured narrative
+        // history degrades mutation quality by ~7% due to prompt distraction.
+        // Prompt capacity is reserved strictly for current telemetry and precise source code.
+        let history_prompt = "";
 
         // ─── Step 2: Generate hypotheses via agent swarm ───
         let llm_start = Instant::now();
         let hypotheses =
-            generate_hypotheses(&config, &telemetry_prompt, &history_prompt, repo_root).await;
+            generate_hypotheses(&config, &telemetry_prompt, history_prompt, repo_root).await;
 
         log_event(
             repo_root,

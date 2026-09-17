@@ -4395,9 +4395,24 @@ max_recovery_attempts = 3
                         .join(crate::safety::killswitch::KILLSWITCH_FILE_NAME);
                     let removed = crate::safety::killswitch::remove_file_killswitch(&target_root)?;
                     if removed {
-                        println!("✅ Killswitch file removed: {}", ks_path.display());
+                        println!("Killswitch file removed: {}", ks_path.display());
                     } else {
                         println!("Killswitch file not present at {}", ks_path.display());
+                    }
+
+                    // Re-verify actual system status to report honestly if another gate (e.g. global file or env var) remains active
+                    let check_root = if global {
+                        None
+                    } else {
+                        Some(target_root.as_path())
+                    };
+                    match crate::safety::killswitch::check_killswitch(check_root) {
+                        Ok(()) => {
+                            println!("✅ Killswitch verified clear: system is operational.");
+                        }
+                        Err(e) => {
+                            println!("⚠️  Note: System remains halted by killswitch: {e}");
+                        }
                     }
                 }
             }

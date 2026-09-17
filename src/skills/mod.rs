@@ -415,10 +415,6 @@ impl SkillRegistry {
                             .find(|e| !e.file_name.is_empty() && e.file_name == file_name_str)
                     });
 
-                    let is_candidate = skill.candidate
-                        || matches!(skill.origin.as_deref(), Some("distilled" | "generated"))
-                        || skill.admitted;
-
                     if let Some(entry) = ledger_entry {
                         // This skill is registered in the ledger!
                         // Content hash verification:
@@ -466,10 +462,13 @@ impl SkillRegistry {
                         if entry.scope.is_some() {
                             skill.scope = entry.scope.clone();
                         }
-                    } else if is_candidate {
-                        // Candidate/generated skill or skill claiming admission with NO ledger entry is rejected!
+                    } else {
+                        // Project discovery directory is the untrusted class:
+                        // ANY skill or command in this directory without an entry in
+                        // .admitted_ledger.json is rejected! A file cannot self-admit by
+                        // setting or omitting frontmatter flags (structural trust).
                         warn!(
-                            "Ignoring unadmitted candidate skill '{}' in {}: no entry in admission ledger",
+                            "Ignoring unadmitted skill '{}' in {}: no entry in admission ledger",
                             skill.name,
                             path.display()
                         );
@@ -508,9 +507,109 @@ impl SkillRegistry {
         }
     }
 
+    /// Discover user-authored skills in the given directory (e.g. `~/.selfware/skills/`).
+    ///
+    /// User skills in home directories are trusted user tools and do not require an
+    /// admission ledger, but any candidate or generated file claiming admission
+    /// must still be verified against a ledger if present.
+    pub fn discover_user_dir(&mut self, dir: &Path) {
+        if !dir.is_dir() {
+            debug!("User skill directory does not exist: {}", dir.display());
+            return;
+        }
+
+        let ledger = match AdmissionLedger::load_from_dir(dir) {
+            Ok(l) => Some(l),
+            Err(e) => {
+                warn!(
+                    "Refusing to discover user skills from {} (admission ledger error): {e}",
+                    dir.display()
+                );
+                return;
+            }
+        };
+
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) => {
+                warn!("Failed to read user skill directory {}: {e}", dir.display());
+                return;
+            }
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("md") {
+                continue;
+            }
+
+            match Skill::from_file(&path) {
+                Ok(mut skill) => {
+                    let file_name_str = path
+                        .file_name()
+                        .and_then(|f| f.to_str())
+                        .unwrap_or_default();
+
+                    let is_candidate = skill.candidate
+                        || matches!(skill.origin.as_deref(), Some("distilled" | "generated"))
+                        || skill.admitted;
+
+                    if is_candidate {
+                        // Candidate files in user directory must have a valid ledger entry
+                        let ledger_entry = ledger.as_ref().and_then(|l| {
+                            l.entries.get(&skill.name).or_else(|| {
+                                l.entries.values().find(|e| {
+                                    !e.file_name.is_empty() && e.file_name == file_name_str
+                                })
+                            })
+                        });
+
+                        if let Some(entry) = ledger_entry {
+                            let actual_hash =
+                                format!("{:x}", sha2::Sha256::digest(skill.content.as_bytes()));
+                            if actual_hash != entry.content_hash {
+                                warn!(
+                                    "Ignoring admitted candidate skill '{}' in user dir {}: content hash mismatch",
+                                    skill.name,
+                                    path.display()
+                                );
+                                continue;
+                            }
+                            skill.candidate = true;
+                            skill.admitted = true;
+                            skill.verified = entry.verified;
+                        } else {
+                            warn!(
+                                "Ignoring unadmitted candidate skill '{}' in user directory {}: no entry in admission ledger",
+                                skill.name,
+                                path.display()
+                            );
+                            continue;
+                        }
+                    } else {
+                        // User-authored skill: trusted, not a machine candidate
+                        skill.candidate = false;
+                        skill.admitted = false;
+                        skill.verified = false;
+                    }
+
+                    debug!(
+                        "Discovered user skill '{}' from {}",
+                        skill.name,
+                        path.display()
+                    );
+                    self.skills.insert(skill.name.clone(), skill);
+                }
+                Err(e) => {
+                    warn!("Failed to load user skill from {}: {e}", path.display());
+                }
+            }
+        }
+    }
+
     /// Discover skills in the standard locations:
-    /// - `~/.selfware/skills/` and `~/.selfware/commands/`
-    /// - `./.selfware/skills/` and `./.selfware/commands/`
+    /// - `~/.selfware/skills/` and `~/.selfware/commands/` (user-global)
+    /// - `./.selfware/skills/` and `./.selfware/commands/` (project-local, ledger-gated)
     ///
     /// (`commands/` is the Claude-Code-parity alias — same markdown +
     /// frontmatter format, not a second template system.)
@@ -519,8 +618,8 @@ impl SkillRegistry {
 
         // User-global skills
         if let Some(home) = dirs::home_dir() {
-            registry.discover_dir(&home.join(".selfware").join("skills"));
-            registry.discover_dir(&home.join(".selfware").join("commands"));
+            registry.discover_user_dir(&home.join(".selfware").join("skills"));
+            registry.discover_user_dir(&home.join(".selfware").join("commands"));
         }
 
         // Project-local skills
