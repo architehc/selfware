@@ -43,7 +43,8 @@ pub struct PrefixObservation {
 impl PrefixObservation {
     /// Returns true if this observation represents a successful evaluation.
     pub fn is_successful(&self) -> bool {
-        self.status == AttemptStatus::Evaluated && self.score.is_some()
+        (self.status == AttemptStatus::Evaluated || self.status == AttemptStatus::Baseline)
+            && self.score.is_some()
     }
 
     /// Returns true if this observation represents a repairable failure.

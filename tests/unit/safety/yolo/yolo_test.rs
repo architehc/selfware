@@ -591,3 +591,39 @@ fn test_container_run_volume_mount_tmp_allowed() {
 
     assert_eq!(decision, YoloDecision::AutoApprove);
 }
+
+#[test]
+fn test_yolo_cp_operands_and_substitutions_blocked() {
+    let config = YoloConfig::fully_autonomous();
+    let manager = YoloManager::new(config);
+
+    // cp operands (both source and destination)
+    for cmd in [
+        "cp .admitted_ledger.json /tmp/exfil",
+        "cp /tmp/evil .admitted_ledger.json",
+        "cp -r .selfware/skills /tmp/skills_copy",
+        "cp /tmp/evil .selfware/active_policy.json",
+        "cp /tmp/evil .selfware/attempts/run_1.jsonl",
+    ] {
+        let args = serde_json::json!({ "command": cmd });
+        let decision = manager.should_auto_approve("shell_exec", &args);
+        assert!(
+            matches!(decision, YoloDecision::Block(_)),
+            "cp command should be blocked: {cmd}"
+        );
+    }
+
+    // Command substitutions in YOLO
+    for cmd in [
+        "rm -f $(echo .admitted_ledger.json)",
+        "rm -f `echo .admitted_ledger.json`",
+        "touch $(echo .selfware/active_policy.json)",
+    ] {
+        let args = serde_json::json!({ "command": cmd });
+        let decision = manager.should_auto_approve("shell_exec", &args);
+        assert!(
+            matches!(decision, YoloDecision::Block(_)),
+            "subshell command should be blocked: {cmd}"
+        );
+    }
+}

@@ -394,51 +394,139 @@ impl AttemptTree {
         groups
     }
 
-    /// Partition the tree into (discovery_tree, held_out_tree) by splitting independent ancestry groups.
-    /// Ensures that discovery and held-out validation never share lineages or nodes,
-    /// and that all validation nodes have valid, reachable root ancestors within their tree.
+    /// Computes the set of all node IDs reachable by traversing downwards from roots.
+    pub fn reachable_node_ids(&self) -> HashSet<String> {
+        let mut reachable = HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        for root in self.roots() {
+            reachable.insert(root.id.clone());
+            queue.push_back(root.id.clone());
+        }
+
+        while let Some(curr) = queue.pop_front() {
+            if let Some(children_indices) = self.children_map.get(&curr) {
+                for &child_idx in children_indices {
+                    if let Some(child) = self.nodes.get(child_idx) {
+                        if reachable.insert(child.id.clone()) {
+                            queue.push_back(child.id.clone());
+                        }
+                    }
+                }
+            }
+        }
+        reachable
+    }
+
+    /// Partition the tree into (discovery_tree, held_out_tree) ensuring that each partition
+    /// forms a valid, fully connected tree/forest where every node is reachable from a root node
+    /// within that tree.
     pub fn split_held_out(&self, validation_fraction: f64) -> Result<(Self, Self), TreeLogError> {
         self.validate_ancestry()?;
 
-        let groups = self.ancestry_groups();
-        let branches = self.branches();
-        if branches.len() < 2 {
-            return Err(TreeLogError::InsufficientBranchesForHeldOut(branches.len()));
-        }
-        if groups.len() < 2 {
-            return Err(TreeLogError::InsufficientAncestryGroupsForHeldOut(
-                groups.len(),
-            ));
-        }
-
+        let roots = self.roots();
         let frac = validation_fraction.clamp(0.05, 0.50);
-        let val_count = ((groups.len() as f64 * frac).round() as usize).clamp(1, groups.len() - 1);
-        let split_idx = groups.len() - val_count;
 
-        let disc_node_ids: HashSet<String> = groups[..split_idx]
-            .iter()
-            .flat_map(|g| g.iter().cloned())
-            .collect();
-        let val_node_ids: HashSet<String> = groups[split_idx..]
-            .iter()
-            .flat_map(|g| g.iter().cloned())
-            .collect();
+        if roots.len() >= 2 {
+            // Case 1: Multiple independent root components (forest)
+            let val_count =
+                ((roots.len() as f64 * frac).round() as usize).clamp(1, roots.len() - 1);
+            let split_idx = roots.len() - val_count;
+            let disc_roots: HashSet<String> =
+                roots[..split_idx].iter().map(|r| r.id.clone()).collect();
+            let val_roots: HashSet<String> =
+                roots[split_idx..].iter().map(|r| r.id.clone()).collect();
 
-        let mut disc_tree = Self::new();
-        let mut val_tree = Self::new();
+            let mut disc_tree = Self::new();
+            let mut val_tree = Self::new();
 
-        for node in &self.nodes {
-            if disc_node_ids.contains(&node.id) {
-                let _ = disc_tree.add_node(node.clone());
-            } else if val_node_ids.contains(&node.id) {
-                let _ = val_tree.add_node(node.clone());
+            for node in &self.nodes {
+                let mut curr = node;
+                while let Some(ref pid) = curr.parent_id {
+                    if let Some(&idx) = self.id_to_index.get(pid) {
+                        curr = &self.nodes[idx];
+                    } else {
+                        break;
+                    }
+                }
+                if disc_roots.contains(&curr.id) {
+                    let _ = disc_tree.add_node(node.clone());
+                } else if val_roots.contains(&curr.id) {
+                    let _ = val_tree.add_node(node.clone());
+                }
             }
+
+            disc_tree.validate_ancestry()?;
+            val_tree.validate_ancestry()?;
+            return Ok((disc_tree, val_tree));
         }
 
-        disc_tree.validate_ancestry()?;
-        val_tree.validate_ancestry()?;
+        // Case 2: Single common root (e.g. baseline node) with multiple exploratory branches
+        if let Some(common_root) = roots.first() {
+            let mut non_root_branches: Vec<String> = self
+                .nodes
+                .iter()
+                .filter(|n| n.parent_id.is_some())
+                .map(|n| n.branch_id.clone())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            non_root_branches.sort();
 
-        Ok((disc_tree, val_tree))
+            if non_root_branches.len() < 2 {
+                return Err(TreeLogError::InsufficientBranchesForHeldOut(
+                    non_root_branches.len(),
+                ));
+            }
+
+            let val_count = ((non_root_branches.len() as f64 * frac).round() as usize)
+                .clamp(1, non_root_branches.len() - 1);
+            let split_idx = non_root_branches.len() - val_count;
+
+            let disc_branches: HashSet<String> =
+                non_root_branches[..split_idx].iter().cloned().collect();
+            let val_branches: HashSet<String> =
+                non_root_branches[split_idx..].iter().cloned().collect();
+
+            let mut disc_tree = Self::new();
+            let mut val_tree = Self::new();
+
+            // Common root is present in both trees to provide the reachable root ancestor
+            disc_tree.add_node((*common_root).clone())?;
+            val_tree.add_node((*common_root).clone())?;
+
+            for node in &self.nodes {
+                if node.id == common_root.id {
+                    continue;
+                }
+                if disc_branches.contains(&node.branch_id) {
+                    let _ = disc_tree.add_node(node.clone());
+                } else if val_branches.contains(&node.branch_id) {
+                    let _ = val_tree.add_node(node.clone());
+                }
+            }
+
+            disc_tree.validate_ancestry()?;
+            val_tree.validate_ancestry()?;
+
+            let disc_reachable = disc_tree.reachable_node_ids();
+            if disc_reachable.len() != disc_tree.nodes.len() {
+                return Err(TreeLogError::OrphanedNode {
+                    node_id: "discovery partition contains unreachable nodes".into(),
+                    parent_id: "missing".into(),
+                });
+            }
+            let val_reachable = val_tree.reachable_node_ids();
+            if val_reachable.len() != val_tree.nodes.len() {
+                return Err(TreeLogError::OrphanedNode {
+                    node_id: "validation partition contains unreachable nodes".into(),
+                    parent_id: "missing".into(),
+                });
+            }
+
+            return Ok((disc_tree, val_tree));
+        }
+
+        Err(TreeLogError::InsufficientBranchesForHeldOut(0))
     }
 
     /// Load an attempt tree from a JSONL file.

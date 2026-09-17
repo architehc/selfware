@@ -98,6 +98,22 @@ fn fatal_loop_errors_are_not_recoverable() {
     assert!(is_fatal_loop_error(&anyhow::anyhow!(
         "NONTERM_PROSE_NO_TOOL: mutation-required task produced 6 consecutive no-tool turns"
     )));
+    // Typed killswitch downcasting checks
+    let ks_err = crate::safety::killswitch::KillswitchError::InProcess {
+        reason: "unit test halt".to_string(),
+    };
+    assert!(is_fatal_loop_error(&anyhow::Error::from(ks_err)));
+
+    let safety_ks_err =
+        crate::errors::SelfwareError::Safety(crate::errors::SafetyError::KillswitchActive {
+            reason: "file sentinel active".to_string(),
+        });
+    assert!(is_fatal_loop_error(&anyhow::Error::from(safety_ks_err)));
+
+    // Unanchored string containing "killswitch" in user prompt or harmless log MUST NOT trigger fatal abort
+    assert!(!is_fatal_loop_error(&anyhow::anyhow!(
+        "User prompt contains the word killswitch in documentation"
+    )));
     assert!(!is_fatal_loop_error(&anyhow::anyhow!(
         "temporary API failure"
     )));

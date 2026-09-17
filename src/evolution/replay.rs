@@ -10,7 +10,7 @@
 //! - Policies are ranked by objective: J(π) = V_terminal(π) - β * Cost(π).
 
 use super::policy::{LegalAction, PolicyDecision, PrefixObservation, PrefixView, SearchPolicy};
-use super::tree_log::AttemptTree;
+use super::tree_log::{AttemptStatus, AttemptTree};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -293,7 +293,27 @@ impl ReplaySimulator {
             )));
         }
 
+        // Pre-discover baseline node if present; treated as already known at round 0
+        let effective_baseline_score = if self.baseline_score > 0.0 {
+            self.baseline_score
+        } else {
+            self.tree
+                .nodes()
+                .iter()
+                .find(|n| n.status == AttemptStatus::Baseline || n.id == "att-baseline")
+                .and_then(|n| n.composite_score)
+                .unwrap_or(self.baseline_score)
+        };
+
         let mut revealed_ids: HashSet<String> = HashSet::new();
+        let mut baseline_order: Vec<String> = Vec::new();
+        for node in self.tree.nodes() {
+            if node.status == AttemptStatus::Baseline || node.id == "att-baseline" {
+                revealed_ids.insert(node.id.clone());
+                baseline_order.push(node.id.clone());
+            }
+        }
+
         let mut revealed_order: Vec<String> = Vec::new();
         let mut decision_rounds = 0;
         let mut effective_sequential_rounds = 0;
@@ -315,9 +335,16 @@ impl ReplaySimulator {
                 break;
             }
 
-            // Construct prefix view with revealed observations
-            let prefix_obs = self.build_prefix_observations(&revealed_order);
-            let prefix = PrefixView::new(prefix_obs, self.baseline_score, self.max_parallelism);
+            // Construct prefix view with revealed observations (including baseline)
+            let all_revealed: Vec<String> = baseline_order
+                .iter()
+                .chain(revealed_order.iter())
+                .cloned()
+                .collect();
+            let prefix_obs =
+                self.build_prefix_observations(&all_revealed, effective_baseline_score);
+            let prefix =
+                PrefixView::new(prefix_obs, effective_baseline_score, self.max_parallelism);
 
             // Policy decides next action batch
             let decision = policy.decide(&prefix, &legal_actions, beta);
@@ -394,9 +421,9 @@ impl ReplaySimulator {
             .iter()
             .filter_map(|id| self.tree.get(id))
             .filter_map(|n| n.composite_score)
-            .fold(self.baseline_score, f64::max);
+            .fold(effective_baseline_score, f64::max);
 
-        let score_improvement = terminal_score - self.baseline_score;
+        let score_improvement = terminal_score - effective_baseline_score;
         let parallel_penalty = if total_probes > 0 {
             effective_sequential_rounds as f64 / total_probes as f64
         } else {
@@ -410,7 +437,7 @@ impl ReplaySimulator {
         Ok(ReplayReport {
             policy_name: policy.name().to_string(),
             beta,
-            baseline_score: self.baseline_score,
+            baseline_score: effective_baseline_score,
             terminal_score,
             score_improvement,
             total_probes,
@@ -595,13 +622,25 @@ impl ReplaySimulator {
         });
 
         let discovery_stability = if discovery_trees.len() > 1 && candidate_factories.len() > 1 {
-            Self::compute_ranking_stability(&disc_evals).ok()
+            match Self::compute_ranking_stability(&disc_evals) {
+                Ok(stab) => Some(stab),
+                Err(err) => {
+                    tracing::warn!("Failed to compute discovery ranking stability: {err}");
+                    None
+                }
+            }
         } else {
             None
         };
 
         let validation_stability = if validation_trees.len() > 1 && candidate_factories.len() > 1 {
-            Self::compute_ranking_stability(&val_evals).ok()
+            match Self::compute_ranking_stability(&val_evals) {
+                Ok(stab) => Some(stab),
+                Err(err) => {
+                    tracing::warn!("Failed to compute validation ranking stability: {err}");
+                    None
+                }
+            }
         } else {
             None
         };
@@ -671,9 +710,12 @@ impl ReplaySimulator {
                 }
                 per_tree_rankings.push(tree_ranks);
             }
+            // Rule 3: Honest status over optimistic success.
+            // With fewer than 2 trees or 2 policies, concordance has zero degrees
+            // of freedom; claiming W = 1.0 and is_stable: true is a false green badge.
             return Ok(RankingStability {
-                kendall_w: 1.0,
-                is_stable: true,
+                kendall_w: 0.0,
+                is_stable: false,
                 tree_count,
                 policy_count,
                 per_tree_rankings,
@@ -770,6 +812,10 @@ impl ReplaySimulator {
             if revealed_ids.contains(&node.id) {
                 continue;
             }
+            if node.branch_id == "control" {
+                // Control anchors are shadow environment verification tests, not exploration actions
+                continue;
+            }
 
             match &node.parent_id {
                 None => {
@@ -782,11 +828,24 @@ impl ReplaySimulator {
                 Some(pid) => {
                     // Refinement is legal only if parent has already been revealed
                     if revealed_ids.contains(pid) {
-                        legal.push(LegalAction::RefineFrontier {
-                            branch_id: node.branch_id.clone(),
-                            parent_id: pid.clone(),
-                            node_id: node.id.clone(),
-                        });
+                        let parent_is_baseline = self
+                            .tree
+                            .get(pid)
+                            .map(|p| p.status == AttemptStatus::Baseline || p.id == "att-baseline")
+                            .unwrap_or(false);
+
+                        if parent_is_baseline {
+                            legal.push(LegalAction::OpenRoot {
+                                branch_id: node.branch_id.clone(),
+                                node_id: node.id.clone(),
+                            });
+                        } else {
+                            legal.push(LegalAction::RefineFrontier {
+                                branch_id: node.branch_id.clone(),
+                                parent_id: pid.clone(),
+                                node_id: node.id.clone(),
+                            });
+                        }
                     }
                 }
             }
@@ -796,7 +855,11 @@ impl ReplaySimulator {
     }
 
     /// Helper to construct PrefixObservation sequence in chronological reveal order.
-    fn build_prefix_observations(&self, revealed_order: &[String]) -> Vec<PrefixObservation> {
+    fn build_prefix_observations(
+        &self,
+        revealed_order: &[String],
+        baseline_score: f64,
+    ) -> Vec<PrefixObservation> {
         let mut observations = Vec::new();
 
         for id in revealed_order {
@@ -812,7 +875,7 @@ impl ReplaySimulator {
                     _ => None,
                 };
 
-                let delta_vs_baseline = node.composite_score.map(|s| s - self.baseline_score);
+                let delta_vs_baseline = node.composite_score.map(|s| s - baseline_score);
 
                 // Calculate depth within branch based on parent chain
                 let mut depth = 0;

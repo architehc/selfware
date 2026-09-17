@@ -6,12 +6,14 @@ fn test_in_process_killswitch_trips_and_resets() {
     let _lock = KILLSWITCH_TEST_LOCK.lock();
     std::env::remove_var(KILLSWITCH_ENV_VAR);
     reset_in_process();
-    assert!(!is_killswitch_active());
+    let tmp = tempdir().unwrap();
+    let empty_dir = tmp.path();
+    assert!(check_killswitch_with_home(Some(empty_dir), Some(empty_dir)).is_ok());
 
     trip_in_process("Emergency stop for testing");
     assert!(is_killswitch_active());
 
-    match check_killswitch(None) {
+    match check_killswitch_with_home(Some(empty_dir), Some(empty_dir)) {
         Err(KillswitchError::InProcess { reason }) => {
             assert!(reason.contains("Emergency stop for testing"));
         }
@@ -19,7 +21,7 @@ fn test_in_process_killswitch_trips_and_resets() {
     }
 
     reset_in_process();
-    assert!(!is_killswitch_active());
+    assert!(check_killswitch_with_home(Some(empty_dir), Some(empty_dir)).is_ok());
 }
 
 #[test]

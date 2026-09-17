@@ -783,9 +783,16 @@ fn targets_protected_path(cmd: &str, protected_paths: &[String]) -> Option<Strin
         }
     }
 
-    // 2. Check for mutating / destructive commands targeting protected paths
+    // 2. Check command substitutions `$(...)` and backticks
+    for subcmd in crate::safety::checker::validation::extract_command_substitutions(cmd) {
+        if let Some(p) = targets_protected_path(&subcmd, protected_paths) {
+            return Some(p);
+        }
+    }
+
+    // 3. Check for mutating / destructive commands targeting protected paths
     const MUTATING_COMMANDS: &[&str] = &[
-        "rm", "unlink", "rmdir", "mv", "touch", "truncate", "chmod", "chown", "shred",
+        "rm", "unlink", "rmdir", "mv", "touch", "truncate", "chmod", "chown", "shred", "cp",
     ];
 
     let tokens = shell_path_tokens(cmd);
@@ -803,17 +810,7 @@ fn targets_protected_path(cmd: &str, protected_paths: &[String]) -> Option<Strin
         }
     }
 
-    // For `cp`, only the destination operand is a write/mutation target.
-    // Reading from a protected source (e.g. copying a template into workspace) is safe and allowed.
-    if tokens.contains(&"cp") {
-        if let Some(dest) = cp_destination_operand(&tokens) {
-            if let Some(p) = path_matches_protected(dest, protected_paths) {
-                return Some(p);
-            }
-        }
-    }
-
-    // 3. Inspect nested subshell invocations (sh -c '...', bash -c "...", eval ...)
+    // 4. Inspect nested subshell invocations (sh -c '...', bash -c "...", eval ...)
     if cmd.contains("sh") || cmd.contains("eval") || cmd.contains("fish") || cmd.contains("csh") {
         let parts = crate::safety::checker::validation::split_shell_commands(cmd);
         for part in parts {
@@ -822,12 +819,18 @@ fn targets_protected_path(cmd: &str, protected_paths: &[String]) -> Option<Strin
                 .iter()
                 .position(|t| crate::safety::checker::validation::is_shell_command_flag(t))
             {
-                if let Some(nested) = sub_tokens.get(c_pos + 1..) {
-                    let nested_cmd = nested.join(" ");
-                    let nested_trimmed = nested_cmd.trim_matches(|c| c == '\'' || c == '"');
-                    if let Some(p) = targets_protected_path(nested_trimmed, protected_paths) {
-                        return Some(p);
-                    }
+                let nested_cmd: String = if let Some(extracted) =
+                    crate::safety::checker::validation::extract_nested_shell_command(
+                        &sub_tokens,
+                        c_pos,
+                    ) {
+                    extracted
+                } else {
+                    sub_tokens[c_pos + 1..].join(" ")
+                };
+                let nested_trimmed = nested_cmd.trim_matches(|c| c == '\'' || c == '"');
+                if let Some(p) = targets_protected_path(nested_trimmed, protected_paths) {
+                    return Some(p);
                 }
             } else if sub_tokens.first() == Some(&"eval") && sub_tokens.len() > 1 {
                 let nested_cmd = sub_tokens[1..].join(" ");
@@ -840,31 +843,6 @@ fn targets_protected_path(cmd: &str, protected_paths: &[String]) -> Option<Strin
     }
 
     None
-}
-
-/// Locate the destination operand of a `cp` command (accounting for -t/--target-directory flags).
-fn cp_destination_operand<'a>(tokens: &'a [&'a str]) -> Option<&'a str> {
-    let cp_idx = tokens.iter().position(|&t| t == "cp")?;
-    let args = &tokens[cp_idx + 1..];
-
-    for (i, &arg) in args.iter().enumerate() {
-        if arg == "-t" || arg == "--target-directory" {
-            return args.get(i + 1).copied();
-        }
-        if let Some(dir) = arg.strip_prefix("-t") {
-            if !dir.is_empty() {
-                return Some(dir);
-            }
-        }
-        if let Some(dir) = arg.strip_prefix("--target-directory=") {
-            return Some(dir);
-        }
-    }
-
-    args.iter()
-        .rev()
-        .find(|&&arg| !arg.starts_with('-'))
-        .copied()
 }
 
 fn path_matches_protected(path_str: &str, protected_paths: &[String]) -> Option<String> {

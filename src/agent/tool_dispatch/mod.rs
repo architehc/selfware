@@ -1589,7 +1589,7 @@ impl Agent {
                     )
                 );
                 if is_killswitch {
-                    return Err(anyhow::anyhow!("Killswitch active: {error_msg}"));
+                    return Err(e.into());
                 }
                 continue;
             }
@@ -2089,7 +2089,7 @@ impl Agent {
                 )
             );
             if is_killswitch {
-                return Err(anyhow::anyhow!("Killswitch active: {error_msg}"));
+                return Err(e.into());
             }
             return Ok(());
         }

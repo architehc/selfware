@@ -567,7 +567,7 @@ pub fn check_sglang_backend(endpoint: &str) -> Option<bool> {
 /// falling back to hostname/port heuristics when offline or when probing cannot be performed.
 /// Transient failures preserve an unknown state and are not cached as negative results.
 pub fn is_sglang_backend(endpoint: &str) -> bool {
-    check_sglang_backend(endpoint).unwrap_or(false)
+    check_sglang_backend(endpoint).unwrap_or_else(|| is_sglang_serving_deployment(endpoint))
 }
 
 /// Returns true if the endpoint URL indicates an SGLang serving deployment

@@ -629,3 +629,196 @@ fn test_higher_mean_score_with_volatile_rankings_blocks_promotion() {
         "Promotion must be explicitly blocked when rankings are volatile (W < 0.70)"
     );
 }
+
+#[test]
+fn test_ranking_stability_degenerate_counts_not_falsely_green() {
+    // Single tree evaluation: concordance cannot be established across 1 tree (Rule 3)
+    let single_tree_evals = vec![
+        MultiTreeEvaluation {
+            policy_name: "P1".into(),
+            beta: 0.1,
+            tree_count: 1,
+            mean_terminal_score: 0.8,
+            mean_improvement: 0.0,
+            mean_probes: 1.0,
+            mean_objective_value: 0.8,
+            mean_pareto_reward: 0.0,
+            cumulative_tokens: 100,
+            cumulative_wall_time_ms: 10,
+            per_tree_reports: vec![dummy_eval("P1", 0.8, 0.8).per_tree_reports[0].clone()],
+        },
+        MultiTreeEvaluation {
+            policy_name: "P2".into(),
+            beta: 0.1,
+            tree_count: 1,
+            mean_objective_value: 0.5,
+            mean_terminal_score: 0.5,
+            mean_improvement: 0.0,
+            mean_probes: 1.0,
+            mean_pareto_reward: 0.0,
+            cumulative_tokens: 100,
+            cumulative_wall_time_ms: 10,
+            per_tree_reports: vec![dummy_eval("P2", 0.5, 0.5).per_tree_reports[0].clone()],
+        },
+    ];
+    let stab = ReplaySimulator::compute_ranking_stability(&single_tree_evals).expect("stability");
+    assert_eq!(
+        stab.kendall_w, 0.0,
+        "Kendall's W must be 0.0 for tree_count < 2"
+    );
+    assert!(
+        !stab.is_stable,
+        "is_stable must be false for tree_count < 2"
+    );
+
+    // Single policy evaluation: cannot rank a single policy against itself (Rule 3)
+    let single_policy_evals = vec![dummy_eval("OnlyPolicy", 0.9, 0.85)];
+    let stab_single_p =
+        ReplaySimulator::compute_ranking_stability(&single_policy_evals).expect("stability");
+    assert_eq!(
+        stab_single_p.kendall_w, 0.0,
+        "Kendall's W must be 0.0 for policy_count < 2"
+    );
+    assert!(
+        !stab_single_p.is_stable,
+        "is_stable must be false for policy_count < 2"
+    );
+}
+
+#[test]
+fn test_replay_daemon_tree_shape_with_baseline_root_and_control_anchors() {
+    let mut tree = AttemptTree::new();
+
+    // att-baseline is the sole root in daemon-generated attempt trees
+    let baseline_node = AttemptNode {
+        id: "att-baseline".to_string(),
+        parent_id: None,
+        generation: 0,
+        branch_id: "baseline".to_string(),
+        hypothesis_id: "baseline".to_string(),
+        description: "Initial baseline capability measurement".to_string(),
+        diff_sha256: "sha_base".to_string(),
+        patch: None,
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(0.75),
+        tokens_used: Some(500),
+        wall_time_ms: 1000,
+        status: AttemptStatus::Baseline,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        created_at: "2026-09-17T00:00:00Z".to_string(),
+    };
+    tree.add_node(baseline_node).unwrap();
+
+    // Control anchor node from generation 1
+    let ctrl_node = AttemptNode {
+        id: "att-g1-control".to_string(),
+        parent_id: Some("att-baseline".to_string()),
+        generation: 1,
+        branch_id: "control".to_string(),
+        hypothesis_id: "control".to_string(),
+        description: "Unpatched control anchor".to_string(),
+        diff_sha256: "sha_ctrl".to_string(),
+        patch: None,
+        sab_report_path: None,
+        metrics: None,
+        composite_score: None,
+        tokens_used: None,
+        wall_time_ms: 500,
+        status: AttemptStatus::InternalError,
+        failure_class: Some(FailureClass::EnvironmentError),
+        failure_reason: Some("Control clean check".to_string()),
+        output_tail: None,
+        binary_sha256: None,
+        created_at: "2026-09-17T00:01:00Z".to_string(),
+    };
+    tree.add_node(ctrl_node).unwrap();
+
+    // Actual mutation attempts beneath att-baseline
+    let hyp1_node = AttemptNode {
+        id: "att-g1-hyp-1".to_string(),
+        parent_id: Some("att-baseline".to_string()),
+        generation: 1,
+        branch_id: "hyp-1".to_string(),
+        hypothesis_id: "hyp-1".to_string(),
+        description: "Hypothesis 1".to_string(),
+        diff_sha256: "sha_hyp1".to_string(),
+        patch: Some("diff1".to_string()),
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(0.85),
+        tokens_used: Some(1000),
+        wall_time_ms: 2000,
+        status: AttemptStatus::Evaluated,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        created_at: "2026-09-17T00:02:00Z".to_string(),
+    };
+    tree.add_node(hyp1_node).unwrap();
+
+    let hyp2_node = AttemptNode {
+        id: "att-g1-hyp-2".to_string(),
+        parent_id: Some("att-baseline".to_string()),
+        generation: 1,
+        branch_id: "hyp-2".to_string(),
+        hypothesis_id: "hyp-2".to_string(),
+        description: "Hypothesis 2".to_string(),
+        diff_sha256: "sha_hyp2".to_string(),
+        patch: Some("diff2".to_string()),
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(0.80),
+        tokens_used: Some(1000),
+        wall_time_ms: 2000,
+        status: AttemptStatus::Evaluated,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        created_at: "2026-09-17T00:03:00Z".to_string(),
+    };
+    tree.add_node(hyp2_node).unwrap();
+
+    // FixedPopulationPolicy with population size 2
+    let mut policy = FixedPopulationPolicy::new(2);
+
+    // Baseline score 0.0 passed (as CLI does by default); simulator should pick up 0.75 from att-baseline
+    let sim = ReplaySimulator::new(tree, 0.0);
+    let report = sim
+        .evaluate_policy(&mut policy, 0.1)
+        .expect("replay report");
+
+    // 1. Baseline node must NOT be counted as a probe
+    assert_eq!(
+        report.total_probes, 2,
+        "probes must only count actual mutations, not att-baseline"
+    );
+    assert!(report
+        .revealed_node_ids
+        .contains(&"att-g1-hyp-1".to_string()));
+    assert!(report
+        .revealed_node_ids
+        .contains(&"att-g1-hyp-2".to_string()));
+    assert!(
+        !report
+            .revealed_node_ids
+            .contains(&"att-g1-control".to_string()),
+        "control anchor must be excluded"
+    );
+    assert!(
+        !report
+            .revealed_node_ids
+            .contains(&"att-baseline".to_string()),
+        "baseline must not be in probe sequence"
+    );
+
+    // 2. Baseline score must be resolved from att-baseline
+    assert_eq!(report.baseline_score, 0.75);
+    assert_eq!(report.terminal_score, 0.85);
+    assert!((report.score_improvement - 0.10).abs() < 1e-9);
+}

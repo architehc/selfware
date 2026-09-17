@@ -457,8 +457,8 @@ fn test_darwinx_non_regression_rejects_candidate_when_previously_passing_scenari
         wall_clock: Duration::from_secs(2),
         rating: GenerationRating::Wilt,
         binary_sha256: "hash".to_string(),
-        model: None,
-        endpoint: None,
+        model: Some("qwen".to_string()),
+        endpoint: Some("http://localhost:11434".to_string()),
         run_id: "r1".to_string(),
         report_path: PathBuf::from("reports/sab-r1/sab_report.json"),
     };
@@ -471,8 +471,8 @@ fn test_darwinx_non_regression_rejects_candidate_when_previously_passing_scenari
         wall_clock: Duration::from_secs(2),
         rating: GenerationRating::Wilt,
         binary_sha256: "hash".to_string(),
-        model: None,
-        endpoint: None,
+        model: Some("qwen".to_string()),
+        endpoint: Some("http://localhost:11434".to_string()),
         run_id: "r2".to_string(),
         report_path: PathBuf::from("reports/sab-r2/sab_report.json"),
     };
@@ -509,8 +509,8 @@ fn test_darwinx_non_regression_rejects_candidate_when_baseline_passed_scenario_m
         wall_clock: Duration::from_secs(2),
         rating: GenerationRating::Bloom,
         binary_sha256: "hash".to_string(),
-        model: None,
-        endpoint: None,
+        model: Some("qwen".to_string()),
+        endpoint: Some("http://localhost:11434".to_string()),
         run_id: "r1".to_string(),
         report_path: PathBuf::from("reports/sab-r1/sab_report.json"),
     };
@@ -523,8 +523,8 @@ fn test_darwinx_non_regression_rejects_candidate_when_baseline_passed_scenario_m
         wall_clock: Duration::from_secs(1),
         rating: GenerationRating::Bloom,
         binary_sha256: "hash".to_string(),
-        model: None,
-        endpoint: None,
+        model: Some("qwen".to_string()),
+        endpoint: Some("http://localhost:11434".to_string()),
         run_id: "r2".to_string(),
         report_path: PathBuf::from("reports/sab-r2/sab_report.json"),
     };
@@ -598,6 +598,69 @@ fn test_darwinx_non_regression_rejects_model_or_endpoint_mismatch() {
             candidate_endpoint: Some("https://api.openai.com/v1".to_string()),
         }
     );
+}
+
+#[test]
+fn test_darwinx_non_regression_rejects_missing_or_empty_identity() {
+    let make_scenario = |name: &str| ScenarioScore {
+        name: name.to_string(),
+        difficulty: Difficulty::Medium,
+        score: 100.0,
+        tests_passed: true,
+        broken_tests_fixed: true,
+        clean_exit: true,
+        tokens_used: Some(1000),
+        duration: Duration::from_secs(1),
+    };
+
+    let base = SabResult {
+        aggregate_score: 100.0,
+        scenario_scores: vec![make_scenario("sc1")],
+        total_tokens_used: Some(1000),
+        wall_clock: Duration::from_secs(1),
+        rating: GenerationRating::Bloom,
+        binary_sha256: "hash".to_string(),
+        model: Some("qwen-2.5-coder-32b".to_string()),
+        endpoint: Some("http://localhost:11434/v1".to_string()),
+        run_id: "r1".to_string(),
+        report_path: PathBuf::from("reports/sab-r1/sab_report.json"),
+    };
+
+    // Both baseline and candidate having None for model must fail (finding 3: None == None bug)
+    let mut no_model_base = base.clone();
+    no_model_base.model = None;
+    let mut no_model_cand = base.clone();
+    no_model_cand.model = None;
+    assert!(matches!(
+        no_model_base.check_darwinx_non_regression(&no_model_cand),
+        Err(DarwinXViolation::IdentityMismatch { .. })
+    ));
+
+    // Both having None for endpoint must fail
+    let mut no_ep_base = base.clone();
+    no_ep_base.endpoint = None;
+    let mut no_ep_cand = base.clone();
+    no_ep_cand.endpoint = None;
+    assert!(matches!(
+        no_ep_base.check_darwinx_non_regression(&no_ep_cand),
+        Err(DarwinXViolation::IdentityMismatch { .. })
+    ));
+
+    // Empty model string
+    let mut empty_model_cand = base.clone();
+    empty_model_cand.model = Some("   ".to_string());
+    assert!(matches!(
+        base.check_darwinx_non_regression(&empty_model_cand),
+        Err(DarwinXViolation::IdentityMismatch { .. })
+    ));
+
+    // Empty endpoint string
+    let mut empty_ep_cand = base.clone();
+    empty_ep_cand.endpoint = Some("".to_string());
+    assert!(matches!(
+        base.check_darwinx_non_regression(&empty_ep_cand),
+        Err(DarwinXViolation::IdentityMismatch { .. })
+    ));
 }
 
 #[test]

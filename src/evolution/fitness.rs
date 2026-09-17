@@ -629,7 +629,20 @@ impl SabResult {
         &self,
         candidate: &SabResult,
     ) -> Result<(), DarwinXViolation> {
-        if self.model != candidate.model || self.endpoint != candidate.endpoint {
+        let is_valid_ident = |val: &Option<String>| -> bool {
+            match val {
+                Some(s) => !s.trim().is_empty(),
+                None => false,
+            }
+        };
+
+        if !is_valid_ident(&self.model)
+            || !is_valid_ident(&candidate.model)
+            || !is_valid_ident(&self.endpoint)
+            || !is_valid_ident(&candidate.endpoint)
+            || self.model != candidate.model
+            || self.endpoint != candidate.endpoint
+        {
             return Err(DarwinXViolation::IdentityMismatch {
                 baseline_model: self.model.clone(),
                 candidate_model: candidate.model.clone(),

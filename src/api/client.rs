@@ -758,6 +758,7 @@ impl ApiClient {
         tools: Option<Vec<ToolDefinition>>,
         thinking: ThinkingMode,
     ) -> Result<(ChatResponse, ChatMetadata)> {
+        crate::safety::killswitch::check_killswitch(None)?;
         // Compute the prompt-token estimate before `messages` is moved into
         // `build_chat_body` so the progress event reports the actual outgoing
         // size (messages + tool definitions).
@@ -961,6 +962,7 @@ impl ApiClient {
         tools: Option<Vec<ToolDefinition>>,
         thinking: ThinkingMode,
     ) -> Result<(StreamingResponse, ChatMetadata)> {
+        crate::safety::killswitch::check_killswitch(None)?;
         let estimated_tokens = estimate_messages_tokens(&messages)
             + estimate_tool_definitions_tokens_opt(tools.as_ref());
         let body = self.build_chat_body(messages, tools, thinking, true)?;

@@ -770,6 +770,66 @@ impl SkillRegistry {
         candidates
     }
 
+    /// Validate whether a path matches any denied pattern (credentials, git internals, killswitch, system dirs).
+    /// Prevents plant-then-admit attacks from using sensitive directories or files as candidates or targets.
+    fn is_admission_denied(path: &Path) -> Option<String> {
+        let path_str = path.to_string_lossy().replace('\\', "/");
+        let canonical = std::fs::canonicalize(path).ok();
+        let canonical_str = canonical
+            .as_ref()
+            .map(|p| p.to_string_lossy().replace('\\', "/"));
+
+        let denied = crate::config::default_denied_paths();
+        for pattern in &denied {
+            // Exclude allowed skill directories from the denylist for admission
+            if pattern.contains(".selfware/skills")
+                || pattern.contains(".selfware/skill-candidates")
+                || pattern.contains(".selfware/attempts")
+            {
+                continue;
+            }
+            let pattern_glob = crate::safety::checker::to_glob_form(pattern);
+            if let Ok(glob) = glob::Pattern::new(&pattern_glob) {
+                if glob.matches(&path_str) {
+                    return Some(pattern.clone());
+                }
+                if let Some(ref c_str) = canonical_str {
+                    if glob.matches(c_str) {
+                        return Some(pattern.clone());
+                    }
+                }
+                if !pattern.contains('/') && !pattern.contains('\\') {
+                    for comp in path.components() {
+                        if let std::path::Component::Normal(name) = comp {
+                            if glob.matches(&name.to_string_lossy()) {
+                                return Some(pattern.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for comp in path.components() {
+            if let std::path::Component::Normal(name) = comp {
+                if name == ".git" {
+                    return Some(".git/**".to_string());
+                }
+            }
+        }
+        let sys_prefixes = ["/etc", "/root", "/proc", "/sys", "/dev"];
+        for prefix in sys_prefixes {
+            if path_str.starts_with(prefix) {
+                return Some(format!("{prefix}/**"));
+            }
+            if let Some(ref c_str) = canonical_str {
+                if c_str.starts_with(prefix) {
+                    return Some(format!("{prefix}/**"));
+                }
+            }
+        }
+        None
+    }
+
     /// Explicit admission gate: admit a candidate skill into the target active skills directory.
     pub fn admit_candidate(
         candidate_path: &Path,
@@ -782,6 +842,15 @@ impl SkillRegistry {
             return Err("Killswitch is active: candidate admission blocked".to_string());
         }
 
+        if let Some(pat) = Self::is_admission_denied(candidate_path) {
+            return Err(format!("Candidate path matches denied pattern: {pat}"));
+        }
+        if let Some(pat) = Self::is_admission_denied(target_skills_dir) {
+            return Err(format!(
+                "Target skills directory matches denied pattern: {pat}"
+            ));
+        }
+
         let mut skill = Skill::from_file(candidate_path)?;
         let safe_name = validate_skill_name(&skill.name)?;
 
@@ -789,6 +858,9 @@ impl SkillRegistry {
             .map_err(|e| format!("Failed to create target skills dir: {e}"))?;
 
         let target_file = target_skills_dir.join(format!("{safe_name}.md"));
+        if let Some(pat) = Self::is_admission_denied(&target_file) {
+            return Err(format!("Target file matches denied pattern: {pat}"));
+        }
         if !target_file.starts_with(target_skills_dir) {
             return Err(format!(
                 "Destination path escapes skills directory: {}",

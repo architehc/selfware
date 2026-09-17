@@ -444,8 +444,8 @@ fn make_sab(scores: Vec<(&str, f64, bool)>) -> crate::evolution::fitness::SabRes
         wall_clock: Duration::from_secs(1),
         rating: GenerationRating::Grow,
         binary_sha256: "dummy".to_string(),
-        model: None,
-        endpoint: None,
+        model: Some("qwen-test".to_string()),
+        endpoint: Some("http://localhost:11434".to_string()),
         run_id: "test".to_string(),
         report_path: std::path::PathBuf::from("reports/sab-test/sab_report.json"),
     }
@@ -1672,6 +1672,58 @@ fn test_log_and_append_attempt_failure_aborts() {
 }
 
 #[test]
+fn test_control_failure_with_unwritable_attempts_file_aborts() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo_root = temp.path();
+
+    // Create a directory where the attempts file should be, causing log_and_append_attempt to fail
+    let attempts_file = repo_root.join("unwritable_attempts_dir");
+    std::fs::create_dir_all(&attempts_file).unwrap();
+
+    let node = AttemptNode {
+        id: "att-g1-control".to_string(),
+        parent_id: Some("att-baseline".to_string()),
+        generation: 1,
+        branch_id: "control".to_string(),
+        hypothesis_id: "control".to_string(),
+        description: "Unpatched control anchor".to_string(),
+        diff_sha256: compute_sha256(b""),
+        patch: None,
+        sab_report_path: None,
+        metrics: None,
+        composite_score: None,
+        tokens_used: None,
+        wall_time_ms: 50,
+        status: AttemptStatus::InternalError,
+        failure_class: Some(FailureClass::EnvironmentError),
+        failure_reason: Some("Control worktree failed".to_string()),
+        output_tail: None,
+        binary_sha256: None,
+        created_at: chrono_now(),
+    };
+
+    let result = log_and_append_attempt(
+        &attempts_file,
+        &node,
+        repo_root,
+        1,
+        std::time::Instant::now(),
+    );
+
+    assert!(
+        result.is_err(),
+        "log_and_append_attempt must return Err when attempt file is unwritable"
+    );
+
+    // Verify aborted event was written to .evolution-log.jsonl
+    let events_file = repo_root.join(".evolution-log.jsonl");
+    assert!(events_file.exists());
+    let events_content = std::fs::read_to_string(&events_file).unwrap();
+    assert!(events_content.contains("\"outcome\":\"aborted\""));
+    assert!(events_content.contains("attempt logging failed"));
+}
+
+#[test]
 fn test_ranked_candidate_promotion_runner_up_qualifies() {
     let base_metrics = make_metrics(100, 100);
     let base_sab = make_sab(vec![("sc1", 90.0, true), ("sc2", 80.0, true)]);
@@ -1703,6 +1755,7 @@ fn test_ranked_candidate_promotion_runner_up_qualifies() {
             tested_diff: "diff1".into(),
             composite: cand1_composite,
             attempt_id: "att-1".into(),
+            branch_id: "branch-1".into(),
         },
         EvaluatedCandidate {
             hypothesis: Hypothesis {
@@ -1717,6 +1770,7 @@ fn test_ranked_candidate_promotion_runner_up_qualifies() {
             tested_diff: "diff2".into(),
             composite: cand2_composite,
             attempt_id: "att-2".into(),
+            branch_id: "branch-2".into(),
         },
     ];
 

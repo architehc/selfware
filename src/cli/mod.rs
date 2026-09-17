@@ -1763,6 +1763,7 @@ async fn handle_command(
 ) -> Result<()> {
     match command {
         Commands::Chat => {
+            crate::safety::killswitch::check_killswitch(None)?;
             if !quiet {
                 println!("{}", ui::components::render_welcome(ctx));
             }
@@ -1843,6 +1844,7 @@ async fn handle_command(
             skill,
             preset,
         } => {
+            crate::safety::killswitch::check_killswitch(None)?;
             // Resolve the task: --preset <id> renders the preset's task +
             // invariants; otherwise the positional task is required (clap
             // enforces this via required_unless_present).
@@ -2694,6 +2696,33 @@ async fn handle_command(
                             incumbent_objective,
                             kendall_w,
                         );
+                        let active_policy_path =
+                            repo_root.join(".selfware").join("active_policy.json");
+                        let payload = serde_json::json!({
+                            "policy_name": winner_name,
+                            "promoted_at": std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs(),
+                            "validation_objective": validation_objective,
+                            "incumbent_objective": incumbent_objective,
+                            "kendall_w": kendall_w,
+                        });
+                        if let Ok(json_str) = serde_json::to_string_pretty(&payload) {
+                            if let Err(e) = std::fs::write(&active_policy_path, json_str) {
+                                eprintln!(
+                                    "   Warning: failed to persist active policy to {}: {}",
+                                    active_policy_path.display(),
+                                    e
+                                );
+                            } else {
+                                println!(
+                                    "   {} Persisted promoted policy to {}",
+                                    Glyphs::leaf(),
+                                    active_policy_path.display()
+                                );
+                            }
+                        }
                     }
                     PromotionReadiness::BlockedByInstability {
                         winner_name,

@@ -672,6 +672,7 @@ pub async fn spawn(
     project_root: PathBuf,
     registry: ApplyRegistry,
 ) -> Result<String> {
+    crate::safety::killswitch::check_killswitch(Some(&project_root))?;
     let exe = std::env::current_exe()?;
     let staged = stage_run(prompt.clone(), project_root.clone(), registry.clone()).await?;
     let id = staged.id;

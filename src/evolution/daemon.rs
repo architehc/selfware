@@ -108,7 +108,7 @@ fn measure_compile_test_baseline(
     let feat = features_arg(features);
 
     let mut check_cmd = Command::new("cargo");
-    check_cmd.arg("check").current_dir(dir);
+    check_cmd.arg("check").arg("--all-targets").current_dir(dir);
     if !features.is_empty() {
         check_cmd.arg("--features").arg(&feat);
     }
@@ -157,7 +157,10 @@ fn measure_compile_test_baseline(
         .unwrap_or(false);
 
     let mut clippy_cmd = Command::new("cargo");
-    clippy_cmd.arg("clippy").current_dir(dir);
+    clippy_cmd
+        .arg("clippy")
+        .arg("--all-targets")
+        .current_dir(dir);
     if !features.is_empty() {
         clippy_cmd.arg("--features").arg(&feat);
     }
@@ -367,13 +370,45 @@ pub(crate) struct EvaluatedCandidate {
     pub(crate) tested_diff: String,
     pub(crate) composite: f64,
     pub(crate) attempt_id: String,
+    pub(crate) branch_id: String,
 }
 
-/// Minimum SAB score margin (epsilon) to consider a capability delta real rather than noise.
-pub const SAB_NOISE_MARGIN: f64 = 0.5;
+/// Default noise margin (epsilon) when empirical scenario variance is unmeasured.
+pub const DEFAULT_SAB_NOISE_MARGIN: f64 = 0.5;
+pub const SAB_NOISE_MARGIN: f64 = DEFAULT_SAB_NOISE_MARGIN;
+
+/// Empirical noise margin for SAB capability scores (Rule 4: Measured, not estimated).
+/// When paired scenario scores are available from benchmark runs, calculates the
+/// standard error of the mean scenario score delta across the benchmark suite.
+/// Falls back to [`DEFAULT_SAB_NOISE_MARGIN`] when unmeasured.
+pub(crate) fn compute_empirical_noise_margin(
+    base_sab: Option<&SabResult>,
+    cand_sab: Option<&SabResult>,
+) -> f64 {
+    if let (Some(base), Some(cand)) = (base_sab, cand_sab) {
+        if !base.scenario_scores.is_empty()
+            && base.scenario_scores.len() == cand.scenario_scores.len()
+        {
+            let deltas: Vec<f64> = base
+                .scenario_scores
+                .iter()
+                .zip(cand.scenario_scores.iter())
+                .map(|(b, c)| c.score - b.score)
+                .collect();
+            let n = deltas.len() as f64;
+            if n >= 2.0 {
+                let mean = deltas.iter().sum::<f64>() / n;
+                let var = deltas.iter().map(|d| (d - mean).powi(2)).sum::<f64>() / (n - 1.0);
+                let std_err = (var / n).sqrt();
+                return std_err.clamp(0.05, DEFAULT_SAB_NOISE_MARGIN);
+            }
+        }
+    }
+    DEFAULT_SAB_NOISE_MARGIN
+}
 
 /// Compare two candidates using a consistent, transitive ranking rule (total order):
-/// 1. Primary: SAB score discretized into noise-margin tiers (`(sab / SAB_NOISE_MARGIN).floor() as i64`).
+/// 1. Primary: SAB score discretized into noise-margin tiers (`(sab / DEFAULT_SAB_NOISE_MARGIN).floor() as i64`).
 ///    A candidate in a higher tier is strictly superior.
 /// 2. Secondary: Composite fitness score within the same SAB tier.
 /// 3. Tertiary: Raw continuous SAB score as tie-breaker.
@@ -383,8 +418,8 @@ pub(crate) fn candidate_rank_cmp(
     b_sab: f64,
     b_composite: f64,
 ) -> std::cmp::Ordering {
-    let a_tier = (a_sab / SAB_NOISE_MARGIN).floor() as i64;
-    let b_tier = (b_sab / SAB_NOISE_MARGIN).floor() as i64;
+    let a_tier = (a_sab / DEFAULT_SAB_NOISE_MARGIN).floor() as i64;
+    let b_tier = (b_sab / DEFAULT_SAB_NOISE_MARGIN).floor() as i64;
 
     match a_tier.cmp(&b_tier) {
         std::cmp::Ordering::Equal => {}
@@ -421,10 +456,10 @@ pub(crate) fn is_candidate_better(
 }
 
 /// Evaluates whether a candidate winner should be promoted to baseline:
-/// 1. Must not regress SAB capability beyond the noise margin (0.5).
+/// 1. Must not regress SAB capability beyond the noise margin (measured or default 0.5).
 /// 2. Must pass the DarwinX non-regression gate over SAB results.
 /// 3. Must not regress total test count relative to baseline.
-/// 4. When SAB improvement is within noise margin (0.5), composite score
+/// 4. When SAB improvement is within noise margin, composite score
 ///    must strictly exceed baseline (secondary metrics: latency, pass rate, etc.).
 pub(crate) fn evaluate_candidate_promotion(
     baseline_composite: f64,
@@ -434,10 +469,11 @@ pub(crate) fn evaluate_candidate_promotion(
     base_metrics: &FitnessMetrics,
     winner_metrics: &FitnessMetrics,
 ) -> PromotionDecision {
-    if winner_metrics.sab_score < base_metrics.sab_score - SAB_NOISE_MARGIN {
+    let noise_margin = compute_empirical_noise_margin(base_sab, cand_sab);
+    if winner_metrics.sab_score < base_metrics.sab_score - noise_margin {
         return PromotionDecision::Reject(format!(
             "winner SAB score ({:.2}) regressed below baseline ({:.2}) beyond noise margin ({:.2})",
-            winner_metrics.sab_score, base_metrics.sab_score, SAB_NOISE_MARGIN
+            winner_metrics.sab_score, base_metrics.sab_score, noise_margin
         ));
     }
 
@@ -453,10 +489,10 @@ pub(crate) fn evaluate_candidate_promotion(
 
     // Latency and binary size are tie-breakers within a generation, not promotion
     // drivers over baseline. Promotion requires either:
-    // 1. A genuine SAB capability improvement beyond the noise margin (sab_delta > SAB_NOISE_MARGIN).
+    // 1. A genuine SAB capability improvement beyond the noise margin (sab_delta > noise_margin).
     // 2. Or, if SAB capability is within noise margin, a significant measured token efficiency
     //    improvement (> 5% reduction, with both arms measured), and higher composite.
-    if sab_delta <= SAB_NOISE_MARGIN {
+    if sab_delta <= noise_margin {
         if winner_composite <= baseline_composite {
             return PromotionDecision::Reject(format!(
                 "winner composite ({:.4}) does not exceed baseline ({:.4})",
@@ -474,7 +510,7 @@ pub(crate) fn evaluate_candidate_promotion(
         if !has_token_improvement {
             return PromotionDecision::Reject(format!(
                 "winner SAB delta ({:.2}) is within noise margin ({:.2}) and has no measured token efficiency improvement; latency and binary size are tie-breakers, not promotion drivers",
-                sab_delta, SAB_NOISE_MARGIN
+                sab_delta, noise_margin
             ));
         }
     }
@@ -528,17 +564,52 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
     let _ = std::fs::create_dir_all(&attempts_dir);
     let attempts_file = attempts_dir.join(format!("{}.jsonl", run_id));
 
+    // Load promoted search policy if available from offline held-out replay validation
+    let active_policy_file = repo_root.join(".selfware").join("active_policy.json");
+    if active_policy_file.exists() {
+        if let Ok(content) = std::fs::read_to_string(&active_policy_file) {
+            if let Ok(policy_val) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(p_name) = policy_val.get("policy_name").and_then(|v| v.as_str()) {
+                    tracing::info!("Evolution daemon loaded active search policy: {}", p_name);
+                }
+            }
+        }
+    }
+
+    let mut initial_sab = 0.0;
+
+    macro_rules! abort_run {
+        ($reason:expr, $gen_count:expr, $final_sab:expr, $hof:expr) => {{
+            let reason_str = $reason;
+            log_event(
+                repo_root,
+                &serde_json::json!({
+                    "event": "run_end",
+                    "kind": "run_end",
+                    "timestamp": chrono_now(),
+                    "run_id": &run_id,
+                    "outcome": "aborted",
+                    "reason": &reason_str,
+                    "generations_run": $gen_count,
+                    "final_sab_score": $final_sab,
+                    "duration_secs": start.elapsed().as_secs_f64(),
+                }),
+            );
+            return EvolutionResult {
+                generations_run: $gen_count,
+                improvements: $hof,
+                final_sab_score: $final_sab,
+                initial_sab_score: initial_sab,
+                total_duration: start.elapsed(),
+                aborted: Some(reason_str),
+            };
+        }};
+    }
+
     // Fail-closed killswitch check before starting evolution
     if let Err(err) = crate::safety::killswitch::check_killswitch(Some(repo_root)) {
         log_warning(&format!("Killswitch active: {err}; aborting evolution"));
-        return EvolutionResult {
-            generations_run: 0,
-            improvements: Vec::new(),
-            final_sab_score: 0.0,
-            initial_sab_score: 0.0,
-            total_duration: start.elapsed(),
-            aborted: Some(format!("killswitch active: {err}")),
-        };
+        abort_run!(format!("killswitch active: {err}"), 0, 0.0, Vec::new());
     }
 
     log_event(
@@ -551,6 +622,8 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             "population_size": config.population_size,
             "endpoint": config.llm.endpoint,
             "model": config.llm.model,
+            "negative_feedback_history": true,
+            "sab_noise_margin": DEFAULT_SAB_NOISE_MARGIN,
         }),
     );
 
@@ -605,18 +678,16 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 log_warning(&format!(
                     "SAB baseline failed ({e}); refusing to evolve against an unmeasured baseline"
                 ));
-                return EvolutionResult {
-                    generations_run: 0,
-                    improvements: Vec::new(),
-                    final_sab_score: 0.0,
-                    initial_sab_score: 0.0,
-                    total_duration: start.elapsed(),
-                    aborted: Some(format!(
+                abort_run!(
+                    format!(
                         "baseline measurement failed: {e}. Promotion needs a real baseline \
                          to compare against; scoring candidates against a placeholder \
                          cannot show improvement."
-                    )),
-                };
+                    ),
+                    0,
+                    0.0,
+                    Vec::new()
+                );
             }
         }
     } else {
@@ -629,25 +700,23 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             Err(e) => {
                 log_warning(&format!(
                     "Compile/test baseline failed ({e}); refusing to evolve against an \
-                     unmeasured baseline"
+                      unmeasured baseline"
                 ));
-                return EvolutionResult {
-                    generations_run: 0,
-                    improvements: Vec::new(),
-                    final_sab_score: 0.0,
-                    initial_sab_score: 0.0,
-                    total_duration: start.elapsed(),
-                    aborted: Some(format!(
+                abort_run!(
+                    format!(
                         "baseline measurement failed: {e}. Promotion needs a real baseline \
                          to compare against; scoring candidates against a placeholder \
                          cannot show improvement."
-                    )),
-                };
+                    ),
+                    0,
+                    0.0,
+                    Vec::new()
+                );
             }
         }
     };
 
-    let initial_sab = baseline_metrics.sab_score;
+    initial_sab = baseline_metrics.sab_score;
     let mut current_baseline_metrics = baseline_metrics;
 
     log_baseline(&current_baseline_metrics, sab_mode);
@@ -681,16 +750,15 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         created_at: chrono_now(),
     };
     if let Err(err) = log_and_append_attempt(&attempts_file, &baseline_node, repo_root, 0, start) {
-        return EvolutionResult {
-            generations_run: 0,
-            improvements: Vec::new(),
-            final_sab_score: current_baseline_metrics.sab_score,
-            initial_sab_score: initial_sab,
-            total_duration: start.elapsed(),
-            aborted: Some(format!("initial baseline logging failed: {err}")),
-        };
+        abort_run!(
+            format!("initial baseline logging failed: {err}"),
+            0,
+            current_baseline_metrics.sab_score,
+            Vec::new()
+        );
     }
     let mut active_parent_id: Option<String> = Some(baseline_node.id.clone());
+    let mut active_parent_branch_id: String = baseline_node.branch_id.clone();
 
     // ═══════════════════════════════════════════════════════
     // MAIN EVOLUTIONARY LOOP
@@ -707,16 +775,12 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             log_warning(&format!(
                 "Killswitch active at generation {generation}: {err}; halting evolution"
             ));
-            return EvolutionResult {
-                generations_run: generation.saturating_sub(1),
-                improvements: hall_of_fame,
-                final_sab_score: current_baseline_metrics.sab_score,
-                initial_sab_score: initial_sab,
-                total_duration: start.elapsed(),
-                aborted: Some(format!(
-                    "killswitch tripped at generation {generation}: {err}"
-                )),
-            };
+            abort_run!(
+                format!("killswitch tripped at generation {generation}: {err}"),
+                generation.saturating_sub(1),
+                current_baseline_metrics.sab_score,
+                hall_of_fame
+            );
         }
 
         log_generation_start(generation);
@@ -743,8 +807,12 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
         // ─── Step 2: Generate hypotheses via agent swarm ───
         let llm_start = Instant::now();
-        let hypotheses =
+        let mut hypotheses =
             generate_hypotheses(&config, &telemetry_prompt, &history_prompt, repo_root).await;
+
+        for (h_idx, h) in hypotheses.iter_mut().enumerate() {
+            h.id = format!("g{}-hyp{}", generation, h_idx);
+        }
 
         log_event(
             repo_root,
@@ -765,12 +833,20 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             continue;
         }
 
-        // ─── Step 3: Safety filter ───
+        // ─── Step 3: Safety & duplicate filter ───
         // Gate on the paths the patch ACTUALLY edits, not the LLM-declared
         // target_files metadata (free-form JSON, never cross-checked — an
         // empty array passed trivially). See hypothesis_touches_protected.
+        // Also detect and reject duplicate patches matching previously failed diffs.
+        let prior_failed_diffs = load_failed_diff_shas(&attempts_file);
         let mut valid = Vec::new();
-        for h in hypotheses {
+        for (h_idx, h) in hypotheses.into_iter().enumerate() {
+            let h_branch_id = if active_parent_id.as_deref() == Some("att-baseline") {
+                format!("branch-g{}-h{}", generation, h_idx)
+            } else {
+                active_parent_branch_id.clone()
+            };
+            let diff_sha256 = compute_sha256(h.patch.as_bytes());
             if hypothesis_touches_protected(&h) {
                 log_warning(&format!(
                     "Hypothesis '{}' touches protected files, rejected",
@@ -780,10 +856,10 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     id: format!("att-g{}-{}", generation, h.id),
                     parent_id: active_parent_id.clone(),
                     generation,
-                    branch_id: h.id.clone(),
+                    branch_id: h_branch_id,
                     hypothesis_id: h.id.clone(),
                     description: h.description.clone(),
-                    diff_sha256: compute_sha256(h.patch.as_bytes()),
+                    diff_sha256,
                     patch: Some(h.patch.clone()),
                     sab_report_path: None,
                     metrics: None,
@@ -800,22 +876,63 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 if let Err(err) =
                     log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start)
                 {
-                    return EvolutionResult {
-                        generations_run: generation.saturating_sub(1),
-                        improvements: hall_of_fame,
-                        final_sab_score: current_baseline_metrics.sab_score,
-                        initial_sab_score: initial_sab,
-                        total_duration: start.elapsed(),
-                        aborted: Some(format!("attempt logging failed: {err}")),
-                    };
+                    abort_run!(
+                        format!("attempt logging failed: {err}"),
+                        generation.saturating_sub(1),
+                        current_baseline_metrics.sab_score,
+                        hall_of_fame
+                    );
                 }
                 continue;
             }
+
+            if prior_failed_diffs.contains(&diff_sha256) {
+                log_warning(&format!(
+                    "Hypothesis '{}' matches previously failed patch diff (sha256: {}), rejected as duplicate",
+                    h.id, diff_sha256
+                ));
+                let node = AttemptNode {
+                    id: format!("att-g{}-{}", generation, h.id),
+                    parent_id: active_parent_id.clone(),
+                    generation,
+                    branch_id: h_branch_id,
+                    hypothesis_id: h.id.clone(),
+                    description: h.description.clone(),
+                    diff_sha256: diff_sha256.clone(),
+                    patch: Some(h.patch.clone()),
+                    sab_report_path: None,
+                    metrics: None,
+                    composite_score: None,
+                    tokens_used: None,
+                    wall_time_ms: 0,
+                    status: AttemptStatus::CompileFailed,
+                    failure_class: Some(FailureClass::Unclassified),
+                    failure_reason: Some(format!(
+                        "Duplicate of previously failed patch diff (sha256: {})",
+                        diff_sha256
+                    )),
+                    output_tail: None,
+                    binary_sha256: None,
+                    created_at: chrono_now(),
+                };
+                if let Err(err) =
+                    log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start)
+                {
+                    abort_run!(
+                        format!("attempt logging failed: {err}"),
+                        generation.saturating_sub(1),
+                        current_baseline_metrics.sab_score,
+                        hall_of_fame
+                    );
+                }
+                continue;
+            }
+
             valid.push(h);
         }
 
         if valid.is_empty() {
-            log_warning("All hypotheses rejected by safety filter");
+            log_warning("All hypotheses rejected by safety/duplicate filter");
             // Backoff to avoid 100% CPU busy-loop.
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             continue;
@@ -856,8 +973,16 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     binary_sha256: None,
                     created_at: chrono_now(),
                 };
-                let _ =
-                    log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start);
+                if let Err(err) =
+                    log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start)
+                {
+                    abort_run!(
+                        format!("attempt logging failed during control failure: {err}"),
+                        generation.saturating_sub(1),
+                        current_baseline_metrics.sab_score,
+                        hall_of_fame
+                    );
+                }
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 continue;
             }
@@ -867,6 +992,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         let mut ctrl_check_cmd = Command::new("cargo");
         ctrl_check_cmd
             .arg("check")
+            .arg("--all-targets")
             .arg("--features")
             .arg(features_arg(EVOLVE_FEATURES))
             .env("CARGO_TARGET_DIR", evolution_target_dir(repo_root))
@@ -913,7 +1039,16 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 binary_sha256: None,
                 created_at: chrono_now(),
             };
-            let _ = log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start);
+            if let Err(err) =
+                log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start)
+            {
+                abort_run!(
+                    format!("attempt logging failed during control failure: {err}"),
+                    generation.saturating_sub(1),
+                    current_baseline_metrics.sab_score,
+                    hall_of_fame
+                );
+            }
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             continue;
         }
@@ -977,7 +1112,16 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 binary_sha256: None,
                 created_at: chrono_now(),
             };
-            let _ = log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start);
+            if let Err(err) =
+                log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start)
+            {
+                abort_run!(
+                    format!("attempt logging failed during control failure: {err}"),
+                    generation.saturating_sub(1),
+                    current_baseline_metrics.sab_score,
+                    hall_of_fame
+                );
+            }
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             continue;
         }
@@ -988,10 +1132,15 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             sab_config.runner_script.exists() && std::env::var("SELFWARE_EVOLVE_SAB").is_ok();
         let mut evaluated_candidates: Vec<EvaluatedCandidate> = Vec::new();
 
-        for hypothesis in &valid {
+        for (h_idx, hypothesis) in valid.iter().enumerate() {
             let attempt_start = Instant::now();
             let attempt_id = format!("att-g{}-{}", generation, hypothesis.id);
             let raw_diff_sha256 = compute_sha256(hypothesis.patch.as_bytes());
+            let hypothesis_branch_id = if active_parent_id.as_deref() == Some("att-baseline") {
+                format!("branch-g{}-h{}", generation, h_idx)
+            } else {
+                active_parent_branch_id.clone()
+            };
 
             log_phase(&format!(
                 "  Testing '{}' [{}]...",
@@ -1011,7 +1160,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         id: attempt_id.clone(),
                         parent_id: active_parent_id.clone(),
                         generation,
-                        branch_id: hypothesis.id.clone(),
+                        branch_id: hypothesis_branch_id.clone(),
                         hypothesis_id: hypothesis.id.clone(),
                         description: hypothesis.description.clone(),
                         diff_sha256: raw_diff_sha256.clone(),
@@ -1035,14 +1184,12 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         generation,
                         gen_start,
                     ) {
-                        return EvolutionResult {
-                            generations_run: generation.saturating_sub(1),
-                            improvements: hall_of_fame,
-                            final_sab_score: current_baseline_metrics.sab_score,
-                            initial_sab_score: initial_sab,
-                            total_duration: start.elapsed(),
-                            aborted: Some(format!("attempt logging failed: {err}")),
-                        };
+                        abort_run!(
+                            format!("attempt logging failed: {err}"),
+                            generation.saturating_sub(1),
+                            current_baseline_metrics.sab_score,
+                            hall_of_fame
+                        );
                     }
                     continue;
                 }
@@ -1052,14 +1199,11 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             // Apply edits (search-and-replace or unified diff)
             if !apply_patch_to_worktree(&worktree, &hypothesis.patch) {
                 log_frost(generation, &format!("Patch failed: {}", hypothesis.id));
-                // Log the first 500 chars of the edit data for debugging
-                let preview = truncate_char_boundary(&hypothesis.patch, 500);
-                log_warning(&format!("  Edit preview:\n{}", preview));
                 let node = AttemptNode {
                     id: attempt_id.clone(),
                     parent_id: active_parent_id.clone(),
                     generation,
-                    branch_id: hypothesis.id.clone(),
+                    branch_id: hypothesis_branch_id.clone(),
                     hypothesis_id: hypothesis.id.clone(),
                     description: hypothesis.description.clone(),
                     diff_sha256: raw_diff_sha256.clone(),
@@ -1079,14 +1223,12 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 if let Err(err) =
                     log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start)
                 {
-                    return EvolutionResult {
-                        generations_run: generation.saturating_sub(1),
-                        improvements: hall_of_fame,
-                        final_sab_score: current_baseline_metrics.sab_score,
-                        initial_sab_score: initial_sab,
-                        total_duration: start.elapsed(),
-                        aborted: Some(format!("attempt logging failed: {err}")),
-                    };
+                    abort_run!(
+                        format!("attempt logging failed: {err}"),
+                        generation.saturating_sub(1),
+                        current_baseline_metrics.sab_score,
+                        hall_of_fame
+                    );
                 }
                 continue;
             }
@@ -1124,7 +1266,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         id: attempt_id.clone(),
                         parent_id: active_parent_id.clone(),
                         generation,
-                        branch_id: hypothesis.id.clone(),
+                        branch_id: hypothesis_branch_id.clone(),
                         hypothesis_id: hypothesis.id.clone(),
                         description: hypothesis.description.clone(),
                         diff_sha256: raw_diff_sha256.clone(),
@@ -1148,14 +1290,12 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         generation,
                         gen_start,
                     ) {
-                        return EvolutionResult {
-                            generations_run: generation.saturating_sub(1),
-                            improvements: hall_of_fame,
-                            final_sab_score: current_baseline_metrics.sab_score,
-                            initial_sab_score: initial_sab,
-                            total_duration: start.elapsed(),
-                            aborted: Some(format!("attempt logging failed: {err}")),
-                        };
+                        abort_run!(
+                            format!("attempt logging failed: {err}"),
+                            generation.saturating_sub(1),
+                            current_baseline_metrics.sab_score,
+                            hall_of_fame
+                        );
                     }
                     continue;
                 }
@@ -1165,6 +1305,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             let mut check_cmd = Command::new("cargo");
             check_cmd
                 .arg("check")
+                .arg("--all-targets")
                 .arg("--features")
                 .arg(features_arg(EVOLVE_FEATURES))
                 .env("CARGO_TARGET_DIR", evolution_target_dir(repo_root))
@@ -1191,7 +1332,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     id: attempt_id.clone(),
                     parent_id: active_parent_id.clone(),
                     generation,
-                    branch_id: hypothesis.id.clone(),
+                    branch_id: hypothesis_branch_id.clone(),
                     hypothesis_id: hypothesis.id.clone(),
                     description: hypothesis.description.clone(),
                     diff_sha256: raw_diff_sha256.clone(),
@@ -1211,14 +1352,12 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 if let Err(err) =
                     log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start)
                 {
-                    return EvolutionResult {
-                        generations_run: generation.saturating_sub(1),
-                        improvements: hall_of_fame,
-                        final_sab_score: current_baseline_metrics.sab_score,
-                        initial_sab_score: initial_sab,
-                        total_duration: start.elapsed(),
-                        aborted: Some(format!("attempt logging failed: {err}")),
-                    };
+                    abort_run!(
+                        format!("attempt logging failed: {err}"),
+                        generation.saturating_sub(1),
+                        current_baseline_metrics.sab_score,
+                        hall_of_fame
+                    );
                 }
                 continue;
             }
@@ -1244,7 +1383,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         id: attempt_id.clone(),
                         parent_id: active_parent_id.clone(),
                         generation,
-                        branch_id: hypothesis.id.clone(),
+                        branch_id: hypothesis_branch_id.clone(),
                         hypothesis_id: hypothesis.id.clone(),
                         description: hypothesis.description.clone(),
                         diff_sha256: raw_diff_sha256.clone(),
@@ -1268,14 +1407,12 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         generation,
                         gen_start,
                     ) {
-                        return EvolutionResult {
-                            generations_run: generation.saturating_sub(1),
-                            improvements: hall_of_fame,
-                            final_sab_score: current_baseline_metrics.sab_score,
-                            initial_sab_score: initial_sab,
-                            total_duration: start.elapsed(),
-                            aborted: Some(format!("attempt logging failed: {err}")),
-                        };
+                        abort_run!(
+                            format!("attempt logging failed: {err}"),
+                            generation.saturating_sub(1),
+                            current_baseline_metrics.sab_score,
+                            hall_of_fame
+                        );
                     }
                     continue;
                 }
@@ -1324,7 +1461,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     id: attempt_id.clone(),
                     parent_id: active_parent_id.clone(),
                     generation,
-                    branch_id: hypothesis.id.clone(),
+                    branch_id: hypothesis_branch_id.clone(),
                     hypothesis_id: hypothesis.id.clone(),
                     description: hypothesis.description.clone(),
                     diff_sha256: raw_diff_sha256.clone(),
@@ -1344,14 +1481,12 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 if let Err(err) =
                     log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start)
                 {
-                    return EvolutionResult {
-                        generations_run: generation.saturating_sub(1),
-                        improvements: hall_of_fame,
-                        final_sab_score: current_baseline_metrics.sab_score,
-                        initial_sab_score: initial_sab,
-                        total_duration: start.elapsed(),
-                        aborted: Some(format!("attempt logging failed: {err}")),
-                    };
+                    abort_run!(
+                        format!("attempt logging failed: {err}"),
+                        generation.saturating_sub(1),
+                        current_baseline_metrics.sab_score,
+                        hall_of_fame
+                    );
                 }
                 continue;
             }
@@ -1360,6 +1495,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             let mut clippy_cmd = Command::new("cargo");
             clippy_cmd
                 .arg("clippy")
+                .arg("--all-targets")
                 .arg("--features")
                 .arg(features_arg(EVOLVE_FEATURES))
                 .env("CARGO_TARGET_DIR", evolution_target_dir(repo_root))
@@ -1387,7 +1523,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     id: attempt_id.clone(),
                     parent_id: active_parent_id.clone(),
                     generation,
-                    branch_id: hypothesis.id.clone(),
+                    branch_id: hypothesis_branch_id.clone(),
                     hypothesis_id: hypothesis.id.clone(),
                     description: hypothesis.description.clone(),
                     diff_sha256: raw_diff_sha256.clone(),
@@ -1407,14 +1543,12 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 if let Err(err) =
                     log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start)
                 {
-                    return EvolutionResult {
-                        generations_run: generation.saturating_sub(1),
-                        improvements: hall_of_fame,
-                        final_sab_score: current_baseline_metrics.sab_score,
-                        initial_sab_score: initial_sab,
-                        total_duration: start.elapsed(),
-                        aborted: Some(format!("attempt logging failed: {err}")),
-                    };
+                    abort_run!(
+                        format!("attempt logging failed: {err}"),
+                        generation.saturating_sub(1),
+                        current_baseline_metrics.sab_score,
+                        hall_of_fame
+                    );
                 }
                 continue;
             }
@@ -1450,7 +1584,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         id: attempt_id.clone(),
                         parent_id: active_parent_id.clone(),
                         generation,
-                        branch_id: hypothesis.id.clone(),
+                        branch_id: hypothesis_branch_id.clone(),
                         hypothesis_id: hypothesis.id.clone(),
                         description: hypothesis.description.clone(),
                         diff_sha256: raw_diff_sha256.clone(),
@@ -1474,14 +1608,12 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         generation,
                         gen_start,
                     ) {
-                        return EvolutionResult {
-                            generations_run: generation.saturating_sub(1),
-                            improvements: hall_of_fame,
-                            final_sab_score: current_baseline_metrics.sab_score,
-                            initial_sab_score: initial_sab,
-                            total_duration: start.elapsed(),
-                            aborted: Some(format!("attempt logging failed: {err}")),
-                        };
+                        abort_run!(
+                            format!("attempt logging failed: {err}"),
+                            generation.saturating_sub(1),
+                            current_baseline_metrics.sab_score,
+                            hall_of_fame
+                        );
                     }
                     continue;
                 }
@@ -1502,7 +1634,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             id: attempt_id.clone(),
                             parent_id: active_parent_id.clone(),
                             generation,
-                            branch_id: hypothesis.id.clone(),
+                            branch_id: hypothesis_branch_id.clone(),
                             hypothesis_id: hypothesis.id.clone(),
                             description: hypothesis.description.clone(),
                             diff_sha256: raw_diff_sha256.clone(),
@@ -1526,14 +1658,12 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             generation,
                             gen_start,
                         ) {
-                            return EvolutionResult {
-                                generations_run: generation.saturating_sub(1),
-                                improvements: hall_of_fame,
-                                final_sab_score: current_baseline_metrics.sab_score,
-                                initial_sab_score: initial_sab,
-                                total_duration: start.elapsed(),
-                                aborted: Some(format!("attempt logging failed: {err}")),
-                            };
+                            abort_run!(
+                                format!("attempt logging failed: {err}"),
+                                generation.saturating_sub(1),
+                                current_baseline_metrics.sab_score,
+                                hall_of_fame
+                            );
                         }
                         continue;
                     }
@@ -1556,7 +1686,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             id: attempt_id.clone(),
                             parent_id: active_parent_id.clone(),
                             generation,
-                            branch_id: hypothesis.id.clone(),
+                            branch_id: hypothesis_branch_id.clone(),
                             hypothesis_id: hypothesis.id.clone(),
                             description: hypothesis.description.clone(),
                             diff_sha256: raw_diff_sha256.clone(),
@@ -1580,14 +1710,12 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             generation,
                             gen_start,
                         ) {
-                            return EvolutionResult {
-                                generations_run: generation.saturating_sub(1),
-                                improvements: hall_of_fame,
-                                final_sab_score: current_baseline_metrics.sab_score,
-                                initial_sab_score: initial_sab,
-                                total_duration: start.elapsed(),
-                                aborted: Some(format!("attempt logging failed: {err}")),
-                            };
+                            abort_run!(
+                                format!("attempt logging failed: {err}"),
+                                generation.saturating_sub(1),
+                                current_baseline_metrics.sab_score,
+                                hall_of_fame
+                            );
                         }
                         continue;
                     }
@@ -1611,7 +1739,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         id: attempt_id.clone(),
                         parent_id: active_parent_id.clone(),
                         generation,
-                        branch_id: hypothesis.id.clone(),
+                        branch_id: hypothesis_branch_id.clone(),
                         hypothesis_id: hypothesis.id.clone(),
                         description: hypothesis.description.clone(),
                         diff_sha256: raw_diff_sha256.clone(),
@@ -1635,14 +1763,12 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         generation,
                         gen_start,
                     ) {
-                        return EvolutionResult {
-                            generations_run: generation.saturating_sub(1),
-                            improvements: hall_of_fame,
-                            final_sab_score: current_baseline_metrics.sab_score,
-                            initial_sab_score: initial_sab,
-                            total_duration: start.elapsed(),
-                            aborted: Some(format!("attempt logging failed: {err}")),
-                        };
+                        abort_run!(
+                            format!("attempt logging failed: {err}"),
+                            generation.saturating_sub(1),
+                            current_baseline_metrics.sab_score,
+                            hall_of_fame
+                        );
                     }
                     continue;
                 }
@@ -1655,7 +1781,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 id: attempt_id.clone(),
                 parent_id: active_parent_id.clone(),
                 generation,
-                branch_id: hypothesis.id.clone(),
+                branch_id: hypothesis_branch_id.clone(),
                 hypothesis_id: hypothesis.id.clone(),
                 description: hypothesis.description.clone(),
                 diff_sha256: tested_diff_sha256,
@@ -1675,14 +1801,12 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             if let Err(err) =
                 log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start)
             {
-                return EvolutionResult {
-                    generations_run: generation.saturating_sub(1),
-                    improvements: hall_of_fame,
-                    final_sab_score: current_baseline_metrics.sab_score,
-                    initial_sab_score: initial_sab,
-                    total_duration: start.elapsed(),
-                    aborted: Some(format!("attempt logging failed: {err}")),
-                };
+                abort_run!(
+                    format!("attempt logging failed: {err}"),
+                    generation.saturating_sub(1),
+                    current_baseline_metrics.sab_score,
+                    hall_of_fame
+                );
             }
 
             log_phase(&format!(
@@ -1700,6 +1824,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 tested_diff,
                 composite: candidate_composite,
                 attempt_id: attempt_id.clone(),
+                branch_id: hypothesis_branch_id.clone(),
             });
         }
 
@@ -1731,6 +1856,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             .then_with(|| a.attempt_id.cmp(&b.attempt_id))
         });
 
+        let top_candidate = evaluated_candidates.first().cloned();
         let mut promoted_winner = None;
         let baseline_composite = config.fitness_weights.composite(&current_baseline_metrics);
 
@@ -1792,6 +1918,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 // the BLOOM commit on whatever branch was checked out.
                 if commit_winner_to_repo(repo_root, &winner.tested_diff, &commit_msg) {
                     active_parent_id = Some(winner.attempt_id.clone());
+                    active_parent_branch_id = winner.branch_id.clone();
 
                     let git_tag = if generation.is_multiple_of(config.checkpoint_interval) {
                         let tag = format!("evolve-gen-{}", generation);
@@ -1881,17 +2008,34 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 }
             }
             None => {
-                log_frost(
+                let (rating, winner_sab) = if let Some(ref top) = top_candidate {
+                    let score = top.metrics.sab_score;
+                    let r = if top.composite < baseline_composite * 0.9 {
+                        GenerationRating::Frost
+                    } else {
+                        GenerationRating::Wilt
+                    };
+                    (r, score)
+                } else {
+                    (GenerationRating::Frost, 0.0)
+                };
+                log_reject(
                     generation,
-                    "All evaluated candidates were rejected by non-regression or promotion gates",
+                    &rating,
+                    winner_sab,
+                    current_baseline_metrics.sab_score,
                 );
+                let outcome_str = match rating {
+                    GenerationRating::Wilt => "wilt",
+                    _ => "frost",
+                };
                 log_event(
                     repo_root,
                     &serde_json::json!({
                         "event": "generation_end",
                         "timestamp": chrono_now(),
                         "generation": generation,
-                        "outcome": "frost",
+                        "outcome": outcome_str,
                         "reason": "all evaluated candidates rejected by promotion gates",
                         "duration_secs": gen_start.elapsed().as_secs_f64(),
                     }),
@@ -1899,6 +2043,20 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             }
         }
     }
+
+    log_event(
+        repo_root,
+        &serde_json::json!({
+            "event": "run_end",
+            "kind": "run_end",
+            "timestamp": chrono_now(),
+            "run_id": &run_id,
+            "outcome": "completed",
+            "generations_run": generation,
+            "final_sab_score": current_baseline_metrics.sab_score,
+            "duration_secs": start.elapsed().as_secs_f64(),
+        }),
+    );
 
     EvolutionResult {
         generations_run: generation,
@@ -2137,20 +2295,37 @@ pub fn evolution_target_dir(repo_root: &Path) -> PathBuf {
 /// Prevents the hypothesis generator from getting trapped in local loops
 /// (e.g. repeatedly attempting the same failing patch across multiple generations).
 pub fn format_recent_failure_history(attempts_file: &Path, max_entries: usize) -> String {
-    let Ok(content) = std::fs::read_to_string(attempts_file) else {
-        return String::new();
+    let content = match std::fs::read_to_string(attempts_file) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return String::new(),
+        Err(e) => {
+            tracing::warn!(
+                "Failed to read attempts file {} for failure history: {e}",
+                attempts_file.display()
+            );
+            return String::new();
+        }
     };
     let mut failures = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for line in content.lines().rev() {
         if let Ok(node) = serde_json::from_str::<AttemptNode>(line) {
+            // Filter out control anchors and environment errors
+            if node.branch_id == "control"
+                || node.failure_class == Some(FailureClass::EnvironmentError)
+                || node.status == AttemptStatus::InternalError
+            {
+                continue;
+            }
             if node.status != AttemptStatus::Evaluated && node.status != AttemptStatus::Baseline {
                 let desc = node.description.trim();
                 let reason = node.failure_reason.as_deref().unwrap_or("failed");
-                failures.push(format!(
-                    "- Attempted: \"{desc}\" -> FAILED ({reason}). Do not repeat."
-                ));
-                if failures.len() >= max_entries {
-                    break;
+                let entry = format!("- Attempted: \"{desc}\" -> FAILED ({reason}). Do not repeat.");
+                if seen.insert(entry.clone()) {
+                    failures.push(entry);
+                    if failures.len() >= max_entries {
+                        break;
+                    }
                 }
             }
         }
@@ -2164,6 +2339,26 @@ pub fn format_recent_failure_history(attempts_file: &Path, max_entries: usize) -
             failures.join("\n")
         )
     }
+}
+
+/// Loads SHA-256 hashes of patches from attempts that previously failed.
+pub(crate) fn load_failed_diff_shas(attempts_file: &Path) -> std::collections::HashSet<String> {
+    let mut failed = std::collections::HashSet::new();
+    let Ok(content) = std::fs::read_to_string(attempts_file) else {
+        return failed;
+    };
+    for line in content.lines() {
+        if let Ok(node) = serde_json::from_str::<AttemptNode>(line) {
+            if node.status != AttemptStatus::Evaluated
+                && node.status != AttemptStatus::Baseline
+                && node.branch_id != "control"
+                && !node.diff_sha256.is_empty()
+            {
+                failed.insert(node.diff_sha256);
+            }
+        }
+    }
+    failed
 }
 
 pub fn read_mutation_targets(targets: &super::MutationTargets, repo_root: &Path) -> String {
@@ -3260,6 +3455,14 @@ fn log_event(repo_root: &Path, event: &serde_json::Value) {
 
 fn log_frost(_gen: usize, reason: &str) {
     eprintln!("│  ❄️  FROST: {}", reason);
+    eprintln!("╰────────────────────────────────────────────────────╯");
+}
+
+fn log_reject(_gen: usize, rating: &GenerationRating, winner_sab: f64, baseline_sab: f64) {
+    eprintln!(
+        "│  {} SAB {:.0} vs baseline {:.0} — rejected",
+        rating, winner_sab, baseline_sab
+    );
     eprintln!("╰────────────────────────────────────────────────────╯");
 }
 

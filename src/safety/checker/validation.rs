@@ -498,7 +498,7 @@ impl SafetyChecker {
 
     /// Check if a tool call is safe to execute
     pub fn check_tool_call(&self, call: &ToolCall) -> Result<()> {
-        if let Err(err) = crate::safety::killswitch::check_killswitch(None) {
+        if let Err(err) = crate::safety::killswitch::check_killswitch(Some(&self.working_dir)) {
             return Err(SelfwareError::Safety(SafetyError::KillswitchActive {
                 reason: err.to_string(),
             }));
@@ -931,8 +931,14 @@ impl SafetyChecker {
                     self.check_path(path)?;
                 }
             }
-            "computer_screen" | "computer_window" => {
+            "computer_screen" => {
                 // Screen capture returns base64 PNG in-memory
+            }
+            "computer_window" => {
+                let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
+                if let Some(app) = args.get("app_name").and_then(|v| v.as_str()) {
+                    self.check_shell_command(app)?;
+                }
             }
             "code_introspect" | "code_query" | "code_plan" => {
                 // These tools accept filesystem paths — validate them.
@@ -958,8 +964,18 @@ impl SafetyChecker {
             | "context_summary" => {
                 // Focus/bulk resolve multiple paths; their loaders validate each path before I/O.
             }
-            "computer_mouse" | "computer_keyboard" => {
-                // These manipulate the desktop
+            "computer_mouse" => {
+                // Mouse manipulation
+            }
+            "computer_keyboard" => {
+                let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
+                if let Some(text) = args
+                    .get("text")
+                    .or_else(|| args.get("keys"))
+                    .and_then(|v| v.as_str())
+                {
+                    self.check_content_for_secrets(text)?;
+                }
             }
             "page_control" => {
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
@@ -1085,17 +1101,12 @@ impl SafetyChecker {
             unknown => {
                 // MCP tools are dynamically named `mcp_<server>_<tool>`; they are
                 // registered (user-configured servers), so don't hard-block them.
-                // Apply generic argument checks (path + command) and allow.
+                // Apply generic argument checks (all path-like and command-like keys) and allow.
                 if unknown.starts_with("mcp_") {
                     if let Ok(args) =
                         serde_json::from_str::<serde_json::Value>(&call.function.arguments)
                     {
-                        if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                            self.check_path(path)?;
-                        }
-                        if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
-                            self.check_shell_command(cmd)?;
-                        }
+                        self.check_generic_mcp_arguments(&args)?;
                     }
                     return Ok(());
                 }
@@ -1109,6 +1120,68 @@ impl SafetyChecker {
             }
         }
 
+        Ok(())
+    }
+
+    /// Recursively scan MCP tool arguments for path-like and command-like parameters.
+    fn check_generic_mcp_arguments(&self, val: &serde_json::Value) -> Result<()> {
+        match val {
+            serde_json::Value::Object(map) => {
+                for (key, value) in map {
+                    let key_lower = key.to_ascii_lowercase();
+                    if let Some(s) = value.as_str() {
+                        if matches!(
+                            key_lower.as_str(),
+                            "path"
+                                | "file_path"
+                                | "filepath"
+                                | "file"
+                                | "target"
+                                | "target_path"
+                                | "targetpath"
+                                | "uri"
+                                | "file_uri"
+                                | "fileuri"
+                                | "destination"
+                                | "dest"
+                                | "dest_path"
+                                | "source"
+                                | "src"
+                                | "dir"
+                                | "directory"
+                                | "folder"
+                                | "location"
+                        ) {
+                            self.check_path(s)?;
+                        } else if matches!(
+                            key_lower.as_str(),
+                            "command"
+                                | "cmd"
+                                | "script"
+                                | "exec"
+                                | "shell_command"
+                                | "bash_command"
+                        ) {
+                            self.check_shell_command(s)?;
+                            self.check_shell_command_paths(s)?;
+                        } else if matches!(
+                            key_lower.as_str(),
+                            "content" | "text" | "body" | "payload" | "data" | "code"
+                        ) {
+                            self.check_content_for_secrets(s)?;
+                        }
+                    } else if value.is_object() || value.is_array() {
+                        self.check_generic_mcp_arguments(value)?;
+                    }
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                for item in arr {
+                    self.check_generic_mcp_arguments(item)?;
+                }
+            }
+            _ => {}
+        }
         Ok(())
     }
 
@@ -1589,6 +1662,10 @@ impl SafetyChecker {
             }
         }
 
+        for subcmd in extract_command_substitutions(cmd) {
+            self.check_shell_command(&subcmd)?;
+        }
+
         Ok(())
     }
 
@@ -1649,8 +1726,8 @@ impl SafetyChecker {
                 "sh" | "bash" | "zsh" | "dash" | "ksh" | "fish" | "csh" | "tcsh"
             ) {
                 if let Some(c_pos) = tokens.iter().position(|t| is_shell_command_flag(t)) {
-                    if let Some(nested_cmd) = tokens.get(c_pos + 1) {
-                        for target in shell_output_redirect_targets(nested_cmd) {
+                    if let Some(nested_cmd) = extract_nested_shell_command(&tokens, c_pos) {
+                        for target in shell_output_redirect_targets(&nested_cmd) {
                             if let Some(pattern) = redirect_target_matches_denied(
                                 &target,
                                 &self.working_dir,
@@ -1661,7 +1738,7 @@ impl SafetyChecker {
                                 ));
                             }
                         }
-                        for target in shell_tee_write_targets(nested_cmd) {
+                        for target in shell_tee_write_targets(&nested_cmd) {
                             if let Some(pattern) = redirect_target_matches_denied(
                                 &target,
                                 &self.working_dir,
@@ -1672,7 +1749,7 @@ impl SafetyChecker {
                                 ));
                             }
                         }
-                        self.check_shell_command_paths(nested_cmd)?;
+                        self.check_shell_command_paths(&nested_cmd)?;
                     }
                 }
             } else if verb == "eval" && tokens.len() > cmd_idx + 1 {
@@ -1783,7 +1860,36 @@ impl SafetyChecker {
                     continue;
                 }
                 if !flags_done && tok.starts_with('-') && tok.len() > 1 {
-                    continue; // flag (possibly glued `-oFILE` — a documented gap)
+                    if let Some((flag, val)) = tok.split_once('=') {
+                        let trimmed_val = val.trim_matches(|c| c == '\'' || c == '"');
+                        if !trimmed_val.is_empty() {
+                            let flag_clean = flag.trim_start_matches('-');
+                            let is_path_flag = matches!(
+                                flag_clean,
+                                "target-directory"
+                                    | "directory"
+                                    | "output"
+                                    | "file"
+                                    | "path"
+                                    | "prefix"
+                                    | "root"
+                                    | "cwd"
+                                    | "chdir"
+                                    | "include-from"
+                                    | "exclude-from"
+                                    | "files-from"
+                            );
+                            let looks_like_path = trimmed_val.starts_with('/')
+                                || trimmed_val.starts_with("./")
+                                || trimmed_val.starts_with("../")
+                                || trimmed_val.starts_with('~');
+                            self.check_shell_path_candidate(
+                                trimmed_val,
+                                enforce_allowlist && (is_path_flag || looks_like_path),
+                            )?;
+                        }
+                    }
+                    continue;
                 }
                 if is_file_verb {
                     if verb == "dd" {
@@ -3473,50 +3579,294 @@ pub(crate) fn command_basename(word: &str) -> &str {
     word.rsplit(['/', '\\']).next().unwrap_or(word)
 }
 
-/// Returns true if a shell token represents a command-string flag (e.g. `-c`, `--command`, `-lc`, `-ec`).
+/// Returns true if a shell token represents a command-string flag (e.g. `-c`, `--command`, `-lc`, `-ec`, `--command=...`, `-c=...`).
 #[inline]
 pub(crate) fn is_shell_command_flag(token: &str) -> bool {
     token == "-c"
+        || (token.starts_with("-c") && !token.starts_with("--"))
         || token == "--command"
-        || (token.starts_with('-') && !token.starts_with("--") && token.ends_with('c'))
+        || token.starts_with("--command=")
+        || token.starts_with("-c=")
+        || (token.starts_with('-')
+            && !token.starts_with("--")
+            && (token.ends_with('c') || token.contains("c=")))
 }
 
-/// Locate the command word of one pipeline segment: the first token after
-/// any `VAR=value` prefixes, looking through ONE leading `sudo`/`doas`
-/// wrapper (the canonical `… | sudo tee /root/file` form). Flags known to
-/// take a separate value (`sudo -u root …`) consume one extra token.
+/// Extract the nested shell command string from either an inline value (`--command=...`, `-c=...`, `-c...`)
+/// or the adjacent token (`-c "..."`).
+pub(crate) fn extract_nested_shell_command<T: AsRef<str>>(
+    tokens: &[T],
+    flag_idx: usize,
+) -> Option<String> {
+    let tok = tokens.get(flag_idx)?.as_ref();
+    let inline_val = if let Some(val) = tok.strip_prefix("--command=") {
+        Some(val)
+    } else if let Some(val) = tok.strip_prefix("-c=") {
+        Some(val)
+    } else if tok.starts_with('-') && !tok.starts_with("--") {
+        if let Some(eq_pos) = tok.find("c=") {
+            Some(&tok[eq_pos + 2..])
+        } else if tok.len() > 2 && tok.starts_with("-c") && !tok[2..].starts_with('-') {
+            Some(&tok[2..])
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if let Some(val) = inline_val {
+        if flag_idx + 1 < tokens.len() {
+            let mut res = val.to_string();
+            for t in &tokens[flag_idx + 1..] {
+                res.push(' ');
+                res.push_str(t.as_ref());
+            }
+            Some(res)
+        } else {
+            Some(val.to_string())
+        }
+    } else if flag_idx + 1 < tokens.len() {
+        let joined = tokens[flag_idx + 1..]
+            .iter()
+            .map(|t| t.as_ref())
+            .collect::<Vec<_>>()
+            .join(" ");
+        Some(joined)
+    } else {
+        None
+    }
+}
+
+/// Extract all command substitutions `$(...)` and backtick expressions `...` from a shell command.
+pub(crate) fn extract_command_substitutions(cmd: &str) -> Vec<String> {
+    let mut results = Vec::new();
+    let chars: Vec<char> = cmd.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+
+    while i < len {
+        let c = chars[i];
+        if c == '\\' && i + 1 < len {
+            i += 2;
+            continue;
+        }
+        if c == '\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+            i += 1;
+            continue;
+        }
+        if c == '"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+            i += 1;
+            continue;
+        }
+
+        if !in_single_quote {
+            if c == '$' && i + 1 < len && chars[i + 1] == '(' {
+                let start = i + 2;
+                let mut depth = 1;
+                let mut j = start;
+                let mut sub_single = false;
+                let mut sub_double = false;
+                while j < len && depth > 0 {
+                    let sc = chars[j];
+                    if sc == '\\' && j + 1 < len {
+                        j += 2;
+                        continue;
+                    }
+                    if sc == '\'' && !sub_double {
+                        sub_single = !sub_single;
+                        j += 1;
+                        continue;
+                    }
+                    if sc == '"' && !sub_single {
+                        sub_double = !sub_double;
+                        j += 1;
+                        continue;
+                    }
+                    if !sub_single && !sub_double {
+                        if sc == '(' {
+                            depth += 1;
+                        } else if sc == ')' {
+                            depth -= 1;
+                        }
+                    }
+                    if depth > 0 {
+                        j += 1;
+                    }
+                }
+                if depth == 0 {
+                    let sub_cmd: String = chars[start..j].iter().collect();
+                    let trimmed = sub_cmd.trim().to_string();
+                    if !trimmed.is_empty() {
+                        results.push(trimmed);
+                    }
+                    i = j + 1;
+                    continue;
+                }
+            } else if c == '`' {
+                let start = i + 1;
+                let mut j = start;
+                while j < len {
+                    let bc = chars[j];
+                    if bc == '\\' && j + 1 < len {
+                        j += 2;
+                        continue;
+                    }
+                    if bc == '`' {
+                        break;
+                    }
+                    j += 1;
+                }
+                if j < len && chars[j] == '`' {
+                    let sub_cmd: String = chars[start..j].iter().collect();
+                    let trimmed = sub_cmd.trim().to_string();
+                    if !trimmed.is_empty() {
+                        results.push(trimmed);
+                    }
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    results
+}
+
+/// Locate the command word of one pipeline segment: looking through leading
+/// `VAR=value` prefixes, wrapper prefixes (`sudo`, `doas`, `env`, `nohup`, `nice`, `time`, `stdbuf`),
+/// and subsequent `VAR=val` assignments in a loop.
 fn command_word_index(tokens: &[String]) -> Option<usize> {
     let mut idx = 0;
-    while tokens.get(idx).is_some_and(|t| is_env_assignment(t)) {
-        idx += 1;
-    }
-    if tokens
-        .get(idx)
-        .is_some_and(|t| matches!(command_basename(t), "sudo" | "doas"))
-    {
-        idx += 1;
-        while let Some(t) = tokens.get(idx) {
-            if !t.starts_with('-') || t.as_str() == "-" {
-                break;
-            }
+    loop {
+        while tokens.get(idx).is_some_and(|t| is_env_assignment(t)) {
             idx += 1;
-            if matches!(
-                t.as_str(),
-                "-u" | "--user"
-                    | "-g"
-                    | "--group"
-                    | "-h"
-                    | "--host"
-                    | "-p"
-                    | "--prompt"
-                    | "-C"
-                    | "-D"
-                    | "--chdir"
-                    | "-R"
-                    | "-U"
-            ) {
+        }
+        let Some(tok) = tokens.get(idx) else {
+            break;
+        };
+        let base = command_basename(tok);
+        match base {
+            "sudo" | "doas" => {
                 idx += 1;
+                while let Some(t) = tokens.get(idx) {
+                    if !t.starts_with('-') || t.as_str() == "-" {
+                        break;
+                    }
+                    let flag = t.as_str();
+                    idx += 1;
+                    if matches!(
+                        flag,
+                        "-u" | "--user"
+                            | "-g"
+                            | "--group"
+                            | "-h"
+                            | "--host"
+                            | "-p"
+                            | "--prompt"
+                            | "-C"
+                            | "-D"
+                            | "--chdir"
+                            | "-R"
+                            | "-U"
+                    ) {
+                        idx += 1;
+                    }
+                }
             }
+            "env" => {
+                idx += 1;
+                while let Some(t) = tokens.get(idx) {
+                    if is_env_assignment(t) {
+                        idx += 1;
+                        continue;
+                    }
+                    if !t.starts_with('-') || t.as_str() == "-" {
+                        break;
+                    }
+                    let flag = t.as_str();
+                    idx += 1;
+                    if matches!(
+                        flag,
+                        "-u" | "--unset" | "-C" | "--chdir" | "-S" | "--split-string"
+                    ) {
+                        idx += 1;
+                    }
+                }
+            }
+            "nice" => {
+                idx += 1;
+                while let Some(t) = tokens.get(idx) {
+                    if !t.starts_with('-') || t.as_str() == "-" {
+                        break;
+                    }
+                    let flag = t.as_str();
+                    idx += 1;
+                    if matches!(flag, "-n" | "--adjustment") {
+                        idx += 1;
+                    }
+                }
+            }
+            "time" => {
+                idx += 1;
+                while let Some(t) = tokens.get(idx) {
+                    if !t.starts_with('-') || t.as_str() == "-" {
+                        break;
+                    }
+                    let flag = t.as_str();
+                    idx += 1;
+                    if matches!(flag, "-o" | "--output" | "-f" | "--format") {
+                        idx += 1;
+                    }
+                }
+            }
+            "stdbuf" => {
+                idx += 1;
+                while let Some(t) = tokens.get(idx) {
+                    if !t.starts_with('-') || t.as_str() == "-" {
+                        break;
+                    }
+                    let flag = t.as_str();
+                    idx += 1;
+                    if matches!(
+                        flag,
+                        "-i" | "--input" | "-o" | "--output" | "-e" | "--error"
+                    ) {
+                        idx += 1;
+                    }
+                }
+            }
+            "nohup" => {
+                idx += 1;
+                while let Some(t) = tokens.get(idx) {
+                    if !t.starts_with('-') || t.as_str() == "-" {
+                        break;
+                    }
+                    idx += 1;
+                }
+            }
+            "timeout" => {
+                idx += 1;
+                while let Some(t) = tokens.get(idx) {
+                    if !t.starts_with('-') || t.as_str() == "-" {
+                        break;
+                    }
+                    let flag = t.as_str();
+                    idx += 1;
+                    if matches!(flag, "-k" | "--kill-after" | "-s" | "--signal") {
+                        idx += 1;
+                    }
+                }
+                // Skip the timeout duration operand (e.g. "5", "10s", "1m")
+                if idx < tokens.len() {
+                    idx += 1;
+                }
+            }
+            _ => break,
         }
     }
     (idx < tokens.len()).then_some(idx)

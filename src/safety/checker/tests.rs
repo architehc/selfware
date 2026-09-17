@@ -3615,3 +3615,103 @@ fn skeleton_context_tool_obeys_direct_read_path_policy() {
         ))
         .is_ok());
 }
+
+#[test]
+fn test_wrapper_prefixes_and_command_substitutions_blocked() {
+    let checker = SafetyChecker::new(&SafetyConfig::default());
+
+    // Wrapper prefixes peeling
+    for cmd in [
+        "sudo cat .env",
+        "doas cat .env",
+        "env FOO=bar cat .env",
+        "env -i cat .env",
+        "nohup cat .env",
+        "nice -n 10 cat .env",
+        "time cat .env",
+        "stdbuf -oL cat .env",
+        "sudo env VAR=1 nice time nohup cat .env",
+    ] {
+        let result = checker.check_tool_call(&shell_call(cmd));
+        assert!(
+            result.is_err(),
+            "Wrapper prefix bypass should be blocked: {cmd}"
+        );
+    }
+
+    // Command substitutions and backticks
+    for cmd in [
+        "echo $(cat .env)",
+        "echo `cat .env`",
+        "echo $(grep key .env)",
+        "echo $(rm -rf /)",
+        "echo `rm -rf /`",
+    ] {
+        let result = checker.check_tool_call(&shell_call(cmd));
+        assert!(
+            result.is_err(),
+            "Command substitution bypass should be blocked: {cmd}"
+        );
+    }
+
+    // --flag=VALUE and inline shell flags
+    for cmd in [
+        "cat --file=.env",
+        "grep foo --file=.env",
+        "bash --command='cat .env'",
+        "bash -c=cat .env",
+        "sh -c'cat .env'",
+        "bash -lc 'cat .env'",
+    ] {
+        let result = checker.check_tool_call(&shell_call(cmd));
+        assert!(
+            result.is_err(),
+            "Inline/glued flag bypass should be blocked: {cmd}"
+        );
+    }
+}
+
+#[test]
+fn test_mcp_and_computer_tools_validation() {
+    let checker = SafetyChecker::new(&SafetyConfig::default());
+
+    // MCP generic path-like keys
+    for key in [
+        "file_path",
+        "filePath",
+        "target",
+        "uri",
+        "destination",
+        "dest_path",
+    ] {
+        let args = serde_json::json!({ key: ".env" }).to_string();
+        let result = checker.check_tool_call(&create_test_call("mcp_server_test", &args));
+        assert!(
+            result.is_err(),
+            "MCP path key '{key}' targeting .env must be blocked"
+        );
+    }
+
+    // MCP command-like keys
+    for key in ["command", "cmd", "script", "shell_command"] {
+        let args = serde_json::json!({ key: "cat .env" }).to_string();
+        let result = checker.check_tool_call(&create_test_call("mcp_server_exec", &args));
+        assert!(
+            result.is_err(),
+            "MCP command key '{key}' targeting .env must be blocked"
+        );
+    }
+
+    // Computer window tool
+    let win_args = serde_json::json!({ "action": "launch", "app_name": "rm -rf /" }).to_string();
+    assert!(checker
+        .check_tool_call(&create_test_call("computer_window", &win_args))
+        .is_err());
+
+    // Computer keyboard tool secret scanning
+    let kb_args =
+        serde_json::json!({ "action": "type", "text": "AKIA7H3M9Q2V6N8C4R5T" }).to_string();
+    assert!(checker
+        .check_tool_call(&create_test_call("computer_keyboard", &kb_args))
+        .is_err());
+}
