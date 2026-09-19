@@ -177,6 +177,7 @@ fn test_format_recent_failure_history_extracts_recent_failures() {
         base_commit: None,
         committed_commit: None,
         action_type: None,
+        git_tree_id: None,
         created_at: "now".to_string(),
     };
     let n2 = AttemptNode {
@@ -201,6 +202,7 @@ fn test_format_recent_failure_history_extracts_recent_failures() {
         base_commit: None,
         committed_commit: None,
         action_type: None,
+        git_tree_id: None,
         created_at: "now".to_string(),
     };
 
@@ -1820,6 +1822,7 @@ fn test_log_and_append_attempt_failure_aborts() {
         base_commit: None,
         committed_commit: None,
         action_type: None,
+        git_tree_id: None,
         created_at: "2026-09-17T00:00:00Z".to_string(),
     };
 
@@ -1875,6 +1878,7 @@ fn test_control_failure_with_unwritable_attempts_file_aborts() {
         base_commit: None,
         committed_commit: None,
         action_type: None,
+        git_tree_id: None,
         created_at: chrono_now(),
     };
 
@@ -2099,6 +2103,7 @@ fn test_promoted_policies_control_live_search_decisions() {
         base_commit: None,
         committed_commit: None,
         action_type: None,
+        git_tree_id: None,
         created_at: "2026-09-17T00:00:00Z".into(),
     };
     let b1 = AttemptNode {
@@ -2123,6 +2128,7 @@ fn test_promoted_policies_control_live_search_decisions() {
         base_commit: None,
         committed_commit: None,
         action_type: Some(crate::evolution::ActionType::OpenRoot),
+        git_tree_id: None,
         created_at: "2026-09-17T00:01:00Z".into(),
     };
     let b2 = AttemptNode {
@@ -2147,6 +2153,7 @@ fn test_promoted_policies_control_live_search_decisions() {
         base_commit: None,
         committed_commit: None,
         action_type: Some(crate::evolution::ActionType::OpenRoot),
+        git_tree_id: None,
         created_at: "2026-09-17T00:02:00Z".into(),
     };
 
@@ -2276,6 +2283,7 @@ fn test_infrastructure_failures_excluded_from_deduplication() {
             base_commit: None,
             committed_commit: None,
             action_type: None,
+            git_tree_id: None,
             created_at: "2026-09-17T00:00:00Z".into(),
         },
         // 2. Environment error (e.g. test runner killed by external watchdog)
@@ -2301,6 +2309,7 @@ fn test_infrastructure_failures_excluded_from_deduplication() {
             base_commit: None,
             committed_commit: None,
             action_type: None,
+            git_tree_id: None,
             created_at: "2026-09-17T00:01:00Z".into(),
         },
         // 3. Genuine code defect (type error) -> MUST be blacklisted
@@ -2326,6 +2335,7 @@ fn test_infrastructure_failures_excluded_from_deduplication() {
             base_commit: None,
             committed_commit: None,
             action_type: None,
+            git_tree_id: None,
             created_at: "2026-09-17T00:02:00Z".into(),
         },
         // 4. Duplicate rejected upfront -> MUST remain in blacklist
@@ -2351,6 +2361,7 @@ fn test_infrastructure_failures_excluded_from_deduplication() {
             base_commit: None,
             committed_commit: None,
             action_type: None,
+            git_tree_id: None,
             created_at: "2026-09-17T00:03:00Z".into(),
         },
     ];
@@ -2545,6 +2556,7 @@ fn test_multi_action_batch_and_parent_restoration() {
         base_commit: None,
         committed_commit: None,
         action_type: None,
+        git_tree_id: None,
         created_at: "2026-09-17T00:00:00Z".into(),
     };
 
@@ -2570,6 +2582,7 @@ fn test_multi_action_batch_and_parent_restoration() {
         base_commit: None,
         committed_commit: None,
         action_type: None,
+        git_tree_id: None,
         created_at: "2026-09-17T00:01:00Z".into(),
     };
 
@@ -2595,6 +2608,7 @@ fn test_multi_action_batch_and_parent_restoration() {
         base_commit: None,
         committed_commit: None,
         action_type: None,
+        git_tree_id: None,
         created_at: "2026-09-17T00:01:30Z".into(),
     };
 
@@ -2775,6 +2789,7 @@ fn test_refinement_restoration_failure_records_internal_error() {
         base_commit: None,
         committed_commit: None,
         action_type: None,
+        git_tree_id: None,
         created_at: chrono_now(),
     };
     log_and_append_attempt(&attempts_file, &node, repo_root, 2, Instant::now()).unwrap();
@@ -2816,6 +2831,7 @@ fn test_open_root_reads_from_baseline_checkout() {
         base_commit: Some(base_commit.clone()),
         committed_commit: None,
         action_type: None,
+        git_tree_id: None,
         created_at: chrono_now(),
     };
     std::fs::write(
@@ -2884,6 +2900,7 @@ fn test_daemon_open_root_dispatches_from_active_incumbent_parent() {
         base_commit: Some(base_commit.clone()),
         committed_commit: None,
         action_type: None,
+        git_tree_id: None,
         created_at: chrono_now(),
     };
     std::fs::write(
@@ -2938,6 +2955,7 @@ fn test_daemon_open_root_dispatches_from_active_incumbent_parent() {
         base_commit: Some(base_commit),
         committed_commit: Some(c1.clone()),
         action_type: Some(ActionType::OpenRoot),
+        git_tree_id: None,
         created_at: chrono_now(),
     };
     {
@@ -3069,4 +3087,161 @@ fn test_load_active_policy_authentication_and_tampering() {
         .as_ref()
         .unwrap()
         .contains("digest mismatch"));
+}
+
+#[test]
+fn test_run_lock_guard_acquire_and_drop() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_root = temp.path();
+    let run_id = "test_run_12345";
+
+    // First acquire must succeed
+    let guard =
+        RunLockGuard::acquire(repo_root, run_id).expect("first lock acquire should succeed");
+    assert!(guard.lock_path.exists(), "lock file should exist on disk");
+
+    // Reading the lock file should contain the current process PID
+    let content = std::fs::read_to_string(&guard.lock_path).unwrap();
+    assert_eq!(content.trim(), std::process::id().to_string());
+
+    // Second acquire on the same run_id must fail due to exclusive flock
+    #[cfg(unix)]
+    {
+        let second_acquire = RunLockGuard::acquire(repo_root, run_id);
+        assert!(
+            second_acquire.is_err(),
+            "second acquire must fail while lock is held"
+        );
+    }
+
+    // Dropping the guard must release the lock and remove the lock file
+    let lock_path = guard.lock_path.clone();
+    drop(guard);
+    assert!(!lock_path.exists(), "lock file must be deleted upon drop");
+}
+
+#[test]
+fn test_sweep_orphaned_runs_protects_live_runs_and_recovers_progress() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_root = temp.path();
+
+    let attempts_dir = repo_root.join(".selfware").join("attempts");
+    std::fs::create_dir_all(&attempts_dir).unwrap();
+
+    let active_run_id = "run_active_999";
+    let dead_run_id = "run_dead_888";
+
+    // Acquire lock for active_run
+    let _active_guard = RunLockGuard::acquire(repo_root, active_run_id).unwrap();
+
+    // Populate dead run attempts file with progress
+    let dead_attempts_file = attempts_dir.join(format!("{dead_run_id}.jsonl"));
+    let mut m1 = make_metrics(10, 10);
+    m1.sab_score = 75.0;
+    let node1 = AttemptNode {
+        id: "att-g1-1".into(),
+        parent_id: None,
+        generation: 1,
+        branch_id: "main".into(),
+        hypothesis_id: "hyp-1".into(),
+        description: "first attempt".into(),
+        diff_sha256: "hash1".into(),
+        patch: None,
+        sab_report_path: None,
+        metrics: Some(m1),
+        composite_score: Some(0.75),
+        tokens_used: Some(1000),
+        wall_time_ms: 500,
+        status: AttemptStatus::Evaluated,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        base_commit: None,
+        committed_commit: None,
+        action_type: None,
+        git_tree_id: None,
+        created_at: "1700000000.000".into(),
+    };
+    let mut m2 = make_metrics(10, 10);
+    m2.sab_score = 88.5;
+    let node2 = AttemptNode {
+        id: "att-g3-1".into(),
+        parent_id: Some("att-g1-1".into()),
+        generation: 3,
+        branch_id: "main".into(),
+        hypothesis_id: "hyp-2".into(),
+        description: "third attempt with higher score".into(),
+        diff_sha256: "hash2".into(),
+        patch: None,
+        sab_report_path: None,
+        metrics: Some(m2),
+        composite_score: Some(0.885),
+        tokens_used: Some(1200),
+        wall_time_ms: 600,
+        status: AttemptStatus::Evaluated,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        base_commit: None,
+        committed_commit: None,
+        action_type: None,
+        git_tree_id: None,
+        created_at: "1700000045.500".into(),
+    };
+    let attempts_content = format!(
+        "{}\n{}\n",
+        serde_json::to_string(&node1).unwrap(),
+        serde_json::to_string(&node2).unwrap()
+    );
+    std::fs::write(&dead_attempts_file, attempts_content).unwrap();
+
+    // Create log file with start events for both runs
+    let log_path = repo_root.join(".evolution-log.jsonl");
+    let log_content = format!(
+        "{}\n{}\n",
+        serde_json::json!({
+            "event": "start",
+            "run_id": active_run_id,
+            "pid": std::process::id(),
+            "timestamp": "1700000000.000",
+        }),
+        serde_json::json!({
+            "event": "start",
+            "run_id": dead_run_id,
+            "pid": 99999999, // non-existent dead PID
+            "timestamp": "1700000000.000",
+        })
+    );
+    std::fs::write(&log_path, log_content).unwrap();
+
+    // Run sweep: active_run is protected by lock and live PID; dead_run is swept
+    let swept = sweep_orphaned_runs(repo_root);
+    assert_eq!(swept, 1, "only the dead run should be swept");
+
+    // Check that dead_run recovered honest metrics from attempts file
+    let updated_log = std::fs::read_to_string(&log_path).unwrap();
+    let mut found_dead_run_end = false;
+    for line in updated_log.lines() {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+            if val.get("event").and_then(|v| v.as_str()) == Some("run_end")
+                && val.get("run_id").and_then(|v| v.as_str()) == Some(dead_run_id)
+            {
+                found_dead_run_end = true;
+                assert_eq!(val["outcome"], "killed");
+                assert_eq!(val["generations_run"], 3);
+                assert!((val["final_sab_score"].as_f64().unwrap() - 88.5).abs() < 1e-6);
+                assert!((val["duration_secs"].as_f64().unwrap() - 45.5).abs() < 1e-3);
+            }
+        }
+    }
+    assert!(
+        found_dead_run_end,
+        "dead run must have a recovered run_end event"
+    );
+
+    // Second sweep should find 0 orphans
+    let second_sweep = sweep_orphaned_runs(repo_root);
+    assert_eq!(second_sweep, 0);
 }

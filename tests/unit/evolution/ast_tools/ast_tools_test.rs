@@ -179,6 +179,7 @@ fn test_restore_worktree_parent_state() {
         base_commit: None,
         committed_commit: None,
         action_type: None,
+        git_tree_id: None,
         created_at: "2026-09-17T00:00:00Z".into(),
     };
 
@@ -204,6 +205,7 @@ fn test_restore_worktree_parent_state() {
         base_commit: None,
         committed_commit: None,
         action_type: None,
+        git_tree_id: None,
         created_at: "2026-09-17T00:01:00Z".into(),
     };
 
@@ -229,6 +231,7 @@ fn test_restore_worktree_parent_state() {
         base_commit: None,
         committed_commit: None,
         action_type: None,
+        git_tree_id: None,
         created_at: "2026-09-17T00:02:00Z".into(),
     };
 
@@ -343,6 +346,7 @@ fn test_sibling_restoration_after_another_branch_committed() {
         base_commit: Some(c0.clone()),
         committed_commit: None,
         action_type: None,
+        git_tree_id: None,
         created_at: "2026-09-17T00:00:00Z".into(),
     };
 
@@ -368,6 +372,7 @@ fn test_sibling_restoration_after_another_branch_committed() {
         base_commit: Some(c0.clone()),
         committed_commit: None,
         action_type: None,
+        git_tree_id: None,
         created_at: "2026-09-17T00:01:00Z".into(),
     };
 
@@ -393,6 +398,7 @@ fn test_sibling_restoration_after_another_branch_committed() {
         base_commit: Some(c0.clone()),
         committed_commit: None,
         action_type: None,
+        git_tree_id: None,
         created_at: "2026-09-17T00:02:00Z".into(),
     };
 
@@ -505,6 +511,7 @@ fn test_restore_worktree_promoted_parent_short_circuit() {
         base_commit: Some(c0.clone()),
         committed_commit: None,
         action_type: None,
+        git_tree_id: None,
         created_at: "2026-09-17T00:00:00Z".into(),
     };
     // Node A records committed_commit: Some(c1)
@@ -530,6 +537,7 @@ fn test_restore_worktree_promoted_parent_short_circuit() {
         base_commit: Some(c0.clone()),
         committed_commit: Some(c1.clone()),
         action_type: None,
+        git_tree_id: None,
         created_at: "2026-09-17T00:01:00Z".into(),
     };
 
@@ -689,6 +697,7 @@ fn test_restore_worktree_candidate_with_new_file() {
         base_commit: Some(c0.clone()),
         committed_commit: None,
         action_type: None,
+        git_tree_id: None,
         created_at: "2026-09-18T00:00:00Z".into(),
     };
 
@@ -714,6 +723,7 @@ fn test_restore_worktree_candidate_with_new_file() {
         base_commit: Some(c0),
         committed_commit: None,
         action_type: None,
+        git_tree_id: None,
         created_at: "2026-09-18T00:01:00Z".into(),
     };
 
@@ -796,6 +806,7 @@ fn test_promote_refine_promote() {
         base_commit: Some(c0.clone()),
         committed_commit: None,
         action_type: None,
+        git_tree_id: None,
         created_at: "2026-09-18T00:00:00Z".into(),
     };
     std::fs::write(
@@ -863,6 +874,7 @@ fn test_promote_refine_promote() {
         base_commit: Some(c0),
         committed_commit: None,
         action_type: None,
+        git_tree_id: None,
         created_at: "2026-09-18T00:01:00Z".into(),
     };
     let mut f = std::fs::OpenOptions::new()
@@ -993,6 +1005,7 @@ fn test_promote_open_root_promote() {
         base_commit: Some(c0.clone()),
         committed_commit: None,
         action_type: None,
+        git_tree_id: None,
         created_at: "2026-09-18T00:00:00Z".into(),
     };
     std::fs::write(
@@ -1059,6 +1072,7 @@ fn test_promote_open_root_promote() {
         base_commit: Some(c0),
         committed_commit: None,
         action_type: Some(crate::evolution::ActionType::OpenRoot),
+        git_tree_id: None,
         created_at: "2026-09-18T00:01:00Z".into(),
     };
     let mut f = std::fs::OpenOptions::new()

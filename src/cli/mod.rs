@@ -3063,6 +3063,17 @@ async fn handle_command(
                     anyhow::bail!("Evolution aborted: {}", abort_reason);
                 }
 
+                if result.outcome == "killed" || crate::is_shutdown_requested() {
+                    eprintln!(
+                        "\n   {} Evolution interrupted: shutdown requested ({} generations, {} improvements, duration {:.1}s)",
+                        Glyphs::frost(),
+                        result.generations_run,
+                        result.improvements.len(),
+                        result.total_duration.as_secs_f64(),
+                    );
+                    return Ok(());
+                }
+
                 if result.outcome == "policy_stopped" {
                     let reason = result
                         .stop_reason

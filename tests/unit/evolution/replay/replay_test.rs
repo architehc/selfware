@@ -47,6 +47,7 @@ fn make_node(
         } else {
             Some(crate::evolution::ActionType::RefineFrontier)
         },
+        git_tree_id: None,
         created_at: "2026-09-16T12:00:00Z".into(),
     }
 }
@@ -727,6 +728,7 @@ fn test_replay_daemon_tree_shape_with_baseline_root_and_control_anchors() {
         base_commit: None,
         committed_commit: None,
         action_type: None,
+        git_tree_id: None,
         created_at: "2026-09-17T00:00:00Z".to_string(),
     };
     tree.add_node(baseline_node).unwrap();
@@ -754,6 +756,7 @@ fn test_replay_daemon_tree_shape_with_baseline_root_and_control_anchors() {
         base_commit: None,
         committed_commit: None,
         action_type: None,
+        git_tree_id: None,
         created_at: "2026-09-17T00:01:00Z".to_string(),
     };
     tree.add_node(ctrl_node).unwrap();
@@ -781,6 +784,7 @@ fn test_replay_daemon_tree_shape_with_baseline_root_and_control_anchors() {
         base_commit: None,
         committed_commit: None,
         action_type: Some(crate::evolution::ActionType::OpenRoot),
+        git_tree_id: None,
         created_at: "2026-09-17T00:02:00Z".to_string(),
     };
     tree.add_node(hyp1_node).unwrap();
@@ -807,6 +811,7 @@ fn test_replay_daemon_tree_shape_with_baseline_root_and_control_anchors() {
         base_commit: None,
         committed_commit: None,
         action_type: Some(crate::evolution::ActionType::OpenRoot),
+        git_tree_id: None,
         created_at: "2026-09-17T00:03:00Z".to_string(),
     };
     tree.add_node(hyp2_node).unwrap();
@@ -876,6 +881,7 @@ fn test_replay_retains_open_root_for_promoted_descendant() {
         base_commit: None,
         committed_commit: None,
         action_type: None,
+        git_tree_id: None,
         created_at: "2026-09-17T00:00:00Z".to_string(),
     };
     tree.add_node(baseline).unwrap();
@@ -903,6 +909,7 @@ fn test_replay_retains_open_root_for_promoted_descendant() {
         base_commit: None,
         committed_commit: Some("c1-commit".to_string()),
         action_type: Some(crate::evolution::ActionType::OpenRoot),
+        git_tree_id: None,
         created_at: "2026-09-17T00:01:00Z".to_string(),
     };
     tree.add_node(cand1).unwrap();
@@ -930,6 +937,7 @@ fn test_replay_retains_open_root_for_promoted_descendant() {
         base_commit: None,
         committed_commit: None,
         action_type: Some(crate::evolution::ActionType::OpenRoot),
+        git_tree_id: None,
         created_at: "2026-09-17T00:02:00Z".to_string(),
     };
     tree.add_node(gen1_open_root).unwrap();
@@ -957,6 +965,7 @@ fn test_replay_retains_open_root_for_promoted_descendant() {
         base_commit: None,
         committed_commit: None,
         action_type: Some(crate::evolution::ActionType::RefineFrontier),
+        git_tree_id: None,
         created_at: "2026-09-17T00:03:00Z".to_string(),
     };
     tree.add_node(gen1_refine).unwrap();

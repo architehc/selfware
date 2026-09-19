@@ -193,6 +193,9 @@ pub struct AttemptNode {
     /// Exploration action type that produced this attempt (OpenRoot vs RefineFrontier).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action_type: Option<ActionType>,
+    /// Git tree object ID of the tested worktree state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_tree_id: Option<String>,
     /// ISO 8601 / RFC 3339 creation timestamp.
     pub created_at: String,
 }
@@ -205,7 +208,17 @@ impl AttemptNode {
 
     /// Returns true if this attempt was created as an OpenRoot exploration action.
     pub fn is_open_root_action(&self) -> bool {
-        self.action_type == Some(ActionType::OpenRoot)
+        match self.action_type {
+            Some(ActionType::OpenRoot) => true,
+            Some(ActionType::RefineFrontier) => false,
+            None => {
+                // Fallback for historical nodes without persisted action_type:
+                // unparented nodes or direct baseline children
+                self.parent_id
+                    .as_deref()
+                    .is_none_or(|pid| pid == "att-baseline" || pid.contains("baseline"))
+            }
+        }
     }
 
     /// Returns true if this attempt was successfully evaluated and has a composite score.

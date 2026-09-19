@@ -292,6 +292,28 @@ impl Drop for LeaseGuard {
     }
 }
 
+/// RAII guard to terminate child benchmark process and its entire process group on drop,
+/// ensuring that cancellation or early returns clean up running benchmark subprocesses.
+struct SabProcessGroupGuard {
+    child: Option<std::process::Child>,
+}
+
+impl Drop for SabProcessGroupGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            #[cfg(unix)]
+            {
+                let pid = child.id();
+                use nix::sys::signal::{killpg, Signal};
+                use nix::unistd::Pid;
+                let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGTERM);
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 /// Run the full SAB benchmark and return structured results
 pub fn run_sab(selfware_binary: &Path, config: &SabConfig) -> Result<SabResult, FitnessError> {
     let start = Instant::now();
@@ -379,15 +401,55 @@ pub fn run_sab(selfware_binary: &Path, config: &SabConfig) -> Result<SabResult, 
             cmd.arg(&filter_str);
         }
     }
-    let output = cmd
-        .output()
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
+    let stdout_path = unique_out_dir.join("sab_stdout.log");
+    let stderr_path = unique_out_dir.join("sab_stderr.log");
+    let stdout_file = std::fs::File::create(&stdout_path)
+        .map_err(|e| FitnessError::SabRunFailed(format!("failed to create stdout log: {e}")))?;
+    let stderr_file = std::fs::File::create(&stderr_path)
+        .map_err(|e| FitnessError::SabRunFailed(format!("failed to create stderr log: {e}")))?;
+
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(stdout_file)
+        .stderr(stderr_file);
+
+    let child = cmd
+        .spawn()
         .map_err(|e| FitnessError::SabRunFailed(e.to_string()))?;
+
+    let mut child_guard = SabProcessGroupGuard { child: Some(child) };
+
+    let exit_status = loop {
+        if let Some(ref mut c) = child_guard.child {
+            match c.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) => {}
+                Err(e) => break Err(FitnessError::SabRunFailed(e.to_string())),
+            }
+        }
+        if crate::is_shutdown_requested() {
+            return Err(FitnessError::SabRunFailed(
+                "cancelled by shutdown signal".to_string(),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }?;
+
+    child_guard.child = None;
 
     let wall_clock = start.elapsed();
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(FitnessError::SabRunFailed(stderr.to_string()));
+    let stdout = std::fs::read_to_string(&stdout_path).unwrap_or_default();
+    let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+
+    if !exit_status.success() {
+        return Err(FitnessError::SabRunFailed(stderr));
     }
 
     if let Err(e) = std::fs::write(unique_out_dir.join(".completed"), b"") {
@@ -399,7 +461,6 @@ pub fn run_sab(selfware_binary: &Path, config: &SabConfig) -> Result<SabResult, 
     drop(lease_guard);
 
     // Parse SAB output — the runner produces JSON reports evaluated against the pinned binary
-    let stdout = String::from_utf8_lossy(&output.stdout);
     parse_sab_output(&stdout, wall_clock, &pinned_binary)
 }
 

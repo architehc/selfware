@@ -70,6 +70,7 @@ fn make_test_node(id: &str, patch: &str, status: AttemptStatus) -> AttemptNode {
         } else {
             Some(crate::evolution::ActionType::OpenRoot)
         },
+        git_tree_id: None,
         created_at: "2026-09-18T20:00:00Z".to_string(),
     }
 }
@@ -621,4 +622,111 @@ fn test_simulate_10000_reviewer_governance_vetoes_on_diff_hash_mismatch() {
         "Cryptographic patch mismatch must trigger hard reject veto"
     );
     assert!(consensus.has_safety_veto || consensus.votes_veto >= 1800);
+}
+
+#[test]
+fn test_validate_benchmark_report_resolved_relative_path_and_schema() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_root = temp.path();
+
+    let rel_dir = std::path::PathBuf::from(".selfware/reports/sab-test1");
+    let full_dir = repo_root.join(&rel_dir);
+    std::fs::create_dir_all(&full_dir).unwrap();
+
+    let rel_report = rel_dir.join("sab_report.json");
+    let full_report = repo_root.join(&rel_report);
+
+    let valid_report = serde_json::json!({
+        "schema": "sab-report/1",
+        "aggregate_score": 85.0,
+        "scenarios": [
+            {
+                "name": "scenario_a",
+                "score": 80.0,
+                "tests_passed": true,
+                "clean_exit": true,
+                "duration_ms": 1200
+            },
+            {
+                "name": "scenario_b",
+                "score": 90.0,
+                "tests_passed": true,
+                "clean_exit": true,
+                "duration_ms": 1300
+            }
+        ]
+    });
+    std::fs::write(&full_report, serde_json::to_string(&valid_report).unwrap()).unwrap();
+
+    let metrics = crate::evolution::FitnessMetrics {
+        sab_score: 85.0,
+        tokens_used: Some(500),
+        token_budget: 100_000,
+        wall_clock_secs: 2.5,
+        timeout_secs: 60.0,
+        full_evaluation_secs: Some(2.5),
+        test_pass_pct: 85.0,
+        binary_size_mb: 4.0,
+        max_binary_size_mb: 50.0,
+        tests_passed: 17,
+        tests_total: 20,
+        visual_score: 100.0,
+    };
+
+    let mut node = make_test_node("att-test1", "", AttemptStatus::Evaluated);
+    node.metrics = Some(metrics);
+
+    // Resolving relative path with repo_root succeeds
+    let res = validate_benchmark_report_resolved(&rel_report, Some(repo_root), &node);
+    assert!(
+        res.is_ok(),
+        "Valid relative report must validate successfully: {:?}",
+        res.err()
+    );
+
+    // Schema mismatch fails
+    let bad_schema = serde_json::json!({
+        "schema": "unknown-schema/99",
+        "aggregate_score": 85.0,
+        "scenarios": [
+            {
+                "name": "scenario_a",
+                "score": 85.0,
+                "tests_passed": true,
+                "clean_exit": true,
+            }
+        ]
+    });
+    std::fs::write(&full_report, serde_json::to_string(&bad_schema).unwrap()).unwrap();
+    let res_schema = validate_benchmark_report_resolved(&rel_report, Some(repo_root), &node);
+    assert!(res_schema.is_err());
+    assert!(res_schema.unwrap_err().contains("schema mismatch"));
+
+    // Inconsistent aggregate score vs scenario average fails
+    let inconsistent_score = serde_json::json!({
+        "schema": "sab-report/1",
+        "aggregate_score": 50.0, // scenario average is (80+90)/2 = 85.0 != 50.0
+        "scenarios": [
+            {
+                "name": "scenario_a",
+                "score": 80.0,
+                "tests_passed": true,
+                "clean_exit": true,
+            },
+            {
+                "name": "scenario_b",
+                "score": 90.0,
+                "tests_passed": true,
+                "clean_exit": true,
+            }
+        ]
+    });
+    std::fs::write(
+        &full_report,
+        serde_json::to_string(&inconsistent_score).unwrap(),
+    )
+    .unwrap();
+    let res_score = validate_benchmark_report_resolved(&rel_report, Some(repo_root), &node);
+    assert!(res_score.is_err());
+    assert!(res_score.unwrap_err().contains("scenario average"));
 }

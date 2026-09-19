@@ -468,7 +468,7 @@ pub(crate) fn is_candidate_better(
 }
 
 /// Evaluates whether a candidate winner should be promoted to baseline:
-/// 1. Must not regress SAB capability beyond the noise margin (measured or default 0.5).
+/// 1. Must not regress SAB capability beyond the noise margin (constant SAB_NOISE_MARGIN = 0.5).
 /// 2. Must pass the DarwinX non-regression gate over SAB results.
 /// 3. Must not regress total test count relative to baseline.
 /// 4. When SAB improvement is within noise margin, composite score
@@ -994,12 +994,19 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
     let _ = std::fs::create_dir_all(&attempts_dir);
     let attempts_file = attempts_dir.join(format!("{}.jsonl", run_id));
 
+    // Acquire advisory exclusive lock on this run to prevent orphan sweeps from killing live runs
+    let _run_lock = match RunLockGuard::acquire(repo_root, &run_id) {
+        Ok(guard) => Some(guard),
+        Err(e) => {
+            log_warning(&format!("Warning: could not acquire run lock: {e}"));
+            None
+        }
+    };
+
     // Sweep any orphaned runs from previous sessions (e.g. killed by signal or missing run_end)
     sweep_orphaned_runs(repo_root);
 
-    // Spawn signal listener to write clean run_end{outcome: killed} if killed by SIGINT/SIGTERM
-    let sig_run_id = run_id.clone();
-    let sig_repo_root = repo_root.to_path_buf();
+    // Spawn signal listener to trigger cooperative shutdown via crate::request_shutdown()
     let signal_handle = tokio::spawn(async move {
         #[cfg(unix)]
         {
@@ -1027,21 +1034,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         {
             let _ = tokio::signal::ctrl_c().await;
         }
-        log_event(
-            &sig_repo_root,
-            &serde_json::json!({
-                "event": "run_end",
-                "kind": "run_end",
-                "timestamp": chrono_now(),
-                "run_id": &sig_run_id,
-                "outcome": "killed",
-                "reason": "process terminated by signal",
-                "generations_run": 0,
-                "final_sab_score": 0.0,
-                "duration_secs": 0.0,
-            }),
-        );
-        std::process::exit(130);
+        crate::request_shutdown();
     });
 
     // Load promoted search policy if available from offline held-out replay validation
@@ -1102,6 +1095,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         &serde_json::json!({
             "event": "start",
             "run_id": run_id,
+            "pid": std::process::id(),
             "timestamp": chrono_now(),
             "generations": config.generations,
             "population_size": config.population_size,
@@ -1214,6 +1208,24 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
     }
 
     let initial_baseline_composite = config.fitness_weights.composite(&current_baseline_metrics);
+    let baseline_tree_id = Command::new("git")
+        .env_remove("GIT_INDEX_FILE")
+        .args(["rev-parse", "HEAD^{tree}"])
+        .current_dir(repo_root)
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if !s.is_empty() {
+                    Some(s)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        });
     let baseline_node = AttemptNode {
         id: "att-baseline".to_string(),
         parent_id: None,
@@ -1238,6 +1250,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         base_commit: ast_tools::get_git_head_commit(repo_root),
         committed_commit: None,
         action_type: None,
+        git_tree_id: baseline_tree_id,
         created_at: chrono_now(),
     };
     if let Err(err) = log_and_append_attempt(&attempts_file, &baseline_node, repo_root, 0, start) {
@@ -1256,6 +1269,10 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
     // ═══════════════════════════════════════════════════════
 
     loop {
+        if crate::is_shutdown_requested() {
+            log_warning("Shutdown requested; halting evolutionary loop cleanly");
+            break;
+        }
         generation += 1;
         if config.generations > 0 && generation > config.generations {
             break;
@@ -1354,6 +1371,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         const MAX_EMPTY_LLM_RETRIES: usize = 3;
 
         for retry_idx in 0..MAX_EMPTY_LLM_RETRIES {
+            if crate::is_shutdown_requested() {
+                break;
+            }
             if retry_idx > 0 {
                 log_warning(&format!(
                     "No valid hypotheses generated, retrying generation {generation} (attempt {}/{MAX_EMPTY_LLM_RETRIES})...",
@@ -1363,6 +1383,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             }
 
             for (action_idx, action) in active_actions.iter().enumerate() {
+                if crate::is_shutdown_requested() {
+                    break;
+                }
                 let (h_parent_id_str, h_branch_id, h_action_type) =
                     resolve_action_dispatch(action, active_parent_id.as_deref(), &baseline_node.id);
                 let h_parent_id = Some(h_parent_id_str.clone());
@@ -1414,6 +1437,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                                     ),
                                     committed_commit: None,
                                     action_type: Some(ActionType::RefineFrontier),
+                                    git_tree_id: None,
                                     created_at: chrono_now(),
                                 };
                                 let _ = log_and_append_attempt(
@@ -1474,6 +1498,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                                     ),
                                     committed_commit: None,
                                     action_type: Some(ActionType::OpenRoot),
+                                    git_tree_id: None,
                                     created_at: chrono_now(),
                                 };
                                 let _ = log_and_append_attempt(
@@ -1572,6 +1597,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     base_commit: None,
                     committed_commit: None,
                     action_type: Some(h_action_type),
+                    git_tree_id: None,
                     created_at: chrono_now(),
                 };
                 if let Err(err) =
@@ -1617,6 +1643,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     base_commit: None,
                     committed_commit: None,
                     action_type: Some(h_action_type),
+                    git_tree_id: None,
                     created_at: chrono_now(),
                 };
                 if let Err(err) =
@@ -1679,6 +1706,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     base_commit: control_base_commit.clone(),
                     committed_commit: None,
                     action_type: None,
+                    git_tree_id: None,
                     created_at: chrono_now(),
                 };
                 if let Err(err) =
@@ -1748,6 +1776,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 base_commit: control_base_commit.clone(),
                 committed_commit: None,
                 action_type: None,
+                git_tree_id: None,
                 created_at: chrono_now(),
             };
             if let Err(err) =
@@ -1824,6 +1853,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 base_commit: control_base_commit,
                 committed_commit: None,
                 action_type: None,
+                git_tree_id: None,
                 created_at: chrono_now(),
             };
             if let Err(err) =
@@ -1847,6 +1877,10 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         let mut evaluated_candidates: Vec<EvaluatedCandidate> = Vec::new();
 
         for (hypothesis, hyp_parent_id, hyp_branch_id, hyp_action_type) in &valid {
+            if crate::is_shutdown_requested() {
+                log_warning("Shutdown requested; halting candidate evaluations cleanly");
+                break;
+            }
             let attempt_start = Instant::now();
             let attempt_id = format!("att-g{}-{}", generation, hypothesis.id);
             let attempt_base_commit =
@@ -1890,6 +1924,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         base_commit: attempt_base_commit.clone(),
                         committed_commit: None,
                         action_type: Some(*hyp_action_type),
+                        git_tree_id: None,
                         created_at: chrono_now(),
                     };
                     if let Err(err) = log_and_append_attempt(
@@ -1936,6 +1971,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     base_commit: attempt_base_commit.clone(),
                     committed_commit: None,
                     action_type: Some(*hyp_action_type),
+                    git_tree_id: None,
                     created_at: chrono_now(),
                 };
                 if let Err(err) =
@@ -2002,6 +2038,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         base_commit: attempt_base_commit.clone(),
                         committed_commit: None,
                         action_type: Some(*hyp_action_type),
+                        git_tree_id: None,
                         created_at: chrono_now(),
                     };
                     if let Err(err) = log_and_append_attempt(
@@ -2071,6 +2108,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     base_commit: attempt_base_commit.clone(),
                     committed_commit: None,
                     action_type: Some(*hyp_action_type),
+                    git_tree_id: None,
                     created_at: chrono_now(),
                 };
                 if let Err(err) =
@@ -2125,6 +2163,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         base_commit: attempt_base_commit.clone(),
                         committed_commit: None,
                         action_type: Some(*hyp_action_type),
+                        git_tree_id: None,
                         created_at: chrono_now(),
                     };
                     if let Err(err) = log_and_append_attempt(
@@ -2206,6 +2245,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     base_commit: attempt_base_commit.clone(),
                     committed_commit: None,
                     action_type: Some(*hyp_action_type),
+                    git_tree_id: None,
                     created_at: chrono_now(),
                 };
                 if let Err(err) =
@@ -2271,6 +2311,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     base_commit: attempt_base_commit.clone(),
                     committed_commit: None,
                     action_type: Some(*hyp_action_type),
+                    git_tree_id: None,
                     created_at: chrono_now(),
                 };
                 if let Err(err) =
@@ -2335,6 +2376,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         base_commit: attempt_base_commit.clone(),
                         committed_commit: None,
                         action_type: Some(*hyp_action_type),
+                        git_tree_id: None,
                         created_at: chrono_now(),
                     };
                     if let Err(err) = log_and_append_attempt(
@@ -2388,6 +2430,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             base_commit: attempt_base_commit.clone(),
                             committed_commit: None,
                             action_type: Some(*hyp_action_type),
+                            git_tree_id: None,
                             created_at: chrono_now(),
                         };
                         if let Err(err) = log_and_append_attempt(
@@ -2443,6 +2486,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             base_commit: attempt_base_commit.clone(),
                             committed_commit: None,
                             action_type: Some(*hyp_action_type),
+                            git_tree_id: None,
                             created_at: chrono_now(),
                         };
                         if let Err(err) = log_and_append_attempt(
@@ -2499,6 +2543,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         base_commit: attempt_base_commit.clone(),
                         committed_commit: None,
                         action_type: Some(*hyp_action_type),
+                        git_tree_id: None,
                         created_at: chrono_now(),
                     };
                     if let Err(err) = log_and_append_attempt(
@@ -2553,6 +2598,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         base_commit: attempt_base_commit.clone(),
                         committed_commit: None,
                         action_type: Some(*hyp_action_type),
+                        git_tree_id: None,
                         created_at: chrono_now(),
                     };
                     if let Err(err) = log_and_append_attempt(
@@ -2595,6 +2641,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 base_commit: attempt_base_commit.clone(),
                 committed_commit: None,
                 action_type: Some(*hyp_action_type),
+                git_tree_id: Some(evaluated_tree.clone()),
                 created_at: chrono_now(),
             };
             if let Err(err) =
@@ -2737,11 +2784,6 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                                 "Failed to record committed_commit anchor for attempt '{}' at {}: {e}",
                                 winner.attempt_id, head_sha
                             ));
-                            let _ = AttemptTree::record_committed_commit(
-                                &attempts_file,
-                                &winner.attempt_id,
-                                head_sha,
-                            );
                         }
                     } else {
                         log_error(&format!(
@@ -2877,7 +2919,12 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         }
     }
 
-    let (outcome, stop_reason) = if let Some(reason) = policy_stopped_reason {
+    let (outcome, stop_reason) = if crate::is_shutdown_requested() {
+        (
+            "killed".to_string(),
+            Some("process terminated by shutdown signal".to_string()),
+        )
+    } else if let Some(reason) = policy_stopped_reason {
         ("policy_stopped".to_string(), Some(reason))
     } else {
         ("completed".to_string(), None)
@@ -4236,6 +4283,75 @@ impl Drop for IsolatedIndexGuard {
     }
 }
 
+/// RAII guard holding an advisory exclusive lock on `.selfware/runs/<run_id>.lock`
+/// for the duration of an evolution run, releasing and removing it on drop.
+pub struct RunLockGuard {
+    pub lock_path: PathBuf,
+    pub lock_file: Option<std::fs::File>,
+}
+
+impl RunLockGuard {
+    pub fn acquire(repo_root: &Path, run_id: &str) -> Result<Self, String> {
+        let runs_dir = repo_root.join(".selfware").join("runs");
+        std::fs::create_dir_all(&runs_dir).map_err(|e| {
+            format!(
+                "Failed to create runs directory '{}': {e}",
+                runs_dir.display()
+            )
+        })?;
+        let lock_path = runs_dir.join(format!("{run_id}.lock"));
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&lock_path)
+            .map_err(|e| {
+                format!(
+                    "Failed to open run lock file '{}': {e}",
+                    lock_path.display()
+                )
+            })?;
+
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let rc = unsafe {
+                nix::libc::flock(file.as_raw_fd(), nix::libc::LOCK_EX | nix::libc::LOCK_NB)
+            };
+            if rc != 0 {
+                return Err(format!(
+                    "Failed to acquire exclusive advisory lock on run '{}' (another instance may be running)",
+                    run_id
+                ));
+            }
+        }
+
+        use std::io::Write;
+        let _ = writeln!(file, "{}", std::process::id());
+        let _ = file.flush();
+
+        Ok(Self {
+            lock_path,
+            lock_file: Some(file),
+        })
+    }
+}
+
+impl Drop for RunLockGuard {
+    fn drop(&mut self) {
+        if let Some(file) = self.lock_file.take() {
+            #[cfg(unix)]
+            unsafe {
+                use std::os::fd::AsRawFd;
+                nix::libc::flock(file.as_raw_fd(), nix::libc::LOCK_UN);
+            }
+            drop(file);
+        }
+        let _ = std::fs::remove_file(&self.lock_path);
+    }
+}
+
 /// Commits the specified paths using an isolated index file.
 ///
 /// If `expected_tree` is provided, verifies that `git write-tree` on the isolated index
@@ -4339,7 +4455,16 @@ pub(crate) fn commit_scoped_paths_isolated(
     for p in paths {
         reset.arg(p);
     }
-    let _ = reset.current_dir(repo_root).output();
+    let reset_out = reset
+        .current_dir(repo_root)
+        .output()
+        .map_err(|e| format!("Failed to execute git reset HEAD: {e}"))?;
+    if !reset_out.status.success() {
+        log_warning(&format!(
+            "git reset HEAD after isolated commit produced warning: {}",
+            String::from_utf8_lossy(&reset_out.stderr).trim()
+        ));
+    }
 
     Ok(promoted_tree)
 }
@@ -4425,8 +4550,30 @@ fn log_event(repo_root: &Path, event: &serde_json::Value) {
     }
 }
 
+/// Helper to parse timestamp (epoch float or ISO8601/RFC3339) into epoch seconds
+fn parse_event_or_node_timestamp(ts: &str) -> Option<f64> {
+    if let Ok(v) = ts.parse::<f64>() {
+        return Some(v);
+    }
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
+        return Some(dt.timestamp() as f64 + dt.timestamp_subsec_millis() as f64 / 1000.0);
+    }
+    None
+}
+
+/// Information recovered about an unended run
+#[derive(Default)]
+struct RecoveredRunProgress {
+    pid: Option<i32>,
+    start_time: Option<f64>,
+    max_generation: usize,
+    best_sab_score: f64,
+    last_activity_time: Option<f64>,
+}
+
 /// Scans `.evolution-log.jsonl` for runs that have an `event: "start"` but no corresponding
-/// `event: "run_end"`. Writes a synthetic `run_end` with `outcome: "killed"` for each orphaned run.
+/// `event: "run_end"`. For any truly dead run (PID dead and no active flock held), recovers
+/// actual recorded progress (generations, SAB score, duration) and logs `run_end{outcome: "killed"}`.
 /// Returns the number of orphaned runs closed.
 pub fn sweep_orphaned_runs(repo_root: &Path) -> usize {
     let log_path = repo_root.join(".evolution-log.jsonl");
@@ -4437,6 +4584,8 @@ pub fn sweep_orphaned_runs(repo_root: &Path) -> usize {
 
     let mut started_runs: Vec<String> = Vec::new();
     let mut ended_runs: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut run_progress: std::collections::HashMap<String, RecoveredRunProgress> =
+        std::collections::HashMap::new();
 
     for line in content.lines() {
         let trimmed = line.trim();
@@ -4453,35 +4602,162 @@ pub fn sweep_orphaned_runs(repo_root: &Path) -> usize {
             if run_id.is_empty() {
                 continue;
             }
+
+            let entry = run_progress.entry(run_id.clone()).or_default();
+
+            let event_ts = val
+                .get("timestamp")
+                .and_then(|v| v.as_str())
+                .and_then(parse_event_or_node_timestamp);
+            if let Some(ts) = event_ts {
+                if entry.last_activity_time.map(|t| ts > t).unwrap_or(true) {
+                    entry.last_activity_time = Some(ts);
+                }
+            }
+
             if event == "start" {
                 if !started_runs.contains(&run_id) {
-                    started_runs.push(run_id);
+                    started_runs.push(run_id.clone());
+                }
+                if let Some(pid_val) = val.get("pid").and_then(|v| v.as_i64()) {
+                    entry.pid = Some(pid_val as i32);
+                }
+                if let Some(ts) = event_ts {
+                    entry.start_time = Some(ts);
                 }
             } else if event == "run_end" {
                 ended_runs.insert(run_id);
+            } else if event == "generation_end" || event == "generation_start" {
+                if let Some(gen) = val.get("generation").and_then(|v| v.as_u64()) {
+                    entry.max_generation = entry.max_generation.max(gen as usize);
+                }
             }
         }
     }
 
+    let runs_dir = repo_root.join(".selfware").join("runs");
+    let attempts_dir = repo_root.join(".selfware").join("attempts");
     let mut closed_count = 0;
+
     for run_id in started_runs {
-        if !ended_runs.contains(&run_id) {
-            log_event(
-                repo_root,
-                &serde_json::json!({
-                    "event": "run_end",
-                    "kind": "run_end",
-                    "timestamp": chrono_now(),
-                    "run_id": run_id,
-                    "outcome": "killed",
-                    "reason": "orphaned run detected during startup sweep (process terminated without clean run_end)",
-                    "generations_run": 0,
-                    "final_sab_score": 0.0,
-                    "duration_secs": 0.0,
-                }),
-            );
-            closed_count += 1;
+        if ended_runs.contains(&run_id) {
+            continue;
         }
+
+        let mut progress = run_progress.remove(&run_id).unwrap_or_default();
+        let lock_path = runs_dir.join(format!("{run_id}.lock"));
+
+        // If lock file exists and records PID, read it if not already in start event
+        if lock_path.exists() && progress.pid.is_none() {
+            if let Ok(pid_str) = std::fs::read_to_string(&lock_path) {
+                if let Ok(p) = pid_str.trim().parse::<i32>() {
+                    progress.pid = Some(p);
+                }
+            }
+        }
+
+        // Check if the run is active via flock
+        #[cfg(unix)]
+        let lock_is_held = if lock_path.exists() {
+            use std::os::fd::AsRawFd;
+            match std::fs::File::open(&lock_path) {
+                Ok(file) => {
+                    let rc = unsafe {
+                        nix::libc::flock(file.as_raw_fd(), nix::libc::LOCK_EX | nix::libc::LOCK_NB)
+                    };
+                    if rc != 0 {
+                        true // Another process actively holds this lock!
+                    } else {
+                        // We acquired it; unlock now
+                        unsafe {
+                            nix::libc::flock(file.as_raw_fd(), nix::libc::LOCK_UN);
+                        }
+                        false
+                    }
+                }
+                Err(_) => false,
+            }
+        } else {
+            false
+        };
+        #[cfg(not(unix))]
+        let lock_is_held = false;
+
+        if lock_is_held {
+            // Live concurrent run holding the lock! Do not sweep.
+            continue;
+        }
+
+        // Check if recorded PID is alive
+        #[cfg(unix)]
+        let pid_is_alive = if let Some(pid) = progress.pid {
+            let res = unsafe { nix::libc::kill(pid, 0) };
+            if res == 0 {
+                true
+            } else {
+                let err = std::io::Error::last_os_error();
+                err.raw_os_error() == Some(nix::libc::EPERM)
+            }
+        } else {
+            false
+        };
+        #[cfg(not(unix))]
+        let pid_is_alive = false;
+
+        if pid_is_alive {
+            // Process is still running! Do not sweep.
+            continue;
+        }
+
+        // The run is confirmed dead. Recover any additional progress from attempts file
+        let run_attempts_file = attempts_dir.join(format!("{run_id}.jsonl"));
+        if let Ok(attempts_content) = std::fs::read_to_string(&run_attempts_file) {
+            for line in attempts_content.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if let Ok(node) = serde_json::from_str::<AttemptNode>(trimmed) {
+                    progress.max_generation = progress.max_generation.max(node.generation);
+                    if let Some(ref m) = node.metrics {
+                        if m.sab_score > progress.best_sab_score {
+                            progress.best_sab_score = m.sab_score;
+                        }
+                    }
+                    if let Some(ts) = parse_event_or_node_timestamp(&node.created_at) {
+                        if progress.last_activity_time.map(|t| ts > t).unwrap_or(true) {
+                            progress.last_activity_time = Some(ts);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Calculate recovered duration
+        let duration_secs = match (progress.start_time, progress.last_activity_time) {
+            (Some(st), Some(lt)) if lt >= st => lt - st,
+            _ => 0.0,
+        };
+
+        // Write recovered honest run_end event
+        log_event(
+            repo_root,
+            &serde_json::json!({
+                "event": "run_end",
+                "kind": "run_end",
+                "timestamp": chrono_now(),
+                "run_id": run_id,
+                "outcome": "killed",
+                "reason": "orphaned run detected during startup sweep (process terminated without clean run_end)",
+                "generations_run": progress.max_generation,
+                "final_sab_score": progress.best_sab_score,
+                "duration_secs": duration_secs,
+            }),
+        );
+
+        // Remove leftover lock file if any
+        let _ = std::fs::remove_file(&lock_path);
+        closed_count += 1;
     }
 
     if closed_count > 0 {

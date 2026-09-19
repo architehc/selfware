@@ -27,6 +27,9 @@ pub struct GroundedCitation {
     pub before_excerpt: Option<String>,
     #[serde(default)]
     pub after_excerpt: Option<String>,
+    /// SHA256 digest of the baseline before-excerpt grounded in git revision.
+    #[serde(default)]
+    pub before_content_hash: Option<String>,
 }
 
 /// Category of opaque, under-specified, or hazard-prone structure detected during RSI.
@@ -432,6 +435,9 @@ pub fn scan_patch_for_opaque_structures(
 
         let exact_excerpt = offending_evidence.to_string();
         let content_hash = compute_sha256(exact_excerpt.as_bytes());
+        let before_content_hash = resolved_before
+            .as_ref()
+            .map(|b| compute_sha256(b.as_bytes()));
 
         let hyperlink = if let Some(commit) = base_commit {
             if start_line > 0 && end_line > 0 {
@@ -473,6 +479,7 @@ pub fn scan_patch_for_opaque_structures(
             hyperlink,
             before_excerpt: resolved_before,
             after_excerpt,
+            before_content_hash,
         }
     };
 
@@ -848,62 +855,75 @@ pub fn scan_patch_for_opaque_structures(
 
 /// Validates benchmark report artifact presence, regular file type, non-zero size,
 /// valid JSON schema (`sab-report/1`), and candidate metric bindings (binary SHA256 and scores).
-pub fn validate_benchmark_report(path: &Path, node: &AttemptNode) -> Result<(), String> {
-    if !path.exists() {
+/// Resolves relative paths against `repo_root` if provided to prevent CWD dependency.
+pub fn validate_benchmark_report_resolved(
+    path: &Path,
+    repo_root: Option<&Path>,
+    node: &AttemptNode,
+) -> Result<(), String> {
+    let resolved_buf;
+    let resolved = if path.is_absolute() {
+        path
+    } else if let Some(root) = repo_root {
+        resolved_buf = root.join(path);
+        &resolved_buf
+    } else {
+        path
+    };
+
+    if !resolved.exists() {
         return Err(format!(
             "Benchmark report artifact '{}' does not exist on disk",
-            path.display()
+            resolved.display()
         ));
     }
-    if !path.is_file() {
+    if !resolved.is_file() {
         return Err(format!(
             "Benchmark report artifact '{}' is not a regular file",
-            path.display()
+            resolved.display()
         ));
     }
-    let metadata = std::fs::metadata(path).map_err(|e| {
+    let metadata = std::fs::metadata(resolved).map_err(|e| {
         format!(
             "Failed to read metadata for benchmark report '{}': {e}",
-            path.display()
+            resolved.display()
         )
     })?;
     if metadata.len() == 0 {
         return Err(format!(
             "Benchmark report artifact '{}' is empty (0 bytes)",
-            path.display()
+            resolved.display()
         ));
     }
 
-    let content = std::fs::read_to_string(path).map_err(|e| {
+    let content = std::fs::read_to_string(resolved).map_err(|e| {
         format!(
             "Benchmark report artifact '{}' corrupted or unreadable: {e}",
-            path.display()
+            resolved.display()
         )
     })?;
 
     let json: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
         format!(
             "Benchmark report artifact '{}' corrupted JSON: {e}",
-            path.display()
+            resolved.display()
         )
     })?;
 
-    // Schema validation: require sab-report/1 schema or scenarios array
+    // Schema validation: require sab-report/1 schema
     match json.get("schema").and_then(|v| v.as_str()) {
         Some("sab-report/1") => {}
         Some(other) => {
             return Err(format!(
                 "Benchmark report artifact '{}' schema mismatch (found '{other}', expected 'sab-report/1')",
-                path.display()
+                resolved.display()
             ));
         }
         None => {
-            if json.get("scenarios").is_none() {
-                return Err(format!(
-                    "Benchmark report artifact '{}' corrupted: missing schema and scenarios array",
-                    path.display()
-                ));
-            }
+            return Err(format!(
+                "Benchmark report artifact '{}' corrupted: missing schema and scenarios array",
+                resolved.display()
+            ));
         }
     }
 
@@ -920,52 +940,87 @@ pub fn validate_benchmark_report(path: &Path, node: &AttemptNode) -> Result<(), 
         }
     }
 
+    // Strict scenario completeness validation matching fitness::parse_sab_output
+    let scenarios = json
+        .get("scenarios")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| {
+            format!(
+                "Benchmark report artifact '{}' missing scenarios array",
+                resolved.display()
+            )
+        })?;
+    if scenarios.is_empty() {
+        return Err(format!(
+            "Benchmark report artifact '{}' has empty scenarios array; a suite with 0 scenarios is incomplete",
+            resolved.display()
+        ));
+    }
+    if let Some(expected_count) = json.get("scenarios_expected").and_then(|v| v.as_u64()) {
+        if scenarios.len() as u64 != expected_count {
+            return Err(format!(
+                "Benchmark report artifact '{}' scenario count mismatch: {} reported of {expected_count} expected",
+                resolved.display(),
+                scenarios.len()
+            ));
+        }
+    }
+
+    let mut sum_score = 0.0;
+    for (idx, s) in scenarios.iter().enumerate() {
+        let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        if name.trim().is_empty() || name == "unknown" {
+            return Err(format!(
+                "Benchmark report scenario {idx} has missing or invalid name"
+            ));
+        }
+        let score = s
+            .get("score")
+            .and_then(|v| v.as_f64())
+            .ok_or_else(|| format!("Benchmark report scenario '{name}' missing valid score"))?;
+        if s.get("tests_passed").and_then(|v| v.as_bool()).is_none() {
+            return Err(format!(
+                "Benchmark report scenario '{name}' missing valid tests_passed"
+            ));
+        }
+        if s.get("clean_exit").and_then(|v| v.as_bool()).is_none() {
+            return Err(format!(
+                "Benchmark report scenario '{name}' missing valid clean_exit"
+            ));
+        }
+        sum_score += score;
+    }
+    let calculated_avg = sum_score / scenarios.len() as f64;
+
+    if let Some(agg_score) = json.get("aggregate_score").and_then(|v| v.as_f64()) {
+        if (agg_score - calculated_avg).abs() > 0.05 {
+            return Err(format!(
+                "Benchmark report aggregate score mismatch (reported {agg_score:.2}, scenario average {calculated_avg:.2})"
+            ));
+        }
+    }
+
     // Match reported aggregate metrics against node.metrics
     if let Some(ref expected_metrics) = node.metrics {
-        let reported_score =
-            if let Some(score) = json.get("aggregate_score").and_then(|v| v.as_f64()) {
-                Some(score)
-            } else if let Some(scenarios) = json.get("scenarios").and_then(|v| v.as_array()) {
-                if scenarios.is_empty() {
-                    None
-                } else {
-                    let mut sum = 0.0;
-                    let mut count = 0;
-                    for s in scenarios {
-                        if let Some(sc) = s.get("score").and_then(|v| v.as_f64()) {
-                            sum += sc;
-                            count += 1;
-                        }
-                    }
-                    if count > 0 {
-                        Some(sum / count as f64)
-                    } else {
-                        None
-                    }
-                }
-            } else {
-                None
-            };
+        let reported_score = json
+            .get("aggregate_score")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(calculated_avg);
 
-        match reported_score {
-            Some(score) => {
-                if (score - expected_metrics.sab_score).abs() > 0.05 {
-                    return Err(format!(
-                        "Benchmark report aggregate score mismatch (reported {:.2}, expected {:.2})",
-                        score, expected_metrics.sab_score
-                    ));
-                }
-            }
-            None => {
-                return Err(format!(
-                    "Benchmark report artifact '{}' missing valid aggregate or scenario scores",
-                    path.display()
-                ));
-            }
+        if (reported_score - expected_metrics.sab_score).abs() > 0.05 {
+            return Err(format!(
+                "Benchmark report aggregate score mismatch (reported {:.2}, expected {:.2})",
+                reported_score, expected_metrics.sab_score
+            ));
         }
     }
 
     Ok(())
+}
+
+/// Backward-compatible wrapper validating benchmark report relative to current working directory.
+pub fn validate_benchmark_report(path: &Path, node: &AttemptNode) -> Result<(), String> {
+    validate_benchmark_report_resolved(path, None, node)
 }
 
 /// Simulates synthetic heuristic scoring modeled as a 10,000-reviewer governance panel
@@ -977,6 +1032,17 @@ pub fn simulate_10000_reviewer_governance(
     node: &AttemptNode,
     findings: &[OpaqueStructureFinding],
     safety: &Degree5Safety,
+) -> ReviewerConsensus {
+    simulate_10000_reviewer_governance_resolved(node, findings, safety, None)
+}
+
+/// Simulates synthetic heuristic scoring modeled as a 10,000-reviewer governance panel
+/// across 4 specialized evaluator perspectives, resolving benchmark paths against repo_root.
+pub fn simulate_10000_reviewer_governance_resolved(
+    node: &AttemptNode,
+    findings: &[OpaqueStructureFinding],
+    safety: &Degree5Safety,
+    repo_root: Option<&Path>,
 ) -> ReviewerConsensus {
     let has_critical = findings
         .iter()
@@ -1176,7 +1242,7 @@ pub fn simulate_10000_reviewer_governance(
 
         // Check benchmark artifact presence, structure, and metric bindings
         let benchmark_status = match &node.sab_report_path {
-            Some(path) => validate_benchmark_report(path, node),
+            Some(path) => validate_benchmark_report_resolved(path, repo_root, node),
             None => {
                 if node.status == AttemptStatus::Baseline && node.metrics.is_some() {
                     Ok(())
@@ -1360,6 +1426,55 @@ pub fn find_affected_callers(
     callers
 }
 
+/// Extracts co-occurring domain concepts and architectural tags from touched files, symbols, and descriptions.
+pub fn extract_cooccurring_concepts(
+    files: &[String],
+    symbols: &[String],
+    desc: &str,
+) -> Vec<String> {
+    let mut concepts = std::collections::HashSet::new();
+    for f in files {
+        let p = Path::new(f);
+        for comp in p.components() {
+            let s = comp.as_os_str().to_string_lossy();
+            if s != "src" && s != "tests" && s != "unit" && !s.ends_with(".rs") {
+                concepts.insert(s.to_string());
+            }
+        }
+    }
+    for sym in symbols {
+        for part in sym.split('_') {
+            if part.len() >= 4 {
+                concepts.insert(part.to_lowercase());
+            }
+        }
+    }
+    for word in desc.split_whitespace() {
+        let clean: String = word.chars().filter(|c| c.is_alphanumeric()).collect();
+        if clean.len() >= 5 {
+            let lower = clean.to_lowercase();
+            if matches!(
+                lower.as_str(),
+                "evolution"
+                    | "policy"
+                    | "replay"
+                    | "benchmark"
+                    | "worktree"
+                    | "safety"
+                    | "citation"
+                    | "partition"
+                    | "metrics"
+                    | "daemon"
+            ) {
+                concepts.insert(lower);
+            }
+        }
+    }
+    let mut list: Vec<String> = concepts.into_iter().collect();
+    list.sort();
+    list
+}
+
 /// Conducts an active investigation of a single evolutionary attempt node.
 pub fn investigate_attempt(node: &AttemptNode, repo_root: &Path) -> InvestigativeDossier {
     let patch_str = node.patch.as_deref().unwrap_or("");
@@ -1387,16 +1502,46 @@ pub fn investigate_attempt(node: &AttemptNode, repo_root: &Path) -> Investigativ
         .iter()
         .any(|f| crate::evolution::is_protected(Path::new(f)));
 
+    let merkle_tree_equality = match (&node.git_tree_id, &node.committed_commit) {
+        (Some(eval_tree), Some(commit)) => {
+            let commit_tree = Command::new("git")
+                .env_remove("GIT_INDEX_FILE")
+                .args(["rev-parse", &format!("{commit}^{{tree}}")])
+                .current_dir(repo_root)
+                .output()
+                .ok()
+                .and_then(|o| {
+                    if o.status.success() {
+                        Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    } else {
+                        None
+                    }
+                });
+            commit_tree.map(|ct| ct == *eval_tree)
+        }
+        _ => None,
+    };
+
+    let rule1_verified = match &node.metrics {
+        Some(m) => {
+            (node.status == AttemptStatus::Evaluated || node.status == AttemptStatus::Baseline)
+                && m.tests_total > 0
+                && m.tests_passed == m.tests_total
+        }
+        None => false,
+    };
+
     let safety = Degree5Safety {
         protected_paths_clean: protected_clean,
-        rule1_verified: node.status == AttemptStatus::Evaluated
-            || node.status == AttemptStatus::Baseline,
-        merkle_tree_equality: None, // Honest reporting: Merkle tree equality is unrecorded in historical attempt node
+        rule1_verified,
+        merkle_tree_equality,
         has_killswitch_bypass: false,
     };
 
     let primary_symbols = extract_symbols_from_patch(patch_str);
     let callers_affected = find_affected_callers(repo_root, &primary_symbols, &files_touched);
+    let cooccurring_concepts =
+        extract_cooccurring_concepts(&files_touched, &primary_symbols, &node.description);
 
     let degrees = SixDegreesOfConnection {
         degree_1_intent: Degree1Intent {
@@ -1416,7 +1561,7 @@ pub fn investigate_attempt(node: &AttemptNode, repo_root: &Path) -> Investigativ
         degree_3_ontology: Degree3Ontology {
             primary_symbols,
             callers_affected,
-            cooccurring_concepts: Vec::new(),
+            cooccurring_concepts,
         },
         degree_4_empirical: Degree4Empirical {
             status: node.status,
@@ -1438,7 +1583,8 @@ pub fn investigate_attempt(node: &AttemptNode, repo_root: &Path) -> Investigativ
         },
     };
 
-    let consensus = simulate_10000_reviewer_governance(node, &findings, &safety);
+    let consensus =
+        simulate_10000_reviewer_governance_resolved(node, &findings, &safety, Some(repo_root));
 
     InvestigativeDossier {
         attempt_id: node.id.clone(),
@@ -1495,9 +1641,23 @@ pub fn export_markdown(dossier: &InvestigativeDossier) -> String {
     } else {
         format!("{:?}", dossier.degrees.degree_3_ontology.callers_affected)
     };
+    let concepts_desc = if dossier
+        .degrees
+        .degree_3_ontology
+        .cooccurring_concepts
+        .is_empty()
+    {
+        "None detected".to_string()
+    } else {
+        dossier
+            .degrees
+            .degree_3_ontology
+            .cooccurring_concepts
+            .join(", ")
+    };
     out.push_str(&format!(
-        "| **3** | **Ontological Neighborhood** | Symbols: `{}` · Downstream Callers: `{}` |\n",
-        symbols_desc, callers_desc
+        "| **3** | **Ontological Neighborhood** | Symbols: `{}` · Downstream Callers: `{}` · Concepts: `{}` |\n",
+        symbols_desc, callers_desc, concepts_desc
     ));
     out.push_str(&format!(
         "| **4** | **Empirical Verification** | Status: `{:?}` · Score: `{:.4}` · Time: `{}ms` |\n",
@@ -1514,10 +1674,19 @@ pub fn export_markdown(dossier: &InvestigativeDossier) -> String {
         Some(false) => "MISMATCH (Divergent)",
         None => "Unmeasured / Not recorded in attempt node",
     };
+    let rule1_desc = if dossier.degrees.degree_5_safety.rule1_verified {
+        "Verified (compile+test+fmt+clippy green)"
+    } else if dossier.degrees.degree_4_empirical.status == AttemptStatus::Baseline
+        && dossier.degrees.degree_4_empirical.sab_score.is_some()
+    {
+        "Baseline Suite Measured"
+    } else {
+        "Unverified / Failing Gates"
+    };
     out.push_str(&format!(
-        "| **5** | **Safety & Envelopes** | Protected Paths Clean: `{}` · Rule 1 Verified: `{}` · Merkle Tree: `{}` |\n",
+        "| **5** | **Safety & Envelopes** | Protected Paths Clean: `{}` · Rule 1: `{}` · Merkle Tree: `{}` |\n",
         dossier.degrees.degree_5_safety.protected_paths_clean,
-        dossier.degrees.degree_5_safety.rule1_verified,
+        rule1_desc,
         merkle_desc
     ));
     out.push_str(&format!("| **6** | **Lineage & Provenance** | Gen: `{}` · Branch: `{}` · Base: `{:?}` · Promoted: `{:?}` |\n\n",
@@ -1560,8 +1729,14 @@ pub fn export_markdown(dossier: &InvestigativeDossier) -> String {
                 "* **Citation `{}`**: [{loc_str}](<{}>)\n",
                 c.citation_id, c.hyperlink
             ));
-            out.push_str(&format!("  * Content SHA256: `{}`\n", c.content_hash));
+            out.push_str(&format!(
+                "  * Offending Mutation SHA256: `{}`\n",
+                c.content_hash
+            ));
             if let Some(ref before) = c.before_excerpt {
+                if let Some(ref b_hash) = c.before_content_hash {
+                    out.push_str(&format!("  * Baseline Excerpt SHA256: `{}`\n", b_hash));
+                }
                 out.push_str(&format!(
                     "  * Before Excerpt (Baseline):\n```rust\n{}\n```\n",
                     before
