@@ -5,7 +5,20 @@ use std::path::Path;
 fn make_test_node(id: &str, patch: &str, status: AttemptStatus) -> AttemptNode {
     let (metrics, sab_report_path) = if status == AttemptStatus::Evaluated {
         let dummy_report = std::env::temp_dir().join(format!("test_sab_report_{id}.json"));
-        let _ = std::fs::write(&dummy_report, "{\"scenarios\": []}");
+        let report_body = serde_json::json!({
+            "schema": "sab-report/1",
+            "aggregate_score": 85.0,
+            "scenarios_expected": 1,
+            "scenarios": [{
+                "name": "test_scenario",
+                "score": 85.0,
+                "tests_passed": true,
+                "broken_tests_fixed": false,
+                "clean_exit": true,
+                "duration_secs": 1
+            }]
+        });
+        let _ = std::fs::write(&dummy_report, serde_json::to_string(&report_body).unwrap());
         (
             Some(crate::evolution::FitnessMetrics {
                 sab_score: 85.0,
@@ -379,9 +392,180 @@ fn test_make_citation_hashes_lines_at_base_commit_not_dirty_worktree() {
     assert_eq!(cit.line_range, (2, 2));
     assert_eq!(cit.git_commit.as_deref(), Some(base_commit.as_str()));
 
-    // Content hash MUST match the line in base_commit ("    let x = foo();")
-    let expected_hash = compute_sha256("    let x = foo();".as_bytes());
+    // Offending evidence excerpt displays the actual defect with unwrap
+    assert_eq!(cit.exact_excerpt, "let x = foo().unwrap();");
+    let expected_hash = compute_sha256("let x = foo().unwrap();".as_bytes());
     assert_eq!(cit.content_hash, expected_hash);
+
+    // Pre-mutation baseline excerpt extracted from base_commit
+    assert_eq!(cit.before_excerpt.as_deref(), Some("    let x = foo();"));
+    assert_eq!(
+        cit.after_excerpt.as_deref(),
+        Some("let x = foo().unwrap();")
+    );
+
+    // Hyperlink points to the immutable git revision, not the mutable working copy
+    assert!(cit.hyperlink.starts_with("git://"));
+    assert!(cit.hyperlink.contains(&base_commit));
+    assert!(cit.hyperlink.ends_with("src/lib.rs#L2-L2"));
+}
+
+#[test]
+fn test_validate_benchmark_report_structural_checks() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+
+    let node = make_test_node("att-bench-struct", "", AttemptStatus::Evaluated);
+
+    // 1. Nonexistent path
+    let missing = dir.join("missing.json");
+    let err = validate_benchmark_report(&missing, &node).unwrap_err();
+    assert!(err.contains("does not exist"));
+
+    // 2. Directory instead of file
+    let subdir = dir.join("sub_dir");
+    std::fs::create_dir(&subdir).unwrap();
+    let err = validate_benchmark_report(&subdir, &node).unwrap_err();
+    assert!(err.contains("not a regular file"));
+
+    // 3. 0-byte file
+    let empty_file = dir.join("empty.json");
+    std::fs::write(&empty_file, "").unwrap();
+    let err = validate_benchmark_report(&empty_file, &node).unwrap_err();
+    assert!(err.contains("empty (0 bytes)"));
+
+    // 4. Corrupted JSON
+    let corrupt_file = dir.join("corrupt.json");
+    std::fs::write(&corrupt_file, "{not_valid_json}").unwrap();
+    let err = validate_benchmark_report(&corrupt_file, &node).unwrap_err();
+    assert!(err.contains("corrupted JSON"));
+
+    // 5. Schema mismatch
+    let bad_schema = dir.join("bad_schema.json");
+    let bad_body = serde_json::json!({
+        "schema": "unsupported-schema/99",
+        "aggregate_score": 85.0
+    });
+    std::fs::write(&bad_schema, serde_json::to_string(&bad_body).unwrap()).unwrap();
+    let err = validate_benchmark_report(&bad_schema, &node).unwrap_err();
+    assert!(err.contains("schema mismatch"));
+
+    // 6. Score mismatch
+    let score_mismatch = dir.join("score_mismatch.json");
+    let mismatch_body = serde_json::json!({
+        "schema": "sab-report/1",
+        "aggregate_score": 42.0, // expected 85.0
+        "scenarios_expected": 1,
+        "scenarios": [{
+            "name": "s1",
+            "score": 42.0,
+            "tests_passed": true,
+            "broken_tests_fixed": false,
+            "clean_exit": true,
+            "duration_secs": 1
+        }]
+    });
+    std::fs::write(
+        &score_mismatch,
+        serde_json::to_string(&mismatch_body).unwrap(),
+    )
+    .unwrap();
+    let err = validate_benchmark_report(&score_mismatch, &node).unwrap_err();
+    assert!(err.contains("score mismatch"));
+
+    // 7. Binary sha256 mismatch
+    let mut node_with_sha = node.clone();
+    node_with_sha.binary_sha256 = Some("expected_binary_hash_123456".to_string());
+    let sha_mismatch = dir.join("sha_mismatch.json");
+    let sha_body = serde_json::json!({
+        "schema": "sab-report/1",
+        "binary_sha256": "wrong_hash_9999",
+        "aggregate_score": 85.0,
+        "scenarios_expected": 1,
+        "scenarios": [{
+            "name": "s1",
+            "score": 85.0,
+            "tests_passed": true,
+            "broken_tests_fixed": false,
+            "clean_exit": true,
+            "duration_secs": 1
+        }]
+    });
+    std::fs::write(&sha_mismatch, serde_json::to_string(&sha_body).unwrap()).unwrap();
+    let err = validate_benchmark_report(&sha_mismatch, &node_with_sha).unwrap_err();
+    assert!(err.contains("binary_sha256 mismatch"));
+
+    // 8. Structurally valid report matching candidate
+    let valid_file = dir.join("valid.json");
+    let valid_body = serde_json::json!({
+        "schema": "sab-report/1",
+        "binary_sha256": "expected_binary_hash_123456",
+        "aggregate_score": 85.0,
+        "scenarios_expected": 1,
+        "scenarios": [{
+            "name": "s1",
+            "score": 85.0,
+            "tests_passed": true,
+            "broken_tests_fixed": false,
+            "clean_exit": true,
+            "duration_secs": 1
+        }]
+    });
+    std::fs::write(&valid_file, serde_json::to_string(&valid_body).unwrap()).unwrap();
+    assert!(validate_benchmark_report(&valid_file, &node_with_sha).is_ok());
+}
+
+#[test]
+fn test_simulate_10000_reviewer_governance_vetoes_on_corrupt_benchmark_report() {
+    let temp = tempfile::tempdir().unwrap();
+    let report_path = temp.path().join("corrupt_report.json");
+    std::fs::write(&report_path, "not json content").unwrap();
+
+    let mut node = make_test_node("att-corrupt-bench", "", AttemptStatus::Evaluated);
+    node.sab_report_path = Some(report_path);
+
+    let findings = Vec::new();
+    let safety = Degree5Safety {
+        protected_paths_clean: true,
+        rule1_verified: true,
+        merkle_tree_equality: None,
+        has_killswitch_bypass: false,
+    };
+
+    let consensus = simulate_10000_reviewer_governance(&node, &findings, &safety);
+    assert_eq!(consensus.decision, GovernanceDecision::HardRejectVeto);
+    assert!(consensus
+        .deliberation_summary
+        .contains("VETO: Integrity failure"));
+}
+
+#[test]
+fn test_sweep_orphaned_runs_closes_unended_runs() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_root = temp.path();
+
+    let log_path = repo_root.join(".evolution-log.jsonl");
+    let sample_log = concat!(
+        "{\"event\":\"start\",\"run_id\":\"run_1\"}\n",
+        "{\"event\":\"start\",\"run_id\":\"run_2\"}\n",
+        "{\"event\":\"run_end\",\"run_id\":\"run_1\",\"outcome\":\"completed\"}\n",
+        "{\"event\":\"start\",\"run_id\":\"run_3\"}\n"
+    );
+    std::fs::write(&log_path, sample_log).unwrap();
+
+    // Run startup sweep
+    let closed = crate::evolution::daemon::sweep_orphaned_runs(repo_root);
+    assert_eq!(closed, 2, "run_2 and run_3 should be marked as killed");
+
+    // Second sweep should find 0 orphaned runs
+    let closed_again = crate::evolution::daemon::sweep_orphaned_runs(repo_root);
+    assert_eq!(closed_again, 0);
+
+    // Verify log content has run_end events with outcome: killed
+    let updated_content = std::fs::read_to_string(&log_path).unwrap();
+    assert!(updated_content.contains("\"run_id\":\"run_2\""));
+    assert!(updated_content.contains("\"outcome\":\"killed\""));
+    assert!(updated_content.contains("\"run_id\":\"run_3\""));
 }
 
 #[test]

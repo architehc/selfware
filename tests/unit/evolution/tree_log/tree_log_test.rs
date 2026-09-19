@@ -425,6 +425,110 @@ fn test_split_held_out_excludes_control_anchors() {
 }
 
 #[test]
+fn test_split_held_out_with_daemon_open_root_children_nonempty() {
+    let mut tree = AttemptTree::new();
+
+    // Actual daemon structure: baseline is unparented root
+    let mut baseline = sample_node(
+        "baseline",
+        None,
+        "baseline",
+        Some(50.0),
+        AttemptStatus::Baseline,
+    );
+    baseline.action_type = None;
+    tree.add_node(baseline).unwrap();
+
+    // Daemon starts new branches via OpenRoot action parented at baseline
+    let mut child0 = sample_node(
+        "hyp0",
+        Some("baseline"),
+        "branch-g1-hyp0",
+        Some(60.0),
+        AttemptStatus::Evaluated,
+    );
+    child0.action_type = Some(ActionType::OpenRoot);
+    tree.add_node(child0).unwrap();
+
+    let mut child1 = sample_node(
+        "hyp1",
+        Some("baseline"),
+        "branch-g1-hyp1",
+        Some(70.0),
+        AttemptStatus::Evaluated,
+    );
+    child1.action_type = Some(ActionType::OpenRoot);
+    tree.add_node(child1).unwrap();
+
+    // Subsequent frontier refinements on each branch
+    let mut child0_refine = sample_node(
+        "hyp0-refine",
+        Some("hyp0"),
+        "branch-g1-hyp0",
+        Some(65.0),
+        AttemptStatus::Evaluated,
+    );
+    child0_refine.action_type = Some(ActionType::RefineFrontier);
+    tree.add_node(child0_refine).unwrap();
+
+    let mut child1_refine = sample_node(
+        "hyp1-refine",
+        Some("hyp1"),
+        "branch-g1-hyp1",
+        Some(75.0),
+        AttemptStatus::Evaluated,
+    );
+    child1_refine.action_type = Some(ActionType::RefineFrontier);
+    tree.add_node(child1_refine).unwrap();
+
+    // Invariant: tree.roots() must only return topological roots (parent_id.is_none())
+    let roots = tree.roots();
+    assert_eq!(roots.len(), 1, "Only baseline should be a topological root");
+    assert_eq!(roots[0].id, "baseline");
+
+    // Split held-out validation partition
+    let (disc, val) = tree.split_held_out(0.40).expect("split must succeed");
+
+    // Both partitions must be non-empty and have exploratory candidates beyond baseline
+    assert!(
+        disc.len() > 1,
+        "Discovery tree must contain candidate mutations"
+    );
+    assert!(val.len() > 1, "Validation tree must NOT be empty");
+
+    assert!(disc.has_node("baseline"));
+    assert!(val.has_node("baseline"));
+
+    let disc_has_candidates = disc.nodes.iter().any(|n| n.id != "baseline");
+    let val_has_candidates = val.nodes.iter().any(|n| n.id != "baseline");
+    assert!(disc_has_candidates);
+    assert!(val_has_candidates);
+
+    // Lineage integrity: branches must not be split across partitions
+    let disc_branches: std::collections::HashSet<_> = disc
+        .nodes
+        .iter()
+        .filter(|n| n.id != "baseline")
+        .map(|n| &n.branch_id)
+        .collect();
+    let val_branches: std::collections::HashSet<_> = val
+        .nodes
+        .iter()
+        .filter(|n| n.id != "baseline")
+        .map(|n| &n.branch_id)
+        .collect();
+
+    assert!(
+        disc_branches.is_disjoint(&val_branches),
+        "Branches must be strictly partitioned across discovery and validation"
+    );
+
+    // Ancestry and reachability valid
+    assert!(disc.validate_ancestry().is_ok());
+    assert!(val.validate_ancestry().is_ok());
+}
+
+#[test]
 fn test_record_committed_commit_updates_attempts_file() {
     let dir = tempdir().unwrap();
     let attempts_file = dir.path().join("attempts.jsonl");

@@ -963,6 +963,56 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
     let _ = std::fs::create_dir_all(&attempts_dir);
     let attempts_file = attempts_dir.join(format!("{}.jsonl", run_id));
 
+    // Sweep any orphaned runs from previous sessions (e.g. killed by signal or missing run_end)
+    sweep_orphaned_runs(repo_root);
+
+    // Spawn signal listener to write clean run_end{outcome: killed} if killed by SIGINT/SIGTERM
+    let sig_run_id = run_id.clone();
+    let sig_repo_root = repo_root.to_path_buf();
+    let signal_handle = tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigint = signal(SignalKind::interrupt()).ok();
+            let mut sigterm = signal(SignalKind::terminate()).ok();
+            tokio::select! {
+                _ = async {
+                    if let Some(ref mut s) = sigint {
+                        s.recv().await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {}
+                _ = async {
+                    if let Some(ref mut s) = sigterm {
+                        s.recv().await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+        log_event(
+            &sig_repo_root,
+            &serde_json::json!({
+                "event": "run_end",
+                "kind": "run_end",
+                "timestamp": chrono_now(),
+                "run_id": &sig_run_id,
+                "outcome": "killed",
+                "reason": "process terminated by signal",
+                "generations_run": 0,
+                "final_sab_score": 0.0,
+                "duration_secs": 0.0,
+            }),
+        );
+        std::process::exit(130);
+    });
+
     // Load promoted search policy if available from offline held-out replay validation
     let active_policy_file = repo_root.join(".selfware").join("active_policy.json");
     let loaded_active_policy = load_active_policy(&active_policy_file, config.population_size);
@@ -981,6 +1031,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
     macro_rules! abort_run {
         ($reason:expr, $gen_count:expr, $final_sab:expr, $hof:expr) => {{
+            signal_handle.abort();
             let reason_str = $reason;
             log_event(
                 repo_root,
@@ -2830,6 +2881,8 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         }),
     );
 
+    signal_handle.abort();
+
     EvolutionResult {
         generations_run: generation,
         improvements: hall_of_fame,
@@ -4351,6 +4404,74 @@ fn log_event(repo_root: &Path, event: &serde_json::Value) {
     {
         let _ = writeln!(f, "{}", event);
     }
+}
+
+/// Scans `.evolution-log.jsonl` for runs that have an `event: "start"` but no corresponding
+/// `event: "run_end"`. Writes a synthetic `run_end` with `outcome: "killed"` for each orphaned run.
+/// Returns the number of orphaned runs closed.
+pub fn sweep_orphaned_runs(repo_root: &Path) -> usize {
+    let log_path = repo_root.join(".evolution-log.jsonl");
+    let content = match std::fs::read_to_string(&log_path) {
+        Ok(c) => c,
+        Err(_) => return 0,
+    };
+
+    let mut started_runs: Vec<String> = Vec::new();
+    let mut ended_runs: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            let event = val.get("event").and_then(|v| v.as_str()).unwrap_or("");
+            let run_id = val
+                .get("run_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if run_id.is_empty() {
+                continue;
+            }
+            if event == "start" {
+                if !started_runs.contains(&run_id) {
+                    started_runs.push(run_id);
+                }
+            } else if event == "run_end" {
+                ended_runs.insert(run_id);
+            }
+        }
+    }
+
+    let mut closed_count = 0;
+    for run_id in started_runs {
+        if !ended_runs.contains(&run_id) {
+            log_event(
+                repo_root,
+                &serde_json::json!({
+                    "event": "run_end",
+                    "kind": "run_end",
+                    "timestamp": chrono_now(),
+                    "run_id": run_id,
+                    "outcome": "killed",
+                    "reason": "orphaned run detected during startup sweep (process terminated without clean run_end)",
+                    "generations_run": 0,
+                    "final_sab_score": 0.0,
+                    "duration_secs": 0.0,
+                }),
+            );
+            closed_count += 1;
+        }
+    }
+
+    if closed_count > 0 {
+        log_warning(&format!(
+            "Startup sweep: marked {closed_count} orphaned run(s) as killed in .evolution-log.jsonl"
+        ));
+    }
+
+    closed_count
 }
 
 fn log_frost(_gen: usize, reason: &str) {

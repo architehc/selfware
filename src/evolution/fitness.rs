@@ -337,6 +337,31 @@ pub fn run_sab(selfware_binary: &Path, config: &SabConfig) -> Result<SabResult, 
         lease_file: Some(lease_file),
     };
 
+    if !selfware_binary.exists() {
+        return Err(FitnessError::BinaryNotFound(selfware_binary.to_path_buf()));
+    }
+
+    // Pin the requested binary into unique_out_dir before launching the runner.
+    // This decouples the evaluation from host builds (e.g. `cargo build --release`),
+    // preventing concurrent builds from overwriting the binary mid-run during long suites.
+    let pinned_binary = unique_out_dir.join("pinned_selfware_bin");
+    std::fs::copy(selfware_binary, &pinned_binary).map_err(|e| {
+        FitnessError::SabRunFailed(format!(
+            "failed to pin binary '{}' into '{}': {e}",
+            selfware_binary.display(),
+            pinned_binary.display()
+        ))
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&pinned_binary) {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o755);
+            let _ = std::fs::set_permissions(&pinned_binary, perms);
+        }
+    }
+
     // Set up environment for SAB runner
     let mut cmd = Command::new("bash");
     cmd.arg(&config.runner_script)
@@ -345,10 +370,7 @@ pub fn run_sab(selfware_binary: &Path, config: &SabConfig) -> Result<SabResult, 
         .env("ENDPOINT", &config.endpoint)
         .env("MODEL", &config.model)
         .env("MAX_PARALLEL", config.max_parallel.to_string())
-        .env(
-            "SELFWARE_BINARY",
-            selfware_binary.to_string_lossy().as_ref(),
-        )
+        .env("SELFWARE_BINARY", pinned_binary.to_string_lossy().as_ref())
         .env("TIMEOUT", config.scenario_timeout.as_secs().to_string());
     if let Some(ref filter) = config.scenario_filter {
         if !filter.is_empty() {
@@ -376,9 +398,9 @@ pub fn run_sab(selfware_binary: &Path, config: &SabConfig) -> Result<SabResult, 
     }
     drop(lease_guard);
 
-    // Parse SAB output — the runner produces JSON reports
+    // Parse SAB output — the runner produces JSON reports evaluated against the pinned binary
     let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_sab_output(&stdout, wall_clock, selfware_binary)
+    parse_sab_output(&stdout, wall_clock, &pinned_binary)
 }
 
 /// SHA-256 of a file, so a report can be checked against the binary requested.

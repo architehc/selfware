@@ -198,9 +198,14 @@ pub struct AttemptNode {
 }
 
 impl AttemptNode {
-    /// Returns true if this attempt is an unparented root exploration or an OpenRoot action.
+    /// Returns true if this attempt is an unparented root attempt (topological root).
     pub fn is_root(&self) -> bool {
-        self.action_type == Some(ActionType::OpenRoot) || self.parent_id.is_none()
+        self.parent_id.is_none()
+    }
+
+    /// Returns true if this attempt was created as an OpenRoot exploration action.
+    pub fn is_open_root_action(&self) -> bool {
+        self.action_type == Some(ActionType::OpenRoot)
     }
 
     /// Returns true if this attempt was successfully evaluated and has a composite score.
@@ -528,6 +533,9 @@ impl AttemptTree {
 
             disc_tree.validate_ancestry()?;
             val_tree.validate_ancestry()?;
+            if disc_tree.is_empty() || val_tree.is_empty() {
+                return Err(TreeLogError::InsufficientAncestryGroupsForHeldOut(0));
+            }
             return Ok((disc_tree, val_tree));
         }
 
@@ -598,6 +606,10 @@ impl AttemptTree {
                     node_id: "validation partition contains unreachable nodes".into(),
                     parent_id: "missing".into(),
                 });
+            }
+
+            if disc_tree.len() <= 1 || val_tree.len() <= 1 {
+                return Err(TreeLogError::InsufficientBranchesForHeldOut(0));
             }
 
             return Ok((disc_tree, val_tree));

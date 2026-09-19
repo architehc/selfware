@@ -23,6 +23,10 @@ pub struct GroundedCitation {
     pub attempt_id: Option<String>,
     pub exact_excerpt: String,
     pub hyperlink: String,
+    #[serde(default)]
+    pub before_excerpt: Option<String>,
+    #[serde(default)]
+    pub after_excerpt: Option<String>,
 }
 
 /// Category of opaque, under-specified, or hazard-prone structure detected during RSI.
@@ -400,33 +404,42 @@ pub fn scan_patch_for_opaque_structures(
     let mut citations = Vec::new();
     let mut citation_idx = 0;
 
-    let mut make_citation = |file_path: &str, target_excerpt: &str, symbol: Option<String>| {
+    let mut make_citation = |file_path: &str,
+                             offending_evidence: &str,
+                             anchor_search: Option<&str>,
+                             before_excerpt: Option<String>,
+                             after_excerpt: Option<String>,
+                             symbol: Option<String>| {
         citation_idx += 1;
+        let anchor = anchor_search.unwrap_or(offending_evidence);
         let (start_line, end_line) =
-            find_line_range_in_revision(repo_root, file_path, target_excerpt, base_commit);
-        let (content_hash, exact_excerpt) = if start_line > 0 && end_line > 0 {
-            if let Some(content) = read_file_content_at_revision(repo_root, file_path, base_commit)
-            {
-                let range_lines: Vec<&str> = content
-                    .lines()
-                    .skip(start_line - 1)
-                    .take(end_line - start_line + 1)
-                    .collect();
-                let slice = range_lines.join("\n");
-                (compute_sha256(slice.as_bytes()), slice)
-            } else {
-                (
-                    compute_sha256(target_excerpt.as_bytes()),
-                    target_excerpt.to_string(),
-                )
-            }
+            find_line_range_in_revision(repo_root, file_path, anchor, base_commit);
+
+        let resolved_before = if start_line > 0 && end_line > 0 {
+            read_file_content_at_revision(repo_root, file_path, base_commit)
+                .map(|content| {
+                    let range_lines: Vec<&str> = content
+                        .lines()
+                        .skip(start_line - 1)
+                        .take(end_line - start_line + 1)
+                        .collect();
+                    range_lines.join("\n")
+                })
+                .or(before_excerpt)
         } else {
-            (
-                compute_sha256(target_excerpt.as_bytes()),
-                target_excerpt.to_string(),
-            )
+            before_excerpt
         };
-        let hyperlink = if start_line > 0 && end_line > 0 {
+
+        let exact_excerpt = offending_evidence.to_string();
+        let content_hash = compute_sha256(exact_excerpt.as_bytes());
+
+        let hyperlink = if let Some(commit) = base_commit {
+            if start_line > 0 && end_line > 0 {
+                format!("git://{commit}/{file_path}#L{start_line}-L{end_line}")
+            } else {
+                format!("git://{commit}/{file_path}")
+            }
+        } else if start_line > 0 && end_line > 0 {
             format!(
                 "file://{}{}{file_path}#L{start_line}-L{end_line}",
                 repo_root.display(),
@@ -447,6 +460,7 @@ pub fn scan_patch_for_opaque_structures(
                 }
             )
         };
+
         GroundedCitation {
             citation_id: format!("cite-{attempt_id}-{citation_idx}"),
             file_path: file_path.to_string(),
@@ -457,6 +471,8 @@ pub fn scan_patch_for_opaque_structures(
             attempt_id: Some(attempt_id.to_string()),
             exact_excerpt,
             hyperlink,
+            before_excerpt: resolved_before,
+            after_excerpt,
         }
     };
 
@@ -473,8 +489,19 @@ pub fn scan_patch_for_opaque_structures(
 
             // Finding 0: Blast radius leak into protected paths
             if crate::evolution::is_protected(Path::new(file_path)) {
-                let target_text = search_text.unwrap_or(replace_text);
-                let cite = make_citation(file_path, target_text, None);
+                let offending = if !replace_text.is_empty() {
+                    replace_text
+                } else {
+                    file_path
+                };
+                let cite = make_citation(
+                    file_path,
+                    offending,
+                    search_text,
+                    search_text.map(str::to_string),
+                    Some(replace_text.to_string()),
+                    None,
+                );
                 findings.push(OpaqueStructureFinding {
                     category: OpaqueCategory::BlastRadiusLeak,
                     severity: FindingSeverity::Critical,
@@ -499,7 +526,14 @@ pub fn scan_patch_for_opaque_structures(
                     || replace_text.contains("pub struct ")
                     || replace_text.contains("pub enum ");
                 if had_pub && !has_pub {
-                    let cite = make_citation(file_path, st, None);
+                    let cite = make_citation(
+                        file_path,
+                        st,
+                        Some(st),
+                        Some(st.to_string()),
+                        Some(replace_text.to_string()),
+                        None,
+                    );
                     findings.push(OpaqueStructureFinding {
                         category: OpaqueCategory::ContractBreakage,
                         severity: FindingSeverity::Critical,
@@ -516,8 +550,24 @@ pub fn scan_patch_for_opaque_structures(
             if !file_path.contains("test")
                 && (replace_text.contains(".unwrap()") || replace_text.contains(".expect("))
             {
-                let target_text = search_text.unwrap_or(replace_text);
-                let cite = make_citation(file_path, target_text, None);
+                let offending_lines: Vec<&str> = replace_text
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| l.contains(".unwrap()") || l.contains(".expect("))
+                    .collect();
+                let offending = if offending_lines.is_empty() {
+                    replace_text.to_string()
+                } else {
+                    offending_lines.join("\n")
+                };
+                let cite = make_citation(
+                    file_path,
+                    &offending,
+                    search_text,
+                    search_text.map(str::to_string),
+                    Some(replace_text.to_string()),
+                    None,
+                );
                 findings.push(OpaqueStructureFinding {
                     category: OpaqueCategory::UncheckedUnwrap,
                     severity: FindingSeverity::Critical,
@@ -540,8 +590,14 @@ pub fn scan_patch_for_opaque_structures(
                     && !trimmed.starts_with("const ")
                     && !trimmed.starts_with("//")
                 {
-                    let target_text = search_text.unwrap_or(trimmed);
-                    let cite = make_citation(file_path, target_text, None);
+                    let cite = make_citation(
+                        file_path,
+                        trimmed,
+                        search_text,
+                        search_text.map(str::to_string),
+                        Some(replace_text.to_string()),
+                        None,
+                    );
                     findings.push(OpaqueStructureFinding {
                         category: OpaqueCategory::ImplicitConstant,
                         severity: FindingSeverity::Warning,
@@ -557,8 +613,24 @@ pub fn scan_patch_for_opaque_structures(
 
             // Finding 3: Undocumented public API
             if replace_text.contains("pub fn ") && !replace_text.contains("///") {
-                let target_text = search_text.unwrap_or(replace_text);
-                let cite = make_citation(file_path, target_text, None);
+                let pub_lines: Vec<&str> = replace_text
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| l.contains("pub fn "))
+                    .collect();
+                let offending = if pub_lines.is_empty() {
+                    replace_text.to_string()
+                } else {
+                    pub_lines.join("\n")
+                };
+                let cite = make_citation(
+                    file_path,
+                    &offending,
+                    search_text,
+                    search_text.map(str::to_string),
+                    Some(replace_text.to_string()),
+                    None,
+                );
                 findings.push(OpaqueStructureFinding {
                     category: OpaqueCategory::UndocumentedPublicApi,
                     severity: FindingSeverity::Warning,
@@ -574,8 +646,26 @@ pub fn scan_patch_for_opaque_structures(
             if replace_text.contains("unwrap_or_default()")
                 || replace_text.contains(".unwrap_or_else(|_|")
             {
-                let target_text = search_text.unwrap_or(replace_text);
-                let cite = make_citation(file_path, target_text, None);
+                let fb_lines: Vec<&str> = replace_text
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| {
+                        l.contains("unwrap_or_default()") || l.contains(".unwrap_or_else(|_|")
+                    })
+                    .collect();
+                let offending = if fb_lines.is_empty() {
+                    replace_text.to_string()
+                } else {
+                    fb_lines.join("\n")
+                };
+                let cite = make_citation(
+                    file_path,
+                    &offending,
+                    search_text,
+                    search_text.map(str::to_string),
+                    Some(replace_text.to_string()),
+                    None,
+                );
                 findings.push(OpaqueStructureFinding {
                     category: OpaqueCategory::SilentFallback,
                     severity: FindingSeverity::Info,
@@ -595,7 +685,14 @@ pub fn scan_patch_for_opaque_structures(
                 let p = stripped.trim().trim_start_matches("b/").trim();
                 current_file = p.to_string();
                 if crate::evolution::is_protected(Path::new(&current_file)) {
-                    let cite = make_citation(&current_file, &current_file, None);
+                    let cite = make_citation(
+                        &current_file,
+                        &current_file,
+                        None,
+                        None,
+                        Some(current_file.clone()),
+                        None,
+                    );
                     findings.push(OpaqueStructureFinding {
                         category: OpaqueCategory::BlastRadiusLeak,
                         severity: FindingSeverity::Critical,
@@ -616,7 +713,14 @@ pub fn scan_patch_for_opaque_structures(
                         || trimmed_rem.starts_with("pub struct ")
                         || trimmed_rem.starts_with("pub enum ")
                     {
-                        let cite = make_citation(&current_file, trimmed_rem, None);
+                        let cite = make_citation(
+                            &current_file,
+                            trimmed_rem,
+                            Some(trimmed_rem),
+                            Some(trimmed_rem.to_string()),
+                            None,
+                            None,
+                        );
                         findings.push(OpaqueStructureFinding {
                             category: OpaqueCategory::ContractBreakage,
                             severity: FindingSeverity::Critical,
@@ -641,7 +745,14 @@ pub fn scan_patch_for_opaque_structures(
                 if !current_file.contains("test")
                     && (added.contains(".unwrap()") || added.contains(".expect("))
                 {
-                    let cite = make_citation(&current_file, trimmed, None);
+                    let cite = make_citation(
+                        &current_file,
+                        trimmed,
+                        None,
+                        None,
+                        Some(trimmed.to_string()),
+                        None,
+                    );
                     findings.push(OpaqueStructureFinding {
                         category: OpaqueCategory::UncheckedUnwrap,
                         severity: FindingSeverity::Critical,
@@ -663,7 +774,14 @@ pub fn scan_patch_for_opaque_structures(
                     && !trimmed.starts_with("const ")
                     && !trimmed.starts_with("//")
                 {
-                    let cite = make_citation(&current_file, trimmed, None);
+                    let cite = make_citation(
+                        &current_file,
+                        trimmed,
+                        None,
+                        None,
+                        Some(trimmed.to_string()),
+                        None,
+                    );
                     findings.push(OpaqueStructureFinding {
                         category: OpaqueCategory::ImplicitConstant,
                         severity: FindingSeverity::Warning,
@@ -677,7 +795,14 @@ pub fn scan_patch_for_opaque_structures(
 
                 // Undocumented public API
                 if trimmed.contains("pub fn ") && !trimmed.contains("///") {
-                    let cite = make_citation(&current_file, trimmed, None);
+                    let cite = make_citation(
+                        &current_file,
+                        trimmed,
+                        None,
+                        None,
+                        Some(trimmed.to_string()),
+                        None,
+                    );
                     findings.push(OpaqueStructureFinding {
                         category: OpaqueCategory::UndocumentedPublicApi,
                         severity: FindingSeverity::Warning,
@@ -694,7 +819,14 @@ pub fn scan_patch_for_opaque_structures(
                 if trimmed.contains("unwrap_or_default()")
                     || trimmed.contains(".unwrap_or_else(|_|")
                 {
-                    let cite = make_citation(&current_file, trimmed, None);
+                    let cite = make_citation(
+                        &current_file,
+                        trimmed,
+                        None,
+                        None,
+                        Some(trimmed.to_string()),
+                        None,
+                    );
                     findings.push(OpaqueStructureFinding {
                         category: OpaqueCategory::SilentFallback,
                         severity: FindingSeverity::Info,
@@ -712,6 +844,128 @@ pub fn scan_patch_for_opaque_structures(
     }
 
     (findings, citations)
+}
+
+/// Validates benchmark report artifact presence, regular file type, non-zero size,
+/// valid JSON schema (`sab-report/1`), and candidate metric bindings (binary SHA256 and scores).
+pub fn validate_benchmark_report(path: &Path, node: &AttemptNode) -> Result<(), String> {
+    if !path.exists() {
+        return Err(format!(
+            "Benchmark report artifact '{}' does not exist on disk",
+            path.display()
+        ));
+    }
+    if !path.is_file() {
+        return Err(format!(
+            "Benchmark report artifact '{}' is not a regular file",
+            path.display()
+        ));
+    }
+    let metadata = std::fs::metadata(path).map_err(|e| {
+        format!(
+            "Failed to read metadata for benchmark report '{}': {e}",
+            path.display()
+        )
+    })?;
+    if metadata.len() == 0 {
+        return Err(format!(
+            "Benchmark report artifact '{}' is empty (0 bytes)",
+            path.display()
+        ));
+    }
+
+    let content = std::fs::read_to_string(path).map_err(|e| {
+        format!(
+            "Benchmark report artifact '{}' corrupted or unreadable: {e}",
+            path.display()
+        )
+    })?;
+
+    let json: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
+        format!(
+            "Benchmark report artifact '{}' corrupted JSON: {e}",
+            path.display()
+        )
+    })?;
+
+    // Schema validation: require sab-report/1 schema or scenarios array
+    match json.get("schema").and_then(|v| v.as_str()) {
+        Some("sab-report/1") => {}
+        Some(other) => {
+            return Err(format!(
+                "Benchmark report artifact '{}' schema mismatch (found '{other}', expected 'sab-report/1')",
+                path.display()
+            ));
+        }
+        None => {
+            if json.get("scenarios").is_none() {
+                return Err(format!(
+                    "Benchmark report artifact '{}' corrupted: missing schema and scenarios array",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    // Match binary_sha256 if present in candidate node
+    if let Some(ref expected_bin_sha) = node.binary_sha256 {
+        let reported_sha = json
+            .get("binary_sha256")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if reported_sha != expected_bin_sha {
+            return Err(format!(
+                "Benchmark report binary_sha256 mismatch (reported '{reported_sha}', expected '{expected_bin_sha}')"
+            ));
+        }
+    }
+
+    // Match reported aggregate metrics against node.metrics
+    if let Some(ref expected_metrics) = node.metrics {
+        let reported_score =
+            if let Some(score) = json.get("aggregate_score").and_then(|v| v.as_f64()) {
+                Some(score)
+            } else if let Some(scenarios) = json.get("scenarios").and_then(|v| v.as_array()) {
+                if scenarios.is_empty() {
+                    None
+                } else {
+                    let mut sum = 0.0;
+                    let mut count = 0;
+                    for s in scenarios {
+                        if let Some(sc) = s.get("score").and_then(|v| v.as_f64()) {
+                            sum += sc;
+                            count += 1;
+                        }
+                    }
+                    if count > 0 {
+                        Some(sum / count as f64)
+                    } else {
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+        match reported_score {
+            Some(score) => {
+                if (score - expected_metrics.sab_score).abs() > 0.05 {
+                    return Err(format!(
+                        "Benchmark report aggregate score mismatch (reported {:.2}, expected {:.2})",
+                        score, expected_metrics.sab_score
+                    ));
+                }
+            }
+            None => {
+                return Err(format!(
+                    "Benchmark report artifact '{}' missing valid aggregate or scenario scores",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Simulates synthetic heuristic scoring modeled as a 10,000-reviewer governance panel
@@ -920,18 +1174,9 @@ pub fn simulate_10000_reviewer_governance(
             }
         };
 
-        // Check benchmark artifact presence on disk
+        // Check benchmark artifact presence, structure, and metric bindings
         let benchmark_status = match &node.sab_report_path {
-            Some(path) => {
-                if path.exists() {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "Benchmark report artifact '{}' does not exist on disk",
-                        path.display()
-                    ))
-                }
-            }
+            Some(path) => validate_benchmark_report(path, node),
             None => {
                 if node.status == AttemptStatus::Baseline && node.metrics.is_some() {
                     Ok(())
@@ -942,7 +1187,15 @@ pub fn simulate_10000_reviewer_governance(
         };
 
         match (patch_status, benchmark_status) {
-            (Err(err), _) if err.contains("mismatch") => (
+            (Err(err), _) if err.contains("mismatch") || err.contains("corrupted") => (
+                0,
+                0,
+                0,
+                2000,
+                format!("VETO: Integrity failure — {err}."),
+                true,
+            ),
+            (_, Err(err)) if err.contains("mismatch") || err.contains("corrupted") => (
                 0,
                 0,
                 0,
@@ -955,7 +1208,7 @@ pub fn simulate_10000_reviewer_governance(
                 0,
                 0,
                 0,
-                "PASS: Deterministic provenance, patch hash integrity, and benchmark artifacts verified."
+                "PASS: Deterministic provenance, patch hash integrity, and benchmark artifact present and structurally valid."
                     .to_string(),
                 false,
             ),
@@ -1015,6 +1268,16 @@ pub fn simulate_10000_reviewer_governance(
         format!(
             "Synthetic Heuristic Scoring (10,000-Reviewer Projection Model): Verdict 'HARD REJECT & VETO' — Candidate failed validation (status: {:?}); promotion blocked without verified successful benchmark.",
             node.status
+        )
+    } else if integrity_veto {
+        format!(
+            "Synthetic Heuristic Scoring (10,000-Reviewer Projection Model): Verdict 'HARD REJECT & VETO' — {} [Automated heuristic scoring projection, not independent human peer review]",
+            p_prov.assessment
+        )
+    } else if safety_veto {
+        format!(
+            "Synthetic Heuristic Scoring (10,000-Reviewer Projection Model): Verdict 'HARD REJECT & VETO' — {} [Automated heuristic scoring projection, not independent human peer review]",
+            p_safety.assessment
         )
     } else {
         format!(
@@ -1285,7 +1548,11 @@ pub fn export_markdown(dossier: &InvestigativeDossier) -> String {
     } else {
         for c in &dossier.citations {
             let loc_str = if c.line_range == (0, 0) {
-                format!("{}:[line range unavailable in current tree]", c.file_path)
+                if c.git_commit.is_some() {
+                    format!("{}:[line range unmeasured in revision]", c.file_path)
+                } else {
+                    format!("{}:[line range unavailable in current tree]", c.file_path)
+                }
             } else {
                 format!("{}:L{}-L{}", c.file_path, c.line_range.0, c.line_range.1)
             };
@@ -1294,8 +1561,20 @@ pub fn export_markdown(dossier: &InvestigativeDossier) -> String {
                 c.citation_id, c.hyperlink
             ));
             out.push_str(&format!("  * Content SHA256: `{}`\n", c.content_hash));
+            if let Some(ref before) = c.before_excerpt {
+                out.push_str(&format!(
+                    "  * Before Excerpt (Baseline):\n```rust\n{}\n```\n",
+                    before
+                ));
+            }
+            if let Some(ref after) = c.after_excerpt {
+                out.push_str(&format!(
+                    "  * After Excerpt (Patch):\n```rust\n{}\n```\n",
+                    after
+                ));
+            }
             out.push_str(&format!(
-                "  * Excerpt:\n```rust\n{}\n```\n",
+                "  * Offending Evidence Excerpt:\n```rust\n{}\n```\n",
                 c.exact_excerpt
             ));
         }
