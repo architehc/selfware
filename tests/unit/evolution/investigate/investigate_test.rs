@@ -237,3 +237,68 @@ fn test_export_markdown_renders_table_and_consensus() {
     assert!(md.contains("Frontier Safety & Boundary Compliance"));
     assert!(md.contains("Merkle Tree: `Unmeasured / Not recorded in attempt node`"));
 }
+
+#[test]
+fn test_scan_patch_detects_blast_radius_and_contract_breakage() {
+    let repo_root = Path::new("/workspace");
+    // 1. JSON edit modifying protected path
+    let patch_blast =
+        r#"[{"file": "src/safety/checker.rs", "search": "x = 1;", "replace": "x = 2;"}]"#;
+    let (findings_blast, _) =
+        scan_patch_for_opaque_structures(patch_blast, repo_root, "att-blast", None);
+    assert!(findings_blast
+        .iter()
+        .any(|f| f.category == OpaqueCategory::BlastRadiusLeak));
+
+    // 2. JSON edit deleting pub fn contract
+    let patch_contract = r#"[{"file": "src/tools/api.rs", "search": "pub fn old_api() -> bool { true }", "replace": "fn old_api() -> bool { true }"}]"#;
+    let (findings_contract, _) =
+        scan_patch_for_opaque_structures(patch_contract, repo_root, "att-contract", None);
+    assert!(findings_contract
+        .iter()
+        .any(|f| f.category == OpaqueCategory::ContractBreakage));
+
+    // 3. Unified diff deleting pub fn contract
+    let patch_diff_contract = "--- a/src/tools/api.rs\n+++ b/src/tools/api.rs\n@@ -1,3 +1,1 @@\n-pub fn deleted_api() {}\n";
+    let (findings_diff, _) =
+        scan_patch_for_opaque_structures(patch_diff_contract, repo_root, "att-diff-contract", None);
+    assert!(findings_diff
+        .iter()
+        .any(|f| f.category == OpaqueCategory::ContractBreakage));
+}
+
+#[test]
+fn test_investigation_report_path_is_protected() {
+    use crate::evolution::is_protected;
+    assert!(is_protected(Path::new(
+        ".selfware/investigation_report_latest.md"
+    )));
+    assert!(is_protected(Path::new(".selfware/attempts/run_123.jsonl")));
+}
+
+#[test]
+fn test_find_affected_callers_real_lookup() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_root = temp.path();
+    std::fs::create_dir_all(repo_root.join("src/module_a")).unwrap();
+    std::fs::create_dir_all(repo_root.join("src/module_b")).unwrap();
+
+    std::fs::write(
+        repo_root.join("src/module_a/lib.rs"),
+        "pub fn target_action() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo_root.join("src/module_b/caller.rs"),
+        "use crate::module_a::target_action;\nfn call_it() { target_action(); }\n",
+    )
+    .unwrap();
+
+    let symbols = vec!["target_action".to_string()];
+    let files_touched = vec!["src/module_a/lib.rs".to_string()];
+    let callers = find_affected_callers(repo_root, &symbols, &files_touched);
+
+    assert_eq!(callers.len(), 1);
+    assert!(callers[0].contains("src/module_b/caller.rs"));
+    assert!(callers[0].contains("target_action"));
+}

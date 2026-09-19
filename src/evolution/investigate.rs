@@ -439,6 +439,46 @@ pub fn scan_patch_for_opaque_structures(
             let replace_text = edit.get("replace").and_then(|v| v.as_str()).unwrap_or("");
             let search_text = edit.get("search").and_then(|v| v.as_str());
 
+            // Finding 0: Blast radius leak into protected paths
+            if crate::evolution::is_protected(Path::new(file_path)) {
+                let cite = make_citation(file_path, replace_text, search_text, None);
+                findings.push(OpaqueStructureFinding {
+                    category: OpaqueCategory::BlastRadiusLeak,
+                    severity: FindingSeverity::Critical,
+                    title: "Protected path targeted by mutation".to_string(),
+                    explanation: format!(
+                        "Modification targets protected path '{file_path}', violating evolutionary safety invariants."
+                    ),
+                    citation: cite.clone(),
+                    remediation: "Re-target mutation strictly to unconstrained code files.".to_string(),
+                });
+                citations.push(cite);
+            }
+
+            // Finding 0b: Contract breakage via interface erasure
+            if let Some(st) = search_text {
+                let had_pub = st.contains("pub fn ")
+                    || st.contains("pub trait ")
+                    || st.contains("pub struct ")
+                    || st.contains("pub enum ");
+                let has_pub = replace_text.contains("pub fn ")
+                    || replace_text.contains("pub trait ")
+                    || replace_text.contains("pub struct ")
+                    || replace_text.contains("pub enum ");
+                if had_pub && !has_pub {
+                    let cite = make_citation(file_path, replace_text, search_text, None);
+                    findings.push(OpaqueStructureFinding {
+                        category: OpaqueCategory::ContractBreakage,
+                        severity: FindingSeverity::Critical,
+                        title: "Public API contract erased or converted to private visibility".to_string(),
+                        explanation: "Publicly visible symbol in search context was deleted or made private, breaking API contract.".to_string(),
+                        citation: cite.clone(),
+                        remediation: "Maintain public interface stability and backwards compatibility.".to_string(),
+                    });
+                    citations.push(cite);
+                }
+            }
+
             // Finding 1: Unchecked unwrap in production code
             if !file_path.contains("test")
                 && (replace_text.contains(".unwrap()") || replace_text.contains(".expect("))
@@ -517,6 +557,43 @@ pub fn scan_patch_for_opaque_structures(
             if let Some(stripped) = line.strip_prefix("+++ ") {
                 let p = stripped.trim().trim_start_matches("b/").trim();
                 current_file = p.to_string();
+                if crate::evolution::is_protected(Path::new(&current_file)) {
+                    let cite = make_citation(&current_file, &current_file, None, None);
+                    findings.push(OpaqueStructureFinding {
+                        category: OpaqueCategory::BlastRadiusLeak,
+                        severity: FindingSeverity::Critical,
+                        title: "Protected path targeted in unified diff".to_string(),
+                        explanation: format!(
+                            "Unified diff modifies protected path '{current_file}', violating evolutionary safety invariants."
+                        ),
+                        citation: cite.clone(),
+                        remediation: "Re-target mutation strictly to unconstrained code files.".to_string(),
+                    });
+                    citations.push(cite);
+                }
+            } else if let Some(removed) = line.strip_prefix('-') {
+                if !removed.starts_with('-') {
+                    let trimmed_rem = removed.trim();
+                    if trimmed_rem.starts_with("pub fn ")
+                        || trimmed_rem.starts_with("pub trait ")
+                        || trimmed_rem.starts_with("pub struct ")
+                        || trimmed_rem.starts_with("pub enum ")
+                    {
+                        let cite = make_citation(&current_file, trimmed_rem, None, None);
+                        findings.push(OpaqueStructureFinding {
+                            category: OpaqueCategory::ContractBreakage,
+                            severity: FindingSeverity::Critical,
+                            title: "Public API definition deleted in unified diff".to_string(),
+                            explanation: format!(
+                                "Removed public contract symbol definition: '{trimmed_rem}'."
+                            ),
+                            citation: cite.clone(),
+                            remediation: "Preserve exported public interface contracts."
+                                .to_string(),
+                        });
+                        citations.push(cite);
+                    }
+                }
             } else if let Some(added) = line.strip_prefix('+') {
                 if added.starts_with('+') {
                     continue;
@@ -829,6 +906,61 @@ pub fn simulate_10000_reviewer_governance(
     }
 }
 
+/// Syntactically searches the repository for call sites or references of the specified symbols
+/// in files outside `files_touched`.
+pub fn find_affected_callers(
+    repo_root: &Path,
+    symbols: &[String],
+    files_touched: &[String],
+) -> Vec<String> {
+    if symbols.is_empty() {
+        return Vec::new();
+    }
+    let src_dir = repo_root.join("src");
+    if !src_dir.exists() {
+        return Vec::new();
+    }
+
+    let mut callers = Vec::new();
+    let mut stack = vec![src_dir];
+
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let rel = path
+                    .strip_prefix(repo_root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if files_touched.iter().any(|t| t == &rel) {
+                    continue;
+                }
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    for sym in symbols {
+                        let pat1 = format!("{sym}(");
+                        let pat2 = format!("{sym}::");
+                        if content.contains(&pat1) || content.contains(&pat2) {
+                            callers.push(format!("{rel} (ref: {sym})"));
+                            break;
+                        }
+                    }
+                }
+                if callers.len() >= 12 {
+                    return callers;
+                }
+            }
+        }
+    }
+
+    callers
+}
+
 /// Conducts an active investigation of a single evolutionary attempt node.
 pub fn investigate_attempt(node: &AttemptNode, repo_root: &Path) -> InvestigativeDossier {
     let patch_str = node.patch.as_deref().unwrap_or("");
@@ -865,6 +997,7 @@ pub fn investigate_attempt(node: &AttemptNode, repo_root: &Path) -> Investigativ
     };
 
     let primary_symbols = extract_symbols_from_patch(patch_str);
+    let callers_affected = find_affected_callers(repo_root, &primary_symbols, &files_touched);
 
     let degrees = SixDegreesOfConnection {
         degree_1_intent: Degree1Intent {
@@ -883,7 +1016,7 @@ pub fn investigate_attempt(node: &AttemptNode, repo_root: &Path) -> Investigativ
         },
         degree_3_ontology: Degree3Ontology {
             primary_symbols,
-            callers_affected: Vec::new(),
+            callers_affected,
             cooccurring_concepts: Vec::new(),
         },
         degree_4_empirical: Degree4Empirical {

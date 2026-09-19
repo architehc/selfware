@@ -725,3 +725,198 @@ fn test_restore_worktree_candidate_with_new_file() {
 
     cleanup_worktree(repo_root, &restored_wt).unwrap();
 }
+
+#[test]
+fn test_promote_refine_promote() {
+    let temp_repo = tempfile::tempdir().unwrap();
+    let repo_root = temp_repo.path();
+
+    let run_git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .env_remove("GIT_INDEX_FILE")
+            .args(args)
+            .current_dir(repo_root)
+            .output()
+            .expect("git cmd failed");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+
+    run_git(&["init", "-b", "main"]);
+    run_git(&["config", "user.email", "test@example.com"]);
+    run_git(&["config", "user.name", "Test Runner"]);
+
+    std::fs::create_dir_all(repo_root.join("src")).unwrap();
+    std::fs::write(
+        repo_root.join("src/lib.rs"),
+        "pub fn root() -> u32 {\n    1\n}\n",
+    )
+    .unwrap();
+    run_git(&["add", "src/lib.rs"]);
+    run_git(&["commit", "-m", "initial C0"]);
+    let c0 = run_git(&["rev-parse", "HEAD"]);
+
+    let attempts_file = repo_root.join("attempts.jsonl");
+
+    // Baseline attempt at C0
+    let node_baseline = crate::evolution::tree_log::AttemptNode {
+        id: "att-baseline".into(),
+        parent_id: None,
+        generation: 0,
+        branch_id: "baseline".into(),
+        hypothesis_id: "baseline".into(),
+        description: "Initial baseline measurement".into(),
+        diff_sha256: "0".into(),
+        patch: None,
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(0.5),
+        tokens_used: None,
+        wall_time_ms: 0,
+        status: crate::evolution::tree_log::AttemptStatus::Baseline,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        base_commit: Some(c0.clone()),
+        committed_commit: None,
+        created_at: "2026-09-18T00:00:00Z".into(),
+    };
+    std::fs::write(
+        &attempts_file,
+        format!("{}\n", serde_json::to_string(&node_baseline).unwrap()),
+    )
+    .unwrap();
+
+    // ─── Gen 0: Candidate 1 modifies root() to return 2 ───
+    let wt1 = create_shadow_worktree_for_parent(repo_root, &attempts_file, Some("att-baseline"))
+        .expect("Gen 0 worktree from baseline must succeed");
+    std::fs::write(wt1.join("src/lib.rs"), "pub fn root() -> u32 {\n    2\n}\n").unwrap();
+
+    let diff1 = {
+        let add = std::process::Command::new("git")
+            .env_remove("GIT_INDEX_FILE")
+            .args(["add", "-A"])
+            .current_dir(&wt1)
+            .output()
+            .unwrap();
+        assert!(add.status.success());
+        let diff = std::process::Command::new("git")
+            .env_remove("GIT_INDEX_FILE")
+            .args(["diff", "--cached", "--binary", "HEAD"])
+            .current_dir(&wt1)
+            .output()
+            .unwrap();
+        assert!(diff.status.success());
+        String::from_utf8_lossy(&diff.stdout).to_string()
+    };
+    let tree1 = crate::evolution::daemon::capture_worktree_tree_id(&wt1)
+        .expect("Must capture tree1 digest");
+    cleanup_worktree(repo_root, &wt1).unwrap();
+
+    // Promote Candidate 1 to repo
+    let ok1 = crate::evolution::daemon::commit_winner_to_repo(
+        repo_root,
+        &diff1,
+        Some(&tree1),
+        "Gen 0 promotion",
+    );
+    assert!(ok1, "Gen 0 candidate promotion must succeed");
+    let c1 = run_git(&["rev-parse", "HEAD"]);
+    assert_ne!(c1, c0, "C1 must advance past C0");
+
+    let node_cand1 = crate::evolution::tree_log::AttemptNode {
+        id: "att-cand1".into(),
+        parent_id: Some("att-baseline".into()),
+        generation: 0,
+        branch_id: "branch-0".into(),
+        hypothesis_id: "hyp-0".into(),
+        description: "Candidate 1 (Gen 0)".into(),
+        diff_sha256: crate::evolution::tree_log::compute_sha256(diff1.as_bytes()),
+        patch: Some(diff1),
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(0.8),
+        tokens_used: None,
+        wall_time_ms: 100,
+        status: crate::evolution::tree_log::AttemptStatus::Evaluated,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        base_commit: Some(c0),
+        committed_commit: None,
+        created_at: "2026-09-18T00:01:00Z".into(),
+    };
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&attempts_file)
+        .unwrap();
+    use std::io::Write;
+    writeln!(f, "{}", serde_json::to_string(&node_cand1).unwrap()).unwrap();
+
+    // Record committed commit anchor for att-cand1
+    crate::evolution::tree_log::AttemptTree::record_committed_commit(
+        &attempts_file,
+        "att-cand1",
+        &c1,
+    )
+    .expect("Must record committed_commit anchor");
+
+    // ─── Gen 1: Candidate 2 refines Candidate 1, modifying root() to return 3 ───
+    let wt2 = create_shadow_worktree_for_parent(repo_root, &attempts_file, Some("att-cand1"))
+        .expect("Gen 1 worktree refining att-cand1 must succeed");
+    let restored_content = std::fs::read_to_string(wt2.join("src/lib.rs")).unwrap();
+    assert!(
+        restored_content.contains("2"),
+        "Restored worktree for att-cand1 must contain Gen 0 state (return 2)"
+    );
+
+    std::fs::write(wt2.join("src/lib.rs"), "pub fn root() -> u32 {\n    3\n}\n").unwrap();
+
+    let diff2 = {
+        let add = std::process::Command::new("git")
+            .env_remove("GIT_INDEX_FILE")
+            .args(["add", "-A"])
+            .current_dir(&wt2)
+            .output()
+            .unwrap();
+        assert!(add.status.success());
+        let diff = std::process::Command::new("git")
+            .env_remove("GIT_INDEX_FILE")
+            .args(["diff", "--cached", "--binary", "HEAD"])
+            .current_dir(&wt2)
+            .output()
+            .unwrap();
+        assert!(diff.status.success());
+        String::from_utf8_lossy(&diff.stdout).to_string()
+    };
+    let tree2 = crate::evolution::daemon::capture_worktree_tree_id(&wt2)
+        .expect("Must capture tree2 digest");
+    cleanup_worktree(repo_root, &wt2).unwrap();
+
+    // Promote Candidate 2 to repo
+    let ok2 = crate::evolution::daemon::commit_winner_to_repo(
+        repo_root,
+        &diff2,
+        Some(&tree2),
+        "Gen 1 promotion",
+    );
+    assert!(
+        ok2,
+        "Gen 1 candidate refining Gen 0 must promote cleanly with tree verification"
+    );
+    let c2 = run_git(&["rev-parse", "HEAD"]);
+    assert_ne!(c2, c1, "C2 must advance past C1");
+
+    let final_content = std::fs::read_to_string(repo_root.join("src/lib.rs")).unwrap();
+    assert!(
+        final_content.contains("3"),
+        "Repo root must contain final Gen 1 state (return 3)"
+    );
+}

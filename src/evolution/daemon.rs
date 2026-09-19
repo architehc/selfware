@@ -387,7 +387,6 @@ pub const SAB_NOISE_MARGIN: f64 = DEFAULT_SAB_NOISE_MARGIN;
 /// When paired scenario scores are available from benchmark runs, calculates the
 /// standard error of the mean scenario score delta across the benchmark suite.
 /// Falls back to [`DEFAULT_SAB_NOISE_MARGIN`] when unmeasured.
-#[allow(dead_code)]
 pub(crate) fn compute_empirical_noise_margin(
     base_sab: Option<&SabResult>,
     cand_sab: Option<&SabResult>,
@@ -476,7 +475,7 @@ pub(crate) fn evaluate_candidate_promotion(
     base_metrics: &FitnessMetrics,
     winner_metrics: &FitnessMetrics,
 ) -> PromotionDecision {
-    let noise_margin = DEFAULT_SAB_NOISE_MARGIN;
+    let noise_margin = compute_empirical_noise_margin(base_sab, cand_sab);
     if winner_metrics.sab_score < base_metrics.sab_score - noise_margin {
         return PromotionDecision::Reject(format!(
             "winner SAB score ({:.2}) regressed below baseline ({:.2}) beyond noise margin ({:.2})",
@@ -682,8 +681,27 @@ pub fn load_active_policy(active_policy_path: &Path, population_size: usize) -> 
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        // If tree_files are provided, verify each on disk against its expected digest
-        if let Some(tree_files_arr) = val.get("tree_files").and_then(|v| v.as_array()) {
+        // If tree_digests are specified, tree_files is mandatory and must verify on disk
+        if !tree_digests.is_empty() {
+            let tree_files_arr = val.get("tree_files").and_then(|v| v.as_array());
+            let Some(tree_files_arr) = tree_files_arr else {
+                let msg = format!(
+                    "Policy specifies {} tree digest(s) but missing 'tree_files' attestation array",
+                    tree_digests.len()
+                );
+                tracing::warn!("{msg}; falling back to incumbent");
+                return fallback(Some(msg));
+            };
+            if tree_files_arr.len() != tree_digests.len() {
+                let msg = format!(
+                    "Policy 'tree_files' count ({}) does not match 'tree_digests' count ({})",
+                    tree_files_arr.len(),
+                    tree_digests.len()
+                );
+                tracing::warn!("{msg}; falling back to incumbent");
+                return fallback(Some(msg));
+            }
+
             for (i, tf_val) in tree_files_arr.iter().enumerate() {
                 if let Some(tf_str) = tf_val.as_str() {
                     let tf_path = Path::new(tf_str);
@@ -950,6 +968,12 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
     let active_policy_name = loaded_active_policy.policy_name;
     let active_policy_beta = loaded_active_policy.beta;
     let active_policy_evidence_hash = loaded_active_policy.evidence_hash;
+    let active_policy_fallback_reason = loaded_active_policy.fallback_reason;
+    if let Some(ref reason) = active_policy_fallback_reason {
+        if active_policy_file.exists() {
+            log_warning(&format!("Active policy fallback: {reason}"));
+        }
+    }
 
     let mut initial_sab = 0.0;
 
@@ -1247,6 +1271,10 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
 
+            let root_parent = active_parent_id
+                .clone()
+                .unwrap_or_else(|| baseline_node.id.clone());
+
             for (action_idx, action) in active_actions.iter().enumerate() {
                 let (h_parent_id, h_branch_id) = match action {
                     LegalAction::RefineFrontier {
@@ -1255,12 +1283,12 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         ..
                     } => (Some(parent_id.clone()), branch_id.clone()),
                     LegalAction::OpenRoot { branch_id, .. } => {
-                        (Some(baseline_node.id.clone()), branch_id.clone())
+                        (Some(root_parent.clone()), branch_id.clone())
                     }
                 };
 
                 // Restore parent/root worktree to inspect exact source state.
-                // Read root context from the same immutable baseline checkout used for testing.
+                // Read root context from the latest active incumbent/baseline checkout used for testing.
                 // Restoration errors produce a recorded failure instead of silently falling back to repo_root.
                 let (source_context, parent_context, temp_worktree) = match action {
                     LegalAction::RefineFrontier { parent_id, .. } => {
@@ -1276,12 +1304,12 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                                 ));
                                 let node = AttemptNode {
                                     id: format!(
-                                        "att-g{generation}-refine-restoration-fail-{action_idx}"
+                                        "att-g{generation}-r{retry_idx}-refine-restoration-fail-{action_idx}"
                                     ),
                                     parent_id: Some(parent_id.clone()),
                                     generation,
                                     branch_id: h_branch_id.clone(),
-                                    hypothesis_id: format!("hyp-restore-fail-{action_idx}"),
+                                    hypothesis_id: format!("hyp-r{retry_idx}-restore-fail-{action_idx}"),
                                     description: format!(
                                         "Refinement restoration failed for parent {parent_id}"
                                     ),
@@ -1326,23 +1354,24 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         let worktree = match ast_tools::create_shadow_worktree_for_parent(
                             repo_root,
                             &attempts_file,
-                            Some("att-baseline"),
+                            Some(&root_parent),
                         ) {
                             Ok(w) => w,
                             Err(e) => {
                                 log_warning(&format!(
-                                    "Root worktree restoration failed for baseline: {e}"
+                                    "Root worktree restoration failed for parent '{root_parent}': {e}"
                                 ));
                                 let node = AttemptNode {
                                     id: format!(
-                                        "att-g{generation}-root-restoration-fail-{action_idx}"
+                                        "att-g{generation}-r{retry_idx}-root-restoration-fail-{action_idx}"
                                     ),
-                                    parent_id: Some(baseline_node.id.clone()),
+                                    parent_id: Some(root_parent.clone()),
                                     generation,
                                     branch_id: h_branch_id.clone(),
-                                    hypothesis_id: format!("hyp-root-restore-fail-{action_idx}"),
-                                    description: "Root worktree restoration failed for baseline"
-                                        .to_string(),
+                                    hypothesis_id: format!("hyp-r{retry_idx}-root-restore-fail-{action_idx}"),
+                                    description: format!(
+                                        "Root worktree restoration failed for parent '{root_parent}'"
+                                    ),
                                     diff_sha256: compute_sha256(b""),
                                     patch: None,
                                     sab_report_path: None,
@@ -1359,7 +1388,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                                     binary_sha256: None,
                                     base_commit: resolve_attempt_base_commit(
                                         &attempts_file,
-                                        Some(&baseline_node.id),
+                                        Some(&root_parent),
                                         repo_root,
                                     ),
                                     committed_commit: None,
@@ -2599,16 +2628,32 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
                     let new_head = ast_tools::get_git_head_commit(repo_root);
                     if let Some(ref head_sha) = new_head {
-                        let _ = AttemptTree::record_committed_commit(
+                        if let Err(e) = AttemptTree::record_committed_commit(
                             &attempts_file,
                             &winner.attempt_id,
                             head_sha,
-                        );
+                        ) {
+                            log_error(&format!(
+                                "Failed to record committed_commit anchor for attempt '{}' at {}: {e}",
+                                winner.attempt_id, head_sha
+                            ));
+                            let _ = AttemptTree::record_committed_commit(
+                                &attempts_file,
+                                &winner.attempt_id,
+                                head_sha,
+                            );
+                        }
+                    } else {
+                        log_error(&format!(
+                            "Failed to resolve git HEAD commit after committing winner '{}'",
+                            winner.attempt_id
+                        ));
                     }
 
                     let git_tag = if generation.is_multiple_of(config.checkpoint_interval) {
                         let tag = format!("evolve-gen-{}", generation);
                         let _ = Command::new("git")
+                            .env_remove("GIT_INDEX_FILE")
                             .args(["tag", &tag])
                             .current_dir(repo_root)
                             .output();
@@ -2890,6 +2935,7 @@ fn extract_function_signatures(source: &str) -> Vec<String> {
 /// Get recent git changes for context
 fn get_recent_git_changes(repo_root: &Path, max_commits: usize) -> Option<String> {
     let output = std::process::Command::new("git")
+        .env_remove("GIT_INDEX_FILE")
         .args(["log", "--oneline", "--no-merges"])
         .arg(format!("-{}", max_commits))
         .current_dir(repo_root)
@@ -3786,6 +3832,7 @@ fn apply_unified_diff(dir: &Path, patch: &str) -> bool {
 
     // Strategy 1: strict git apply
     let strict = Command::new("git")
+        .env_remove("GIT_INDEX_FILE")
         .args(["apply", ".evolution-patch"])
         .current_dir(dir)
         .output();
@@ -3796,6 +3843,7 @@ fn apply_unified_diff(dir: &Path, patch: &str) -> bool {
 
     // Strategy 2: git apply with relaxed whitespace and reduced context
     let relaxed = Command::new("git")
+        .env_remove("GIT_INDEX_FILE")
         .args(["apply", "--ignore-whitespace", "-C1", ".evolution-patch"])
         .current_dir(dir)
         .output();
@@ -4031,6 +4079,7 @@ fn apply_tested_diff_to_repo(repo_root: &Path, tested_diff: &str) -> bool {
         return false;
     }
     let applied = Command::new("git")
+        .env_remove("GIT_INDEX_FILE")
         .args(["apply", ".evolution-tested.patch"])
         .current_dir(repo_root)
         .output();
@@ -4059,6 +4108,7 @@ fn revert_applied_diff(repo_root: &Path, tested_diff: &str) {
         return;
     }
     let _ = Command::new("git")
+        .env_remove("GIT_INDEX_FILE")
         .args(["apply", "-R", ".evolution-tested.patch"])
         .current_dir(repo_root)
         .output();
@@ -4070,6 +4120,7 @@ fn revert_applied_diff(repo_root: &Path, tested_diff: &str) {
 /// commit only ever stages the paths the tested diff edits.
 fn warn_unrelated_dirty_paths(repo_root: &Path, edited: &[PathBuf]) {
     let status = Command::new("git")
+        .env_remove("GIT_INDEX_FILE")
         .args(["status", "--porcelain"])
         .current_dir(repo_root)
         .output();
@@ -4111,6 +4162,7 @@ fn commit_scoped_paths(repo_root: &Path, paths: &[PathBuf], commit_msg: &str) ->
         return false;
     }
     let mut add = Command::new("git");
+    add.env_remove("GIT_INDEX_FILE");
     add.arg("add").arg("--");
     for p in paths {
         add.arg(p);
@@ -4131,6 +4183,7 @@ fn commit_scoped_paths(repo_root: &Path, paths: &[PathBuf], commit_msg: &str) ->
     }
 
     let mut commit = Command::new("git");
+    commit.env_remove("GIT_INDEX_FILE");
     commit.arg("commit").arg("-m").arg(commit_msg).arg("--");
     for p in paths {
         commit.arg(p);

@@ -2882,7 +2882,7 @@ async fn handle_command(
                             .unwrap_or(0.0)
                     );
                     println!(
-                        "Consensus:   {} ({:.1}% approval across 10,000 reviewers)",
+                        "Consensus:   {} ({:.1}% approval [simulated 10,000-reviewer heuristic projection model])",
                         dossier.consensus.decision,
                         dossier.consensus.consensus_score * 100.0
                     );
@@ -2893,12 +2893,19 @@ async fn handle_command(
                         );
                         for f in &dossier.findings {
                             println!("  - [{}] {}: {}", f.severity, f.category, f.title);
-                            println!(
-                                "    Citation: {} (L{}-L{})",
-                                f.citation.file_path,
-                                f.citation.line_range.0,
-                                f.citation.line_range.1
-                            );
+                            if f.citation.line_range == (0, 0) {
+                                println!(
+                                    "    Citation: {} [line range unmeasured/unavailable in recorded tree]",
+                                    f.citation.file_path
+                                );
+                            } else {
+                                println!(
+                                    "    Citation: {} (L{}-L{})",
+                                    f.citation.file_path,
+                                    f.citation.line_range.0,
+                                    f.citation.line_range.1
+                                );
+                            }
                         }
                     } else {
                         println!("Findings:    None (Transparent contracts)");

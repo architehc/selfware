@@ -2307,7 +2307,18 @@ fn test_promoted_policy_name_round_trip() {
     let inc_obj = 0.7210;
     let kendall_w = 0.8123;
     let beta = 0.35;
-    let tree_digests = vec!["tree-digest-1".to_string(), "tree-digest-2".to_string()];
+    let tf1 = root.join("tree1.jsonl");
+    let tf2 = root.join("tree2.jsonl");
+    std::fs::write(&tf1, b"sample tree 1 content").unwrap();
+    std::fs::write(&tf2, b"sample tree 2 content").unwrap();
+    let tree_digests = vec![
+        crate::evolution::tree_log::compute_sha256(b"sample tree 1 content"),
+        crate::evolution::tree_log::compute_sha256(b"sample tree 2 content"),
+    ];
+    let tree_files = vec![
+        tf1.to_str().unwrap().to_string(),
+        tf2.to_str().unwrap().to_string(),
+    ];
     let report_digest = "report-digest-123";
     let evidence_hash = crate::evolution::replay::compute_policy_evidence_hash(
         winner_name,
@@ -2326,6 +2337,7 @@ fn test_promoted_policy_name_round_trip() {
         "incumbent_objective": inc_obj,
         "kendall_w": kendall_w,
         "beta": beta,
+        "tree_files": tree_files,
         "tree_digests": tree_digests,
         "report_digest": report_digest,
         "evidence_hash": evidence_hash,

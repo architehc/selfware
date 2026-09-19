@@ -442,6 +442,7 @@ fn is_patch_already_applied(dir: &Path, patch: &str) -> bool {
     let temp_patch = dir.join(format!(".test-check-{}.patch", uuid_short()));
     if std::fs::write(&temp_patch, patch).is_ok() {
         let status = std::process::Command::new("git")
+            .env_remove("GIT_INDEX_FILE")
             .args(["apply", "-R", "--check"])
             .arg(&temp_patch)
             .current_dir(dir)
