@@ -373,7 +373,7 @@ pub(crate) struct EvaluatedCandidate {
     pub(crate) metrics: FitnessMetrics,
     pub(crate) sab_result: Option<fitness::SabResult>,
     pub(crate) tested_diff: String,
-    pub(crate) evaluated_tree: Option<String>,
+    pub(crate) evaluated_tree: String,
     pub(crate) composite: f64,
     pub(crate) attempt_id: String,
     pub(crate) branch_id: String,
@@ -2395,6 +2395,56 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             let candidate_composite = config.fitness_weights.composite(&winner_metrics);
             let tested_diff_sha256 = compute_sha256(tested_diff.as_bytes());
 
+            let evaluated_tree = match capture_worktree_tree_id(&worktree) {
+                Some(tree) if !tree.trim().is_empty() => tree,
+                _ => {
+                    log_error(&format!(
+                        "Failed to capture evaluated tree verification digest for '{}' — candidate ineligible for promotion",
+                        hypothesis.description
+                    ));
+                    let node = AttemptNode {
+                        id: attempt_id.clone(),
+                        parent_id: hyp_parent_id.clone(),
+                        generation,
+                        branch_id: hyp_branch_id.clone(),
+                        hypothesis_id: hypothesis.id.clone(),
+                        description: hypothesis.description.clone(),
+                        diff_sha256: tested_diff_sha256,
+                        patch: Some(tested_diff),
+                        sab_report_path: winner_sab.as_ref().map(|s| s.report_path.clone()),
+                        metrics: Some(winner_metrics.clone()),
+                        composite_score: Some(candidate_composite),
+                        tokens_used: winner_metrics.tokens_used,
+                        wall_time_ms: attempt_start.elapsed().as_millis() as u64,
+                        status: AttemptStatus::InternalError,
+                        failure_class: Some(FailureClass::EnvironmentError),
+                        failure_reason: Some(
+                            "Failed to capture evaluated tree verification digest".into(),
+                        ),
+                        output_tail: None,
+                        binary_sha256: winner_sab.as_ref().map(|s| s.binary_sha256.clone()),
+                        base_commit: attempt_base_commit.clone(),
+                        committed_commit: None,
+                        created_at: chrono_now(),
+                    };
+                    if let Err(err) = log_and_append_attempt(
+                        &attempts_file,
+                        &node,
+                        repo_root,
+                        generation,
+                        gen_start,
+                    ) {
+                        abort_run!(
+                            format!("attempt logging failed: {err}"),
+                            generation.saturating_sub(1),
+                            current_baseline_metrics.sab_score,
+                            hall_of_fame
+                        );
+                    }
+                    continue;
+                }
+            };
+
             let node = AttemptNode {
                 id: attempt_id.clone(),
                 parent_id: hyp_parent_id.clone(),
@@ -2436,8 +2486,6 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 candidate_composite,
                 winner_metrics.wall_clock_secs
             ));
-
-            let evaluated_tree = capture_worktree_tree_id(&worktree);
 
             evaluated_candidates.push(EvaluatedCandidate {
                 hypothesis: hypothesis.clone(),
@@ -2544,7 +2592,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 if commit_winner_to_repo(
                     repo_root,
                     &winner.tested_diff,
-                    winner.evaluated_tree.as_deref(),
+                    Some(&winner.evaluated_tree),
                     &commit_msg,
                 ) {
                     active_parent_id = Some(winner.attempt_id.clone());
@@ -3822,6 +3870,7 @@ impl Drop for WorktreeGuard<'_> {
 /// byte-identical to the state that passed the gates.
 fn capture_tested_diff(worktree: &Path) -> Option<String> {
     let add = Command::new("git")
+        .env_remove("GIT_INDEX_FILE")
         .args(["add", "-A"])
         .current_dir(worktree)
         .output()
@@ -3830,6 +3879,7 @@ fn capture_tested_diff(worktree: &Path) -> Option<String> {
         return None;
     }
     let diff = Command::new("git")
+        .env_remove("GIT_INDEX_FILE")
         .args(["diff", "--cached", "--binary", "HEAD"])
         .current_dir(worktree)
         .output()
@@ -3879,66 +3929,72 @@ pub(crate) fn commit_winner_to_repo(
         return false;
     }
 
+    // Require an expected evaluated tree digest upfront (fail-closed promotion gate).
+    let Some(expected) = expected_tree else {
+        log_error("Missing evaluated tree verification digest — refusing to commit unbenchmarked code (fail-closed promotion gate)");
+        return false;
+    };
+    let expected = expected.trim();
+    if expected.is_empty() {
+        log_error("Empty evaluated tree verification digest — refusing to commit unbenchmarked code (fail-closed promotion gate)");
+        return false;
+    }
+
     if !apply_tested_diff_to_repo(repo_root, tested_diff) {
         return false;
     }
     let edited = patch_edited_paths(tested_diff);
     warn_unrelated_dirty_paths(repo_root, &edited);
 
-    // If an expected evaluated tree is supplied, require the staged tree in repo_root
-    // to match the evaluated tree byte-for-byte before committing. This prevents committing
-    // untested code combinations when HEAD has moved since the candidate was evaluated.
-    if let Some(expected) = expected_tree {
-        let mut add = Command::new("git");
-        add.env_remove("GIT_INDEX_FILE");
-        add.arg("add").arg("--");
-        for p in &edited {
-            add.arg(p);
+    // Require the staged tree in repo_root to match the evaluated tree byte-for-byte before committing.
+    // This prevents committing untested code combinations when HEAD has moved since the candidate was evaluated.
+    let mut add = Command::new("git");
+    add.env_remove("GIT_INDEX_FILE");
+    add.arg("add").arg("--");
+    for p in &edited {
+        add.arg(p);
+    }
+    let add_ok = add
+        .current_dir(repo_root)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !add_ok {
+        log_error("Failed to stage edited paths for tree verification — reverting applied diff");
+        revert_applied_diff(repo_root, tested_diff);
+        return false;
+    }
+
+    let promoted_tree = capture_worktree_tree_id(repo_root);
+    match promoted_tree {
+        Some(ref actual) if actual == expected => {
+            // Exact match: promoted tree is identical to the evaluated benchmark tree
         }
-        let add_ok = add
-            .current_dir(repo_root)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if !add_ok {
-            log_error(
-                "Failed to stage edited paths for tree verification — reverting applied diff",
-            );
+        Some(ref actual) => {
+            log_error(&format!(
+                "Promoted tree mismatch: evaluated benchmark tree is {expected}, but applying diff to HEAD produced {actual} (untested code combination from divergent HEAD) — refusing to commit unbenchmarked code"
+            ));
+            let _ = Command::new("git")
+                .env_remove("GIT_INDEX_FILE")
+                .args(["reset", "HEAD", "--"])
+                .args(&edited)
+                .current_dir(repo_root)
+                .output();
             revert_applied_diff(repo_root, tested_diff);
             return false;
         }
-
-        let promoted_tree = capture_worktree_tree_id(repo_root);
-        match promoted_tree {
-            Some(ref actual) if actual == expected => {
-                // Exact match: promoted tree is identical to the evaluated benchmark tree
-            }
-            Some(ref actual) => {
-                log_error(&format!(
-                    "Promoted tree mismatch: evaluated benchmark tree is {expected}, but applying diff to HEAD produced {actual} (untested code combination from divergent HEAD) — refusing to commit unbenchmarked code"
-                ));
-                let _ = Command::new("git")
-                    .env_remove("GIT_INDEX_FILE")
-                    .args(["reset", "HEAD", "--"])
-                    .args(&edited)
-                    .current_dir(repo_root)
-                    .output();
-                revert_applied_diff(repo_root, tested_diff);
-                return false;
-            }
-            None => {
-                log_error(
-                    "Failed to capture promoted git tree — refusing to commit unbenchmarked code",
-                );
-                let _ = Command::new("git")
-                    .env_remove("GIT_INDEX_FILE")
-                    .args(["reset", "HEAD", "--"])
-                    .args(&edited)
-                    .current_dir(repo_root)
-                    .output();
-                revert_applied_diff(repo_root, tested_diff);
-                return false;
-            }
+        None => {
+            log_error(
+                "Failed to capture promoted git tree — refusing to commit unbenchmarked code",
+            );
+            let _ = Command::new("git")
+                .env_remove("GIT_INDEX_FILE")
+                .args(["reset", "HEAD", "--"])
+                .args(&edited)
+                .current_dir(repo_root)
+                .output();
+            revert_applied_diff(repo_root, tested_diff);
+            return false;
         }
     }
 

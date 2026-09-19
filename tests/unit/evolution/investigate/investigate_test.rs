@@ -41,9 +41,85 @@ fn test_scan_patch_detects_unchecked_unwrap_in_production() {
     assert!(findings[0].title.contains("Unchecked panic vector"));
     assert_eq!(citations.len(), 1);
     assert_eq!(citations[0].file_path, "src/tools/worker.rs");
+    assert_eq!(citations[0].line_range, (0, 0));
     assert!(citations[0]
         .hyperlink
-        .contains("/workspace/src/tools/worker.rs#L1-L10"));
+        .contains("/workspace/src/tools/worker.rs"));
+}
+
+#[test]
+fn test_scan_patch_extracts_real_line_numbers_when_file_exists() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_root = temp.path();
+    std::fs::create_dir_all(repo_root.join("src/tools")).unwrap();
+    std::fs::write(
+        repo_root.join("src/tools/worker.rs"),
+        "// header\n// context\nlet x = foo();\n// footer\n",
+    )
+    .unwrap();
+
+    let patch = r#"[{"file": "src/tools/worker.rs", "search": "let x = foo();", "replace": "let x = foo().unwrap();"}]"#;
+    let (findings, citations) =
+        scan_patch_for_opaque_structures(patch, repo_root, "att-real-lines", None);
+
+    assert_eq!(findings.len(), 1);
+    assert_eq!(citations.len(), 1);
+    // Line range grounded in search text at line 3 of the actual file
+    assert_eq!(citations[0].line_range, (3, 3));
+    assert!(citations[0]
+        .hyperlink
+        .ends_with("src/tools/worker.rs#L3-L3"));
+}
+
+#[test]
+fn test_extract_symbols_from_patch_real_extraction() {
+    let patch = r#"[{"file": "src/algo.rs", "search": "// empty", "replace": "pub fn compute_hash() {}\npub struct StateTracker {}\npub enum ErrorKind {}"}]"#;
+    let symbols = extract_symbols_from_patch(patch);
+    assert_eq!(symbols, vec!["ErrorKind", "StateTracker", "compute_hash"]);
+
+    let empty_patch = r#"[{"file": "src/algo.rs", "search": "x = 1;", "replace": "x = 2;"}]"#;
+    let empty_symbols = extract_symbols_from_patch(empty_patch);
+    assert!(
+        empty_symbols.is_empty(),
+        "Should be empty when no symbols declared"
+    );
+}
+
+#[test]
+fn test_extract_touched_files_and_safety_gate_on_unified_diff() {
+    let repo_root = Path::new("/workspace");
+    let patch = "--- a/src/evolution/daemon.rs\n+++ b/src/evolution/daemon.rs\n@@ -1,3 +1,3 @@\n-old\n+new\n";
+    let touched = extract_touched_files(patch);
+    assert_eq!(touched, vec!["src/evolution/daemon.rs"]);
+
+    let node = make_test_node("att-diff-protected", patch, AttemptStatus::Evaluated);
+    let dossier = investigate_attempt(&node, repo_root);
+
+    // Protected path in unified diff must be detected
+    assert!(!dossier.degrees.degree_5_safety.protected_paths_clean);
+    assert!(dossier.consensus.has_safety_veto);
+    assert_eq!(
+        dossier.consensus.decision,
+        GovernanceDecision::HardRejectVeto
+    );
+}
+
+#[test]
+fn test_simulate_10000_reviewer_governance_rejects_unverified_build_failed() {
+    // Finding 2: BuildFailed must NEVER receive approval, even with 0 heuristic findings
+    let node = make_test_node("att-build-failed", "", AttemptStatus::BuildFailed);
+    let findings = Vec::new();
+    let safety = Degree5Safety {
+        protected_paths_clean: true,
+        rule1_verified: false,
+        merkle_tree_equality: None,
+        has_killswitch_bypass: false,
+    };
+
+    let consensus = simulate_10000_reviewer_governance(&node, &findings, &safety);
+    assert_eq!(consensus.decision, GovernanceDecision::HardRejectVeto);
+    assert_eq!(consensus.votes_approve, 0);
+    assert!(consensus.votes_veto >= 2500);
 }
 
 #[test]
@@ -157,6 +233,7 @@ fn test_export_markdown_renders_table_and_consensus() {
     assert!(md.contains("## 1. The 6 Degrees of Grounded Connection"));
     assert!(md.contains("## 2. Opaque Structure Findings"));
     assert!(md.contains("## 3. Maximum-Power Grounded Citations"));
-    assert!(md.contains("## 4. 10,000-Reviewer Governance & Deliberation"));
+    assert!(md.contains("## 4. Synthetic Heuristic Scoring (10,000-Reviewer Projection Model)"));
     assert!(md.contains("Frontier Safety & Boundary Compliance"));
+    assert!(md.contains("Merkle Tree: `Unmeasured / Not recorded in attempt node`"));
 }

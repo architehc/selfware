@@ -372,14 +372,28 @@ pub fn restore_worktree_parent_state(
         restored_ids.push(ancestor.id.clone());
     }
 
-    // Verify cryptographic diff fidelity against parent's expected diff if in a git repository
+    // Verify cryptographic diff fidelity against parent's expected diff if in a git repository.
+    // Must match daemon::capture_tested_diff canonical representation: `git add -A` followed by
+    // `git diff --cached --binary HEAD`, which correctly includes newly added untracked files and binary changes.
     if worktree.join(".git").exists()
         && parent_node.status == crate::evolution::tree_log::AttemptStatus::Evaluated
         && parent_node.diff_sha256.len() == 64
     {
+        let add_out = Command::new("git")
+            .env_remove("GIT_INDEX_FILE")
+            .args(["add", "-A"])
+            .current_dir(worktree)
+            .output()
+            .map_err(|e| WorktreeError::GitFailed(e.to_string()))?;
+        if !add_out.status.success() {
+            return Err(WorktreeError::GitFailed(
+                "Failed to stage changes for diff fidelity check".into(),
+            ));
+        }
+
         let diff_out = Command::new("git")
             .env_remove("GIT_INDEX_FILE")
-            .args(["diff"])
+            .args(["diff", "--cached", "--binary", "HEAD"])
             .current_dir(worktree)
             .output()
             .map_err(|e| WorktreeError::GitFailed(e.to_string()))?;

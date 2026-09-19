@@ -1660,6 +1660,44 @@ fn test_commit_winner_to_repo_rejects_divergent_promoted_tree() {
 }
 
 #[test]
+fn test_commit_winner_to_repo_rejects_missing_or_empty_expected_tree() {
+    let dir = setup_winner_repo();
+    let root = dir.path();
+
+    let worktree = ast_tools::create_shadow_worktree(root).unwrap();
+    std::fs::write(
+        worktree.join("src/lib.rs"),
+        "pub fn f() -> usize {\n    99\n}\n",
+    )
+    .unwrap();
+    let tested_diff = capture_tested_diff(&worktree).unwrap();
+    ast_tools::cleanup_worktree(root, &worktree).unwrap();
+
+    // 1. Rejects None
+    assert!(
+        !commit_winner_to_repo(root, &tested_diff, None, "🧬 Gen 3 BLOOM"),
+        "Promotion must fail closed when expected_tree is None"
+    );
+
+    // 2. Rejects empty or whitespace string
+    assert!(
+        !commit_winner_to_repo(root, &tested_diff, Some(""), "🧬 Gen 3 BLOOM"),
+        "Promotion must fail closed when expected_tree is empty"
+    );
+    assert!(
+        !commit_winner_to_repo(root, &tested_diff, Some("   \n"), "🧬 Gen 3 BLOOM"),
+        "Promotion must fail closed when expected_tree is whitespace"
+    );
+
+    // 3. Verify repo remains clean
+    let content = std::fs::read_to_string(root.join("src/lib.rs")).unwrap();
+    assert!(
+        !content.contains("99"),
+        "Candidate diff must not be committed when expected_tree is missing"
+    );
+}
+
+#[test]
 fn test_apply_tested_diff_refuses_protected_paths() {
     let dir = setup_winner_repo();
     let root = dir.path();
@@ -1808,7 +1846,7 @@ fn test_ranked_candidate_promotion_runner_up_qualifies() {
             metrics: cand1_metrics.clone(),
             sab_result: Some(cand1_sab.clone()),
             tested_diff: "diff1".into(),
-            evaluated_tree: None,
+            evaluated_tree: "tree1".into(),
             composite: cand1_composite,
             attempt_id: "att-1".into(),
             branch_id: "branch-1".into(),
@@ -1824,7 +1862,7 @@ fn test_ranked_candidate_promotion_runner_up_qualifies() {
             metrics: cand2_metrics.clone(),
             sab_result: Some(cand2_sab.clone()),
             tested_diff: "diff2".into(),
-            evaluated_tree: None,
+            evaluated_tree: "tree2".into(),
             composite: cand2_composite,
             attempt_id: "att-2".into(),
             branch_id: "branch-2".into(),

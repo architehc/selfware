@@ -602,3 +602,126 @@ fn test_strict_patch_fails_on_divergent_code() {
     let res = apply_strict_patch(repo_root, bad_patch);
     assert!(!res, "apply_strict_patch must fail on divergent context");
 }
+
+#[test]
+fn test_restore_worktree_candidate_with_new_file() {
+    let temp_repo = tempfile::tempdir().unwrap();
+    let repo_root = temp_repo.path();
+
+    let run_git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .env_remove("GIT_INDEX_FILE")
+            .args(args)
+            .current_dir(repo_root)
+            .output()
+            .expect("git cmd failed");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+
+    run_git(&["init", "-b", "main"]);
+    run_git(&["config", "user.email", "test@example.com"]);
+    run_git(&["config", "user.name", "Test Runner"]);
+
+    std::fs::create_dir_all(repo_root.join("src")).unwrap();
+    std::fs::write(repo_root.join("src/lib.rs"), "pub fn root() {}\n").unwrap();
+    run_git(&["add", "src/lib.rs"]);
+    run_git(&["commit", "-m", "initial"]);
+    let c0 = run_git(&["rev-parse", "HEAD"]);
+
+    // Unified diff creating a completely new file
+    let patch_new_file = "diff --git a/src/new_mod.rs b/src/new_mod.rs\nnew file mode 100644\n--- /dev/null\n+++ b/src/new_mod.rs\n@@ -0,0 +1,3 @@\n+pub fn new_feature() -> bool {\n+    true\n+}\n".to_string();
+
+    // Create a temporary worktree to capture the exact canonical diff produced by this patch
+    let wt = create_shadow_worktree(repo_root).unwrap();
+    assert!(apply_strict_patch(&wt, &patch_new_file));
+    let add_out = std::process::Command::new("git")
+        .env_remove("GIT_INDEX_FILE")
+        .args(["add", "-A"])
+        .current_dir(&wt)
+        .output()
+        .unwrap();
+    assert!(add_out.status.success());
+    let diff_out = std::process::Command::new("git")
+        .env_remove("GIT_INDEX_FILE")
+        .args(["diff", "--cached", "--binary", "HEAD"])
+        .current_dir(&wt)
+        .output()
+        .unwrap();
+    assert!(diff_out.status.success());
+    let canonical_diff = String::from_utf8_lossy(&diff_out.stdout).to_string();
+    let diff_sha = crate::evolution::tree_log::compute_sha256(canonical_diff.as_bytes());
+    cleanup_worktree(repo_root, &wt).unwrap();
+
+    let attempts_file = repo_root.join("attempts.jsonl");
+    let node_baseline = crate::evolution::tree_log::AttemptNode {
+        id: "att-base".into(),
+        parent_id: None,
+        generation: 0,
+        branch_id: "base".into(),
+        hypothesis_id: "base".into(),
+        description: "Base".into(),
+        diff_sha256: "0".into(),
+        patch: None,
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(0.5),
+        tokens_used: None,
+        wall_time_ms: 0,
+        status: crate::evolution::tree_log::AttemptStatus::Baseline,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        base_commit: Some(c0.clone()),
+        committed_commit: None,
+        created_at: "2026-09-18T00:00:00Z".into(),
+    };
+
+    let node_candidate = crate::evolution::tree_log::AttemptNode {
+        id: "att-newfile".into(),
+        parent_id: Some("att-base".into()),
+        generation: 1,
+        branch_id: "branch-newfile".into(),
+        hypothesis_id: "hyp-newfile".into(),
+        description: "Candidate adding new file".into(),
+        diff_sha256: diff_sha,
+        patch: Some(patch_new_file),
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(0.9),
+        tokens_used: None,
+        wall_time_ms: 100,
+        status: crate::evolution::tree_log::AttemptStatus::Evaluated,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        base_commit: Some(c0),
+        committed_commit: None,
+        created_at: "2026-09-18T00:01:00Z".into(),
+    };
+
+    let lines = format!(
+        "{}\n{}\n",
+        serde_json::to_string(&node_baseline).unwrap(),
+        serde_json::to_string(&node_candidate).unwrap()
+    );
+    std::fs::write(&attempts_file, lines).unwrap();
+
+    // Restoration must succeed and verify diff fidelity against newly added file
+    let restored_wt =
+        create_shadow_worktree_for_parent(repo_root, &attempts_file, Some("att-newfile"))
+            .expect("Parent adding new file must restore cleanly with staged diff fidelity");
+
+    assert!(restored_wt.join("src/new_mod.rs").exists());
+    let content = std::fs::read_to_string(restored_wt.join("src/new_mod.rs")).unwrap();
+    assert!(content.contains("pub fn new_feature()"));
+
+    cleanup_worktree(repo_root, &restored_wt).unwrap();
+}

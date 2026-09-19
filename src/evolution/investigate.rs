@@ -215,6 +215,166 @@ pub struct InvestigativeDossier {
     pub consensus: ReviewerConsensus,
 }
 
+/// Extracts touched file paths across both JSON search-replace and unified diff formats.
+pub fn extract_touched_files(patch: &str) -> Vec<String> {
+    let mut files = Vec::new();
+
+    // 1. JSON search-replace format
+    if let Ok(edits) = serde_json::from_str::<Vec<serde_json::Value>>(patch) {
+        for edit in edits {
+            if let Some(f) = edit
+                .get("file")
+                .or_else(|| edit.get("path"))
+                .and_then(|v| v.as_str())
+            {
+                let trimmed = f.trim();
+                if !trimmed.is_empty() {
+                    files.push(trimmed.to_string());
+                }
+            }
+        }
+    }
+
+    // 2. Unified diff format
+    for line in patch.lines() {
+        let (header, prefix) = if let Some(rest) = line.strip_prefix("+++ ") {
+            (rest, "b/")
+        } else if let Some(rest) = line.strip_prefix("--- ") {
+            (rest, "a/")
+        } else {
+            continue;
+        };
+        let p = header.trim().trim_start_matches(prefix).trim();
+        if !p.is_empty() && p != "/dev/null" {
+            files.push(p.to_string());
+        }
+    }
+
+    files.sort();
+    files.dedup();
+    files
+}
+
+/// Extracts declared Rust symbols (fn, struct, enum, trait, type, const) directly from patch text.
+pub fn extract_symbols_from_patch(patch: &str) -> Vec<String> {
+    let mut symbols = Vec::new();
+
+    let extract_ident = |line: &str, keyword: &str| -> Option<String> {
+        let idx = line.find(keyword)?;
+        let rest = &line[idx + keyword.len()..];
+        let ident: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if ident.is_empty() {
+            None
+        } else {
+            Some(ident)
+        }
+    };
+
+    let keywords = ["fn ", "struct ", "enum ", "trait ", "type ", "const "];
+
+    for line in patch.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("+++") || trimmed.starts_with("---") || trimmed.starts_with("//") {
+            continue;
+        }
+        for kw in keywords {
+            if let Some(ident) = extract_ident(trimmed, kw) {
+                if !matches!(
+                    ident.as_str(),
+                    "if" | "while"
+                        | "match"
+                        | "return"
+                        | "true"
+                        | "false"
+                        | "mut"
+                        | "pub"
+                        | "ref"
+                        | "self"
+                        | "Self"
+                        | "where"
+                        | "for"
+                        | "in"
+                ) {
+                    symbols.push(ident);
+                }
+            }
+        }
+    }
+
+    symbols.sort();
+    symbols.dedup();
+    symbols
+}
+
+/// Searches the target file in repo_root for excerpt or fallback search text.
+/// Returns 1-indexed (start_line, end_line) if located, or (0, 0) if unmeasured/unavailable.
+pub fn find_line_range_in_file(
+    repo_root: &Path,
+    file_path: &str,
+    target_excerpt: &str,
+    fallback_search: Option<&str>,
+) -> (usize, usize) {
+    let target_file = repo_root.join(file_path);
+    let Ok(content) = std::fs::read_to_string(&target_file) else {
+        return (0, 0);
+    };
+
+    let count_line =
+        |pos: usize| -> usize { content[..pos].chars().filter(|&c| c == '\n').count() + 1 };
+
+    let trimmed_target = target_excerpt.trim();
+    if !trimmed_target.is_empty() {
+        if let Some(pos) = content.find(trimmed_target) {
+            let start_line = count_line(pos);
+            let match_lines = trimmed_target.lines().count().max(1);
+            return (start_line, start_line + match_lines - 1);
+        }
+
+        if let Some(first_line) = trimmed_target
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+        {
+            for (idx, line) in content.lines().enumerate() {
+                if line.contains(first_line) {
+                    let start_line = idx + 1;
+                    let match_lines = trimmed_target.lines().count().max(1);
+                    return (start_line, start_line + match_lines - 1);
+                }
+            }
+        }
+    }
+
+    if let Some(search) = fallback_search {
+        let trimmed_search = search.trim();
+        if !trimmed_search.is_empty() {
+            if let Some(pos) = content.find(trimmed_search) {
+                let start_line = count_line(pos);
+                let match_lines = trimmed_search.lines().count().max(1);
+                return (start_line, start_line + match_lines - 1);
+            }
+            if let Some(first_line) = trimmed_search
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+            {
+                for (idx, line) in content.lines().enumerate() {
+                    if line.contains(first_line) {
+                        let start_line = idx + 1;
+                        let match_lines = trimmed_search.lines().count().max(1);
+                        return (start_line, start_line + match_lines - 1);
+                    }
+                }
+            }
+        }
+    }
+
+    (0, 0)
+}
+
 /// Scans raw patch content and surrounding repo context for opaque structures.
 pub fn scan_patch_for_opaque_structures(
     patch_str: &str,
@@ -227,21 +387,34 @@ pub fn scan_patch_for_opaque_structures(
     let mut citation_idx = 0;
 
     let mut make_citation = |file_path: &str,
-                             start_line: usize,
-                             end_line: usize,
-                             excerpt: &str,
+                             target_excerpt: &str,
+                             fallback_search: Option<&str>,
                              symbol: Option<String>| {
         citation_idx += 1;
-        let content_hash = compute_sha256(excerpt.as_bytes());
-        let hyperlink = format!(
-            "file://{}{}{file_path}#L{start_line}-L{end_line}",
-            repo_root.display(),
-            if repo_root.to_string_lossy().ends_with('/') {
-                ""
-            } else {
-                "/"
-            }
-        );
+        let (start_line, end_line) =
+            find_line_range_in_file(repo_root, file_path, target_excerpt, fallback_search);
+        let content_hash = compute_sha256(target_excerpt.as_bytes());
+        let hyperlink = if start_line > 0 && end_line > 0 {
+            format!(
+                "file://{}{}{file_path}#L{start_line}-L{end_line}",
+                repo_root.display(),
+                if repo_root.to_string_lossy().ends_with('/') {
+                    ""
+                } else {
+                    "/"
+                }
+            )
+        } else {
+            format!(
+                "file://{}{}{file_path}",
+                repo_root.display(),
+                if repo_root.to_string_lossy().ends_with('/') {
+                    ""
+                } else {
+                    "/"
+                }
+            )
+        };
         GroundedCitation {
             citation_id: format!("cite-{attempt_id}-{citation_idx}"),
             file_path: file_path.to_string(),
@@ -250,7 +423,7 @@ pub fn scan_patch_for_opaque_structures(
             content_hash,
             git_commit: base_commit.map(str::to_string),
             attempt_id: Some(attempt_id.to_string()),
-            exact_excerpt: excerpt.to_string(),
+            exact_excerpt: target_excerpt.to_string(),
             hyperlink,
         }
     };
@@ -264,12 +437,13 @@ pub fn scan_patch_for_opaque_structures(
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown_file");
             let replace_text = edit.get("replace").and_then(|v| v.as_str()).unwrap_or("");
+            let search_text = edit.get("search").and_then(|v| v.as_str());
 
             // Finding 1: Unchecked unwrap in production code
             if !file_path.contains("test")
                 && (replace_text.contains(".unwrap()") || replace_text.contains(".expect("))
             {
-                let cite = make_citation(file_path, 1, 10, replace_text, None);
+                let cite = make_citation(file_path, replace_text, search_text, None);
                 findings.push(OpaqueStructureFinding {
                     category: OpaqueCategory::UncheckedUnwrap,
                     severity: FindingSeverity::Critical,
@@ -292,7 +466,7 @@ pub fn scan_patch_for_opaque_structures(
                     && !trimmed.starts_with("const ")
                     && !trimmed.starts_with("//")
                 {
-                    let cite = make_citation(file_path, 1, 5, trimmed, None);
+                    let cite = make_citation(file_path, trimmed, search_text, None);
                     findings.push(OpaqueStructureFinding {
                         category: OpaqueCategory::ImplicitConstant,
                         severity: FindingSeverity::Warning,
@@ -308,7 +482,7 @@ pub fn scan_patch_for_opaque_structures(
 
             // Finding 3: Undocumented public API
             if replace_text.contains("pub fn ") && !replace_text.contains("///") {
-                let cite = make_citation(file_path, 1, 8, replace_text, None);
+                let cite = make_citation(file_path, replace_text, search_text, None);
                 findings.push(OpaqueStructureFinding {
                     category: OpaqueCategory::UndocumentedPublicApi,
                     severity: FindingSeverity::Warning,
@@ -324,7 +498,7 @@ pub fn scan_patch_for_opaque_structures(
             if replace_text.contains("unwrap_or_default()")
                 || replace_text.contains(".unwrap_or_else(|_|")
             {
-                let cite = make_citation(file_path, 1, 5, replace_text, None);
+                let cite = make_citation(file_path, replace_text, search_text, None);
                 findings.push(OpaqueStructureFinding {
                     category: OpaqueCategory::SilentFallback,
                     severity: FindingSeverity::Info,
@@ -340,14 +514,20 @@ pub fn scan_patch_for_opaque_structures(
         // 2. Unified diff format
         let mut current_file = "unknown_file".to_string();
         for line in patch_str.lines() {
-            if let Some(stripped) = line.strip_prefix("+++ b/") {
-                current_file = stripped.to_string();
+            if let Some(stripped) = line.strip_prefix("+++ ") {
+                let p = stripped.trim().trim_start_matches("b/").trim();
+                current_file = p.to_string();
             } else if let Some(added) = line.strip_prefix('+') {
-                if !added.starts_with("++")
-                    && !current_file.contains("test")
+                if added.starts_with('+') {
+                    continue;
+                }
+                let trimmed = added.trim();
+
+                // Unchecked unwrap in production
+                if !current_file.contains("test")
                     && (added.contains(".unwrap()") || added.contains(".expect("))
                 {
-                    let cite = make_citation(&current_file, 1, 5, added, None);
+                    let cite = make_citation(&current_file, trimmed, None, None);
                     findings.push(OpaqueStructureFinding {
                         category: OpaqueCategory::UncheckedUnwrap,
                         severity: FindingSeverity::Critical,
@@ -359,6 +539,60 @@ pub fn scan_patch_for_opaque_structures(
                     });
                     citations.push(cite);
                 }
+
+                // Implicit constant
+                if (trimmed.contains(" = ") || trimmed.contains(": "))
+                    && (trimmed.contains("1000")
+                        || trimmed.contains("5000")
+                        || trimmed.contains("0.05")
+                        || trimmed.contains("0.1"))
+                    && !trimmed.starts_with("const ")
+                    && !trimmed.starts_with("//")
+                {
+                    let cite = make_citation(&current_file, trimmed, None, None);
+                    findings.push(OpaqueStructureFinding {
+                        category: OpaqueCategory::ImplicitConstant,
+                        severity: FindingSeverity::Warning,
+                        title: "Implicit numerical constant embedded in unified diff".to_string(),
+                        explanation: format!("Literal value in '{trimmed}' lacks an explicit named constant or configuration binding."),
+                        citation: cite.clone(),
+                        remediation: "Define a documented `const` or bind to an evolutionary configuration setting.".to_string(),
+                    });
+                    citations.push(cite);
+                }
+
+                // Undocumented public API
+                if trimmed.contains("pub fn ") && !trimmed.contains("///") {
+                    let cite = make_citation(&current_file, trimmed, None, None);
+                    findings.push(OpaqueStructureFinding {
+                        category: OpaqueCategory::UndocumentedPublicApi,
+                        severity: FindingSeverity::Warning,
+                        title: "Public function declared without rustdoc in unified diff"
+                            .to_string(),
+                        explanation: "Exported `pub fn` missing `///` documentation.".to_string(),
+                        citation: cite.clone(),
+                        remediation: "Add comprehensive `///` docstrings.".to_string(),
+                    });
+                    citations.push(cite);
+                }
+
+                // Silent fallback
+                if trimmed.contains("unwrap_or_default()")
+                    || trimmed.contains(".unwrap_or_else(|_|")
+                {
+                    let cite = make_citation(&current_file, trimmed, None, None);
+                    findings.push(OpaqueStructureFinding {
+                        category: OpaqueCategory::SilentFallback,
+                        severity: FindingSeverity::Info,
+                        title: "Silent fallback obscures failure mode in unified diff".to_string(),
+                        explanation: "Defaulting silently upon error masks degradation."
+                            .to_string(),
+                        citation: cite.clone(),
+                        remediation: "Emit structured tracing or record a typed failure class."
+                            .to_string(),
+                    });
+                    citations.push(cite);
+                }
             }
         }
     }
@@ -366,7 +600,11 @@ pub fn scan_patch_for_opaque_structures(
     (findings, citations)
 }
 
-/// Simulates the 10,000-reviewer consensus process across the 4 specialized governance personas.
+/// Simulates synthetic heuristic scoring modeled as a 10,000-reviewer governance panel
+/// across 4 specialized evaluator perspectives.
+///
+/// NOTE: Governance scores and vote distributions are synthetic heuristic projections
+/// derived from automated policy rules and verification gates, not independent human peer review.
 pub fn simulate_10000_reviewer_governance(
     node: &AttemptNode,
     findings: &[OpaqueStructureFinding],
@@ -379,6 +617,9 @@ pub fn simulate_10000_reviewer_governance(
         .iter()
         .any(|f| f.severity == FindingSeverity::Warning);
 
+    let is_verified_success =
+        node.is_successful_evaluation() || node.status == AttemptStatus::Baseline;
+
     // 1. Frontier Safety & Boundary Compliance (3,500 reviewers / 35% weight)
     let safety_veto = !safety.protected_paths_clean
         || safety.has_killswitch_bypass
@@ -387,6 +628,9 @@ pub fn simulate_10000_reviewer_governance(
 
     let (s_app, s_cla, s_qua, s_vet) = if safety_veto {
         (0, 0, 0, 3500)
+    } else if !is_verified_success {
+        // AGENTS.md Rule 1: CI red means stop. Unverified or failing code cannot be approved by Safety.
+        (0, 500, 1000, 2000)
     } else if has_critical {
         (500, 1000, 1500, 500)
     } else if has_warning {
@@ -398,6 +642,11 @@ pub fn simulate_10000_reviewer_governance(
     let safety_score = s_app as f64 / 3500.0;
     let safety_assessment = if safety_veto {
         "CRITICAL VETO: Protected path or Merkle tree invariant breach detected.".to_string()
+    } else if !is_verified_success {
+        format!(
+            "VETO/QUARANTINE: Attempt failed verification (status: {:?}).",
+            node.status
+        )
     } else if has_critical {
         "CONCERN: Critical unhandled panic or contract risk requires quarantine.".to_string()
     } else {
@@ -418,6 +667,12 @@ pub fn simulate_10000_reviewer_governance(
     // 2. Systems & Performance Robustness (2,500 reviewers / 25% weight)
     let (sys_app, sys_cla, sys_qua, sys_vet) = if node.status == AttemptStatus::Timeout {
         (0, 0, 500, 2000)
+    } else if node.status == AttemptStatus::BuildFailed
+        || node.status == AttemptStatus::InternalError
+    {
+        (0, 0, 1000, 1500)
+    } else if !is_verified_success {
+        (0, 500, 1500, 500)
     } else if has_critical {
         (1000, 800, 700, 0)
     } else if has_warning {
@@ -429,6 +684,10 @@ pub fn simulate_10000_reviewer_governance(
     let sys_score = sys_app as f64 / 2500.0;
     let sys_assessment = if node.status == AttemptStatus::Timeout {
         "VETO: Mutation exceeded latency threshold or timed out.".to_string()
+    } else if node.status == AttemptStatus::BuildFailed {
+        "VETO: Release build failed during system compilation.".to_string()
+    } else if !is_verified_success {
+        "NOTICE: System performance could not be verified due to gate failure.".to_string()
     } else {
         "PASS: Resource bounds and runtime efficiency confirmed.".to_string()
     };
@@ -445,10 +704,20 @@ pub fn simulate_10000_reviewer_governance(
     };
 
     // 3. Software Architecture & Code Quality (2,000 reviewers / 20% weight)
-    let (swe_app, swe_cla, swe_qua, swe_vet) = if node.status == AttemptStatus::CompileFailed {
+    let swe_failed = matches!(
+        node.status,
+        AttemptStatus::CompileFailed
+            | AttemptStatus::BuildFailed
+            | AttemptStatus::TestFailed
+            | AttemptStatus::ClippyFailed
+            | AttemptStatus::FormatFailed
+            | AttemptStatus::PatchFailed
+    );
+
+    let (swe_app, swe_cla, swe_qua, swe_vet) = if swe_failed {
         (0, 0, 200, 1800)
-    } else if node.status == AttemptStatus::TestFailed {
-        (0, 200, 400, 1400)
+    } else if !is_verified_success {
+        (0, 500, 500, 1000)
     } else if has_critical {
         (600, 1000, 400, 0)
     } else if has_warning {
@@ -458,12 +727,15 @@ pub fn simulate_10000_reviewer_governance(
     };
 
     let swe_score = swe_app as f64 / 2000.0;
-    let swe_assessment = if node.status == AttemptStatus::CompileFailed
-        || node.status == AttemptStatus::TestFailed
-    {
-        "VETO: Regression in compilation or unit test suite detected.".to_string()
+    let swe_assessment = if swe_failed {
+        format!(
+            "VETO: Regression detected in compilation, lint, or tests ({:?}).",
+            node.status
+        )
     } else if has_warning {
         "NOTICE: Code quality warnings detected; clarification recommended.".to_string()
+    } else if !is_verified_success {
+        "QUARANTINE: Code structure unverified due to incomplete evaluation.".to_string()
     } else {
         "PASS: High structural clarity, strong typing, clean formatting.".to_string()
     };
@@ -484,8 +756,8 @@ pub fn simulate_10000_reviewer_governance(
         (0, 0, 500, 1500)
     } else if node.status == AttemptStatus::InternalError {
         (0, 500, 1500, 0)
-    } else if node.composite_score.is_none() && node.status == AttemptStatus::Evaluated {
-        (500, 500, 1000, 0)
+    } else if !is_verified_success {
+        (0, 500, 1000, 500)
     } else {
         (2000, 0, 0, 0)
     };
@@ -493,6 +765,8 @@ pub fn simulate_10000_reviewer_governance(
     let prov_score = prov_app as f64 / 2000.0;
     let prov_assessment = if node.diff_sha256.len() != 64 {
         "VETO: Cryptographic diff hash corrupt or missing.".to_string()
+    } else if !is_verified_success {
+        "NOTICE: Incomplete execution trace or unverified metrics.".to_string()
     } else {
         "PASS: Deterministic provenance and verifiable execution trace verified.".to_string()
     };
@@ -514,7 +788,7 @@ pub fn simulate_10000_reviewer_governance(
     let tot_vet = s_vet + sys_vet + swe_vet + prov_vet;
     let consensus_score = tot_app as f64 / 10000.0;
 
-    let decision = if safety_veto || tot_vet >= 2500 {
+    let decision = if safety_veto || tot_vet >= 2500 || !is_verified_success {
         GovernanceDecision::HardRejectVeto
     } else if consensus_score >= 0.85 {
         GovernanceDecision::ApproveForPromotion
@@ -524,15 +798,22 @@ pub fn simulate_10000_reviewer_governance(
         GovernanceDecision::QuarantineForExperimentation
     };
 
-    let deliberation_summary = format!(
-        "Panel of 10,000 reviewers reached verdict '{}' with {:.1}% approval ({}/10000 approve, {} clarify, {} quarantine, {} veto).",
-        decision,
-        consensus_score * 100.0,
-        tot_app,
-        tot_cla,
-        tot_qua,
-        tot_vet
-    );
+    let deliberation_summary = if !is_verified_success {
+        format!(
+            "Synthetic Heuristic Scoring (10,000-Reviewer Projection Model): Verdict 'HARD REJECT & VETO' — Candidate failed validation (status: {:?}); promotion blocked without verified successful benchmark.",
+            node.status
+        )
+    } else {
+        format!(
+            "Synthetic Heuristic Scoring (10,000-Reviewer Projection Model): Verdict '{}' with {:.1}% approval ({}/10000 approve, {} clarify, {} quarantine, {} veto). [Automated heuristic scoring projection, not independent human peer review]",
+            decision,
+            consensus_score * 100.0,
+            tot_app,
+            tot_cla,
+            tot_qua,
+            tot_vet
+        )
+    };
 
     ReviewerConsensus {
         total_reviewers: 10000,
@@ -558,21 +839,8 @@ pub fn investigate_attempt(node: &AttemptNode, repo_root: &Path) -> Investigativ
         node.base_commit.as_deref(),
     );
 
-    // Extract files touched
-    let mut files_touched = Vec::new();
-    if let Ok(edits) = serde_json::from_str::<Vec<serde_json::Value>>(patch_str) {
-        for edit in edits {
-            if let Some(f) = edit
-                .get("file")
-                .or_else(|| edit.get("path"))
-                .and_then(|v| v.as_str())
-            {
-                files_touched.push(f.to_string());
-            }
-        }
-    }
-    files_touched.sort();
-    files_touched.dedup();
+    // Extract files touched across both JSON search-replace and unified diff formats
+    let files_touched = extract_touched_files(patch_str);
 
     let lines_added = patch_str
         .lines()
@@ -583,23 +851,20 @@ pub fn investigate_attempt(node: &AttemptNode, repo_root: &Path) -> Investigativ
         .filter(|l| l.starts_with('-') && !l.starts_with("---"))
         .count();
 
-    // Degree 5: Safety checks
-    let protected_paths = ["src/evolution/", "src/safety/", "Cargo.toml", "Cargo.lock"];
+    // Degree 5: Safety checks (using repo-wide canonical protected path filter)
     let protected_clean = !files_touched
         .iter()
-        .any(|f| protected_paths.iter().any(|p| f.starts_with(p)));
+        .any(|f| crate::evolution::is_protected(Path::new(f)));
 
     let safety = Degree5Safety {
         protected_paths_clean: protected_clean,
         rule1_verified: node.status == AttemptStatus::Evaluated
             || node.status == AttemptStatus::Baseline,
-        merkle_tree_equality: if node.committed_commit.is_some() {
-            Some(true)
-        } else {
-            None
-        },
+        merkle_tree_equality: None, // Honest reporting: Merkle tree equality is unrecorded in historical attempt node
         has_killswitch_bypass: false,
     };
+
+    let primary_symbols = extract_symbols_from_patch(patch_str);
 
     let degrees = SixDegreesOfConnection {
         degree_1_intent: Degree1Intent {
@@ -617,12 +882,9 @@ pub fn investigate_attempt(node: &AttemptNode, repo_root: &Path) -> Investigativ
             is_json_search_replace: patch_str.starts_with('['),
         },
         degree_3_ontology: Degree3Ontology {
-            primary_symbols: vec!["calculate_complexity".to_string()],
-            callers_affected: vec!["analyze_file".to_string(), "CodeMetrics".to_string()],
-            cooccurring_concepts: vec![
-                "CyclomaticComplexity".to_string(),
-                "MetricReport".to_string(),
-            ],
+            primary_symbols,
+            callers_affected: Vec::new(),
+            cooccurring_concepts: Vec::new(),
         },
         degree_4_empirical: Degree4Empirical {
             status: node.status,
@@ -639,7 +901,7 @@ pub fn investigate_attempt(node: &AttemptNode, repo_root: &Path) -> Investigativ
             branch_id: node.branch_id.clone(),
             base_commit: node.base_commit.clone(),
             committed_commit: node.committed_commit.clone(),
-            lineage_depth: if node.parent_id.is_some() { 2 } else { 1 },
+            lineage_depth: node.generation,
             promotes_to_main: node.committed_commit.is_some(),
         },
     };
@@ -686,10 +948,24 @@ pub fn export_markdown(dossier: &InvestigativeDossier) -> String {
         &dossier.degrees.degree_2_syntax.diff_sha256
             [..12.min(dossier.degrees.degree_2_syntax.diff_sha256.len())]
     ));
+    let symbols_desc = if dossier.degrees.degree_3_ontology.primary_symbols.is_empty() {
+        "None extracted / Unavailable".to_string()
+    } else {
+        format!("{:?}", dossier.degrees.degree_3_ontology.primary_symbols)
+    };
+    let callers_desc = if dossier
+        .degrees
+        .degree_3_ontology
+        .callers_affected
+        .is_empty()
+    {
+        "None identified / Unavailable".to_string()
+    } else {
+        format!("{:?}", dossier.degrees.degree_3_ontology.callers_affected)
+    };
     out.push_str(&format!(
-        "| **3** | **Ontological Neighborhood** | Symbols: `{:?}` · Downstream Callers: `{:?}` |\n",
-        dossier.degrees.degree_3_ontology.primary_symbols,
-        dossier.degrees.degree_3_ontology.callers_affected
+        "| **3** | **Ontological Neighborhood** | Symbols: `{}` · Downstream Callers: `{}` |\n",
+        symbols_desc, callers_desc
     ));
     out.push_str(&format!(
         "| **4** | **Empirical Verification** | Status: `{:?}` · Score: `{:.4}` · Time: `{}ms` |\n",
@@ -701,9 +977,16 @@ pub fn export_markdown(dossier: &InvestigativeDossier) -> String {
             .unwrap_or(0.0),
         dossier.degrees.degree_4_empirical.wall_time_ms
     ));
-    out.push_str(&format!("| **5** | **Safety & Envelopes** | Protected Paths Clean: `{}` · Rule 1 Verified: `{}` |\n",
+    let merkle_desc = match dossier.degrees.degree_5_safety.merkle_tree_equality {
+        Some(true) => "Verified Exact",
+        Some(false) => "MISMATCH (Divergent)",
+        None => "Unmeasured / Not recorded in attempt node",
+    };
+    out.push_str(&format!(
+        "| **5** | **Safety & Envelopes** | Protected Paths Clean: `{}` · Rule 1 Verified: `{}` · Merkle Tree: `{}` |\n",
         dossier.degrees.degree_5_safety.protected_paths_clean,
-        dossier.degrees.degree_5_safety.rule1_verified
+        dossier.degrees.degree_5_safety.rule1_verified,
+        merkle_desc
     ));
     out.push_str(&format!("| **6** | **Lineage & Provenance** | Gen: `{}` · Branch: `{}` · Base: `{:?}` · Promoted: `{:?}` |\n\n",
         dossier.degrees.degree_6_lineage.generation,
@@ -732,9 +1015,14 @@ pub fn export_markdown(dossier: &InvestigativeDossier) -> String {
         out.push_str("No localized code citations recorded.\n\n");
     } else {
         for c in &dossier.citations {
+            let loc_str = if c.line_range == (0, 0) {
+                format!("{}:[line range unavailable in current tree]", c.file_path)
+            } else {
+                format!("{}:L{}-L{}", c.file_path, c.line_range.0, c.line_range.1)
+            };
             out.push_str(&format!(
-                "* **Citation `{}`**: [{}:L{}-L{}](<{}>)\n",
-                c.citation_id, c.file_path, c.line_range.0, c.line_range.1, c.hyperlink
+                "* **Citation `{}`**: [{loc_str}](<{}>)\n",
+                c.citation_id, c.hyperlink
             ));
             out.push_str(&format!("  * Content SHA256: `{}`\n", c.content_hash));
             out.push_str(&format!(
@@ -745,7 +1033,8 @@ pub fn export_markdown(dossier: &InvestigativeDossier) -> String {
         out.push('\n');
     }
 
-    out.push_str("## 4. 10,000-Reviewer Governance & Deliberation\n\n");
+    out.push_str("## 4. Synthetic Heuristic Scoring (10,000-Reviewer Projection Model)\n\n");
+    out.push_str("> [!NOTE]\n> Governance scores and vote distributions are synthetic heuristic projections derived from automated policy rules, static analysis, and benchmark telemetry, not independent human peer review.\n\n");
     out.push_str(
         "| Reviewer Perspective | Reviewers | Approve | Clarify | Quarantine | Veto | Score |\n",
     );
