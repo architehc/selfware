@@ -1544,8 +1544,8 @@ fn test_worktree_guard_cleans_up_on_drop() {
     );
 }
 
-#[test]
-fn test_commit_scoped_paths_excludes_unrelated_dirty_and_env() {
+#[tokio::test]
+async fn test_commit_scoped_paths_excludes_unrelated_dirty_and_env() {
     let _exec = crate::test_support::ExecGuard::hold();
     let dir = setup_winner_repo();
     let root = dir.path();
@@ -1553,11 +1553,7 @@ fn test_commit_scoped_paths_excludes_unrelated_dirty_and_env() {
     std::fs::write(root.join("src/lib.rs"), "pub fn f() -> usize { 2 }\n").unwrap();
 
     let paths = vec![PathBuf::from("src/lib.rs")];
-    assert!(commit_scoped_paths(
-        root,
-        &paths,
-        "🧬 Gen 1 BLOOM: 50 → 60 | test"
-    ));
+    assert!(commit_scoped_paths(root, &paths, "🧬 Gen 1 BLOOM: 50 → 60 | test").await);
 
     // The commit contains ONLY src/lib.rs.
     let names = git_stdout(root, &["show", "--name-only", "--format=", "HEAD"]);
@@ -1581,8 +1577,8 @@ fn test_commit_scoped_paths_excludes_unrelated_dirty_and_env() {
     assert_eq!(notes, "user work in progress\n");
 }
 
-#[test]
-fn test_commit_scoped_paths_handles_new_and_deleted_files() {
+#[tokio::test]
+async fn test_commit_scoped_paths_handles_new_and_deleted_files() {
     let _exec = crate::test_support::ExecGuard::hold();
     let dir = setup_winner_repo();
     let root = dir.path();
@@ -1594,7 +1590,7 @@ fn test_commit_scoped_paths_handles_new_and_deleted_files() {
     std::fs::remove_file(root.join("notes.txt")).unwrap();
 
     let paths = vec![PathBuf::from("src/new.rs"), PathBuf::from("notes.txt")];
-    assert!(commit_scoped_paths(root, &paths, "🧬 Gen 2 BLOOM"));
+    assert!(commit_scoped_paths(root, &paths, "🧬 Gen 2 BLOOM").await);
 
     let names = git_stdout(root, &["show", "--name-status", "--format=", "HEAD"]);
     assert!(names.contains("A\tsrc/new.rs"), "new file added: {}", names);
@@ -1606,8 +1602,8 @@ fn test_commit_scoped_paths_handles_new_and_deleted_files() {
     assert!(!names.contains(".env"));
 }
 
-#[test]
-fn test_commit_winner_to_repo_applies_tested_diff_exactly() {
+#[tokio::test]
+async fn test_commit_winner_to_repo_applies_tested_diff_exactly() {
     let _exec = crate::test_support::ExecGuard::hold();
     let dir = setup_winner_repo();
     let root = dir.path();
@@ -1623,12 +1619,7 @@ fn test_commit_winner_to_repo_applies_tested_diff_exactly() {
     let tree_id = capture_worktree_tree_id(&worktree).unwrap();
     ast_tools::cleanup_worktree(root, &worktree).unwrap();
 
-    assert!(commit_winner_to_repo(
-        root,
-        &tested_diff,
-        Some(&tree_id),
-        "🧬 Gen 3 BLOOM"
-    ));
+    assert!(commit_winner_to_repo(root, &tested_diff, Some(&tree_id), "🧬 Gen 3 BLOOM").await);
     // The committed content is byte-identical to the TESTED worktree
     // content (fmt fix included), not the raw LLM patch.
     let content = std::fs::read_to_string(root.join("src/lib.rs")).unwrap();
@@ -1645,8 +1636,8 @@ fn test_commit_winner_to_repo_applies_tested_diff_exactly() {
     assert!(status.contains(" M notes.txt"));
 }
 
-#[test]
-fn test_commit_winner_to_repo_with_unrelated_staged_changes() {
+#[tokio::test]
+async fn test_commit_winner_to_repo_with_unrelated_staged_changes() {
     let _exec = crate::test_support::ExecGuard::hold();
     let dir = setup_winner_repo();
     let root = dir.path();
@@ -1675,7 +1666,7 @@ fn test_commit_winner_to_repo_with_unrelated_staged_changes() {
 
     // 3. Commit winner to repo with expected tree_id
     assert!(
-        commit_winner_to_repo(root, &tested_diff, Some(&tree_id), "🧬 Gen 4 BLOOM"),
+        commit_winner_to_repo(root, &tested_diff, Some(&tree_id), "🧬 Gen 4 BLOOM").await,
         "Promotion commit must succeed using isolated index"
     );
 
@@ -1699,8 +1690,9 @@ fn test_commit_winner_to_repo_with_unrelated_staged_changes() {
     assert!(committed_content.contains("777"));
 }
 
-#[test]
-fn test_commit_winner_to_repo_rejects_divergent_promoted_tree() {
+#[tokio::test]
+async fn test_commit_winner_to_repo_rejects_divergent_promoted_tree() {
+    let _exec = crate::test_support::ExecGuard::hold();
     let dir = setup_winner_repo();
     let root = dir.path();
 
@@ -1728,7 +1720,7 @@ fn test_commit_winner_to_repo_rejects_divergent_promoted_tree() {
 
     // 3. Attempting to commit the candidate with expected tree_id MUST fail because HEAD diverged
     assert!(
-        !commit_winner_to_repo(root, &tested_diff, Some(&tree_id), "🧬 Gen 3 BLOOM"),
+        !commit_winner_to_repo(root, &tested_diff, Some(&tree_id), "🧬 Gen 3 BLOOM").await,
         "Promotion must be rejected when promoted tree differs from evaluated benchmark tree"
     );
 
@@ -1740,8 +1732,9 @@ fn test_commit_winner_to_repo_rejects_divergent_promoted_tree() {
     );
 }
 
-#[test]
-fn test_commit_winner_to_repo_rejects_missing_or_empty_expected_tree() {
+#[tokio::test]
+async fn test_commit_winner_to_repo_rejects_missing_or_empty_expected_tree() {
+    let _exec = crate::test_support::ExecGuard::hold();
     let dir = setup_winner_repo();
     let root = dir.path();
 
@@ -1756,17 +1749,17 @@ fn test_commit_winner_to_repo_rejects_missing_or_empty_expected_tree() {
 
     // 1. Rejects None
     assert!(
-        !commit_winner_to_repo(root, &tested_diff, None, "🧬 Gen 3 BLOOM"),
+        !commit_winner_to_repo(root, &tested_diff, None, "🧬 Gen 3 BLOOM").await,
         "Promotion must fail closed when expected_tree is None"
     );
 
     // 2. Rejects empty or whitespace string
     assert!(
-        !commit_winner_to_repo(root, &tested_diff, Some(""), "🧬 Gen 3 BLOOM"),
+        !commit_winner_to_repo(root, &tested_diff, Some(""), "🧬 Gen 3 BLOOM").await,
         "Promotion must fail closed when expected_tree is empty"
     );
     assert!(
-        !commit_winner_to_repo(root, &tested_diff, Some("   \n"), "🧬 Gen 3 BLOOM"),
+        !commit_winner_to_repo(root, &tested_diff, Some("   \n"), "🧬 Gen 3 BLOOM").await,
         "Promotion must fail closed when expected_tree is whitespace"
     );
 
@@ -3411,8 +3404,8 @@ fn test_run_lock_guard_concurrent_attempt_preserves_holder_pid() {
     drop(guard1);
 }
 
-#[test]
-fn test_shutdown_requested_prevents_winner_commit_and_leaves_head_unchanged() {
+#[tokio::test]
+async fn test_shutdown_requested_prevents_winner_commit_and_leaves_head_unchanged() {
     let _exec = crate::test_support::ExecGuard::hold();
     let dir = setup_winner_repo();
     let root = dir.path();
@@ -3439,7 +3432,8 @@ fn test_shutdown_requested_prevents_winner_commit_and_leaves_head_unchanged() {
         &tested_diff,
         Some(&tree_id),
         "🧬 Gen 3 BLOOM (should be refused)",
-    );
+    )
+    .await;
     assert!(
         !committed,
         "commit_winner_to_repo must return false when shutdown requested"
@@ -3493,8 +3487,8 @@ fn test_run_lock_guard_mutual_exclusion_across_different_runs() {
     drop(guard2);
 }
 
-#[test]
-fn test_commit_scoped_paths_isolated_shutdown_aborts_before_commit() {
+#[tokio::test]
+async fn test_commit_scoped_paths_isolated_shutdown_aborts_before_commit() {
     let _exec = crate::test_support::ExecGuard::hold();
     let dir = setup_winner_repo();
     let root = dir.path();
@@ -3511,7 +3505,8 @@ fn test_commit_scoped_paths_isolated_shutdown_aborts_before_commit() {
         &[std::path::PathBuf::from("src/lib.rs")],
         None,
         "test shutdown commit",
-    );
+    )
+    .await;
     assert!(res.is_err());
     assert!(res
         .unwrap_err()
@@ -3526,17 +3521,103 @@ fn test_commit_scoped_paths_isolated_shutdown_aborts_before_commit() {
 }
 
 #[tokio::test]
+async fn test_commit_scoped_paths_isolated_interrupted_hook_reaps_process_group_and_does_not_commit(
+) {
+    let _exec = crate::test_support::ExecGuard::hold();
+    crate::reset_shutdown_for_test();
+
+    let dir = setup_winner_repo();
+    let root = dir.path();
+
+    // Install a slow pre-commit hook that sleeps 30 seconds
+    let hook_dir = root.join(".git").join("hooks");
+    std::fs::create_dir_all(&hook_dir).unwrap();
+    let hook_path = hook_dir.join("pre-commit");
+    std::fs::write(&hook_path, "#!/bin/sh\nsleep 30\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&hook_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&hook_path, perms).unwrap();
+    }
+
+    let head_before = git_stdout(root, &["rev-parse", "HEAD"]);
+    let test_file = root.join("src/lib.rs");
+    std::fs::write(&test_file, "pub fn f() -> usize { 9999 }\n").unwrap();
+
+    // Request shutdown 100ms into the commit hook execution
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        crate::request_shutdown();
+    });
+
+    let res = commit_scoped_paths_isolated(
+        root,
+        &[std::path::PathBuf::from("src/lib.rs")],
+        None,
+        "test slow hook cancellation",
+    )
+    .await;
+
+    assert!(
+        res.is_err(),
+        "Commit must fail when cancelled during pre-commit hook"
+    );
+    let err = res.unwrap_err();
+    assert!(
+        err.contains("Shutdown requested") || err.contains("commit aborted"),
+        "Error must indicate shutdown during hook: {err}"
+    );
+
+    let head_after = git_stdout(root, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        head_before, head_after,
+        "HEAD must not have moved when hook was interrupted"
+    );
+
+    crate::reset_shutdown_for_test();
+}
+
+#[tokio::test]
+async fn test_run_cancellable_subprocess_inflight_kill_on_shutdown() {
+    let _exec = crate::test_support::ExecGuard::hold();
+    crate::reset_shutdown_for_test();
+
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.args(["-c", "sleep 30"]);
+
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        crate::request_shutdown();
+    });
+
+    let res = run_cancellable_subprocess(cmd, std::time::Duration::from_secs(10)).await;
+    assert!(
+        matches!(res, Err(SubprocessError::ShutdownRequested)),
+        "In-flight subprocess must be cancelled on shutdown"
+    );
+    crate::reset_shutdown_for_test();
+}
+
+#[tokio::test]
 async fn test_run_cancellable_subprocess_captures_stdout_and_stderr() {
-    let mut cmd = tokio::process::Command::new("cargo");
-    cmd.arg("--version");
+    let _exec = crate::test_support::ExecGuard::hold();
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.args(["-c", "echo 'out_captured'; echo 'err_captured' >&2"]);
     let output = run_cancellable_subprocess(cmd, std::time::Duration::from_secs(30))
         .await
-        .expect("cargo --version must execute");
+        .expect("sh must execute");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stdout.contains("cargo"),
+        stdout.contains("out_captured"),
         "stdout must be captured, got: {stdout}"
+    );
+    assert!(
+        stderr.contains("err_captured"),
+        "stderr must be captured, got: {stderr}"
     );
 
     // Verify control gate test summary parsing on captured buffer
@@ -3546,6 +3627,41 @@ async fn test_run_cancellable_subprocess_captures_stdout_and_stderr() {
     assert!(synthetic_test_output
         .lines()
         .any(|l| l.starts_with("test result: ok.")));
+}
+
+#[tokio::test]
+async fn test_build_candidate_metrics_shutdown_returns_typed_shutdown_requested() {
+    let _exec = crate::test_support::ExecGuard::hold();
+    let dir = setup_winner_repo();
+    let root = dir.path();
+
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt;
+    let test_output = std::process::Output {
+        #[cfg(unix)]
+        status: std::process::ExitStatus::from_raw(0),
+        #[cfg(not(unix))]
+        status: std::process::ExitStatus::default(),
+        stdout: b"test result: ok. 1 passed; 0 failed\n".to_vec(),
+        stderr: Vec::new(),
+    };
+
+    crate::request_shutdown();
+    let config = EvolutionConfig::default();
+    let res = build_candidate_metrics(
+        root,
+        &test_output,
+        std::time::Duration::from_millis(100),
+        &[],
+        &config,
+    )
+    .await;
+
+    assert!(
+        matches!(res, Err(SubprocessError::ShutdownRequested)),
+        "build_candidate_metrics must return typed ShutdownRequested on shutdown"
+    );
+    crate::reset_shutdown_for_test();
 }
 
 #[tokio::test]

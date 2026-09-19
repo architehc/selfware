@@ -441,7 +441,9 @@ pub fn scan_patch_for_opaque_structures(
 
         // If base_commit is present, export an immutable snapshot of the file at that revision
         // so file:// links open immutable revision snapshots instead of mutable working copy.
-        let target_display_path = if let Some(commit) = base_commit {
+        // If snapshot cannot be verified or generated, report unavailable evidence rather than
+        // silently falling back to the mutable working copy.
+        let hyperlink = if let Some(commit) = base_commit {
             let rel_p = std::path::Path::new(file_path);
             let is_contained = !rel_p.is_absolute()
                 && !rel_p.components().any(|c| {
@@ -454,39 +456,70 @@ pub fn scan_patch_for_opaque_structures(
             if is_contained {
                 let snapshot_dir = repo_root.join(".selfware").join("snapshots").join(commit);
                 let snapshot_file = snapshot_dir.join(file_path);
-                if !snapshot_file.exists() {
-                    let mut cmd = Command::new("git");
-                    cmd.env_remove("GIT_INDEX_FILE");
-                    cmd.args(["show", &format!("{commit}:{file_path}")]);
-                    cmd.current_dir(repo_root);
-                    if let Ok(out) = cmd.output() {
-                        if out.status.success() {
+
+                let mut cmd = Command::new("git");
+                cmd.env_remove("GIT_INDEX_FILE");
+                cmd.args(["show", &format!("{commit}:{file_path}")]);
+                cmd.current_dir(repo_root);
+
+                match cmd.output() {
+                    Ok(out) if out.status.success() => {
+                        let expected_bytes = out.stdout;
+                        let cached_valid = if snapshot_file.exists() {
+                            std::fs::read(&snapshot_file)
+                                .map(|b| b == expected_bytes)
+                                .unwrap_or(false)
+                        } else {
+                            false
+                        };
+
+                        if !cached_valid {
                             if let Some(parent) = snapshot_file.parent() {
                                 let _ = std::fs::create_dir_all(parent);
+                                let nonce = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_nanos())
+                                    .unwrap_or(0);
+                                let tmp_path = parent.join(format!(
+                                    ".tmp_snap_{}_{}_{}",
+                                    std::process::id(),
+                                    citation_idx,
+                                    nonce
+                                ));
+                                if std::fs::write(&tmp_path, &expected_bytes).is_ok() {
+                                    let _ = std::fs::rename(&tmp_path, &snapshot_file);
+                                }
                             }
-                            let _ = std::fs::write(&snapshot_file, out.stdout);
+                        }
+
+                        if snapshot_file.exists() {
+                            if start_line > 0 && end_line > 0 {
+                                format!(
+                                    "file://{}#L{start_line}-L{end_line}",
+                                    snapshot_file.display()
+                                )
+                            } else {
+                                format!("file://{}", snapshot_file.display())
+                            }
+                        } else {
+                            format!("unavailable://git/{commit}/{file_path}")
                         }
                     }
-                }
-                if snapshot_file.exists() {
-                    snapshot_file
-                } else {
-                    repo_root.join(file_path)
+                    _ => format!("unavailable://git/{commit}/{file_path}"),
                 }
             } else {
-                repo_root.join(file_path)
+                format!("unavailable://invalid-path/{file_path}")
             }
         } else {
-            repo_root.join(file_path)
-        };
-
-        let hyperlink = if start_line > 0 && end_line > 0 {
-            format!(
-                "file://{}#L{start_line}-L{end_line}",
-                target_display_path.display()
-            )
-        } else {
-            format!("file://{}", target_display_path.display())
+            let target_display_path = repo_root.join(file_path);
+            if start_line > 0 && end_line > 0 {
+                format!(
+                    "file://{}#L{start_line}-L{end_line}",
+                    target_display_path.display()
+                )
+            } else {
+                format!("file://{}", target_display_path.display())
+            }
         };
 
         GroundedCitation {
@@ -1060,7 +1093,8 @@ pub fn simulate_10000_reviewer_governance_resolved(
     // 2. Systems & Performance Robustness (2,500 reviewers / 25% weight)
     let (sys_app, sys_cla, sys_qua, sys_vet) = if node.status == AttemptStatus::Timeout {
         (0, 0, 500, 2000)
-    } else if node.status == AttemptStatus::BuildFailed
+    } else if node.status == AttemptStatus::Cancelled
+        || node.status == AttemptStatus::BuildFailed
         || node.status == AttemptStatus::InternalError
     {
         (0, 0, 1000, 1500)
@@ -1077,6 +1111,8 @@ pub fn simulate_10000_reviewer_governance_resolved(
     let sys_score = sys_app as f64 / 2500.0;
     let sys_assessment = if node.status == AttemptStatus::Timeout {
         "VETO: Mutation exceeded latency threshold or timed out.".to_string()
+    } else if node.status == AttemptStatus::Cancelled {
+        "NOTICE: Candidate evaluation was interrupted by shutdown request.".to_string()
     } else if node.status == AttemptStatus::BuildFailed {
         "VETO: Release build failed during system compilation.".to_string()
     } else if !is_verified_success {

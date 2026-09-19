@@ -197,9 +197,13 @@ async fn measure_compile_test_baseline(
     if !features.is_empty() {
         check_cmd.arg("--features").arg(&feat);
     }
-    let check = run_cancellable_subprocess(check_cmd, std::time::Duration::from_secs(300))
-        .await
-        .map_err(|e| format!("cargo check failed to run: {e}"))?;
+    let check =
+        match run_cancellable_subprocess(check_cmd, std::time::Duration::from_secs(300)).await {
+            Ok(o) => o,
+            Err(SubprocessError::ShutdownRequested) => return Err("shutdown requested".to_string()),
+            Err(SubprocessError::Timeout) => return Err("cargo check timed out (300s)".to_string()),
+            Err(SubprocessError::Io(e)) => return Err(format!("cargo check failed to run: {e}")),
+        };
     if !check.status.success() {
         return Err(format!(
             "cargo check failed:\n{}",
@@ -214,12 +218,19 @@ async fn measure_compile_test_baseline(
     if !features.is_empty() {
         test_cmd.arg("--features").arg(&feat);
     }
-    let test = run_cancellable_subprocess(
+    let test = match run_cancellable_subprocess(
         test_cmd,
         std::time::Duration::from_secs(timeout_secs as u64),
     )
     .await
-    .map_err(|e| format!("cargo test failed to run: {e}"))?;
+    {
+        Ok(o) => o,
+        Err(SubprocessError::ShutdownRequested) => return Err("shutdown requested".to_string()),
+        Err(SubprocessError::Timeout) => {
+            return Err(format!("cargo test timed out ({timeout_secs}s)"));
+        }
+        Err(SubprocessError::Io(e)) => return Err(format!("cargo test failed to run: {e}")),
+    };
     let test_duration = test_start.elapsed();
     let test_stdout = String::from_utf8_lossy(&test.stdout);
     let test_stderr = String::from_utf8_lossy(&test.stderr);
@@ -228,10 +239,13 @@ async fn measure_compile_test_baseline(
 
     let mut fmt_cmd = tokio::process::Command::new("cargo");
     fmt_cmd.args(["fmt", "--", "--check"]).current_dir(dir);
-    let fmt_ok = run_cancellable_subprocess(fmt_cmd, std::time::Duration::from_secs(120))
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let fmt_ok =
+        match run_cancellable_subprocess(fmt_cmd, std::time::Duration::from_secs(120)).await {
+            Ok(o) => o.status.success(),
+            Err(SubprocessError::ShutdownRequested) => return Err("shutdown requested".to_string()),
+            Err(SubprocessError::Timeout) => return Err("cargo fmt timed out (120s)".to_string()),
+            Err(SubprocessError::Io(e)) => return Err(format!("cargo fmt failed to run: {e}")),
+        };
 
     let mut clippy_cmd = tokio::process::Command::new("cargo");
     clippy_cmd
@@ -242,19 +256,32 @@ async fn measure_compile_test_baseline(
         clippy_cmd.arg("--features").arg(&feat);
     }
     clippy_cmd.args(["--", "-D", "warnings"]);
-    let clippy_ok = run_cancellable_subprocess(clippy_cmd, std::time::Duration::from_secs(300))
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let clippy_ok =
+        match run_cancellable_subprocess(clippy_cmd, std::time::Duration::from_secs(300)).await {
+            Ok(o) => o.status.success(),
+            Err(SubprocessError::ShutdownRequested) => return Err("shutdown requested".to_string()),
+            Err(SubprocessError::Timeout) => {
+                return Err("cargo clippy timed out (300s)".to_string())
+            }
+            Err(SubprocessError::Io(e)) => return Err(format!("cargo clippy failed to run: {e}")),
+        };
 
     let mut build_cmd = tokio::process::Command::new("cargo");
     build_cmd.args(["build", "--release"]).current_dir(dir);
     if !features.is_empty() {
         build_cmd.arg("--features").arg(&feat);
     }
-    let build = run_cancellable_subprocess(build_cmd, std::time::Duration::from_secs(600))
-        .await
-        .map_err(|e| format!("cargo build --release failed to run: {e}"))?;
+    let build =
+        match run_cancellable_subprocess(build_cmd, std::time::Duration::from_secs(600)).await {
+            Ok(o) => o,
+            Err(SubprocessError::ShutdownRequested) => return Err("shutdown requested".to_string()),
+            Err(SubprocessError::Timeout) => {
+                return Err("cargo build --release timed out (600s)".to_string());
+            }
+            Err(SubprocessError::Io(e)) => {
+                return Err(format!("cargo build --release failed to run: {e}"));
+            }
+        };
     if !build.status.success() {
         return Err(format!(
             "cargo build --release failed:\n{}",
@@ -287,7 +314,7 @@ async fn measure_compile_test_baseline(
         full_evaluation_secs: Some(start.elapsed().as_secs_f64()),
         test_pass_pct: pass_ratio * 100.0,
         binary_size_mb,
-        max_binary_size_mb: 50.0,
+        max_binary_size_mb: 0.0,
         tests_passed,
         tests_total,
         visual_score: 0.0,
@@ -302,7 +329,7 @@ async fn build_candidate_metrics(
     test_duration: std::time::Duration,
     features: &[&str],
     config: &EvolutionConfig,
-) -> Option<FitnessMetrics> {
+) -> Result<FitnessMetrics, SubprocessError> {
     let stdout = String::from_utf8_lossy(&test_output.stdout);
     let stderr = String::from_utf8_lossy(&test_output.stderr);
     let combined = format!("{}\n{}", stdout, stderr);
@@ -314,11 +341,13 @@ async fn build_candidate_metrics(
     if !features.is_empty() {
         build_cmd.arg("--features").arg(&feat);
     }
-    let build = run_cancellable_subprocess(build_cmd, std::time::Duration::from_secs(600))
-        .await
-        .ok()?;
+    let build = run_cancellable_subprocess(build_cmd, std::time::Duration::from_secs(600)).await?;
     if !build.status.success() {
-        return None;
+        let err_tail = tail_lines(&String::from_utf8_lossy(&build.stderr), 50);
+        return Err(SubprocessError::Io(std::io::Error::other(format!(
+            "cargo build --release exited {}: {}",
+            build.status, err_tail
+        ))));
     }
     let binary_path = worktree.join("target/release/selfware");
     let binary_size_mb = std::fs::metadata(&binary_path)
@@ -331,7 +360,7 @@ async fn build_candidate_metrics(
         0.0
     };
 
-    Some(FitnessMetrics {
+    Ok(FitnessMetrics {
         sab_score: pass_ratio * 100.0,
         tokens_used: None,
         token_budget: DEFAULT_TOKEN_BUDGET,
@@ -1052,6 +1081,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
     let start = Instant::now();
     let mut hall_of_fame: Vec<GenerationWinner> = Vec::new();
     let mut generation: usize = 0;
+    let mut total_candidates_evaluated: usize = 0;
 
     // Initialize durable attempt tree log directory and run file
     let run_id = format!(
@@ -2072,6 +2102,34 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 resolve_attempt_base_commit(&attempts_file, hyp_parent_id.as_deref(), repo_root);
             let raw_diff_sha256 = compute_sha256(hypothesis.patch.as_bytes());
 
+            let make_cancelled_node = |phase: &str| AttemptNode {
+                id: attempt_id.clone(),
+                parent_id: hyp_parent_id.clone(),
+                generation,
+                branch_id: hyp_branch_id.clone(),
+                hypothesis_id: hypothesis.id.clone(),
+                description: hypothesis.description.clone(),
+                diff_sha256: raw_diff_sha256.clone(),
+                patch: Some(hypothesis.patch.clone()),
+                sab_report_path: None,
+                metrics: None,
+                composite_score: None,
+                tokens_used: None,
+                wall_time_ms: attempt_start.elapsed().as_millis() as u64,
+                status: AttemptStatus::Cancelled,
+                failure_class: Some(FailureClass::EnvironmentError),
+                failure_reason: Some(format!(
+                    "Candidate evaluation cancelled by shutdown during {phase}"
+                )),
+                output_tail: None,
+                binary_sha256: None,
+                base_commit: attempt_base_commit.clone(),
+                committed_commit: None,
+                action_type: Some(*hyp_action_type),
+                git_tree_id: None,
+                created_at: chrono_now(),
+            };
+
             log_phase(&format!(
                 "  Testing '{}' [{}]...",
                 hypothesis.description, hypothesis.id
@@ -2184,6 +2242,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     .await;
             if matches!(&fmt_check, Err(SubprocessError::ShutdownRequested)) {
                 log_warning("Shutdown requested during candidate fmt check; halting cleanly");
+                let node = make_cancelled_node("fmt check");
+                let _ =
+                    log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start);
                 break;
             }
 
@@ -2196,6 +2257,14 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 if matches!(&fmt_fix, Err(SubprocessError::ShutdownRequested)) {
                     log_warning(
                         "Shutdown requested during candidate fmt auto-fix; halting cleanly",
+                    );
+                    let node = make_cancelled_node("fmt fix");
+                    let _ = log_and_append_attempt(
+                        &attempts_file,
+                        &node,
+                        repo_root,
+                        generation,
+                        gen_start,
                     );
                     break;
                 }
@@ -2274,6 +2343,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 log_warning(
                     "Shutdown requested during candidate compilation check; halting cleanly",
                 );
+                let node = make_cancelled_node("compile check");
+                let _ =
+                    log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start);
                 break;
             }
             let (check_failed, check_tail) = match &check {
@@ -2349,11 +2421,61 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             .await;
             if matches!(&test, Err(SubprocessError::ShutdownRequested)) {
                 log_warning("Shutdown requested during candidate test execution; halting cleanly");
+                let node = make_cancelled_node("test execution");
+                let _ =
+                    log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start);
                 break;
             }
 
             let test_output = match test {
                 Ok(o) => o,
+                Err(SubprocessError::Timeout) => {
+                    log_warning(&format!(
+                        "  Test execution timed out ({DEFAULT_TIMEOUT_SECS}s)"
+                    ));
+                    let node = AttemptNode {
+                        id: attempt_id.clone(),
+                        parent_id: hyp_parent_id.clone(),
+                        generation,
+                        branch_id: hyp_branch_id.clone(),
+                        hypothesis_id: hypothesis.id.clone(),
+                        description: hypothesis.description.clone(),
+                        diff_sha256: raw_diff_sha256.clone(),
+                        patch: Some(hypothesis.patch.clone()),
+                        sab_report_path: None,
+                        metrics: None,
+                        composite_score: None,
+                        tokens_used: None,
+                        wall_time_ms: attempt_start.elapsed().as_millis() as u64,
+                        status: AttemptStatus::Timeout,
+                        failure_class: Some(FailureClass::Unclassified),
+                        failure_reason: Some(format!(
+                            "Test execution timed out ({DEFAULT_TIMEOUT_SECS}s)"
+                        )),
+                        output_tail: None,
+                        binary_sha256: None,
+                        base_commit: attempt_base_commit.clone(),
+                        committed_commit: None,
+                        action_type: Some(*hyp_action_type),
+                        git_tree_id: None,
+                        created_at: chrono_now(),
+                    };
+                    if let Err(err) = log_and_append_attempt(
+                        &attempts_file,
+                        &node,
+                        repo_root,
+                        generation,
+                        gen_start,
+                    ) {
+                        abort_run!(
+                            format!("attempt logging failed: {err}"),
+                            generation.saturating_sub(1),
+                            current_baseline_metrics.sab_score,
+                            hall_of_fame
+                        );
+                    }
+                    continue;
+                }
                 Err(e) => {
                     log_warning(&format!("  Test execution failed: {}", e));
                     let node = AttemptNode {
@@ -2491,6 +2613,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 run_cancellable_subprocess(clippy_cmd, std::time::Duration::from_secs(300)).await;
             if matches!(&clippy, Err(SubprocessError::ShutdownRequested)) {
                 log_warning("Shutdown requested during candidate clippy check; halting cleanly");
+                let node = make_cancelled_node("clippy check");
+                let _ =
+                    log_and_append_attempt(&attempts_file, &node, repo_root, generation, gen_start);
                 break;
             }
             let (clippy_failed, clippy_tail) = match &clippy {
@@ -2563,11 +2688,24 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     log_warning(
                         "Shutdown requested during candidate release build; halting cleanly",
                     );
+                    let node = make_cancelled_node("release build");
+                    let _ = log_and_append_attempt(
+                        &attempts_file,
+                        &node,
+                        repo_root,
+                        generation,
+                        gen_start,
+                    );
                     break;
                 }
-                let (build_failed, build_tail) = match &build {
+                let (build_failed, build_status, build_reason, build_tail) = match &build {
+                    Ok(o) if o.status.success() => {
+                        (false, AttemptStatus::BuildFailed, String::new(), None)
+                    }
                     Ok(o) => (
-                        !o.status.success(),
+                        true,
+                        AttemptStatus::BuildFailed,
+                        "Release build failed".to_string(),
                         Some(tail_lines(
                             &format!(
                                 "{}\n{}",
@@ -2577,7 +2715,18 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             50,
                         )),
                     ),
-                    Err(e) => (true, Some(format!("Build error: {e}"))),
+                    Err(SubprocessError::Timeout) => (
+                        true,
+                        AttemptStatus::Timeout,
+                        "cargo build --release timed out (600s)".to_string(),
+                        None,
+                    ),
+                    Err(e) => (
+                        true,
+                        AttemptStatus::BuildFailed,
+                        format!("Build error: {e}"),
+                        None,
+                    ),
                 };
 
                 if build_failed {
@@ -2599,9 +2748,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         composite_score: None,
                         tokens_used: None,
                         wall_time_ms: attempt_start.elapsed().as_millis() as u64,
-                        status: AttemptStatus::BuildFailed,
+                        status: build_status,
                         failure_class: Some(FailureClass::Unclassified),
-                        failure_reason: Some("Release build failed".into()),
+                        failure_reason: Some(build_reason),
                         output_tail: build_tail,
                         binary_sha256: None,
                         base_commit: attempt_base_commit.clone(),
@@ -2695,8 +2844,68 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 )
                 .await
                 {
-                    Some(m) => (m, None),
-                    None => {
+                    Ok(m) => (m, None),
+                    Err(SubprocessError::ShutdownRequested) => {
+                        log_warning(
+                            "Shutdown requested during candidate release build; halting cleanly",
+                        );
+                        let node = make_cancelled_node("release build");
+                        let _ = log_and_append_attempt(
+                            &attempts_file,
+                            &node,
+                            repo_root,
+                            generation,
+                            gen_start,
+                        );
+                        break;
+                    }
+                    Err(SubprocessError::Timeout) => {
+                        log_frost(
+                            generation,
+                            &format!("Release build timed out: {}", hypothesis.id),
+                        );
+                        let node = AttemptNode {
+                            id: attempt_id.clone(),
+                            parent_id: hyp_parent_id.clone(),
+                            generation,
+                            branch_id: hyp_branch_id.clone(),
+                            hypothesis_id: hypothesis.id.clone(),
+                            description: hypothesis.description.clone(),
+                            diff_sha256: raw_diff_sha256.clone(),
+                            patch: Some(hypothesis.patch.clone()),
+                            sab_report_path: None,
+                            metrics: None,
+                            composite_score: None,
+                            tokens_used: None,
+                            wall_time_ms: attempt_start.elapsed().as_millis() as u64,
+                            status: AttemptStatus::Timeout,
+                            failure_class: Some(FailureClass::Unclassified),
+                            failure_reason: Some("Release build timed out (600s)".into()),
+                            output_tail: None,
+                            binary_sha256: None,
+                            base_commit: attempt_base_commit.clone(),
+                            committed_commit: None,
+                            action_type: Some(*hyp_action_type),
+                            git_tree_id: None,
+                            created_at: chrono_now(),
+                        };
+                        if let Err(err) = log_and_append_attempt(
+                            &attempts_file,
+                            &node,
+                            repo_root,
+                            generation,
+                            gen_start,
+                        ) {
+                            abort_run!(
+                                format!("attempt logging failed: {err}"),
+                                generation.saturating_sub(1),
+                                current_baseline_metrics.sab_score,
+                                hall_of_fame
+                            );
+                        }
+                        continue;
+                    }
+                    Err(e) => {
                         log_frost(
                             generation,
                             &format!("Release build failed: {}", hypothesis.id),
@@ -2717,7 +2926,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             wall_time_ms: attempt_start.elapsed().as_millis() as u64,
                             status: AttemptStatus::BuildFailed,
                             failure_class: Some(FailureClass::Unclassified),
-                            failure_reason: Some("Candidate build failed".into()),
+                            failure_reason: Some(format!("Candidate build failed: {e}")),
                             output_tail: None,
                             binary_sha256: None,
                             base_commit: attempt_base_commit.clone(),
@@ -2891,6 +3100,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     hall_of_fame
                 );
             }
+            total_candidates_evaluated += 1;
 
             log_phase(&format!(
                 "  ✓ '{}' passed (score: {:.0}, composite: {:.4}, {:.1}s)",
@@ -3014,7 +3224,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     &winner.tested_diff,
                     Some(&winner.evaluated_tree),
                     &commit_msg,
-                ) {
+                )
+                .await
+                {
                     log_bloom(
                         generation,
                         &winner.hypothesis.description,
@@ -3178,6 +3390,11 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         )
     } else if let Some(reason) = policy_stopped_reason {
         ("policy_stopped".to_string(), Some(reason))
+    } else if total_candidates_evaluated == 0 {
+        (
+            "failed".to_string(),
+            Some("No candidates were evaluated during evolution run".to_string()),
+        )
     } else {
         ("completed".to_string(), None)
     };
@@ -3199,13 +3416,19 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
     signal_handle.abort();
 
+    let aborted = if outcome == "failed" {
+        stop_reason.clone()
+    } else {
+        None
+    };
+
     EvolutionResult {
         generations_run: generation,
         improvements: hall_of_fame,
         final_sab_score: current_baseline_metrics.sab_score,
         initial_sab_score: initial_sab,
         total_duration: start.elapsed(),
-        aborted: None,
+        aborted,
         outcome,
         stop_reason,
     }
@@ -4372,7 +4595,7 @@ pub(crate) fn capture_worktree_tree_id(worktree: &Path) -> Option<String> {
 ///
 /// If `expected_tree` is supplied, the promoted tree must match the evaluated
 /// benchmark tree exactly, preventing committing unbenchmarked code combinations.
-pub(crate) fn commit_winner_to_repo(
+pub(crate) async fn commit_winner_to_repo(
     repo_root: &Path,
     tested_diff: &str,
     expected_tree: Option<&str>,
@@ -4413,7 +4636,7 @@ pub(crate) fn commit_winner_to_repo(
     // Promote and commit using an isolated index. This guarantees that:
     // 1. The verified tree and the committed tree are byte-identical (both computed from the isolated index).
     // 2. Unrelated staged changes or staged reverts in the user's main index do not distort verification or commit.
-    match commit_scoped_paths_isolated(repo_root, &edited, Some(expected), commit_msg) {
+    match commit_scoped_paths_isolated(repo_root, &edited, Some(expected), commit_msg).await {
         Ok(_) => true,
         Err(err) => {
             log_error(&format!(
@@ -4675,7 +4898,7 @@ impl Drop for RunLockGuard {
 /// Both verification and the commit are executed against the exact same isolated index,
 /// ensuring that unrelated staged changes or staged reverts in the main index cannot cause
 /// the committed tree to diverge from the verified tree.
-pub(crate) fn commit_scoped_paths_isolated(
+pub(crate) async fn commit_scoped_paths_isolated(
     repo_root: &Path,
     paths: &[PathBuf],
     expected_tree: Option<&str>,
@@ -4688,11 +4911,12 @@ pub(crate) fn commit_scoped_paths_isolated(
     let guard = IsolatedIndexGuard::new(repo_root);
 
     // 1. Initialize isolated index with the tree of HEAD
-    let read_tree = Command::new("git")
+    let read_tree = tokio::process::Command::new("git")
         .env("GIT_INDEX_FILE", &guard.index_path)
         .args(["read-tree", "HEAD"])
         .current_dir(repo_root)
         .output()
+        .await
         .map_err(|e| format!("Failed to execute git read-tree: {e}"))?;
     if !read_tree.status.success() {
         return Err(format!(
@@ -4702,7 +4926,7 @@ pub(crate) fn commit_scoped_paths_isolated(
     }
 
     // 2. Stage ONLY the specified paths into the isolated index
-    let mut add = Command::new("git");
+    let mut add = tokio::process::Command::new("git");
     add.env("GIT_INDEX_FILE", &guard.index_path);
     add.arg("add").arg("--");
     for p in paths {
@@ -4711,6 +4935,7 @@ pub(crate) fn commit_scoped_paths_isolated(
     let add_out = add
         .current_dir(repo_root)
         .output()
+        .await
         .map_err(|e| format!("Failed to execute git add into isolated index: {e}"))?;
     if !add_out.status.success() {
         return Err(format!(
@@ -4720,11 +4945,12 @@ pub(crate) fn commit_scoped_paths_isolated(
     }
 
     // 3. Write and capture the tree from the isolated index
-    let write_tree = Command::new("git")
+    let write_tree = tokio::process::Command::new("git")
         .env("GIT_INDEX_FILE", &guard.index_path)
         .args(["write-tree"])
         .current_dir(repo_root)
         .output()
+        .await
         .map_err(|e| format!("Failed to execute git write-tree on isolated index: {e}"))?;
     if !write_tree.status.success() {
         return Err(format!(
@@ -4754,28 +4980,79 @@ pub(crate) fn commit_scoped_paths_isolated(
         return Err("Shutdown requested before commit".to_string());
     }
 
-    let commit = Command::new("git")
-        .env("GIT_INDEX_FILE", &guard.index_path)
-        .args(["commit", "-m", commit_msg])
+    let head_before = tokio::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
         .current_dir(repo_root)
         .output()
-        .map_err(|e| format!("Failed to execute git commit with isolated index: {e}"))?;
-    if !commit.status.success() {
-        return Err(format!(
-            "git commit with isolated index failed: {}",
-            String::from_utf8_lossy(&commit.stderr).trim()
-        ));
-    }
+        .await
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        });
+
+    let mut commit_cmd = tokio::process::Command::new("git");
+    commit_cmd
+        .env("GIT_INDEX_FILE", &guard.index_path)
+        .args(["commit", "-m", commit_msg])
+        .current_dir(repo_root);
+
+    let commit_res =
+        run_cancellable_subprocess(commit_cmd, std::time::Duration::from_secs(300)).await;
+
+    let head_after = tokio::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_root)
+        .output()
+        .await
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        });
+
+    match commit_res {
+        Ok(out) if out.status.success() => {}
+        Err(SubprocessError::ShutdownRequested) => {
+            if head_after.is_some() && head_before != head_after {
+                log_warning(
+                    "Shutdown requested during git commit hook, but HEAD was updated; reconciling index",
+                );
+            } else {
+                return Err("Shutdown requested during git commit hook; commit aborted".to_string());
+            }
+        }
+        Ok(out) => {
+            return Err(format!(
+                "git commit with isolated index failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Err(SubprocessError::Timeout) => {
+            return Err("git commit timed out after 300s".to_string());
+        }
+        Err(SubprocessError::Io(e)) => {
+            return Err(format!(
+                "Failed to execute git commit with isolated index: {e}"
+            ));
+        }
+    };
 
     // 6. Synchronize main repository index for the committed paths so working copy status is clean,
     // without disturbing any unrelated staged changes.
-    let mut reset = Command::new("git");
+    let mut reset = tokio::process::Command::new("git");
     reset.env_remove("GIT_INDEX_FILE");
     reset.args(["reset", "HEAD", "--"]);
     for p in paths {
         reset.arg(p);
     }
-    match reset.current_dir(repo_root).output() {
+    match reset.current_dir(repo_root).output().await {
         Ok(reset_out) if reset_out.status.success() => {}
         Ok(reset_out) => {
             let err_msg = String::from_utf8_lossy(&reset_out.stderr)
@@ -4816,8 +5093,12 @@ pub(crate) fn commit_scoped_paths_isolated(
 /// Stage and commit ONLY the given paths using an isolated index — never `git add -A`,
 /// keeping unrelated staged changes and untracked files completely untouched and uncommitted.
 #[allow(dead_code)]
-pub(crate) fn commit_scoped_paths(repo_root: &Path, paths: &[PathBuf], commit_msg: &str) -> bool {
-    match commit_scoped_paths_isolated(repo_root, paths, None, commit_msg) {
+pub(crate) async fn commit_scoped_paths(
+    repo_root: &Path,
+    paths: &[PathBuf],
+    commit_msg: &str,
+) -> bool {
+    match commit_scoped_paths_isolated(repo_root, paths, None, commit_msg).await {
         Ok(_) => true,
         Err(e) => {
             log_warning(&format!("  commit_scoped_paths failed: {e}"));

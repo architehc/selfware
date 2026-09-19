@@ -746,8 +746,8 @@ fn test_restore_worktree_candidate_with_new_file() {
     cleanup_worktree(repo_root, &restored_wt).unwrap();
 }
 
-#[test]
-fn test_promote_refine_promote() {
+#[tokio::test]
+async fn test_promote_refine_promote() {
     let temp_repo = tempfile::tempdir().unwrap();
     let repo_root = temp_repo.path();
 
@@ -847,7 +847,8 @@ fn test_promote_refine_promote() {
         &diff1,
         Some(&tree1),
         "Gen 0 promotion",
-    );
+    )
+    .await;
     assert!(ok1, "Gen 0 candidate promotion must succeed");
     let c1 = run_git(&["rev-parse", "HEAD"]);
     assert_ne!(c1, c0, "C1 must advance past C0");
@@ -930,7 +931,8 @@ fn test_promote_refine_promote() {
         &diff2,
         Some(&tree2),
         "Gen 1 promotion",
-    );
+    )
+    .await;
     assert!(
         ok2,
         "Gen 1 candidate refining Gen 0 must promote cleanly with tree verification"
@@ -945,8 +947,8 @@ fn test_promote_refine_promote() {
     );
 }
 
-#[test]
-fn test_promote_open_root_promote() {
+#[tokio::test]
+async fn test_promote_open_root_promote() {
     let temp_repo = tempfile::tempdir().unwrap();
     let repo_root = temp_repo.path();
 
@@ -1045,7 +1047,8 @@ fn test_promote_open_root_promote() {
         &diff1,
         Some(&tree1),
         "Gen 0 promotion",
-    );
+    )
+    .await;
     assert!(ok1, "Gen 0 candidate promotion must succeed");
     let c1 = run_git(&["rev-parse", "HEAD"]);
     assert_ne!(c1, c0, "C1 must advance past C0");
@@ -1153,7 +1156,8 @@ fn test_promote_open_root_promote() {
         &diff_root,
         Some(&tree_root),
         "Gen 1 OpenRoot promotion",
-    );
+    )
+    .await;
     assert!(
         ok_root,
         "Gen 1 OpenRoot candidate re-baselined to active_parent_id must promote cleanly with tree verification"
@@ -1199,7 +1203,8 @@ fn test_promote_open_root_promote() {
         &diff_stale,
         Some(&tree_stale),
         "Gen 2 Stale OpenRoot promotion",
-    );
+    )
+    .await;
     assert!(
         !ok_stale,
         "Stale candidate rooted at pre-promotion baseline must be rejected by tree verification"

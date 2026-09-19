@@ -41,6 +41,8 @@ pub enum AttemptStatus {
     Timeout,
     /// Rejected upfront as duplicate of previously failed patch diff.
     DuplicateRejected,
+    /// Candidate evaluation was cancelled by shutdown request.
+    Cancelled,
     /// Unexpected runtime / internal error.
     InternalError,
 }
@@ -59,6 +61,7 @@ impl std::fmt::Display for AttemptStatus {
             Self::BuildFailed => write!(f, "build_failed"),
             Self::Timeout => write!(f, "timeout"),
             Self::DuplicateRejected => write!(f, "duplicate_rejected"),
+            Self::Cancelled => write!(f, "cancelled"),
             Self::InternalError => write!(f, "internal_error"),
         }
     }

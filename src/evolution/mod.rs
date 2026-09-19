@@ -160,6 +160,21 @@ pub struct EvolutionConfig {
     pub llm: LlmConfig,
 }
 
+impl Default for EvolutionConfig {
+    fn default() -> Self {
+        Self {
+            generations: 10,
+            population_size: 4,
+            parallel_eval: 2,
+            checkpoint_interval: 5,
+            fitness_weights: FitnessWeights::default(),
+            mutation_targets: MutationTargets::default(),
+            safety: SafetyConfig::default(),
+            llm: LlmConfig::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FitnessWeights {
     /// Weight for SAB benchmark aggregate score (0-100)
@@ -278,7 +293,7 @@ pub struct FitnessMetrics {
     pub visual_score: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MutationTargets {
     /// Config keys the agent can modify (e.g., temperature, token_budget)
     pub config_keys: Vec<String>,

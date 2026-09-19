@@ -1019,15 +1019,142 @@ fn test_investigate_citations_traversal_path_fails_closed() {
     let temp = tempfile::tempdir().unwrap();
     let repo_root = temp.path();
 
-    // Malicious diff attempting directory traversal in file path
-    let diff =
-        "--- a/../escaped_secret.rs\n+++ b/../escaped_secret.rs\n@@ -1,1 +1,1 @@\n-bad\n+good\n";
-    let mut node = make_test_node("att-snap-traversal", diff, AttemptStatus::Evaluated);
-    node.base_commit = Some("fakecommit12345".to_string());
+    // Initialize real git repo
+    let _ = Command::new("git")
+        .args(["init"])
+        .current_dir(repo_root)
+        .output();
+    let _ = Command::new("git")
+        .args(["config", "user.email", "evo@test"])
+        .current_dir(repo_root)
+        .output();
+    let _ = Command::new("git")
+        .args(["config", "user.name", "Evo Test"])
+        .current_dir(repo_root)
+        .output();
+    let src_dir = repo_root.join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::write(src_dir.join("lib.rs"), "fn hello() {}\n").unwrap();
+    let _ = Command::new("git")
+        .args(["add", "."])
+        .current_dir(repo_root)
+        .output();
+    let _ = Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(repo_root)
+        .output();
 
-    let _ = investigate_attempt(&node, repo_root);
+    let head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_root)
+        .output()
+        .unwrap();
+    let head_sha = String::from_utf8_lossy(&head.stdout).trim().to_string();
 
-    // Escaped file or directory must not have been created
+    // Malicious edit attempting directory traversal with an opaque defect (.unwrap())
+    let edits = serde_json::json!([
+        {
+            "file": "../escaped_secret.rs",
+            "search": "fn old() {}",
+            "replace": "fn bad() { let _ = x.unwrap(); }"
+        }
+    ]);
+    let patch = serde_json::to_string(&edits).unwrap();
+
+    let (findings, _citations) =
+        scan_patch_for_opaque_structures(&patch, repo_root, "att-snap-traversal", Some(&head_sha));
+
+    assert!(
+        !findings.is_empty(),
+        "Must detect unchecked unwrap in patch"
+    );
+    let citation = &findings[0].citation;
+    assert_eq!(
+        citation.hyperlink, "unavailable://invalid-path/../escaped_secret.rs",
+        "Traversal path must fail closed with unavailable link"
+    );
+
+    // Escaped file or directory must not have been created anywhere
     let escaped_path = repo_root.join("../escaped_secret.rs");
-    assert!(!escaped_path.exists(), "Traversal path must not be created");
+    assert!(
+        !escaped_path.exists(),
+        "Parent traversal path must not be created"
+    );
+    let snapshot_escaped = repo_root.join(".selfware/snapshots/escaped_secret.rs");
+    assert!(
+        !snapshot_escaped.exists(),
+        "Snapshot directory escape must not occur"
+    );
+}
+
+#[test]
+fn test_investigate_citations_refreshes_corrupted_cached_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_root = temp.path();
+
+    // Initialize real git repo
+    let _ = Command::new("git")
+        .args(["init"])
+        .current_dir(repo_root)
+        .output();
+    let _ = Command::new("git")
+        .args(["config", "user.email", "evo@test"])
+        .current_dir(repo_root)
+        .output();
+    let _ = Command::new("git")
+        .args(["config", "user.name", "Evo Test"])
+        .current_dir(repo_root)
+        .output();
+    let src_dir = repo_root.join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    let original_content = "pub fn honest_code() {\n    // valid baseline\n}\n";
+    std::fs::write(src_dir.join("lib.rs"), original_content).unwrap();
+    let _ = Command::new("git")
+        .args(["add", "."])
+        .current_dir(repo_root)
+        .output();
+    let _ = Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(repo_root)
+        .output();
+
+    let head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_root)
+        .output()
+        .unwrap();
+    let head_sha = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+    // Plant a corrupted snapshot on disk
+    let snapshot_file = repo_root
+        .join(".selfware")
+        .join("snapshots")
+        .join(&head_sha)
+        .join("src/lib.rs");
+    std::fs::create_dir_all(snapshot_file.parent().unwrap()).unwrap();
+    std::fs::write(&snapshot_file, "corrupted garbage content").unwrap();
+
+    // Patch targeting src/lib.rs with an unwrap defect
+    let edits = serde_json::json!([
+        {
+            "file": "src/lib.rs",
+            "search": "honest_code()",
+            "replace": "honest_code() { let _ = x.unwrap(); }"
+        }
+    ]);
+    let patch = serde_json::to_string(&edits).unwrap();
+
+    let (findings, _citations) =
+        scan_patch_for_opaque_structures(&patch, repo_root, "att-refresh-test", Some(&head_sha));
+
+    assert!(!findings.is_empty());
+    let citation = &findings[0].citation;
+    assert!(citation.hyperlink.starts_with("file://"));
+
+    // Corrupted snapshot must have been detected, verified against Git, and overwritten with real content
+    let refreshed_content = std::fs::read_to_string(&snapshot_file).unwrap();
+    assert_eq!(
+        refreshed_content, original_content,
+        "Corrupted snapshot must be refreshed from Git"
+    );
 }
