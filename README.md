@@ -1,6 +1,7 @@
 # Selfware
 
 [![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-pink?logo=github)](https://github.com/sponsors/architehc)
+[![Crates.io](https://img.shields.io/crates/v/selfware.svg)](https://crates.io/crates/selfware)
 [![CI](https://github.com/architehc/selfware/actions/workflows/ci.yml/badge.svg)](https://github.com/architehc/selfware/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![codecov](https://codecov.io/gh/architehc/selfware/branch/main/graph/badge.svg)](https://codecov.io/gh/architehc/selfware)
@@ -233,12 +234,9 @@ unzip -o /tmp/selfware.zip -d /tmp/selfware && sudo mv /tmp/selfware/selfware /u
 | **macOS** | Intel | [selfware-macos-x86_64.zip](https://github.com/architehc/selfware/releases/latest) |
 | **Windows** | x86_64 | [selfware-windows-x86_64.zip](https://github.com/architehc/selfware/releases/latest) |
 
-**Option B: Install via Cargo (from Git)**
+**Option B: Install via Cargo**
 
-> selfware depends on a Git-only crate (`llmfit-core`), so it is distributed via Git and
-> release binaries rather than crates.io.
-
-Compiling from source requires a few native packages. On Debian/Ubuntu:
+Compiling requires native build packages. On Debian/Ubuntu:
 
 ```bash
 sudo apt-get update && sudo apt-get install -y \
@@ -247,6 +245,10 @@ sudo apt-get update && sudo apt-get install -y \
 ```
 
 ```bash
+# Install from crates.io
+cargo install selfware
+
+# Or install the latest unreleased main branch:
 cargo install --git https://github.com/architehc/selfware
 ```
 
@@ -911,6 +913,7 @@ The evolution engine **CANNOT** modify:
 | `src/safety/` | Cannot weaken safety checks |
 | `system_tests/` | Cannot modify its own benchmark suite |
 | `benches/sab_*` | Cannot game fitness measurements |
+| `.selfware/` | Cannot tamper with evolution lock or run state |
 
 These are enforced at the code level via `PROTECTED_PATHS` in `src/evolution/mod.rs`.
 

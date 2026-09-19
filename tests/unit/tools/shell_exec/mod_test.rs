@@ -271,6 +271,7 @@ fn test_parse_sed_substitution_falls_back_for_complex() {
 #[tokio::test]
 #[cfg(not(target_os = "windows"))]
 async fn test_shell_exec_intercepts_sed() {
+    let _g = crate::test_support::CwdGuard::hold();
     let tool = ShellExec;
     // Keep the temp directory under the current working dir so the default
     // safety config (`./**`) allows the intercepted path validation.
@@ -303,6 +304,7 @@ async fn test_shell_exec_intercepts_sed() {
 #[tokio::test]
 #[cfg(not(target_os = "windows"))]
 async fn sed_interception_no_g_replaces_first_match_per_line() {
+    let _g = crate::test_support::CwdGuard::hold();
     // Real sed without `g` replaces the first match ON EACH LINE, not the
     // first match in the whole file — the old interception got this wrong.
     let tool = ShellExec;
@@ -332,6 +334,7 @@ async fn sed_interception_no_g_replaces_first_match_per_line() {
 #[tokio::test]
 #[cfg(not(target_os = "windows"))]
 async fn sed_interception_honors_backup_suffix() {
+    let _g = crate::test_support::CwdGuard::hold();
     // `sed -i.bak` must leave the original at <file>.bak like real sed.
     let tool = ShellExec;
     let temp_dir = std::env::current_dir()
@@ -362,6 +365,7 @@ async fn sed_interception_honors_backup_suffix() {
 #[tokio::test]
 #[cfg(not(target_os = "windows"))]
 async fn sed_interception_resolves_relative_path_against_cwd() {
+    let _g = crate::test_support::CwdGuard::hold();
     // The interception must resolve a relative target against the call's
     // cwd, exactly like the real sed subprocess would.
     let tool = ShellExec;
@@ -393,6 +397,7 @@ async fn sed_interception_resolves_relative_path_against_cwd() {
 #[tokio::test]
 #[cfg(not(target_os = "windows"))]
 async fn sed_no_match_exits_zero_and_leaves_file_untouched() {
+    let _g = crate::test_support::CwdGuard::hold();
     // Real sed with no match exits 0 and does not modify the file; the
     // interception must not invent a failure.
     let tool = ShellExec;

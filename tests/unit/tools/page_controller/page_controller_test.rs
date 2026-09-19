@@ -106,6 +106,7 @@ async fn test_page_control_invalid_action() {
 
 #[test]
 fn test_validate_url_allows_workspace_file() {
+    let _guard = crate::test_support::CwdGuard::hold();
     let workspace_file = NamedTempFile::new_in(std::env::current_dir().unwrap()).unwrap();
     fs::write(workspace_file.path(), "<html><body>ok</body></html>").unwrap();
     let url = format!("file://{}", workspace_file.path().display());
@@ -116,6 +117,7 @@ fn test_validate_url_allows_workspace_file() {
 
 #[test]
 fn test_validate_url_blocks_file_outside_workspace() {
+    let _guard = crate::test_support::CwdGuard::hold();
     let outside = tempdir().unwrap();
     let file = outside.path().join("external.html");
     fs::write(&file, "<html><body>blocked</body></html>").unwrap();

@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.4] - 2026-09-19
+
+### Added
+- **Process-group supervised commit execution**: `commit_scoped_paths_isolated` and `commit_winner_to_repo` supervise `git commit` via `run_cancellable_subprocess`, isolating process groups (`cmd.process_group(0)`) and sending cooperative SIGKILL to reap slow pre-commit hook process trees on shutdown.
+- **HEAD ref movement reconciliation**: Compares `head_before` vs `head_after` to verify whether Git actually advanced the ref before reporting success or reverting applied candidate diffs.
+- **Typed candidate cancellation logging**: Added `AttemptStatus::Cancelled` across candidate compilation, formatting, linting, and benchmark stages; records attempt nodes in `attempts.jsonl` upon shutdown rather than silently dropping candidates.
+- **Honest empty-run failure reporting (AGENTS.md Rule 3)**: When 0 candidates are evaluated, `evolve` now returns `outcome: "failed"` and sets `aborted` rather than falsely reporting `"completed"`.
+- **Atomic snapshot generation & verification**: Atomic snapshot writes via temp file and rename, cached snapshot validation against `git show <commit>:<path>`, automatic corrupted cache refresh, and fail-closed `unavailable://` URLs instead of falling back to mutable working copies.
+- **Empirical noise margin evaluation (AGENTS.md Rule 4)**: `compute_empirical_noise_margin` calculates the standard error of the mean delta across paired benchmark scenarios, clamping between 0.05 and 0.50, and falling back to default when unmeasured.
+- **Test-suite killswitch isolation**: Added `TEST_ROOT_OVERRIDE` in `src/safety/killswitch.rs` to insulate unit test killswitch checks from ambient repository CWD state.
+
+### Fixed
+- **MCP argument over-blocking**: Introduced `looks_like_mcp_path_token` across `validation.rs` and `yolo.rs`, eliminating over-blocking on non-path arguments like MIME types (`application/json`), URLs, and CLI flags, while strictly preserving checks on explicit paths and sensitive dotfiles.
+- **SGLang capability tri-state**: Explicit tri-state matching on `check_sglang_backend` prevents unprobed endpoints from silently collapsing to not-SGLang during synchronous validation.
+- **Extended path protection**: Added `.selfware/active_evolution.lock` and `.selfware/runs/*.lock` to `PROTECTED_PATHS` and `default_denied_paths`.
+- **Subprocess test race isolation**: Serialized subprocess test execution via `ExecGuard::hold()` and asserted both stdout and stderr.
+- **CWD concurrency test isolation**: Serialized `page_controller` URL validation tests and `shell_exec` sed tests via `CwdGuard::hold()`, eliminating test races during concurrent parallel test suite runs.
+
 ## [0.7.3] - 2026-09-08
 
 ### Added
@@ -391,7 +409,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Protected paths system
 - Git force push prevention
 
-[Unreleased]: https://github.com/architehc/selfware/compare/v0.7.3...HEAD
+[Unreleased]: https://github.com/architehc/selfware/compare/v0.7.4...HEAD
+[0.7.4]: https://github.com/architehc/selfware/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/architehc/selfware/compare/v0.7.2...v0.7.3
 [0.7.0]: https://github.com/architehc/selfware/compare/v0.6.8-beta.1...v0.7.0
 [0.6.8-beta.1]: https://github.com/architehc/selfware/compare/v0.6.7...v0.6.8-beta.1
