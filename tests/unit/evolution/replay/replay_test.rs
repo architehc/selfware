@@ -35,7 +35,14 @@ fn make_node(
         binary_sha256: None,
         base_commit: None,
         committed_commit: None,
-        action_type: if parent_id.is_none() {
+        action_type: if status == AttemptStatus::Baseline
+            || (parent_id.is_none() && id.contains("baseline"))
+        {
+            None
+        } else if parent_id.is_none()
+            || parent_id == Some("baseline")
+            || parent_id == Some("att-baseline")
+        {
             Some(crate::evolution::ActionType::OpenRoot)
         } else {
             Some(crate::evolution::ActionType::RefineFrontier)

@@ -534,7 +534,9 @@ impl AttemptTree {
             disc_tree.validate_ancestry()?;
             val_tree.validate_ancestry()?;
             if disc_tree.is_empty() || val_tree.is_empty() {
-                return Err(TreeLogError::InsufficientAncestryGroupsForHeldOut(0));
+                return Err(TreeLogError::InsufficientAncestryGroupsForHeldOut(
+                    val_tree.len(),
+                ));
             }
             return Ok((disc_tree, val_tree));
         }
@@ -608,8 +610,18 @@ impl AttemptTree {
                 });
             }
 
-            if disc_tree.len() <= 1 || val_tree.len() <= 1 {
-                return Err(TreeLogError::InsufficientBranchesForHeldOut(0));
+            let disc_candidates = disc_tree
+                .nodes
+                .iter()
+                .filter(|n| n.id != common_root.id)
+                .count();
+            let val_candidates = val_tree
+                .nodes
+                .iter()
+                .filter(|n| n.id != common_root.id)
+                .count();
+            if disc_candidates == 0 || val_candidates == 0 {
+                return Err(TreeLogError::InsufficientBranchesForHeldOut(val_candidates));
             }
 
             return Ok((disc_tree, val_tree));

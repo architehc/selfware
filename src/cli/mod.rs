@@ -3063,12 +3063,26 @@ async fn handle_command(
                     anyhow::bail!("Evolution aborted: {}", abort_reason);
                 }
 
-                println!(
-                    "\n   {} Evolution complete: {} generations, {} improvements",
-                    Glyphs::bloom(),
-                    result.generations_run,
-                    result.improvements.len()
-                );
+                if result.outcome == "policy_stopped" {
+                    let reason = result
+                        .stop_reason
+                        .as_deref()
+                        .unwrap_or("search policy converged");
+                    println!(
+                        "\n   {} Evolution converged (policy stopped): {} ({} generations, {} improvements)",
+                        Glyphs::bloom(),
+                        reason,
+                        result.generations_run,
+                        result.improvements.len()
+                    );
+                } else {
+                    println!(
+                        "\n   {} Evolution complete: {} generations, {} improvements",
+                        Glyphs::bloom(),
+                        result.generations_run,
+                        result.improvements.len()
+                    );
+                }
                 println!(
                     "   SAB: {:.0} → {:.0} ({:+.1})",
                     result.initial_sab_score,

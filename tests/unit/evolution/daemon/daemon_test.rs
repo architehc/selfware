@@ -374,6 +374,8 @@ fn test_generation_winner_fields() {
 fn test_evolution_result_fields() {
     let result = EvolutionResult {
         aborted: None,
+        outcome: "completed".to_string(),
+        stop_reason: None,
         generations_run: 0,
         improvements: vec![],
         final_sab_score: 0.0,
@@ -381,7 +383,31 @@ fn test_evolution_result_fields() {
         total_duration: std::time::Duration::from_secs(1),
     };
     assert_eq!(result.generations_run, 0);
+    assert_eq!(result.outcome, "completed");
     assert!(result.improvements.is_empty());
+}
+
+#[test]
+fn test_evolution_result_policy_stopped_clean_exit() {
+    let result = EvolutionResult {
+        aborted: None,
+        outcome: "policy_stopped".to_string(),
+        stop_reason: Some("Incumbent fixed population reached (2/2)".to_string()),
+        generations_run: 1,
+        improvements: vec![],
+        final_sab_score: 85.0,
+        initial_sab_score: 85.0,
+        total_duration: std::time::Duration::from_secs(10),
+    };
+    assert!(
+        result.aborted.is_none(),
+        "policy_stopped must have aborted: None so CLI does not bail"
+    );
+    assert_eq!(result.outcome, "policy_stopped");
+    assert_eq!(
+        result.stop_reason.as_deref(),
+        Some("Incumbent fixed population reached (2/2)")
+    );
 }
 
 // ─── Winner test-count gate (evolution daemon hardening) ───
@@ -2096,7 +2122,7 @@ fn test_promoted_policies_control_live_search_decisions() {
         binary_sha256: None,
         base_commit: None,
         committed_commit: None,
-        action_type: None,
+        action_type: Some(crate::evolution::ActionType::OpenRoot),
         created_at: "2026-09-17T00:01:00Z".into(),
     };
     let b2 = AttemptNode {
@@ -2120,7 +2146,7 @@ fn test_promoted_policies_control_live_search_decisions() {
         binary_sha256: None,
         base_commit: None,
         committed_commit: None,
-        action_type: None,
+        action_type: Some(crate::evolution::ActionType::OpenRoot),
         created_at: "2026-09-17T00:02:00Z".into(),
     };
 
@@ -2823,6 +2849,145 @@ fn test_open_root_reads_from_baseline_checkout() {
     assert!(
         !content.contains("promoted_gen1"),
         "OpenRoot worktree must contain original baseline source, not subsequent promoted commits"
+    );
+    ast_tools::cleanup_worktree(root, &worktree).unwrap();
+}
+
+#[test]
+fn test_daemon_open_root_dispatches_from_active_incumbent_parent() {
+    let dir = setup_winner_repo();
+    let root = dir.path();
+    let attempts_file = root.join("attempts.jsonl");
+
+    let base_commit = ast_tools::get_git_head_commit(root).unwrap();
+
+    // Baseline node recorded at base_commit
+    let baseline_node = AttemptNode {
+        id: "att-baseline".to_string(),
+        parent_id: None,
+        generation: 0,
+        branch_id: "baseline".to_string(),
+        hypothesis_id: "baseline".to_string(),
+        description: "Initial baseline".to_string(),
+        diff_sha256: compute_sha256(b""),
+        patch: None,
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(0.50),
+        tokens_used: None,
+        wall_time_ms: 0,
+        status: AttemptStatus::Baseline,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        base_commit: Some(base_commit.clone()),
+        committed_commit: None,
+        action_type: None,
+        created_at: chrono_now(),
+    };
+    std::fs::write(
+        &attempts_file,
+        format!("{}\n", serde_json::to_string(&baseline_node).unwrap()),
+    )
+    .unwrap();
+
+    // Gen 0 action without active_parent_id: OpenRoot must resolve to baseline_node.id
+    let open_action_gen0 = LegalAction::OpenRoot {
+        branch_id: "branch-g1-r0".to_string(),
+        node_id: "root-g1-r0".to_string(),
+    };
+    let (parent_gen0, branch_gen0, action_type_gen0) =
+        resolve_action_dispatch(&open_action_gen0, None, &baseline_node.id);
+    assert_eq!(parent_gen0, "att-baseline");
+    assert_eq!(branch_gen0, "branch-g1-r0");
+    assert_eq!(action_type_gen0, ActionType::OpenRoot);
+
+    // Commit Gen 1 winner to repo (simulating promotion to main)
+    std::fs::write(root.join("src/lib.rs"), "pub fn winner_c1() {}\n").unwrap();
+    let _ = Command::new("git")
+        .args(["add", "src/lib.rs"])
+        .current_dir(root)
+        .output();
+    let _ = Command::new("git")
+        .args(["commit", "-m", "Gen 1 winner committed"])
+        .current_dir(root)
+        .output();
+    let c1 = ast_tools::get_git_head_commit(root).unwrap();
+
+    // Record Gen 1 winner in attempts ledger with committed_commit anchor
+    let cand1 = AttemptNode {
+        id: "att-cand1".to_string(),
+        parent_id: Some("att-baseline".to_string()),
+        generation: 1,
+        branch_id: "branch-g1-r0".to_string(),
+        hypothesis_id: "hyp-1".to_string(),
+        description: "Candidate 1 (Gen 1 winner)".to_string(),
+        diff_sha256: compute_sha256(b"diff1"),
+        patch: Some("diff1".to_string()),
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(0.85),
+        tokens_used: Some(1000),
+        wall_time_ms: 100,
+        status: AttemptStatus::Evaluated,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        base_commit: Some(base_commit),
+        committed_commit: Some(c1.clone()),
+        action_type: Some(ActionType::OpenRoot),
+        created_at: chrono_now(),
+    };
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&attempts_file)
+            .unwrap();
+        writeln!(f, "{}", serde_json::to_string(&cand1).unwrap()).unwrap();
+    }
+
+    // When active_parent_id is Some("att-cand1"), OpenRoot must resolve to the incumbent parent
+    let active_parent_id = Some("att-cand1");
+    let open_action_gen2 = LegalAction::OpenRoot {
+        branch_id: "branch-g2-r0".to_string(),
+        node_id: "root-g2-r0".to_string(),
+    };
+    let (parent_gen2, branch_gen2, action_type_gen2) =
+        resolve_action_dispatch(&open_action_gen2, active_parent_id, &baseline_node.id);
+    assert_eq!(
+        parent_gen2, "att-cand1",
+        "OpenRoot in Gen 2 must resolve to the active incumbent parent, not stale baseline"
+    );
+    assert_eq!(branch_gen2, "branch-g2-r0");
+    assert_eq!(action_type_gen2, ActionType::OpenRoot);
+
+    // RefineFrontier action must preserve its own parent regardless of active_parent_id
+    let refine_action = LegalAction::RefineFrontier {
+        branch_id: "branch-g1-r0".to_string(),
+        parent_id: "att-cand1".to_string(),
+        node_id: "refine-1".to_string(),
+    };
+    let (parent_refine, _, action_type_refine) =
+        resolve_action_dispatch(&refine_action, active_parent_id, &baseline_node.id);
+    assert_eq!(parent_refine, "att-cand1");
+    assert_eq!(action_type_refine, ActionType::RefineFrontier);
+
+    // Driving shadow worktree restoration using the parent resolved by resolve_action_dispatch
+    let worktree =
+        ast_tools::create_shadow_worktree_for_parent(root, &attempts_file, Some(&parent_gen2))
+            .expect("Restoring shadow worktree for dispatched parent must succeed");
+    let wt_commit = ast_tools::get_git_head_commit(&worktree).unwrap();
+    assert_eq!(
+        wt_commit, c1,
+        "OpenRoot worktree inheriting active_parent_id must be at C1, not C0"
+    );
+    let wt_content = std::fs::read_to_string(worktree.join("src/lib.rs")).unwrap();
+    assert!(
+        wt_content.contains("winner_c1"),
+        "OpenRoot worktree inheriting active_parent_id must restore C1 state"
     );
     ast_tools::cleanup_worktree(root, &worktree).unwrap();
 }

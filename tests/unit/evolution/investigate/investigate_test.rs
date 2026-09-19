@@ -65,7 +65,11 @@ fn make_test_node(id: &str, patch: &str, status: AttemptStatus) -> AttemptNode {
         binary_sha256: None,
         base_commit: Some("deadbeef0123456789".to_string()),
         committed_commit: None,
-        action_type: Some(crate::evolution::ActionType::RefineFrontier),
+        action_type: if status == AttemptStatus::Baseline || id.contains("baseline") {
+            None
+        } else {
+            Some(crate::evolution::ActionType::OpenRoot)
+        },
         created_at: "2026-09-18T20:00:00Z".to_string(),
     }
 }

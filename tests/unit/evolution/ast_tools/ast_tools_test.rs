@@ -1078,14 +1078,22 @@ fn test_promote_open_root_promote() {
     // Daemon sets active_parent_id after promotion:
     let active_parent_id: Option<String> = Some("att-cand1".to_string());
 
-    // ─── Gen 1: OpenRoot action re-baselined to active_parent_id ───
-    let root_parent = active_parent_id
-        .clone()
-        .unwrap_or_else(|| node_baseline.id.clone());
+    // ─── Gen 1: OpenRoot action re-baselined to active_parent_id via daemon dispatch ───
+    let open_root_action = crate::evolution::policy::LegalAction::OpenRoot {
+        branch_id: "branch-1".to_string(),
+        node_id: "root-g1-r0".to_string(),
+    };
+    let (root_parent, branch_id, action_type) = crate::evolution::daemon::resolve_action_dispatch(
+        &open_root_action,
+        active_parent_id.as_deref(),
+        &node_baseline.id,
+    );
     assert_eq!(
         root_parent, "att-cand1",
-        "OpenRoot must inherit active_parent_id"
+        "OpenRoot must inherit active_parent_id from daemon resolve_action_dispatch"
     );
+    assert_eq!(branch_id, "branch-1");
+    assert_eq!(action_type, crate::evolution::ActionType::OpenRoot);
 
     let wt_open_root =
         create_shadow_worktree_for_parent(repo_root, &attempts_file, Some(&root_parent))

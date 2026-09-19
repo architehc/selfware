@@ -48,12 +48,16 @@ pub struct EvolutionResult {
     pub final_sab_score: f64,
     pub initial_sab_score: f64,
     pub total_duration: std::time::Duration,
-    /// Why the run stopped early, if it did.
+    /// Why the run stopped early due to an unrecoverable failure (killswitch, baseline failure, I/O error).
     ///
     /// A run abandoned because its baseline could not be measured used to be
     /// indistinguishable from one that ran fully and found no improvement:
     /// both returned zero improvements. They mean opposite things.
     pub aborted: Option<String>,
+    /// Terminal outcome string ("completed", "policy_stopped", "aborted", "killed")
+    pub outcome: String,
+    /// If stopped by search policy convergence, the typed reason for stopping.
+    pub stop_reason: Option<String>,
 }
 
 const DEFAULT_TOKEN_BUDGET: u64 = 500_000;
@@ -869,6 +873,33 @@ pub fn decide_next_search_action(
     policy.decide(&prefix, &legal_actions, beta)
 }
 
+/// Resolves the parent attempt ID, branch ID, and ActionType for an exploration action.
+/// For OpenRoot actions, the parent is the active incumbent parent (or initial baseline if none).
+/// For RefineFrontier actions, the parent is the target parent specified in the action.
+pub fn resolve_action_dispatch(
+    action: &LegalAction,
+    active_parent_id: Option<&str>,
+    baseline_id: &str,
+) -> (String, String, ActionType) {
+    let root_parent = active_parent_id.unwrap_or(baseline_id);
+    match action {
+        LegalAction::RefineFrontier {
+            branch_id,
+            parent_id,
+            ..
+        } => (
+            parent_id.clone(),
+            branch_id.clone(),
+            ActionType::RefineFrontier,
+        ),
+        LegalAction::OpenRoot { branch_id, .. } => (
+            root_parent.to_string(),
+            branch_id.clone(),
+            ActionType::OpenRoot,
+        ),
+    }
+}
+
 /// Resolve the immutable base git commit for an attempt, looking up the parent's base commit
 /// or falling back to the current repository HEAD.
 fn resolve_attempt_base_commit(
@@ -1054,6 +1085,8 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 initial_sab_score: initial_sab,
                 total_duration: start.elapsed(),
                 aborted: Some(reason_str),
+                outcome: "aborted".to_string(),
+                stop_reason: None,
             };
         }};
     }
@@ -1329,27 +1362,10 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
 
-            let root_parent = active_parent_id
-                .clone()
-                .unwrap_or_else(|| baseline_node.id.clone());
-
             for (action_idx, action) in active_actions.iter().enumerate() {
-                let (h_parent_id, h_branch_id, h_action_type) = match action {
-                    LegalAction::RefineFrontier {
-                        branch_id,
-                        parent_id,
-                        ..
-                    } => (
-                        Some(parent_id.clone()),
-                        branch_id.clone(),
-                        ActionType::RefineFrontier,
-                    ),
-                    LegalAction::OpenRoot { branch_id, .. } => (
-                        Some(root_parent.clone()),
-                        branch_id.clone(),
-                        ActionType::OpenRoot,
-                    ),
-                };
+                let (h_parent_id_str, h_branch_id, h_action_type) =
+                    resolve_action_dispatch(action, active_parent_id.as_deref(), &baseline_node.id);
+                let h_parent_id = Some(h_parent_id_str.clone());
 
                 // Restore parent/root worktree to inspect exact source state.
                 // Read root context from the latest active incumbent/baseline checkout used for testing.
@@ -1419,23 +1435,23 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         let worktree = match ast_tools::create_shadow_worktree_for_parent(
                             repo_root,
                             &attempts_file,
-                            Some(&root_parent),
+                            Some(&h_parent_id_str),
                         ) {
                             Ok(w) => w,
                             Err(e) => {
                                 log_warning(&format!(
-                                    "Root worktree restoration failed for parent '{root_parent}': {e}"
+                                    "Root worktree restoration failed for parent '{h_parent_id_str}': {e}"
                                 ));
                                 let node = AttemptNode {
                                     id: format!(
                                         "att-g{generation}-r{retry_idx}-root-restoration-fail-{action_idx}"
                                     ),
-                                    parent_id: Some(root_parent.clone()),
+                                    parent_id: Some(h_parent_id_str.clone()),
                                     generation,
                                     branch_id: h_branch_id.clone(),
                                     hypothesis_id: format!("hyp-r{retry_idx}-root-restore-fail-{action_idx}"),
                                     description: format!(
-                                        "Root worktree restoration failed for parent '{root_parent}'"
+                                        "Root worktree restoration failed for parent '{h_parent_id_str}'"
                                     ),
                                     diff_sha256: compute_sha256(b""),
                                     patch: None,
@@ -1453,7 +1469,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                                     binary_sha256: None,
                                     base_commit: resolve_attempt_base_commit(
                                         &attempts_file,
-                                        Some(&root_parent),
+                                        Some(&h_parent_id_str),
                                         repo_root,
                                     ),
                                     committed_commit: None,
@@ -2861,10 +2877,10 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         }
     }
 
-    let (outcome, aborted) = if let Some(ref reason) = policy_stopped_reason {
-        ("policy_stopped", Some(format!("Policy stopped: {reason}")))
+    let (outcome, stop_reason) = if let Some(reason) = policy_stopped_reason {
+        ("policy_stopped".to_string(), Some(reason))
     } else {
-        ("completed", None)
+        ("completed".to_string(), None)
     };
 
     log_event(
@@ -2874,7 +2890,8 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             "kind": "run_end",
             "timestamp": chrono_now(),
             "run_id": &run_id,
-            "outcome": outcome,
+            "outcome": &outcome,
+            "stop_reason": &stop_reason,
             "generations_run": generation,
             "final_sab_score": current_baseline_metrics.sab_score,
             "duration_secs": start.elapsed().as_secs_f64(),
@@ -2889,7 +2906,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         final_sab_score: current_baseline_metrics.sab_score,
         initial_sab_score: initial_sab,
         total_duration: start.elapsed(),
-        aborted,
+        aborted: None,
+        outcome,
+        stop_reason,
     }
 }
 
