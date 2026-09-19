@@ -82,10 +82,10 @@ fn test_empty_snapshot() {
 
 #[test]
 fn test_parse_folded_stacks_basic() {
-    let tmp = std::env::temp_dir().join("selfware-test-folded-basic.folded");
+    let temp = tempfile::tempdir().unwrap();
+    let tmp = temp.path().join("stacks.folded");
     std::fs::write(&tmp, "main;foo;bar 100\nmain;foo;baz 50\nmain;qux 25\n").unwrap();
     let hotspots = parse_folded_stacks(&tmp).unwrap();
-    let _ = std::fs::remove_file(&tmp);
 
     assert_eq!(hotspots.len(), 3);
     // Sorted by CPU%, so "bar" (100/175 = 57.1%) should be first
@@ -97,19 +97,19 @@ fn test_parse_folded_stacks_basic() {
 
 #[test]
 fn test_parse_folded_stacks_empty_file() {
-    let tmp = std::env::temp_dir().join("selfware-test-folded-empty.folded");
+    let temp = tempfile::tempdir().unwrap();
+    let tmp = temp.path().join("empty.folded");
     std::fs::write(&tmp, "").unwrap();
     let hotspots = parse_folded_stacks(&tmp).unwrap();
-    let _ = std::fs::remove_file(&tmp);
     assert!(hotspots.is_empty());
 }
 
 #[test]
 fn test_parse_folded_stacks_single_entry() {
-    let tmp = std::env::temp_dir().join("selfware-test-folded-single.folded");
+    let temp = tempfile::tempdir().unwrap();
+    let tmp = temp.path().join("single.folded");
     std::fs::write(&tmp, "main;only_func 42\n").unwrap();
     let hotspots = parse_folded_stacks(&tmp).unwrap();
-    let _ = std::fs::remove_file(&tmp);
 
     assert_eq!(hotspots.len(), 1);
     assert_eq!(hotspots[0].function, "only_func");
@@ -221,14 +221,14 @@ fn test_prompt_many_allocations_truncated() {
 
 #[test]
 fn test_parse_folded_stacks_malformed_lines() {
-    let tmp = std::env::temp_dir().join("selfware-test-folded-malformed.folded");
+    let temp = tempfile::tempdir().unwrap();
+    let tmp = temp.path().join("malformed.folded");
     std::fs::write(
         &tmp,
         "main;valid_func 50\nno_count_here\n\nmain;another 30\n",
     )
     .unwrap();
     let hotspots = parse_folded_stacks(&tmp).unwrap();
-    let _ = std::fs::remove_file(&tmp);
 
     // Should parse 2 valid entries, skip the malformed ones
     assert_eq!(hotspots.len(), 2);

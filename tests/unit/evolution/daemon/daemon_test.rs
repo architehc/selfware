@@ -227,16 +227,15 @@ fn test_apply_patch_to_worktree_nonexistent_dir() {
 
 #[test]
 fn test_apply_patch_to_repo_bad_patch() {
-    let tmp = std::env::temp_dir().join("selfware-test-bad-patch");
-    let _ = std::fs::create_dir_all(&tmp);
+    let temp = tempfile::tempdir().unwrap();
+    let tmp = temp.path();
     // Initialize a git repo so `git apply` can run
     let _ = std::process::Command::new("git")
         .args(["init"])
-        .current_dir(&tmp)
+        .current_dir(tmp)
         .output();
-    let result = apply_patch_to_repo(&tmp, "this is not a valid patch format");
+    let result = apply_patch_to_repo(tmp, "this is not a valid patch format");
     assert!(!result, "Should fail gracefully for bad patch content");
-    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 // ─── Protected-path gate on ACTUAL patch paths (Evolution P1) ───
@@ -840,8 +839,8 @@ fn test_parse_hypotheses_edits_format() {
 
 #[test]
 fn test_apply_search_replace_basic() {
-    let tmp = std::env::temp_dir().join("selfware-test-sr");
-    let _ = std::fs::create_dir_all(&tmp);
+    let temp = tempfile::tempdir().unwrap();
+    let tmp = temp.path();
     let test_file = tmp.join("test.rs");
     std::fs::write(&test_file, "fn old_func() {\n    println!(\"hello\");\n}\n").unwrap();
 
@@ -851,20 +850,18 @@ fn test_apply_search_replace_basic() {
         "replace": "fn new_func()"
     })];
 
-    let result = apply_search_replace(&tmp, &edits);
+    let result = apply_search_replace(tmp, &edits);
     assert!(result);
 
     let content = std::fs::read_to_string(&test_file).unwrap();
     assert!(content.contains("fn new_func()"));
     assert!(!content.contains("fn old_func()"));
-
-    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 #[test]
 fn test_apply_search_replace_not_found() {
-    let tmp = std::env::temp_dir().join("selfware-test-sr-notfound");
-    let _ = std::fs::create_dir_all(&tmp);
+    let temp = tempfile::tempdir().unwrap();
+    let tmp = temp.path();
     let test_file = tmp.join("test.rs");
     std::fs::write(&test_file, "fn foo() {}\n").unwrap();
 
@@ -874,10 +871,8 @@ fn test_apply_search_replace_not_found() {
         "replace": "fn bar()"
     })];
 
-    let result = apply_search_replace(&tmp, &edits);
+    let result = apply_search_replace(tmp, &edits);
     assert!(!result);
-
-    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 #[test]
@@ -996,22 +991,27 @@ fn test_leading_whitespace_all_spaces() {
 
 #[test]
 fn test_apply_edits_dispatches_to_search_replace() {
-    let tmp = std::env::temp_dir().join("selfware-test-dispatch-sr");
-    let _ = std::fs::create_dir_all(&tmp);
+    let temp = tempfile::tempdir().unwrap();
+    let tmp = temp.path();
     // Init git repo for the function
+    let _ = Command::new("git").args(["init"]).current_dir(tmp).output();
     let _ = Command::new("git")
-        .args(["init"])
-        .current_dir(&tmp)
+        .args(["config", "user.email", "evo@test"])
+        .current_dir(tmp)
+        .output();
+    let _ = Command::new("git")
+        .args(["config", "user.name", "Evo Test"])
+        .current_dir(tmp)
         .output();
     let test_file = tmp.join("test.rs");
     std::fs::write(&test_file, "fn old() {}\n").unwrap();
     let _ = Command::new("git")
         .args(["add", "."])
-        .current_dir(&tmp)
+        .current_dir(tmp)
         .output();
     let _ = Command::new("git")
         .args(["commit", "-m", "init"])
-        .current_dir(&tmp)
+        .current_dir(tmp)
         .output();
 
     // JSON array with search/replace → should dispatch to apply_search_replace
@@ -1019,73 +1019,77 @@ fn test_apply_edits_dispatches_to_search_replace() {
         {"file": "test.rs", "search": "fn old() {}", "replace": "fn new() {}"}
     ]);
     let patch = serde_json::to_string(&edits_json).unwrap();
-    assert!(apply_edits(&tmp, &patch));
+    assert!(apply_edits(tmp, &patch));
 
     let content = std::fs::read_to_string(&test_file).unwrap();
     assert!(content.contains("fn new()"));
-
-    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 #[test]
 fn test_apply_edits_dispatches_to_unified_diff() {
-    let tmp = std::env::temp_dir().join("selfware-test-dispatch-ud");
-    let _ = std::fs::create_dir_all(&tmp);
+    let temp = tempfile::tempdir().unwrap();
+    let tmp = temp.path();
+    let _ = Command::new("git").args(["init"]).current_dir(tmp).output();
     let _ = Command::new("git")
-        .args(["init"])
-        .current_dir(&tmp)
+        .args(["config", "user.email", "evo@test"])
+        .current_dir(tmp)
+        .output();
+    let _ = Command::new("git")
+        .args(["config", "user.name", "Evo Test"])
+        .current_dir(tmp)
         .output();
     let test_file = tmp.join("test.rs");
     std::fs::write(&test_file, "fn old() {}\n").unwrap();
     let _ = Command::new("git")
         .args(["add", "."])
-        .current_dir(&tmp)
+        .current_dir(tmp)
         .output();
     let _ = Command::new("git")
         .args(["commit", "-m", "init"])
-        .current_dir(&tmp)
+        .current_dir(tmp)
         .output();
 
     // A plain unified diff string → should dispatch to apply_unified_diff
     let patch = "--- a/test.rs\n+++ b/test.rs\n@@ -1 +1 @@\n-fn old() {}\n+fn new() {}\n";
-    assert!(apply_edits(&tmp, patch));
+    assert!(apply_edits(tmp, patch));
 
     let content = std::fs::read_to_string(&test_file).unwrap();
     assert!(content.contains("fn new()"));
-
-    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 #[test]
 fn test_apply_edits_bad_json_falls_to_diff() {
     // Not valid JSON → falls through to unified diff (which will also fail for gibberish)
-    let tmp = std::env::temp_dir().join("selfware-test-dispatch-bad");
-    let _ = std::fs::create_dir_all(&tmp);
+    let temp = tempfile::tempdir().unwrap();
+    let tmp = temp.path();
+    let _ = Command::new("git").args(["init"]).current_dir(tmp).output();
     let _ = Command::new("git")
-        .args(["init"])
-        .current_dir(&tmp)
+        .args(["config", "user.email", "evo@test"])
+        .current_dir(tmp)
+        .output();
+    let _ = Command::new("git")
+        .args(["config", "user.name", "Evo Test"])
+        .current_dir(tmp)
         .output();
     std::fs::write(tmp.join("x.rs"), "code\n").unwrap();
     let _ = Command::new("git")
         .args(["add", "."])
-        .current_dir(&tmp)
+        .current_dir(tmp)
         .output();
     let _ = Command::new("git")
         .args(["commit", "-m", "init"])
-        .current_dir(&tmp)
+        .current_dir(tmp)
         .output();
 
-    assert!(!apply_edits(&tmp, "not json and not a patch"));
-
-    let _ = std::fs::remove_dir_all(&tmp);
+    assert!(!apply_edits(tmp, "not json and not a patch"));
 }
 
 // ── apply_search_replace edge cases ──
 
 #[test]
 fn test_apply_search_replace_ambiguous() {
-    let tmp = std::env::temp_dir().join("selfware-test-sr-ambig");
-    let _ = std::fs::create_dir_all(&tmp);
+    let temp = tempfile::tempdir().unwrap();
+    let tmp = temp.path();
     // File with duplicate pattern
     std::fs::write(tmp.join("dup.rs"), "fn foo() {}\nfn foo() {}\n").unwrap();
 
@@ -1095,15 +1099,13 @@ fn test_apply_search_replace_ambiguous() {
         "replace": "fn bar() {}"
     })];
     // Should reject because search is ambiguous (2 matches)
-    assert!(!apply_search_replace(&tmp, &edits));
-
-    let _ = std::fs::remove_dir_all(&tmp);
+    assert!(!apply_search_replace(tmp, &edits));
 }
 
 #[test]
 fn test_apply_search_replace_multiple_edits_same_file() {
-    let tmp = std::env::temp_dir().join("selfware-test-sr-multi");
-    let _ = std::fs::create_dir_all(&tmp);
+    let temp = tempfile::tempdir().unwrap();
+    let tmp = temp.path();
     std::fs::write(
         tmp.join("multi.rs"),
         "fn alpha() {}\nfn beta() {}\nfn gamma() {}\n",
@@ -1114,35 +1116,31 @@ fn test_apply_search_replace_multiple_edits_same_file() {
         serde_json::json!({"file": "multi.rs", "search": "fn alpha() {}", "replace": "fn alpha_v2() {}"}),
         serde_json::json!({"file": "multi.rs", "search": "fn gamma() {}", "replace": "fn gamma_v2() {}"}),
     ];
-    assert!(apply_search_replace(&tmp, &edits));
+    assert!(apply_search_replace(tmp, &edits));
 
     let content = std::fs::read_to_string(tmp.join("multi.rs")).unwrap();
     assert!(content.contains("fn alpha_v2()"));
     assert!(content.contains("fn beta()")); // unchanged
     assert!(content.contains("fn gamma_v2()"));
-
-    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 #[test]
 fn test_apply_search_replace_missing_file() {
-    let tmp = std::env::temp_dir().join("selfware-test-sr-nofile");
-    let _ = std::fs::create_dir_all(&tmp);
+    let temp = tempfile::tempdir().unwrap();
+    let tmp = temp.path();
 
     let edits = vec![serde_json::json!({
         "file": "nonexistent.rs",
         "search": "a",
         "replace": "b"
     })];
-    assert!(!apply_search_replace(&tmp, &edits));
-
-    let _ = std::fs::remove_dir_all(&tmp);
+    assert!(!apply_search_replace(tmp, &edits));
 }
 
 #[test]
 fn test_apply_search_replace_noop_rejected() {
-    let tmp = std::env::temp_dir().join("selfware-test-sr-noop");
-    let _ = std::fs::create_dir_all(&tmp);
+    let temp = tempfile::tempdir().unwrap();
+    let tmp = temp.path();
     std::fs::write(tmp.join("noop.rs"), "fn foo() {}\n").unwrap();
 
     // search == replace → no change → should be rejected
@@ -1151,9 +1149,7 @@ fn test_apply_search_replace_noop_rejected() {
         "search": "fn foo() {}",
         "replace": "fn foo() {}"
     })];
-    assert!(!apply_search_replace(&tmp, &edits));
-
-    let _ = std::fs::remove_dir_all(&tmp);
+    assert!(!apply_search_replace(tmp, &edits));
 }
 
 // ── fuzzy_find_and_replace edge cases ──
@@ -1209,7 +1205,8 @@ fn test_fuzzy_find_and_replace_at_start_of_file() {
 
 #[test]
 fn test_read_mutation_targets_sorts_by_size() {
-    let tmp = std::env::temp_dir().join("selfware-test-rmt");
+    let temp = tempfile::tempdir().unwrap();
+    let tmp = temp.path();
     let _ = std::fs::create_dir_all(tmp.join("src"));
     // Create files of different sizes
     std::fs::write(tmp.join("src/big.rs"), "x".repeat(5000)).unwrap();
@@ -1227,20 +1224,19 @@ fn test_read_mutation_targets_sorts_by_size() {
         config_keys: vec![],
     };
 
-    let context = read_mutation_targets(&targets, &tmp);
+    let context = read_mutation_targets(&targets, tmp);
     // small.rs should appear before big.rs (sorted by size ascending)
     let small_pos = context.find("src/small.rs").unwrap();
     let medium_pos = context.find("src/medium.rs").unwrap();
     let big_pos = context.find("src/big.rs").unwrap();
     assert!(small_pos < medium_pos, "small should come before medium");
     assert!(medium_pos < big_pos, "medium should come before big");
-
-    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 #[test]
 fn test_read_mutation_targets_includes_line_numbers() {
-    let tmp = std::env::temp_dir().join("selfware-test-rmt-ln");
+    let temp = tempfile::tempdir().unwrap();
+    let tmp = temp.path();
     let _ = std::fs::create_dir_all(tmp.join("src"));
     std::fs::write(
         tmp.join("src/test.rs"),
@@ -1255,21 +1251,19 @@ fn test_read_mutation_targets_includes_line_numbers() {
         config_keys: vec![],
     };
 
-    let context = read_mutation_targets(&targets, &tmp);
+    let context = read_mutation_targets(&targets, tmp);
     assert!(
         context.contains("1| fn main()"),
         "Should contain line numbers: {}",
         truncate_char_boundary(&context, 200)
     );
     assert!(context.contains("2|     println!"));
-
-    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 #[test]
 fn test_read_mutation_targets_empty() {
-    let tmp = std::env::temp_dir().join("selfware-test-rmt-empty");
-    let _ = std::fs::create_dir_all(&tmp);
+    let temp = tempfile::tempdir().unwrap();
+    let tmp = temp.path();
 
     let targets = super::super::MutationTargets {
         prompt_logic: vec![],
@@ -1278,16 +1272,14 @@ fn test_read_mutation_targets_empty() {
         config_keys: vec![],
     };
 
-    let context = read_mutation_targets(&targets, &tmp);
+    let context = read_mutation_targets(&targets, tmp);
     assert!(context.is_empty());
-
-    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 #[test]
 fn test_read_mutation_targets_missing_file() {
-    let tmp = std::env::temp_dir().join("selfware-test-rmt-missing");
-    let _ = std::fs::create_dir_all(&tmp);
+    let temp = tempfile::tempdir().unwrap();
+    let tmp = temp.path();
 
     let targets = super::super::MutationTargets {
         prompt_logic: vec![PathBuf::from("nonexistent.rs")],
@@ -1296,23 +1288,21 @@ fn test_read_mutation_targets_missing_file() {
         config_keys: vec![],
     };
 
-    let context = read_mutation_targets(&targets, &tmp);
+    let context = read_mutation_targets(&targets, tmp);
     // Should gracefully skip missing files
     assert!(context.is_empty() || !context.contains("```rust"));
-
-    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 // ── log_event tests ──
 
 #[test]
 fn test_log_event_writes_jsonl() {
-    let tmp = std::env::temp_dir().join("selfware-test-logevent");
-    let _ = std::fs::create_dir_all(&tmp);
+    let temp = tempfile::tempdir().unwrap();
+    let tmp = temp.path();
 
     let event = serde_json::json!({"event": "test", "value": 42});
-    log_event(&tmp, &event);
-    log_event(&tmp, &serde_json::json!({"event": "second"}));
+    log_event(tmp, &event);
+    log_event(tmp, &serde_json::json!({"event": "second"}));
 
     let log_path = tmp.join(".evolution-log.jsonl");
     let content = std::fs::read_to_string(&log_path).unwrap();
@@ -1322,60 +1312,64 @@ fn test_log_event_writes_jsonl() {
     let parsed: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
     assert_eq!(parsed["event"], "test");
     assert_eq!(parsed["value"], 42);
-
-    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 // ── apply_unified_diff tests ──
 
 #[test]
 fn test_apply_unified_diff_valid_patch() {
-    let tmp = std::env::temp_dir().join("selfware-test-ud-valid");
-    let _ = std::fs::create_dir_all(&tmp);
+    let temp = tempfile::tempdir().unwrap();
+    let tmp = temp.path();
+    let _ = Command::new("git").args(["init"]).current_dir(tmp).output();
     let _ = Command::new("git")
-        .args(["init"])
-        .current_dir(&tmp)
+        .args(["config", "user.email", "evo@test"])
+        .current_dir(tmp)
+        .output();
+    let _ = Command::new("git")
+        .args(["config", "user.name", "Evo Test"])
+        .current_dir(tmp)
         .output();
     std::fs::write(tmp.join("file.rs"), "fn old() {}\n").unwrap();
     let _ = Command::new("git")
         .args(["add", "."])
-        .current_dir(&tmp)
+        .current_dir(tmp)
         .output();
     let _ = Command::new("git")
         .args(["commit", "-m", "init"])
-        .current_dir(&tmp)
+        .current_dir(tmp)
         .output();
 
     let patch = "--- a/file.rs\n+++ b/file.rs\n@@ -1 +1 @@\n-fn old() {}\n+fn new() {}\n";
-    assert!(apply_unified_diff(&tmp, patch));
+    assert!(apply_unified_diff(tmp, patch));
 
     let content = std::fs::read_to_string(tmp.join("file.rs")).unwrap();
     assert!(content.contains("fn new()"));
-
-    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 #[test]
 fn test_apply_unified_diff_invalid_patch() {
-    let tmp = std::env::temp_dir().join("selfware-test-ud-invalid");
-    let _ = std::fs::create_dir_all(&tmp);
+    let temp = tempfile::tempdir().unwrap();
+    let tmp = temp.path();
+    let _ = Command::new("git").args(["init"]).current_dir(tmp).output();
     let _ = Command::new("git")
-        .args(["init"])
-        .current_dir(&tmp)
+        .args(["config", "user.email", "evo@test"])
+        .current_dir(tmp)
+        .output();
+    let _ = Command::new("git")
+        .args(["config", "user.name", "Evo Test"])
+        .current_dir(tmp)
         .output();
     std::fs::write(tmp.join("file.rs"), "fn foo() {}\n").unwrap();
     let _ = Command::new("git")
         .args(["add", "."])
-        .current_dir(&tmp)
+        .current_dir(tmp)
         .output();
     let _ = Command::new("git")
         .args(["commit", "-m", "init"])
-        .current_dir(&tmp)
+        .current_dir(tmp)
         .output();
 
-    assert!(!apply_unified_diff(&tmp, "garbage patch content"));
-
-    let _ = std::fs::remove_dir_all(&tmp);
+    assert!(!apply_unified_diff(tmp, "garbage patch content"));
 }
 
 // ── parse_hypotheses edge cases ──
