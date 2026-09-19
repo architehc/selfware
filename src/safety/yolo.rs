@@ -669,7 +669,7 @@ fn collect_all_paths(args: &serde_json::Value, paths: &mut Vec<String>) {
                 } else if let Some(arr) = v.as_array() {
                     for item in arr {
                         if let Some(s) = item.as_str() {
-                            if s.contains('/') || s.contains('\\') || s.starts_with('.') {
+                            if crate::safety::checker::validation::looks_like_mcp_path_token(s) {
                                 paths.push(s.to_string());
                             }
                         } else {
@@ -684,7 +684,7 @@ fn collect_all_paths(args: &serde_json::Value, paths: &mut Vec<String>) {
         serde_json::Value::Array(arr) => {
             for item in arr {
                 if let Some(s) = item.as_str() {
-                    if s.contains('/') || s.contains('\\') || s.starts_with('.') {
+                    if crate::safety::checker::validation::looks_like_mcp_path_token(s) {
                         paths.push(s.to_string());
                     }
                 } else {

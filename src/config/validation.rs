@@ -316,13 +316,24 @@ impl Config {
                 }
 
                 // 2. Behavioral SGLang check: 'xhigh' is rejected by SGLang schema at top-level
-                if val_lower == "xhigh" && is_sglang_backend(&self.endpoint) {
-                    bail!(
-                        "Config error: extra_body.reasoning_effort cannot be 'xhigh' at top-level on SGLang serving deployments. \
-                         Top-level reasoning_effort only accepts 'low' or 'medium' ('xhigh' is rejected by the endpoint schema). \
-                         For xhigh reasoning, place it under [extra_body.chat_template_kwargs.reasoning_effort] \
-                         or omit the field (default is xhigh)."
-                    );
+                if val_lower == "xhigh" {
+                    match check_sglang_backend(&self.endpoint) {
+                        Some(true) => {
+                            bail!(
+                                "Config error: extra_body.reasoning_effort cannot be 'xhigh' at top-level on SGLang serving deployments. \
+                                 Top-level reasoning_effort only accepts 'low' or 'medium' ('xhigh' is rejected by the endpoint schema). \
+                                 For xhigh reasoning, place it under [extra_body.chat_template_kwargs.reasoning_effort] \
+                                 or omit the field (default is xhigh)."
+                            );
+                        }
+                        None => {
+                            tracing::debug!(
+                                "Endpoint '{}' was unprobed during synchronous validation with reasoning_effort='xhigh'",
+                                self.endpoint
+                            );
+                        }
+                        Some(false) => {}
+                    }
                 }
             }
         }
@@ -356,14 +367,25 @@ impl Config {
                         );
                     }
 
-                    if val_lower == "xhigh" && is_sglang_backend(&profile.endpoint) {
-                        bail!(
-                            "Config error: models.{}.extra_body.reasoning_effort cannot be 'xhigh' at top-level on SGLang serving deployments. \
-                             Top-level reasoning_effort only accepts 'low' or 'medium' ('xhigh' is rejected by the endpoint schema). \
-                             For xhigh reasoning, place it under [models.{}.extra_body.chat_template_kwargs.reasoning_effort] \
-                             or omit the field (default is xhigh).",
-                            name, name
-                        );
+                    if val_lower == "xhigh" {
+                        match check_sglang_backend(&profile.endpoint) {
+                            Some(true) => {
+                                bail!(
+                                    "Config error: models.{}.extra_body.reasoning_effort cannot be 'xhigh' at top-level on SGLang serving deployments. \
+                                     Top-level reasoning_effort only accepts 'low' or 'medium' ('xhigh' is rejected by the endpoint schema). \
+                                     For xhigh reasoning, place it under [models.{}.extra_body.chat_template_kwargs.reasoning_effort] \
+                                     or omit the field (default is xhigh).",
+                                    name, name
+                                );
+                            }
+                            None => {
+                                tracing::debug!(
+                                    "Endpoint '{}' for model '{}' was unprobed during synchronous validation with reasoning_effort='xhigh'",
+                                    profile.endpoint, name
+                                );
+                            }
+                            Some(false) => {}
+                        }
                     }
                 }
             }

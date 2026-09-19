@@ -1230,11 +1230,7 @@ impl SafetyChecker {
                             for item in arr {
                                 if let Some(s) = item.as_str() {
                                     str_tokens.push(s);
-                                    if looks_like_explicit_path(s)
-                                        || s.starts_with('.')
-                                        || s.contains('/')
-                                        || s.contains('\\')
-                                    {
+                                    if looks_like_mcp_path_token(s) {
                                         self.check_path(s)?;
                                     }
                                     self.check_content_for_secrets(s)?;
@@ -1298,11 +1294,7 @@ impl SafetyChecker {
                 for item in arr {
                     if let Some(s) = item.as_str() {
                         self.check_content_for_secrets(s)?;
-                        if looks_like_explicit_path(s)
-                            || s.starts_with('.')
-                            || s.contains('/')
-                            || s.contains('\\')
-                        {
+                        if looks_like_mcp_path_token(s) {
                             self.check_path(s)?;
                         }
                     } else {
@@ -4440,6 +4432,33 @@ fn looks_like_explicit_path(tok: &str) -> bool {
     // Windows drive-letter absolute path (both separator flavors).
     let b = tok.as_bytes();
     b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'/' || b[2] == b'\\')
+}
+
+/// Check if an MCP generic argument token qualifies as a filesystem path candidate.
+/// Bare strings, MIME types (e.g. `application/json`), URLs (`https://...`), and CLI
+/// flags (`-v`, `--format`) are excluded to avoid MCP over-blocking. Explicit paths
+/// (`/...`, `./...`, `~/...`, Windows drive letters) and sensitive dot-targets
+/// (`.env`, `.git/`, `.ssh/`, `.selfware/`, `.aws/`, `.admitted_ledger.json`) qualify.
+pub(crate) fn looks_like_mcp_path_token(tok: &str) -> bool {
+    let trimmed = tok.trim();
+    if trimmed.is_empty() || trimmed.contains("://") || trimmed.starts_with('-') {
+        return false;
+    }
+    if looks_like_explicit_path(trimmed) {
+        return true;
+    }
+    if let Some(rest) = trimmed.strip_prefix('.') {
+        if rest.starts_with("env")
+            || rest.starts_with("git")
+            || rest.starts_with("ssh")
+            || rest.starts_with("selfware")
+            || rest.starts_with("aws")
+            || rest.starts_with("admitted_ledger")
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Expand a leading `~`/`~/` against the user's home directory so a

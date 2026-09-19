@@ -490,7 +490,6 @@ pub const SAB_NOISE_MARGIN: f64 = DEFAULT_SAB_NOISE_MARGIN;
 /// When paired scenario scores are available from benchmark runs, calculates the
 /// standard error of the mean scenario score delta across the benchmark suite.
 /// Falls back to [`DEFAULT_SAB_NOISE_MARGIN`] when unmeasured.
-#[allow(dead_code)]
 pub(crate) fn compute_empirical_noise_margin(
     base_sab: Option<&SabResult>,
     cand_sab: Option<&SabResult>,
@@ -579,7 +578,7 @@ pub(crate) fn evaluate_candidate_promotion(
     base_metrics: &FitnessMetrics,
     winner_metrics: &FitnessMetrics,
 ) -> PromotionDecision {
-    let noise_margin = SAB_NOISE_MARGIN;
+    let noise_margin = compute_empirical_noise_margin(base_sab, cand_sab);
     if winner_metrics.sab_score < base_metrics.sab_score - noise_margin {
         return PromotionDecision::Reject(format!(
             "winner SAB score ({:.2}) regressed below baseline ({:.2}) beyond noise margin ({:.2})",

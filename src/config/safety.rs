@@ -98,6 +98,8 @@ pub fn default_denied_paths() -> Vec<String> {
         "**/.selfware/snapshots/**".to_string(),
         "**/.selfware/active_policy.json".to_string(),
         "**/.selfware/**/active_policy.json".to_string(),
+        "**/.selfware/active_evolution.lock".to_string(),
+        "**/.selfware/runs/*.lock".to_string(),
         "**/.admitted_ledger.json".to_string(),
         "**/.selfware/**/.admitted_ledger.json".to_string(),
     ]

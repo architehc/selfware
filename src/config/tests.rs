@@ -2417,7 +2417,7 @@ fn test_default_min_completion_steps_fn() {
 #[test]
 fn test_default_denied_paths_fn() {
     let paths = default_denied_paths();
-    assert_eq!(paths.len(), 28);
+    assert_eq!(paths.len(), 30);
     assert!(paths.contains(&"**/.env".to_string()));
     assert!(paths.contains(&"**/.env.local".to_string()));
     // .env.production / .env.staging etc. (red-team wave-3 finding).
@@ -2451,6 +2451,8 @@ fn test_default_denied_paths_fn() {
     assert!(paths.contains(&"**/.selfware/snapshots/**".to_string()));
     assert!(paths.contains(&"**/.selfware/active_policy.json".to_string()));
     assert!(paths.contains(&"**/.selfware/**/active_policy.json".to_string()));
+    assert!(paths.contains(&"**/.selfware/active_evolution.lock".to_string()));
+    assert!(paths.contains(&"**/.selfware/runs/*.lock".to_string()));
     assert!(paths.contains(&"**/.admitted_ledger.json".to_string()));
     assert!(paths.contains(&"**/.selfware/**/.admitted_ledger.json".to_string()));
 }

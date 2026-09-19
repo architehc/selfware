@@ -40,6 +40,9 @@ fn test_protected_paths() {
     )));
     assert!(is_protected(std::path::Path::new("src/main.rs")));
     assert!(is_protected(std::path::Path::new("tests/unit/mod.rs")));
+    assert!(is_protected(std::path::Path::new(
+        ".selfware/active_evolution.lock"
+    )));
 
     assert!(!is_protected(std::path::Path::new("src/agent/agent.rs")));
     assert!(!is_protected(std::path::Path::new(

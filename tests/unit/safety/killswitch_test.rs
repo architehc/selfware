@@ -8,6 +8,7 @@ fn test_in_process_killswitch_trips_and_resets() {
     reset_in_process();
     let tmp = tempdir().unwrap();
     let empty_dir = tmp.path();
+    set_test_root_override(Some(empty_dir.to_path_buf()));
     assert!(check_killswitch_with_home(Some(empty_dir), Some(empty_dir)).is_ok());
 
     trip_in_process("Emergency stop for testing");
@@ -348,6 +349,8 @@ fn test_global_killswitch_inspection_error_fails_closed() {
 #[test]
 fn test_safety_checker_ordinary_denied_path_does_not_trip_killswitch() {
     let _lock = KILLSWITCH_TEST_LOCK.lock();
+    let tmp = tempdir().unwrap();
+    set_test_root_override(Some(tmp.path().to_path_buf()));
 
     let config = crate::config::SafetyConfig::default();
     let checker = crate::safety::SafetyChecker::new(&config);
@@ -421,4 +424,24 @@ fn test_remove_file_killswitch_nonempty_directory_survives_and_errors() {
     assert!(res_empty.is_ok());
     assert!(res_empty.unwrap());
     assert!(!ks_dir.exists());
+}
+
+#[test]
+fn test_killswitch_root_override_isolates_from_cwd() {
+    let _lock = KILLSWITCH_TEST_LOCK.lock();
+    let tmp = tempdir().unwrap();
+    let isolated_root = tmp.path();
+
+    // With isolated root override set, check_killswitch(None) passes even if cwd has ambient state
+    set_test_root_override(Some(isolated_root.to_path_buf()));
+    assert!(check_killswitch(None).is_ok());
+
+    // Tripping in the isolated root is detected
+    trip_file_killswitch(isolated_root, "Isolated root test trip").unwrap();
+    assert!(check_killswitch(None).is_err());
+    assert!(is_killswitch_active());
+
+    // Resetting root override clears the state
+    remove_file_killswitch(isolated_root).unwrap();
+    assert!(check_killswitch(None).is_ok());
 }

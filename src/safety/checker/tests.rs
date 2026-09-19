@@ -3756,6 +3756,15 @@ fn test_mcp_and_computer_tools_validation() {
         .check_tool_call(&create_test_call("mcp_fs_tool", &mcp_args_path))
         .is_err());
 
+    // Benign non-path MCP args (MIME types, URLs, CLI options) must NOT be over-blocked
+    let mcp_benign_args = serde_json::json!({
+        "args": ["application/json", "https://api.example.com/v1", "--verbose", "feature/branch"]
+    })
+    .to_string();
+    assert!(checker
+        .check_tool_call(&create_test_call("mcp_api_tool", &mcp_benign_args))
+        .is_ok());
+
     // Computer window tool
     let win_args = serde_json::json!({ "action": "launch", "app_name": "rm -rf /" }).to_string();
     assert!(checker

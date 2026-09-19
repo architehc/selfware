@@ -650,6 +650,36 @@ fn test_evaluate_candidate_promotion_gates() {
 }
 
 #[test]
+fn test_compute_empirical_noise_margin_calculation_and_gating() {
+    // 1. None inputs fall back to default constant 0.5
+    assert_eq!(compute_empirical_noise_margin(None, None), 0.5);
+
+    // 2. Paired scenarios calculate standard error of mean delta
+    let base_sab = make_sab(vec![("sc1", 90.0, true), ("sc2", 80.0, true)]);
+    let cand_sab = make_sab(vec![("sc1", 90.1, true), ("sc2", 80.1, true)]);
+    // Deltas: [0.1, 0.1]. Mean = 0.1, Var = 0.0, StdErr = 0.0 -> clamped to 0.05
+    let margin = compute_empirical_noise_margin(Some(&base_sab), Some(&cand_sab));
+    assert!((margin - 0.05).abs() < 1e-6);
+
+    // 3. Evaluate promotion with empirical margin: regression of 0.08 is beyond 0.05 margin
+    let base_metrics = make_metrics(100, 100);
+    let mut cand_metrics = make_metrics(100, 100);
+    cand_metrics.sab_score = base_metrics.sab_score - 0.08;
+    let decision = evaluate_candidate_promotion(
+        0.8,
+        0.85,
+        Some(&base_sab),
+        Some(&cand_sab),
+        &base_metrics,
+        &cand_metrics,
+    );
+    assert!(matches!(
+        decision,
+        PromotionDecision::Reject(r) if r.contains("regressed below baseline") && r.contains("0.05")
+    ));
+}
+
+#[test]
 fn test_parse_hypotheses_valid_json() {
     let json = r#"[
             {

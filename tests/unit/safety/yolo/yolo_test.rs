@@ -702,4 +702,14 @@ fn test_yolo_mcp_arguments_blocked() {
         matches!(decision, YoloDecision::Block(_)),
         "MCP command args targeting protected path must be blocked by YOLO"
     );
+
+    // Benign non-path MCP args (MIME types, URLs, CLI options) must NOT be blocked by YOLO
+    let mcp_benign_args = serde_json::json!({
+        "args": ["application/json", "https://api.example.com/v1", "--verbose", "feature/branch"]
+    });
+    let decision_benign = manager.should_auto_approve("mcp_server_exec", &mcp_benign_args);
+    assert!(
+        matches!(decision_benign, YoloDecision::AutoApprove),
+        "Benign MCP arguments must be approved by YOLO"
+    );
 }

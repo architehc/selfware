@@ -53,6 +53,15 @@ impl KillswitchStatus {
 }
 
 #[cfg(test)]
+pub(crate) static TEST_ROOT_OVERRIDE: parking_lot::RwLock<Option<PathBuf>> =
+    parking_lot::RwLock::new(None);
+
+#[cfg(test)]
+pub(crate) fn set_test_root_override(path: Option<PathBuf>) {
+    *TEST_ROOT_OVERRIDE.write() = path;
+}
+
+#[cfg(test)]
 pub(crate) struct KillswitchTestLock;
 
 #[cfg(test)]
@@ -66,6 +75,7 @@ impl KillswitchTestLock {
         let lock = crate::test_support::state_lock();
         std::env::remove_var(KILLSWITCH_ENV_VAR);
         std::env::remove_var("SELFWARE_KILLSWITCH_IGNORE_HOME");
+        *TEST_ROOT_OVERRIDE.write() = None;
         reset_in_process();
         KillswitchTestGuard { _lock: lock }
     }
@@ -76,6 +86,7 @@ impl Drop for KillswitchTestGuard {
     fn drop(&mut self) {
         std::env::remove_var(KILLSWITCH_ENV_VAR);
         std::env::remove_var("SELFWARE_KILLSWITCH_IGNORE_HOME");
+        *TEST_ROOT_OVERRIDE.write() = None;
         reset_in_process();
     }
 }
@@ -150,8 +161,17 @@ pub fn check_killswitch_with_home(
     // 3. File existence checks (fail-closed for project root / cwd)
     let mut check_paths = Vec::new();
 
-    // Specific project root if provided, otherwise check current working directory
-    if let Some(root) = project_root {
+    // Specific project root if provided (or test root override), otherwise check current working directory
+    #[cfg(test)]
+    let effective_root_buf = project_root
+        .map(Path::to_path_buf)
+        .or_else(|| TEST_ROOT_OVERRIDE.read().clone());
+    #[cfg(test)]
+    let effective_root = effective_root_buf.as_deref();
+    #[cfg(not(test))]
+    let effective_root = project_root;
+
+    if let Some(root) = effective_root {
         check_paths.push(root.join(".selfware").join(KILLSWITCH_FILE_NAME));
     } else if let Ok(cwd) = std::env::current_dir() {
         let cwd_ks = cwd.join(".selfware").join(KILLSWITCH_FILE_NAME);
