@@ -442,24 +442,37 @@ pub fn scan_patch_for_opaque_structures(
         // If base_commit is present, export an immutable snapshot of the file at that revision
         // so file:// links open immutable revision snapshots instead of mutable working copy.
         let target_display_path = if let Some(commit) = base_commit {
-            let snapshot_dir = repo_root.join(".selfware").join("snapshots").join(commit);
-            let snapshot_file = snapshot_dir.join(file_path);
-            if !snapshot_file.exists() {
-                if let Some(parent) = snapshot_file.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                let mut cmd = Command::new("git");
-                cmd.env_remove("GIT_INDEX_FILE");
-                cmd.args(["show", &format!("{commit}:{file_path}")]);
-                cmd.current_dir(repo_root);
-                if let Ok(out) = cmd.output() {
-                    if out.status.success() {
-                        let _ = std::fs::write(&snapshot_file, out.stdout);
+            let rel_p = std::path::Path::new(file_path);
+            let is_contained = !rel_p.is_absolute()
+                && !rel_p.components().any(|c| {
+                    matches!(
+                        c,
+                        std::path::Component::ParentDir | std::path::Component::Prefix(_)
+                    )
+                });
+
+            if is_contained {
+                let snapshot_dir = repo_root.join(".selfware").join("snapshots").join(commit);
+                let snapshot_file = snapshot_dir.join(file_path);
+                if !snapshot_file.exists() {
+                    let mut cmd = Command::new("git");
+                    cmd.env_remove("GIT_INDEX_FILE");
+                    cmd.args(["show", &format!("{commit}:{file_path}")]);
+                    cmd.current_dir(repo_root);
+                    if let Ok(out) = cmd.output() {
+                        if out.status.success() {
+                            if let Some(parent) = snapshot_file.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                            let _ = std::fs::write(&snapshot_file, out.stdout);
+                        }
                     }
                 }
-            }
-            if snapshot_file.exists() {
-                snapshot_file
+                if snapshot_file.exists() {
+                    snapshot_file
+                } else {
+                    repo_root.join(file_path)
+                }
             } else {
                 repo_root.join(file_path)
             }

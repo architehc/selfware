@@ -96,6 +96,10 @@ pub(crate) async fn run_cancellable_subprocess(
     #[cfg(unix)]
     cmd.process_group(0);
 
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    cmd.stdin(std::process::Stdio::null());
+
     let child = cmd.spawn().map_err(SubprocessError::Io)?;
     let child_pid = child.id();
 
@@ -180,7 +184,7 @@ fn features_arg(features: &[&str]) -> String {
 
 /// Measure baseline fitness from real compile / test / fmt / clippy / build
 /// metrics. This replaces the previous synthetic baseline score of 50.
-fn measure_compile_test_baseline(
+async fn measure_compile_test_baseline(
     dir: &Path,
     features: &[&str],
     timeout_secs: f64,
@@ -188,13 +192,13 @@ fn measure_compile_test_baseline(
     let start = Instant::now();
     let feat = features_arg(features);
 
-    let mut check_cmd = Command::new("cargo");
+    let mut check_cmd = tokio::process::Command::new("cargo");
     check_cmd.arg("check").arg("--all-targets").current_dir(dir);
     if !features.is_empty() {
         check_cmd.arg("--features").arg(&feat);
     }
-    let check = check_cmd
-        .output()
+    let check = run_cancellable_subprocess(check_cmd, std::time::Duration::from_secs(300))
+        .await
         .map_err(|e| format!("cargo check failed to run: {e}"))?;
     if !check.status.success() {
         return Err(format!(
@@ -204,40 +208,32 @@ fn measure_compile_test_baseline(
     }
 
     // Time the TEST PHASE ONLY, because that is what the candidate arm times.
-    //
-    // `start` above covers check + test + fmt + clippy + release build, and
-    // `build_candidate_metrics` recorded only its test duration. Latency is a
-    // weighted fitness term, so the baseline carried four extra phases of
-    // wall-clock that no candidate ever paid: every candidate looked faster
-    // than the baseline by construction, and that bias pushed toward promotion.
-    // Two arms must measure the same boundary or the comparison is not one.
     let test_start = Instant::now();
-    let mut test_cmd = Command::new("cargo");
-    test_cmd
-        .arg("test")
-        .arg("--lib")
-        .stdin(std::process::Stdio::null())
-        .current_dir(dir);
+    let mut test_cmd = tokio::process::Command::new("cargo");
+    test_cmd.arg("test").arg("--lib").current_dir(dir);
     if !features.is_empty() {
         test_cmd.arg("--features").arg(&feat);
     }
-    let test = test_cmd
-        .output()
-        .map_err(|e| format!("cargo test failed to run: {e}"))?;
+    let test = run_cancellable_subprocess(
+        test_cmd,
+        std::time::Duration::from_secs(timeout_secs as u64),
+    )
+    .await
+    .map_err(|e| format!("cargo test failed to run: {e}"))?;
     let test_duration = test_start.elapsed();
     let test_stdout = String::from_utf8_lossy(&test.stdout);
     let test_stderr = String::from_utf8_lossy(&test.stderr);
     let full_output = format!("{}\n{}", test_stdout, test_stderr);
     let (tests_passed, tests_total) = parse_test_summary(&full_output);
 
-    let mut fmt_cmd = Command::new("cargo");
+    let mut fmt_cmd = tokio::process::Command::new("cargo");
     fmt_cmd.args(["fmt", "--", "--check"]).current_dir(dir);
-    let fmt_ok = fmt_cmd
-        .output()
+    let fmt_ok = run_cancellable_subprocess(fmt_cmd, std::time::Duration::from_secs(120))
+        .await
         .map(|o| o.status.success())
         .unwrap_or(false);
 
-    let mut clippy_cmd = Command::new("cargo");
+    let mut clippy_cmd = tokio::process::Command::new("cargo");
     clippy_cmd
         .arg("clippy")
         .arg("--all-targets")
@@ -246,18 +242,18 @@ fn measure_compile_test_baseline(
         clippy_cmd.arg("--features").arg(&feat);
     }
     clippy_cmd.args(["--", "-D", "warnings"]);
-    let clippy_ok = clippy_cmd
-        .output()
+    let clippy_ok = run_cancellable_subprocess(clippy_cmd, std::time::Duration::from_secs(300))
+        .await
         .map(|o| o.status.success())
         .unwrap_or(false);
 
-    let mut build_cmd = Command::new("cargo");
+    let mut build_cmd = tokio::process::Command::new("cargo");
     build_cmd.args(["build", "--release"]).current_dir(dir);
     if !features.is_empty() {
         build_cmd.arg("--features").arg(&feat);
     }
-    let build = build_cmd
-        .output()
+    let build = run_cancellable_subprocess(build_cmd, std::time::Duration::from_secs(600))
+        .await
         .map_err(|e| format!("cargo build --release failed to run: {e}"))?;
     if !build.status.success() {
         return Err(format!(
@@ -1286,13 +1282,14 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         }
     } else {
         log_phase("Using compile+test fitness (set SELFWARE_EVOLVE_SAB=1 for full SAB)");
-        match measure_compile_test_baseline(repo_root, EVOLVE_FEATURES, DEFAULT_TIMEOUT_SECS) {
+        match measure_compile_test_baseline(repo_root, EVOLVE_FEATURES, DEFAULT_TIMEOUT_SECS).await
+        {
             Ok(mut m) => {
                 m.max_binary_size_mb = config.safety.max_binary_size_mb;
                 (m, None)
             }
             Err(e) => {
-                if crate::is_shutdown_requested() {
+                if crate::is_shutdown_requested() || e.contains("shutdown requested") {
                     signal_handle.abort();
                     log_warning(
                         "Baseline measurement interrupted by shutdown request; halting cleanly",
@@ -2178,16 +2175,30 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             // Format FIRST — the fmt auto-fix must not change code after it
             // was tested, otherwise the committed bytes differ from the
             // tested bytes.
-            let fmt_check = Command::new("cargo")
+            let mut fmt_check_cmd = tokio::process::Command::new("cargo");
+            fmt_check_cmd
                 .args(["fmt", "--", "--check"])
-                .current_dir(&worktree)
-                .output();
+                .current_dir(&worktree);
+            let fmt_check =
+                run_cancellable_subprocess(fmt_check_cmd, std::time::Duration::from_secs(120))
+                    .await;
+            if matches!(&fmt_check, Err(SubprocessError::ShutdownRequested)) {
+                log_warning("Shutdown requested during candidate fmt check; halting cleanly");
+                break;
+            }
 
             if fmt_check.map(|o| !o.status.success()).unwrap_or(true) {
-                let fmt_fix = Command::new("cargo")
-                    .arg("fmt")
-                    .current_dir(&worktree)
-                    .output();
+                let mut fmt_fix_cmd = tokio::process::Command::new("cargo");
+                fmt_fix_cmd.arg("fmt").current_dir(&worktree);
+                let fmt_fix =
+                    run_cancellable_subprocess(fmt_fix_cmd, std::time::Duration::from_secs(120))
+                        .await;
+                if matches!(&fmt_fix, Err(SubprocessError::ShutdownRequested)) {
+                    log_warning(
+                        "Shutdown requested during candidate fmt auto-fix; halting cleanly",
+                    );
+                    break;
+                }
                 let (fmt_failed, fmt_tail) = match &fmt_fix {
                     Ok(o) => (
                         !o.status.success(),
@@ -2200,7 +2211,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             50,
                         )),
                     ),
-                    Err(_) => (true, None),
+                    Err(e) => (true, Some(format!("cargo fmt error: {e}"))),
                 };
                 if fmt_failed {
                     log_frost(generation, &format!("cargo fmt failed: {}", hypothesis.id));
@@ -2961,6 +2972,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         repo_root,
                         &serde_json::json!({
                             "event": "candidate_rejected",
+                            "run_id": &run_id,
                             "timestamp": chrono_now(),
                             "generation": generation,
                             "rank": rank,
@@ -4651,7 +4663,8 @@ impl Drop for RunLockGuard {
             }
             drop(global_file);
         }
-        let _ = std::fs::remove_file(&self.global_lock_path);
+        // Do NOT delete active_evolution.lock — retain it permanently on disk so concurrent
+        // processes always contend on the exact same inode without unlinking races.
     }
 }
 
@@ -4765,57 +4778,35 @@ pub(crate) fn commit_scoped_paths_isolated(
     match reset.current_dir(repo_root).output() {
         Ok(reset_out) if reset_out.status.success() => {}
         Ok(reset_out) => {
+            let err_msg = String::from_utf8_lossy(&reset_out.stderr)
+                .trim()
+                .to_string();
             log_warning(&format!(
-                "git reset HEAD after isolated commit failed ({}), attempting git read-tree HEAD fallback",
-                String::from_utf8_lossy(&reset_out.stderr).trim()
+                "git reset HEAD -- <paths> after isolated commit produced warning: {err_msg}; preserving index to avoid disturbing unrelated staged files"
             ));
-            let read_tree = Command::new("git")
-                .env_remove("GIT_INDEX_FILE")
-                .args(["read-tree", "HEAD"])
-                .current_dir(repo_root)
-                .output();
-            if let Ok(rt_out) = read_tree {
-                if !rt_out.status.success() {
-                    let err_msg = String::from_utf8_lossy(&rt_out.stderr).trim().to_string();
-                    log_error(&format!(
-                        "git read-tree HEAD fallback also failed: {err_msg}"
-                    ));
-                    log_event(
-                        repo_root,
-                        &serde_json::json!({
-                            "event": "index_resync_failed",
-                            "error": err_msg,
-                            "timestamp": chrono_now(),
-                        }),
-                    );
-                }
-            }
+            log_event(
+                repo_root,
+                &serde_json::json!({
+                    "event": "index_resync_failed",
+                    "error": err_msg,
+                    "paths": paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+                    "timestamp": chrono_now(),
+                }),
+            );
         }
         Err(e) => {
             log_warning(&format!(
-                "Failed to execute git reset HEAD after isolated commit: {e}, attempting git read-tree HEAD fallback"
+                "Failed to execute git reset HEAD -- <paths> after isolated commit: {e}; preserving index to avoid disturbing unrelated staged files"
             ));
-            let read_tree = Command::new("git")
-                .env_remove("GIT_INDEX_FILE")
-                .args(["read-tree", "HEAD"])
-                .current_dir(repo_root)
-                .output();
-            if let Ok(rt_out) = read_tree {
-                if !rt_out.status.success() {
-                    let err_msg = String::from_utf8_lossy(&rt_out.stderr).trim().to_string();
-                    log_error(&format!(
-                        "git read-tree HEAD fallback also failed: {err_msg}"
-                    ));
-                    log_event(
-                        repo_root,
-                        &serde_json::json!({
-                            "event": "index_resync_failed",
-                            "error": err_msg,
-                            "timestamp": chrono_now(),
-                        }),
-                    );
-                }
-            }
+            log_event(
+                repo_root,
+                &serde_json::json!({
+                    "event": "index_resync_failed",
+                    "error": format!("{e}"),
+                    "paths": paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+                    "timestamp": chrono_now(),
+                }),
+            );
         }
     }
 

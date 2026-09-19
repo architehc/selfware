@@ -1013,3 +1013,21 @@ fn test_investigate_citations_export_immutable_snapshots() {
         assert_eq!(content, original_code);
     }
 }
+
+#[test]
+fn test_investigate_citations_traversal_path_fails_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_root = temp.path();
+
+    // Malicious diff attempting directory traversal in file path
+    let diff =
+        "--- a/../escaped_secret.rs\n+++ b/../escaped_secret.rs\n@@ -1,1 +1,1 @@\n-bad\n+good\n";
+    let mut node = make_test_node("att-snap-traversal", diff, AttemptStatus::Evaluated);
+    node.base_commit = Some("fakecommit12345".to_string());
+
+    let _ = investigate_attempt(&node, repo_root);
+
+    // Escaped file or directory must not have been created
+    let escaped_path = repo_root.join("../escaped_secret.rs");
+    assert!(!escaped_path.exists(), "Traversal path must not be created");
+}

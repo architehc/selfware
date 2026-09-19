@@ -3530,3 +3530,98 @@ fn test_commit_scoped_paths_isolated_shutdown_aborts_before_commit() {
     );
     crate::reset_shutdown_for_test();
 }
+
+#[tokio::test]
+async fn test_run_cancellable_subprocess_captures_stdout_and_stderr() {
+    let mut cmd = tokio::process::Command::new("cargo");
+    cmd.arg("--version");
+    let output = run_cancellable_subprocess(cmd, std::time::Duration::from_secs(30))
+        .await
+        .expect("cargo --version must execute");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("cargo"),
+        "stdout must be captured, got: {stdout}"
+    );
+
+    // Verify control gate test summary parsing on captured buffer
+    let synthetic_test_output = "running 2 tests\ntest foo ... ok\ntest bar ... ok\n\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n";
+    let (passed, total) = parse_test_summary(synthetic_test_output);
+    assert_eq!((passed, total), (2, 2));
+    assert!(synthetic_test_output
+        .lines()
+        .any(|l| l.starts_with("test result: ok.")));
+}
+
+#[tokio::test]
+async fn test_measure_compile_test_baseline_shutdown_aborts_promptly() {
+    let _exec = crate::test_support::ExecGuard::hold();
+    let temp = tempfile::tempdir().unwrap();
+    let repo_root = temp.path();
+
+    crate::request_shutdown();
+    assert!(crate::is_shutdown_requested());
+
+    let res = measure_compile_test_baseline(repo_root, &[], 60.0).await;
+    assert!(res.is_err());
+    let err = res.unwrap_err();
+    assert!(
+        err.contains("shutdown requested"),
+        "Expected shutdown requested error, got: {err}"
+    );
+    crate::reset_shutdown_for_test();
+}
+
+#[test]
+fn test_run_lock_guard_permanent_lock_file_overlapping_acquisitions() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_root = temp.path();
+
+    // First run creates and acquires the lock
+    let guard1 =
+        RunLockGuard::acquire(repo_root, "run-1").expect("first acquisition should succeed");
+    let global_lock = repo_root
+        .join(".selfware")
+        .join("runs")
+        .join("active_evolution.lock");
+    assert!(global_lock.exists());
+
+    // Concurrent run must fail
+    #[cfg(unix)]
+    {
+        let second_res = RunLockGuard::acquire(repo_root, "run-2");
+        assert!(
+            second_res.is_err(),
+            "concurrent run must fail while lock is held"
+        );
+    }
+
+    // Drop guard1 — global lock file MUST remain on disk permanently
+    drop(guard1);
+    assert!(
+        global_lock.exists(),
+        "active_evolution.lock must NOT be unlinked on drop"
+    );
+
+    // Second run acquires the EXACT same existing lock file
+    let guard2 = RunLockGuard::acquire(repo_root, "run-2")
+        .expect("second acquisition should succeed after drop");
+    assert!(global_lock.exists());
+
+    // Third run must fail while guard2 is held
+    #[cfg(unix)]
+    {
+        let third_res = RunLockGuard::acquire(repo_root, "run-3");
+        assert!(
+            third_res.is_err(),
+            "third run must fail while guard2 is held"
+        );
+    }
+
+    drop(guard2);
+    assert!(
+        global_lock.exists(),
+        "active_evolution.lock must still exist after second drop"
+    );
+}
