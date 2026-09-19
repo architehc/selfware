@@ -2815,6 +2815,111 @@ async fn handle_command(
                 let _ = std::fs::write(&report_path, report_json);
 
                 return Ok(());
+            } else if workflow == "investigate" {
+                use crate::evolution::investigate::{export_markdown, investigate_attempts_file};
+
+                if !quiet {
+                    println!(
+                        "\n{} {}\n",
+                        Glyphs::gear(),
+                        "RSI Active Investigative Search & Review Interface".workshop_title()
+                    );
+                }
+
+                let attempts_dir = repo_root.join(".selfware").join("attempts");
+                if !attempts_dir.exists() {
+                    println!(
+                        "   {} No attempt history found at .selfware/attempts/",
+                        Glyphs::leaf()
+                    );
+                    return Ok(());
+                }
+
+                let mut log_files: Vec<std::path::PathBuf> = std::fs::read_dir(&attempts_dir)?
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| p.extension().is_some_and(|ext| ext == "jsonl"))
+                    .collect();
+                log_files.sort();
+
+                if log_files.is_empty() {
+                    println!(
+                        "   {} No JSONL attempt trees found in .selfware/attempts/",
+                        Glyphs::leaf()
+                    );
+                    return Ok(());
+                }
+
+                println!(
+                    "   Investigating {} attempt log(s) across {}\n",
+                    log_files.len(),
+                    attempts_dir.display()
+                );
+
+                let latest_file = log_files.last().unwrap();
+                println!("   Investigating latest log: {}\n", latest_file.display());
+                let dossiers = investigate_attempts_file(latest_file, &repo_root)?;
+
+                println!("   Analyzed {} attempts in latest run.\n", dossiers.len());
+
+                for dossier in &dossiers {
+                    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                    println!("Attempt ID:  {}", dossier.attempt_id);
+                    println!(
+                        "Hypothesis:  {}",
+                        dossier.degrees.degree_1_intent.description
+                    );
+                    println!(
+                        "Files:       {:?}",
+                        dossier.degrees.degree_2_syntax.files_touched
+                    );
+                    println!(
+                        "Status:      {:?} (Score: {:.4})",
+                        dossier.degrees.degree_4_empirical.status,
+                        dossier
+                            .degrees
+                            .degree_4_empirical
+                            .composite_score
+                            .unwrap_or(0.0)
+                    );
+                    println!(
+                        "Consensus:   {} ({:.1}% approval across 10,000 reviewers)",
+                        dossier.consensus.decision,
+                        dossier.consensus.consensus_score * 100.0
+                    );
+                    if !dossier.findings.is_empty() {
+                        println!(
+                            "Findings:    {} opaque structure(s) flagged:",
+                            dossier.findings.len()
+                        );
+                        for f in &dossier.findings {
+                            println!("  - [{}] {}: {}", f.severity, f.category, f.title);
+                            println!(
+                                "    Citation: {} (L{}-L{})",
+                                f.citation.file_path,
+                                f.citation.line_range.0,
+                                f.citation.line_range.1
+                            );
+                        }
+                    } else {
+                        println!("Findings:    None (Transparent contracts)");
+                    }
+                }
+
+                // Write full investigative report to .selfware/investigation_report_latest.md
+                if let Some(last_dossier) = dossiers.last() {
+                    let md = export_markdown(last_dossier);
+                    let report_path = repo_root
+                        .join(".selfware")
+                        .join("investigation_report_latest.md");
+                    let _ = std::fs::write(&report_path, md);
+                    println!(
+                        "\n   {} Full investigative dossier exported to {}",
+                        Glyphs::bloom(),
+                        report_path.display()
+                    );
+                }
+
+                return Ok(());
             } else {
                 // Default evolution daemon workflow
                 use crate::evolution::daemon;

@@ -34,6 +34,7 @@
 pub mod ast_tools;
 pub mod daemon;
 pub mod fitness;
+pub mod investigate;
 pub mod micro_mode;
 pub mod policy;
 pub mod replay;

@@ -517,7 +517,7 @@ pub(crate) enum Commands {
         #[arg(long)]
         dry_run: bool,
 
-        /// Workflow to use: "default" for evolution daemon, "rsi" for RSI orchestrator, "replay" for offline policy replay
+        /// Workflow to use: "default" for evolution daemon, "rsi" for RSI orchestrator, "replay" for offline policy replay, "investigate" for active structural audit
         #[arg(long, default_value = "default")]
         workflow: String,
     },
