@@ -34,6 +34,9 @@ pub enum SelfwareError {
     #[error("Internal error: {0}")]
     Internal(String),
 
+    #[error("Operation interrupted by user or shutdown signal")]
+    Interrupted,
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -445,6 +448,7 @@ pub const EXIT_CONFIG_ERROR: u8 = 2;
 pub const EXIT_API_ERROR: u8 = 4;
 pub const EXIT_SAFETY_ERROR: u8 = 5;
 pub const EXIT_CONFIRMATION_REQUIRED: u8 = 6;
+pub const EXIT_INTERRUPTED: u8 = 130;
 
 /// Determine the appropriate process exit code for an error.
 pub fn get_exit_code(e: &anyhow::Error) -> u8 {
@@ -461,6 +465,7 @@ pub fn get_exit_code(e: &anyhow::Error) -> u8 {
                 SelfwareError::Config(_) => EXIT_CONFIG_ERROR,
                 SelfwareError::Api(_) => EXIT_API_ERROR,
                 SelfwareError::Safety(_) => EXIT_SAFETY_ERROR,
+                SelfwareError::Interrupted => EXIT_INTERRUPTED,
                 _ => EXIT_ERROR,
             };
         }

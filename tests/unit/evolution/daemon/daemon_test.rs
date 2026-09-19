@@ -1552,6 +1552,7 @@ fn test_worktree_guard_cleans_up_on_drop() {
 
 #[test]
 fn test_commit_scoped_paths_excludes_unrelated_dirty_and_env() {
+    let _exec = crate::test_support::ExecGuard::hold();
     let dir = setup_winner_repo();
     let root = dir.path();
     // Winner change to src/lib.rs (as if applied from the tested diff).
@@ -1588,6 +1589,7 @@ fn test_commit_scoped_paths_excludes_unrelated_dirty_and_env() {
 
 #[test]
 fn test_commit_scoped_paths_handles_new_and_deleted_files() {
+    let _exec = crate::test_support::ExecGuard::hold();
     let dir = setup_winner_repo();
     let root = dir.path();
     std::fs::write(root.join("src/new.rs"), "pub fn g() {}\n").unwrap();
@@ -1612,6 +1614,7 @@ fn test_commit_scoped_paths_handles_new_and_deleted_files() {
 
 #[test]
 fn test_commit_winner_to_repo_applies_tested_diff_exactly() {
+    let _exec = crate::test_support::ExecGuard::hold();
     let dir = setup_winner_repo();
     let root = dir.path();
 
@@ -1650,6 +1653,7 @@ fn test_commit_winner_to_repo_applies_tested_diff_exactly() {
 
 #[test]
 fn test_commit_winner_to_repo_with_unrelated_staged_changes() {
+    let _exec = crate::test_support::ExecGuard::hold();
     let dir = setup_winner_repo();
     let root = dir.path();
 
@@ -3139,12 +3143,12 @@ fn test_sweep_orphaned_runs_protects_live_runs_and_recovers_progress() {
     let mut m1 = make_metrics(10, 10);
     m1.sab_score = 75.0;
     let node1 = AttemptNode {
-        id: "att-g1-1".into(),
+        id: "att-baseline".into(),
         parent_id: None,
-        generation: 1,
-        branch_id: "main".into(),
-        hypothesis_id: "hyp-1".into(),
-        description: "first attempt".into(),
+        generation: 0,
+        branch_id: "baseline".into(),
+        hypothesis_id: "baseline".into(),
+        description: "Initial baseline capability measurement".into(),
         diff_sha256: "hash1".into(),
         patch: None,
         sab_report_path: None,
@@ -3152,7 +3156,7 @@ fn test_sweep_orphaned_runs_protects_live_runs_and_recovers_progress() {
         composite_score: Some(0.75),
         tokens_used: Some(1000),
         wall_time_ms: 500,
-        status: AttemptStatus::Evaluated,
+        status: AttemptStatus::Baseline,
         failure_class: None,
         failure_reason: None,
         output_tail: None,
@@ -3167,7 +3171,7 @@ fn test_sweep_orphaned_runs_protects_live_runs_and_recovers_progress() {
     m2.sab_score = 88.5;
     let node2 = AttemptNode {
         id: "att-g3-1".into(),
-        parent_id: Some("att-g1-1".into()),
+        parent_id: Some("att-baseline".into()),
         generation: 3,
         branch_id: "main".into(),
         hypothesis_id: "hyp-2".into(),
@@ -3190,10 +3194,38 @@ fn test_sweep_orphaned_runs_protects_live_runs_and_recovers_progress() {
         git_tree_id: None,
         created_at: "1700000045.500".into(),
     };
+    let mut m3 = make_metrics(10, 10);
+    m3.sab_score = 92.0;
+    let node3 = AttemptNode {
+        id: "att-g2-root".into(),
+        parent_id: None,
+        generation: 2,
+        branch_id: "main".into(),
+        hypothesis_id: "hyp-3".into(),
+        description: "unpromoted exploratory root candidate with high score".into(),
+        diff_sha256: "hash3".into(),
+        patch: None,
+        sab_report_path: None,
+        metrics: Some(m3),
+        composite_score: Some(0.92),
+        tokens_used: Some(1500),
+        wall_time_ms: 700,
+        status: AttemptStatus::Evaluated,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        base_commit: None,
+        committed_commit: None,
+        action_type: Some(ActionType::OpenRoot),
+        git_tree_id: None,
+        created_at: "1700000030.000".into(),
+    };
     let attempts_content = format!(
-        "{}\n{}\n",
+        "{}\n{}\n{}\n",
         serde_json::to_string(&node1).unwrap(),
-        serde_json::to_string(&node2).unwrap()
+        serde_json::to_string(&node2).unwrap(),
+        serde_json::to_string(&node3).unwrap()
     );
     std::fs::write(&dead_attempts_file, attempts_content).unwrap();
 
@@ -3231,11 +3263,11 @@ fn test_sweep_orphaned_runs_protects_live_runs_and_recovers_progress() {
                 found_dead_run_end = true;
                 assert_eq!(val["outcome"], "killed");
                 assert_eq!(val["generations_run"], 3);
-                // Unpromoted candidate score (88.5) must NOT inflate final_sab_score;
+                // Unpromoted candidate scores (88.5 and 92.0) must NOT inflate final_sab_score;
                 // final_sab_score must recover the confirmed baseline incumbent (75.0),
-                // while best_attempted_score captures the candidate's attempted 88.5.
+                // while best_attempted_score captures the candidate's attempted 92.0.
                 assert!((val["final_sab_score"].as_f64().unwrap() - 75.0).abs() < 1e-6);
-                assert!((val["best_attempted_score"].as_f64().unwrap() - 88.5).abs() < 1e-6);
+                assert!((val["best_attempted_score"].as_f64().unwrap() - 92.0).abs() < 1e-6);
                 assert!((val["duration_secs"].as_f64().unwrap() - 45.5).abs() < 1e-3);
             }
         }
@@ -3432,4 +3464,69 @@ fn test_shutdown_requested_prevents_winner_commit_and_leaves_head_unchanged() {
         !status.contains("src/lib.rs"),
         "worktree src/lib.rs must not have uncommitted changes"
     );
+    crate::reset_shutdown_for_test();
+}
+
+#[test]
+fn test_run_lock_guard_mutual_exclusion_across_different_runs() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_root = temp.path();
+
+    // 1. First run acquires lock
+    let guard1 =
+        RunLockGuard::acquire(repo_root, "run-alpha").expect("first run should acquire lock");
+    assert!(guard1.global_lock_path.exists());
+    assert!(guard1.lock_path.exists());
+
+    // 2. Second run with a different run_id on the same repo root must fail due to active_evolution.lock
+    #[cfg(unix)]
+    {
+        let guard2_res = RunLockGuard::acquire(repo_root, "run-beta");
+        assert!(
+            guard2_res.is_err(),
+            "second run must fail while first run holds active_evolution.lock"
+        );
+    }
+
+    // 3. Dropping guard1 releases the global and per-run locks
+    drop(guard1);
+
+    // 4. Now second run can acquire successfully
+    let guard2 = RunLockGuard::acquire(repo_root, "run-beta")
+        .expect("second run should succeed after first dropped");
+    assert!(guard2.global_lock_path.exists());
+    assert!(guard2.lock_path.exists());
+    drop(guard2);
+}
+
+#[test]
+fn test_commit_scoped_paths_isolated_shutdown_aborts_before_commit() {
+    let _exec = crate::test_support::ExecGuard::hold();
+    let dir = setup_winner_repo();
+    let root = dir.path();
+
+    let head_before = git_stdout(root, &["rev-parse", "HEAD"]);
+    let test_file = root.join("src/lib.rs");
+    std::fs::write(&test_file, "pub fn f() -> usize { 42 }\n").unwrap();
+
+    crate::request_shutdown();
+    assert!(crate::is_shutdown_requested());
+
+    let res = commit_scoped_paths_isolated(
+        root,
+        &[std::path::PathBuf::from("src/lib.rs")],
+        None,
+        "test shutdown commit",
+    );
+    assert!(res.is_err());
+    assert!(res
+        .unwrap_err()
+        .contains("Shutdown requested before commit"));
+
+    let head_after = git_stdout(root, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        head_before, head_after,
+        "HEAD must not move when shutdown requested before commit"
+    );
+    crate::reset_shutdown_for_test();
 }

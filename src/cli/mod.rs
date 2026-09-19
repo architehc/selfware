@@ -3054,16 +3054,7 @@ async fn handle_command(
                     }
                 };
 
-                if let Some(ref abort_reason) = result.aborted {
-                    eprintln!(
-                        "\n   {} Evolution aborted: {}",
-                        Glyphs::frost(),
-                        abort_reason
-                    );
-                    anyhow::bail!("Evolution aborted: {}", abort_reason);
-                }
-
-                if result.outcome == "killed" || crate::is_shutdown_requested() {
+                if result.outcome == "killed" {
                     eprintln!(
                         "\n   {} Evolution interrupted: shutdown requested ({} generations, {} improvements, duration {:.1}s)",
                         Glyphs::frost(),
@@ -3071,7 +3062,16 @@ async fn handle_command(
                         result.improvements.len(),
                         result.total_duration.as_secs_f64(),
                     );
-                    std::process::exit(130);
+                    return Err(anyhow::anyhow!(crate::errors::SelfwareError::Interrupted));
+                }
+
+                if let Some(ref abort_reason) = result.aborted {
+                    eprintln!(
+                        "\n   {} Evolution aborted: {}",
+                        Glyphs::frost(),
+                        abort_reason
+                    );
+                    anyhow::bail!("Evolution aborted: {}", abort_reason);
                 }
 
                 if result.outcome == "policy_stopped" {

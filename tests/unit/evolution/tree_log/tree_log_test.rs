@@ -596,3 +596,99 @@ fn test_find_lineage_root_branch_cycle_guard() {
     let root_branch = tree.find_lineage_root_branch("c1", "root");
     assert_eq!(root_branch, None);
 }
+
+#[test]
+fn test_legacy_jsonl_migration_populates_action_type() {
+    let dir = tempdir().unwrap();
+    let attempts_file = dir.path().join("legacy_attempts.jsonl");
+
+    // Write nodes without action_type
+    let base = sample_node(
+        "att-baseline",
+        None,
+        "baseline",
+        Some(50.0),
+        AttemptStatus::Baseline,
+    );
+    let mut exp1 = sample_node(
+        "att-exp1",
+        Some("att-baseline"),
+        "branch-1",
+        Some(60.0),
+        AttemptStatus::Evaluated,
+    );
+    exp1.action_type = None;
+    let mut ref1 = sample_node(
+        "att-ref1",
+        Some("att-exp1"),
+        "branch-1",
+        Some(65.0),
+        AttemptStatus::Evaluated,
+    );
+    ref1.action_type = None;
+    let mut root2 = sample_node(
+        "att-root2",
+        None,
+        "branch-2",
+        Some(70.0),
+        AttemptStatus::Evaluated,
+    );
+    root2.action_type = None;
+    let mut ref2 = sample_node(
+        "att-ref2",
+        Some("att-root2"),
+        "branch-2",
+        Some(75.0),
+        AttemptStatus::Evaluated,
+    );
+    ref2.action_type = None;
+
+    let content = format!(
+        "{}\n{}\n{}\n{}\n{}\n",
+        serde_json::to_string(&base).unwrap(),
+        serde_json::to_string(&exp1).unwrap(),
+        serde_json::to_string(&ref1).unwrap(),
+        serde_json::to_string(&root2).unwrap(),
+        serde_json::to_string(&ref2).unwrap(),
+    );
+    std::fs::write(&attempts_file, content).unwrap();
+
+    let tree =
+        AttemptTree::load_from_jsonl(&attempts_file).expect("loading legacy tree must succeed");
+
+    let n_base = tree.get("att-baseline").unwrap();
+    assert_eq!(n_base.action_type, Some(ActionType::OpenRoot));
+    assert!(n_base.is_open_root_action());
+
+    let n_exp1 = tree.get("att-exp1").unwrap();
+    assert_eq!(
+        n_exp1.action_type,
+        Some(ActionType::OpenRoot),
+        "Baseline-parented node must migrate to OpenRoot"
+    );
+    assert!(n_exp1.is_open_root_action());
+
+    let n_ref1 = tree.get("att-ref1").unwrap();
+    assert_eq!(
+        n_ref1.action_type,
+        Some(ActionType::RefineFrontier),
+        "Non-baseline parented node must migrate to RefineFrontier"
+    );
+    assert!(!n_ref1.is_open_root_action());
+
+    let n_root2 = tree.get("att-root2").unwrap();
+    assert_eq!(
+        n_root2.action_type,
+        Some(ActionType::OpenRoot),
+        "Unparented node must migrate to OpenRoot"
+    );
+    assert!(n_root2.is_open_root_action());
+
+    let n_ref2 = tree.get("att-ref2").unwrap();
+    assert_eq!(
+        n_ref2.action_type,
+        Some(ActionType::RefineFrontier),
+        "Child of unparented exploratory node must migrate to RefineFrontier"
+    );
+    assert!(!n_ref2.is_open_root_action());
+}

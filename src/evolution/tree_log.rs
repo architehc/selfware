@@ -211,7 +211,9 @@ impl AttemptNode {
         match self.action_type {
             Some(ActionType::OpenRoot) => true,
             Some(ActionType::RefineFrontier) => false,
-            None => self.parent_id.is_none(),
+            None => self.parent_id.as_deref().is_none_or(|pid| {
+                pid == "baseline" || pid.starts_with("baseline-") || pid == "att-baseline"
+            }),
         }
     }
 
@@ -654,6 +656,37 @@ impl AttemptTree {
                 TreeLogError::CorruptLine(format!("line {}: {}: raw: {}", line_num + 1, e, trimmed))
             })?;
             tree.add_node(node)?;
+        }
+
+        // Tree-aware legacy migration for older logs that lack action_type
+        for idx in 0..tree.nodes.len() {
+            if tree.nodes[idx].action_type.is_none() {
+                let action = match &tree.nodes[idx].parent_id {
+                    None => ActionType::OpenRoot,
+                    Some(pid) => {
+                        let parent_is_baseline = tree.get(pid).map_or_else(
+                            || {
+                                pid == "baseline"
+                                    || pid.starts_with("baseline-")
+                                    || pid == "att-baseline"
+                            },
+                            |p| {
+                                p.status == AttemptStatus::Baseline
+                                    || p.id == "baseline"
+                                    || p.id.starts_with("baseline-")
+                                    || p.id == "att-baseline"
+                                    || p.branch_id == "baseline"
+                            },
+                        );
+                        if parent_is_baseline {
+                            ActionType::OpenRoot
+                        } else {
+                            ActionType::RefineFrontier
+                        }
+                    }
+                };
+                tree.nodes[idx].action_type = Some(action);
+            }
         }
 
         Ok(tree)

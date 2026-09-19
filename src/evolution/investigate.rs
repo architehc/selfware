@@ -439,19 +439,41 @@ pub fn scan_patch_for_opaque_structures(
             .as_ref()
             .map(|b| compute_sha256(b.as_bytes()));
 
-        let path_sep = if repo_root.to_string_lossy().ends_with('/') {
-            ""
+        // If base_commit is present, export an immutable snapshot of the file at that revision
+        // so file:// links open immutable revision snapshots instead of mutable working copy.
+        let target_display_path = if let Some(commit) = base_commit {
+            let snapshot_dir = repo_root.join(".selfware").join("snapshots").join(commit);
+            let snapshot_file = snapshot_dir.join(file_path);
+            if !snapshot_file.exists() {
+                if let Some(parent) = snapshot_file.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let mut cmd = Command::new("git");
+                cmd.env_remove("GIT_INDEX_FILE");
+                cmd.args(["show", &format!("{commit}:{file_path}")]);
+                cmd.current_dir(repo_root);
+                if let Ok(out) = cmd.output() {
+                    if out.status.success() {
+                        let _ = std::fs::write(&snapshot_file, out.stdout);
+                    }
+                }
+            }
+            if snapshot_file.exists() {
+                snapshot_file
+            } else {
+                repo_root.join(file_path)
+            }
         } else {
-            "/"
+            repo_root.join(file_path)
         };
+
         let hyperlink = if start_line > 0 && end_line > 0 {
             format!(
-                "file://{}{}{file_path}#L{start_line}-L{end_line}",
-                repo_root.display(),
-                path_sep
+                "file://{}#L{start_line}-L{end_line}",
+                target_display_path.display()
             )
         } else {
-            format!("file://{}{}{file_path}", repo_root.display(), path_sep)
+            format!("file://{}", target_display_path.display())
         };
 
         GroundedCitation {
@@ -869,6 +891,25 @@ pub fn validate_benchmark_report_resolved(
             "Benchmark report artifact '{}' is not a regular file",
             resolved.display()
         ));
+    }
+
+    let canonical = resolved.canonicalize().map_err(|e| {
+        format!(
+            "Failed to canonicalize benchmark report path '{}': {e}",
+            resolved.display()
+        )
+    })?;
+
+    if let Some(root) = repo_root {
+        if let Ok(canonical_root) = root.canonicalize() {
+            if !canonical.starts_with(&canonical_root) {
+                return Err(format!(
+                    "Benchmark report path '{}' escapes repository root '{}' (traversal denied)",
+                    resolved.display(),
+                    root.display()
+                ));
+            }
+        }
     }
     let metadata = std::fs::metadata(resolved).map_err(|e| {
         format!(

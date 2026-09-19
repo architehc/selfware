@@ -891,3 +891,125 @@ fn test_export_markdown_renders_honest_rule1_labels() {
     let fail_md = export_markdown(&fail_dossier);
     assert!(fail_md.contains("Rule 1: `Unverified / Failing Gates`"));
 }
+
+#[test]
+fn test_validate_benchmark_report_resolved_rejects_path_traversal() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_root = temp.path().join("repo");
+    let outside_dir = temp.path().join("outside");
+    std::fs::create_dir_all(&repo_root).unwrap();
+    std::fs::create_dir_all(&outside_dir).unwrap();
+
+    let outside_file = outside_dir.join("leaked_report.json");
+    let valid_report = serde_json::json!({
+        "schema": "sab-report/1",
+        "binary_sha256": "fake_sha",
+        "aggregate_score": 80.0,
+        "scenarios_expected": 1,
+        "scenarios": [
+            {
+                "name": "scenario_a",
+                "score": 80.0,
+                "tests_passed": true,
+                "broken_tests_fixed": false,
+                "clean_exit": true,
+                "duration_secs": 1
+            }
+        ]
+    });
+    std::fs::write(&outside_file, serde_json::to_string(&valid_report).unwrap()).unwrap();
+
+    let mut node = make_test_node("att-traversal", "", AttemptStatus::Evaluated);
+    node.metrics = Some(crate::evolution::FitnessMetrics {
+        sab_score: 80.0,
+        tokens_used: Some(100),
+        token_budget: 1000,
+        wall_clock_secs: 1.0,
+        timeout_secs: 60.0,
+        full_evaluation_secs: Some(1.0),
+        test_pass_pct: 100.0,
+        binary_size_mb: 2.0,
+        max_binary_size_mb: 50.0,
+        tests_passed: 1,
+        tests_total: 1,
+        visual_score: 100.0,
+    });
+
+    // Attempt traversal using relative path with ../
+    let traversal_rel = Path::new("../outside/leaked_report.json");
+    let res = validate_benchmark_report_resolved(traversal_rel, Some(&repo_root), &node);
+    assert!(res.is_err());
+    let err = res.unwrap_err();
+    assert!(
+        err.contains("escapes repository root") || err.contains("traversal denied"),
+        "Expected traversal error but got: {err}"
+    );
+}
+
+#[test]
+fn test_investigate_citations_export_immutable_snapshots() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_root = temp.path();
+
+    // Initialize git repo and commit a file
+    let run_git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo_root)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {:?} failed", args);
+        output
+    };
+
+    run_git(&["init"]);
+    run_git(&["config", "user.email", "test@selfware.ai"]);
+    run_git(&["config", "user.name", "Test Agent"]);
+
+    let src_dir = repo_root.join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    let test_file = src_dir.join("main.rs");
+    let original_code =
+        "fn main() {\n    let secret = 100;\n    println!(\"val: {}\", secret);\n}\n";
+    std::fs::write(&test_file, original_code).unwrap();
+
+    run_git(&["add", "."]);
+    run_git(&["commit", "-m", "initial commit"]);
+    let commit_out = run_git(&["rev-parse", "HEAD"]);
+    let commit_sha = String::from_utf8_lossy(&commit_out.stdout)
+        .trim()
+        .to_string();
+
+    let diff = "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -2,2 +2,2 @@\n-    let secret = 100;\n+    let secret = 200;\n";
+    let mut node = make_test_node("att-snap-test", diff, AttemptStatus::Evaluated);
+    node.base_commit = Some(commit_sha.clone());
+
+    let dossier = investigate_attempt(&node, repo_root);
+    assert!(
+        !dossier.citations.is_empty(),
+        "citations should be extracted from patch"
+    );
+
+    for citation in &dossier.citations {
+        assert!(
+            citation
+                .hyperlink
+                .contains(&format!(".selfware/snapshots/{commit_sha}")),
+            "Citation hyperlink '{}' must point to immutable snapshot dir for commit {}",
+            citation.hyperlink,
+            commit_sha
+        );
+        let snapshot_path = repo_root
+            .join(".selfware")
+            .join("snapshots")
+            .join(&commit_sha)
+            .join(&citation.file_path);
+        assert!(
+            snapshot_path.exists(),
+            "Snapshot file must be written to disk at {}",
+            snapshot_path.display()
+        );
+        let content = std::fs::read_to_string(&snapshot_path).unwrap();
+        assert_eq!(content, original_code);
+    }
+}

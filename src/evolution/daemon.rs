@@ -64,6 +64,77 @@ const DEFAULT_TOKEN_BUDGET: u64 = 500_000;
 const DEFAULT_TIMEOUT_SECS: f64 = 3600.0;
 const EVOLVE_FEATURES: &[&str] = &["self-improvement"];
 
+/// Error returned by cancellable daemon subprocess executions.
+#[derive(Debug)]
+pub(crate) enum SubprocessError {
+    ShutdownRequested,
+    Timeout,
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for SubprocessError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ShutdownRequested => write!(f, "subprocess cancelled: shutdown requested"),
+            Self::Timeout => write!(f, "subprocess timed out"),
+            Self::Io(e) => write!(f, "subprocess I/O error: {e}"),
+        }
+    }
+}
+
+/// Run a command asynchronously with process group isolation and cancellation polling.
+/// If shutdown is requested while the command runs, terminates the entire process group with SIGKILL.
+pub(crate) async fn run_cancellable_subprocess(
+    mut cmd: tokio::process::Command,
+    timeout: std::time::Duration,
+) -> Result<std::process::Output, SubprocessError> {
+    if crate::is_shutdown_requested() {
+        return Err(SubprocessError::ShutdownRequested);
+    }
+
+    cmd.kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
+
+    let child = cmd.spawn().map_err(SubprocessError::Io)?;
+    let child_pid = child.id();
+
+    let wait_fut = tokio::time::timeout(timeout, child.wait_with_output());
+    tokio::pin!(wait_fut);
+
+    let wait_res = loop {
+        if crate::is_shutdown_requested() {
+            #[cfg(unix)]
+            if let Some(pid) = child_pid {
+                let _ = nix::sys::signal::killpg(
+                    nix::unistd::Pid::from_raw(pid as i32),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+            }
+            return Err(SubprocessError::ShutdownRequested);
+        }
+
+        tokio::select! {
+            res = &mut wait_fut => break res,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+        }
+    };
+
+    match wait_res {
+        Ok(output_res) => output_res.map_err(SubprocessError::Io),
+        Err(_) => {
+            #[cfg(unix)]
+            if let Some(pid) = child_pid {
+                let _ = nix::sys::signal::killpg(
+                    nix::unistd::Pid::from_raw(pid as i32),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+            }
+            Err(SubprocessError::Timeout)
+        }
+    }
+}
+
 fn rating_from_score(score: f64) -> GenerationRating {
     match score as u32 {
         85..=100 => GenerationRating::Bloom,
@@ -229,7 +300,7 @@ fn measure_compile_test_baseline(
 
 /// Build FitnessMetrics for a candidate that has already passed compile, test,
 /// fmt and clippy. Runs a release build to capture real binary size.
-fn build_candidate_metrics(
+async fn build_candidate_metrics(
     worktree: &Path,
     test_output: &std::process::Output,
     test_duration: std::time::Duration,
@@ -242,12 +313,14 @@ fn build_candidate_metrics(
     let (tests_passed, tests_total) = parse_test_summary(&combined);
 
     let feat = features_arg(features);
-    let mut build_cmd = Command::new("cargo");
+    let mut build_cmd = tokio::process::Command::new("cargo");
     build_cmd.args(["build", "--release"]).current_dir(worktree);
     if !features.is_empty() {
         build_cmd.arg("--features").arg(&feat);
     }
-    let build = build_cmd.output().ok()?;
+    let build = run_cancellable_subprocess(build_cmd, std::time::Duration::from_secs(600))
+        .await
+        .ok()?;
     if !build.status.success() {
         return None;
     }
@@ -1166,6 +1239,36 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 (m, Some(r))
             }
             Err(e) => {
+                if crate::is_shutdown_requested() {
+                    signal_handle.abort();
+                    log_warning(
+                        "Baseline measurement interrupted by shutdown request; halting cleanly",
+                    );
+                    log_event(
+                        repo_root,
+                        &serde_json::json!({
+                            "event": "run_end",
+                            "kind": "run_end",
+                            "timestamp": chrono_now(),
+                            "run_id": &run_id,
+                            "outcome": "killed",
+                            "reason": "shutdown requested during baseline benchmark",
+                            "generations_run": 0,
+                            "final_sab_score": 0.0,
+                            "duration_secs": start.elapsed().as_secs_f64(),
+                        }),
+                    );
+                    return EvolutionResult {
+                        generations_run: 0,
+                        improvements: Vec::new(),
+                        final_sab_score: 0.0,
+                        initial_sab_score: 0.0,
+                        total_duration: start.elapsed(),
+                        aborted: Some("shutdown requested during baseline benchmark".to_string()),
+                        outcome: "killed".to_string(),
+                        stop_reason: Some("shutdown requested".to_string()),
+                    };
+                }
                 log_warning(&format!(
                     "SAB baseline failed ({e}); refusing to evolve against an unmeasured baseline"
                 ));
@@ -1189,6 +1292,36 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 (m, None)
             }
             Err(e) => {
+                if crate::is_shutdown_requested() {
+                    signal_handle.abort();
+                    log_warning(
+                        "Baseline measurement interrupted by shutdown request; halting cleanly",
+                    );
+                    log_event(
+                        repo_root,
+                        &serde_json::json!({
+                            "event": "run_end",
+                            "kind": "run_end",
+                            "timestamp": chrono_now(),
+                            "run_id": &run_id,
+                            "outcome": "killed",
+                            "reason": "shutdown requested during baseline benchmark",
+                            "generations_run": 0,
+                            "final_sab_score": 0.0,
+                            "duration_secs": start.elapsed().as_secs_f64(),
+                        }),
+                    );
+                    return EvolutionResult {
+                        generations_run: 0,
+                        improvements: Vec::new(),
+                        final_sab_score: 0.0,
+                        initial_sab_score: 0.0,
+                        total_duration: start.elapsed(),
+                        aborted: Some("shutdown requested during baseline benchmark".to_string()),
+                        outcome: "killed".to_string(),
+                        stop_reason: Some("shutdown requested".to_string()),
+                    };
+                }
                 log_warning(&format!(
                     "Compile/test baseline failed ({e}); refusing to evolve against an \
                       unmeasured baseline"
@@ -1217,6 +1350,17 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
     }
 
     let initial_baseline_composite = config.fitness_weights.composite(&current_baseline_metrics);
+    log_event(
+        repo_root,
+        &serde_json::json!({
+            "event": "baseline",
+            "timestamp": chrono_now(),
+            "run_id": &run_id,
+            "sab_score": current_baseline_metrics.sab_score,
+            "composite": initial_baseline_composite,
+            "mode": if sab_mode { "sab" } else { "compile_test" },
+        }),
+    );
     let baseline_tree_id = Command::new("git")
         .env_remove("GIT_INDEX_FILE")
         .args(["rev-parse", "HEAD^{tree}"])
@@ -1272,6 +1416,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
     }
     let mut active_parent_id: Option<String> = Some(baseline_node.id.clone());
     let mut policy_stopped_reason: Option<String> = None;
+    let mut expected_head_commit = ast_tools::get_git_head_commit(repo_root);
 
     // ═══════════════════════════════════════════════════════
     // MAIN EVOLUTIONARY LOOP
@@ -1285,6 +1430,24 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         generation += 1;
         if config.generations > 0 && generation > config.generations {
             break;
+        }
+
+        // Check for early HEAD drift before running expensive evaluations
+        if let Some(ref expected) = expected_head_commit {
+            let actual_head = ast_tools::get_git_head_commit(repo_root);
+            if let Some(ref actual) = actual_head {
+                if actual != expected {
+                    log_warning(&format!(
+                        "HEAD drift detected at generation {generation}: expected HEAD {expected}, but repo HEAD is {actual} (concurrent commit detected); aborting run early"
+                    ));
+                    abort_run!(
+                        format!("HEAD drift detected: expected {expected}, actual {actual}"),
+                        generation.saturating_sub(1),
+                        current_baseline_metrics.sab_score,
+                        hall_of_fame
+                    );
+                }
+            }
         }
 
         // Check fail-closed killswitch at each generation start
@@ -1734,7 +1897,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         };
         let _ctrl_guard = WorktreeGuard::new(repo_root, control_worktree.clone());
 
-        let mut ctrl_check_cmd = Command::new("cargo");
+        let mut ctrl_check_cmd = tokio::process::Command::new("cargo");
         ctrl_check_cmd
             .arg("check")
             .arg("--all-targets")
@@ -1743,7 +1906,15 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             .env("CARGO_TARGET_DIR", evolution_target_dir(repo_root))
             .stdin(std::process::Stdio::null())
             .current_dir(&control_worktree);
-        let ctrl_check = ctrl_check_cmd.output();
+        let ctrl_check = run_cancellable_subprocess(
+            ctrl_check_cmd,
+            std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS as u64),
+        )
+        .await;
+        if matches!(&ctrl_check, Err(SubprocessError::ShutdownRequested)) {
+            log_warning("Shutdown requested during control check; halting evolution cleanly");
+            break;
+        }
         let ctrl_check_failed = match &ctrl_check {
             Ok(o) => !o.status.success(),
             Err(_) => true,
@@ -1802,7 +1973,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             continue;
         }
 
-        let mut ctrl_test_cmd = Command::new("cargo");
+        let mut ctrl_test_cmd = tokio::process::Command::new("cargo");
         ctrl_test_cmd
             .arg("test")
             .arg("--lib")
@@ -1811,7 +1982,15 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             .env("CARGO_TARGET_DIR", evolution_target_dir(repo_root))
             .stdin(std::process::Stdio::null())
             .current_dir(&control_worktree);
-        let ctrl_test = ctrl_test_cmd.output();
+        let ctrl_test = run_cancellable_subprocess(
+            ctrl_test_cmd,
+            std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS as u64),
+        )
+        .await;
+        if matches!(&ctrl_test, Err(SubprocessError::ShutdownRequested)) {
+            log_warning("Shutdown requested during control test; halting evolution cleanly");
+            break;
+        }
         let ctrl_test_passed = match &ctrl_test {
             Ok(o) => {
                 let combined = format!(
@@ -2069,15 +2248,23 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             }
 
             // Compile check
-            let mut check_cmd = Command::new("cargo");
+            let mut check_cmd = tokio::process::Command::new("cargo");
             check_cmd
                 .arg("check")
                 .arg("--all-targets")
                 .arg("--features")
                 .arg(features_arg(EVOLVE_FEATURES))
                 .env("CARGO_TARGET_DIR", evolution_target_dir(repo_root))
+                .stdin(std::process::Stdio::null())
                 .current_dir(&worktree);
-            let check = check_cmd.output();
+            let check =
+                run_cancellable_subprocess(check_cmd, std::time::Duration::from_secs(300)).await;
+            if matches!(&check, Err(SubprocessError::ShutdownRequested)) {
+                log_warning(
+                    "Shutdown requested during candidate compilation check; halting cleanly",
+                );
+                break;
+            }
             let (check_failed, check_tail) = match &check {
                 Ok(o) => (
                     !o.status.success(),
@@ -2090,7 +2277,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         50,
                     )),
                 ),
-                Err(_) => (true, None),
+                Err(e) => (true, Some(format!("Check error: {e}"))),
             };
 
             if check_failed {
@@ -2135,7 +2322,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
             // Run tests
             let test_start = Instant::now();
-            let mut test_cmd = Command::new("cargo");
+            let mut test_cmd = tokio::process::Command::new("cargo");
             test_cmd
                 .arg("test")
                 .arg("--lib")
@@ -2144,7 +2331,15 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 .env("CARGO_TARGET_DIR", evolution_target_dir(repo_root))
                 .stdin(std::process::Stdio::null())
                 .current_dir(&worktree);
-            let test = test_cmd.output();
+            let test = run_cancellable_subprocess(
+                test_cmd,
+                std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS as u64),
+            )
+            .await;
+            if matches!(&test, Err(SubprocessError::ShutdownRequested)) {
+                log_warning("Shutdown requested during candidate test execution; halting cleanly");
+                break;
+            }
 
             let test_output = match test {
                 Ok(o) => o,
@@ -2271,16 +2466,22 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             }
 
             // Clippy lint gate — reject code with clippy warnings
-            let mut clippy_cmd = Command::new("cargo");
+            let mut clippy_cmd = tokio::process::Command::new("cargo");
             clippy_cmd
                 .arg("clippy")
                 .arg("--all-targets")
                 .arg("--features")
                 .arg(features_arg(EVOLVE_FEATURES))
                 .env("CARGO_TARGET_DIR", evolution_target_dir(repo_root))
+                .stdin(std::process::Stdio::null())
                 .current_dir(&worktree);
             clippy_cmd.args(["--", "-D", "warnings"]);
-            let clippy = clippy_cmd.output();
+            let clippy =
+                run_cancellable_subprocess(clippy_cmd, std::time::Duration::from_secs(300)).await;
+            if matches!(&clippy, Err(SubprocessError::ShutdownRequested)) {
+                log_warning("Shutdown requested during candidate clippy check; halting cleanly");
+                break;
+            }
             let (clippy_failed, clippy_tail) = match &clippy {
                 Ok(o) => (
                     !o.status.success(),
@@ -2293,7 +2494,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         50,
                     )),
                 ),
-                Err(_) => (true, None),
+                Err(e) => (true, Some(format!("Clippy error: {e}"))),
             };
 
             if clippy_failed {
@@ -2339,10 +2540,20 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             // Compute real fitness metrics. If SAB is available, run the full
             // benchmark; otherwise derive compile/test/binary-size metrics.
             let (winner_metrics, winner_sab) = if sab_available {
-                let build = Command::new("cargo")
+                let mut build_cmd = tokio::process::Command::new("cargo");
+                build_cmd
                     .args(["build", "--release", "--features", "self-improvement"])
-                    .current_dir(&worktree)
-                    .output();
+                    .stdin(std::process::Stdio::null())
+                    .current_dir(&worktree);
+                let build =
+                    run_cancellable_subprocess(build_cmd, std::time::Duration::from_secs(600))
+                        .await;
+                if matches!(&build, Err(SubprocessError::ShutdownRequested)) {
+                    log_warning(
+                        "Shutdown requested during candidate release build; halting cleanly",
+                    );
+                    break;
+                }
                 let (build_failed, build_tail) = match &build {
                     Ok(o) => (
                         !o.status.success(),
@@ -2355,7 +2566,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             50,
                         )),
                     ),
-                    Err(_) => (true, None),
+                    Err(e) => (true, Some(format!("Build error: {e}"))),
                 };
 
                 if build_failed {
@@ -2470,7 +2681,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     test_duration,
                     EVOLVE_FEATURES,
                     &config,
-                ) {
+                )
+                .await
+                {
                     Some(m) => (m, None),
                     None => {
                         log_frost(
@@ -2753,6 +2966,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             "rank": rank,
                             "description": candidate.hypothesis.description,
                             "composite": candidate.composite,
+                            "sab_score": candidate.metrics.sab_score,
                             "branch_id": candidate.branch_id,
                             "reason": reason,
                         }),
@@ -2769,13 +2983,6 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     );
                     break;
                 }
-
-                log_bloom(
-                    generation,
-                    &winner.hypothesis.description,
-                    current_baseline_metrics.sab_score,
-                    winner.metrics.sab_score,
-                );
 
                 let commit_msg = format!(
                     "🧬 Gen {} BLOOM (Rank {}): {:.0} → {:.0} | {}",
@@ -2796,10 +3003,18 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     Some(&winner.evaluated_tree),
                     &commit_msg,
                 ) {
+                    log_bloom(
+                        generation,
+                        &winner.hypothesis.description,
+                        current_baseline_metrics.sab_score,
+                        winner.metrics.sab_score,
+                    );
+
                     active_parent_id = Some(winner.attempt_id.clone());
 
                     let new_head = ast_tools::get_git_head_commit(repo_root);
                     if let Some(ref head_sha) = new_head {
+                        expected_head_commit = Some(head_sha.clone());
                         if let Err(e) = AttemptTree::record_committed_commit(
                             &attempts_file,
                             &winner.attempt_id,
@@ -4314,11 +4529,15 @@ impl Drop for IsolatedIndexGuard {
     }
 }
 
-/// RAII guard holding an advisory exclusive lock on `.selfware/runs/<run_id>.lock`
-/// for the duration of an evolution run, releasing and removing it on drop.
+/// RAII guard holding an advisory exclusive lock on `.selfware/runs/active_evolution.lock`
+/// (ensuring only one evolution run operates on the repository at a time) and
+/// `.selfware/runs/<run_id>.lock` (acting as a per-run liveness marker for orphan sweepers),
+/// releasing and removing them on drop.
 pub struct RunLockGuard {
     pub lock_path: PathBuf,
     pub lock_file: Option<std::fs::File>,
+    pub global_lock_path: PathBuf,
+    pub global_lock_file: Option<std::fs::File>,
 }
 
 impl RunLockGuard {
@@ -4330,6 +4549,46 @@ impl RunLockGuard {
                 runs_dir.display()
             )
         })?;
+
+        // 1. Acquire global repository lock to prevent concurrent evolution runs on the same repo
+        let global_lock_path = runs_dir.join("active_evolution.lock");
+        let mut global_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&global_lock_path)
+            .map_err(|e| {
+                format!(
+                    "Failed to open global evolution lock file '{}': {e}",
+                    global_lock_path.display()
+                )
+            })?;
+
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let rc = unsafe {
+                nix::libc::flock(
+                    global_file.as_raw_fd(),
+                    nix::libc::LOCK_EX | nix::libc::LOCK_NB,
+                )
+            };
+            if rc != 0 {
+                return Err(format!(
+                    "Failed to acquire exclusive lock on '{}': another evolution process is already running on this repository",
+                    global_lock_path.display()
+                ));
+            }
+        }
+
+        use std::io::{Seek, SeekFrom, Write};
+        let _ = global_file.set_len(0);
+        let _ = global_file.seek(SeekFrom::Start(0));
+        let _ = writeln!(global_file, "{} {}", std::process::id(), run_id);
+        let _ = global_file.flush();
+
+        // 2. Acquire per-run lock file as liveness marker
         let lock_path = runs_dir.join(format!("{run_id}.lock"));
         let mut file = std::fs::OpenOptions::new()
             .read(true)
@@ -4358,7 +4617,6 @@ impl RunLockGuard {
             }
         }
 
-        use std::io::{Seek, SeekFrom, Write};
         let _ = file.set_len(0);
         let _ = file.seek(SeekFrom::Start(0));
         let _ = writeln!(file, "{}", std::process::id());
@@ -4367,6 +4625,8 @@ impl RunLockGuard {
         Ok(Self {
             lock_path,
             lock_file: Some(file),
+            global_lock_path,
+            global_lock_file: Some(global_file),
         })
     }
 }
@@ -4382,6 +4642,16 @@ impl Drop for RunLockGuard {
             drop(file);
         }
         let _ = std::fs::remove_file(&self.lock_path);
+
+        if let Some(global_file) = self.global_lock_file.take() {
+            #[cfg(unix)]
+            unsafe {
+                use std::os::fd::AsRawFd;
+                nix::libc::flock(global_file.as_raw_fd(), nix::libc::LOCK_UN);
+            }
+            drop(global_file);
+        }
+        let _ = std::fs::remove_file(&self.global_lock_path);
     }
 }
 
@@ -4467,6 +4737,10 @@ pub(crate) fn commit_scoped_paths_isolated(
     }
 
     // 5. Commit using the isolated index (commit without pathspec commits the entire isolated index)
+    if crate::is_shutdown_requested() {
+        return Err("Shutdown requested before commit".to_string());
+    }
+
     let commit = Command::new("git")
         .env("GIT_INDEX_FILE", &guard.index_path)
         .args(["commit", "-m", commit_msg])
@@ -4489,18 +4763,59 @@ pub(crate) fn commit_scoped_paths_isolated(
         reset.arg(p);
     }
     match reset.current_dir(repo_root).output() {
+        Ok(reset_out) if reset_out.status.success() => {}
         Ok(reset_out) => {
-            if !reset_out.status.success() {
-                log_warning(&format!(
-                    "git reset HEAD after isolated commit produced warning: {}",
-                    String::from_utf8_lossy(&reset_out.stderr).trim()
-                ));
+            log_warning(&format!(
+                "git reset HEAD after isolated commit failed ({}), attempting git read-tree HEAD fallback",
+                String::from_utf8_lossy(&reset_out.stderr).trim()
+            ));
+            let read_tree = Command::new("git")
+                .env_remove("GIT_INDEX_FILE")
+                .args(["read-tree", "HEAD"])
+                .current_dir(repo_root)
+                .output();
+            if let Ok(rt_out) = read_tree {
+                if !rt_out.status.success() {
+                    let err_msg = String::from_utf8_lossy(&rt_out.stderr).trim().to_string();
+                    log_error(&format!(
+                        "git read-tree HEAD fallback also failed: {err_msg}"
+                    ));
+                    log_event(
+                        repo_root,
+                        &serde_json::json!({
+                            "event": "index_resync_failed",
+                            "error": err_msg,
+                            "timestamp": chrono_now(),
+                        }),
+                    );
+                }
             }
         }
         Err(e) => {
             log_warning(&format!(
-                "Failed to execute git reset HEAD after isolated commit: {e}"
+                "Failed to execute git reset HEAD after isolated commit: {e}, attempting git read-tree HEAD fallback"
             ));
+            let read_tree = Command::new("git")
+                .env_remove("GIT_INDEX_FILE")
+                .args(["read-tree", "HEAD"])
+                .current_dir(repo_root)
+                .output();
+            if let Ok(rt_out) = read_tree {
+                if !rt_out.status.success() {
+                    let err_msg = String::from_utf8_lossy(&rt_out.stderr).trim().to_string();
+                    log_error(&format!(
+                        "git read-tree HEAD fallback also failed: {err_msg}"
+                    ));
+                    log_event(
+                        repo_root,
+                        &serde_json::json!({
+                            "event": "index_resync_failed",
+                            "error": err_msg,
+                            "timestamp": chrono_now(),
+                        }),
+                    );
+                }
+            }
         }
     }
 
@@ -4666,18 +4981,28 @@ pub fn sweep_orphaned_runs(repo_root: &Path) -> usize {
                 }
             } else if event == "run_end" {
                 ended_runs.insert(run_id);
-            } else if event == "generation_end" || event == "generation_start" {
-                if let Some(gen) = val.get("generation").and_then(|v| v.as_u64()) {
-                    entry.max_generation = entry.max_generation.max(gen as usize);
-                }
-            } else if event == "candidate_promoted" {
-                if let Some(score) = val.get("score_after").and_then(|v| v.as_f64()) {
+            } else if event == "baseline" {
+                if let Some(score) = val.get("sab_score").and_then(|v| v.as_f64()) {
                     entry.last_incumbent_score = score;
                     if score > entry.best_attempted_score {
                         entry.best_attempted_score = score;
                     }
                 }
-            } else if event == "candidate_evaluated" || event == "candidate_rejected" {
+            } else if event == "generation_end" || event == "generation_start" {
+                if let Some(gen) = val.get("generation").and_then(|v| v.as_u64()) {
+                    entry.max_generation = entry.max_generation.max(gen as usize);
+                }
+                if event == "generation_end"
+                    && val.get("outcome").and_then(|v| v.as_str()) == Some("bloom")
+                {
+                    if let Some(score) = val.get("score_after").and_then(|v| v.as_f64()) {
+                        entry.last_incumbent_score = score;
+                        if score > entry.best_attempted_score {
+                            entry.best_attempted_score = score;
+                        }
+                    }
+                }
+            } else if event == "candidate_rejected" {
                 if let Some(score) = val
                     .get("sab_score")
                     .or_else(|| val.get("score"))
@@ -4781,10 +5106,11 @@ pub fn sweep_orphaned_runs(repo_root: &Path) -> usize {
                         }
                         // Only confirmed incumbent updates last_incumbent_score:
                         // baseline root node, or any promoted winner with committed_commit anchor
-                        if node.status == AttemptStatus::Baseline
-                            || node.parent_id.is_none()
-                            || node.committed_commit.is_some()
-                        {
+                        let is_baseline = node.status == AttemptStatus::Baseline
+                            || node.id == "baseline"
+                            || node.id.starts_with("baseline-")
+                            || node.id == "att-baseline";
+                        if is_baseline || node.committed_commit.is_some() {
                             progress.last_incumbent_score = m.sab_score;
                         }
                     }
