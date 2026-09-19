@@ -3071,7 +3071,7 @@ async fn handle_command(
                         result.improvements.len(),
                         result.total_duration.as_secs_f64(),
                     );
-                    return Ok(());
+                    std::process::exit(130);
                 }
 
                 if result.outcome == "policy_stopped" {

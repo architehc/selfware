@@ -1186,3 +1186,142 @@ fn test_failed_run_becomes_prune_eligible_past_age_backstop() {
         "failed run older than 2h must be pruned despite still-alive daemon PID"
     );
 }
+
+#[test]
+fn test_parse_sab_report_content_accepts_valid_report() {
+    let body = serde_json::json!({
+        "schema": "sab-report/1",
+        "run_id": "test-run-123",
+        "binary_sha256": "abc123def456",
+        "scenarios_expected": 2,
+        "scenarios": [
+            {
+                "name": "scen_1",
+                "difficulty": "easy",
+                "score": 80.0,
+                "tests_passed": true,
+                "broken_tests_fixed": false,
+                "clean_exit": true,
+                "duration_secs": 2,
+                "tokens_used": 100
+            },
+            {
+                "name": "scen_2",
+                "difficulty": "medium",
+                "score": 90.0,
+                "tests_passed": true,
+                "broken_tests_fixed": true,
+                "clean_exit": true,
+                "duration_secs": 3,
+                "tokens_used": 200
+            }
+        ]
+    });
+    let content = serde_json::to_string(&body).unwrap();
+    let res = parse_sab_report_content(&content, Some("abc123def456")).unwrap();
+    assert_eq!(res.aggregate_score, 85.0);
+    assert_eq!(res.binary_sha256, "abc123def456");
+    assert_eq!(res.run_id, "test-run-123");
+    assert_eq!(res.total_tokens_used, Some(300));
+}
+
+#[test]
+fn test_parse_sab_report_content_rejects_duplicate_names() {
+    let body = serde_json::json!({
+        "schema": "sab-report/1",
+        "binary_sha256": "abc123def456",
+        "scenarios_expected": 2,
+        "scenarios": [
+            {
+                "name": "same_name",
+                "difficulty": "easy",
+                "score": 80.0,
+                "tests_passed": true,
+                "broken_tests_fixed": false,
+                "clean_exit": true,
+                "duration_secs": 2
+            },
+            {
+                "name": "same_name",
+                "difficulty": "medium",
+                "score": 90.0,
+                "tests_passed": true,
+                "broken_tests_fixed": false,
+                "clean_exit": true,
+                "duration_secs": 3
+            }
+        ]
+    });
+    let content = serde_json::to_string(&body).unwrap();
+    let err = parse_sab_report_content(&content, Some("abc123def456")).unwrap_err();
+    assert!(format!("{err}").contains("duplicate scenario name"));
+}
+
+#[test]
+fn test_parse_sab_report_content_rejects_out_of_range_scores() {
+    let body = serde_json::json!({
+        "schema": "sab-report/1",
+        "binary_sha256": "abc123def456",
+        "scenarios_expected": 1,
+        "scenarios": [
+            {
+                "name": "scen_1",
+                "difficulty": "easy",
+                "score": 110.0,
+                "tests_passed": true,
+                "broken_tests_fixed": false,
+                "clean_exit": true,
+                "duration_secs": 2
+            }
+        ]
+    });
+    let content = serde_json::to_string(&body).unwrap();
+    let err = parse_sab_report_content(&content, Some("abc123def456")).unwrap_err();
+    assert!(format!("{err}").contains("invalid score"));
+}
+
+#[test]
+fn test_parse_sab_report_content_rejects_missing_required_fields() {
+    // Missing broken_tests_fixed
+    let body = serde_json::json!({
+        "schema": "sab-report/1",
+        "binary_sha256": "abc123def456",
+        "scenarios_expected": 1,
+        "scenarios": [
+            {
+                "name": "scen_1",
+                "difficulty": "easy",
+                "score": 90.0,
+                "tests_passed": true,
+                "clean_exit": true,
+                "duration_secs": 2
+            }
+        ]
+    });
+    let content = serde_json::to_string(&body).unwrap();
+    let err = parse_sab_report_content(&content, Some("abc123def456")).unwrap_err();
+    assert!(format!("{err}").contains("broken_tests_fixed"));
+}
+
+#[test]
+fn test_parse_sab_report_content_rejects_wrong_binary_sha() {
+    let body = serde_json::json!({
+        "schema": "sab-report/1",
+        "binary_sha256": "wrong_sha",
+        "scenarios_expected": 1,
+        "scenarios": [
+            {
+                "name": "scen_1",
+                "difficulty": "easy",
+                "score": 90.0,
+                "tests_passed": true,
+                "broken_tests_fixed": false,
+                "clean_exit": true,
+                "duration_secs": 2
+            }
+        ]
+    });
+    let content = serde_json::to_string(&body).unwrap();
+    let err = parse_sab_report_content(&content, Some("expected_sha")).unwrap_err();
+    assert!(matches!(err, FitnessError::WrongBinaryEvaluated { .. }));
+}

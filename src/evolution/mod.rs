@@ -85,6 +85,7 @@ pub const PROTECTED_PATHS: &[&str] = &[
     ".selfware/commands/",
     ".selfware/skill-candidates/",
     ".selfware/attempts/",
+    ".selfware/runs/",
     ".selfware/active_policy.json",
     ".selfware/investigation_report_latest.md",
     ".admitted_ledger.json",

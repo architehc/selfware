@@ -502,28 +502,51 @@ fn parse_sab_output(
 
     let content = std::fs::read_to_string(report_path)
         .map_err(|e| FitnessError::ReportParseFailed(format!("{report_path}: {e}")))?;
-    let json: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| FitnessError::ReportParseFailed(e.to_string()))?;
 
-    match json["schema"].as_str() {
+    let requested = sha256_of(requested_binary)?;
+    let mut result = parse_sab_report_content(&content, Some(&requested))?;
+    result.wall_clock = wall_clock;
+    result.report_path = PathBuf::from(report_path);
+    Ok(result)
+}
+
+/// Parse and strictly validate SAB report JSON content according to `sab-report/1` schema.
+///
+/// Shared canonical parser used across candidate evaluation (`fitness.rs`) and
+/// investigative review / audit verification (`investigate.rs`).
+pub fn parse_sab_report_content(
+    content: &str,
+    expected_binary_sha: Option<&str>,
+) -> Result<SabResult, FitnessError> {
+    let json: serde_json::Value = serde_json::from_str(content)
+        .map_err(|e| FitnessError::ReportParseFailed(format!("corrupted JSON: {e}")))?;
+
+    match json.get("schema").and_then(|v| v.as_str()) {
         Some("sab-report/1") => {}
-        other => {
+        Some(other) => {
             return Err(FitnessError::ReportParseFailed(format!(
-                "unsupported report schema: {other:?}"
-            )))
+                "schema mismatch (found '{other}', expected 'sab-report/1')"
+            )));
+        }
+        None => {
+            return Err(FitnessError::ReportParseFailed(
+                "corrupted: missing schema and scenarios array".into(),
+            ));
         }
     }
 
     // Did the runner score the build we asked it to score?
-    let evaluated = json["binary_sha256"]
-        .as_str()
-        .ok_or_else(|| FitnessError::IncompleteReport("binary_sha256".into()))?;
-    let requested = sha256_of(requested_binary)?;
-    if evaluated != requested {
-        return Err(FitnessError::WrongBinaryEvaluated {
-            requested,
-            evaluated: evaluated.to_string(),
-        });
+    let evaluated = json
+        .get("binary_sha256")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if let Some(expected) = expected_binary_sha {
+        if evaluated.is_empty() || evaluated != expected {
+            return Err(FitnessError::WrongBinaryEvaluated {
+                requested: expected.to_string(),
+                evaluated: evaluated.to_string(),
+            });
+        }
     }
 
     let expected = json["scenarios_expected"]
@@ -532,10 +555,12 @@ fn parse_sab_output(
     let scenarios = json["scenarios"]
         .as_array()
         .ok_or_else(|| FitnessError::IncompleteReport("scenarios".into()))?;
+    if scenarios.is_empty() {
+        return Err(FitnessError::IncompleteReport(
+            "no scenarios in report; a suite with 0 scenarios is incomplete".into(),
+        ));
+    }
     if scenarios.len() as u64 != expected {
-        // A partial run averaged over the scenarios that finished, so a
-        // candidate that crashed most of the suite could outscore one that
-        // completed it.
         return Err(FitnessError::IncompleteReport(format!(
             "{} of {expected} scenarios reported; a partial suite is not a score",
             scenarios.len()
@@ -551,7 +576,11 @@ fn parse_sab_output(
             };
             Ok(ScenarioScore {
                 name: field("name")?.as_str().unwrap_or("unknown").to_string(),
-                difficulty: match field("difficulty")?.as_str().unwrap_or("medium") {
+                difficulty: match s
+                    .get("difficulty")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("medium")
+                {
                     "easy" => Difficulty::Easy,
                     "medium" => Difficulty::Medium,
                     "hard" => Difficulty::Hard,
@@ -603,13 +632,16 @@ fn parse_sab_output(
         }
     }
 
-    let aggregate = if scenario_scores.is_empty() {
-        return Err(FitnessError::IncompleteReport(
-            "no scenarios in report".into(),
-        ));
-    } else {
-        scenario_scores.iter().map(|s| s.score).sum::<f64>() / scenario_scores.len() as f64
-    };
+    let aggregate =
+        scenario_scores.iter().map(|s| s.score).sum::<f64>() / scenario_scores.len() as f64;
+
+    if let Some(agg_score) = json.get("aggregate_score").and_then(|v| v.as_f64()) {
+        if (agg_score - aggregate).abs() > 0.05 {
+            return Err(FitnessError::ReportParseFailed(format!(
+                "aggregate score mismatch (reported {agg_score:.2}, scenario average {aggregate:.2})"
+            )));
+        }
+    }
 
     // A total only exists if every scenario reported. Summing the ones that did
     // and calling it the total understates cost by however many were missing.
@@ -638,13 +670,13 @@ fn parse_sab_output(
         aggregate_score: aggregate,
         scenario_scores,
         total_tokens_used,
-        wall_clock,
+        wall_clock: Duration::ZERO,
         rating,
         binary_sha256: evaluated.to_string(),
         model,
         endpoint,
         run_id: json["run_id"].as_str().unwrap_or("unknown").to_string(),
-        report_path: PathBuf::from(report_path),
+        report_path: PathBuf::new(),
     })
 }
 

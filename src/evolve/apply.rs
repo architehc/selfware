@@ -375,7 +375,20 @@ async fn cargo_check_shadow(shadow_path: &Path, project_root: &Path) -> CompileG
             return CompileGate::Unavailable(format!("compile gate failed to spawn cargo: {e}"));
         }
     };
-    match tokio::time::timeout(CARGO_CHECK_TIMEOUT, child.wait_with_output()).await {
+    let wait_fut = tokio::time::timeout(CARGO_CHECK_TIMEOUT, child.wait_with_output());
+    tokio::pin!(wait_fut);
+    let wait_res = loop {
+        if crate::is_shutdown_requested() {
+            return CompileGate::Unavailable(
+                "compile gate aborted: shutdown requested".to_string(),
+            );
+        }
+        tokio::select! {
+            res = &mut wait_fut => break res,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
+        }
+    };
+    match wait_res {
         Ok(Ok(output)) if output.status.success() => CompileGate::Passed,
         Ok(Ok(output)) => {
             let stderr: String = String::from_utf8_lossy(&output.stderr)

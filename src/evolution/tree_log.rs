@@ -211,13 +211,7 @@ impl AttemptNode {
         match self.action_type {
             Some(ActionType::OpenRoot) => true,
             Some(ActionType::RefineFrontier) => false,
-            None => {
-                // Fallback for historical nodes without persisted action_type:
-                // unparented nodes or direct baseline children
-                self.parent_id
-                    .as_deref()
-                    .is_none_or(|pid| pid == "att-baseline" || pid.contains("baseline"))
-            }
+            None => self.parent_id.is_none(),
         }
     }
 

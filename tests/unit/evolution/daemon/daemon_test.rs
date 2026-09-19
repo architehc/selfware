@@ -3231,7 +3231,11 @@ fn test_sweep_orphaned_runs_protects_live_runs_and_recovers_progress() {
                 found_dead_run_end = true;
                 assert_eq!(val["outcome"], "killed");
                 assert_eq!(val["generations_run"], 3);
-                assert!((val["final_sab_score"].as_f64().unwrap() - 88.5).abs() < 1e-6);
+                // Unpromoted candidate score (88.5) must NOT inflate final_sab_score;
+                // final_sab_score must recover the confirmed baseline incumbent (75.0),
+                // while best_attempted_score captures the candidate's attempted 88.5.
+                assert!((val["final_sab_score"].as_f64().unwrap() - 75.0).abs() < 1e-6);
+                assert!((val["best_attempted_score"].as_f64().unwrap() - 88.5).abs() < 1e-6);
                 assert!((val["duration_secs"].as_f64().unwrap() - 45.5).abs() < 1e-3);
             }
         }
@@ -3244,4 +3248,188 @@ fn test_sweep_orphaned_runs_protects_live_runs_and_recovers_progress() {
     // Second sweep should find 0 orphans
     let second_sweep = sweep_orphaned_runs(repo_root);
     assert_eq!(second_sweep, 0);
+}
+
+#[test]
+fn test_sweep_orphaned_runs_updates_incumbent_when_winner_was_committed() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_root = temp.path();
+
+    let attempts_dir = repo_root.join(".selfware").join("attempts");
+    std::fs::create_dir_all(&attempts_dir).unwrap();
+
+    let run_id = "test-run-committed";
+    let attempts_file = attempts_dir.join(format!("{run_id}.jsonl"));
+
+    let mut m1 = make_metrics(10, 10);
+    m1.sab_score = 70.0;
+    let node1 = AttemptNode {
+        id: "att-base".into(),
+        parent_id: None,
+        generation: 0,
+        branch_id: "main".into(),
+        hypothesis_id: "baseline".into(),
+        description: "baseline attempt".into(),
+        diff_sha256: "hash0".into(),
+        patch: None,
+        sab_report_path: None,
+        metrics: Some(m1),
+        composite_score: Some(0.70),
+        tokens_used: Some(1000),
+        wall_time_ms: 500,
+        status: AttemptStatus::Baseline,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        base_commit: None,
+        committed_commit: None,
+        action_type: None,
+        git_tree_id: None,
+        created_at: "1700000000.000".into(),
+    };
+
+    let mut m2 = make_metrics(10, 10);
+    m2.sab_score = 92.0;
+    let node2 = AttemptNode {
+        id: "att-g1-1".into(),
+        parent_id: Some("att-base".into()),
+        generation: 1,
+        branch_id: "main".into(),
+        hypothesis_id: "hyp-1".into(),
+        description: "promoted winner".into(),
+        diff_sha256: "hash1".into(),
+        patch: None,
+        sab_report_path: None,
+        metrics: Some(m2),
+        composite_score: Some(0.92),
+        tokens_used: Some(1200),
+        wall_time_ms: 600,
+        status: AttemptStatus::Evaluated,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        base_commit: None,
+        committed_commit: Some("commit_sha_12345678".into()),
+        action_type: None,
+        git_tree_id: None,
+        created_at: "1700000030.000".into(),
+    };
+
+    let attempts_content = format!(
+        "{}\n{}\n",
+        serde_json::to_string(&node1).unwrap(),
+        serde_json::to_string(&node2).unwrap()
+    );
+    std::fs::write(&attempts_file, attempts_content).unwrap();
+
+    let log_path = repo_root.join(".evolution-log.jsonl");
+    let log_content = serde_json::json!({
+        "event": "start",
+        "run_id": run_id,
+        "pid": 99999999,
+        "timestamp": "1700000000.000",
+    })
+    .to_string();
+    std::fs::write(&log_path, format!("{log_content}\n")).unwrap();
+
+    let swept = sweep_orphaned_runs(repo_root);
+    assert_eq!(swept, 1);
+
+    let updated_log = std::fs::read_to_string(&log_path).unwrap();
+    let mut found = false;
+    for line in updated_log.lines() {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+            if val["event"] == "run_end" && val["run_id"] == run_id {
+                found = true;
+                // Because node2 had committed_commit, last_incumbent_score recovered is 92.0
+                assert!((val["final_sab_score"].as_f64().unwrap() - 92.0).abs() < 1e-6);
+                assert!((val["best_attempted_score"].as_f64().unwrap() - 92.0).abs() < 1e-6);
+            }
+        }
+    }
+    assert!(found);
+}
+
+#[test]
+fn test_run_lock_guard_concurrent_attempt_preserves_holder_pid() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_root = temp.path();
+    let run_id = "concurrent-run-test";
+
+    // 1. First process acquires lock
+    let guard1 =
+        RunLockGuard::acquire(repo_root, run_id).expect("first lock acquire should succeed");
+    let lock_path = repo_root
+        .join(".selfware")
+        .join("runs")
+        .join(format!("{run_id}.lock"));
+    assert!(lock_path.exists());
+
+    let initial_pid = std::fs::read_to_string(&lock_path).unwrap();
+    assert_eq!(initial_pid.trim(), format!("{}", std::process::id()));
+
+    // 2. Second concurrent acquisition must fail
+    let guard2_res = RunLockGuard::acquire(repo_root, run_id);
+    assert!(guard2_res.is_err(), "concurrent acquire must fail");
+
+    // 3. Critically: holder's PID must NOT have been erased by second caller's OpenOptions
+    let after_pid = std::fs::read_to_string(&lock_path).unwrap();
+    assert_eq!(
+        after_pid.trim(),
+        format!("{}", std::process::id()),
+        "lock file PID must be preserved even when concurrent process attempts acquisition"
+    );
+
+    drop(guard1);
+}
+
+#[test]
+fn test_shutdown_requested_prevents_winner_commit_and_leaves_head_unchanged() {
+    let _exec = crate::test_support::ExecGuard::hold();
+    let dir = setup_winner_repo();
+    let root = dir.path();
+
+    let head_before = git_stdout(root, &["rev-parse", "HEAD"]);
+
+    let worktree = ast_tools::create_shadow_worktree(root).unwrap();
+    std::fs::write(
+        worktree.join("src/lib.rs"),
+        "pub fn f() -> usize {\n    999\n}\n",
+    )
+    .unwrap();
+    let tested_diff = capture_tested_diff(&worktree).unwrap();
+    let tree_id = capture_worktree_tree_id(&worktree).unwrap();
+    ast_tools::cleanup_worktree(root, &worktree).unwrap();
+
+    // Trigger shutdown
+    crate::request_shutdown();
+    assert!(crate::is_shutdown_requested());
+
+    // Promotion commit must be refused
+    let committed = commit_winner_to_repo(
+        root,
+        &tested_diff,
+        Some(&tree_id),
+        "🧬 Gen 3 BLOOM (should be refused)",
+    );
+    assert!(
+        !committed,
+        "commit_winner_to_repo must return false when shutdown requested"
+    );
+
+    // HEAD must remain completely unchanged
+    let head_after = git_stdout(root, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        head_before, head_after,
+        "HEAD commit must not move after cancellation"
+    );
+
+    // Working directory must remain clean / unchanged
+    let status = git_stdout(root, &["status", "--porcelain"]);
+    assert!(
+        !status.contains("src/lib.rs"),
+        "worktree src/lib.rs must not have uncommitted changes"
+    );
 }

@@ -439,32 +439,19 @@ pub fn scan_patch_for_opaque_structures(
             .as_ref()
             .map(|b| compute_sha256(b.as_bytes()));
 
-        let hyperlink = if let Some(commit) = base_commit {
-            if start_line > 0 && end_line > 0 {
-                format!("git://{commit}/{file_path}#L{start_line}-L{end_line}")
-            } else {
-                format!("git://{commit}/{file_path}")
-            }
-        } else if start_line > 0 && end_line > 0 {
+        let path_sep = if repo_root.to_string_lossy().ends_with('/') {
+            ""
+        } else {
+            "/"
+        };
+        let hyperlink = if start_line > 0 && end_line > 0 {
             format!(
                 "file://{}{}{file_path}#L{start_line}-L{end_line}",
                 repo_root.display(),
-                if repo_root.to_string_lossy().ends_with('/') {
-                    ""
-                } else {
-                    "/"
-                }
+                path_sep
             )
         } else {
-            format!(
-                "file://{}{}{file_path}",
-                repo_root.display(),
-                if repo_root.to_string_lossy().ends_with('/') {
-                    ""
-                } else {
-                    "/"
-                }
-            )
+            format!("file://{}{}{file_path}", repo_root.display(), path_sep)
         };
 
         GroundedCitation {
@@ -903,114 +890,32 @@ pub fn validate_benchmark_report_resolved(
         )
     })?;
 
-    let json: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
-        format!(
-            "Benchmark report artifact '{}' corrupted JSON: {e}",
-            resolved.display()
-        )
+    let sab_result = crate::evolution::fitness::parse_sab_report_content(
+        &content,
+        node.binary_sha256.as_deref(),
+    )
+    .map_err(|e| match e {
+        crate::evolution::fitness::FitnessError::WrongBinaryEvaluated { requested, evaluated } => {
+            format!("Benchmark report binary_sha256 mismatch (reported '{evaluated}', expected '{requested}')")
+        }
+        crate::evolution::fitness::FitnessError::ReportParseFailed(ref msg) if msg.contains("schema mismatch") => {
+            format!("Benchmark report artifact '{}' {msg}", resolved.display())
+        }
+        crate::evolution::fitness::FitnessError::ReportParseFailed(ref msg) if msg.contains("aggregate score mismatch") => {
+            format!("Benchmark report {msg}")
+        }
+        crate::evolution::fitness::FitnessError::ReportParseFailed(ref msg) if msg.contains("corrupted JSON") => {
+            format!("Benchmark report artifact '{}' {msg}", resolved.display())
+        }
+        other => format!("Benchmark report artifact '{}' invalid: {other}", resolved.display()),
     })?;
-
-    // Schema validation: require sab-report/1 schema
-    match json.get("schema").and_then(|v| v.as_str()) {
-        Some("sab-report/1") => {}
-        Some(other) => {
-            return Err(format!(
-                "Benchmark report artifact '{}' schema mismatch (found '{other}', expected 'sab-report/1')",
-                resolved.display()
-            ));
-        }
-        None => {
-            return Err(format!(
-                "Benchmark report artifact '{}' corrupted: missing schema and scenarios array",
-                resolved.display()
-            ));
-        }
-    }
-
-    // Match binary_sha256 if present in candidate node
-    if let Some(ref expected_bin_sha) = node.binary_sha256 {
-        let reported_sha = json
-            .get("binary_sha256")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if reported_sha != expected_bin_sha {
-            return Err(format!(
-                "Benchmark report binary_sha256 mismatch (reported '{reported_sha}', expected '{expected_bin_sha}')"
-            ));
-        }
-    }
-
-    // Strict scenario completeness validation matching fitness::parse_sab_output
-    let scenarios = json
-        .get("scenarios")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| {
-            format!(
-                "Benchmark report artifact '{}' missing scenarios array",
-                resolved.display()
-            )
-        })?;
-    if scenarios.is_empty() {
-        return Err(format!(
-            "Benchmark report artifact '{}' has empty scenarios array; a suite with 0 scenarios is incomplete",
-            resolved.display()
-        ));
-    }
-    if let Some(expected_count) = json.get("scenarios_expected").and_then(|v| v.as_u64()) {
-        if scenarios.len() as u64 != expected_count {
-            return Err(format!(
-                "Benchmark report artifact '{}' scenario count mismatch: {} reported of {expected_count} expected",
-                resolved.display(),
-                scenarios.len()
-            ));
-        }
-    }
-
-    let mut sum_score = 0.0;
-    for (idx, s) in scenarios.iter().enumerate() {
-        let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        if name.trim().is_empty() || name == "unknown" {
-            return Err(format!(
-                "Benchmark report scenario {idx} has missing or invalid name"
-            ));
-        }
-        let score = s
-            .get("score")
-            .and_then(|v| v.as_f64())
-            .ok_or_else(|| format!("Benchmark report scenario '{name}' missing valid score"))?;
-        if s.get("tests_passed").and_then(|v| v.as_bool()).is_none() {
-            return Err(format!(
-                "Benchmark report scenario '{name}' missing valid tests_passed"
-            ));
-        }
-        if s.get("clean_exit").and_then(|v| v.as_bool()).is_none() {
-            return Err(format!(
-                "Benchmark report scenario '{name}' missing valid clean_exit"
-            ));
-        }
-        sum_score += score;
-    }
-    let calculated_avg = sum_score / scenarios.len() as f64;
-
-    if let Some(agg_score) = json.get("aggregate_score").and_then(|v| v.as_f64()) {
-        if (agg_score - calculated_avg).abs() > 0.05 {
-            return Err(format!(
-                "Benchmark report aggregate score mismatch (reported {agg_score:.2}, scenario average {calculated_avg:.2})"
-            ));
-        }
-    }
 
     // Match reported aggregate metrics against node.metrics
     if let Some(ref expected_metrics) = node.metrics {
-        let reported_score = json
-            .get("aggregate_score")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(calculated_avg);
-
-        if (reported_score - expected_metrics.sab_score).abs() > 0.05 {
+        if (sab_result.aggregate_score - expected_metrics.sab_score).abs() > 0.05 {
             return Err(format!(
                 "Benchmark report aggregate score mismatch (reported {:.2}, expected {:.2})",
-                reported_score, expected_metrics.sab_score
+                sab_result.aggregate_score, expected_metrics.sab_score
             ));
         }
     }
@@ -1674,12 +1579,12 @@ pub fn export_markdown(dossier: &InvestigativeDossier) -> String {
         Some(false) => "MISMATCH (Divergent)",
         None => "Unmeasured / Not recorded in attempt node",
     };
-    let rule1_desc = if dossier.degrees.degree_5_safety.rule1_verified {
-        "Verified (compile+test+fmt+clippy green)"
-    } else if dossier.degrees.degree_4_empirical.status == AttemptStatus::Baseline
+    let rule1_desc = if dossier.degrees.degree_4_empirical.status == AttemptStatus::Baseline
         && dossier.degrees.degree_4_empirical.sab_score.is_some()
     {
-        "Baseline Suite Measured"
+        "Baseline Benchmark Verified"
+    } else if dossier.degrees.degree_5_safety.rule1_verified {
+        "Candidate Test Suite Passed"
     } else {
         "Unverified / Failing Gates"
     };

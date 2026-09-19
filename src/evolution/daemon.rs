@@ -996,10 +996,19 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
     // Acquire advisory exclusive lock on this run to prevent orphan sweeps from killing live runs
     let _run_lock = match RunLockGuard::acquire(repo_root, &run_id) {
-        Ok(guard) => Some(guard),
+        Ok(guard) => guard,
         Err(e) => {
-            log_warning(&format!("Warning: could not acquire run lock: {e}"));
-            None
+            log_error(&format!("Fatal: could not acquire run lock: {e}"));
+            return EvolutionResult {
+                generations_run: 0,
+                improvements: Vec::new(),
+                final_sab_score: 0.0,
+                initial_sab_score: 0.0,
+                total_duration: start.elapsed(),
+                aborted: Some(format!("could not acquire run lock: {e}")),
+                outcome: "aborted".to_string(),
+                stop_reason: None,
+            };
         }
     };
 
@@ -2407,6 +2416,10 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         Some(r),
                     ),
                     Err(e) => {
+                        if crate::is_shutdown_requested() {
+                            log_warning("Shutdown requested during SAB benchmark; halting candidate loop cleanly without recording error node");
+                            break;
+                        }
                         log_warning(&format!("  SAB failed: {}", e));
                         let node = AttemptNode {
                             id: attempt_id.clone(),
@@ -2676,6 +2689,11 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         }
 
         // ─── Step 5: EMERGE OR DIE (Ranked Promotion) ───
+        if crate::is_shutdown_requested() {
+            log_warning("Shutdown requested; skipping promotion and halting cleanly");
+            break;
+        }
+
         if evaluated_candidates.is_empty() {
             log_frost(generation, "No hypotheses survived evaluation");
             log_event(
@@ -2745,6 +2763,13 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
         match promoted_winner {
             Some((rank, winner)) => {
+                if crate::is_shutdown_requested() {
+                    log_warning(
+                        "Shutdown requested; refusing to commit winner and halting cleanly",
+                    );
+                    break;
+                }
+
                 log_bloom(
                     generation,
                     &winner.hypothesis.description,
@@ -4126,6 +4151,12 @@ pub(crate) fn commit_winner_to_repo(
     expected_tree: Option<&str>,
     commit_msg: &str,
 ) -> bool {
+    // Re-check shutdown immediately before applying and committing:
+    if crate::is_shutdown_requested() {
+        log_warning("Shutdown requested before commit — refusing to commit winner mutation");
+        return false;
+    }
+
     // Re-check killswitch immediately before applying and committing:
     // even if the cycle started green, a trip during in-flight evaluation must halt mutation.
     if let Err(err) = crate::safety::killswitch::check_killswitch(Some(repo_root)) {
@@ -4304,7 +4335,7 @@ impl RunLockGuard {
             .read(true)
             .write(true)
             .create(true)
-            .truncate(true)
+            .truncate(false)
             .open(&lock_path)
             .map_err(|e| {
                 format!(
@@ -4327,7 +4358,9 @@ impl RunLockGuard {
             }
         }
 
-        use std::io::Write;
+        use std::io::{Seek, SeekFrom, Write};
+        let _ = file.set_len(0);
+        let _ = file.seek(SeekFrom::Start(0));
         let _ = writeln!(file, "{}", std::process::id());
         let _ = file.flush();
 
@@ -4455,15 +4488,20 @@ pub(crate) fn commit_scoped_paths_isolated(
     for p in paths {
         reset.arg(p);
     }
-    let reset_out = reset
-        .current_dir(repo_root)
-        .output()
-        .map_err(|e| format!("Failed to execute git reset HEAD: {e}"))?;
-    if !reset_out.status.success() {
-        log_warning(&format!(
-            "git reset HEAD after isolated commit produced warning: {}",
-            String::from_utf8_lossy(&reset_out.stderr).trim()
-        ));
+    match reset.current_dir(repo_root).output() {
+        Ok(reset_out) => {
+            if !reset_out.status.success() {
+                log_warning(&format!(
+                    "git reset HEAD after isolated commit produced warning: {}",
+                    String::from_utf8_lossy(&reset_out.stderr).trim()
+                ));
+            }
+        }
+        Err(e) => {
+            log_warning(&format!(
+                "Failed to execute git reset HEAD after isolated commit: {e}"
+            ));
+        }
     }
 
     Ok(promoted_tree)
@@ -4567,7 +4605,8 @@ struct RecoveredRunProgress {
     pid: Option<i32>,
     start_time: Option<f64>,
     max_generation: usize,
-    best_sab_score: f64,
+    last_incumbent_score: f64,
+    best_attempted_score: f64,
     last_activity_time: Option<f64>,
 }
 
@@ -4630,6 +4669,23 @@ pub fn sweep_orphaned_runs(repo_root: &Path) -> usize {
             } else if event == "generation_end" || event == "generation_start" {
                 if let Some(gen) = val.get("generation").and_then(|v| v.as_u64()) {
                     entry.max_generation = entry.max_generation.max(gen as usize);
+                }
+            } else if event == "candidate_promoted" {
+                if let Some(score) = val.get("score_after").and_then(|v| v.as_f64()) {
+                    entry.last_incumbent_score = score;
+                    if score > entry.best_attempted_score {
+                        entry.best_attempted_score = score;
+                    }
+                }
+            } else if event == "candidate_evaluated" || event == "candidate_rejected" {
+                if let Some(score) = val
+                    .get("sab_score")
+                    .or_else(|| val.get("score"))
+                    .and_then(|v| v.as_f64())
+                {
+                    if score > entry.best_attempted_score {
+                        entry.best_attempted_score = score;
+                    }
                 }
             }
         }
@@ -4720,8 +4776,16 @@ pub fn sweep_orphaned_runs(repo_root: &Path) -> usize {
                 if let Ok(node) = serde_json::from_str::<AttemptNode>(trimmed) {
                     progress.max_generation = progress.max_generation.max(node.generation);
                     if let Some(ref m) = node.metrics {
-                        if m.sab_score > progress.best_sab_score {
-                            progress.best_sab_score = m.sab_score;
+                        if m.sab_score > progress.best_attempted_score {
+                            progress.best_attempted_score = m.sab_score;
+                        }
+                        // Only confirmed incumbent updates last_incumbent_score:
+                        // baseline root node, or any promoted winner with committed_commit anchor
+                        if node.status == AttemptStatus::Baseline
+                            || node.parent_id.is_none()
+                            || node.committed_commit.is_some()
+                        {
+                            progress.last_incumbent_score = m.sab_score;
                         }
                     }
                     if let Some(ts) = parse_event_or_node_timestamp(&node.created_at) {
@@ -4750,7 +4814,8 @@ pub fn sweep_orphaned_runs(repo_root: &Path) -> usize {
                 "outcome": "killed",
                 "reason": "orphaned run detected during startup sweep (process terminated without clean run_end)",
                 "generations_run": progress.max_generation,
-                "final_sab_score": progress.best_sab_score,
+                "final_sab_score": progress.last_incumbent_score,
+                "best_attempted_score": progress.best_attempted_score,
                 "duration_secs": duration_secs,
             }),
         );

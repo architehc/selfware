@@ -409,9 +409,8 @@ fn test_make_citation_hashes_lines_at_base_commit_not_dirty_worktree() {
         Some("let x = foo().unwrap();")
     );
 
-    // Hyperlink points to the immutable git revision, not the mutable working copy
-    assert!(cit.hyperlink.starts_with("git://"));
-    assert!(cit.hyperlink.contains(&base_commit));
+    // Hyperlink points to clickable file URI for local navigation
+    assert!(cit.hyperlink.starts_with("file://"));
     assert!(cit.hyperlink.ends_with("src/lib.rs#L2-L2"));
 }
 
@@ -518,6 +517,103 @@ fn test_validate_benchmark_report_structural_checks() {
     });
     std::fs::write(&valid_file, serde_json::to_string(&valid_body).unwrap()).unwrap();
     assert!(validate_benchmark_report(&valid_file, &node_with_sha).is_ok());
+
+    // 9. Duplicate scenario names rejected
+    let dup_file = dir.join("dup_names.json");
+    let dup_body = serde_json::json!({
+        "schema": "sab-report/1",
+        "binary_sha256": "expected_binary_hash_123456",
+        "aggregate_score": 85.0,
+        "scenarios_expected": 2,
+        "scenarios": [
+            {
+                "name": "dup_scenario",
+                "score": 85.0,
+                "tests_passed": true,
+                "broken_tests_fixed": false,
+                "clean_exit": true,
+                "duration_secs": 1
+            },
+            {
+                "name": "dup_scenario",
+                "score": 85.0,
+                "tests_passed": true,
+                "broken_tests_fixed": false,
+                "clean_exit": true,
+                "duration_secs": 1
+            }
+        ]
+    });
+    std::fs::write(&dup_file, serde_json::to_string(&dup_body).unwrap()).unwrap();
+    let err_dup = validate_benchmark_report(&dup_file, &node_with_sha).unwrap_err();
+    assert!(err_dup.contains("duplicate scenario name"));
+
+    // 10. Out-of-range score rejected
+    let oob_file = dir.join("oob_score.json");
+    let oob_body = serde_json::json!({
+        "schema": "sab-report/1",
+        "binary_sha256": "expected_binary_hash_123456",
+        "aggregate_score": 105.0,
+        "scenarios_expected": 1,
+        "scenarios": [{
+            "name": "s1",
+            "score": 105.0,
+            "tests_passed": true,
+            "broken_tests_fixed": false,
+            "clean_exit": true,
+            "duration_secs": 1
+        }]
+    });
+    std::fs::write(&oob_file, serde_json::to_string(&oob_body).unwrap()).unwrap();
+    let err_oob = validate_benchmark_report(&oob_file, &node_with_sha).unwrap_err();
+    assert!(err_oob.contains("invalid score"));
+
+    // 11. Missing required boolean field (broken_tests_fixed) rejected
+    let missing_field_file = dir.join("missing_field.json");
+    let missing_field_body = serde_json::json!({
+        "schema": "sab-report/1",
+        "binary_sha256": "expected_binary_hash_123456",
+        "aggregate_score": 85.0,
+        "scenarios_expected": 1,
+        "scenarios": [{
+            "name": "s1",
+            "score": 85.0,
+            "tests_passed": true,
+            // broken_tests_fixed missing
+            "clean_exit": true,
+            "duration_secs": 1
+        }]
+    });
+    std::fs::write(
+        &missing_field_file,
+        serde_json::to_string(&missing_field_body).unwrap(),
+    )
+    .unwrap();
+    let err_missing = validate_benchmark_report(&missing_field_file, &node_with_sha).unwrap_err();
+    assert!(err_missing.contains("broken_tests_fixed"));
+
+    // 12. Missing scenarios_expected rejected
+    let no_expected_file = dir.join("no_expected.json");
+    let no_expected_body = serde_json::json!({
+        "schema": "sab-report/1",
+        "binary_sha256": "expected_binary_hash_123456",
+        "aggregate_score": 85.0,
+        "scenarios": [{
+            "name": "s1",
+            "score": 85.0,
+            "tests_passed": true,
+            "broken_tests_fixed": false,
+            "clean_exit": true,
+            "duration_secs": 1
+        }]
+    });
+    std::fs::write(
+        &no_expected_file,
+        serde_json::to_string(&no_expected_body).unwrap(),
+    )
+    .unwrap();
+    let err_no_exp = validate_benchmark_report(&no_expected_file, &node_with_sha).unwrap_err();
+    assert!(err_no_exp.contains("scenarios_expected"));
 }
 
 #[test]
@@ -638,21 +734,25 @@ fn test_validate_benchmark_report_resolved_relative_path_and_schema() {
 
     let valid_report = serde_json::json!({
         "schema": "sab-report/1",
+        "binary_sha256": "fake_sha_for_test",
         "aggregate_score": 85.0,
+        "scenarios_expected": 2,
         "scenarios": [
             {
                 "name": "scenario_a",
                 "score": 80.0,
                 "tests_passed": true,
+                "broken_tests_fixed": false,
                 "clean_exit": true,
-                "duration_ms": 1200
+                "duration_secs": 1
             },
             {
                 "name": "scenario_b",
                 "score": 90.0,
                 "tests_passed": true,
+                "broken_tests_fixed": false,
                 "clean_exit": true,
-                "duration_ms": 1300
+                "duration_secs": 1
             }
         ]
     });
@@ -688,12 +788,15 @@ fn test_validate_benchmark_report_resolved_relative_path_and_schema() {
     let bad_schema = serde_json::json!({
         "schema": "unknown-schema/99",
         "aggregate_score": 85.0,
+        "scenarios_expected": 1,
         "scenarios": [
             {
                 "name": "scenario_a",
                 "score": 85.0,
                 "tests_passed": true,
+                "broken_tests_fixed": false,
                 "clean_exit": true,
+                "duration_secs": 1
             }
         ]
     });
@@ -705,19 +808,25 @@ fn test_validate_benchmark_report_resolved_relative_path_and_schema() {
     // Inconsistent aggregate score vs scenario average fails
     let inconsistent_score = serde_json::json!({
         "schema": "sab-report/1",
+        "binary_sha256": "fake_sha_for_test",
         "aggregate_score": 50.0, // scenario average is (80+90)/2 = 85.0 != 50.0
+        "scenarios_expected": 2,
         "scenarios": [
             {
                 "name": "scenario_a",
                 "score": 80.0,
                 "tests_passed": true,
+                "broken_tests_fixed": false,
                 "clean_exit": true,
+                "duration_secs": 1
             },
             {
                 "name": "scenario_b",
                 "score": 90.0,
                 "tests_passed": true,
+                "broken_tests_fixed": false,
                 "clean_exit": true,
+                "duration_secs": 1
             }
         ]
     });
@@ -729,4 +838,56 @@ fn test_validate_benchmark_report_resolved_relative_path_and_schema() {
     let res_score = validate_benchmark_report_resolved(&rel_report, Some(repo_root), &node);
     assert!(res_score.is_err());
     assert!(res_score.unwrap_err().contains("scenario average"));
+}
+
+#[test]
+fn test_export_markdown_renders_honest_rule1_labels() {
+    let repo_root = Path::new("/test_repo");
+
+    // 1. Evaluated node with test suite passing -> "Candidate Test Suite Passed"
+    let mut eval_node = make_test_node("att-eval", "add feature", AttemptStatus::Evaluated);
+    eval_node.metrics = Some(crate::evolution::FitnessMetrics {
+        sab_score: 80.0,
+        tokens_used: Some(100),
+        token_budget: 1000,
+        wall_clock_secs: 1.0,
+        timeout_secs: 60.0,
+        full_evaluation_secs: Some(1.0),
+        test_pass_pct: 100.0,
+        binary_size_mb: 2.0,
+        max_binary_size_mb: 50.0,
+        tests_passed: 10,
+        tests_total: 10,
+        visual_score: 100.0,
+    });
+    let eval_dossier = investigate_attempt(&eval_node, repo_root);
+    let eval_md = export_markdown(&eval_dossier);
+    assert!(eval_md.contains("Rule 1: `Candidate Test Suite Passed`"));
+    assert!(!eval_md.contains("compile+test+fmt+clippy green"));
+
+    // 2. Baseline node -> "Baseline Benchmark Verified"
+    let mut base_node = make_test_node("att-base", "baseline run", AttemptStatus::Baseline);
+    base_node.metrics = Some(crate::evolution::FitnessMetrics {
+        sab_score: 75.0,
+        tokens_used: None,
+        token_budget: 1000,
+        wall_clock_secs: 1.0,
+        timeout_secs: 60.0,
+        full_evaluation_secs: Some(1.0),
+        test_pass_pct: 75.0,
+        binary_size_mb: 2.0,
+        max_binary_size_mb: 50.0,
+        tests_passed: 3,
+        tests_total: 4,
+        visual_score: 100.0,
+    });
+    let base_dossier = investigate_attempt(&base_node, repo_root);
+    let base_md = export_markdown(&base_dossier);
+    assert!(base_md.contains("Rule 1: `Baseline Benchmark Verified`"));
+
+    // 3. Failing node -> "Unverified / Failing Gates"
+    let fail_node = make_test_node("att-fail", "bad candidate", AttemptStatus::CompileFailed);
+    let fail_dossier = investigate_attempt(&fail_node, repo_root);
+    let fail_md = export_markdown(&fail_dossier);
+    assert!(fail_md.contains("Rule 1: `Unverified / Failing Gates`"));
 }
