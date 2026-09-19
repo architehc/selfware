@@ -178,6 +178,7 @@ fn test_restore_worktree_parent_state() {
         binary_sha256: None,
         base_commit: None,
         committed_commit: None,
+        action_type: None,
         created_at: "2026-09-17T00:00:00Z".into(),
     };
 
@@ -202,6 +203,7 @@ fn test_restore_worktree_parent_state() {
         binary_sha256: None,
         base_commit: None,
         committed_commit: None,
+        action_type: None,
         created_at: "2026-09-17T00:01:00Z".into(),
     };
 
@@ -226,6 +228,7 @@ fn test_restore_worktree_parent_state() {
         binary_sha256: None,
         base_commit: None,
         committed_commit: None,
+        action_type: None,
         created_at: "2026-09-17T00:02:00Z".into(),
     };
 
@@ -339,6 +342,7 @@ fn test_sibling_restoration_after_another_branch_committed() {
         binary_sha256: None,
         base_commit: Some(c0.clone()),
         committed_commit: None,
+        action_type: None,
         created_at: "2026-09-17T00:00:00Z".into(),
     };
 
@@ -363,6 +367,7 @@ fn test_sibling_restoration_after_another_branch_committed() {
         binary_sha256: None,
         base_commit: Some(c0.clone()),
         committed_commit: None,
+        action_type: None,
         created_at: "2026-09-17T00:01:00Z".into(),
     };
 
@@ -387,6 +392,7 @@ fn test_sibling_restoration_after_another_branch_committed() {
         binary_sha256: None,
         base_commit: Some(c0.clone()),
         committed_commit: None,
+        action_type: None,
         created_at: "2026-09-17T00:02:00Z".into(),
     };
 
@@ -498,6 +504,7 @@ fn test_restore_worktree_promoted_parent_short_circuit() {
         binary_sha256: None,
         base_commit: Some(c0.clone()),
         committed_commit: None,
+        action_type: None,
         created_at: "2026-09-17T00:00:00Z".into(),
     };
     // Node A records committed_commit: Some(c1)
@@ -522,6 +529,7 @@ fn test_restore_worktree_promoted_parent_short_circuit() {
         binary_sha256: None,
         base_commit: Some(c0.clone()),
         committed_commit: Some(c1.clone()),
+        action_type: None,
         created_at: "2026-09-17T00:01:00Z".into(),
     };
 
@@ -680,6 +688,7 @@ fn test_restore_worktree_candidate_with_new_file() {
         binary_sha256: None,
         base_commit: Some(c0.clone()),
         committed_commit: None,
+        action_type: None,
         created_at: "2026-09-18T00:00:00Z".into(),
     };
 
@@ -704,6 +713,7 @@ fn test_restore_worktree_candidate_with_new_file() {
         binary_sha256: None,
         base_commit: Some(c0),
         committed_commit: None,
+        action_type: None,
         created_at: "2026-09-18T00:01:00Z".into(),
     };
 
@@ -785,6 +795,7 @@ fn test_promote_refine_promote() {
         binary_sha256: None,
         base_commit: Some(c0.clone()),
         committed_commit: None,
+        action_type: None,
         created_at: "2026-09-18T00:00:00Z".into(),
     };
     std::fs::write(
@@ -851,6 +862,7 @@ fn test_promote_refine_promote() {
         binary_sha256: None,
         base_commit: Some(c0),
         committed_commit: None,
+        action_type: None,
         created_at: "2026-09-18T00:01:00Z".into(),
     };
     let mut f = std::fs::OpenOptions::new()
@@ -918,5 +930,256 @@ fn test_promote_refine_promote() {
     assert!(
         final_content.contains("3"),
         "Repo root must contain final Gen 1 state (return 3)"
+    );
+}
+
+#[test]
+fn test_promote_open_root_promote() {
+    let temp_repo = tempfile::tempdir().unwrap();
+    let repo_root = temp_repo.path();
+
+    let run_git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .env_remove("GIT_INDEX_FILE")
+            .args(args)
+            .current_dir(repo_root)
+            .output()
+            .expect("git cmd failed");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+
+    run_git(&["init", "-b", "main"]);
+    run_git(&["config", "user.email", "test@example.com"]);
+    run_git(&["config", "user.name", "Test Runner"]);
+
+    std::fs::create_dir_all(repo_root.join("src")).unwrap();
+    std::fs::write(
+        repo_root.join("src/lib.rs"),
+        "pub fn root() -> u32 {\n    1\n}\n",
+    )
+    .unwrap();
+    run_git(&["add", "src/lib.rs"]);
+    run_git(&["commit", "-m", "initial C0"]);
+    let c0 = run_git(&["rev-parse", "HEAD"]);
+
+    let attempts_file = repo_root.join("attempts.jsonl");
+
+    // Baseline attempt at C0
+    let node_baseline = crate::evolution::tree_log::AttemptNode {
+        id: "att-baseline".into(),
+        parent_id: None,
+        generation: 0,
+        branch_id: "baseline".into(),
+        hypothesis_id: "baseline".into(),
+        description: "Initial baseline measurement".into(),
+        diff_sha256: "0".into(),
+        patch: None,
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(0.5),
+        tokens_used: None,
+        wall_time_ms: 0,
+        status: crate::evolution::tree_log::AttemptStatus::Baseline,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        base_commit: Some(c0.clone()),
+        committed_commit: None,
+        action_type: None,
+        created_at: "2026-09-18T00:00:00Z".into(),
+    };
+    std::fs::write(
+        &attempts_file,
+        format!("{}\n", serde_json::to_string(&node_baseline).unwrap()),
+    )
+    .unwrap();
+
+    // ─── Gen 0: Candidate 1 promotes to C1 ───
+    let wt1 = create_shadow_worktree_for_parent(repo_root, &attempts_file, Some("att-baseline"))
+        .expect("Gen 0 worktree from baseline must succeed");
+    std::fs::write(wt1.join("src/lib.rs"), "pub fn root() -> u32 {\n    2\n}\n").unwrap();
+
+    let diff1 = {
+        let add = std::process::Command::new("git")
+            .env_remove("GIT_INDEX_FILE")
+            .args(["add", "-A"])
+            .current_dir(&wt1)
+            .output()
+            .unwrap();
+        assert!(add.status.success());
+        let diff = std::process::Command::new("git")
+            .env_remove("GIT_INDEX_FILE")
+            .args(["diff", "--cached", "--binary", "HEAD"])
+            .current_dir(&wt1)
+            .output()
+            .unwrap();
+        assert!(diff.status.success());
+        String::from_utf8_lossy(&diff.stdout).to_string()
+    };
+    let tree1 = crate::evolution::daemon::capture_worktree_tree_id(&wt1)
+        .expect("Must capture tree1 digest");
+    cleanup_worktree(repo_root, &wt1).unwrap();
+
+    let ok1 = crate::evolution::daemon::commit_winner_to_repo(
+        repo_root,
+        &diff1,
+        Some(&tree1),
+        "Gen 0 promotion",
+    );
+    assert!(ok1, "Gen 0 candidate promotion must succeed");
+    let c1 = run_git(&["rev-parse", "HEAD"]);
+    assert_ne!(c1, c0, "C1 must advance past C0");
+
+    let node_cand1 = crate::evolution::tree_log::AttemptNode {
+        id: "att-cand1".into(),
+        parent_id: Some("att-baseline".into()),
+        generation: 0,
+        branch_id: "branch-0".into(),
+        hypothesis_id: "hyp-0".into(),
+        description: "Candidate 1 (Gen 0)".into(),
+        diff_sha256: crate::evolution::tree_log::compute_sha256(diff1.as_bytes()),
+        patch: Some(diff1),
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(0.8),
+        tokens_used: None,
+        wall_time_ms: 100,
+        status: crate::evolution::tree_log::AttemptStatus::Evaluated,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        base_commit: Some(c0),
+        committed_commit: None,
+        action_type: Some(crate::evolution::ActionType::OpenRoot),
+        created_at: "2026-09-18T00:01:00Z".into(),
+    };
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&attempts_file)
+        .unwrap();
+    use std::io::Write;
+    writeln!(f, "{}", serde_json::to_string(&node_cand1).unwrap()).unwrap();
+
+    crate::evolution::tree_log::AttemptTree::record_committed_commit(
+        &attempts_file,
+        "att-cand1",
+        &c1,
+    )
+    .expect("Must record committed_commit anchor");
+
+    // Daemon sets active_parent_id after promotion:
+    let active_parent_id: Option<String> = Some("att-cand1".to_string());
+
+    // ─── Gen 1: OpenRoot action re-baselined to active_parent_id ───
+    let root_parent = active_parent_id
+        .clone()
+        .unwrap_or_else(|| node_baseline.id.clone());
+    assert_eq!(
+        root_parent, "att-cand1",
+        "OpenRoot must inherit active_parent_id"
+    );
+
+    let wt_open_root =
+        create_shadow_worktree_for_parent(repo_root, &attempts_file, Some(&root_parent))
+            .expect("Gen 1 OpenRoot worktree from active incumbent must succeed");
+
+    let restored_content = std::fs::read_to_string(wt_open_root.join("src/lib.rs")).unwrap();
+    assert!(
+        restored_content.contains("2"),
+        "OpenRoot worktree inheriting active_parent_id must restore C1 state (return 2)"
+    );
+
+    // OpenRoot candidate modifies code to return 10
+    std::fs::write(
+        wt_open_root.join("src/lib.rs"),
+        "pub fn root() -> u32 {\n    10\n}\n",
+    )
+    .unwrap();
+
+    let diff_root = {
+        let add = std::process::Command::new("git")
+            .env_remove("GIT_INDEX_FILE")
+            .args(["add", "-A"])
+            .current_dir(&wt_open_root)
+            .output()
+            .unwrap();
+        assert!(add.status.success());
+        let diff = std::process::Command::new("git")
+            .env_remove("GIT_INDEX_FILE")
+            .args(["diff", "--cached", "--binary", "HEAD"])
+            .current_dir(&wt_open_root)
+            .output()
+            .unwrap();
+        assert!(diff.status.success());
+        String::from_utf8_lossy(&diff.stdout).to_string()
+    };
+    let tree_root = crate::evolution::daemon::capture_worktree_tree_id(&wt_open_root)
+        .expect("Must capture tree_root digest");
+    cleanup_worktree(repo_root, &wt_open_root).unwrap();
+
+    // Promote Gen 1 OpenRoot candidate to repo
+    let ok_root = crate::evolution::daemon::commit_winner_to_repo(
+        repo_root,
+        &diff_root,
+        Some(&tree_root),
+        "Gen 1 OpenRoot promotion",
+    );
+    assert!(
+        ok_root,
+        "Gen 1 OpenRoot candidate re-baselined to active_parent_id must promote cleanly with tree verification"
+    );
+    let c2 = run_git(&["rev-parse", "HEAD"]);
+    assert_ne!(c2, c1, "C2 must advance past C1");
+
+    let final_content = std::fs::read_to_string(repo_root.join("src/lib.rs")).unwrap();
+    assert!(
+        final_content.contains("10"),
+        "Repo root must contain promoted Gen 1 OpenRoot state (return 10)"
+    );
+
+    // Verify negative case: if root_parent was att-baseline instead of att-cand1,
+    // worktree is at C0, diff is against C0, but HEAD is at C2 -> tree verification fails!
+    let wt_stale =
+        create_shadow_worktree_for_parent(repo_root, &attempts_file, Some("att-baseline"))
+            .expect("Stale baseline worktree creation");
+    std::fs::write(
+        wt_stale.join("src/lib.rs"),
+        "pub fn root() -> u32 {\n    99\n}\n",
+    )
+    .unwrap();
+    let diff_stale = {
+        let _ = std::process::Command::new("git")
+            .env_remove("GIT_INDEX_FILE")
+            .args(["add", "-A"])
+            .current_dir(&wt_stale)
+            .output();
+        let diff = std::process::Command::new("git")
+            .env_remove("GIT_INDEX_FILE")
+            .args(["diff", "--cached", "--binary", "HEAD"])
+            .current_dir(&wt_stale)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&diff.stdout).to_string()
+    };
+    let tree_stale = crate::evolution::daemon::capture_worktree_tree_id(&wt_stale).unwrap();
+    cleanup_worktree(repo_root, &wt_stale).unwrap();
+
+    let ok_stale = crate::evolution::daemon::commit_winner_to_repo(
+        repo_root,
+        &diff_stale,
+        Some(&tree_stale),
+        "Gen 2 Stale OpenRoot promotion",
+    );
+    assert!(
+        !ok_stale,
+        "Stale candidate rooted at pre-promotion baseline must be rejected by tree verification"
     );
 }

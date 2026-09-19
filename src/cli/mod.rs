@@ -2849,14 +2849,17 @@ async fn handle_command(
                     return Ok(());
                 }
 
-                println!(
-                    "   Investigating {} attempt log(s) across {}\n",
-                    log_files.len(),
-                    attempts_dir.display()
-                );
-
                 let latest_file = log_files.last().unwrap();
-                println!("   Investigating latest log: {}\n", latest_file.display());
+                if log_files.len() > 1 {
+                    println!(
+                        "   Found {} attempt log(s) across {}; analyzing latest: {}\n",
+                        log_files.len(),
+                        attempts_dir.display(),
+                        latest_file.display()
+                    );
+                } else {
+                    println!("   Investigating latest log: {}\n", latest_file.display());
+                }
                 let dossiers = investigate_attempts_file(latest_file, &repo_root)?;
 
                 println!("   Analyzed {} attempts in latest run.\n", dossiers.len());
@@ -2913,17 +2916,25 @@ async fn handle_command(
                 }
 
                 // Write full investigative report to .selfware/investigation_report_latest.md
-                if let Some(last_dossier) = dossiers.last() {
+                if dry_run {
+                    println!("\n   [dry-run] Skipping writing investigative report to disk.");
+                } else if let Some(last_dossier) = dossiers.last() {
                     let md = export_markdown(last_dossier);
                     let report_path = repo_root
                         .join(".selfware")
                         .join("investigation_report_latest.md");
-                    let _ = std::fs::write(&report_path, md);
-                    println!(
-                        "\n   {} Full investigative dossier exported to {}",
-                        Glyphs::bloom(),
-                        report_path.display()
-                    );
+                    match std::fs::write(&report_path, md) {
+                        Ok(()) => {
+                            println!(
+                                "\n   {} Full investigative dossier exported to {}",
+                                Glyphs::bloom(),
+                                report_path.display()
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!("   Failed to export investigative dossier: {e}");
+                        }
+                    }
                 }
 
                 return Ok(());

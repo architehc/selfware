@@ -9,6 +9,7 @@ use super::tree_log::{compute_sha256, AttemptNode, AttemptStatus, FailureClass};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::process::Command;
 
 /// Maximum-power citation linking directly to exact file, line range, and content hash.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -309,70 +310,83 @@ pub fn extract_symbols_from_patch(patch: &str) -> Vec<String> {
     symbols
 }
 
-/// Searches the target file in repo_root for excerpt or fallback search text.
-/// Returns 1-indexed (start_line, end_line) if located, or (0, 0) if unmeasured/unavailable.
-pub fn find_line_range_in_file(
+/// Reads file content at an explicit git revision, falling back to repo_root working tree
+/// only when revision is None.
+pub fn read_file_content_at_revision(
+    repo_root: &Path,
+    file_path: &str,
+    revision: Option<&str>,
+) -> Option<String> {
+    if let Some(rev) = revision {
+        let trimmed_rev = rev.trim();
+        if !trimmed_rev.is_empty() {
+            let spec = format!("{trimmed_rev}:{file_path}");
+            let out = Command::new("git")
+                .env_remove("GIT_INDEX_FILE")
+                .args(["show", &spec])
+                .current_dir(repo_root)
+                .output()
+                .ok()?;
+            if out.status.success() {
+                return Some(String::from_utf8_lossy(&out.stdout).to_string());
+            } else {
+                return None;
+            }
+        }
+    }
+    std::fs::read_to_string(repo_root.join(file_path)).ok()
+}
+
+/// Searches the resolved target file content (from explicit revision or working tree)
+/// for the exact complete target excerpt.
+/// Returns 1-indexed (start_line, end_line) if the entire excerpt matches, or (0, 0) if unmeasured/unavailable.
+///
+/// NOTE: Partial or first-line matches are strictly disallowed to ensure that citations never
+/// point to line ranges whose content diverges from the citation excerpt and cryptographic content hash.
+pub fn find_line_range_in_revision(
     repo_root: &Path,
     file_path: &str,
     target_excerpt: &str,
-    fallback_search: Option<&str>,
+    revision: Option<&str>,
 ) -> (usize, usize) {
-    let target_file = repo_root.join(file_path);
-    let Ok(content) = std::fs::read_to_string(&target_file) else {
+    let trimmed_target = target_excerpt.trim();
+    if trimmed_target.is_empty() {
+        return (0, 0);
+    }
+
+    let Some(content) = read_file_content_at_revision(repo_root, file_path, revision) else {
         return (0, 0);
     };
 
     let count_line =
         |pos: usize| -> usize { content[..pos].chars().filter(|&c| c == '\n').count() + 1 };
 
-    let trimmed_target = target_excerpt.trim();
-    if !trimmed_target.is_empty() {
-        if let Some(pos) = content.find(trimmed_target) {
-            let start_line = count_line(pos);
-            let match_lines = trimmed_target.lines().count().max(1);
-            return (start_line, start_line + match_lines - 1);
-        }
-
-        if let Some(first_line) = trimmed_target
-            .lines()
-            .map(str::trim)
-            .find(|l| !l.is_empty())
-        {
-            for (idx, line) in content.lines().enumerate() {
-                if line.contains(first_line) {
-                    let start_line = idx + 1;
-                    let match_lines = trimmed_target.lines().count().max(1);
-                    return (start_line, start_line + match_lines - 1);
-                }
-            }
-        }
+    // Complete exact match of target_excerpt
+    if let Some(pos) = content.find(target_excerpt) {
+        let start_line = count_line(pos);
+        let match_lines = target_excerpt.lines().count().max(1);
+        return (start_line, start_line + match_lines - 1);
     }
 
-    if let Some(search) = fallback_search {
-        let trimmed_search = search.trim();
-        if !trimmed_search.is_empty() {
-            if let Some(pos) = content.find(trimmed_search) {
-                let start_line = count_line(pos);
-                let match_lines = trimmed_search.lines().count().max(1);
-                return (start_line, start_line + match_lines - 1);
-            }
-            if let Some(first_line) = trimmed_search
-                .lines()
-                .map(str::trim)
-                .find(|l| !l.is_empty())
-            {
-                for (idx, line) in content.lines().enumerate() {
-                    if line.contains(first_line) {
-                        let start_line = idx + 1;
-                        let match_lines = trimmed_search.lines().count().max(1);
-                        return (start_line, start_line + match_lines - 1);
-                    }
-                }
-            }
-        }
+    // Complete exact match of trimmed_target
+    if let Some(pos) = content.find(trimmed_target) {
+        let start_line = count_line(pos);
+        let match_lines = trimmed_target.lines().count().max(1);
+        return (start_line, start_line + match_lines - 1);
     }
 
     (0, 0)
+}
+
+/// Searches the target file in repo_root for complete exact excerpt match.
+/// Returns 1-indexed (start_line, end_line) if located, or (0, 0) if unmeasured/unavailable.
+pub fn find_line_range_in_file(
+    repo_root: &Path,
+    file_path: &str,
+    target_excerpt: &str,
+    _fallback_search: Option<&str>,
+) -> (usize, usize) {
+    find_line_range_in_revision(repo_root, file_path, target_excerpt, None)
 }
 
 /// Scans raw patch content and surrounding repo context for opaque structures.
@@ -386,14 +400,32 @@ pub fn scan_patch_for_opaque_structures(
     let mut citations = Vec::new();
     let mut citation_idx = 0;
 
-    let mut make_citation = |file_path: &str,
-                             target_excerpt: &str,
-                             fallback_search: Option<&str>,
-                             symbol: Option<String>| {
+    let mut make_citation = |file_path: &str, target_excerpt: &str, symbol: Option<String>| {
         citation_idx += 1;
         let (start_line, end_line) =
-            find_line_range_in_file(repo_root, file_path, target_excerpt, fallback_search);
-        let content_hash = compute_sha256(target_excerpt.as_bytes());
+            find_line_range_in_revision(repo_root, file_path, target_excerpt, base_commit);
+        let (content_hash, exact_excerpt) = if start_line > 0 && end_line > 0 {
+            if let Some(content) = read_file_content_at_revision(repo_root, file_path, base_commit)
+            {
+                let range_lines: Vec<&str> = content
+                    .lines()
+                    .skip(start_line - 1)
+                    .take(end_line - start_line + 1)
+                    .collect();
+                let slice = range_lines.join("\n");
+                (compute_sha256(slice.as_bytes()), slice)
+            } else {
+                (
+                    compute_sha256(target_excerpt.as_bytes()),
+                    target_excerpt.to_string(),
+                )
+            }
+        } else {
+            (
+                compute_sha256(target_excerpt.as_bytes()),
+                target_excerpt.to_string(),
+            )
+        };
         let hyperlink = if start_line > 0 && end_line > 0 {
             format!(
                 "file://{}{}{file_path}#L{start_line}-L{end_line}",
@@ -423,7 +455,7 @@ pub fn scan_patch_for_opaque_structures(
             content_hash,
             git_commit: base_commit.map(str::to_string),
             attempt_id: Some(attempt_id.to_string()),
-            exact_excerpt: target_excerpt.to_string(),
+            exact_excerpt,
             hyperlink,
         }
     };
@@ -441,7 +473,8 @@ pub fn scan_patch_for_opaque_structures(
 
             // Finding 0: Blast radius leak into protected paths
             if crate::evolution::is_protected(Path::new(file_path)) {
-                let cite = make_citation(file_path, replace_text, search_text, None);
+                let target_text = search_text.unwrap_or(replace_text);
+                let cite = make_citation(file_path, target_text, None);
                 findings.push(OpaqueStructureFinding {
                     category: OpaqueCategory::BlastRadiusLeak,
                     severity: FindingSeverity::Critical,
@@ -466,7 +499,7 @@ pub fn scan_patch_for_opaque_structures(
                     || replace_text.contains("pub struct ")
                     || replace_text.contains("pub enum ");
                 if had_pub && !has_pub {
-                    let cite = make_citation(file_path, replace_text, search_text, None);
+                    let cite = make_citation(file_path, st, None);
                     findings.push(OpaqueStructureFinding {
                         category: OpaqueCategory::ContractBreakage,
                         severity: FindingSeverity::Critical,
@@ -483,7 +516,8 @@ pub fn scan_patch_for_opaque_structures(
             if !file_path.contains("test")
                 && (replace_text.contains(".unwrap()") || replace_text.contains(".expect("))
             {
-                let cite = make_citation(file_path, replace_text, search_text, None);
+                let target_text = search_text.unwrap_or(replace_text);
+                let cite = make_citation(file_path, target_text, None);
                 findings.push(OpaqueStructureFinding {
                     category: OpaqueCategory::UncheckedUnwrap,
                     severity: FindingSeverity::Critical,
@@ -506,7 +540,8 @@ pub fn scan_patch_for_opaque_structures(
                     && !trimmed.starts_with("const ")
                     && !trimmed.starts_with("//")
                 {
-                    let cite = make_citation(file_path, trimmed, search_text, None);
+                    let target_text = search_text.unwrap_or(trimmed);
+                    let cite = make_citation(file_path, target_text, None);
                     findings.push(OpaqueStructureFinding {
                         category: OpaqueCategory::ImplicitConstant,
                         severity: FindingSeverity::Warning,
@@ -522,7 +557,8 @@ pub fn scan_patch_for_opaque_structures(
 
             // Finding 3: Undocumented public API
             if replace_text.contains("pub fn ") && !replace_text.contains("///") {
-                let cite = make_citation(file_path, replace_text, search_text, None);
+                let target_text = search_text.unwrap_or(replace_text);
+                let cite = make_citation(file_path, target_text, None);
                 findings.push(OpaqueStructureFinding {
                     category: OpaqueCategory::UndocumentedPublicApi,
                     severity: FindingSeverity::Warning,
@@ -538,7 +574,8 @@ pub fn scan_patch_for_opaque_structures(
             if replace_text.contains("unwrap_or_default()")
                 || replace_text.contains(".unwrap_or_else(|_|")
             {
-                let cite = make_citation(file_path, replace_text, search_text, None);
+                let target_text = search_text.unwrap_or(replace_text);
+                let cite = make_citation(file_path, target_text, None);
                 findings.push(OpaqueStructureFinding {
                     category: OpaqueCategory::SilentFallback,
                     severity: FindingSeverity::Info,
@@ -558,7 +595,7 @@ pub fn scan_patch_for_opaque_structures(
                 let p = stripped.trim().trim_start_matches("b/").trim();
                 current_file = p.to_string();
                 if crate::evolution::is_protected(Path::new(&current_file)) {
-                    let cite = make_citation(&current_file, &current_file, None, None);
+                    let cite = make_citation(&current_file, &current_file, None);
                     findings.push(OpaqueStructureFinding {
                         category: OpaqueCategory::BlastRadiusLeak,
                         severity: FindingSeverity::Critical,
@@ -579,7 +616,7 @@ pub fn scan_patch_for_opaque_structures(
                         || trimmed_rem.starts_with("pub struct ")
                         || trimmed_rem.starts_with("pub enum ")
                     {
-                        let cite = make_citation(&current_file, trimmed_rem, None, None);
+                        let cite = make_citation(&current_file, trimmed_rem, None);
                         findings.push(OpaqueStructureFinding {
                             category: OpaqueCategory::ContractBreakage,
                             severity: FindingSeverity::Critical,
@@ -604,7 +641,7 @@ pub fn scan_patch_for_opaque_structures(
                 if !current_file.contains("test")
                     && (added.contains(".unwrap()") || added.contains(".expect("))
                 {
-                    let cite = make_citation(&current_file, trimmed, None, None);
+                    let cite = make_citation(&current_file, trimmed, None);
                     findings.push(OpaqueStructureFinding {
                         category: OpaqueCategory::UncheckedUnwrap,
                         severity: FindingSeverity::Critical,
@@ -626,7 +663,7 @@ pub fn scan_patch_for_opaque_structures(
                     && !trimmed.starts_with("const ")
                     && !trimmed.starts_with("//")
                 {
-                    let cite = make_citation(&current_file, trimmed, None, None);
+                    let cite = make_citation(&current_file, trimmed, None);
                     findings.push(OpaqueStructureFinding {
                         category: OpaqueCategory::ImplicitConstant,
                         severity: FindingSeverity::Warning,
@@ -640,7 +677,7 @@ pub fn scan_patch_for_opaque_structures(
 
                 // Undocumented public API
                 if trimmed.contains("pub fn ") && !trimmed.contains("///") {
-                    let cite = make_citation(&current_file, trimmed, None, None);
+                    let cite = make_citation(&current_file, trimmed, None);
                     findings.push(OpaqueStructureFinding {
                         category: OpaqueCategory::UndocumentedPublicApi,
                         severity: FindingSeverity::Warning,
@@ -657,7 +694,7 @@ pub fn scan_patch_for_opaque_structures(
                 if trimmed.contains("unwrap_or_default()")
                     || trimmed.contains(".unwrap_or_else(|_|")
                 {
-                    let cite = make_citation(&current_file, trimmed, None, None);
+                    let cite = make_citation(&current_file, trimmed, None);
                     findings.push(OpaqueStructureFinding {
                         category: OpaqueCategory::SilentFallback,
                         severity: FindingSeverity::Info,
@@ -829,24 +866,123 @@ pub fn simulate_10000_reviewer_governance(
     };
 
     // 4. Empirical Provenance & Reproducibility (2,000 reviewers / 20% weight)
-    let (prov_app, prov_cla, prov_qua, prov_vet) = if node.diff_sha256.len() != 64 {
-        (0, 0, 500, 1500)
+    let (prov_app, prov_cla, prov_qua, prov_vet, prov_assessment, integrity_veto) = if node
+        .diff_sha256
+        .len()
+        != 64
+    {
+        (
+            0,
+            0,
+            0,
+            2000,
+            "VETO: Cryptographic diff hash corrupt or invalid format.".to_string(),
+            true,
+        )
     } else if node.status == AttemptStatus::InternalError {
-        (0, 500, 1500, 0)
+        (
+            0,
+            500,
+            1500,
+            0,
+            "NOTICE: Internal error during evaluation execution trace.".to_string(),
+            false,
+        )
     } else if !is_verified_success {
-        (0, 500, 1000, 500)
+        (
+            0,
+            500,
+            1000,
+            500,
+            "NOTICE: Incomplete execution trace or unverified metrics.".to_string(),
+            false,
+        )
     } else {
-        (2000, 0, 0, 0)
+        // Compare cryptographic patch hash against diff_sha256
+        let patch_status = match &node.patch {
+            Some(p) => {
+                let computed = compute_sha256(p.as_bytes());
+                if computed == node.diff_sha256 {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "Patch SHA256 mismatch (computed {computed}, expected {})",
+                        node.diff_sha256
+                    ))
+                }
+            }
+            None => {
+                if node.status == AttemptStatus::Baseline {
+                    Ok(())
+                } else {
+                    Err("Patch text missing from attempt node".to_string())
+                }
+            }
+        };
+
+        // Check benchmark artifact presence on disk
+        let benchmark_status = match &node.sab_report_path {
+            Some(path) => {
+                if path.exists() {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "Benchmark report artifact '{}' does not exist on disk",
+                        path.display()
+                    ))
+                }
+            }
+            None => {
+                if node.status == AttemptStatus::Baseline && node.metrics.is_some() {
+                    Ok(())
+                } else {
+                    Err("Benchmark report artifact not recorded on attempt node".to_string())
+                }
+            }
+        };
+
+        match (patch_status, benchmark_status) {
+            (Err(err), _) if err.contains("mismatch") => (
+                0,
+                0,
+                0,
+                2000,
+                format!("VETO: Integrity failure — {err}."),
+                true,
+            ),
+            (Ok(()), Ok(())) => (
+                2000,
+                0,
+                0,
+                0,
+                "PASS: Deterministic provenance, patch hash integrity, and benchmark artifacts verified."
+                    .to_string(),
+                false,
+            ),
+            (patch_res, bench_res) => {
+                let mut issues = Vec::new();
+                if let Err(e) = patch_res {
+                    issues.push(e);
+                }
+                if let Err(e) = bench_res {
+                    issues.push(e);
+                }
+                (
+                    0,
+                    1000,
+                    1000,
+                    0,
+                    format!(
+                        "UNVERIFIED: Provenance incomplete ({}) — full approval blocked.",
+                        issues.join("; ")
+                    ),
+                    false,
+                )
+            }
+        }
     };
 
     let prov_score = prov_app as f64 / 2000.0;
-    let prov_assessment = if node.diff_sha256.len() != 64 {
-        "VETO: Cryptographic diff hash corrupt or missing.".to_string()
-    } else if !is_verified_success {
-        "NOTICE: Incomplete execution trace or unverified metrics.".to_string()
-    } else {
-        "PASS: Deterministic provenance and verifiable execution trace verified.".to_string()
-    };
 
     let p_prov = ReviewerPerspective {
         name: "Empirical Provenance & Reproducibility".to_string(),
@@ -865,7 +1001,7 @@ pub fn simulate_10000_reviewer_governance(
     let tot_vet = s_vet + sys_vet + swe_vet + prov_vet;
     let consensus_score = tot_app as f64 / 10000.0;
 
-    let decision = if safety_veto || tot_vet >= 2500 || !is_verified_success {
+    let decision = if safety_veto || integrity_veto || tot_vet >= 2500 || !is_verified_success {
         GovernanceDecision::HardRejectVeto
     } else if consensus_score >= 0.85 {
         GovernanceDecision::ApproveForPromotion
@@ -900,7 +1036,7 @@ pub fn simulate_10000_reviewer_governance(
         votes_veto: tot_vet,
         consensus_score,
         decision,
-        has_safety_veto: safety_veto,
+        has_safety_veto: safety_veto || integrity_veto,
         perspectives: vec![p_safety, p_systems, p_swe, p_prov],
         deliberation_summary,
     }
@@ -1203,14 +1339,33 @@ pub fn investigate_attempts_file(
 ) -> Result<Vec<InvestigativeDossier>> {
     let content = std::fs::read_to_string(attempts_file)?;
     let mut dossiers = Vec::new();
-    for line in content.lines() {
+    let mut unparsable_count = 0;
+    for (line_no, line) in content.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
-        if let Ok(node) = serde_json::from_str::<AttemptNode>(trimmed) {
-            dossiers.push(investigate_attempt(&node, repo_root));
+        match serde_json::from_str::<AttemptNode>(trimmed) {
+            Ok(node) => {
+                dossiers.push(investigate_attempt(&node, repo_root));
+            }
+            Err(e) => {
+                unparsable_count += 1;
+                eprintln!(
+                    "Warning: skipping unparsable attempt log line {} in {}: {}",
+                    line_no + 1,
+                    attempts_file.display(),
+                    e
+                );
+            }
         }
+    }
+    if unparsable_count > 0 {
+        eprintln!(
+            "Warning: {} unparsable attempt log line(s) skipped in {}",
+            unparsable_count,
+            attempts_file.display()
+        );
     }
     Ok(dossiers)
 }

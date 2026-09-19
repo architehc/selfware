@@ -176,6 +176,7 @@ fn test_format_recent_failure_history_extracts_recent_failures() {
         binary_sha256: None,
         base_commit: None,
         committed_commit: None,
+        action_type: None,
         created_at: "now".to_string(),
     };
     let n2 = AttemptNode {
@@ -199,6 +200,7 @@ fn test_format_recent_failure_history_extracts_recent_failures() {
         binary_sha256: None,
         base_commit: None,
         committed_commit: None,
+        action_type: None,
         created_at: "now".to_string(),
     };
 
@@ -1619,6 +1621,59 @@ fn test_commit_winner_to_repo_applies_tested_diff_exactly() {
 }
 
 #[test]
+fn test_commit_winner_to_repo_with_unrelated_staged_changes() {
+    let dir = setup_winner_repo();
+    let root = dir.path();
+
+    // 1. User stages an unrelated change in the main repo index
+    std::fs::write(root.join("unrelated_staged.txt"), "staged by user\n").unwrap();
+    git_ok(root, &["add", "unrelated_staged.txt"]);
+
+    // Verify it is staged in main index
+    let status_before = git_stdout(root, &["status", "--porcelain"]);
+    assert!(
+        status_before.contains("A  unrelated_staged.txt"),
+        "unrelated_staged.txt must be staged before promotion: {status_before}"
+    );
+
+    // 2. Candidate diff is prepared in a shadow worktree
+    let worktree = ast_tools::create_shadow_worktree(root).unwrap();
+    std::fs::write(
+        worktree.join("src/lib.rs"),
+        "pub fn f() -> usize {\n    777\n}\n",
+    )
+    .unwrap();
+    let tested_diff = capture_tested_diff(&worktree).unwrap();
+    let tree_id = capture_worktree_tree_id(&worktree).unwrap();
+    ast_tools::cleanup_worktree(root, &worktree).unwrap();
+
+    // 3. Commit winner to repo with expected tree_id
+    assert!(
+        commit_winner_to_repo(root, &tested_diff, Some(&tree_id), "🧬 Gen 4 BLOOM"),
+        "Promotion commit must succeed using isolated index"
+    );
+
+    // 4. Committed commit contains ONLY src/lib.rs, NOT unrelated_staged.txt
+    let committed_files = git_stdout(root, &["show", "--name-only", "--format=", "HEAD"]);
+    assert!(committed_files.contains("src/lib.rs"));
+    assert!(
+        !committed_files.contains("unrelated_staged.txt"),
+        "HEAD commit must not contain unrelated staged changes: {committed_files}"
+    );
+
+    // 5. Unrelated file remains staged in the user's index
+    let status_after = git_stdout(root, &["status", "--porcelain"]);
+    assert!(
+        status_after.contains("A  unrelated_staged.txt"),
+        "unrelated_staged.txt must remain staged after promotion: {status_after}"
+    );
+
+    // 6. src/lib.rs committed content matches tested content
+    let committed_content = git_stdout(root, &["show", "HEAD:src/lib.rs"]);
+    assert!(committed_content.contains("777"));
+}
+
+#[test]
 fn test_commit_winner_to_repo_rejects_divergent_promoted_tree() {
     let dir = setup_winner_repo();
     let root = dir.path();
@@ -1738,6 +1793,7 @@ fn test_log_and_append_attempt_failure_aborts() {
         binary_sha256: None,
         base_commit: None,
         committed_commit: None,
+        action_type: None,
         created_at: "2026-09-17T00:00:00Z".to_string(),
     };
 
@@ -1792,6 +1848,7 @@ fn test_control_failure_with_unwritable_attempts_file_aborts() {
         binary_sha256: None,
         base_commit: None,
         committed_commit: None,
+        action_type: None,
         created_at: chrono_now(),
     };
 
@@ -2015,6 +2072,7 @@ fn test_promoted_policies_control_live_search_decisions() {
         binary_sha256: None,
         base_commit: None,
         committed_commit: None,
+        action_type: None,
         created_at: "2026-09-17T00:00:00Z".into(),
     };
     let b1 = AttemptNode {
@@ -2038,6 +2096,7 @@ fn test_promoted_policies_control_live_search_decisions() {
         binary_sha256: None,
         base_commit: None,
         committed_commit: None,
+        action_type: None,
         created_at: "2026-09-17T00:01:00Z".into(),
     };
     let b2 = AttemptNode {
@@ -2061,6 +2120,7 @@ fn test_promoted_policies_control_live_search_decisions() {
         binary_sha256: None,
         base_commit: None,
         committed_commit: None,
+        action_type: None,
         created_at: "2026-09-17T00:02:00Z".into(),
     };
 
@@ -2189,6 +2249,7 @@ fn test_infrastructure_failures_excluded_from_deduplication() {
             binary_sha256: None,
             base_commit: None,
             committed_commit: None,
+            action_type: None,
             created_at: "2026-09-17T00:00:00Z".into(),
         },
         // 2. Environment error (e.g. test runner killed by external watchdog)
@@ -2213,6 +2274,7 @@ fn test_infrastructure_failures_excluded_from_deduplication() {
             binary_sha256: None,
             base_commit: None,
             committed_commit: None,
+            action_type: None,
             created_at: "2026-09-17T00:01:00Z".into(),
         },
         // 3. Genuine code defect (type error) -> MUST be blacklisted
@@ -2237,6 +2299,7 @@ fn test_infrastructure_failures_excluded_from_deduplication() {
             binary_sha256: None,
             base_commit: None,
             committed_commit: None,
+            action_type: None,
             created_at: "2026-09-17T00:02:00Z".into(),
         },
         // 4. Duplicate rejected upfront -> MUST remain in blacklist
@@ -2261,6 +2324,7 @@ fn test_infrastructure_failures_excluded_from_deduplication() {
             binary_sha256: None,
             base_commit: None,
             committed_commit: None,
+            action_type: None,
             created_at: "2026-09-17T00:03:00Z".into(),
         },
     ];
@@ -2454,6 +2518,7 @@ fn test_multi_action_batch_and_parent_restoration() {
         binary_sha256: None,
         base_commit: None,
         committed_commit: None,
+        action_type: None,
         created_at: "2026-09-17T00:00:00Z".into(),
     };
 
@@ -2478,6 +2543,7 @@ fn test_multi_action_batch_and_parent_restoration() {
         binary_sha256: None,
         base_commit: None,
         committed_commit: None,
+        action_type: None,
         created_at: "2026-09-17T00:01:00Z".into(),
     };
 
@@ -2502,6 +2568,7 @@ fn test_multi_action_batch_and_parent_restoration() {
         binary_sha256: None,
         base_commit: None,
         committed_commit: None,
+        action_type: None,
         created_at: "2026-09-17T00:01:30Z".into(),
     };
 
@@ -2681,6 +2748,7 @@ fn test_refinement_restoration_failure_records_internal_error() {
         binary_sha256: None,
         base_commit: None,
         committed_commit: None,
+        action_type: None,
         created_at: chrono_now(),
     };
     log_and_append_attempt(&attempts_file, &node, repo_root, 2, Instant::now()).unwrap();
@@ -2721,6 +2789,7 @@ fn test_open_root_reads_from_baseline_checkout() {
         binary_sha256: None,
         base_commit: Some(base_commit.clone()),
         committed_commit: None,
+        action_type: None,
         created_at: chrono_now(),
     };
     std::fs::write(

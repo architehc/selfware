@@ -48,7 +48,9 @@ pub use policy::{
     PrefixObservation, PrefixView, RefineTop1Policy, SearchPolicy,
 };
 pub use replay::{ReplayError, ReplayReport, ReplaySimulator};
-pub use tree_log::{AttemptNode, AttemptStatus, AttemptTree, FailureClass, TreeLogError};
+pub use tree_log::{
+    ActionType, AttemptNode, AttemptStatus, AttemptTree, FailureClass, TreeLogError,
+};
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

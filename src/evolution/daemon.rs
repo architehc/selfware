@@ -15,7 +15,8 @@ use super::policy::{
 use super::telemetry;
 use super::tournament::Hypothesis;
 use super::tree_log::{
-    compute_sha256, tail_lines, AttemptNode, AttemptStatus, AttemptTree, FailureClass, TreeLogError,
+    compute_sha256, tail_lines, ActionType, AttemptNode, AttemptStatus, AttemptTree, FailureClass,
+    TreeLogError,
 };
 use super::{is_protected, EvolutionConfig, FitnessMetrics, GenerationRating, LlmConfig};
 use std::path::{Path, PathBuf};
@@ -387,6 +388,7 @@ pub const SAB_NOISE_MARGIN: f64 = DEFAULT_SAB_NOISE_MARGIN;
 /// When paired scenario scores are available from benchmark runs, calculates the
 /// standard error of the mean scenario score delta across the benchmark suite.
 /// Falls back to [`DEFAULT_SAB_NOISE_MARGIN`] when unmeasured.
+#[allow(dead_code)]
 pub(crate) fn compute_empirical_noise_margin(
     base_sab: Option<&SabResult>,
     cand_sab: Option<&SabResult>,
@@ -475,7 +477,7 @@ pub(crate) fn evaluate_candidate_promotion(
     base_metrics: &FitnessMetrics,
     winner_metrics: &FitnessMetrics,
 ) -> PromotionDecision {
-    let noise_margin = compute_empirical_noise_margin(base_sab, cand_sab);
+    let noise_margin = SAB_NOISE_MARGIN;
     if winner_metrics.sab_score < base_metrics.sab_score - noise_margin {
         return PromotionDecision::Reject(format!(
             "winner SAB score ({:.2}) regressed below baseline ({:.2}) beyond noise margin ({:.2})",
@@ -1151,6 +1153,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             .map(|r| r.binary_sha256.clone()),
         base_commit: ast_tools::get_git_head_commit(repo_root),
         committed_commit: None,
+        action_type: None,
         created_at: chrono_now(),
     };
     if let Err(err) = log_and_append_attempt(&attempts_file, &baseline_node, repo_root, 0, start) {
@@ -1162,6 +1165,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         );
     }
     let mut active_parent_id: Option<String> = Some(baseline_node.id.clone());
+    let mut policy_stopped_reason: Option<String> = None;
 
     // ═══════════════════════════════════════════════════════
     // MAIN EVOLUTIONARY LOOP
@@ -1223,6 +1227,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         "timestamp": chrono_now(),
                     }),
                 );
+                policy_stopped_reason = Some(reason);
                 break;
             }
             PolicyDecision::SelectBatch(actions) => {
@@ -1231,6 +1236,8 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         "🛑 Active search policy '{}' returned empty action batch; terminating search",
                         search_policy.name()
                     ));
+                    policy_stopped_reason =
+                        Some("Empty action batch returned by policy".to_string());
                     break;
                 }
                 actions
@@ -1276,15 +1283,21 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 .unwrap_or_else(|| baseline_node.id.clone());
 
             for (action_idx, action) in active_actions.iter().enumerate() {
-                let (h_parent_id, h_branch_id) = match action {
+                let (h_parent_id, h_branch_id, h_action_type) = match action {
                     LegalAction::RefineFrontier {
                         branch_id,
                         parent_id,
                         ..
-                    } => (Some(parent_id.clone()), branch_id.clone()),
-                    LegalAction::OpenRoot { branch_id, .. } => {
-                        (Some(root_parent.clone()), branch_id.clone())
-                    }
+                    } => (
+                        Some(parent_id.clone()),
+                        branch_id.clone(),
+                        ActionType::RefineFrontier,
+                    ),
+                    LegalAction::OpenRoot { branch_id, .. } => (
+                        Some(root_parent.clone()),
+                        branch_id.clone(),
+                        ActionType::OpenRoot,
+                    ),
                 };
 
                 // Restore parent/root worktree to inspect exact source state.
@@ -1333,6 +1346,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                                         repo_root,
                                     ),
                                     committed_commit: None,
+                                    action_type: Some(ActionType::RefineFrontier),
                                     created_at: chrono_now(),
                                 };
                                 let _ = log_and_append_attempt(
@@ -1392,6 +1406,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                                         repo_root,
                                     ),
                                     committed_commit: None,
+                                    action_type: Some(ActionType::OpenRoot),
                                     created_at: chrono_now(),
                                 };
                                 let _ = log_and_append_attempt(
@@ -1426,7 +1441,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
                 if let Some(mut h) = hyp {
                     h.id = format!("g{}-hyp{}", generation, action_idx);
-                    hypotheses_with_actions.push((h, h_parent_id, h_branch_id));
+                    hypotheses_with_actions.push((h, h_parent_id, h_branch_id, h_action_type));
                 }
             }
 
@@ -1442,7 +1457,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 "timestamp": chrono_now(),
                 "generation": generation,
                 "count": hypotheses_with_actions.len(),
-                "descriptions": hypotheses_with_actions.iter().map(|(h, _, _)| &h.description).collect::<Vec<_>>(),
+                "descriptions": hypotheses_with_actions.iter().map(|(h, _, _, _)| &h.description).collect::<Vec<_>>(),
                 "llm_duration_secs": llm_start.elapsed().as_secs_f64(),
             }),
         );
@@ -1461,7 +1476,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         // Also detect and reject duplicate patches matching previously failed diffs.
         let prior_failed_diffs = load_failed_diff_shas(&attempts_file);
         let mut valid = Vec::new();
-        for (h, h_parent_id, h_branch_id) in hypotheses_with_actions {
+        for (h, h_parent_id, h_branch_id, h_action_type) in hypotheses_with_actions {
             let diff_sha256 = compute_sha256(h.patch.as_bytes());
             if hypothesis_touches_protected(&h) {
                 log_warning(&format!(
@@ -1489,6 +1504,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     binary_sha256: None,
                     base_commit: None,
                     committed_commit: None,
+                    action_type: Some(h_action_type),
                     created_at: chrono_now(),
                 };
                 if let Err(err) =
@@ -1533,6 +1549,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     binary_sha256: None,
                     base_commit: None,
                     committed_commit: None,
+                    action_type: Some(h_action_type),
                     created_at: chrono_now(),
                 };
                 if let Err(err) =
@@ -1548,7 +1565,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 continue;
             }
 
-            valid.push((h, h_parent_id, h_branch_id));
+            valid.push((h, h_parent_id, h_branch_id, h_action_type));
         }
 
         if valid.is_empty() {
@@ -1594,6 +1611,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     binary_sha256: None,
                     base_commit: control_base_commit.clone(),
                     committed_commit: None,
+                    action_type: None,
                     created_at: chrono_now(),
                 };
                 if let Err(err) =
@@ -1662,6 +1680,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 binary_sha256: None,
                 base_commit: control_base_commit.clone(),
                 committed_commit: None,
+                action_type: None,
                 created_at: chrono_now(),
             };
             if let Err(err) =
@@ -1737,6 +1756,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 binary_sha256: None,
                 base_commit: control_base_commit,
                 committed_commit: None,
+                action_type: None,
                 created_at: chrono_now(),
             };
             if let Err(err) =
@@ -1759,7 +1779,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             sab_config.runner_script.exists() && std::env::var("SELFWARE_EVOLVE_SAB").is_ok();
         let mut evaluated_candidates: Vec<EvaluatedCandidate> = Vec::new();
 
-        for (hypothesis, hyp_parent_id, hyp_branch_id) in &valid {
+        for (hypothesis, hyp_parent_id, hyp_branch_id, hyp_action_type) in &valid {
             let attempt_start = Instant::now();
             let attempt_id = format!("att-g{}-{}", generation, hypothesis.id);
             let attempt_base_commit =
@@ -1802,6 +1822,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         binary_sha256: None,
                         base_commit: attempt_base_commit.clone(),
                         committed_commit: None,
+                        action_type: Some(*hyp_action_type),
                         created_at: chrono_now(),
                     };
                     if let Err(err) = log_and_append_attempt(
@@ -1847,6 +1868,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     binary_sha256: None,
                     base_commit: attempt_base_commit.clone(),
                     committed_commit: None,
+                    action_type: Some(*hyp_action_type),
                     created_at: chrono_now(),
                 };
                 if let Err(err) =
@@ -1912,6 +1934,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         binary_sha256: None,
                         base_commit: attempt_base_commit.clone(),
                         committed_commit: None,
+                        action_type: Some(*hyp_action_type),
                         created_at: chrono_now(),
                     };
                     if let Err(err) = log_and_append_attempt(
@@ -1980,6 +2003,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     binary_sha256: None,
                     base_commit: attempt_base_commit.clone(),
                     committed_commit: None,
+                    action_type: Some(*hyp_action_type),
                     created_at: chrono_now(),
                 };
                 if let Err(err) =
@@ -2033,6 +2057,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         binary_sha256: None,
                         base_commit: attempt_base_commit.clone(),
                         committed_commit: None,
+                        action_type: Some(*hyp_action_type),
                         created_at: chrono_now(),
                     };
                     if let Err(err) = log_and_append_attempt(
@@ -2113,6 +2138,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     binary_sha256: None,
                     base_commit: attempt_base_commit.clone(),
                     committed_commit: None,
+                    action_type: Some(*hyp_action_type),
                     created_at: chrono_now(),
                 };
                 if let Err(err) =
@@ -2177,6 +2203,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     binary_sha256: None,
                     base_commit: attempt_base_commit.clone(),
                     committed_commit: None,
+                    action_type: Some(*hyp_action_type),
                     created_at: chrono_now(),
                 };
                 if let Err(err) =
@@ -2240,6 +2267,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         binary_sha256: None,
                         base_commit: attempt_base_commit.clone(),
                         committed_commit: None,
+                        action_type: Some(*hyp_action_type),
                         created_at: chrono_now(),
                     };
                     if let Err(err) = log_and_append_attempt(
@@ -2292,6 +2320,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             binary_sha256: None,
                             base_commit: attempt_base_commit.clone(),
                             committed_commit: None,
+                            action_type: Some(*hyp_action_type),
                             created_at: chrono_now(),
                         };
                         if let Err(err) = log_and_append_attempt(
@@ -2346,6 +2375,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             binary_sha256: None,
                             base_commit: attempt_base_commit.clone(),
                             committed_commit: None,
+                            action_type: Some(*hyp_action_type),
                             created_at: chrono_now(),
                         };
                         if let Err(err) = log_and_append_attempt(
@@ -2401,6 +2431,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         binary_sha256: None,
                         base_commit: attempt_base_commit.clone(),
                         committed_commit: None,
+                        action_type: Some(*hyp_action_type),
                         created_at: chrono_now(),
                     };
                     if let Err(err) = log_and_append_attempt(
@@ -2454,6 +2485,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         binary_sha256: winner_sab.as_ref().map(|s| s.binary_sha256.clone()),
                         base_commit: attempt_base_commit.clone(),
                         committed_commit: None,
+                        action_type: Some(*hyp_action_type),
                         created_at: chrono_now(),
                     };
                     if let Err(err) = log_and_append_attempt(
@@ -2495,6 +2527,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 binary_sha256: winner_sab.as_ref().map(|s| s.binary_sha256.clone()),
                 base_commit: attempt_base_commit.clone(),
                 committed_commit: None,
+                action_type: Some(*hyp_action_type),
                 created_at: chrono_now(),
             };
             if let Err(err) =
@@ -2777,6 +2810,12 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         }
     }
 
+    let (outcome, aborted) = if let Some(ref reason) = policy_stopped_reason {
+        ("policy_stopped", Some(format!("Policy stopped: {reason}")))
+    } else {
+        ("completed", None)
+    };
+
     log_event(
         repo_root,
         &serde_json::json!({
@@ -2784,7 +2823,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             "kind": "run_end",
             "timestamp": chrono_now(),
             "run_id": &run_id,
-            "outcome": "completed",
+            "outcome": outcome,
             "generations_run": generation,
             "final_sab_score": current_baseline_metrics.sab_score,
             "duration_secs": start.elapsed().as_secs_f64(),
@@ -2797,7 +2836,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         final_sab_score: current_baseline_metrics.sab_score,
         initial_sab_score: initial_sab,
         total_duration: start.elapsed(),
-        aborted: None,
+        aborted,
     }
 }
 
@@ -3994,70 +4033,19 @@ pub(crate) fn commit_winner_to_repo(
     let edited = patch_edited_paths(tested_diff);
     warn_unrelated_dirty_paths(repo_root, &edited);
 
-    // Require the staged tree in repo_root to match the evaluated tree byte-for-byte before committing.
-    // This prevents committing untested code combinations when HEAD has moved since the candidate was evaluated.
-    let mut add = Command::new("git");
-    add.env_remove("GIT_INDEX_FILE");
-    add.arg("add").arg("--");
-    for p in &edited {
-        add.arg(p);
-    }
-    let add_ok = add
-        .current_dir(repo_root)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if !add_ok {
-        log_error("Failed to stage edited paths for tree verification — reverting applied diff");
-        revert_applied_diff(repo_root, tested_diff);
-        return false;
-    }
-
-    let promoted_tree = capture_worktree_tree_id(repo_root);
-    match promoted_tree {
-        Some(ref actual) if actual == expected => {
-            // Exact match: promoted tree is identical to the evaluated benchmark tree
-        }
-        Some(ref actual) => {
+    // Promote and commit using an isolated index. This guarantees that:
+    // 1. The verified tree and the committed tree are byte-identical (both computed from the isolated index).
+    // 2. Unrelated staged changes or staged reverts in the user's main index do not distort verification or commit.
+    match commit_scoped_paths_isolated(repo_root, &edited, Some(expected), commit_msg) {
+        Ok(_) => true,
+        Err(err) => {
             log_error(&format!(
-                "Promoted tree mismatch: evaluated benchmark tree is {expected}, but applying diff to HEAD produced {actual} (untested code combination from divergent HEAD) — refusing to commit unbenchmarked code"
+                "Promotion commit failed: {err} — reverting applied diff"
             ));
-            let _ = Command::new("git")
-                .env_remove("GIT_INDEX_FILE")
-                .args(["reset", "HEAD", "--"])
-                .args(&edited)
-                .current_dir(repo_root)
-                .output();
             revert_applied_diff(repo_root, tested_diff);
-            return false;
-        }
-        None => {
-            log_error(
-                "Failed to capture promoted git tree — refusing to commit unbenchmarked code",
-            );
-            let _ = Command::new("git")
-                .env_remove("GIT_INDEX_FILE")
-                .args(["reset", "HEAD", "--"])
-                .args(&edited)
-                .current_dir(repo_root)
-                .output();
-            revert_applied_diff(repo_root, tested_diff);
-            return false;
+            false
         }
     }
-
-    if commit_scoped_paths(repo_root, &edited, commit_msg) {
-        return true;
-    }
-    log_error("Winner commit failed — reverting the applied diff to keep the worktree clean");
-    let _ = Command::new("git")
-        .env_remove("GIT_INDEX_FILE")
-        .args(["reset", "HEAD", "--"])
-        .args(&edited)
-        .current_dir(repo_root)
-        .output();
-    revert_applied_diff(repo_root, tested_diff);
-    false
 }
 
 /// Apply the tested diff to the real repository with STRICT `git apply` — no
@@ -4151,54 +4139,147 @@ fn warn_unrelated_dirty_paths(repo_root: &Path, edited: &[PathBuf]) {
     }
 }
 
-/// Stage and commit ONLY the given paths — never `git add -A`, which used to
-/// sweep every dirty edit and untracked file (scratch, `.env`, credentials)
-/// into the "🧬 Gen N BLOOM" commit on the user's current branch. The
-/// pathspec form of `git commit` also keeps previously-staged unrelated
-/// changes out of the commit.
-fn commit_scoped_paths(repo_root: &Path, paths: &[PathBuf], commit_msg: &str) -> bool {
-    if paths.is_empty() {
-        log_warning("  Winner patch edits no paths — nothing to commit");
-        return false;
+struct IsolatedIndexGuard {
+    index_path: PathBuf,
+}
+
+impl IsolatedIndexGuard {
+    fn new(repo_root: &Path) -> Self {
+        let unique_name = format!("selfware_promote_idx_{}", uuid::Uuid::new_v4().simple());
+        let dot_git = repo_root.join(".git");
+        let index_path = if dot_git.is_dir() {
+            dot_git.join(unique_name)
+        } else {
+            std::env::temp_dir().join(unique_name)
+        };
+        Self { index_path }
     }
+}
+
+impl Drop for IsolatedIndexGuard {
+    fn drop(&mut self) {
+        if self.index_path.exists() {
+            let _ = std::fs::remove_file(&self.index_path);
+        }
+    }
+}
+
+/// Commits the specified paths using an isolated index file.
+///
+/// If `expected_tree` is provided, verifies that `git write-tree` on the isolated index
+/// exactly matches `expected_tree` before committing.
+/// Both verification and the commit are executed against the exact same isolated index,
+/// ensuring that unrelated staged changes or staged reverts in the main index cannot cause
+/// the committed tree to diverge from the verified tree.
+pub(crate) fn commit_scoped_paths_isolated(
+    repo_root: &Path,
+    paths: &[PathBuf],
+    expected_tree: Option<&str>,
+    commit_msg: &str,
+) -> Result<String, String> {
+    if paths.is_empty() {
+        return Err("Winner patch edits no paths — nothing to commit".to_string());
+    }
+
+    let guard = IsolatedIndexGuard::new(repo_root);
+
+    // 1. Initialize isolated index with the tree of HEAD
+    let read_tree = Command::new("git")
+        .env("GIT_INDEX_FILE", &guard.index_path)
+        .args(["read-tree", "HEAD"])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|e| format!("Failed to execute git read-tree: {e}"))?;
+    if !read_tree.status.success() {
+        return Err(format!(
+            "git read-tree HEAD failed: {}",
+            String::from_utf8_lossy(&read_tree.stderr).trim()
+        ));
+    }
+
+    // 2. Stage ONLY the specified paths into the isolated index
     let mut add = Command::new("git");
-    add.env_remove("GIT_INDEX_FILE");
+    add.env("GIT_INDEX_FILE", &guard.index_path);
     add.arg("add").arg("--");
     for p in paths {
         add.arg(p);
     }
-    match add.current_dir(repo_root).output() {
-        Ok(o) if o.status.success() => {}
-        Ok(o) => {
-            log_warning(&format!(
-                "  git add of winner paths failed: {}",
-                String::from_utf8_lossy(&o.stderr).trim()
+    let add_out = add
+        .current_dir(repo_root)
+        .output()
+        .map_err(|e| format!("Failed to execute git add into isolated index: {e}"))?;
+    if !add_out.status.success() {
+        return Err(format!(
+            "git add into isolated index failed: {}",
+            String::from_utf8_lossy(&add_out.stderr).trim()
+        ));
+    }
+
+    // 3. Write and capture the tree from the isolated index
+    let write_tree = Command::new("git")
+        .env("GIT_INDEX_FILE", &guard.index_path)
+        .args(["write-tree"])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|e| format!("Failed to execute git write-tree on isolated index: {e}"))?;
+    if !write_tree.status.success() {
+        return Err(format!(
+            "git write-tree on isolated index failed: {}",
+            String::from_utf8_lossy(&write_tree.stderr).trim()
+        ));
+    }
+    let promoted_tree = String::from_utf8_lossy(&write_tree.stdout)
+        .trim()
+        .to_string();
+    if promoted_tree.is_empty() {
+        return Err("git write-tree produced empty tree SHA".to_string());
+    }
+
+    // 4. Verify against expected_tree if provided
+    if let Some(expected) = expected_tree {
+        let expected = expected.trim();
+        if promoted_tree != expected {
+            return Err(format!(
+                "Promoted tree mismatch: evaluated benchmark tree is {expected}, but isolated index produced {promoted_tree} (untested code combination from divergent HEAD) — refusing to commit unbenchmarked code"
             ));
-            return false;
-        }
-        Err(e) => {
-            log_warning(&format!("  Failed to run git add: {}", e));
-            return false;
         }
     }
 
-    let mut commit = Command::new("git");
-    commit.env_remove("GIT_INDEX_FILE");
-    commit.arg("commit").arg("-m").arg(commit_msg).arg("--");
-    for p in paths {
-        commit.arg(p);
+    // 5. Commit using the isolated index (commit without pathspec commits the entire isolated index)
+    let commit = Command::new("git")
+        .env("GIT_INDEX_FILE", &guard.index_path)
+        .args(["commit", "-m", commit_msg])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|e| format!("Failed to execute git commit with isolated index: {e}"))?;
+    if !commit.status.success() {
+        return Err(format!(
+            "git commit with isolated index failed: {}",
+            String::from_utf8_lossy(&commit.stderr).trim()
+        ));
     }
-    match commit.current_dir(repo_root).output() {
-        Ok(o) if o.status.success() => true,
-        Ok(o) => {
-            log_warning(&format!(
-                "  git commit of winner paths failed: {}",
-                String::from_utf8_lossy(&o.stderr).trim()
-            ));
-            false
-        }
+
+    // 6. Synchronize main repository index for the committed paths so working copy status is clean,
+    // without disturbing any unrelated staged changes.
+    let mut reset = Command::new("git");
+    reset.env_remove("GIT_INDEX_FILE");
+    reset.args(["reset", "HEAD", "--"]);
+    for p in paths {
+        reset.arg(p);
+    }
+    let _ = reset.current_dir(repo_root).output();
+
+    Ok(promoted_tree)
+}
+
+/// Stage and commit ONLY the given paths using an isolated index — never `git add -A`,
+/// keeping unrelated staged changes and untracked files completely untouched and uncommitted.
+#[allow(dead_code)]
+pub(crate) fn commit_scoped_paths(repo_root: &Path, paths: &[PathBuf], commit_msg: &str) -> bool {
+    match commit_scoped_paths_isolated(repo_root, paths, None, commit_msg) {
+        Ok(_) => true,
         Err(e) => {
-            log_warning(&format!("  Failed to run git commit: {}", e));
+            log_warning(&format!("  commit_scoped_paths failed: {e}"));
             false
         }
     }

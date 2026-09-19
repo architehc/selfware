@@ -117,6 +117,25 @@ pub fn tail_lines(text: &str, n: usize) -> String {
     }
 }
 
+/// The exploration action type that produced an attempt node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionType {
+    /// Open a root exploration candidate (rooted at baseline or active promoted incumbent).
+    OpenRoot,
+    /// Refine an existing attempt frontier.
+    RefineFrontier,
+}
+
+impl std::fmt::Display for ActionType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OpenRoot => write!(f, "open_root"),
+            Self::RefineFrontier => write!(f, "refine_frontier"),
+        }
+    }
+}
+
 /// A single node in the evolutionary attempt tree.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AttemptNode {
@@ -171,14 +190,17 @@ pub struct AttemptNode {
     /// Git commit hash created if this attempt was successfully promoted and committed to repo_root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub committed_commit: Option<String>,
+    /// Exploration action type that produced this attempt (OpenRoot vs RefineFrontier).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_type: Option<ActionType>,
     /// ISO 8601 / RFC 3339 creation timestamp.
     pub created_at: String,
 }
 
 impl AttemptNode {
-    /// Returns true if this attempt is an unparented root exploration.
+    /// Returns true if this attempt is an unparented root exploration or an OpenRoot action.
     pub fn is_root(&self) -> bool {
-        self.parent_id.is_none()
+        self.action_type == Some(ActionType::OpenRoot) || self.parent_id.is_none()
     }
 
     /// Returns true if this attempt was successfully evaluated and has a composite score.
@@ -211,6 +233,10 @@ pub enum TreeLogError {
     OrphanedNode { node_id: String, parent_id: String },
     #[error("Insufficient independent ancestry groups for held-out validation: {0} group(s) found (minimum 2 required)")]
     InsufficientAncestryGroupsForHeldOut(usize),
+    #[error("Attempts log file not found: {0}")]
+    LogFileNotFound(String),
+    #[error("Node '{0}' not found in attempts log")]
+    NodeNotFound(String),
 }
 
 /// In-memory indexed collection of evolutionary attempts forming a tree/forest.
@@ -643,7 +669,7 @@ impl AttemptTree {
         commit_hash: &str,
     ) -> Result<(), TreeLogError> {
         if !path.exists() {
-            return Ok(());
+            return Err(TreeLogError::LogFileNotFound(path.display().to_string()));
         }
         let content = std::fs::read_to_string(path)?;
         let mut updated_lines = Vec::new();
@@ -665,17 +691,19 @@ impl AttemptTree {
             updated_lines.push(trimmed.to_string());
         }
 
-        if modified {
-            let tmp_path = path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
-            {
-                let mut file = File::create(&tmp_path)?;
-                for line in updated_lines {
-                    writeln!(file, "{}", line)?;
-                }
-                file.sync_all()?;
-            }
-            std::fs::rename(&tmp_path, path)?;
+        if !modified {
+            return Err(TreeLogError::NodeNotFound(id.to_string()));
         }
+
+        let tmp_path = path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
+        {
+            let mut file = File::create(&tmp_path)?;
+            for line in updated_lines {
+                writeln!(file, "{}", line)?;
+            }
+            file.sync_all()?;
+        }
+        std::fs::rename(&tmp_path, path)?;
 
         Ok(())
     }

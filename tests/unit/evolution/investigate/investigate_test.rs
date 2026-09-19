@@ -3,6 +3,30 @@ use crate::evolution::tree_log::{compute_sha256, AttemptNode, AttemptStatus};
 use std::path::Path;
 
 fn make_test_node(id: &str, patch: &str, status: AttemptStatus) -> AttemptNode {
+    let (metrics, sab_report_path) = if status == AttemptStatus::Evaluated {
+        let dummy_report = std::env::temp_dir().join(format!("test_sab_report_{id}.json"));
+        let _ = std::fs::write(&dummy_report, "{\"scenarios\": []}");
+        (
+            Some(crate::evolution::FitnessMetrics {
+                sab_score: 85.0,
+                tokens_used: Some(1500),
+                token_budget: 100_000,
+                wall_clock_secs: 1.2,
+                timeout_secs: 60.0,
+                full_evaluation_secs: Some(1.2),
+                test_pass_pct: 100.0,
+                binary_size_mb: 15.0,
+                max_binary_size_mb: 50.0,
+                tests_passed: 10,
+                tests_total: 10,
+                visual_score: 100.0,
+            }),
+            Some(dummy_report),
+        )
+    } else {
+        (None, None)
+    };
+
     AttemptNode {
         id: id.to_string(),
         parent_id: Some("att-baseline".to_string()),
@@ -12,9 +36,13 @@ fn make_test_node(id: &str, patch: &str, status: AttemptStatus) -> AttemptNode {
         description: "Test hypothesis for investigate engine".to_string(),
         diff_sha256: compute_sha256(patch.as_bytes()),
         patch: Some(patch.to_string()),
-        sab_report_path: None,
-        metrics: None,
-        composite_score: Some(0.85),
+        sab_report_path,
+        metrics,
+        composite_score: if status == AttemptStatus::Evaluated {
+            Some(0.85)
+        } else {
+            None
+        },
         tokens_used: Some(1500),
         wall_time_ms: 1200,
         status,
@@ -24,6 +52,7 @@ fn make_test_node(id: &str, patch: &str, status: AttemptStatus) -> AttemptNode {
         binary_sha256: None,
         base_commit: Some("deadbeef0123456789".to_string()),
         committed_commit: None,
+        action_type: Some(crate::evolution::ActionType::RefineFrontier),
         created_at: "2026-09-18T20:00:00Z".to_string(),
     }
 }
@@ -301,4 +330,107 @@ fn test_find_affected_callers_real_lookup() {
     assert_eq!(callers.len(), 1);
     assert!(callers[0].contains("src/module_b/caller.rs"));
     assert!(callers[0].contains("target_action"));
+}
+
+#[test]
+fn test_make_citation_hashes_lines_at_base_commit_not_dirty_worktree() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_root = temp.path();
+
+    let run_git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .env_remove("GIT_INDEX_FILE")
+            .args(args)
+            .current_dir(repo_root)
+            .output()
+            .expect("git cmd failed");
+        assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+
+    run_git(&["init", "-b", "main"]);
+    run_git(&["config", "user.email", "test@example.com"]);
+    run_git(&["config", "user.name", "Test Runner"]);
+
+    std::fs::create_dir_all(repo_root.join("src")).unwrap();
+    let original_content = "pub fn greet() {\n    let x = foo();\n    println!(\"done\");\n}\n";
+    std::fs::write(repo_root.join("src/lib.rs"), original_content).unwrap();
+    run_git(&["add", "src/lib.rs"]);
+    run_git(&["commit", "-m", "base commit"]);
+    let base_commit = run_git(&["rev-parse", "HEAD"]);
+
+    // Dirty worktree change: mutate the line in the working tree
+    let dirty_content = "pub fn greet() {\n    let x = bar();\n    println!(\"done\");\n}\n";
+    std::fs::write(repo_root.join("src/lib.rs"), dirty_content).unwrap();
+
+    // Patch targets the code at base_commit
+    let patch = r#"[{"file": "src/lib.rs", "search": "let x = foo();", "replace": "let x = foo().unwrap();"}]"#;
+    let (findings, citations) = scan_patch_for_opaque_structures(
+        patch,
+        repo_root,
+        "att-citation-commit",
+        Some(&base_commit),
+    );
+
+    assert_eq!(findings.len(), 1);
+    assert_eq!(citations.len(), 1);
+    let cit = &citations[0];
+    assert_eq!(cit.file_path, "src/lib.rs");
+    assert_eq!(cit.line_range, (2, 2));
+    assert_eq!(cit.git_commit.as_deref(), Some(base_commit.as_str()));
+
+    // Content hash MUST match the line in base_commit ("    let x = foo();")
+    let expected_hash = compute_sha256("    let x = foo();".as_bytes());
+    assert_eq!(cit.content_hash, expected_hash);
+}
+
+#[test]
+fn test_simulate_10000_reviewer_governance_blocks_approval_when_benchmark_missing() {
+    let mut node = make_test_node("att-no-bench", "", AttemptStatus::Evaluated);
+    node.sab_report_path = None; // benchmark report missing
+
+    let findings = Vec::new();
+    let safety = Degree5Safety {
+        protected_paths_clean: true,
+        rule1_verified: true,
+        merkle_tree_equality: None,
+        has_killswitch_bypass: false,
+    };
+
+    let consensus = simulate_10000_reviewer_governance(&node, &findings, &safety);
+    assert_eq!(
+        consensus.decision,
+        GovernanceDecision::ConditionalClarification,
+        "Approval must be blocked when benchmark report is missing"
+    );
+    assert!(consensus.votes_approve < 10000);
+    assert!(
+        consensus
+            .deliberation_summary
+            .contains("ConditionalClarification")
+            || consensus.deliberation_summary.contains("80.0%")
+    );
+}
+
+#[test]
+fn test_simulate_10000_reviewer_governance_vetoes_on_diff_hash_mismatch() {
+    let mut node = make_test_node("att-hash-mismatch", "valid_patch", AttemptStatus::Evaluated);
+    node.diff_sha256 =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(); // forged hash
+
+    let findings = Vec::new();
+    let safety = Degree5Safety {
+        protected_paths_clean: true,
+        rule1_verified: true,
+        merkle_tree_equality: None,
+        has_killswitch_bypass: false,
+    };
+
+    let consensus = simulate_10000_reviewer_governance(&node, &findings, &safety);
+    assert_eq!(
+        consensus.decision,
+        GovernanceDecision::HardRejectVeto,
+        "Cryptographic patch mismatch must trigger hard reject veto"
+    );
+    assert!(consensus.has_safety_veto || consensus.votes_veto >= 1800);
 }

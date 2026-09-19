@@ -54,6 +54,11 @@ fn sample_node(
         binary_sha256: None,
         base_commit: None,
         committed_commit: None,
+        action_type: if parent_id.is_none() {
+            Some(ActionType::OpenRoot)
+        } else {
+            Some(ActionType::RefineFrontier)
+        },
         created_at: "2026-09-16T12:00:00Z".to_string(),
     }
 }
@@ -458,9 +463,11 @@ fn test_record_committed_commit_updates_attempts_file() {
     let baseline = reloaded.get("att-baseline").unwrap();
     assert_eq!(baseline.committed_commit, None);
 
-    // Non-existent node is a safe no-op
-    AttemptTree::record_committed_commit(&attempts_file, "non-existent", "commit-sha-xyz")
-        .expect("must succeed as no-op");
+    // Non-existent node must fail closed with NodeNotFound
+    let err =
+        AttemptTree::record_committed_commit(&attempts_file, "non-existent", "commit-sha-xyz")
+            .unwrap_err();
+    assert!(matches!(err, TreeLogError::NodeNotFound(_)));
 }
 
 #[test]

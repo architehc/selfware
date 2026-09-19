@@ -35,6 +35,11 @@ fn make_node(
         binary_sha256: None,
         base_commit: None,
         committed_commit: None,
+        action_type: if parent_id.is_none() {
+            Some(crate::evolution::ActionType::OpenRoot)
+        } else {
+            Some(crate::evolution::ActionType::RefineFrontier)
+        },
         created_at: "2026-09-16T12:00:00Z".into(),
     }
 }
@@ -714,6 +719,7 @@ fn test_replay_daemon_tree_shape_with_baseline_root_and_control_anchors() {
         binary_sha256: None,
         base_commit: None,
         committed_commit: None,
+        action_type: None,
         created_at: "2026-09-17T00:00:00Z".to_string(),
     };
     tree.add_node(baseline_node).unwrap();
@@ -740,6 +746,7 @@ fn test_replay_daemon_tree_shape_with_baseline_root_and_control_anchors() {
         binary_sha256: None,
         base_commit: None,
         committed_commit: None,
+        action_type: None,
         created_at: "2026-09-17T00:01:00Z".to_string(),
     };
     tree.add_node(ctrl_node).unwrap();
@@ -766,6 +773,7 @@ fn test_replay_daemon_tree_shape_with_baseline_root_and_control_anchors() {
         binary_sha256: None,
         base_commit: None,
         committed_commit: None,
+        action_type: Some(crate::evolution::ActionType::OpenRoot),
         created_at: "2026-09-17T00:02:00Z".to_string(),
     };
     tree.add_node(hyp1_node).unwrap();
@@ -791,6 +799,7 @@ fn test_replay_daemon_tree_shape_with_baseline_root_and_control_anchors() {
         binary_sha256: None,
         base_commit: None,
         committed_commit: None,
+        action_type: Some(crate::evolution::ActionType::OpenRoot),
         created_at: "2026-09-17T00:03:00Z".to_string(),
     };
     tree.add_node(hyp2_node).unwrap();
@@ -832,4 +841,145 @@ fn test_replay_daemon_tree_shape_with_baseline_root_and_control_anchors() {
     assert_eq!(report.baseline_score, 0.75);
     assert_eq!(report.terminal_score, 0.85);
     assert!((report.score_improvement - 0.10).abs() < 1e-9);
+}
+
+#[test]
+fn test_replay_retains_open_root_for_promoted_descendant() {
+    let mut tree = AttemptTree::new();
+
+    let baseline = AttemptNode {
+        id: "att-baseline".to_string(),
+        parent_id: None,
+        generation: 0,
+        branch_id: "baseline".to_string(),
+        hypothesis_id: "baseline".to_string(),
+        description: "Baseline".to_string(),
+        diff_sha256: "0".to_string(),
+        patch: None,
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(0.50),
+        tokens_used: None,
+        wall_time_ms: 0,
+        status: AttemptStatus::Baseline,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        base_commit: None,
+        committed_commit: None,
+        action_type: None,
+        created_at: "2026-09-17T00:00:00Z".to_string(),
+    };
+    tree.add_node(baseline).unwrap();
+
+    // Promoted attempt from baseline
+    let cand1 = AttemptNode {
+        id: "att-cand1".to_string(),
+        parent_id: Some("att-baseline".to_string()),
+        generation: 0,
+        branch_id: "branch-0".to_string(),
+        hypothesis_id: "hyp-0".to_string(),
+        description: "Candidate 1 (Gen 0 winner)".to_string(),
+        diff_sha256: "sha1".to_string(),
+        patch: Some("diff1".to_string()),
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(0.80),
+        tokens_used: Some(1000),
+        wall_time_ms: 100,
+        status: AttemptStatus::Evaluated,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        base_commit: None,
+        committed_commit: Some("c1-commit".to_string()),
+        action_type: Some(crate::evolution::ActionType::OpenRoot),
+        created_at: "2026-09-17T00:01:00Z".to_string(),
+    };
+    tree.add_node(cand1).unwrap();
+
+    // Gen 1 OpenRoot action exploring from the promoted candidate att-cand1
+    let gen1_open_root = AttemptNode {
+        id: "att-gen1-root".to_string(),
+        parent_id: Some("att-cand1".to_string()),
+        generation: 1,
+        branch_id: "branch-1".to_string(),
+        hypothesis_id: "hyp-1".to_string(),
+        description: "Gen 1 OpenRoot exploring from incumbent".to_string(),
+        diff_sha256: "sha2".to_string(),
+        patch: Some("diff2".to_string()),
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(0.85),
+        tokens_used: Some(1000),
+        wall_time_ms: 100,
+        status: AttemptStatus::Evaluated,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        base_commit: None,
+        committed_commit: None,
+        action_type: Some(crate::evolution::ActionType::OpenRoot),
+        created_at: "2026-09-17T00:02:00Z".to_string(),
+    };
+    tree.add_node(gen1_open_root).unwrap();
+
+    // Gen 1 RefineFrontier action refining the same parent att-cand1
+    let gen1_refine = AttemptNode {
+        id: "att-gen1-refine".to_string(),
+        parent_id: Some("att-cand1".to_string()),
+        generation: 1,
+        branch_id: "branch-0".to_string(),
+        hypothesis_id: "hyp-refine".to_string(),
+        description: "Gen 1 RefineFrontier refining incumbent".to_string(),
+        diff_sha256: "sha3".to_string(),
+        patch: Some("diff3".to_string()),
+        sab_report_path: None,
+        metrics: None,
+        composite_score: Some(0.82),
+        tokens_used: Some(1000),
+        wall_time_ms: 100,
+        status: AttemptStatus::Evaluated,
+        failure_class: None,
+        failure_reason: None,
+        output_tail: None,
+        binary_sha256: None,
+        base_commit: None,
+        committed_commit: None,
+        action_type: Some(crate::evolution::ActionType::RefineFrontier),
+        created_at: "2026-09-17T00:03:00Z".to_string(),
+    };
+    tree.add_node(gen1_refine).unwrap();
+
+    let sim = ReplaySimulator::new(tree, 0.50);
+    let mut revealed = std::collections::HashSet::new();
+    revealed.insert("att-baseline".to_string());
+    revealed.insert("att-cand1".to_string());
+
+    let legal = sim.compute_legal_actions(&revealed);
+
+    // Check that att-gen1-root is classified as OpenRoot, NOT RefineFrontier
+    let root_action = legal
+        .iter()
+        .find(|a| a.node_id() == "att-gen1-root")
+        .expect("att-gen1-root must be legal");
+    assert!(
+        matches!(root_action, LegalAction::OpenRoot { branch_id, node_id } if branch_id == "branch-1" && node_id == "att-gen1-root"),
+        "att-gen1-root must be LegalAction::OpenRoot, got {:?}",
+        root_action
+    );
+
+    // Check that att-gen1-refine is classified as RefineFrontier
+    let refine_action = legal
+        .iter()
+        .find(|a| a.node_id() == "att-gen1-refine")
+        .expect("att-gen1-refine must be legal");
+    assert!(
+        matches!(refine_action, LegalAction::RefineFrontier { branch_id, parent_id, node_id } if branch_id == "branch-0" && parent_id == "att-cand1" && node_id == "att-gen1-refine"),
+        "att-gen1-refine must be LegalAction::RefineFrontier, got {:?}",
+        refine_action
+    );
 }

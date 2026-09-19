@@ -10,7 +10,7 @@
 //! - Policies are ranked by objective: J(π) = V_terminal(π) - β * Cost(π).
 
 use super::policy::{LegalAction, PolicyDecision, PrefixObservation, PrefixView, SearchPolicy};
-use super::tree_log::{AttemptStatus, AttemptTree};
+use super::tree_log::{ActionType, AttemptStatus, AttemptTree};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -911,13 +911,22 @@ impl ReplaySimulator {
                 Some(pid) => {
                     // Refinement is legal only if parent has already been revealed
                     if revealed_ids.contains(pid) {
-                        let parent_is_baseline = self
-                            .tree
-                            .get(pid)
-                            .map(|p| p.status == AttemptStatus::Baseline || p.id == "att-baseline")
-                            .unwrap_or(false);
+                        let is_root = match node.action_type {
+                            Some(ActionType::OpenRoot) => true,
+                            Some(ActionType::RefineFrontier) => false,
+                            None => {
+                                // Fallback for historical nodes without persisted action_type:
+                                self.tree
+                                    .get(pid)
+                                    .map(|p| {
+                                        p.status == AttemptStatus::Baseline
+                                            || p.id == "att-baseline"
+                                    })
+                                    .unwrap_or(false)
+                            }
+                        };
 
-                        if parent_is_baseline {
+                        if is_root {
                             legal.push(LegalAction::OpenRoot {
                                 branch_id: node.branch_id.clone(),
                                 node_id: node.id.clone(),
