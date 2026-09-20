@@ -658,16 +658,34 @@ impl Config {
         // upstream `401 No cookie auth credentials found` — say so now, with
         // the concrete fix, instead of after a wasted round-trip.
         if config.api_key.is_none() && !is_local_endpoint(&config.endpoint) {
+            let key_hint = if is_openrouter_endpoint(&config.endpoint) {
+                " (or OPENROUTER_API_KEY)"
+            } else {
+                ""
+            };
+            // A bare install — no config file was found at all — has not chosen
+            // this endpoint: it is the built-in default, and the first request is
+            // guaranteed to fail with 401. Stopping here turns "type a prompt,
+            // get an auth error from a provider you never picked" into a
+            // two-line fix. A user who configured a remote endpoint themselves
+            // keeps the warning below: their endpoint with no key is their call,
+            // not ours to refuse.
+            if loaded_from_path.is_none() {
+                bail!(
+                    "no config file found and no API key configured, so this run would call the \
+                     built-in default endpoint '{}' unauthenticated and fail with 401. Choose \
+                     one: (1) local — run `selfware unpack` to detect a running Ollama / LM \
+                     Studio / llama.cpp server, or `selfware boot` to set one up; (2) remote — \
+                     export SELFWARE_API_KEY=<key>{} or run `selfware config set-key <key>`.",
+                    config.endpoint,
+                    key_hint,
+                );
+            }
             config_warning(&format!(
                 "no API key configured for remote endpoint '{}' — requests will fail with 401. \
                  Fix: export SELFWARE_API_KEY=<key>{}, or run `selfware config set-key <key>` \
                  to store it in the OS keyring, or add `api_key = \"...\"` to your config file.",
-                config.endpoint,
-                if is_openrouter_endpoint(&config.endpoint) {
-                    " (or OPENROUTER_API_KEY)"
-                } else {
-                    ""
-                },
+                config.endpoint, key_hint,
             ));
         }
         // Suppress unused-variable warning; the value is consumed by the
