@@ -680,6 +680,31 @@ fn test_compute_empirical_noise_margin_calculation_and_gating() {
 }
 
 #[test]
+fn test_compute_empirical_noise_margin_permutation_invariant() {
+    let base_sab = make_sab(vec![
+        ("sc1", 90.0, true),
+        ("sc2", 80.0, true),
+        ("sc3", 70.0, true),
+    ]);
+    let cand_sab_ordered = make_sab(vec![
+        ("sc1", 90.2, true),
+        ("sc2", 80.5, true),
+        ("sc3", 70.1, true),
+    ]);
+    let cand_sab_permuted = make_sab(vec![
+        ("sc3", 70.1, true),
+        ("sc1", 90.2, true),
+        ("sc2", 80.5, true),
+    ]);
+
+    let margin_ordered = compute_empirical_noise_margin(Some(&base_sab), Some(&cand_sab_ordered));
+    let margin_permuted = compute_empirical_noise_margin(Some(&base_sab), Some(&cand_sab_permuted));
+
+    assert_eq!(margin_ordered, margin_permuted);
+    assert!(margin_ordered > 0.05);
+}
+
+#[test]
 fn test_parse_hypotheses_valid_json() {
     let json = r#"[
             {
@@ -3607,6 +3632,58 @@ async fn test_commit_scoped_paths_isolated_interrupted_hook_reaps_process_group_
     );
 
     crate::reset_shutdown_for_test();
+}
+
+#[tokio::test]
+async fn test_commit_scoped_paths_isolated_post_commit_hook_reconciles_head() {
+    let _exec = crate::test_support::ExecGuard::hold();
+    crate::reset_shutdown_for_test();
+
+    let dir = setup_winner_repo();
+    let root = dir.path();
+
+    // Install a post-commit hook that exits with an error status.
+    // Git executes post-commit AFTER updating HEAD.
+    let hook_dir = root.join(".git").join("hooks");
+    std::fs::create_dir_all(&hook_dir).unwrap();
+    let hook_path = hook_dir.join("post-commit");
+    std::fs::write(
+        &hook_path,
+        "#!/bin/sh\necho 'post-commit failed' >&2\nexit 1\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&hook_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&hook_path, perms).unwrap();
+    }
+
+    let head_before = git_stdout(root, &["rev-parse", "HEAD"]);
+    let test_file = root.join("src/lib.rs");
+    std::fs::write(&test_file, "pub fn f() -> usize { 12345 }\n").unwrap();
+
+    let res = commit_scoped_paths_isolated(
+        root,
+        &[std::path::PathBuf::from("src/lib.rs")],
+        None,
+        "test post-commit reconciliation",
+    )
+    .await;
+
+    // Reconciliation recognizes that HEAD moved despite hook failure, so commit succeeds
+    assert!(
+        res.is_ok(),
+        "commit_scoped_paths_isolated must succeed when HEAD advances despite post-commit hook error: {:?}",
+        res.err()
+    );
+
+    let head_after = git_stdout(root, &["rev-parse", "HEAD"]);
+    assert_ne!(
+        head_before, head_after,
+        "HEAD must have advanced to the new commit"
+    );
 }
 
 #[tokio::test]

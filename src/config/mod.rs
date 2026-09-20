@@ -50,7 +50,7 @@ pub use resources::*;
 pub use safety::*;
 pub use types::*;
 pub use validation::{
-    clear_sglang_capability_cache, get_sglang_capability, is_sglang_backend,
+    check_sglang_backend, clear_sglang_capability_cache, get_sglang_capability, is_sglang_backend,
     is_sglang_server_info_body, is_sglang_serving_deployment, set_sglang_capability,
 };
 

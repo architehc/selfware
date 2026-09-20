@@ -790,7 +790,7 @@ servers = [
 ]
 ```
 
-MCP servers from a project-local `selfware.toml` only start after `selfware trust` in that checkout (see **Repo trust** above).
+MCP servers from a project-local `selfware.toml` only start after `selfware trust` in that checkout (see **Repo trust** above). All MCP tool invocations are checked by the safety gate, ensuring safe argument quoting, nested path boundaries, and credential leak prevention.
 
 ### LSP Integration
 

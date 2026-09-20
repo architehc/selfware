@@ -236,6 +236,40 @@ static EVAL_WITH_SUBSTITUTION: LazyLock<Regex> =
 static EVAL_SUBSTITUTION_PROGRAM: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\beval\b[^\n;]*?\$\(\s*([a-z0-9_.-]+)").expect("Invalid regex"));
 
+/// Quote an argv token sequence into a shell command line string.
+/// Arguments containing whitespace, shell metacharacters, or empty strings are safely quoted
+/// with single quotes so they are parsed into single tokens and their inner content is masked
+/// from naive dangerous command pattern matching.
+pub(crate) fn shell_quote_argv<'a, I>(iter: I) -> String
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    iter.into_iter()
+        .map(|tok| {
+            if tok.is_empty() {
+                "''".to_string()
+            } else if tok.chars().all(|c| {
+                c.is_ascii_alphanumeric()
+                    || c == '_'
+                    || c == '-'
+                    || c == '.'
+                    || c == '/'
+                    || c == ':'
+                    || c == '='
+                    || c == '+'
+                    || c == ','
+                    || c == '@'
+                    || c == '%'
+            }) {
+                tok.to_string()
+            } else {
+                format!("'{}'", tok.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Extract a shell command from tool arguments in either wire form: a plain
 /// string ("command": "cargo test") or an argv array ("command":
 /// ["/bin/sh", "-c", "..."]). The array form previously skipped the shell
@@ -247,11 +281,9 @@ fn command_arg_string(args: &serde_json::Value) -> String {
     let value = args.get("command").or_else(|| args.get("cmd"));
     match value {
         Some(serde_json::Value::String(s)) => s.clone(),
-        Some(serde_json::Value::Array(items)) => items
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect::<Vec<_>>()
-            .join(" "),
+        Some(serde_json::Value::Array(items)) => {
+            shell_quote_argv(items.iter().filter_map(|v| v.as_str()))
+        }
         _ => String::new(),
     }
 }
@@ -1193,23 +1225,9 @@ impl SafetyChecker {
                         }
                     } else if matches!(
                         key_lower.as_str(),
-                        "command"
-                            | "commands"
-                            | "cmd"
-                            | "cmds"
-                            | "script"
-                            | "scripts"
-                            | "exec"
-                            | "execs"
-                            | "shell_command"
-                            | "shell_commands"
-                            | "bash_command"
-                            | "bash_commands"
+                        "commands" | "scripts" | "execs" | "shell_commands" | "bash_commands"
                     ) {
-                        if let Some(s) = value.as_str() {
-                            self.check_shell_command(s)?;
-                            self.check_shell_command_paths(s)?;
-                        } else if let Some(arr) = value.as_array() {
+                        if let Some(arr) = value.as_array() {
                             for item in arr {
                                 if let Some(s) = item.as_str() {
                                     self.check_shell_command(s)?;
@@ -1218,20 +1236,41 @@ impl SafetyChecker {
                                     self.check_generic_mcp_arguments(item)?;
                                 }
                             }
+                        } else if let Some(s) = value.as_str() {
+                            self.check_shell_command(s)?;
+                            self.check_shell_command_paths(s)?;
                         } else {
                             self.check_generic_mcp_arguments(value)?;
                         }
                     } else if matches!(
                         key_lower.as_str(),
-                        "args" | "arguments" | "argv" | "parameters" | "params" | "cmd_args"
+                        "command"
+                            | "cmd"
+                            | "script"
+                            | "exec"
+                            | "shell_command"
+                            | "bash_command"
+                            | "args"
+                            | "arguments"
+                            | "argv"
+                            | "parameters"
+                            | "params"
+                            | "cmd_args"
                     ) {
                         if let Some(arr) = value.as_array() {
                             let mut str_tokens = Vec::new();
-                            for item in arr {
+                            for (idx, item) in arr.iter().enumerate() {
                                 if let Some(s) = item.as_str() {
                                     str_tokens.push(s);
-                                    if looks_like_mcp_path_token(s) {
-                                        self.check_path(s)?;
+                                    let is_cmd_binary = idx == 0
+                                        && (s.starts_with("/bin/")
+                                            || s.starts_with("/usr/bin/")
+                                            || s.starts_with("/usr/local/bin/")
+                                            || s.starts_with("/opt/homebrew/bin/"));
+                                    if !is_cmd_binary {
+                                        if let Some(candidate) = extract_mcp_path_candidate(s) {
+                                            self.check_path(candidate)?;
+                                        }
                                     }
                                     self.check_content_for_secrets(s)?;
                                 } else {
@@ -1249,7 +1288,7 @@ impl SafetyChecker {
                             }
                             // Check reconstructed command line
                             if !str_tokens.is_empty() {
-                                let joined = str_tokens.join(" ");
+                                let joined = shell_quote_argv(str_tokens.iter().copied());
                                 self.check_shell_command(&joined)?;
                                 self.check_shell_command_paths(&joined)?;
                             }
@@ -1294,8 +1333,8 @@ impl SafetyChecker {
                 for item in arr {
                     if let Some(s) = item.as_str() {
                         self.check_content_for_secrets(s)?;
-                        if looks_like_mcp_path_token(s) {
-                            self.check_path(s)?;
+                        if let Some(candidate) = extract_mcp_path_candidate(s) {
+                            self.check_path(candidate)?;
                         }
                     } else {
                         self.check_generic_mcp_arguments(item)?;
@@ -4434,31 +4473,105 @@ fn looks_like_explicit_path(tok: &str) -> bool {
     b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'/' || b[2] == b'\\')
 }
 
-/// Check if an MCP generic argument token qualifies as a filesystem path candidate.
-/// Bare strings, MIME types (e.g. `application/json`), URLs (`https://...`), and CLI
-/// flags (`-v`, `--format`) are excluded to avoid MCP over-blocking. Explicit paths
-/// (`/...`, `./...`, `~/...`, Windows drive letters) and sensitive dot-targets
-/// (`.env`, `.git/`, `.ssh/`, `.selfware/`, `.aws/`, `.admitted_ledger.json`) qualify.
-pub(crate) fn looks_like_mcp_path_token(tok: &str) -> bool {
-    let trimmed = tok.trim();
-    if trimmed.is_empty() || trimmed.contains("://") || trimmed.starts_with('-') {
+/// Check if a token looks like a standard MIME content-type (e.g. `application/json`, `text/html`).
+/// Excludes sensitive filesystem keywords like `.env`, `credentials`, `secret`, `id_rsa`
+/// to prevent evasion.
+pub(crate) fn is_mime_type_token(tok: &str) -> bool {
+    let Some((top, sub)) = tok.split_once('/') else {
+        return false;
+    };
+    if sub.contains('/') || sub.contains('\\') {
         return false;
     }
-    if looks_like_explicit_path(trimmed) {
-        return true;
+    let sub_lower = sub.to_ascii_lowercase();
+    if sub_lower.contains(".env")
+        || sub_lower.contains("secret")
+        || sub_lower.contains("credential")
+        || sub_lower.contains("id_rsa")
+        || sub_lower.contains("id_ed25519")
+        || sub_lower.contains("shadow")
+        || sub_lower.contains("passwd")
+        || sub_lower.contains("token")
+        || sub_lower.contains("private")
+        || sub_lower.contains("config")
+        || sub_lower.contains(".git")
+        || sub_lower.contains(".ssh")
+        || sub_lower.contains(".selfware")
+    {
+        return false;
     }
-    if let Some(rest) = trimmed.strip_prefix('.') {
-        if rest.starts_with("env")
-            || rest.starts_with("git")
-            || rest.starts_with("ssh")
-            || rest.starts_with("selfware")
-            || rest.starts_with("aws")
-            || rest.starts_with("admitted_ledger")
-        {
-            return true;
+    let top_lower = top.to_ascii_lowercase();
+    matches!(
+        top_lower.as_str(),
+        "application"
+            | "audio"
+            | "font"
+            | "example"
+            | "image"
+            | "message"
+            | "model"
+            | "multipart"
+            | "text"
+            | "video"
+    )
+}
+
+/// Extract a filesystem path candidate from an MCP argument token.
+/// Bare strings, MIME types (e.g. `application/json`), URLs (`https://...`), and pure CLI
+/// flags (`-v`, `--format`) are excluded to avoid MCP over-blocking.
+/// Explicit paths (`/...`, `./...`, `~/...`, Windows drive letters), `--flag=VALUE` paths,
+/// relative nested paths (`nested/.env`, `sub/secrets/key.txt`), and sensitive dot targets
+/// (`.env`, `.git/`, `.ssh/`, `.selfware/`, `.aws/`, `.admitted_ledger.json`) qualify.
+pub(crate) fn extract_mcp_path_candidate(tok: &str) -> Option<&str> {
+    let trimmed = tok.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(rest) = trimmed.strip_prefix("file://") {
+        return extract_mcp_path_candidate(rest);
+    }
+    if trimmed.contains("://") {
+        return None;
+    }
+    if trimmed.starts_with('-') {
+        if let Some((_flag, val)) = trimmed.split_once('=') {
+            let val = val.trim();
+            if !val.is_empty() && !val.starts_with('-') {
+                return extract_mcp_path_candidate(val);
+            }
         }
+        return None;
     }
-    false
+    if is_mime_type_token(trimmed) {
+        return None;
+    }
+    if looks_like_explicit_path(trimmed) {
+        return Some(trimmed);
+    }
+    if trimmed.starts_with('.') {
+        return Some(trimmed);
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return Some(trimmed);
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower == "id_rsa"
+        || lower == "id_ed25519"
+        || lower == "credentials"
+        || lower.ends_with(".env")
+        || lower.starts_with(".env")
+        || lower == "shadow"
+        || lower == "passwd"
+    {
+        return Some(trimmed);
+    }
+    None
+}
+
+/// Check if an MCP generic argument token qualifies as a filesystem path candidate.
+#[allow(dead_code)]
+pub(crate) fn looks_like_mcp_path_token(tok: &str) -> bool {
+    extract_mcp_path_candidate(tok).is_some()
 }
 
 /// Expand a leading `~`/`~/` against the user's home directory so a

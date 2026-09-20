@@ -473,7 +473,8 @@ pub fn scan_patch_for_opaque_structures(
                             false
                         };
 
-                        if !cached_valid {
+                        let mut is_valid = cached_valid;
+                        if !is_valid {
                             if let Some(parent) = snapshot_file.parent() {
                                 let _ = std::fs::create_dir_all(parent);
                                 let nonce = std::time::SystemTime::now()
@@ -487,12 +488,19 @@ pub fn scan_patch_for_opaque_structures(
                                     nonce
                                 ));
                                 if std::fs::write(&tmp_path, &expected_bytes).is_ok() {
-                                    let _ = std::fs::rename(&tmp_path, &snapshot_file);
+                                    if std::fs::rename(&tmp_path, &snapshot_file).is_ok() {
+                                        // Verify the replaced file content matches git show expected bytes
+                                        is_valid = std::fs::read(&snapshot_file)
+                                            .map(|b| b == expected_bytes)
+                                            .unwrap_or(false);
+                                    } else {
+                                        let _ = std::fs::remove_file(&tmp_path);
+                                    }
                                 }
                             }
                         }
 
-                        if snapshot_file.exists() {
+                        if is_valid {
                             if start_line > 0 && end_line > 0 {
                                 format!(
                                     "file://{}#L{start_line}-L{end_line}",

@@ -53,8 +53,11 @@ fn test_tool_metaphors_comprehensive() {
     assert_eq!(tool_metaphor("unknown_tool"), "tending");
 }
 
+static ASCII_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn test_glyphs_exist() {
+    let _lock = ASCII_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     set_ascii_mode(false);
     assert!(!Glyphs::seedling().is_empty());
     assert!(!Glyphs::hammer().is_empty());
@@ -63,6 +66,7 @@ fn test_glyphs_exist() {
 
 #[test]
 fn test_all_glyphs() {
+    let _lock = ASCII_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     set_ascii_mode(false);
     // Garden metaphors
     assert!(!Glyphs::sprout().is_empty());
@@ -110,6 +114,7 @@ fn test_all_glyphs() {
 
 #[test]
 fn test_ascii_mode_toggle() {
+    let _lock = ASCII_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     set_ascii_mode(true);
     assert_eq!(Glyphs::seedling(), "[*]");
     assert_eq!(Glyphs::hammer(), "[#]");
@@ -159,6 +164,7 @@ fn test_selfware_style_string() {
 
 #[test]
 fn test_status_message_starting() {
+    let _lock = ASCII_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     set_ascii_mode(false);
     let msg = status_message(ToolStatus::Starting("file_read"));
     assert!(msg.contains("examining"));
@@ -167,6 +173,7 @@ fn test_status_message_starting() {
 
 #[test]
 fn test_status_message_success() {
+    let _lock = ASCII_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     set_ascii_mode(false);
     let msg = status_message(ToolStatus::Success("git_commit"));
     assert!(msg.contains("preserving your harvest"));
@@ -176,6 +183,7 @@ fn test_status_message_success() {
 
 #[test]
 fn test_status_message_warning() {
+    let _lock = ASCII_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     set_ascii_mode(false);
     let msg = status_message(ToolStatus::Warning("cargo_test", "some tests slow"));
     assert!(msg.contains("testing the soil"));
@@ -185,6 +193,7 @@ fn test_status_message_warning() {
 
 #[test]
 fn test_status_message_error() {
+    let _lock = ASCII_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     set_ascii_mode(false);
     let msg = status_message(ToolStatus::Error("cargo_check", "compilation failed"));
     assert!(msg.contains("inspecting the joinery"));

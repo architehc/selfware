@@ -712,4 +712,18 @@ fn test_yolo_mcp_arguments_blocked() {
         matches!(decision_benign, YoloDecision::AutoApprove),
         "Benign MCP arguments must be approved by YOLO"
     );
+
+    // Generic MCP array keys containing relative protected paths must be BLOCKED by YOLO
+    for nested in [
+        "nested/.selfware/active_policy.json",
+        "sub/secrets/key.txt",
+        "--file=nested/.env",
+    ] {
+        let mcp_nested_items = serde_json::json!({ "items": [nested] });
+        let decision = manager.should_auto_approve("mcp_custom_tool", &mcp_nested_items);
+        assert!(
+            matches!(decision, YoloDecision::Block(_)),
+            "MCP generic items array with nested relative path '{nested}' must be blocked by YOLO"
+        );
+    }
 }

@@ -445,3 +445,53 @@ fn test_killswitch_root_override_isolates_from_cwd() {
     remove_file_killswitch(isolated_root).unwrap();
     assert!(check_killswitch(None).is_ok());
 }
+
+#[test]
+fn test_killswitch_cwd_ambient_file_isolated_from_checker_tests() {
+    let _lock = KILLSWITCH_TEST_LOCK.lock();
+    set_test_root_override(None);
+
+    let cwd = std::env::current_dir().unwrap();
+    let ks_path = cwd.join(".selfware").join(KILLSWITCH_FILE_NAME);
+    let existed_before = ks_path.exists();
+
+    if !existed_before {
+        std::fs::create_dir_all(ks_path.parent().unwrap()).unwrap();
+        std::fs::write(&ks_path, "Ambient repo killswitch for test").unwrap();
+    }
+
+    struct Cleanup(PathBuf, bool);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            if !self.1 && self.0.exists() {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+    }
+    let _cleanup = Cleanup(ks_path.clone(), existed_before);
+
+    // In tests, passing cwd explicitly (like SafetyChecker::new does) must NOT trip on ambient cwd killswitch
+    let res_explicit_cwd = check_killswitch(Some(&cwd));
+    assert!(
+        res_explicit_cwd.is_ok(),
+        "Explicit cwd passed during tests must be decoupled from ambient repo killswitch: {:?}",
+        res_explicit_cwd.err()
+    );
+
+    // Calling SafetyChecker::new (which roots in cwd) and checking a benign tool call must succeed
+    let checker = crate::safety::SafetyChecker::new(&crate::config::SafetyConfig::default());
+    let call = crate::api::types::ToolCall {
+        id: "call-1".to_string(),
+        call_type: "function".to_string(),
+        function: crate::api::types::ToolFunction {
+            name: "file_read".to_string(),
+            arguments: serde_json::json!({ "path": "src/lib.rs" }).to_string(),
+        },
+    };
+    let check_res = checker.check_tool_call(&call);
+    assert!(
+        check_res.is_ok(),
+        "SafetyChecker::check_tool_call must not trip on ambient repo killswitch during tests: {:?}",
+        check_res.err()
+    );
+}

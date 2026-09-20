@@ -163,9 +163,28 @@ pub fn check_killswitch_with_home(
 
     // Specific project root if provided (or test root override), otherwise check current working directory
     #[cfg(test)]
-    let effective_root_buf = project_root
-        .map(Path::to_path_buf)
-        .or_else(|| TEST_ROOT_OVERRIDE.read().clone());
+    let effective_root_buf = {
+        let override_root = TEST_ROOT_OVERRIDE.read().clone();
+        if override_root.is_some() {
+            override_root
+        } else if let Some(root) = project_root {
+            // Decouple tests from ambient repository CWD:
+            // When SafetyChecker::new() roots in current_dir() during test runs,
+            // an ambient .selfware/KILLSWITCH in the repository checkout must not break unit tests
+            // unless the test explicitly pointed to a non-cwd path or set TEST_ROOT_OVERRIDE.
+            if let Ok(cwd) = std::env::current_dir() {
+                if root == cwd || root == crate::safety::checker::normalize_path(&cwd) {
+                    None
+                } else {
+                    Some(root.to_path_buf())
+                }
+            } else {
+                Some(root.to_path_buf())
+            }
+        } else {
+            None
+        }
+    };
     #[cfg(test)]
     let effective_root = effective_root_buf.as_deref();
     #[cfg(not(test))]
@@ -173,9 +192,11 @@ pub fn check_killswitch_with_home(
 
     if let Some(root) = effective_root {
         check_paths.push(root.join(".selfware").join(KILLSWITCH_FILE_NAME));
-    } else if let Ok(cwd) = std::env::current_dir() {
-        let cwd_ks = cwd.join(".selfware").join(KILLSWITCH_FILE_NAME);
-        check_paths.push(cwd_ks);
+    } else if cfg!(not(test)) {
+        if let Ok(cwd) = std::env::current_dir() {
+            let cwd_ks = cwd.join(".selfware").join(KILLSWITCH_FILE_NAME);
+            check_paths.push(cwd_ks);
+        }
     }
 
     // User home directory (strictly test-only bypass for test suite isolation)

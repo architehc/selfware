@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.5] - 2026-09-20
+
+### Added
+- **Post-commit hook resilience**: Extended `commit_winner_to_repo` timeout to 600s and added HEAD advancement reconciliation on hook failure/timeout to prevent unnecessary diff rollbacks when commits succeeded.
+- **Empirical noise margin scenario pairing (AGENTS.md Rule 4)**: Paired scenarios strictly by name in `compute_empirical_noise_margin`, ensuring permutation invariance regardless of scenario evaluation order.
+- **Fail-closed snapshot verification**: Verified snapshot file contents against expected git tree hashes before issuing citation links, failing closed to `unavailable://` on write or rename failure.
+- **Decoupled ambient killswitch test mode**: Insulated unit tests from repository-ambient `.selfware/KILLSWITCH` when running in test mode.
+- **SGLang request-path capability check**: Validated top-level `reasoning_effort=xhigh` against SGLang backends on the live request path.
+
+### Fixed
+- **MCP safety over-blocking & relative path fail-open (S1)**: Eliminated over-blocking on benign MIME types, CLI flags, and URLs, while strictly preventing fail-open on nested relative denied paths (`nested/.env`, `sub/secrets/key.txt`, `nested/.selfware/active_policy.json`).
+- **Command argv quoting preservation**: Added `shell_quote_argv` so benign quoted commit messages and arguments in array-style command invocations do not trigger dangerous-command patterns, while shell injection attempts are properly checked.
+- **Binary detection in command argument arrays**: Fixed `is_cmd_binary` so bare dotfiles (such as `.env`) at index 0 of `args` arrays are not misclassified as command binaries.
+- **YOLO mode protected path validation**: Hardened `is_protected_path` against nested subdirectories, infix components, and sensitive credential files.
+- **Candidate evaluation accounting (AGENTS.md Rule 3)**: Accounted for all evaluated candidates by incrementing the evaluation counter at candidate start; evolution runs where all candidates were rejected now report `outcome: "completed"` rather than falsely reporting `"failed: No candidates evaluated"`.
+- **UI style test concurrency isolation**: Synchronized `ASCII_MODE` tests via mutex, eliminating race conditions during parallel test suite runs.
+
 ## [0.7.4] - 2026-09-19
 
 ### Added
@@ -409,7 +426,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Protected paths system
 - Git force push prevention
 
-[Unreleased]: https://github.com/architehc/selfware/compare/v0.7.4...HEAD
+[Unreleased]: https://github.com/architehc/selfware/compare/v0.7.5...HEAD
+[0.7.5]: https://github.com/architehc/selfware/compare/v0.7.4...v0.7.5
 [0.7.4]: https://github.com/architehc/selfware/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/architehc/selfware/compare/v0.7.2...v0.7.3
 [0.7.0]: https://github.com/architehc/selfware/compare/v0.6.8-beta.1...v0.7.0

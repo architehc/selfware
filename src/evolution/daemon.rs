@@ -489,21 +489,20 @@ pub const SAB_NOISE_MARGIN: f64 = DEFAULT_SAB_NOISE_MARGIN;
 /// Empirical noise margin for SAB capability scores (Rule 4: Measured, not estimated).
 /// When paired scenario scores are available from benchmark runs, calculates the
 /// standard error of the mean scenario score delta across the benchmark suite.
+/// Scenarios are paired by name to ensure permutation invariance.
 /// Falls back to [`DEFAULT_SAB_NOISE_MARGIN`] when unmeasured.
 pub(crate) fn compute_empirical_noise_margin(
     base_sab: Option<&SabResult>,
     cand_sab: Option<&SabResult>,
 ) -> f64 {
     if let (Some(base), Some(cand)) = (base_sab, cand_sab) {
-        if !base.scenario_scores.is_empty()
-            && base.scenario_scores.len() == cand.scenario_scores.len()
-        {
-            let deltas: Vec<f64> = base
-                .scenario_scores
-                .iter()
-                .zip(cand.scenario_scores.iter())
-                .map(|(b, c)| c.score - b.score)
-                .collect();
+        if !base.scenario_scores.is_empty() {
+            let mut deltas = Vec::new();
+            for b in &base.scenario_scores {
+                if let Some(c) = cand.scenario_scores.iter().find(|s| s.name == b.name) {
+                    deltas.push(c.score - b.score);
+                }
+            }
             let n = deltas.len() as f64;
             if n >= 2.0 {
                 let mean = deltas.iter().sum::<f64>() / n;
@@ -2133,6 +2132,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 "  Testing '{}' [{}]...",
                 hypothesis.description, hypothesis.id
             ));
+            total_candidates_evaluated += 1;
 
             // Create worktree restored to the selected parent's exact source state.
             // The guard removes it on EVERY exit path from this iteration.
@@ -2787,7 +2787,17 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     ),
                     Err(e) => {
                         if crate::is_shutdown_requested() {
-                            log_warning("Shutdown requested during SAB benchmark; halting candidate loop cleanly without recording error node");
+                            log_warning(
+                                "Shutdown requested during SAB benchmark; halting candidate loop cleanly",
+                            );
+                            let node = make_cancelled_node("SAB benchmark");
+                            let _ = log_and_append_attempt(
+                                &attempts_file,
+                                &node,
+                                repo_root,
+                                generation,
+                                gen_start,
+                            );
                             break;
                         }
                         log_warning(&format!("  SAB failed: {}", e));
@@ -3099,7 +3109,6 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     hall_of_fame
                 );
             }
-            total_candidates_evaluated += 1;
 
             log_phase(&format!(
                 "  ✓ '{}' passed (score: {:.0}, composite: {:.4}, {:.1}s)",
@@ -5000,7 +5009,7 @@ pub(crate) async fn commit_scoped_paths_isolated(
         .current_dir(repo_root);
 
     let commit_res =
-        run_cancellable_subprocess(commit_cmd, std::time::Duration::from_secs(300)).await;
+        run_cancellable_subprocess(commit_cmd, std::time::Duration::from_secs(600)).await;
 
     let head_after = tokio::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -5016,10 +5025,12 @@ pub(crate) async fn commit_scoped_paths_isolated(
             }
         });
 
+    let head_advanced = head_after.is_some() && head_before != head_after;
+
     match commit_res {
         Ok(out) if out.status.success() => {}
         Err(SubprocessError::ShutdownRequested) => {
-            if head_after.is_some() && head_before != head_after {
+            if head_advanced {
                 log_warning(
                     "Shutdown requested during git commit hook, but HEAD was updated; reconciling index",
                 );
@@ -5028,18 +5039,37 @@ pub(crate) async fn commit_scoped_paths_isolated(
             }
         }
         Ok(out) => {
-            return Err(format!(
-                "git commit with isolated index failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ));
+            if head_advanced {
+                log_warning(&format!(
+                    "git commit hook exited non-zero ({}), but HEAD was updated from {head_before:?} to {head_after:?}; reconciling index",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ));
+            } else {
+                return Err(format!(
+                    "git commit with isolated index failed: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ));
+            }
         }
         Err(SubprocessError::Timeout) => {
-            return Err("git commit timed out after 300s".to_string());
+            if head_advanced {
+                log_warning(&format!(
+                    "git commit hook timed out after 600s, but HEAD was updated from {head_before:?} to {head_after:?}; reconciling index"
+                ));
+            } else {
+                return Err("git commit timed out after 600s".to_string());
+            }
         }
         Err(SubprocessError::Io(e)) => {
-            return Err(format!(
-                "Failed to execute git commit with isolated index: {e}"
-            ));
+            if head_advanced {
+                log_warning(&format!(
+                    "git commit subprocess I/O error ({e}), but HEAD was updated; reconciling index"
+                ));
+            } else {
+                return Err(format!(
+                    "Failed to execute git commit with isolated index: {e}"
+                ));
+            }
         }
     };
 

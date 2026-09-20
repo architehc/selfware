@@ -150,16 +150,50 @@ impl YoloConfig {
 
     /// Check if a path is protected
     pub fn is_protected_path(&self, path: &str) -> bool {
-        let expanded = expand_home(path);
-        let normalized = path.trim_start_matches("./");
-        self.protected_paths.iter().any(|p| {
+        let clean_path = if path.starts_with('-') {
+            if let Some((_, val)) = path.split_once('=') {
+                val.trim()
+            } else {
+                path
+            }
+        } else {
+            path
+        };
+        let expanded = expand_home(clean_path);
+        let normalized = clean_path.trim_start_matches("./");
+        if self.protected_paths.iter().any(|p| {
             let protected = expand_home(p);
             let protected_norm = p.trim_start_matches("./");
             expanded == protected
                 || expanded.starts_with(&format!("{protected}/"))
+                || expanded.ends_with(&format!("/{protected}"))
+                || expanded.contains(&format!("/{protected}/"))
                 || normalized == protected_norm
                 || normalized.starts_with(&format!("{protected_norm}/"))
-        })
+                || normalized.ends_with(&format!("/{protected_norm}"))
+                || normalized.contains(&format!("/{protected_norm}/"))
+                || normalized.split('/').any(|seg| seg == protected_norm)
+        }) {
+            return true;
+        }
+
+        // Sensitive credential files (.env, secrets, ssh keys) are always protected from automated modification
+        let lower = normalized.to_lowercase();
+        if lower.contains("/secrets/")
+            || lower.starts_with("secrets/")
+            || lower == "secrets"
+            || lower.contains("/.env")
+            || lower.starts_with(".env")
+            || lower.ends_with(".env")
+            || lower == ".env"
+            || lower.contains("/.ssh/")
+            || lower.starts_with(".ssh/")
+            || lower == ".ssh"
+        {
+            return true;
+        }
+
+        false
     }
 }
 
@@ -669,8 +703,10 @@ fn collect_all_paths(args: &serde_json::Value, paths: &mut Vec<String>) {
                 } else if let Some(arr) = v.as_array() {
                     for item in arr {
                         if let Some(s) = item.as_str() {
-                            if crate::safety::checker::validation::looks_like_mcp_path_token(s) {
-                                paths.push(s.to_string());
+                            if let Some(candidate) =
+                                crate::safety::checker::validation::extract_mcp_path_candidate(s)
+                            {
+                                paths.push(candidate.to_string());
                             }
                         } else {
                             collect_all_paths(item, paths);
@@ -684,8 +720,10 @@ fn collect_all_paths(args: &serde_json::Value, paths: &mut Vec<String>) {
         serde_json::Value::Array(arr) => {
             for item in arr {
                 if let Some(s) = item.as_str() {
-                    if crate::safety::checker::validation::looks_like_mcp_path_token(s) {
-                        paths.push(s.to_string());
+                    if let Some(candidate) =
+                        crate::safety::checker::validation::extract_mcp_path_candidate(s)
+                    {
+                        paths.push(candidate.to_string());
                     }
                 } else {
                     collect_all_paths(item, paths);

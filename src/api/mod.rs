@@ -240,7 +240,7 @@ pub(crate) fn merge_extra_body(
             if val.eq_ignore_ascii_case("xhigh") {
                 let is_sglang = endpoint
                     .map(|ep| {
-                        crate::config::get_sglang_capability(ep) == Some(true)
+                        crate::config::check_sglang_backend(ep) == Some(true)
                             || crate::config::is_sglang_serving_deployment(ep)
                     })
                     .unwrap_or(false);

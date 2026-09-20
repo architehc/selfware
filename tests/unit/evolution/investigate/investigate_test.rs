@@ -1158,3 +1158,71 @@ fn test_investigate_citations_refreshes_corrupted_cached_snapshot() {
         "Corrupted snapshot must be refreshed from Git"
     );
 }
+
+#[test]
+fn test_scan_patch_failed_snapshot_replacement_fails_closed() {
+    let _guard = crate::test_support::ExecGuard::hold();
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_root = tmp.path();
+
+    let _ = Command::new("git")
+        .args(["init"])
+        .current_dir(repo_root)
+        .output();
+    let _ = Command::new("git")
+        .args(["config", "user.email", "evo@test"])
+        .current_dir(repo_root)
+        .output();
+    let _ = Command::new("git")
+        .args(["config", "user.name", "Evo Test"])
+        .current_dir(repo_root)
+        .output();
+    let src_dir = repo_root.join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    let original_content = "pub fn secure_code() {\n    // valid baseline\n}\n";
+    std::fs::write(src_dir.join("lib.rs"), original_content).unwrap();
+    let _ = Command::new("git")
+        .args(["add", "."])
+        .current_dir(repo_root)
+        .output();
+    let _ = Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(repo_root)
+        .output();
+
+    let head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_root)
+        .output()
+        .unwrap();
+    let head_sha = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+    // Create a directory at snapshot_file path so rename fails and read fails (unreplaceable invalid destination)
+    let snapshot_file = repo_root
+        .join(".selfware")
+        .join("snapshots")
+        .join(&head_sha)
+        .join("src/lib.rs");
+    std::fs::create_dir_all(&snapshot_file).unwrap();
+
+    let edits = serde_json::json!([
+        {
+            "file": "src/lib.rs",
+            "search": "secure_code()",
+            "replace": "secure_code() { let _ = x.unwrap(); }"
+        }
+    ]);
+    let patch = serde_json::to_string(&edits).unwrap();
+
+    let (findings, _citations) =
+        scan_patch_for_opaque_structures(&patch, repo_root, "att-fail-replace", Some(&head_sha));
+
+    assert!(!findings.is_empty());
+    let citation = &findings[0].citation;
+    // Failed replacement must FAIL CLOSED to unavailable:// instead of issuing a file:// link to invalid destination
+    assert!(
+        citation.hyperlink.starts_with("unavailable://"),
+        "Citation must fail closed with unavailable:// when snapshot replacement fails: {}",
+        citation.hyperlink
+    );
+}

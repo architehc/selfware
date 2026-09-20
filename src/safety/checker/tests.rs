@@ -3809,3 +3809,73 @@ fn test_mcp_and_computer_tools_validation() {
         .check_tool_call(&create_test_call("computer_keyboard", &kb_safe_combo))
         .is_ok());
 }
+
+#[test]
+fn test_mcp_nested_relative_paths_and_argv_quoting() {
+    let checker = SafetyChecker::new(&SafetyConfig::default());
+
+    // 1. Nested relative denied paths under arbitrary generic array keys MUST be blocked
+    for nested_path in [
+        "nested/.env",
+        "config/.env",
+        "sub/secrets/key.txt",
+        "src/.git/config",
+        "--file=nested/.env",
+        "nested/.selfware/active_policy.json",
+    ] {
+        let args = serde_json::json!({ "items": [nested_path] }).to_string();
+        let result = checker.check_tool_call(&create_test_call("mcp_custom_tool", &args));
+        assert!(
+            result.is_err(),
+            "Nested relative path '{nested_path}' in MCP items array must be blocked"
+        );
+    }
+
+    // 2. Benign MIME types in generic arrays MUST NOT be over-blocked
+    let benign_mime_args = serde_json::json!({
+        "items": ["application/json", "text/html", "image/png", "text/plain", "multipart/form-data"]
+    })
+    .to_string();
+    assert!(
+        checker
+            .check_tool_call(&create_test_call("mcp_custom_tool", &benign_mime_args))
+            .is_ok(),
+        "MIME types must not be blocked"
+    );
+
+    // 3. Quoted arguments containing dangerous commands in commit message MUST NOT trigger false positive
+    let commit_cmd_args = serde_json::json!({
+        "command": ["git", "commit", "-m", "revert the rm -rf / guard"]
+    })
+    .to_string();
+    assert!(
+        checker
+            .check_tool_call(&create_test_call("mcp_exec", &commit_cmd_args))
+            .is_ok(),
+        "Quoted commit message with rm -rf / must not trigger dangerous command pattern"
+    );
+
+    // 4. Genuine unquoted dangerous command in argv array MUST still be blocked
+    let dangerous_argv = serde_json::json!({
+        "command": ["rm", "-rf", "/"]
+    })
+    .to_string();
+    assert!(
+        checker
+            .check_tool_call(&create_test_call("mcp_exec", &dangerous_argv))
+            .is_err(),
+        "Unquoted rm -rf / in command argv must be blocked"
+    );
+
+    // 5. Command invocation with system binary at index 0 is not checked as a workspace path
+    let benign_binary_exec = serde_json::json!({
+        "args": ["/bin/sh", "-c", "echo hello world"]
+    })
+    .to_string();
+    assert!(
+        checker
+            .check_tool_call(&create_test_call("mcp_exec", &benign_binary_exec))
+            .is_ok(),
+        "System executable binary in command position must not be treated as a forbidden path"
+    );
+}
