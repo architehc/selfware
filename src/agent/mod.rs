@@ -116,7 +116,7 @@ pub mod prompt_builder;
 mod recovery;
 pub mod session_log;
 mod streaming;
-mod task_policy;
+pub(crate) mod task_policy;
 mod task_runner;
 mod tool_collect;
 pub(crate) mod tool_dispatch;

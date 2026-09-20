@@ -163,6 +163,50 @@ pub(crate) fn task_references_project_code(task_context: &str, project_name: &st
     CODE_WORDS.iter().any(|word| lower.contains(word))
 }
 
+/// True when a task names a concrete artifact of *this* workspace.
+///
+/// Deliberately stricter than [`task_references_project_code`], because the two
+/// guard different remedies. That predicate biases to `true` since its remedy is
+/// cheap and safe — read a file before answering. This one gates a *refusal* (a
+/// path that cannot ground at all), where a false positive blocks a legitimate
+/// request, so broad code vocabulary ("repository", "module", "function") is not
+/// enough: the task must name this project, a path, a file extension, or point
+/// at the workspace itself. Live-tested: the first version reused the looser
+/// predicate and refused "what makes a good retry policy? Do not reference any
+/// repository" purely on the word "repository".
+pub(crate) fn task_references_workspace_artifact(task_context: &str, project_name: &str) -> bool {
+    let lower = task_context.to_lowercase();
+    let project = project_name.trim().to_lowercase();
+    if !project.is_empty() && lower.contains(&project) {
+        return true;
+    }
+    // A path or a file extension names a concrete artifact.
+    if lower.contains('/') || lower.contains('\\') {
+        return true;
+    }
+    const CODE_EXTENSIONS: &[&str] = &[
+        ".rs", ".toml", ".json", ".yaml", ".yml", ".md", ".py", ".js", ".ts", ".sh", ".lock",
+    ];
+    if CODE_EXTENSIONS.iter().any(|ext| lower.contains(ext)) {
+        return true;
+    }
+    // Self-reference: phrasing that can only mean the workspace this run is in.
+    const SELF_REFERENCE: &[&str] = &[
+        "this codebase",
+        "this repo",
+        "this repository",
+        "this workspace",
+        "this project",
+        "this crate",
+        "our code",
+        "the code in",
+        "the codebase in",
+        "in the repo",
+        "in the repository",
+    ];
+    SELF_REFERENCE.iter().any(|needle| lower.contains(needle))
+}
+
 /// Structured policy envelope: prefix `body` with a single marker line.
 ///
 /// All injected guard/gate messages share this format so downstream
@@ -292,6 +336,39 @@ mod tests {
             "Review the pros and cons of event sourcing",
             "selfware"
         ));
+    }
+
+    #[test]
+    fn workspace_artifact_predicate_is_stricter_than_the_read_first_one() {
+        // Refusal-level signals: a path, an extension, the project name, or
+        // explicit self-reference.
+        assert!(task_references_workspace_artifact(
+            "Read src/concurrency.rs and report the acquisition order",
+            "selfware"
+        ));
+        assert!(task_references_workspace_artifact(
+            "Audit this repository's error handling",
+            "selfware"
+        ));
+        assert!(task_references_workspace_artifact(
+            "What does Cargo.toml pin?",
+            "selfware"
+        ));
+
+        // The false-positive that a refusal cannot afford: broad code
+        // vocabulary alone. The looser predicate fires here (its remedy is a
+        // cheap read); the stricter one must not, because refusing would block
+        // a legitimate question.
+        let general = "In three bullets, what makes a good retry policy? \
+                       Do not reference any repository.";
+        assert!(
+            task_references_project_code(general, "selfware"),
+            "the read-first predicate intentionally over-triggers on code vocabulary"
+        );
+        assert!(
+            !task_references_workspace_artifact(general, "selfware"),
+            "the refusal predicate must not fire on vocabulary alone"
+        );
     }
 
     #[test]

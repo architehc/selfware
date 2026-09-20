@@ -1037,6 +1037,11 @@ fn multi_agent_result_json_shape() {
     assert_eq!(v["usage"]["total_tokens"], 42);
     assert_eq!(v["usage"]["cost"], 0.001);
     assert!(v["error"].is_null());
+    // The fan-out has no tools, so its content is never grounded: a consumer
+    // must be able to tell a persona completion from an evidence-backed finding
+    // without knowing this command's internals.
+    assert_eq!(v["tools_available"], false);
+    assert_eq!(v["grounded"], false);
 }
 
 // ── garden banner / structured output tests ──

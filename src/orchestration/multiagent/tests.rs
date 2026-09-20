@@ -639,6 +639,50 @@ fn mock_fanout_config(endpoint: String) -> Config {
     }
 }
 
+/// The fan-out has no tools, so a task about this workspace cannot be answered
+/// from evidence. It must fail closed with a pointer to the tool-using path
+/// instead of returning confident persona opinions as findings — the observed
+/// failure: 16 agents answered a "read src/concurrency.rs" question with
+/// fabricated internals and reported success.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn test_run_task_refuses_workspace_referencing_tasks() {
+    let server = MockLlmServer::builder().build().await;
+    let config = mock_fanout_config(format!("{}/v1", server.url()));
+    let chat = MultiAgentChat::new(&config, MultiAgentConfig::default()).unwrap();
+
+    let err = chat
+        .run_task("Read src/concurrency.rs and report the acquisition order")
+        .await
+        .expect_err("a workspace-referencing fan-out must fail closed");
+    let msg = err.to_string();
+    assert!(msg.contains("no tools"), "got: {msg}");
+    assert!(
+        msg.contains("selfware run"),
+        "the error must name the path that does have tools, got: {msg}"
+    );
+
+    // The gate fires before any paid call.
+    assert!(
+        server.captured_request_bodies().await.is_empty(),
+        "no completion may be issued before the grounding gate refuses"
+    );
+
+    // A question that does not name an artifact of this workspace still runs.
+    // This one carries the word "repository" and must NOT be refused: the gate
+    // uses the refusal-strict predicate, not the read-first one.
+    let results = chat
+        .run_task(
+            "In three bullets, what makes a good retry policy? Do not reference any repository.",
+        )
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 4);
+}
+
 fn message_roles(body: &str) -> Vec<String> {
     let v: serde_json::Value = serde_json::from_str(body).unwrap();
     v["messages"]

@@ -113,7 +113,37 @@ impl MultiAgentChat {
     /// exhausted (zero budget) before any paid call is made. Otherwise the
     /// run completes with partial results: agents that were skipped to stay
     /// within budget appear as failed results whose error explains why.
+    ///
+    /// Fails closed for a task that asks about this workspace's code — see the
+    /// grounding note in the body.
     pub async fn run_task(&self, task: &str) -> Result<Vec<AgentResult>> {
+        // A fan-out is N parallel one-shot completions with NO tools (see
+        // `run_single_agent`): no agent can read a file, run a test, or cite
+        // evidence, and the role names are personas rather than tool-using
+        // workers. A task about this repository therefore cannot be answered
+        // from anything but model priors — which is how a "review" of a file
+        // none of the agents opened came back as confident findings. This is the
+        // single-agent path's grounding gate; the remedy here is a different
+        // command, because no fan-out configuration can ground.
+        let project_name = std::env::current_dir()
+            .ok()
+            .and_then(|dir| dir.file_name().map(|n| n.to_string_lossy().to_string()))
+            .unwrap_or_default();
+        // The stricter predicate, not `task_references_project_code`: that one
+        // biases to true because reading a file first is cheap, but here the
+        // remedy is a refusal, where a false positive blocks a legitimate
+        // request (live-tested: the looser one refused a retry-policy question
+        // on the word "repository" alone).
+        if crate::agent::task_policy::task_references_workspace_artifact(task, &project_name) {
+            anyhow::bail!(
+                "multi-chat cannot answer questions about this workspace: each agent runs a \
+                 single completion with no tools, so none of them can read a file, run a test, \
+                 or cite evidence (the role names are personas, not tool-using workers). Use \
+                 `selfware run \"<task>\"` for a tool-using agent, or ask something that does \
+                 not depend on this repository."
+            );
+        }
+
         let start = Instant::now();
 
         // Initialize agents if not already done

@@ -1592,6 +1592,11 @@ async fn run_multi_chat_one_shot(
                 ""
             }
         );
+        println!(
+            "{} each agent runs a single completion with no tools — answers come from model \
+             priors, not from this repository, and cannot cite files.",
+            "note:".dimmed()
+        );
     }
 
     let agent_config = multiagent::MultiAgentConfig::default().with_concurrency(concurrency);
@@ -1747,6 +1752,12 @@ fn multi_agent_result_json(result: &multiagent::AgentResult) -> serde_json::Valu
         "content": result.content,
         "error": result.error,
         "usage": result.usage,
+        // Stated explicitly so a consumer cannot mistake a persona completion
+        // for an evidence-backed finding. The fan-out has no tools, so
+        // `content` is never grounded in a repository, and a downstream
+        // orchestrator must not treat it as findings.
+        "tools_available": false,
+        "grounded": false,
     })
 }
 
