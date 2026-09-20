@@ -463,6 +463,31 @@ pub(crate) fn winner_darwinx_gate(
     }
 }
 
+/// Arm-identity check on the SOURCE revision.
+///
+/// Model and endpoint identity are checked in [`winner_darwinx_gate`], but the
+/// comparison is only like-for-like if both arms were built from the same
+/// revision. If a commit lands between the baseline measurement and the
+/// candidate's build, the delta includes that commit's effect and promoting the
+/// candidate attributes it to the patch — a wrong promotion, as opposed to the
+/// missed promotions every other gate here can produce.
+///
+/// Fails open when either side is unknown (a repository with no resolvable git
+/// HEAD). That cannot be compared, and rejecting every run there would be worse
+/// than the risk this guards; a *mismatch*, however, always fails closed.
+pub(crate) fn winner_base_revision_gate(
+    baseline_base: Option<&str>,
+    candidate_base: Option<&str>,
+) -> Result<(), String> {
+    match (baseline_base, candidate_base) {
+        (Some(baseline), Some(candidate)) if baseline != candidate => Err(format!(
+            "winner rejected: candidate base revision {candidate} differs from the measured \
+             baseline's {baseline}; the comparison would not be like-for-like"
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// Promotion decision for a generation winner candidate.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum PromotionDecision {
@@ -480,6 +505,9 @@ pub(crate) struct EvaluatedCandidate {
     pub(crate) composite: f64,
     pub(crate) attempt_id: String,
     pub(crate) branch_id: String,
+    /// The immutable source revision this candidate's arm was built from, for
+    /// the base-revision arm-identity check.
+    pub(crate) base_commit: Option<String>,
 }
 
 /// Default noise margin (epsilon) when empirical scenario variance is unmeasured.
@@ -1295,9 +1323,21 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         }),
     );
 
-    // ═══════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════
     // MEASURE BASELINE
     // ═══════════════════════════════════════════════════════
+
+    // Capture the revision the baseline is ABOUT TO be measured at, before the
+    // measurement. The baseline build is the reference every candidate is
+    // compared against, so this must name the source it was built from — not
+    // whatever HEAD happens to be half an hour later when the node is written.
+    // Capturing it late let a commit landing during the baseline make the
+    // candidates' base differ from the measured baseline's source, with the
+    // delta then attributed to the patch: the one failure mode in this file that
+    // promotes a WRONG candidate rather than missing a good one. The same value
+    // seeds the per-generation drift check below, so a commit during the
+    // baseline now aborts the run instead of silently invalidating it.
+    let baseline_base_commit = ast_tools::get_git_head_commit(repo_root);
 
     log_phase("Measuring baseline fitness...");
     let mut sab_config = SabConfig::default();
@@ -1505,7 +1545,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         binary_sha256: current_baseline_sab
             .as_ref()
             .map(|r| r.binary_sha256.clone()),
-        base_commit: ast_tools::get_git_head_commit(repo_root),
+        base_commit: baseline_base_commit.clone(),
         committed_commit: None,
         action_type: None,
         git_tree_id: baseline_tree_id,
@@ -1526,7 +1566,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
     // generation can produce nothing share one breaker.
     let mut consecutive_barren_generations: usize = 0;
     let barren_limit = barren_generations_limit();
-    let mut expected_head_commit = ast_tools::get_git_head_commit(repo_root);
+    // Same revision the baseline was measured at (not a fresh HEAD read): the
+    // drift check must flag a commit that landed during the baseline itself.
+    let mut expected_head_commit = baseline_base_commit;
 
     // ═══════════════════════════════════════════════════════
     // MAIN EVOLUTIONARY LOOP
@@ -3238,6 +3280,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 composite: candidate_composite,
                 attempt_id: attempt_id.clone(),
                 branch_id: hyp_branch_id.clone(),
+                base_commit: attempt_base_commit.clone(),
             });
         }
 
@@ -3289,6 +3332,36 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 &candidate.metrics,
             ) {
                 PromotionDecision::Promote => {
+                    // Arm identity includes the SOURCE revision, not just the
+                    // model and endpoint that winner_darwinx_gate checks. See
+                    // winner_base_revision_gate: this is the gate that stops a
+                    // commit landing mid-run from being promoted as the
+                    // candidate's improvement.
+                    if let Err(reason) = winner_base_revision_gate(
+                        baseline_node.base_commit.as_deref(),
+                        candidate.base_commit.as_deref(),
+                    ) {
+                        log_phase(&format!(
+                            "  Candidate #{} '{}' rejected: {reason}; evaluating runner-up",
+                            rank, candidate.hypothesis.description
+                        ));
+                        log_event(
+                            repo_root,
+                            &serde_json::json!({
+                                "event": "candidate_rejected",
+                                "run_id": &run_id,
+                                "timestamp": chrono_now(),
+                                "generation": generation,
+                                "rank": rank,
+                                "description": candidate.hypothesis.description,
+                                "composite": candidate.composite,
+                                "sab_score": candidate.metrics.sab_score,
+                                "branch_id": candidate.branch_id,
+                                "reason": reason,
+                            }),
+                        );
+                        continue;
+                    }
                     promoted_winner = Some((rank, candidate));
                     break;
                 }

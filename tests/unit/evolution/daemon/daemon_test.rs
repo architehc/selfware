@@ -268,6 +268,31 @@ fn test_parse_plateau_and_barren_limits() {
     assert!(reason.contains("consecutive"), "got: {reason}");
 }
 
+/// The base-revision arm identity: model and endpoint can match while the two
+/// arms were built from different sources, in which case the delta includes a
+/// foreign commit's effect and promoting the candidate attributes it to the
+/// patch. That is the one failure mode here that promotes a WRONG candidate, so
+/// a mismatch must fail closed — while an unknown revision (no resolvable git
+/// HEAD) must not reject the run outright, since nothing can be compared.
+#[test]
+fn test_winner_base_revision_gate_mismatch_fails_closed() {
+    assert!(
+        winner_base_revision_gate(Some("aaaa111"), Some("aaaa111")).is_ok(),
+        "an identical base is a like-for-like comparison"
+    );
+
+    let err = winner_base_revision_gate(Some("aaaa111"), Some("bbbb222"))
+        .expect_err("a differing base must never be promoted");
+    assert!(err.contains("bbbb222"), "got: {err}");
+    assert!(err.contains("aaaa111"), "got: {err}");
+    assert!(err.contains("not be like-for-like"), "got: {err}");
+
+    // Unresolvable on either side: nothing to compare, so do not fail closed.
+    assert!(winner_base_revision_gate(None, None).is_ok());
+    assert!(winner_base_revision_gate(Some("aaaa111"), None).is_ok());
+    assert!(winner_base_revision_gate(None, Some("bbbb222")).is_ok());
+}
+
 #[test]
 fn test_apply_patch_to_worktree_nonexistent_dir() {
     let result = apply_patch_to_worktree(Path::new("/nonexistent/dir/12345"), "some patch");
@@ -2032,6 +2057,7 @@ fn test_ranked_candidate_promotion_runner_up_qualifies() {
             composite: cand1_composite,
             attempt_id: "att-1".into(),
             branch_id: "branch-1".into(),
+            base_commit: None,
         },
         EvaluatedCandidate {
             hypothesis: Hypothesis {
@@ -2048,6 +2074,7 @@ fn test_ranked_candidate_promotion_runner_up_qualifies() {
             composite: cand2_composite,
             attempt_id: "att-2".into(),
             branch_id: "branch-2".into(),
+            base_commit: None,
         },
     ];
 
