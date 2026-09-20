@@ -3860,6 +3860,143 @@ async fn test_commit_scoped_paths_isolated_timeout_arm() {
 }
 
 #[tokio::test]
+async fn test_commit_scoped_paths_isolated_cancellation_during_slow_post_commit_hook_aborts_publication(
+) {
+    let _exec = crate::test_support::ExecGuard::hold();
+    crate::reset_shutdown_for_test();
+
+    let dir = setup_winner_repo();
+    let root = dir.path();
+
+    // Install a slow post-commit hook that sleeps.
+    let hook_dir = root.join(".git").join("hooks");
+    std::fs::create_dir_all(&hook_dir).unwrap();
+    let hook_path = hook_dir.join("post-commit");
+    std::fs::write(
+        &hook_path,
+        "#!/bin/sh\necho 'slow post-commit running' >&2\nsleep 30\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&hook_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&hook_path, perms).unwrap();
+    }
+
+    let head_before = git_stdout(root, &["rev-parse", "HEAD"]);
+    let symref_before = git_stdout(root, &["symbolic-ref", "HEAD"]);
+    let test_file = root.join("src/lib.rs");
+    std::fs::write(&test_file, "pub fn candidate_code() -> usize { 777 }\n").unwrap();
+
+    // Trigger shutdown while the post-commit hook is in flight
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        crate::request_shutdown();
+    });
+
+    let res = commit_scoped_paths_isolated_with_timeout(
+        root,
+        &[std::path::PathBuf::from("src/lib.rs")],
+        None,
+        "test cancel during slow hook",
+        Some(10),
+    )
+    .await;
+
+    assert!(
+        res.is_err(),
+        "must fail when shutdown interrupts post-commit hook"
+    );
+    let err = res.unwrap_err();
+    assert!(
+        err.contains("Shutdown requested"),
+        "expected shutdown error message, got: {err}"
+    );
+
+    let head_after = git_stdout(root, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        head_before, head_after,
+        "destination branch HEAD must NOT move when shutdown interrupts post-commit hook before publication"
+    );
+
+    let symref_after = git_stdout(root, &["symbolic-ref", "HEAD"]);
+    assert_eq!(
+        symref_before, symref_after,
+        "checkout symbolic-ref must remain unchanged"
+    );
+
+    crate::reset_shutdown_for_test();
+}
+
+#[tokio::test]
+async fn test_commit_scoped_paths_isolated_keeps_developer_head_unchanged_throughout() {
+    let _exec = crate::test_support::ExecGuard::hold();
+    crate::reset_shutdown_for_test();
+
+    let dir = setup_winner_repo();
+    let root = dir.path();
+
+    let symref_before = git_stdout(root, &["symbolic-ref", "HEAD"]);
+    assert_eq!(symref_before.trim(), "refs/heads/main");
+
+    // Install a pre-commit hook that checks parent repo .git/HEAD from inside the worktree
+    let hook_dir = root.join(".git").join("hooks");
+    std::fs::create_dir_all(&hook_dir).unwrap();
+    let hook_path = hook_dir.join("pre-commit");
+    let parent_git_head = root.join(".git").join("HEAD");
+    let parent_git_head_str = parent_git_head.to_string_lossy().to_string();
+    std::fs::write(
+        &hook_path,
+        format!(
+            "#!/bin/sh\n\
+             HEAD_CONTENT=$(cat \"{parent_git_head_str}\" | tr -d '\\r\\n')\n\
+             if [ \"$HEAD_CONTENT\" != 'ref: refs/heads/main' ]; then\n\
+               echo \"Developer checkout HEAD was redirected to $HEAD_CONTENT!\" >&2\n\
+               exit 1\n\
+             fi\n\
+             exit 0\n"
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&hook_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&hook_path, perms).unwrap();
+    }
+
+    let head_before = git_stdout(root, &["rev-parse", "HEAD"]);
+    let test_file = root.join("src/lib.rs");
+    std::fs::write(&test_file, "pub fn candidate_code() -> usize { 12345 }\n").unwrap();
+
+    let res = commit_scoped_paths_isolated(
+        root,
+        &[std::path::PathBuf::from("src/lib.rs")],
+        None,
+        "test developer HEAD invariant",
+    )
+    .await;
+
+    assert!(res.is_ok(), "commit should succeed: {:?}", res.err());
+
+    let symref_after = git_stdout(root, &["symbolic-ref", "HEAD"]);
+    assert_eq!(
+        symref_after.trim(),
+        "refs/heads/main",
+        "Developer checkout HEAD must remain on main"
+    );
+
+    let head_after = git_stdout(root, &["rev-parse", "HEAD"]);
+    assert_ne!(
+        head_before, head_after,
+        "Destination branch HEAD was successfully advanced by promotion"
+    );
+}
+
+#[tokio::test]
 async fn test_run_cancellable_subprocess_inflight_kill_on_shutdown() {
     let _exec = crate::test_support::ExecGuard::hold();
     crate::reset_shutdown_for_test();

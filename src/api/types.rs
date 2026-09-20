@@ -748,15 +748,13 @@ impl Usage {
     /// reasoning tokens separately from completion tokens), treat `0` as unattributed (`None`).
     /// Authoritative nested counts in `completion_tokens_details` are preserved when flat field is None.
     pub fn reported_reasoning_tokens(&self) -> Option<usize> {
-        let val = self.reasoning_tokens.or_else(|| {
-            self.completion_tokens_details
-                .as_ref()
-                .and_then(|d| d.reasoning_tokens)
-        });
-        match val {
-            Some(0) => None,
-            other => other,
-        }
+        let flat = self.reasoning_tokens.filter(|&v| v > 0);
+        let nested = self
+            .completion_tokens_details
+            .as_ref()
+            .and_then(|d| d.reasoning_tokens)
+            .filter(|&v| v > 0);
+        flat.or(nested)
     }
 
     /// Returns reasoning tokens from provider-reported fields (flat or nested details),

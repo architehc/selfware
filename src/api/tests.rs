@@ -4779,6 +4779,98 @@ async fn test_chat_preserves_authoritative_nested_reasoning_without_estimate() {
 }
 
 #[tokio::test]
+async fn test_chat_preserves_authoritative_nested_reasoning_when_flat_is_zero() {
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bodies = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    // Response with flat reasoning_tokens: 0 AND authoritative nested details: 45
+    let body = r#"{"id":"c-flat-zero","object":"chat.completion","created":123,"model":"test","choices":[{"index":0,"message":{"role":"assistant","content":"4","reasoning_content":"Step 1: calculate 2+2..."},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":56,"total_tokens":76,"reasoning_tokens":0,"completion_tokens_details":{"reasoning_tokens":45}}}"#;
+    let server = reasoning_mock_server!(listener, bodies.clone(), [body]);
+
+    let config = crate::config::Config {
+        endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config).unwrap();
+
+    let result = client
+        .chat(vec![Message::user("q")], None, ThinkingMode::Enabled)
+        .await
+        .expect("chat should succeed");
+
+    // Flat 0 must NOT shadow the valid nested count of 45
+    assert_eq!(result.usage.reported_reasoning_tokens(), Some(45));
+    assert_eq!(result.usage.reasoning_tokens(), Some(45));
+    assert_eq!(result.usage.estimated_reasoning_tokens, None);
+    assert!(!result.usage.is_estimated_reasoning());
+    let _ = server.await;
+}
+
+#[test]
+fn test_usage_reported_reasoning_tokens_flat_zero_preserves_nested() {
+    use crate::api::types::{CompletionTokensDetails, Usage};
+
+    // Case 1: Flat 0, nested 45 -> reported is Some(45), not estimated
+    let u1 = Usage {
+        reasoning_tokens: Some(0),
+        completion_tokens_details: Some(CompletionTokensDetails {
+            reasoning_tokens: Some(45),
+            accepted_prediction_tokens: None,
+            rejected_prediction_tokens: None,
+        }),
+        ..Default::default()
+    };
+    assert_eq!(u1.reported_reasoning_tokens(), Some(45));
+    assert_eq!(u1.reasoning_tokens(), Some(45));
+    assert!(!u1.is_estimated_reasoning());
+
+    // Case 2: Flat 50, nested 45 -> flat takes precedence
+    let u2 = Usage {
+        reasoning_tokens: Some(50),
+        completion_tokens_details: Some(CompletionTokensDetails {
+            reasoning_tokens: Some(45),
+            accepted_prediction_tokens: None,
+            rejected_prediction_tokens: None,
+        }),
+        ..Default::default()
+    };
+    assert_eq!(u2.reported_reasoning_tokens(), Some(50));
+    assert_eq!(u2.reasoning_tokens(), Some(50));
+
+    // Case 3: Flat 0, nested 0 -> unattributed (None)
+    let u3 = Usage {
+        reasoning_tokens: Some(0),
+        completion_tokens_details: Some(CompletionTokensDetails {
+            reasoning_tokens: Some(0),
+            accepted_prediction_tokens: None,
+            rejected_prediction_tokens: None,
+        }),
+        estimated_reasoning_tokens: Some(30),
+        ..Default::default()
+    };
+    assert_eq!(u3.reported_reasoning_tokens(), None);
+    assert_eq!(u3.reasoning_tokens(), Some(30));
+    assert!(u3.is_estimated_reasoning());
+
+    // Case 4: Flat None, nested 45 -> Some(45)
+    let u4 = Usage {
+        reasoning_tokens: None,
+        completion_tokens_details: Some(CompletionTokensDetails {
+            reasoning_tokens: Some(45),
+            accepted_prediction_tokens: None,
+            rejected_prediction_tokens: None,
+        }),
+        ..Default::default()
+    };
+    assert_eq!(u4.reported_reasoning_tokens(), Some(45));
+    assert_eq!(u4.reasoning_tokens(), Some(45));
+}
+
+#[tokio::test]
 async fn test_chat_typed_error_when_reasoning_retry_also_exhausts() {
     use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;

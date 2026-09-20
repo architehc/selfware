@@ -4935,6 +4935,41 @@ impl Drop for RunLockGuard {
     }
 }
 
+/// Cleans up any leftover staging worktrees under `.worktrees/` or legacy staging refs
+/// from previous interrupted runs, ensuring that startup or pre-commit state is clean.
+pub(crate) fn cleanup_stale_staging_artifacts(repo_root: &Path) {
+    let worktrees_dir = repo_root.join(".worktrees");
+    if let Ok(entries) = std::fs::read_dir(&worktrees_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with("staging-commit-") {
+                let path = entry.path();
+                let _ = ast_tools::cleanup_worktree(repo_root, &path);
+            }
+        }
+    }
+    if let Ok(output) = std::process::Command::new("git")
+        .args([
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads/selfware-staging-*",
+        ])
+        .current_dir(repo_root)
+        .output()
+    {
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let refname = line.trim();
+            if !refname.is_empty() {
+                let _ = std::process::Command::new("git")
+                    .args(["update-ref", "-d", refname])
+                    .current_dir(repo_root)
+                    .output();
+            }
+        }
+    }
+}
+
 /// Commits the specified paths using an isolated index file.
 ///
 /// If `expected_tree` is provided, verifies that `git write-tree` on the isolated index
@@ -4983,7 +5018,7 @@ pub(crate) async fn commit_scoped_paths_isolated_with_timeout(
     // 2. Stage ONLY the specified paths into the isolated index
     let mut add = tokio::process::Command::new("git");
     add.env("GIT_INDEX_FILE", &guard.index_path);
-    add.arg("add").arg("--");
+    add.arg("add").arg("-A").arg("--");
     for p in paths {
         add.arg(p);
     }
@@ -5030,122 +5065,156 @@ pub(crate) async fn commit_scoped_paths_isolated_with_timeout(
         }
     }
 
-    // 5. Commit using an isolated staging ref to guarantee that the destination branch
-    // is never advanced before commit identity (tree and parent) is fully verified.
+    // 5. Commit using a separate isolated staging worktree to guarantee that the developer
+    // checkout's HEAD is NEVER modified or redirected during commit and verification (Finding 1).
     if crate::is_shutdown_requested() {
         return Err("Shutdown requested before commit".to_string());
     }
+    if crate::safety::killswitch::is_killswitch_active() {
+        return Err("Kill switch is active before commit".to_string());
+    }
 
-    let head_before = tokio::process::Command::new("git")
+    cleanup_stale_staging_artifacts(repo_root);
+
+    let head_before_out = tokio::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(repo_root)
         .output()
         .await
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
-            }
-        });
+        .map_err(|e| format!("Failed to read HEAD from repository: {e}"))?;
+    if !head_before_out.status.success() {
+        return Err(format!(
+            "git rev-parse HEAD failed: {}",
+            String::from_utf8_lossy(&head_before_out.stderr).trim()
+        ));
+    }
+    let head_before = String::from_utf8_lossy(&head_before_out.stdout)
+        .trim()
+        .to_string();
+    if head_before.is_empty() {
+        return Err("git rev-parse HEAD returned empty commit SHA".to_string());
+    }
 
-    let original_symref = tokio::process::Command::new("git")
+    let symref_out = tokio::process::Command::new("git")
         .args(["symbolic-ref", "-q", "HEAD"])
         .current_dir(repo_root)
         .output()
         .await
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
-            }
-        });
-
-    let staging_branch = format!("selfware-staging-{}", uuid::Uuid::new_v4().simple());
-    let staging_ref = format!("refs/heads/{staging_branch}");
-
-    if let Some(ref head_sha) = head_before {
-        let update_staging = tokio::process::Command::new("git")
-            .args(["update-ref", &staging_ref, head_sha])
-            .current_dir(repo_root)
-            .output()
-            .await
-            .map_err(|e| format!("Failed to create staging ref {staging_ref}: {e}"))?;
-        if !update_staging.status.success() {
+        .map_err(|e| format!("Failed to inspect symbolic-ref HEAD: {e}"))?;
+    let original_symref = if symref_out.status.success() {
+        let s = String::from_utf8_lossy(&symref_out.stdout)
+            .trim()
+            .to_string();
+        if s.is_empty() {
+            return Err("symbolic-ref returned empty branch name".to_string());
+        }
+        if s.contains("selfware-staging-") {
             return Err(format!(
-                "git update-ref staging ref failed: {}",
-                String::from_utf8_lossy(&update_staging.stderr).trim()
+                "Repository checkout is currently pointing to a leftover staging ref {s}; refusing to promote until checkout is restored to a valid branch"
             ));
         }
-    }
+        Some(s)
+    } else {
+        None
+    };
 
-    let switch_to_staging = tokio::process::Command::new("git")
-        .args(["symbolic-ref", "HEAD", &staging_ref])
+    let worktrees_dir = repo_root.join(".worktrees");
+    let _ = std::fs::create_dir_all(&worktrees_dir);
+    let worktree_name = format!("staging-commit-{}", uuid::Uuid::new_v4().simple());
+    let worktree_path = worktrees_dir.join(&worktree_name);
+
+    let add_wt = tokio::process::Command::new("git")
+        .env_remove("GIT_INDEX_FILE")
+        .args(["worktree", "add", "--detach"])
+        .arg(&worktree_path)
+        .arg(&head_before)
         .current_dir(repo_root)
         .output()
         .await
-        .map_err(|e| format!("Failed to point HEAD to staging ref: {e}"))?;
-    if !switch_to_staging.status.success() {
-        if head_before.is_some() {
-            let _ = tokio::process::Command::new("git")
-                .args(["update-ref", "-d", &staging_ref])
-                .current_dir(repo_root)
-                .output()
-                .await;
-        }
+        .map_err(|e| format!("Failed to create staging worktree: {e}"))?;
+    if !add_wt.status.success() {
         return Err(format!(
-            "git symbolic-ref to staging ref failed: {}",
-            String::from_utf8_lossy(&switch_to_staging.stderr).trim()
+            "git worktree add for staging failed: {}",
+            String::from_utf8_lossy(&add_wt.stderr).trim()
         ));
     }
 
-    struct StagingRefGuard<'a> {
+    struct StagingWorktreeGuard<'a> {
         repo_root: &'a Path,
-        staging_ref: String,
-        original_symref: Option<String>,
-        original_head: Option<String>,
-        defused: bool,
+        worktree_path: PathBuf,
     }
 
-    impl<'a> Drop for StagingRefGuard<'a> {
+    impl<'a> Drop for StagingWorktreeGuard<'a> {
         fn drop(&mut self) {
-            if self.defused {
-                return;
-            }
-            if let Some(ref orig_ref) = self.original_symref {
-                let _ = std::process::Command::new("git")
-                    .args(["symbolic-ref", "HEAD", orig_ref])
-                    .current_dir(self.repo_root)
-                    .output();
-            } else if let Some(ref orig_sha) = self.original_head {
-                let _ = std::process::Command::new("git")
-                    .args(["update-ref", "--no-deref", "HEAD", orig_sha])
-                    .current_dir(self.repo_root)
-                    .output();
-            }
-            let _ = std::process::Command::new("git")
-                .args(["update-ref", "-d", &self.staging_ref])
-                .current_dir(self.repo_root)
-                .output();
+            let _ = ast_tools::cleanup_worktree(self.repo_root, &self.worktree_path);
         }
     }
 
-    let mut staging_guard = StagingRefGuard {
+    let _wt_guard = StagingWorktreeGuard {
         repo_root,
-        staging_ref: staging_ref.clone(),
-        original_symref: original_symref.clone(),
-        original_head: head_before.clone(),
-        defused: false,
+        worktree_path: worktree_path.clone(),
     };
+
+    // Copy the scoped paths into the staging worktree
+    for p in paths {
+        let src_path = repo_root.join(p);
+        let dst_path = worktree_path.join(p);
+        if src_path.exists() {
+            if let Some(parent) = dst_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            std::fs::copy(&src_path, &dst_path)
+                .map_err(|e| format!("Failed to copy {} to staging worktree: {e}", p.display()))?;
+        } else if dst_path.exists() {
+            let _ = std::fs::remove_file(&dst_path);
+        }
+    }
+
+    let mut wt_add = tokio::process::Command::new("git");
+    wt_add.env_remove("GIT_INDEX_FILE");
+    wt_add.arg("add").arg("-A").arg("--");
+    for p in paths {
+        wt_add.arg(p);
+    }
+    let wt_add_out = wt_add
+        .current_dir(&worktree_path)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to stage candidate files in staging worktree: {e}"))?;
+    if !wt_add_out.status.success() {
+        return Err(format!(
+            "git add in staging worktree failed: {}",
+            String::from_utf8_lossy(&wt_add_out.stderr).trim()
+        ));
+    }
+
+    let wt_tree_out = tokio::process::Command::new("git")
+        .env_remove("GIT_INDEX_FILE")
+        .args(["write-tree"])
+        .current_dir(&worktree_path)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run git write-tree in staging worktree: {e}"))?;
+    if !wt_tree_out.status.success() {
+        return Err(format!(
+            "git write-tree in staging worktree failed: {}",
+            String::from_utf8_lossy(&wt_tree_out.stderr).trim()
+        ));
+    }
+    let wt_tree = String::from_utf8_lossy(&wt_tree_out.stdout)
+        .trim()
+        .to_string();
+    if wt_tree != promoted_tree {
+        return Err(format!(
+            "Staging worktree tree {wt_tree} does not match evaluated tree {promoted_tree}"
+        ));
+    }
 
     let mut commit_cmd = tokio::process::Command::new("git");
     commit_cmd
-        .env("GIT_INDEX_FILE", &guard.index_path)
+        .env_remove("GIT_INDEX_FILE")
         .args(["commit", "-m", commit_msg])
-        .current_dir(repo_root);
+        .current_dir(&worktree_path);
 
     let timeout_secs = timeout_override_secs
         .filter(|&s| s > 0 && s <= 86400)
@@ -5161,8 +5230,9 @@ pub(crate) async fn commit_scoped_paths_isolated_with_timeout(
     let commit_res = run_cancellable_subprocess(commit_cmd, timeout_dur).await;
 
     let staging_commit_after = tokio::process::Command::new("git")
-        .args(["rev-parse", &staging_ref])
-        .current_dir(repo_root)
+        .env_remove("GIT_INDEX_FILE")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&worktree_path)
         .output()
         .await
         .ok()
@@ -5177,48 +5247,48 @@ pub(crate) async fn commit_scoped_paths_isolated_with_timeout(
     let mut our_commit_succeeded = false;
     let mut tree_matches = false;
     let mut parent_matches = false;
-    if staging_commit_after.is_some() && head_before != staging_commit_after {
-        let head_tree = tokio::process::Command::new("git")
-            .args(["rev-parse", &format!("{}^{{tree}}", staging_ref)])
-            .current_dir(repo_root)
-            .output()
-            .await
-            .ok()
-            .and_then(|o| {
-                if o.status.success() {
-                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                } else {
-                    None
-                }
-            });
+    if let Some(ref new_commit) = staging_commit_after {
+        if new_commit != &head_before {
+            let head_tree = tokio::process::Command::new("git")
+                .env_remove("GIT_INDEX_FILE")
+                .args(["rev-parse", "HEAD^{tree}"])
+                .current_dir(&worktree_path)
+                .output()
+                .await
+                .ok()
+                .and_then(|o| {
+                    if o.status.success() {
+                        Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    } else {
+                        None
+                    }
+                });
 
-        let head_parent = tokio::process::Command::new("git")
-            .args(["rev-parse", &format!("{}^", staging_ref)])
-            .current_dir(repo_root)
-            .output()
-            .await
-            .ok()
-            .and_then(|o| {
-                if o.status.success() {
-                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                } else {
-                    None
-                }
-            });
+            let head_parent = tokio::process::Command::new("git")
+                .env_remove("GIT_INDEX_FILE")
+                .args(["rev-parse", "HEAD^"])
+                .current_dir(&worktree_path)
+                .output()
+                .await
+                .ok()
+                .and_then(|o| {
+                    if o.status.success() {
+                        Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    } else {
+                        None
+                    }
+                });
 
-        tree_matches = head_tree.as_deref() == Some(&promoted_tree);
-        parent_matches = match (&head_before, &head_parent) {
-            (Some(before), Some(parent)) => before == parent,
-            (None, None) => true,
-            _ => false,
-        };
+            tree_matches = head_tree.as_deref() == Some(&promoted_tree);
+            parent_matches = head_parent.as_deref() == Some(&head_before);
 
-        if tree_matches && parent_matches {
-            our_commit_succeeded = true;
-        } else {
-            log_warning(&format!(
-                "Candidate commit created on staging ref does not match evaluated candidate (tree match: {tree_matches}, parent match: {parent_matches}); refusing to update destination branch"
-            ));
+            if tree_matches && parent_matches {
+                our_commit_succeeded = true;
+            } else {
+                log_warning(&format!(
+                    "Candidate commit created in staging worktree does not match evaluated candidate (tree match: {tree_matches}, parent match: {parent_matches}); refusing to update destination branch"
+                ));
+            }
         }
     }
 
@@ -5231,57 +5301,49 @@ pub(crate) async fn commit_scoped_paths_isolated_with_timeout(
             }
         }
         Err(SubprocessError::ShutdownRequested) => {
-            if our_commit_succeeded {
-                log_warning(
-                    "Shutdown requested during git commit hook, but candidate commit succeeded on staging ref; reconciling index",
-                );
-            } else {
-                return Err("Shutdown requested during git commit hook; commit aborted".to_string());
-            }
+            return Err(
+                "Shutdown requested during git commit hook; publication aborted".to_string(),
+            );
+        }
+        Err(SubprocessError::Timeout) => {
+            return Err(format!(
+                "git commit hook timed out after {timeout_secs}s; publication aborted"
+            ));
         }
         Ok(out) => {
             if our_commit_succeeded {
                 log_warning(&format!(
-                    "git commit hook exited non-zero ({}), but candidate commit succeeded on staging ref (matching tree {promoted_tree}); reconciling index",
+                    "git commit hook exited non-zero ({}), but candidate commit succeeded in staging worktree (matching tree {promoted_tree}); continuing to publication check",
                     String::from_utf8_lossy(&out.stderr).trim()
                 ));
             } else {
                 return Err(format!(
-                    "git commit with isolated index failed: {}",
+                    "git commit in staging worktree failed: {}",
                     String::from_utf8_lossy(&out.stderr).trim()
                 ));
-            }
-        }
-        Err(SubprocessError::Timeout) => {
-            if our_commit_succeeded {
-                log_warning(&format!(
-                    "git commit hook timed out after {timeout_secs}s, but candidate commit succeeded on staging ref (matching tree {promoted_tree}); reconciling index"
-                ));
-            } else {
-                return Err(format!("git commit timed out after {timeout_secs}s"));
             }
         }
         Err(SubprocessError::Io(e)) => {
-            if our_commit_succeeded {
-                log_warning(&format!(
-                    "git commit subprocess I/O error ({e}), but candidate commit succeeded on staging ref; reconciling index"
-                ));
-            } else {
-                return Err(format!(
-                    "Failed to execute git commit with isolated index: {e}"
-                ));
-            }
+            return Err(format!(
+                "Failed to execute git commit in staging worktree: {e}"
+            ));
         }
     };
 
-    // Promotion verified! Atomically update destination branch to the verified commit:
-    let commit_sha = staging_commit_after.unwrap();
+    // Recheck shutdown and the kill switch immediately before publication (Finding 2)
+    if crate::is_shutdown_requested() {
+        return Err("Shutdown requested before publication; promotion aborted".to_string());
+    }
+    if crate::safety::killswitch::is_killswitch_active() {
+        return Err("Kill switch is active before publication; promotion aborted".to_string());
+    }
+
+    // Promotion verified! Atomically update destination branch to the verified commit via CAS:
+    let commit_sha =
+        staging_commit_after.ok_or_else(|| "No staging commit was created".to_string())?;
     if let Some(ref dest_branch) = original_symref {
         let mut update_dest = tokio::process::Command::new("git");
-        update_dest.args(["update-ref", dest_branch, &commit_sha]);
-        if let Some(ref before) = head_before {
-            update_dest.arg(before);
-        }
+        update_dest.args(["update-ref", dest_branch, &commit_sha, &head_before]);
         let update_res = update_dest
             .current_dir(repo_root)
             .output()
@@ -5289,44 +5351,31 @@ pub(crate) async fn commit_scoped_paths_isolated_with_timeout(
             .map_err(|e| format!("Failed to update destination branch {dest_branch}: {e}"))?;
         if !update_res.status.success() {
             return Err(format!(
-                "git update-ref {dest_branch} to {commit_sha} failed: {}",
+                "git update-ref {dest_branch} to {commit_sha} (CAS against {head_before}) failed: {}",
                 String::from_utf8_lossy(&update_res.stderr).trim()
             ));
         }
-        let restore_head = tokio::process::Command::new("git")
-            .args(["symbolic-ref", "HEAD", dest_branch])
-            .current_dir(repo_root)
-            .output()
-            .await
-            .map_err(|e| format!("Failed to restore HEAD to {dest_branch}: {e}"))?;
-        if !restore_head.status.success() {
-            return Err(format!(
-                "git symbolic-ref HEAD {dest_branch} failed: {}",
-                String::from_utf8_lossy(&restore_head.stderr).trim()
-            ));
-        }
     } else {
-        let update_head = tokio::process::Command::new("git")
-            .args(["update-ref", "--no-deref", "HEAD", &commit_sha])
+        let mut update_head = tokio::process::Command::new("git");
+        update_head.args([
+            "update-ref",
+            "--no-deref",
+            "HEAD",
+            &commit_sha,
+            &head_before,
+        ]);
+        let update_res = update_head
             .current_dir(repo_root)
             .output()
             .await
             .map_err(|e| format!("Failed to update detached HEAD to {commit_sha}: {e}"))?;
-        if !update_head.status.success() {
+        if !update_res.status.success() {
             return Err(format!(
-                "git update-ref --no-deref HEAD {commit_sha} failed: {}",
-                String::from_utf8_lossy(&update_head.stderr).trim()
+                "git update-ref --no-deref HEAD {commit_sha} (CAS against {head_before}) failed: {}",
+                String::from_utf8_lossy(&update_res.stderr).trim()
             ));
         }
     }
-
-    let _ = tokio::process::Command::new("git")
-        .args(["update-ref", "-d", &staging_ref])
-        .current_dir(repo_root)
-        .output()
-        .await;
-
-    staging_guard.defused = true;
 
     // 6. Synchronize main repository index for the committed paths so working copy status is clean,
     // without disturbing any unrelated staged changes.
