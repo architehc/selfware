@@ -37,6 +37,8 @@ exclude = [
     "benchmarks/",
     "tests/",
     "tqec/",
+    "design/",
+    "src/evolve/web/vendor/monaco/",
 ]
 
 [dependencies]
