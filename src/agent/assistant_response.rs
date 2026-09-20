@@ -256,7 +256,10 @@ impl Agent {
         // Stays `None` only if all branches return early via `?`.
         #[allow(unused_assignments)]
         let mut chat_metadata: Option<crate::api::types::ChatMetadata> = None;
-        let (content, reasoning) = if self.config.agent.streaming {
+        // `force_non_streaming` latches after a streamed turn came back empty: the
+        // streaming path is the one that produced nothing, so the retry uses the
+        // path that did not rather than repeating the failing request.
+        let (content, reasoning) = if self.config.agent.streaming && !self.force_non_streaming {
             let mut local_meta = crate::api::types::ChatMetadata::default();
             match self
                 .chat_streaming(

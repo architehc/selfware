@@ -3457,9 +3457,18 @@ async fn test_file_edit_clears_task_state_for_modified_file() {
     ignore = "mock TCP server unreliable on Windows CI"
 )]
 async fn test_step_with_empty_response() {
-    let server = MockLlmServer::builder().with_response("").build().await;
+    // Responses are served FIFO, so queue an empty for each turn under test: the
+    // endpoint in the field answers empty repeatedly, not once.
+    let server = MockLlmServer::builder()
+        .with_response("")
+        .with_response("")
+        .build()
+        .await;
 
-    let config = test_config(format!("{}/v1", server.url()));
+    let mut config = test_config(format!("{}/v1", server.url()));
+    // Exercise the recovery lever: this is the configuration an endpoint that
+    // generates tokens yet delivers no deltas hits.
+    config.agent.streaming = true;
     let mut agent = Agent::new(config).await.unwrap();
 
     let result = agent.execute_step_internal(false).await;
@@ -3470,6 +3479,25 @@ async fn test_step_with_empty_response() {
     assert!(
         !result.unwrap(),
         "an empty response must not be accepted as a completed step"
+    );
+    assert!(
+        agent.force_non_streaming,
+        "the retry must go out non-streaming — the streamed request produced nothing"
+    );
+    assert_eq!(agent.consecutive_empty_responses, 1);
+
+    // The retry already went out non-streaming and was still empty, so nudging
+    // forever would burn the turn budget one empty turn at a time without ever
+    // saying why. It must stop with a typed reason instead.
+    let err = agent
+        .execute_step_internal(false)
+        .await
+        .expect_err("a persistent empty endpoint must stop the run");
+    let msg = err.to_string();
+    assert!(msg.contains("EMPTY_RESPONSE_LOOP"), "got: {msg}");
+    assert!(
+        msg.contains("non-streaming"),
+        "the reason must state that the non-streaming retry was already tried, got: {msg}"
     );
 
     server.stop().await;

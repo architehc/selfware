@@ -1544,6 +1544,56 @@ mod requirements_audit_tests {
 
     const LONG_READONLY_INSTRUCTION: &str = "Explain in detail how this repository handles retries, adaptive timeouts, and error recovery across the API client layer, the tool dispatch loop, and the verification gates. For each mechanism, cite the exact file and line where it lives and describe the failure it was added to prevent. Deliver a written analysis only — do not change any code.";
 
+    /// The gate's suggested commands must fit what the run actually produced.
+    ///
+    /// A Python deliverable was told to run cargo_check/cargo_test/pytest, so the
+    /// model probed toolchains the project does not have before finding
+    /// `python3 -m py_compile` itself — observed as 5 wasted turns on an otherwise
+    /// successful task. What counts as verification is unchanged; only the advice.
+    #[tokio::test]
+    async fn test_suggested_verification_commands_fit_the_project() {
+        let server = MockLlmServer::builder().with_response("ok").build().await;
+        let mut agent = build_agent(&server, LONG_MUTATION_INSTRUCTION).await;
+
+        // `build_agent` logs a file_write for ./src/simplex.py, so the advice
+        // names the syntax check a script-only project can actually run — and
+        // does not lead with cargo, which is what sent the model probing a
+        // toolchain that does not exist there.
+        let python_hints = agent.suggested_verification_commands();
+        assert!(
+            python_hints.contains("py_compile"),
+            "a run that wrote a .py file must be offered a Python syntax check, got: {python_hints}"
+        );
+        assert!(
+            !python_hints.contains("cargo_check"),
+            "a Python-only deliverable must not be sent to cargo, got: {python_hints}"
+        );
+
+        // Once the same run has also written Rust, the Rust toolchain is named too.
+        agent.messages.push(crate::api::types::Message {
+            role: "assistant".to_string(),
+            content: "".into(),
+            reasoning_content: None,
+            tool_calls: Some(vec![crate::api::types::ToolCall {
+                id: "call_rs".to_string(),
+                call_type: "function".to_string(),
+                function: crate::api::types::ToolFunction {
+                    name: "file_edit".to_string(),
+                    arguments: r#"{"path":"src/lib.rs","old_str":"a","new_str":"b"}"#.to_string(),
+                },
+            }]),
+            tool_call_id: None,
+            name: None,
+        });
+        let rust_hints = agent.suggested_verification_commands();
+        assert!(
+            rust_hints.contains("cargo_check"),
+            "a run that edited a .rs file must be told about cargo, got: {rust_hints}"
+        );
+
+        server.stop().await;
+    }
+
     async fn build_agent(server: &MockLlmServer, instruction: &str) -> Agent {
         let config = Config {
             endpoint: format!("{}/v1", server.url()),

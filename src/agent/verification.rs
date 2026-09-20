@@ -1372,6 +1372,74 @@ impl Agent {
         )));
     }
 
+    /// True when this run wrote a file whose path carries one of `exts`.
+    ///
+    /// Reads the durable checkpoint ledger first and the message history as a
+    /// fallback — the same two sources the write check above trusts. Derived from
+    /// what the run actually produced rather than from a filesystem probe of the
+    /// project's manifests: the process cwd is global and mutable, so probing it
+    /// made the advice depend on whatever another thread had chdir'd to, which
+    /// the full suite demonstrated by disagreeing with two isolated runs.
+    fn wrote_extension(&self, exts: &[&str]) -> bool {
+        let hits = |name: &str, args: &str| {
+            super::tool_dispatch::tool_call_writes_file(name)
+                && exts.iter().any(|ext| args.contains(&format!(".{ext}\"")))
+        };
+        let in_checkpoint = self
+            .current_checkpoint
+            .as_ref()
+            .map(|cp| {
+                cp.tool_calls
+                    .iter()
+                    .any(|log| hits(&log.tool_name, &log.arguments))
+            })
+            .unwrap_or(false);
+        in_checkpoint
+            || self
+                .messages
+                .iter()
+                .filter(|m| m.role == "assistant")
+                .filter_map(|m| m.tool_calls.as_ref())
+                .flatten()
+                .any(|tc| hits(&tc.function.name, &tc.function.arguments))
+    }
+
+    /// Verification commands worth suggesting to THIS run, so the gate names the
+    /// toolchains the deliverable implies instead of reciting a fixed list.
+    ///
+    /// The gate used to always say "cargo_check, cargo_test, pytest, npm test,
+    /// go test, mvn test, dotnet test". In a directory holding one Python script
+    /// and no pytest, the model dutifully probed cargo before discovering
+    /// `python3 -m py_compile` on its own — observed as 5 wasted turns on an
+    /// otherwise successful task. Nothing about what *counts* as verification is
+    /// relaxed here; only the advice changes.
+    fn suggested_verification_commands(&self) -> String {
+        let mut cmds: Vec<&str> = Vec::new();
+        if self.wrote_extension(&["rs"]) {
+            cmds.push("cargo_check, cargo_test");
+        }
+        if self.wrote_extension(&["js", "ts", "mjs", "cjs"]) {
+            cmds.push("npm test");
+        }
+        if self.wrote_extension(&["go"]) {
+            cmds.push("go test ./...");
+        }
+        if self.wrote_extension(&["java"]) {
+            cmds.push("mvn test");
+        }
+        if self.wrote_extension(&["py"]) {
+            cmds.push("python3 -m py_compile <path>");
+        }
+        if cmds.is_empty() {
+            // Nothing written yet, so nothing to tailor to: name the common
+            // verifiers rather than leaving the model to guess.
+            return "cargo_check, cargo_test, pytest, npm test, go test, mvn test, \
+                    dotnet test (whichever this project uses)"
+                .to_string();
+        }
+        cmds.join(", ")
+    }
+
     /// Check whether the agent has done enough work to accept completion.
     /// Returns `None` to accept, or `Some(message)` to reject with instructions.
     pub(super) async fn check_completion_gate(&self) -> Option<String> {
@@ -1520,9 +1588,11 @@ impl Agent {
                     PolicyKind::Gate,
                     true,
                     "file written without a passing verification",
-                    "You have written code, but you have not verified it. \
-                     Run a verification command (e.g. cargo_check, cargo_test, pytest, npm test, go test, mvn test, dotnet test) \
-                     successfully before completing.",
+                    &format!(
+                        "You have written code, but you have not verified it. Run a verification \
+                         command that fits this project ({}) successfully before completing.",
+                        self.suggested_verification_commands()
+                    ),
                 ));
             }
         }
@@ -1595,11 +1665,11 @@ impl Agent {
                 || (self.has_successful_verification_tool_call()
                     && self.has_fresh_successful_verification()))
             {
-                return Some(
-                    "You must run at least one verification tool (e.g. cargo_check, cargo_test, pytest, npm test, go test, mvn test, dotnet test) \
-                     successfully before completing the task. Please verify your work now."
-                        .to_string(),
-                );
+                return Some(format!(
+                    "You must run at least one verification tool that fits this project ({}) \
+                     successfully before completing the task. Please verify your work now.",
+                    self.suggested_verification_commands()
+                ));
             }
         }
 

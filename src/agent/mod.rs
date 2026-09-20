@@ -846,6 +846,20 @@ pub struct Agent {
     /// How many times the terminal progress guard fired without producing a write.
     /// After 2 hits the run fails with READ_LOOP_NO_EDIT.
     terminal_guard_hits: usize,
+    /// Consecutive assistant responses that carried no content, no reasoning and
+    /// no tool calls.
+    ///
+    /// A provider that closes a stream having generated tokens but delivering
+    /// none (the observed sglang case: 74 generated, zero deltas) hands the loop
+    /// an empty turn, and nudging forever burns the turn budget one empty turn
+    /// at a time. Reset by any non-empty response.
+    consecutive_empty_responses: usize,
+    /// Latched once a streamed turn came back empty, so the retry goes out
+    /// non-streaming instead of repeating the request that just failed.
+    ///
+    /// Stays latched for the session: the streaming path is what produced
+    /// nothing, so the safer default afterwards is the path that did not.
+    force_non_streaming: bool,
     /// Most recently read file path (set by file_read).  Used to inject
     /// concrete edit templates when the model is stuck in a read loop.
     last_read_file: Option<String>,
@@ -1531,6 +1545,8 @@ To call a tool, use this EXACT XML structure:
             seen_read_targets: std::collections::HashSet::new(),
             post_edit_observational_shell_count: 0,
             terminal_guard_hits: 0,
+            consecutive_empty_responses: 0,
+            force_non_streaming: false,
             last_read_file: None,
             has_written_any_file: false,
             files_checklist_seen: false,

@@ -1195,6 +1195,31 @@ impl Agent {
                 .trim()
                 .to_string();
             if clean_final.is_empty() {
+                self.consecutive_empty_responses += 1;
+                // Bounded recovery. The provider closed a stream that generated
+                // tokens but delivered none (observed on llm.selfware.design: 74
+                // generated, zero deltas, finish_reason present — which is why
+                // `is_unexplained_empty_stream` deliberately stands down here).
+                // Retry once through the non-streaming path, then stop with a
+                // reason: nudging an endpoint that keeps answering empty burns
+                // the turn budget one empty turn at a time and never says why.
+                const MAX_CONSECUTIVE_EMPTY_RESPONSES: usize = 2;
+                if self.consecutive_empty_responses >= MAX_CONSECUTIVE_EMPTY_RESPONSES {
+                    bail!(
+                        "EMPTY_RESPONSE_LOOP: {} consecutive empty assistant responses — the \
+                         provider returned no content, no reasoning and no tool calls each time. \
+                         The retry already went out non-streaming, so this is not a streaming \
+                         artifact: check the endpoint's parser / chat-template configuration.",
+                        self.consecutive_empty_responses
+                    );
+                }
+                if self.config.agent.streaming && !self.force_non_streaming {
+                    self.force_non_streaming = true;
+                    info!(
+                        "Empty response — retrying the next turn with streaming disabled \
+                         (the streamed request produced nothing)"
+                    );
+                }
                 info!("Rejected empty response as final answer — nudging for an actual answer");
                 self.messages.push(crate::api::types::Message::user(
                     "<selfware_system_directive>\n\
@@ -1205,6 +1230,8 @@ impl Agent {
                 ));
                 return Ok(false);
             }
+            // Any non-empty response ends the empty streak.
+            self.consecutive_empty_responses = 0;
 
             // A response cut off by the token limit (finish_reason == "length") is
             // incomplete — don't accept the truncated text as the final answer; ask
