@@ -166,6 +166,10 @@ pub struct AppliedMutation {
     pub summary: String,
 }
 
+/// Cooldown applied to a category that recently failed, measured on the wall
+/// clock. See [`SelfEditOrchestrator::recently_failed_categories`].
+pub const FAILURE_COOLDOWN_SECS: u64 = 1800;
+
 /// Orchestrates the self-improvement loop
 pub struct SelfEditOrchestrator {
     /// History of improvement attempts
@@ -340,7 +344,7 @@ impl SelfEditOrchestrator {
         let mut targets = Vec::new();
 
         // Check for recurring error patterns in improvement history
-        let failed_categories = self.recently_failed_categories(5);
+        let failed_categories = self.recently_failed_categories(FAILURE_COOLDOWN_SECS);
 
         // Scan for common code quality improvements
         targets.extend(self.scan_code_quality());
@@ -601,19 +605,38 @@ impl SelfEditOrchestrator {
         false
     }
 
-    /// Get categories that failed recently (within the last N attempts)
-    fn recently_failed_categories(&self, n: usize) -> Vec<ImprovementCategory> {
+    /// Get categories with a recorded failure still inside the cooldown window.
+    ///
+    /// Age is measured from each record's `completed_at`, NOT from how many
+    /// records exist. A record-count window can never age out its own blocker:
+    /// an idle cycle (no eligible target, or a mutation the trivial gate
+    /// discards) appends no record, so the window never advances and the failed
+    /// category stays excluded — and since the history is persisted, that block
+    /// survived restarts. Wall-clock age expires regardless of activity.
+    ///
+    /// The returned order is unspecified (callers use `contains`).
+    fn recently_failed_categories(&self, window_secs: u64) -> Vec<ImprovementCategory> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         self.history
             .iter()
-            .rev()
-            .take(n)
             .filter(|r| {
                 if r.status == ProposalStatus::SkippedTrivial {
                     return false;
                 }
-                r.rolled_back || r.effectiveness_score < 0.0
+                if !(r.rolled_back || r.effectiveness_score < 0.0) {
+                    return false;
+                }
+                // An unknown timestamp (0 from an older history file) counts as
+                // expired: expiring only means the category may be retried,
+                // which is the safe direction for a cooldown.
+                r.completed_at > 0 && now.saturating_sub(r.completed_at) <= window_secs
             })
             .map(|r| r.category.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
             .collect()
     }
 
@@ -637,18 +660,29 @@ impl SelfEditOrchestrator {
                         .to_string();
 
                     for (i, line) in content.lines().enumerate() {
-                        if line.contains("TODO") || line.contains("FIXME") {
-                            let desc = line.trim().to_string();
-                            let target = ImprovementTarget::new(
-                                ImprovementCategory::CodeQuality,
-                                format!("Address TODO at {}:{}: {}", rel_path, i + 1, desc),
-                                "TODO/FIXME markers indicate known issues or missing features",
-                                ImprovementSource::TechDebt,
-                            )
-                            .with_file(rel_path.clone())
-                            .with_scores(0.3, 0.6);
-                            targets.push(target);
+                        if !line.contains("TODO") && !line.contains("FIXME") {
+                            continue;
                         }
+                        // A marker on a whole-line comment can only be rewritten
+                        // as comment text, and `mutation_is_trivial` discards a
+                        // comment-only diff before evaluation — proposing it
+                        // spends a cycle to learn nothing, and the target stays
+                        // eligible for the next cycle. Only a marker sharing its
+                        // line with code is a mutation that can reach
+                        // evaluation. (`.rs` files only: `glob_rs_files`.)
+                        if line_is_non_code(line, false, false) {
+                            continue;
+                        }
+                        let desc = line.trim().to_string();
+                        let target = ImprovementTarget::new(
+                            ImprovementCategory::CodeQuality,
+                            format!("Address TODO at {}:{}: {}", rel_path, i + 1, desc),
+                            "TODO/FIXME markers indicate known issues or missing features",
+                            ImprovementSource::TechDebt,
+                        )
+                        .with_file(rel_path.clone())
+                        .with_scores(0.3, 0.6);
+                        targets.push(target);
                     }
                 }
             }
@@ -709,6 +743,25 @@ fn glob_rs_files(dir: &Path) -> Result<Vec<PathBuf>> {
         }
     }
     Ok(results)
+}
+
+/// True when `line` contributes no code: blank, or a whole-line comment under
+/// the given stripping rules (`strip_hash` for `#`-comment formats,
+/// `strip_asterisk` for `*`-prefixed block-comment bodies — neither applies to
+/// Rust, where `#` opens an attribute and `*` dereferences).
+///
+/// The single source of truth behind both `rsi_orchestrator::code_lines` (the
+/// trivial-diff gate) and `scan_code_quality`, which must not propose a marker
+/// rewrite that gate would then discard as comment-only. An inline trailing
+/// comment does NOT make a line non-code, so `42 // TODO: x` is a real mutation.
+pub(crate) fn line_is_non_code(line: &str, strip_hash: bool, strip_asterisk: bool) -> bool {
+    let line = line.trim();
+    line.is_empty()
+        || line.starts_with("//")
+        || (strip_hash && line.starts_with('#'))
+        || line.starts_with("/*")
+        || (strip_asterisk && line.starts_with('*'))
+        || line.starts_with("--")
 }
 
 fn parse_line_hint(description: &str) -> Option<usize> {

@@ -25,6 +25,26 @@ pub struct RSIState {
     pub max_consecutive_failures: usize,
 }
 
+/// What one improvement cycle actually did.
+///
+/// `NoEligibleMutation` is deliberately NOT a failure. The cycle it replaces
+/// returned `Ok(false)`, which `run_loop` counted toward the circuit breaker —
+/// so a run in which nothing was ever attempted reported "N consecutive
+/// failures" and stopped on a breaker that had never fired. With the category
+/// cooldown persisted, that misreport could repeat across restarts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CycleOutcome {
+    /// A mutation was evaluated on the paid suites and improved fitness; the
+    /// failure counter resets.
+    Improved,
+    /// A mutation was attempted and did not improve fitness. Counts toward the
+    /// circuit breaker.
+    NotImproved,
+    /// Nothing was attempted: there was no target, or none with a mutation that
+    /// can reach evaluation. Not a failure.
+    NoEligibleMutation,
+}
+
 /// The outer loop for Recursive Self-Improvement
 pub struct RSIOrchestrator {
     edit_orchestrator: SelfEditOrchestrator,
@@ -234,16 +254,28 @@ impl RSIOrchestrator {
 
             let cycle_result = self.execute_improvement_cycle().await;
             match cycle_result {
-                Ok(true) => {
+                Ok(CycleOutcome::Improved) => {
                     info!("Improvement cycle succeeded and was integrated.");
                     self.consecutive_failures = 0;
                 }
-                Ok(false) => {
+                Ok(CycleOutcome::NotImproved) => {
                     info!("Improvement cycle did not yield a better fitness score. Changes discarded.");
                     // Non-improving cycles count toward the circuit breaker
                     // (see record_cycle_failure); a genuine improvement is
                     // the only thing that resets it.
                     self.record_cycle_failure(iteration)?;
+                }
+                Ok(CycleOutcome::NoEligibleMutation) => {
+                    // Nothing was attempted, so there is no failure to count,
+                    // and no point continuing: the scan is deterministic, so
+                    // the next cycle would find the same empty set.
+                    warn!(
+                        "RSI loop stopped: no eligible improvement target — no candidate has a \
+                         mutation that can reach evaluation. Nothing was attempted, so the \
+                         circuit breaker is not engaged."
+                    );
+                    self.is_running = false;
+                    break;
                 }
                 Err(SelfwareError::Safety(crate::errors::SafetyError::KillswitchActive {
                     reason,
@@ -310,8 +342,12 @@ impl RSIOrchestrator {
         }
     }
 
-    /// Executes a single plan -> act -> verify -> reflect cycle
-    async fn execute_improvement_cycle(&mut self) -> Result<bool> {
+    /// Executes a single plan -> act -> verify -> reflect cycle.
+    ///
+    /// Returns what the cycle actually did — see [`CycleOutcome`]. A cycle that
+    /// attempts nothing is reported as [`CycleOutcome::NoEligibleMutation`], not
+    /// as a failure.
+    async fn execute_improvement_cycle(&mut self) -> Result<CycleOutcome> {
         info!("Beginning new improvement cycle");
 
         // Fail-closed killswitch check before starting cycle
@@ -343,7 +379,7 @@ impl RSIOrchestrator {
         let mut targets = self.edit_orchestrator.analyze_self();
         if targets.is_empty() {
             info!("No improvement targets found in this cycle.");
-            return Ok(false);
+            return Ok(CycleOutcome::NoEligibleMutation);
         }
 
         // Re-weight target priorities using meta-learned category weights
@@ -361,8 +397,12 @@ impl RSIOrchestrator {
 
         // Pick highest priority target that has a concrete mutation strategy.
         let Some(target) = self.edit_orchestrator.select_target(&targets).cloned() else {
-            info!("No supported improvement targets found in this cycle.");
-            return Ok(false);
+            info!(
+                "No supported improvement targets found in this cycle ({} candidate(s), none \
+                 with a mutation that can reach evaluation).",
+                targets.len()
+            );
+            return Ok(CycleOutcome::NoEligibleMutation);
         };
         info!("Selected improvement target: {:?}", target);
 
@@ -399,7 +439,7 @@ impl RSIOrchestrator {
             )
             .await?;
             sandbox.cleanup()?;
-            return Ok(false);
+            return Ok(CycleOutcome::NoEligibleMutation);
         }
 
         // 5. Verify compilation and tests in sandbox (local, no paid suites)
@@ -419,7 +459,7 @@ impl RSIOrchestrator {
             )
             .await?;
             sandbox.cleanup()?;
-            return Ok(false);
+            return Ok(CycleOutcome::NotImproved);
         }
 
         // 6. Measure Baseline Fitness (PAID suite #1) — deferred until the
@@ -450,7 +490,7 @@ impl RSIOrchestrator {
             )
             .await?;
             sandbox.cleanup()?;
-            return Ok(false);
+            return Ok(CycleOutcome::NotImproved);
         }
 
         // 7c. Evaluate
@@ -471,7 +511,7 @@ impl RSIOrchestrator {
                 crate::cognitive::self_edit::ProposalStatus::EvaluatedSuccess,
             )
             .await?;
-            Ok(true)
+            Ok(CycleOutcome::Improved)
         } else {
             info!(
                 "Mutation degraded or did not improve fitness ({} <= {}). Rolling back.",
@@ -487,7 +527,7 @@ impl RSIOrchestrator {
             )
             .await?;
             sandbox.cleanup()?;
-            Ok(false)
+            Ok(CycleOutcome::NotImproved)
         }
     }
 
@@ -957,16 +997,13 @@ fn mutation_is_trivial(project_root: &Path, sandbox_dir: &Path, edited_files: &[
 /// The content lines of `content` with blank lines and whole-line comments
 /// removed — see [`mutation_is_trivial`] for the exact stripping rules.
 fn code_lines(content: &str, strip_hash: bool, strip_asterisk: bool) -> Vec<&str> {
+    // Delegates to the shared predicate so this gate and the target scanner in
+    // `self_edit::scan_code_quality` cannot drift apart on what counts as code.
     content
         .lines()
         .map(str::trim)
         .filter(|line| {
-            !(line.is_empty()
-                || line.starts_with("//")
-                || (strip_hash && line.starts_with('#'))
-                || line.starts_with("/*")
-                || (strip_asterisk && line.starts_with('*'))
-                || line.starts_with("--"))
+            !crate::cognitive::self_edit::line_is_non_code(line, strip_hash, strip_asterisk)
         })
         .collect()
 }

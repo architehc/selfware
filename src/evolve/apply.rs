@@ -332,6 +332,18 @@ pub fn verify_staged_diff(
 /// (`kill_on_drop` + dropping the future on timeout).
 const CARGO_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// Wall-clock ceiling on one staged apply run (spawn → exit). The child is an
+/// agentic `selfware run`, so this is deliberately generous; it exists so a hung
+/// child can never hold [`APPLY_LOCK`] forever and block every later apply
+/// request. The compile gate's own timeout only starts once the child exits, so
+/// it cannot bound the run itself.
+const STAGED_RUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1800);
+
+/// How long to keep draining a run's output pipes after the child exited or was
+/// killed, before abandoning the drain. A descendant that inherited a pipe can
+/// hold it open indefinitely, and the drain must not outlive the bound above.
+const PIPE_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Cap on the cargo stderr excerpt stored in a `compile_failed` rejection, so
 /// the status endpoint stays cheap even for verbose compiler output.
 const MAX_COMPILE_STDERR: usize = 2 * 1024;
@@ -698,6 +710,11 @@ pub async fn spawn(
         .current_dir(&staged.shadow_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Own process group: `selfware run` spawns cargo/rustc, and the wall-clock
+    // ceiling below has to be able to kill the whole tree — killing only the
+    // direct child leaves compilers holding target/ locks for later runs.
+    #[cfg(unix)]
+    command.process_group(0);
     // The shadow worktree contains only TRACKED files — a gitignored repo
     // selfware.toml (holding endpoint/model/api_key) is absent and the child
     // would 401. Point it at the project's real config via the override env
@@ -746,11 +763,53 @@ pub async fn spawn(
     tokio::spawn(async move {
         // Hold the apply lock across the whole staged run (spawn → exit).
         let _guard = staged.guard;
-        tokio::join!(
-            pump_pipe(stdout, reg.clone(), rid.clone()),
-            pump_pipe(stderr, reg.clone(), rid.clone()),
-        );
-        let code = child.wait().await.ok().and_then(|s| s.code());
+        // Drain each pipe in its own task instead of inline: a descendant that
+        // inherited a pipe keeps it open past the child's exit, so an inline
+        // read would never see EOF and would hold APPLY_LOCK — the one-use
+        // merge endpoint — until the straggler died.
+        let mut stdout_task = tokio::spawn(pump_pipe(stdout, reg.clone(), rid.clone()));
+        let mut stderr_task = tokio::spawn(pump_pipe(stderr, reg.clone(), rid.clone()));
+
+        // Bound the run itself. The compile gate's timeout starts only after
+        // the child exits, so nothing else caps a child that hangs.
+        let (code, timed_out) = match tokio::time::timeout(STAGED_RUN_TIMEOUT, child.wait()).await {
+            Ok(Ok(status)) => (status.code(), false),
+            Ok(Err(_)) => (None, false),
+            Err(_) => {
+                // Signal the whole process group so descendants die with it,
+                // then reap the direct child.
+                #[cfg(unix)]
+                if let Some(pid) = child.id() {
+                    use nix::sys::signal::{killpg, Signal};
+                    use nix::unistd::Pid;
+                    let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
+                }
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                (None, true)
+            }
+        };
+
+        // Bounded drain: the kill closes the pipes, so both readers finish. If a
+        // straggler still holds one, abandon the drain rather than the lock.
+        let drain = async {
+            let _ = (&mut stdout_task).await;
+            let _ = (&mut stderr_task).await;
+        };
+        if tokio::time::timeout(PIPE_DRAIN_GRACE, drain).await.is_err() {
+            stdout_task.abort();
+            stderr_task.abort();
+            tracing::warn!(
+                "staged apply run {rid}: output pipes stayed open after the child exited; \
+                 abandoning the drain rather than holding the apply lock"
+            );
+        }
+        if timed_out {
+            tracing::warn!(
+                "staged apply run {rid}: no exit within {}s; killed its process group",
+                STAGED_RUN_TIMEOUT.as_secs()
+            );
+        }
         // Verify successful runs BEFORE taking the registry lock (diff scope
         // check + compile gate can take minutes and must not block status
         // polling): clean verified diffs become Staged, typed rejections

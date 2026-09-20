@@ -135,3 +135,66 @@ async fn test_concurrency_governor_16_slot_server_cap_queues_17th() {
         tokio::time::timeout(std::time::Duration::from_millis(50), gov.acquire_stream()).await;
     assert!(p17.is_ok(), "17th stream acquires once a permit frees up");
 }
+
+/// A backlog of stream requesters must not consume the global budget, or the
+/// tool category starves while its own semaphore sits completely idle.
+///
+/// This pins the acquisition order: with global-first, each parked stream
+/// waiter holds a global permit, so `max_global` exhausts on *waiters* and an
+/// `acquire_tool` that has tool slots to spare queues behind a stream that has
+/// not even started. Category-first is what makes the global limit a ceiling
+/// on admitted work rather than a reservation parked on by whoever queued.
+#[tokio::test]
+async fn test_stream_waiters_do_not_starve_the_tool_category() {
+    let gov = std::sync::Arc::new(ConcurrencyGovernor::new(2, 8, 4));
+
+    // Saturate the two stream slots.
+    let mut held = Vec::new();
+    for _ in 0..2 {
+        held.push(gov.acquire_stream().await.expect("stream slot must exist"));
+    }
+    assert_eq!(gov.stats().global_available, 2);
+
+    // Two more stream requesters park on the stream semaphore.
+    let mut waiters = Vec::new();
+    for _ in 0..2 {
+        let g = std::sync::Arc::clone(&gov);
+        waiters.push(tokio::spawn(async move {
+            let _permit = g
+                .acquire_stream()
+                .await
+                .expect("waiter must eventually acquire");
+        }));
+    }
+    // Let the spawned tasks reach their await point before inspecting.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    assert_eq!(
+        gov.stats().streams_available,
+        0,
+        "both stream slots must still be held"
+    );
+    assert_eq!(
+        gov.stats().global_available,
+        2,
+        "parked stream waiters must not hold a global permit"
+    );
+    assert_eq!(
+        gov.stats().tools_available,
+        8,
+        "the tool pool is untouched by the stream backlog"
+    );
+
+    // The tool category is reachable despite the stream backlog.
+    let tool = tokio::time::timeout(std::time::Duration::from_millis(50), gov.acquire_tool()).await;
+    assert!(
+        tool.is_ok(),
+        "tool acquisition must not queue behind parked stream waiters"
+    );
+
+    drop(tool);
+    drop(held);
+    for waiter in waiters {
+        waiter.await.expect("stream waiter task must not panic");
+    }
+}

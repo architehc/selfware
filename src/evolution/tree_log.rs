@@ -248,12 +248,47 @@ pub enum TreeLogError {
     InsufficientBranchesForHeldOut(usize),
     #[error("Tree has orphaned node '{node_id}' referencing missing parent '{parent_id}'")]
     OrphanedNode { node_id: String, parent_id: String },
+    #[error("Tree has cyclic ancestry at node '{node_id}' (a parent chain revisits itself)")]
+    CyclicAncestry { node_id: String },
     #[error("Insufficient independent ancestry groups for held-out validation: {0} group(s) found (minimum 2 required)")]
     InsufficientAncestryGroupsForHeldOut(usize),
     #[error("Attempts log file not found: {0}")]
     LogFileNotFound(String),
     #[error("Node '{0}' not found in attempts log")]
     NodeNotFound(String),
+}
+
+/// Ceiling on how far an ancestry walk follows `parent_id` before giving up, so
+/// an unbounded acyclic chain cannot spin a walker. Shared by every ancestry
+/// walker in the crate — see [`guarded_ancestry_depth`].
+pub const MAX_ANCESTRY_DEPTH: usize = 256;
+
+/// Depth of `start_id` within its branch, following `parent_of` up to the first
+/// root.
+///
+/// The single guarded implementation behind the daemon and replay depth walks.
+/// Both used to inline this loop with no cycle protection, so a `parent_id`
+/// chain that revisited itself (a self-parent record, or A→B→A from an
+/// interrupted re-baseline or a hand-merged log) spun the calling thread at
+/// 100% CPU — while the sibling walkers in this module carried a visited set,
+/// which is what made it a bug *class* rather than one bug. A cycle now stops
+/// the walk, and [`MAX_ANCESTRY_DEPTH`] stops an unbounded chain.
+pub fn guarded_ancestry_depth<F>(start_id: &str, parent_of: F) -> usize
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let mut seen = HashSet::new();
+    seen.insert(start_id.to_string());
+    let mut depth = 0usize;
+    let mut curr = parent_of(start_id);
+    while let Some(pid) = curr {
+        if !seen.insert(pid.clone()) || depth >= MAX_ANCESTRY_DEPTH {
+            break;
+        }
+        depth += 1;
+        curr = parent_of(&pid);
+    }
+    depth
 }
 
 /// In-memory indexed collection of evolutionary attempts forming a tree/forest.
@@ -389,8 +424,9 @@ impl AttemptTree {
         self.id_to_index.contains_key(id)
     }
 
-    /// Validates that every non-root node in the tree has its parent present in the tree.
-    /// Fails closed if any node is orphaned.
+    /// Validates that every non-root node in the tree has its parent present in
+    /// the tree, and that no parent chain revisits itself.
+    /// Fails closed if any node is orphaned or cyclic.
     pub fn validate_ancestry(&self) -> Result<(), TreeLogError> {
         for node in &self.nodes {
             if let Some(ref pid) = node.parent_id {
@@ -400,6 +436,30 @@ impl AttemptTree {
                         parent_id: pid.clone(),
                     });
                 }
+            }
+            // Presence alone is not enough: a chain whose parents all exist can
+            // still loop forever (a self-parent record, or A→B→A). Reject it
+            // here so the depth walkers — which carry the same guard — never
+            // have to see one.
+            let mut seen = HashSet::new();
+            seen.insert(node.id.clone());
+            let mut curr = node.parent_id.clone();
+            let mut steps = 0;
+            while let Some(pid) = curr {
+                if !seen.insert(pid.clone()) {
+                    return Err(TreeLogError::CyclicAncestry {
+                        node_id: node.id.clone(),
+                    });
+                }
+                steps += 1;
+                if steps >= MAX_ANCESTRY_DEPTH {
+                    break;
+                }
+                curr = self
+                    .id_to_index
+                    .get(&pid)
+                    .map(|&idx| self.nodes[idx].parent_id.clone())
+                    .unwrap_or(None);
             }
         }
         Ok(())

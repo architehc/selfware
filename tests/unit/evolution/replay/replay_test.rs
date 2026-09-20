@@ -3,7 +3,8 @@ use crate::evolution::policy::{
     BreadthFirstPolicy, FixedPopulationPolicy, ParetoAdaptivePolicy, RefineTop1Policy,
 };
 use crate::evolution::tree_log::{
-    compute_sha256, AttemptNode, AttemptStatus, FailureClass, TreeLogError,
+    compute_sha256, guarded_ancestry_depth, AttemptNode, AttemptStatus, FailureClass, TreeLogError,
+    MAX_ANCESTRY_DEPTH,
 };
 
 fn make_node(
@@ -534,6 +535,103 @@ fn test_validation_set_with_reachable_root_and_orphaned_child_fails_closed() {
         res,
         Err(ReplayError::ValidationSetEmptyOrUnreachable(msg)) if msg.contains("missing_parent_id")
     ));
+}
+
+/// A parent chain that revisits itself must be rejected, not walked forever.
+///
+/// `has_node` alone cannot see it: every parent in a self-parent (or A→B→A)
+/// chain is present, so ancestry validation used to pass and the unguarded
+/// depth walkers in `replay`/`daemon` then spun at 100% CPU.
+#[test]
+fn test_validate_ancestry_rejects_self_parent() {
+    let mut tree = AttemptTree::new();
+    tree.add_node(make_node(
+        "self_parent",
+        Some("self_parent"),
+        "branch_a",
+        Some(0.70),
+        AttemptStatus::Evaluated,
+        None,
+    ))
+    .unwrap();
+
+    assert!(matches!(
+        tree.validate_ancestry(),
+        Err(TreeLogError::CyclicAncestry { ref node_id }) if node_id == "self_parent"
+    ));
+}
+
+#[test]
+fn test_validate_ancestry_rejects_multi_node_cycle_alongside_legal_root() {
+    let mut tree = AttemptTree::new();
+    tree.add_node(make_node(
+        "legal_root",
+        None,
+        "branch_a",
+        Some(0.60),
+        AttemptStatus::Evaluated,
+        None,
+    ))
+    .unwrap();
+    tree.add_node(make_node(
+        "cycle_a",
+        Some("cycle_b"),
+        "branch_b",
+        Some(0.70),
+        AttemptStatus::Evaluated,
+        None,
+    ))
+    .unwrap();
+    tree.add_node(make_node(
+        "cycle_b",
+        Some("cycle_a"),
+        "branch_b",
+        Some(0.75),
+        AttemptStatus::Evaluated,
+        None,
+    ))
+    .unwrap();
+
+    assert!(
+        matches!(
+            tree.validate_ancestry(),
+            Err(TreeLogError::CyclicAncestry { .. })
+        ),
+        "A→B→A must be rejected even when a legal root is also present"
+    );
+}
+
+/// The shared walker terminates on every malformed shape and still reports the
+/// true depth for a legal chain.
+#[test]
+fn test_guarded_ancestry_depth_terminates_on_cycles_and_ceiling() {
+    // Self-parent: stops at the repeat instead of spinning.
+    let self_parent = |_pid: &str| Some("n0".to_string());
+    assert_eq!(guarded_ancestry_depth("n0", self_parent), 0);
+
+    // A→B→A: stops at the first revisit.
+    let two_cycle = |pid: &str| match pid {
+        "a" => Some("b".to_string()),
+        "b" => Some("a".to_string()),
+        _ => None,
+    };
+    assert!(guarded_ancestry_depth("a", two_cycle) <= 2);
+
+    // A legal chain still reports its true depth.
+    let chain = |pid: &str| match pid {
+        "leaf" => Some("mid".to_string()),
+        "mid" => Some("root".to_string()),
+        _ => None,
+    };
+    assert_eq!(guarded_ancestry_depth("leaf", chain), 2);
+    assert_eq!(guarded_ancestry_depth("root", chain), 0);
+
+    // An unbounded acyclic chain is cut at the ceiling.
+    let endless = |pid: &str| {
+        let n: usize = pid.trim_start_matches('n').parse().unwrap_or(0);
+        Some(format!("n{}", n + 1))
+    };
+    assert_eq!(guarded_ancestry_depth("n0", endless), MAX_ANCESTRY_DEPTH);
 }
 
 fn dummy_eval(name: &str, obj1: f64, obj2: f64) -> MultiTreeEvaluation {

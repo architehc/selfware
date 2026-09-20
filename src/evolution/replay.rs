@@ -956,13 +956,11 @@ impl ReplaySimulator {
 
                 let delta_vs_baseline = node.composite_score.map(|s| s - baseline_score);
 
-                // Calculate depth within branch based on parent chain
-                let mut depth = 0;
-                let mut curr_pid = node.parent_id.clone();
-                while let Some(pid) = curr_pid {
-                    depth += 1;
-                    curr_pid = self.tree.get(&pid).and_then(|p| p.parent_id.clone());
-                }
+                // Depth within the branch, via the shared guarded walker: a cyclic
+                // parent chain must terminate rather than spin.
+                let depth = crate::evolution::tree_log::guarded_ancestry_depth(&node.id, |pid| {
+                    self.tree.get(pid).and_then(|p| p.parent_id.clone())
+                });
 
                 observations.push(PrefixObservation {
                     id: node.id.clone(),

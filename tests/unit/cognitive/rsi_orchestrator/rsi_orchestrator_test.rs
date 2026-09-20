@@ -572,8 +572,12 @@ async fn test_execute_improvement_cycle_applies_mutation_and_records_result() {
     let history_path = project_root.join(".selfware/history.json");
     let mut orch = RSIOrchestrator::with_paths(project_root.clone(), state_path, history_path);
 
-    let improved = orch.execute_improvement_cycle().await.unwrap();
-    assert!(improved, "RSI cycle should merge an improving mutation");
+    let outcome = orch.execute_improvement_cycle().await.unwrap();
+    assert_eq!(
+        outcome,
+        CycleOutcome::Improved,
+        "RSI cycle should merge an improving mutation"
+    );
 
     let content = fs::read_to_string(project_root.join("src/lib.rs")).unwrap();
     assert!(content.contains("Resolved: remove this marker"));
@@ -585,9 +589,12 @@ async fn test_execute_improvement_cycle_applies_mutation_and_records_result() {
     assert!(history[0].effectiveness_score > 0.0);
 }
 
-/// A whole-line TODO comment rewrite is a TRIVIAL mutation: the cycle
-/// must skip the paid e2e evaluation entirely (no results.tsv produced),
-/// return Ok(false), and record the attempt as rolled-back/unverified.
+/// A whole-line TODO comment rewrite cannot change code, so it must never be
+/// proposed in the first place: `scan_code_quality` skips comment-only markers,
+/// so the cycle reports `NoEligibleMutation` rather than counting a failure, and
+/// no paid e2e evaluation runs (no results.tsv produced). The trivial-mutation
+/// gate that would also catch it is covered directly by the `mutation_is_trivial`
+/// unit tests above.
 #[cfg(unix)]
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
@@ -613,10 +620,15 @@ mod tests {
     let history_path = project_root.join(".selfware/history.json");
     let mut orch = RSIOrchestrator::with_paths(project_root.clone(), state_path, history_path);
 
-    let improved = orch.execute_improvement_cycle().await.unwrap();
-    assert!(!improved, "trivial comment mutation must not be merged");
+    let outcome = orch.execute_improvement_cycle().await.unwrap();
+    assert_eq!(
+        outcome,
+        CycleOutcome::NoEligibleMutation,
+        "a comment-only marker must not be proposed as a mutation"
+    );
 
-    // The TODO rewrite happened only in the (now cleaned) sandbox.
+    // The marker is untouched: the target was never selected, so no mutation
+    // was applied anywhere.
     let content = fs::read_to_string(project_root.join("src/lib.rs")).unwrap();
     assert!(content.contains("// TODO: remove this marker"));
 
@@ -633,10 +645,12 @@ mod tests {
         );
     }
 
-    let history = orch.edit_orchestrator.history();
-    assert_eq!(history.len(), 1);
-    assert!(!history[0].verified);
-    assert!(history[0].rolled_back);
+    // Nothing was attempted, so there is no attempt to record — the cycle
+    // reports NoEligibleMutation rather than a borrowed failure.
+    assert!(
+        orch.edit_orchestrator.history().is_empty(),
+        "a cycle that selects no target must not record an attempt"
+    );
 }
 
 /// Helper: replicates the TSV score-parsing logic from run_benchmark_and_get_score.

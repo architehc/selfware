@@ -911,13 +911,12 @@ pub fn decide_next_search_action(
 
         let delta_vs_baseline = node.composite_score.map(|s| s - baseline_score);
 
-        // Calculate depth within branch based on parent chain (matches replay.rs)
-        let mut depth = 0;
-        let mut curr_pid = node.parent_id.clone();
-        while let Some(ref pid) = curr_pid {
-            depth += 1;
-            curr_pid = id_to_node.get(pid).and_then(|p| p.parent_id.clone());
-        }
+        // Depth within the branch, via the shared guarded walker (matches
+        // replay.rs): a cyclic parent_id chain (self-parent, or A→B→A from a
+        // hand-merged log) must not spin this loop at 100% CPU per generation.
+        let depth = crate::evolution::tree_log::guarded_ancestry_depth(&node.id, |pid| {
+            id_to_node.get(pid).and_then(|p| p.parent_id.clone())
+        });
 
         observations.push(PrefixObservation {
             id: node.id.clone(),

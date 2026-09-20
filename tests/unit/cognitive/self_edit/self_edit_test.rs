@@ -1,5 +1,15 @@
 use super::*;
 
+/// Unix seconds, so a record can be stamped as a *recent* failure. The cooldown
+/// ages on the wall clock, so a hard-coded timestamp like `100` reads as decades
+/// old and is correctly treated as already expired.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock must be after the epoch")
+        .as_secs()
+}
+
 #[test]
 fn test_improvement_target_new() {
     let target = ImprovementTarget::new(
@@ -94,11 +104,11 @@ fn test_recently_failed_categories_ignores_skipped_trivial() {
         verified: false,
         rolled_back: true,
         effectiveness_score: -1.0,
-        completed_at: 100,
+        completed_at: now_secs(),
         status: ProposalStatus::SkippedTrivial,
     };
     orchestrator.history.push(trivial_record);
-    let failed = orchestrator.recently_failed_categories(5);
+    let failed = orchestrator.recently_failed_categories(FAILURE_COOLDOWN_SECS);
     assert!(
         failed.is_empty(),
         "SkippedTrivial must be neutral and never penalized as a failed category"
@@ -114,11 +124,11 @@ fn test_recently_failed_categories_ignores_skipped_trivial() {
         verified: false,
         rolled_back: true,
         effectiveness_score: -0.5,
-        completed_at: 101,
+        completed_at: now_secs(),
         status: ProposalStatus::EvaluatedRegression,
     };
     orchestrator.history.push(regressed_record);
-    let failed = orchestrator.recently_failed_categories(5);
+    let failed = orchestrator.recently_failed_categories(FAILURE_COOLDOWN_SECS);
     assert_eq!(failed, vec![ImprovementCategory::ErrorHandling]);
 }
 
@@ -354,7 +364,7 @@ fn test_analyze_self_on_temp_dir_with_todo() {
     std::fs::create_dir_all(&src).unwrap();
     std::fs::write(
         src.join("example.rs"),
-        "fn main() {\n    // TODO: fix this\n}\n",
+        "fn main() {\n    let port = 8080; // TODO: fix this\n}\n",
     )
     .unwrap();
 
@@ -382,7 +392,14 @@ fn test_analyze_self_filters_low_confidence() {
     let tmp = std::env::temp_dir().join("selfware_test_analyze_conf");
     let src = tmp.join("src");
     std::fs::create_dir_all(&src).unwrap();
-    std::fs::write(src.join("a.rs"), "// FIXME: broken\n").unwrap();
+    // The marker shares its line with code — a whole-line comment marker is
+    // deliberately not a target (its rewrite is a comment-only diff, which the
+    // trivial-mutation gate discards before evaluation).
+    std::fs::write(
+        src.join("a.rs"),
+        "const LIMIT: usize = 3; // FIXME: broken\n",
+    )
+    .unwrap();
 
     let orchestrator = SelfEditOrchestrator::new(tmp.clone());
     let targets = orchestrator.analyze_self();
@@ -469,15 +486,99 @@ fn test_recently_failed_categories_cooldown() {
         verified: false,
         rolled_back: true,
         effectiveness_score: -0.3,
-        completed_at: 0,
+        completed_at: now_secs(),
         status: ProposalStatus::VerificationFailed,
     };
     orchestrator.record_result(record).unwrap();
 
-    let failed = orchestrator.recently_failed_categories(5);
+    let failed = orchestrator.recently_failed_categories(FAILURE_COOLDOWN_SECS);
     assert!(failed.contains(&ImprovementCategory::PromptTemplate));
 
     std::fs::remove_dir_all(&tmp).ok();
+}
+
+/// The cooldown must expire on the wall clock, not on the arrival of new
+/// records.
+///
+/// A record-count window can never age out its own blocker: a cycle that finds
+/// nothing eligible appends no record, so the window never advances and the
+/// failed category stays excluded — and because the history is persisted, that
+/// block survived restarts. This is the starvation path that made RSI cycles
+/// spin on a category that could never become eligible again.
+#[test]
+fn test_cooldown_expires_by_age_without_new_records() {
+    let mut orchestrator = SelfEditOrchestrator::new(PathBuf::from("/tmp/selfware_test"));
+    orchestrator.history.clear();
+
+    let stale = ImprovementRecord {
+        target_id: "imp-stale".to_string(),
+        category: ImprovementCategory::CodeQuality,
+        description: "failed long ago".to_string(),
+        before_metrics: None,
+        after_metrics: None,
+        git_commits: vec![],
+        verified: false,
+        rolled_back: true,
+        effectiveness_score: -1.0,
+        completed_at: 1,
+        status: ProposalStatus::VerificationFailed,
+    };
+    orchestrator.history.push(stale.clone());
+
+    // No record is appended between these calls: the window must still advance.
+    let failed = orchestrator.recently_failed_categories(FAILURE_COOLDOWN_SECS);
+    assert!(
+        failed.is_empty(),
+        "an ancient failure must not block its category forever"
+    );
+
+    // The same record stamped now is inside the cooldown.
+    let mut fresh = stale;
+    fresh.completed_at = now_secs();
+    orchestrator.history.clear();
+    orchestrator.history.push(fresh);
+    let failed = orchestrator.recently_failed_categories(FAILURE_COOLDOWN_SECS);
+    assert!(failed.contains(&ImprovementCategory::CodeQuality));
+}
+
+/// A TODO/FIXME on a whole-line comment can only be rewritten as comment text,
+/// which the trivial-mutation gate discards before evaluation — so proposing it
+/// spends a cycle to learn nothing and leaves the target eligible again. The
+/// scanner must only propose markers that share their line with code, which is
+/// exactly the mutation the trivial gate keeps.
+#[test]
+fn test_scan_code_quality_skips_comment_only_markers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_root = tmp.path().to_path_buf();
+    let src_dir = project_root.join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::write(
+        src_dir.join("pipeline.rs"),
+        "pub fn run() -> usize {\n    // TODO: whole-line comment marker\n    let n = 42; // FIXME: inline marker shares its line with code\n    n\n}\n",
+    )
+    .unwrap();
+
+    let orchestrator = SelfEditOrchestrator::new(project_root);
+    let targets = orchestrator.scan_code_quality();
+
+    assert_eq!(
+        targets.len(),
+        1,
+        "only a code-line marker can reach evaluation; got: {:?}",
+        targets
+            .iter()
+            .map(|t| t.description.as_str())
+            .collect::<Vec<_>>()
+    );
+    let target = &targets[0];
+    assert!(
+        target.description.contains("inline marker"),
+        "the surviving target must be the code-line marker, got: {}",
+        target.description
+    );
+    // The invariant the scanner upholds: what it proposes is something the
+    // trivial gate will not throw away.
+    assert!(orchestrator.supports_target(target));
 }
 
 #[test]

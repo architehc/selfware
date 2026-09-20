@@ -8,13 +8,22 @@
 //! All permits are RAII guards that release automatically on drop.
 
 use std::sync::Arc;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// Governs concurrency across streaming, tool execution, and global operations.
 ///
 /// Uses three independent semaphore layers so that, for example, a burst of
 /// tool executions cannot starve streaming slots and vice-versa.  The global
 /// semaphore acts as an upper ceiling across both categories.
+///
+/// **The acquisition order is category-then-global, and that order is what
+/// makes the isolation above real.** A caller that takes the global permit
+/// first holds it while parked on its category semaphore, so a burst of stream
+/// requesters consumes the whole global budget with *waiters* and leaves a
+/// completely idle tool pool unreachable until a stream happens to finish.
+/// Taking the category permit first means only admitted operations ever hold a
+/// global permit, so the global limit behaves as a ceiling on inflight work
+/// rather than a reservation parked on by whoever queued first.
 pub struct ConcurrencyGovernor {
     /// Limits concurrent LLM streaming responses.
     stream_semaphore: Arc<Semaphore>,
@@ -70,12 +79,16 @@ impl ConcurrencyGovernor {
     ///
     /// Returns a [`ConcurrencyPermit`] that holds both a stream-level and a
     /// global-level permit.  Both are released when the permit is dropped.
+    ///
+    /// The stream permit is acquired first: a caller parked here holds no
+    /// global permit, so it cannot starve the tool category (see the ordering
+    /// note on [`ConcurrencyGovernor`]).
     pub async fn acquire_stream(&self) -> Result<ConcurrencyPermit, ConcurrencyError> {
-        let global = Arc::clone(&self.global_semaphore)
+        let stream = Arc::clone(&self.stream_semaphore)
             .acquire_owned()
             .await
             .map_err(|_| ConcurrencyError::SemaphoreClosed)?;
-        let stream = Arc::clone(&self.stream_semaphore)
+        let global = Arc::clone(&self.global_semaphore)
             .acquire_owned()
             .await
             .map_err(|_| ConcurrencyError::SemaphoreClosed)?;
@@ -89,12 +102,15 @@ impl ConcurrencyGovernor {
     ///
     /// Returns a [`ConcurrencyPermit`] that holds both a tool-level and a
     /// global-level permit.  Both are released when the permit is dropped.
+    ///
+    /// The tool permit is acquired first, for the same reason as
+    /// [`Self::acquire_stream`].
     pub async fn acquire_tool(&self) -> Result<ConcurrencyPermit, ConcurrencyError> {
-        let global = Arc::clone(&self.global_semaphore)
+        let tool = Arc::clone(&self.tool_semaphore)
             .acquire_owned()
             .await
             .map_err(|_| ConcurrencyError::SemaphoreClosed)?;
-        let tool = Arc::clone(&self.tool_semaphore)
+        let global = Arc::clone(&self.global_semaphore)
             .acquire_owned()
             .await
             .map_err(|_| ConcurrencyError::SemaphoreClosed)?;
@@ -107,24 +123,20 @@ impl ConcurrencyGovernor {
     /// Try to acquire a tool execution permit without blocking.
     ///
     /// Returns `None` if all tool or global permits are currently held.
+    ///
+    /// Category first, then global — and the category permit is dropped again
+    /// when the global ceiling rejects the request, so a failed try never
+    /// leaks a tool slot (the global limit still bounds this path, which
+    /// `test_global_limit_caps_total_operations` pins).
     pub fn try_acquire_tool(&self) -> Option<ConcurrencyPermit> {
-        let global = Arc::clone(&self.global_semaphore)
-            .try_acquire_owned()
-            .ok()?;
-        match Arc::clone(&self.tool_semaphore).try_acquire_owned() {
-            Ok(tool) => Some(ConcurrencyPermit {
+        let tool = Arc::clone(&self.tool_semaphore).try_acquire_owned().ok()?;
+        match Arc::clone(&self.global_semaphore).try_acquire_owned() {
+            Ok(global) => Some(ConcurrencyPermit {
                 _category: tool,
                 _global: global,
             }),
-            Err(TryAcquireError::NoPermits) => {
-                // Release global permit before returning None
-                drop(global);
-                None
-            }
-            Err(TryAcquireError::Closed) => {
-                drop(global);
-                None
-            }
+            // `tool` drops here, releasing the category permit.
+            Err(_) => None,
         }
     }
 
