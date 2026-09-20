@@ -33,6 +33,13 @@ impl Agent {
         let mut plan_meta = crate::api::types::ChatMetadata::default();
         // Use streaming for planning so the user sees progress and can cancel.
         // Non-streaming blocks silently for 60+ seconds while the model thinks.
+        //
+        // Streaming renders reasoning deltas as they arrive (streaming.rs); the
+        // non-streaming arms render nothing. Track which one ran so the
+        // assembled block below is only printed when nothing streamed it —
+        // printing it after a streamed turn put the whole chain of thought in
+        // the transcript twice.
+        let mut reasoning_streamed = false;
         let assistant_msg = if self.config.agent.streaming {
             match self
                 .chat_streaming(
@@ -43,14 +50,17 @@ impl Agent {
                 )
                 .await
             {
-                Ok((content, reasoning, tool_calls)) => crate::api::types::Message {
-                    role: "assistant".to_string(),
-                    content: content.into(),
-                    reasoning_content: reasoning,
-                    tool_calls,
-                    tool_call_id: None,
-                    name: None,
-                },
+                Ok((content, reasoning, tool_calls)) => {
+                    reasoning_streamed = true;
+                    crate::api::types::Message {
+                        role: "assistant".to_string(),
+                        content: content.into(),
+                        reasoning_content: reasoning,
+                        tool_calls,
+                        tool_call_id: None,
+                        name: None,
+                    }
+                }
                 Err(e) => {
                     // A streaming failure that a non-streaming retry could
                     // plausibly survive must fall back here too. Planning was
@@ -192,8 +202,11 @@ impl Agent {
                 reasoning.len(),
                 reasoning
             );
-            if let Some(r) = &assistant_msg.reasoning_content {
-                output::thinking(r, false);
+            // A streamed turn already showed these deltas live, so printing the
+            // assembled block again duplicated the entire chain of thought.
+            // Only the non-streaming paths need it.
+            if !reasoning_streamed {
+                output::thinking(reasoning, false);
             }
         }
 
@@ -328,6 +341,42 @@ impl Agent {
     pub(super) async fn planning_answer_ready_to_finalize(&mut self) -> Option<String> {
         if self.plan_mode || self.current_task_requires_mutation() {
             return None;
+        }
+        // Read-only alone is not enough to demand grounding: a general-knowledge
+        // answer ("explain how a hash map works") is still accepted from the
+        // planning turn in one request. The gate applies when the task asks
+        // about THIS workspace's code, where an answer produced without opening
+        // anything came from the prompt rather than from the code.
+        if self.current_task_is_read_only() && self.total_tool_call_count() == 0 {
+            let project_name = super::current_project_root()
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_string();
+            if super::task_policy::task_references_project_code(
+                self.task_context_for_classification(),
+                &project_name,
+            ) {
+                const UNGROUNDED_REASON: &str = "read-only report without any read";
+                let already_asked = self
+                    .messages
+                    .iter()
+                    .any(|m| m.content.text().contains(UNGROUNDED_REASON));
+                if !already_asked {
+                    self.messages.push(crate::api::types::Message::system(
+                        super::task_policy::policy_envelope(
+                            super::task_policy::PolicyKind::Gate,
+                            true,
+                            UNGROUNDED_REASON,
+                            "This is a read-only report about this workspace, but nothing has \
+                             been read yet. Read the relevant files with your tools first and \
+                             cite file:line from what you actually opened, then deliver the \
+                             report.",
+                        ),
+                    ));
+                }
+                return None;
+            }
         }
         // The planning response is the assistant message plan() just pushed.
         let content = self

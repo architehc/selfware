@@ -108,6 +108,61 @@ pub(crate) fn task_is_read_only(task_context: &str) -> bool {
     asks_for_report || forbids_editing
 }
 
+/// True when a task asks about *this* workspace's code, so an answer must be
+/// grounded in files the run actually opened rather than in the prompt.
+///
+/// Read-only classification alone is not enough to demand grounding: "Explain
+/// how a hash map works" is read-only and general knowledge, and its answer is
+/// deliberately accepted from the planning turn in a single request. A task
+/// that names the project, a path, a file extension, or a code artifact is
+/// asking about something this workspace contains — and answering that from the
+/// task text plus the injected census is how a "review" ends up citing
+/// file:line that nothing ever opened.
+///
+/// Deliberately lexical, like the classifiers it sits beside. The
+/// false-positive direction is cheap and safe (the run reads a file first); the
+/// false-negative direction preserves the single-request chat fast path.
+pub(crate) fn task_references_project_code(task_context: &str, project_name: &str) -> bool {
+    let lower = task_context.to_lowercase();
+    let project = project_name.trim().to_lowercase();
+    if !project.is_empty() && lower.contains(&project) {
+        return true;
+    }
+    // A path or a file extension names a concrete artifact.
+    if lower.contains('/') || lower.contains('\\') {
+        return true;
+    }
+    const CODE_EXTENSIONS: &[&str] = &[
+        ".rs", ".toml", ".json", ".yaml", ".yml", ".md", ".py", ".js", ".ts", ".sh", ".lock",
+    ];
+    if CODE_EXTENSIONS.iter().any(|ext| lower.contains(ext)) {
+        return true;
+    }
+    // Vocabulary that only makes sense when the question is about this code.
+    const CODE_WORDS: &[&str] = &[
+        "codebase",
+        "repo",
+        "repository",
+        "workspace",
+        "crate",
+        "module",
+        "source",
+        "the code",
+        "the implementation",
+        "src",
+        "cargo",
+        "function",
+        "struct",
+        "impl ",
+        "endpoint",
+        "parser",
+        "generator",
+        "harness",
+        "test suite",
+    ];
+    CODE_WORDS.iter().any(|word| lower.contains(word))
+}
+
 /// Structured policy envelope: prefix `body` with a single marker line.
 ///
 /// All injected guard/gate messages share this format so downstream
@@ -200,6 +255,42 @@ mod tests {
         ));
         assert!(!task_is_read_only(
             "Fix the parser bug; do not edit the config file."
+        ));
+    }
+
+    #[test]
+    fn project_code_reference_needs_the_workspace_not_just_a_report_verb() {
+        // The reported session: a review of this project that forbids writing
+        // code.
+        assert!(task_references_project_code(
+            "can you review the selfware core do not code",
+            "selfware"
+        ));
+        assert!(task_references_project_code(
+            "Review the code in src/agent/ and report findings.",
+            "selfware"
+        ));
+        assert!(task_references_project_code(
+            "Audit the parser module and write a report.",
+            "selfware"
+        ));
+    }
+
+    #[test]
+    fn general_knowledge_questions_do_not_reference_project_code() {
+        // These keep the single-request chat fast path: they are read-only
+        // reports about the world, not about this workspace.
+        assert!(!task_references_project_code(
+            "Explain how a hash map works",
+            "selfware"
+        ));
+        assert!(!task_references_project_code(
+            "Explain ownership in Rust",
+            "selfware"
+        ));
+        assert!(!task_references_project_code(
+            "Review the pros and cons of event sourcing",
+            "selfware"
         ));
     }
 

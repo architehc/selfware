@@ -954,7 +954,12 @@ impl Agent {
         // instantly kill an unattended run — retry a few times with backoff.
         const MAX_PLANNING_RETRIES: u32 = 3;
 
-        let mut progress = output::TaskProgress::new(&["Planning", "Executing"]);
+        // Phase names are discovered as the run proceeds rather than fixed up
+        // front: only planning is known before the first turn, and each
+        // execution step is appended when it is actually taken. A fixed
+        // plan/execute pair cannot represent a retry, an error recovery, or a
+        // run that needed nine steps instead of one.
+        let mut progress = output::TaskProgress::new(&["Planning"]);
         if mode == LoopMode::NewTask {
             progress.start_phase();
         }
@@ -1286,8 +1291,12 @@ impl Agent {
                         self.messages.push(Message::system(progress_msg));
                     }
                     if mode == LoopMode::NewTask {
-                        let step_progress = ((step + 1) as f64 * 0.1).min(0.9);
-                        progress.update_progress(step_progress);
+                        // One phase per executed step. The previous curve
+                        // ((step + 1) * 0.1) reported a fraction of a fixed
+                        // two-phase script, so it read "50%" for the first step
+                        // of a one-step run and never reflected the steps
+                        // actually taken.
+                        progress.begin_step(step);
                     }
                     // Phase-2 synthesis: if the model gathered data but can't
                     // produce a text answer, make a tool-free API call.
@@ -1518,6 +1527,13 @@ impl Agent {
                     });
                     cli_println!("{} {}", "⚠️ Recovering from error:".bright_red(), error);
 
+                    if mode == LoopMode::NewTask {
+                        // Recovery is real work, and it used to have no phase at
+                        // all — a run that spent several turns recovering looked
+                        // like it was still on its last step.
+                        progress.begin_phase("Recovery");
+                    }
+
                     // Hard terminal for recurring errors (any recovery branch).
                     consecutive_error_recoveries += 1;
                     if consecutive_error_recoveries >= MAX_CONSECUTIVE_ERROR_RECOVERIES {
@@ -1741,7 +1757,9 @@ impl Agent {
                 AgentState::Completed => {
                     record_state_transition("Executing", "Completed");
                     if mode == LoopMode::NewTask {
-                        progress.complete_phase();
+                        // Close any phase the run never explicitly completed, so
+                        // a successful run cannot be summarised as partly done.
+                        progress.finish_all();
                     }
                     self.finalize_natural_completion(task_description).await;
                     if let Err(e) = self.complete_checkpoint() {

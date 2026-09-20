@@ -835,3 +835,119 @@ async fn test_plan_step_call_site_preserves_reasoning_when_preserve_thinking_tru
     );
     server.stop().await;
 }
+
+/// The prompt from the reported chat session must classify as a read-only
+/// report — the grounding gate below keys off exactly this decision.
+#[test]
+fn test_review_with_do_not_code_is_classified_read_only() {
+    assert!(
+        crate::agent::task_policy::task_is_read_only(
+            "can you review the selfware core do not code"
+        ),
+        "a review task that forbids writing code must be classified read-only"
+    );
+}
+
+/// A read-only report produced during planning with no tool calls came from the
+/// prompt — the task text plus the injected input census — not from the code.
+/// It must not be finalized; the harness asks for the reading instead.
+#[tokio::test]
+async fn test_ungrounded_read_only_report_is_not_finalized() {
+    let config = mock_agent_config("http://127.0.0.1:1/v1".to_string(), false);
+    let mut agent = Agent::new(config).await.unwrap();
+    // The gate reads the stored task context, so wire it the way a real run
+    // does (see the task_runner gates test).
+    let task = "Review the codebase and report findings.";
+    agent.start_learning_session("gate-ungrounded", task);
+    agent.current_checkpoint = Some(TaskCheckpoint::new(
+        "gate-ungrounded".to_string(),
+        task.to_string(),
+    ));
+    agent.task_is_read_only = true;
+    agent.messages.push(Message::user(task));
+    agent.messages.push(Message::assistant(
+        "Here is my review of the codebase: the agent loop separates planning from \
+         execution, and the tool layer gates every call through the safety checker.",
+    ));
+
+    let ready = agent.planning_answer_ready_to_finalize().await;
+    assert!(
+        ready.is_none(),
+        "an ungrounded read-only report must not be finalized"
+    );
+    assert!(
+        agent.messages.iter().any(|m| m
+            .content
+            .text()
+            .contains("read-only report without any read")),
+        "the harness must ask for the reading at least once"
+    );
+}
+
+/// General-knowledge read-only reports keep the single-request planning fast
+/// path: they are not about this workspace's code, so nothing must be read
+/// first.
+#[tokio::test]
+async fn test_general_knowledge_read_only_answer_is_still_finalized() {
+    let config = mock_agent_config("http://127.0.0.1:1/v1".to_string(), false);
+    let mut agent = Agent::new(config).await.unwrap();
+    let task = "Explain how a hash map works";
+    agent.start_learning_session("gate-general", task);
+    agent.current_checkpoint = Some(TaskCheckpoint::new(
+        "gate-general".to_string(),
+        task.to_string(),
+    ));
+    agent.task_is_read_only = true;
+    agent.messages.push(Message::user(task));
+    agent.messages.push(Message::assistant(
+        "A hash map stores key-value pairs in buckets chosen by hashing the key, so \
+         lookups are O(1) on average.",
+    ));
+
+    assert!(
+        !agent.messages.iter().any(|m| m
+            .content
+            .text()
+            .contains("read-only report without any read")),
+        "a general-knowledge question must not be asked to read the workspace"
+    );
+    assert!(
+        agent.planning_answer_ready_to_finalize().await.is_some(),
+        "a general-knowledge read-only answer must still finalize in the planning turn"
+    );
+}
+
+/// The same answer is finalizable once the run has actually observed something,
+/// which is what makes the gate a grounding requirement rather than a blanket
+/// refusal of read-only planning answers.
+#[tokio::test]
+async fn test_grounded_read_only_report_is_finalizable() {
+    let config = mock_agent_config("http://127.0.0.1:1/v1".to_string(), false);
+    let mut agent = Agent::new(config).await.unwrap();
+    let task = "Review the codebase and report findings.";
+    agent.start_learning_session("gate-grounded", task);
+    agent.current_checkpoint = Some(TaskCheckpoint::new(
+        "gate-grounded".to_string(),
+        task.to_string(),
+    ));
+    agent.task_is_read_only = true;
+    agent.total_tool_call_count = 1;
+    agent.messages.push(Message::user(task));
+    agent.messages.push(Message::assistant(
+        "Here is my review of the codebase: the agent loop separates planning from \
+         execution, and the tool layer gates every call through the safety checker.",
+    ));
+
+    assert!(
+        !agent.messages.iter().any(|m| m
+            .content
+            .text()
+            .contains("read-only report without any read")),
+        "a grounded run must not be asked to read again"
+    );
+    let ready = agent.planning_answer_ready_to_finalize().await;
+    assert!(
+        ready.is_some(),
+        "a grounded read-only report should be finalizable during planning"
+    );
+}

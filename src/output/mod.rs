@@ -1132,7 +1132,13 @@ impl TaskProgress {
         }
     }
 
-    /// Update progress of current phase (0.0 to 1.0)
+    /// Update progress of the current phase (0.0 to 1.0)
+    ///
+    /// No production caller supplies a partial fraction any more: the display
+    /// derives progress from whole phases being completed, because nothing in
+    /// the loop actually knows how far through a step or a planning turn it is.
+    /// The setter is kept for the tests that pin clamping and per-phase display.
+    #[cfg(test)]
     pub(crate) fn update_progress(&mut self, progress: f64) {
         if self.current_phase < self.phases.len() {
             self.phases[self.current_phase].progress = progress.clamp(0.0, 1.0);
@@ -1162,6 +1168,83 @@ impl TaskProgress {
             self.phases[self.current_phase].status = PhaseStatus::Failed;
             self.print_progress();
         }
+    }
+
+    /// Append a discovered phase and make it the active one.
+    ///
+    /// Phases are discovered as a run proceeds — an execution step only exists
+    /// once it is taken — so the tracker grows instead of being fixed up front.
+    /// Two invariants keep this honest: at most one phase is Active at a time
+    /// (any still-active phase is completed first), and the timeline is
+    /// append-only, so `[n/N]` never visibly rewrites history.
+    ///
+    /// Re-entering the phase that is already active is a no-op, so retrying the
+    /// same step does not leave duplicate entries.
+    pub(crate) fn begin_phase(&mut self, name: &str) -> usize {
+        if let Some(current) = self.phases.get(self.current_phase) {
+            if current.name == name && current.status == PhaseStatus::Active {
+                return self.current_phase;
+            }
+        }
+        if let Some(current) = self.phases.get_mut(self.current_phase) {
+            if current.status == PhaseStatus::Active {
+                current.status = PhaseStatus::Completed;
+                current.progress = 1.0;
+            }
+        }
+        self.phases.push(ProgressPhase {
+            name: name.to_string(),
+            status: PhaseStatus::Active,
+            progress: 0.0,
+        });
+        self.current_phase = self.phases.len() - 1;
+        self.print_progress();
+        self.current_phase
+    }
+
+    /// Begin the phase for execution step `step` (0-based).
+    ///
+    /// Per-step phases are what make the display track the real run: a
+    /// plan/execute script flattened to two fixed phases cannot show that a
+    /// step failed, was retried, or that the run took nine steps rather than
+    /// one.
+    pub(crate) fn begin_step(&mut self, step: usize) -> usize {
+        self.begin_phase(&format!("Step {}", step + 1))
+    }
+
+    /// Close out every phase that has not reached a terminal state.
+    ///
+    /// Some successful runs never advance past their first phase — a plain
+    /// analysis turn answers during planning and returns — so the tail has to
+    /// be closed explicitly rather than left Pending and reported as unfinished.
+    /// Failed phases are preserved: a completed run must not rewrite a failure.
+    pub(crate) fn finish_all(&mut self) {
+        let mut changed = false;
+        for phase in &mut self.phases {
+            match phase.status {
+                PhaseStatus::Pending | PhaseStatus::Active => {
+                    phase.status = PhaseStatus::Completed;
+                    phase.progress = 1.0;
+                    changed = true;
+                }
+                PhaseStatus::Completed | PhaseStatus::Failed => {}
+            }
+        }
+        if changed {
+            self.print_progress();
+        }
+    }
+
+    /// Number of phases discovered so far. The denominator grows with the run.
+    pub(crate) fn phase_count(&self) -> usize {
+        self.phases.len()
+    }
+
+    /// Name of the active phase, or `None` once the tracker is past the end.
+    pub(crate) fn current_phase_name(&self) -> Option<&str> {
+        self.phases
+            .get(self.current_phase)
+            .map(|phase| phase.name.as_str())
     }
 
     /// Get overall progress (0.0 to 1.0)
@@ -1223,11 +1306,10 @@ impl TaskProgress {
             } else {
                 0
             };
-            let current_name = self
-                .phases
-                .get(self.current_phase)
-                .map(|p| p.name.as_str())
-                .unwrap_or("Done");
+            // Name the phase that is actually active, whatever it is: the
+            // tracker grows with the run, so this is no longer always the
+            // second of two fixed labels.
+            let current_name = self.current_phase_name().unwrap_or("Done");
             if let Some(eta) = self.format_eta() {
                 println!("[{}% {} ETA:{}]", pct, current_name, eta);
             } else {
@@ -1275,7 +1357,7 @@ impl TaskProgress {
                     "  {} {}/{} {}{}",
                     icon,
                     (i + 1).to_string().dimmed(),
-                    self.phases.len().to_string().dimmed(),
+                    self.phase_count().to_string().dimmed(),
                     name_color,
                     progress_str
                 );

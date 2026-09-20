@@ -91,6 +91,108 @@ fn test_task_progress_failure() {
 }
 
 #[test]
+fn test_task_progress_grows_phases_as_steps_are_taken() {
+    let mut progress = TaskProgress::new(&["Planning"]);
+    progress.start_phase();
+    progress.complete_phase();
+    assert_eq!(progress.phase_count(), 1);
+    assert_eq!(progress.overall_progress(), 1.0);
+
+    // A discovered step is appended rather than squeezed into a fixed
+    // second phase of a two-phase script.
+    progress.begin_step(0);
+    progress.begin_step(1);
+    assert_eq!(progress.phase_count(), 3);
+    let names: Vec<&str> = progress.phases.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, vec!["Planning", "Step 1", "Step 2"]);
+    assert_eq!(progress.current_phase_name(), Some("Step 2"));
+    // Two of three phases are done: the denominator grew with the work, so a
+    // newly discovered step cannot be reported as already complete.
+    assert!((progress.overall_progress() - 2.0 / 3.0).abs() < 0.01);
+}
+
+#[test]
+fn test_task_progress_begin_step_is_idempotent_for_the_active_step() {
+    let mut progress = TaskProgress::new(&["Planning"]);
+    progress.start_phase();
+    progress.complete_phase();
+    progress.begin_step(0);
+    progress.begin_step(0);
+    // Re-entering the active step (a retry) must not add a duplicate phase.
+    assert_eq!(progress.phase_count(), 2);
+    assert_eq!(progress.current_phase_name(), Some("Step 1"));
+}
+
+#[test]
+fn test_task_progress_recovery_phase_closes_when_next_step_begins() {
+    let mut progress = TaskProgress::new(&["Planning"]);
+    progress.start_phase();
+    progress.complete_phase();
+    progress.begin_step(0);
+    progress.begin_phase("Recovery");
+    assert_eq!(progress.current_phase_name(), Some("Recovery"));
+    // At most one phase is active at a time.
+    assert_eq!(
+        progress
+            .phases
+            .iter()
+            .filter(|p| p.status == PhaseStatus::Active)
+            .count(),
+        1
+    );
+
+    progress.begin_step(1);
+    assert_eq!(progress.current_phase_name(), Some("Step 2"));
+    let recovery = progress
+        .phases
+        .iter()
+        .find(|p| p.name == "Recovery")
+        .expect("recovery phase must exist");
+    assert_eq!(recovery.status, PhaseStatus::Completed);
+}
+
+#[test]
+fn test_task_progress_finish_all_closes_a_pending_tail() {
+    let mut progress = TaskProgress::new(&["Planning", "Report"]);
+    progress.start_phase();
+    // The run answered during planning and never advanced to Report.
+    progress.finish_all();
+    assert_eq!(progress.overall_progress(), 1.0);
+    assert!(progress
+        .phases
+        .iter()
+        .all(|p| p.status == PhaseStatus::Completed));
+}
+
+#[test]
+fn test_task_progress_finish_all_preserves_a_failure() {
+    let mut progress = TaskProgress::new(&["Planning"]);
+    progress.start_phase();
+    progress.fail_phase();
+    progress.finish_all();
+    // Closing a successful tail must not rewrite a failure as a completion.
+    assert_eq!(progress.phases[0].status, PhaseStatus::Failed);
+}
+
+#[test]
+fn test_task_progress_timeline_is_append_only() {
+    let mut progress = TaskProgress::new(&["Planning"]);
+    progress.start_phase();
+    progress.complete_phase();
+    let before: Vec<String> = progress.phases.iter().map(|p| p.name.clone()).collect();
+
+    progress.begin_step(0);
+    progress.begin_step(1);
+
+    let after: Vec<String> = progress.phases[..before.len()]
+        .iter()
+        .map(|p| p.name.clone())
+        .collect();
+    assert_eq!(before, after, "earlier phases must keep their place");
+    assert_eq!(progress.phases[0].status, PhaseStatus::Completed);
+}
+
+#[test]
 fn test_semantic_summary_file_read() {
     let args = serde_json::json!({"path": "src/main.rs"});
     let summary = semantic_summary("file_read", &args, None, true, 50);
