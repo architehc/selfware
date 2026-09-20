@@ -437,9 +437,34 @@ run_scenario() {
   local post_status=0
   (cd "${work_dir}" && "${TIMEOUT_CMD}" 120 ${validate_cmd}) > "${log_dir}/post.log" 2>&1 || post_status=$?
 
-  # Count changes
+  # Count changes.
+  #
+  # `diff` exits 1 when it FINDS differences, and `set -o pipefail` promotes that
+  # to a failed pipeline — so the old `|| changed_files=0` overwrote the count
+  # with 0 in exactly the case it was meant to measure. Every scenario therefore
+  # reported "Changed 0", including scenarios the agent had just fixed. Verified:
+  # a run where 3 failing tests became 3 passing still reported 0, while the same
+  # diff piped outside a pipefail shell printed 3. `|| true` absorbs the exit
+  # status while keeping the captured count.
   local changed_files
-  changed_files="$(diff -qr "${template_dir}" "${work_dir}" 2>/dev/null | grep -v target | grep -v Cargo.lock | wc -l | tr -d ' ')" || changed_files=0
+  changed_files="$(diff -qr "${template_dir}" "${work_dir}" 2>/dev/null | grep -v target | grep -v Cargo.lock | wc -l | tr -d ' ')" || true
+  changed_files="${changed_files:-0}"
+
+  # Token usage the agent measured for itself and printed in its summary line.
+  #
+  # The report used to declare usage unobservable and always emit null, which
+  # made `total_tokens_used` None on BOTH arms in the Rust harness
+  # (src/evolution/fitness.rs:695) — so the within-margin promotion path, which
+  # requires both arms' token counts, was unreachable and 25% of the composite
+  # went unmeasured. null (not 0) is kept for "the agent reported no total", so
+  # unknown stays distinguishable from zero.
+  local tokens_used tokens_json
+  tokens_used="$(grep -oE 'tokens: [0-9]+ total' "${log_dir}/agent.log" 2>/dev/null | tail -1 | grep -oE '[0-9]+' || true)"
+  if [[ "${tokens_used}" =~ ^[0-9]+$ ]]; then
+    tokens_json="${tokens_used}"
+  else
+    tokens_json="null"
+  fi
 
   # Error analysis
   local error_hits
@@ -476,6 +501,7 @@ run_scenario() {
   "score": ${score},
   "rating": "${rating}",
   "changed_files": ${changed_files},
+  "tokens_used": ${tokens_json},
   "error_hits": ${error_hits},
   "completed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
@@ -776,8 +802,9 @@ aggregate = {
             'broken_tests_fixed': r['baseline_status'] != 0 and r['post_status'] == 0,
             'clean_exit': r['agent_status'] == 0 and r['timed_out'] == 0,
             'duration_secs': r['duration_secs'],
-            # The runner does not observe token usage. Absent, not zero.
-            'tokens_used': None,
+            # What the agent measured for itself. Still None when the scenario
+            # reported no total — absent, not zero.
+            'tokens_used': r.get('tokens_used'),
         }
         for r in results
     ],
