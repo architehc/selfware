@@ -1640,6 +1640,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                                     git_tree_id: None,
                                     created_at: chrono_now(),
                                 };
+                                total_infrastructure_failures += 1;
                                 let _ = log_and_append_attempt(
                                     &attempts_file,
                                     &node,
@@ -1701,6 +1702,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                                     git_tree_id: None,
                                     created_at: chrono_now(),
                                 };
+                                total_infrastructure_failures += 1;
                                 let _ = log_and_append_attempt(
                                     &attempts_file,
                                     &node,
@@ -3067,6 +3069,8 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         git_tree_id: None,
                         created_at: chrono_now(),
                     };
+                    total_infrastructure_failures += 1;
+                    total_candidates_evaluated = total_candidates_evaluated.saturating_sub(1);
                     if let Err(err) = log_and_append_attempt(
                         &attempts_file,
                         &node,
@@ -4944,6 +4948,17 @@ pub(crate) async fn commit_scoped_paths_isolated(
     expected_tree: Option<&str>,
     commit_msg: &str,
 ) -> Result<String, String> {
+    commit_scoped_paths_isolated_with_timeout(repo_root, paths, expected_tree, commit_msg, None)
+        .await
+}
+
+pub(crate) async fn commit_scoped_paths_isolated_with_timeout(
+    repo_root: &Path,
+    paths: &[PathBuf],
+    expected_tree: Option<&str>,
+    commit_msg: &str,
+    timeout_override_secs: Option<u64>,
+) -> Result<String, String> {
     if paths.is_empty() {
         return Err("Winner patch edits no paths — nothing to commit".to_string());
     }
@@ -5015,7 +5030,8 @@ pub(crate) async fn commit_scoped_paths_isolated(
         }
     }
 
-    // 5. Commit using the isolated index (commit without pathspec commits the entire isolated index)
+    // 5. Commit using an isolated staging ref to guarantee that the destination branch
+    // is never advanced before commit identity (tree and parent) is fully verified.
     if crate::is_shutdown_requested() {
         return Err("Shutdown requested before commit".to_string());
     }
@@ -5034,23 +5050,118 @@ pub(crate) async fn commit_scoped_paths_isolated(
             }
         });
 
+    let original_symref = tokio::process::Command::new("git")
+        .args(["symbolic-ref", "-q", "HEAD"])
+        .current_dir(repo_root)
+        .output()
+        .await
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        });
+
+    let staging_branch = format!("selfware-staging-{}", uuid::Uuid::new_v4().simple());
+    let staging_ref = format!("refs/heads/{staging_branch}");
+
+    if let Some(ref head_sha) = head_before {
+        let update_staging = tokio::process::Command::new("git")
+            .args(["update-ref", &staging_ref, head_sha])
+            .current_dir(repo_root)
+            .output()
+            .await
+            .map_err(|e| format!("Failed to create staging ref {staging_ref}: {e}"))?;
+        if !update_staging.status.success() {
+            return Err(format!(
+                "git update-ref staging ref failed: {}",
+                String::from_utf8_lossy(&update_staging.stderr).trim()
+            ));
+        }
+    }
+
+    let switch_to_staging = tokio::process::Command::new("git")
+        .args(["symbolic-ref", "HEAD", &staging_ref])
+        .current_dir(repo_root)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to point HEAD to staging ref: {e}"))?;
+    if !switch_to_staging.status.success() {
+        if head_before.is_some() {
+            let _ = tokio::process::Command::new("git")
+                .args(["update-ref", "-d", &staging_ref])
+                .current_dir(repo_root)
+                .output()
+                .await;
+        }
+        return Err(format!(
+            "git symbolic-ref to staging ref failed: {}",
+            String::from_utf8_lossy(&switch_to_staging.stderr).trim()
+        ));
+    }
+
+    struct StagingRefGuard<'a> {
+        repo_root: &'a Path,
+        staging_ref: String,
+        original_symref: Option<String>,
+        original_head: Option<String>,
+        defused: bool,
+    }
+
+    impl<'a> Drop for StagingRefGuard<'a> {
+        fn drop(&mut self) {
+            if self.defused {
+                return;
+            }
+            if let Some(ref orig_ref) = self.original_symref {
+                let _ = std::process::Command::new("git")
+                    .args(["symbolic-ref", "HEAD", orig_ref])
+                    .current_dir(self.repo_root)
+                    .output();
+            } else if let Some(ref orig_sha) = self.original_head {
+                let _ = std::process::Command::new("git")
+                    .args(["update-ref", "--no-deref", "HEAD", orig_sha])
+                    .current_dir(self.repo_root)
+                    .output();
+            }
+            let _ = std::process::Command::new("git")
+                .args(["update-ref", "-d", &self.staging_ref])
+                .current_dir(self.repo_root)
+                .output();
+        }
+    }
+
+    let mut staging_guard = StagingRefGuard {
+        repo_root,
+        staging_ref: staging_ref.clone(),
+        original_symref: original_symref.clone(),
+        original_head: head_before.clone(),
+        defused: false,
+    };
+
     let mut commit_cmd = tokio::process::Command::new("git");
     commit_cmd
         .env("GIT_INDEX_FILE", &guard.index_path)
         .args(["commit", "-m", commit_msg])
         .current_dir(repo_root);
 
-    let timeout_secs = std::env::var("SELFWARE_COMMIT_TIMEOUT_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
+    let timeout_secs = timeout_override_secs
         .filter(|&s| s > 0 && s <= 86400)
+        .or_else(|| {
+            std::env::var("SELFWARE_COMMIT_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|&s| s > 0 && s <= 86400)
+        })
         .unwrap_or(600);
     let timeout_dur = std::time::Duration::from_secs(timeout_secs);
 
     let commit_res = run_cancellable_subprocess(commit_cmd, timeout_dur).await;
 
-    let head_after = tokio::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
+    let staging_commit_after = tokio::process::Command::new("git")
+        .args(["rev-parse", &staging_ref])
         .current_dir(repo_root)
         .output()
         .await
@@ -5066,11 +5177,9 @@ pub(crate) async fn commit_scoped_paths_isolated(
     let mut our_commit_succeeded = false;
     let mut tree_matches = false;
     let mut parent_matches = false;
-    if head_after.is_some() && head_before != head_after {
-        // Verify that HEAD really is the commit we created:
-        // 1. Commit tree MUST match promoted_tree produced from isolated index
+    if staging_commit_after.is_some() && head_before != staging_commit_after {
         let head_tree = tokio::process::Command::new("git")
-            .args(["rev-parse", "HEAD^{tree}"])
+            .args(["rev-parse", &format!("{}^{{tree}}", staging_ref)])
             .current_dir(repo_root)
             .output()
             .await
@@ -5083,9 +5192,8 @@ pub(crate) async fn commit_scoped_paths_isolated(
                 }
             });
 
-        // 2. Parent commit MUST match head_before
         let head_parent = tokio::process::Command::new("git")
-            .args(["rev-parse", "HEAD^"])
+            .args(["rev-parse", &format!("{}^", staging_ref)])
             .current_dir(repo_root)
             .output()
             .await
@@ -5101,7 +5209,7 @@ pub(crate) async fn commit_scoped_paths_isolated(
         tree_matches = head_tree.as_deref() == Some(&promoted_tree);
         parent_matches = match (&head_before, &head_parent) {
             (Some(before), Some(parent)) => before == parent,
-            (None, None) => true, // initial commit
+            (None, None) => true,
             _ => false,
         };
 
@@ -5109,7 +5217,7 @@ pub(crate) async fn commit_scoped_paths_isolated(
             our_commit_succeeded = true;
         } else {
             log_warning(&format!(
-                "HEAD moved during git commit but does not match candidate commit (tree match: {tree_matches}, parent match: {parent_matches}); refusing to attribute unrelated HEAD movement to this promotion"
+                "Candidate commit created on staging ref does not match evaluated candidate (tree match: {tree_matches}, parent match: {parent_matches}); refusing to update destination branch"
             ));
         }
     }
@@ -5125,7 +5233,7 @@ pub(crate) async fn commit_scoped_paths_isolated(
         Err(SubprocessError::ShutdownRequested) => {
             if our_commit_succeeded {
                 log_warning(
-                    "Shutdown requested during git commit hook, but candidate commit succeeded at HEAD; reconciling index",
+                    "Shutdown requested during git commit hook, but candidate commit succeeded on staging ref; reconciling index",
                 );
             } else {
                 return Err("Shutdown requested during git commit hook; commit aborted".to_string());
@@ -5134,7 +5242,7 @@ pub(crate) async fn commit_scoped_paths_isolated(
         Ok(out) => {
             if our_commit_succeeded {
                 log_warning(&format!(
-                    "git commit hook exited non-zero ({}), but candidate commit succeeded at HEAD (matching tree {promoted_tree}); reconciling index",
+                    "git commit hook exited non-zero ({}), but candidate commit succeeded on staging ref (matching tree {promoted_tree}); reconciling index",
                     String::from_utf8_lossy(&out.stderr).trim()
                 ));
             } else {
@@ -5147,7 +5255,7 @@ pub(crate) async fn commit_scoped_paths_isolated(
         Err(SubprocessError::Timeout) => {
             if our_commit_succeeded {
                 log_warning(&format!(
-                    "git commit hook timed out after {timeout_secs}s, but candidate commit succeeded at HEAD (matching tree {promoted_tree}); reconciling index"
+                    "git commit hook timed out after {timeout_secs}s, but candidate commit succeeded on staging ref (matching tree {promoted_tree}); reconciling index"
                 ));
             } else {
                 return Err(format!("git commit timed out after {timeout_secs}s"));
@@ -5156,7 +5264,7 @@ pub(crate) async fn commit_scoped_paths_isolated(
         Err(SubprocessError::Io(e)) => {
             if our_commit_succeeded {
                 log_warning(&format!(
-                    "git commit subprocess I/O error ({e}), but candidate commit succeeded at HEAD; reconciling index"
+                    "git commit subprocess I/O error ({e}), but candidate commit succeeded on staging ref; reconciling index"
                 ));
             } else {
                 return Err(format!(
@@ -5165,6 +5273,60 @@ pub(crate) async fn commit_scoped_paths_isolated(
             }
         }
     };
+
+    // Promotion verified! Atomically update destination branch to the verified commit:
+    let commit_sha = staging_commit_after.unwrap();
+    if let Some(ref dest_branch) = original_symref {
+        let mut update_dest = tokio::process::Command::new("git");
+        update_dest.args(["update-ref", dest_branch, &commit_sha]);
+        if let Some(ref before) = head_before {
+            update_dest.arg(before);
+        }
+        let update_res = update_dest
+            .current_dir(repo_root)
+            .output()
+            .await
+            .map_err(|e| format!("Failed to update destination branch {dest_branch}: {e}"))?;
+        if !update_res.status.success() {
+            return Err(format!(
+                "git update-ref {dest_branch} to {commit_sha} failed: {}",
+                String::from_utf8_lossy(&update_res.stderr).trim()
+            ));
+        }
+        let restore_head = tokio::process::Command::new("git")
+            .args(["symbolic-ref", "HEAD", dest_branch])
+            .current_dir(repo_root)
+            .output()
+            .await
+            .map_err(|e| format!("Failed to restore HEAD to {dest_branch}: {e}"))?;
+        if !restore_head.status.success() {
+            return Err(format!(
+                "git symbolic-ref HEAD {dest_branch} failed: {}",
+                String::from_utf8_lossy(&restore_head.stderr).trim()
+            ));
+        }
+    } else {
+        let update_head = tokio::process::Command::new("git")
+            .args(["update-ref", "--no-deref", "HEAD", &commit_sha])
+            .current_dir(repo_root)
+            .output()
+            .await
+            .map_err(|e| format!("Failed to update detached HEAD to {commit_sha}: {e}"))?;
+        if !update_head.status.success() {
+            return Err(format!(
+                "git update-ref --no-deref HEAD {commit_sha} failed: {}",
+                String::from_utf8_lossy(&update_head.stderr).trim()
+            ));
+        }
+    }
+
+    let _ = tokio::process::Command::new("git")
+        .args(["update-ref", "-d", &staging_ref])
+        .current_dir(repo_root)
+        .output()
+        .await;
+
+    staging_guard.defused = true;
 
     // 6. Synchronize main repository index for the committed paths so working copy status is clean,
     // without disturbing any unrelated staged changes.

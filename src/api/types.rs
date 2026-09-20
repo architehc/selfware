@@ -731,6 +731,11 @@ pub struct Usage {
     /// Details about prompt tokens, including cached tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_tokens_details: Option<PromptTokensDetails>,
+    /// Estimated reasoning tokens derived via local token counting when the provider
+    /// returned reasoning content but did not attribute reasoning tokens (e.g. reported 0 or None).
+    /// Kept separate from provider-reported usage for honest attribution (AGENTS.md Rule 3 & 4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_reasoning_tokens: Option<usize>,
     /// Provider-reported cost in USD for this call, when available (e.g.
     /// OpenRouter's `usage.cost`). `None` for providers that don't report it.
     #[serde(default)]
@@ -738,10 +743,11 @@ pub struct Usage {
 }
 
 impl Usage {
-    /// Returns reasoning tokens from either the flat field or nested details.
+    /// Returns provider-reported reasoning tokens from either the flat field or nested details.
     /// When an endpoint reports `Some(0)` reasoning tokens (e.g. SGLang 0.5.9 which does not attribute
-    /// reasoning tokens separately from completion tokens), treat `0` as unattributed.
-    pub fn reasoning_tokens(&self) -> Option<usize> {
+    /// reasoning tokens separately from completion tokens), treat `0` as unattributed (`None`).
+    /// Authoritative nested counts in `completion_tokens_details` are preserved when flat field is None.
+    pub fn reported_reasoning_tokens(&self) -> Option<usize> {
         let val = self.reasoning_tokens.or_else(|| {
             self.completion_tokens_details
                 .as_ref()
@@ -751,6 +757,19 @@ impl Usage {
             Some(0) => None,
             other => other,
         }
+    }
+
+    /// Returns reasoning tokens from provider-reported fields (flat or nested details),
+    /// or falls back to `estimated_reasoning_tokens` if provider reporting was unattributed.
+    pub fn reasoning_tokens(&self) -> Option<usize> {
+        self.reported_reasoning_tokens()
+            .or(self.estimated_reasoning_tokens)
+    }
+
+    /// Returns `true` if the reasoning token count is an estimate rather than
+    /// a provider-reported measurement.
+    pub fn is_estimated_reasoning(&self) -> bool {
+        self.reported_reasoning_tokens().is_none() && self.estimated_reasoning_tokens.is_some()
     }
 
     /// Verify honest token usage reconciliation:

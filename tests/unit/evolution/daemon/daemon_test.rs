@@ -3737,9 +3737,9 @@ async fn test_commit_scoped_paths_isolated_rejects_unrelated_head_movement() {
     );
 
     let head_after = git_stdout(root, &["rev-parse", "HEAD"]);
-    assert_ne!(
+    assert_eq!(
         head_before, head_after,
-        "HEAD was moved by the hook, but should not be reconciled as our promotion"
+        "destination branch HEAD must not move when candidate commit is rejected"
     );
 }
 
@@ -3799,7 +3799,10 @@ async fn test_commit_scoped_paths_isolated_rejects_zero_exit_tree_mutation() {
     );
 
     let head_after = git_stdout(root, &["rev-parse", "HEAD"]);
-    assert_ne!(head_before, head_after);
+    assert_eq!(
+        head_before, head_after,
+        "destination branch HEAD must NOT move when candidate commit is rejected"
+    );
 }
 
 #[tokio::test]
@@ -3829,27 +3832,30 @@ async fn test_commit_scoped_paths_isolated_timeout_arm() {
         std::fs::set_permissions(&hook_path, perms).unwrap();
     }
 
-    // Set timeout to 1s via environment variable
-    std::env::set_var("SELFWARE_COMMIT_TIMEOUT_SECS", "1");
-
+    let head_before = git_stdout(root, &["rev-parse", "HEAD"]);
     let test_file = root.join("src/lib.rs");
     std::fs::write(&test_file, "pub fn candidate_code() -> usize { 888 }\n").unwrap();
 
-    let res = commit_scoped_paths_isolated(
+    let res = commit_scoped_paths_isolated_with_timeout(
         root,
         &[std::path::PathBuf::from("src/lib.rs")],
         None,
         "test timeout candidate commit",
+        Some(1),
     )
     .await;
-
-    std::env::remove_var("SELFWARE_COMMIT_TIMEOUT_SECS");
 
     assert!(res.is_err(), "must fail on timeout");
     let err = res.unwrap_err();
     assert!(
         err.contains("timed out after 1s"),
         "expected timeout error message: {err}"
+    );
+
+    let head_after = git_stdout(root, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        head_before, head_after,
+        "destination branch HEAD must NOT move when commit times out"
     );
 }
 

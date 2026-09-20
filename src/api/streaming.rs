@@ -416,15 +416,11 @@ impl StreamingResponse {
             }],
             usage: {
                 let mut u = usage;
-                if (u.reasoning_tokens.is_none() || u.reasoning_tokens == Some(0))
-                    && !reasoning.is_empty()
-                {
+                let has_authoritative_reasoning = u.reported_reasoning_tokens().is_some();
+                if !has_authoritative_reasoning && !reasoning.is_empty() {
                     let est_tokens = crate::token_count::estimate_content_tokens(&reasoning);
                     if est_tokens > 0 {
-                        u.reasoning_tokens = Some(est_tokens);
-                        if let Some(details) = &mut u.completion_tokens_details {
-                            details.reasoning_tokens = Some(est_tokens);
-                        }
+                        u.estimated_reasoning_tokens = Some(est_tokens);
                     }
                 }
                 u

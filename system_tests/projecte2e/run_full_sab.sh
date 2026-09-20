@@ -306,6 +306,19 @@ run_scenario() {
   # Remove any leftover target dir from template
   rm -rf "${work_dir}/target" "${work_dir}/Cargo.lock"
 
+  # Initialize an isolated, disposable Git repository for the benchmark scenario
+  # to guarantee that agent Git operations (rev-parse, add, commit) remain strictly
+  # confined to the scenario workspace and never touch or corrupt the parent checkout.
+  (
+    cd "${work_dir}"
+    git init -q
+    git config user.name "SAB Benchmark"
+    git config user.email "sab@benchmark.local"
+    git config commit.gpgSign false
+    git add -A
+    git commit -q -m "initial scenario baseline" --no-gpg-sign
+  )
+
   # Baseline validation (with timeout to prevent hanging on slow algorithms)
   local baseline_status=0
   (cd "${work_dir}" && "${TIMEOUT_CMD}" 120 ${validate_cmd}) > "${log_dir}/baseline.log" 2>&1 || baseline_status=$?
@@ -320,7 +333,8 @@ run_scenario() {
   touch "${stall_marker}"
   : > "${progress_file}"
 
-  # Launch agent in background
+  # Launch agent in background with GIT_CEILING_DIRECTORIES to forbid upward git search
+  GIT_CEILING_DIRECTORIES="${REPO_ROOT}" \
   "${BIN}" \
     --config "${CONFIG_FILE}" \
     -C "${work_dir}" \

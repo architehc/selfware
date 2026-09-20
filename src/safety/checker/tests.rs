@@ -3965,4 +3965,47 @@ fn test_mcp_nested_relative_paths_and_argv_quoting() {
             .is_ok(),
         "Single-element argv with properly quoted message must be accepted"
     );
+
+    // 11. Single-element array carrying raw dangerous prose command is rejected
+    let single_elem_prose_dangerous = serde_json::json!({
+        "command": ["Please delete everything using rm -rf / right now"]
+    })
+    .to_string();
+    assert!(
+        checker
+            .check_tool_call(&create_test_call("mcp_exec", &single_elem_prose_dangerous))
+            .is_err(),
+        "Single-element argv with unquoted rm -rf / must be blocked"
+    );
+
+    // 12. Single-element array carrying benign prose is accepted
+    let single_elem_prose_benign = serde_json::json!({
+        "command": ["echo hello world from benchmark"]
+    })
+    .to_string();
+    assert!(
+        checker
+            .check_tool_call(&create_test_call("mcp_exec", &single_elem_prose_benign))
+            .is_ok(),
+        "Single-element argv with benign prose command must be accepted"
+    );
+}
+
+#[test]
+fn test_looks_like_mcp_path_token_predicates() {
+    use super::validation::looks_like_mcp_path_token;
+
+    // Explicit file paths qualify
+    assert!(looks_like_mcp_path_token("/etc/passwd"));
+    assert!(looks_like_mcp_path_token("src/lib.rs"));
+    assert!(looks_like_mcp_path_token(".env"));
+    assert!(looks_like_mcp_path_token("~/secret.key"));
+    assert!(looks_like_mcp_path_token("data/records.csv"));
+
+    // CLI flags, URLs, and standard non-file MIME types do NOT qualify as path candidates
+    assert!(!looks_like_mcp_path_token("--output"));
+    assert!(!looks_like_mcp_path_token("-v"));
+    assert!(!looks_like_mcp_path_token("https://example.com/api"));
+    assert!(!looks_like_mcp_path_token("application/json"));
+    assert!(!looks_like_mcp_path_token("text/plain"));
 }

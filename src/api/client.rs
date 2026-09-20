@@ -1751,10 +1751,9 @@ impl ApiClient {
                                     .as_deref()
                                     .is_some_and(|r| !r.trim().is_empty())
                         });
-                        if (chat_response.usage.reasoning_tokens.is_none()
-                            || chat_response.usage.reasoning_tokens == Some(0))
-                            && has_reasoning_content
-                        {
+                        let has_authoritative_reasoning =
+                            chat_response.usage.reported_reasoning_tokens().is_some();
+                        if !has_authoritative_reasoning && has_reasoning_content {
                             let mut est_reasoning = 0;
                             for c in &chat_response.choices {
                                 if let Some(r) = c
@@ -1766,12 +1765,8 @@ impl ApiClient {
                                 }
                             }
                             if est_reasoning > 0 {
-                                chat_response.usage.reasoning_tokens = Some(est_reasoning);
-                                if let Some(details) =
-                                    &mut chat_response.usage.completion_tokens_details
-                                {
-                                    details.reasoning_tokens = Some(est_reasoning);
-                                }
+                                chat_response.usage.estimated_reasoning_tokens =
+                                    Some(est_reasoning);
                             }
                         }
                         return Ok(ChatCallResult {

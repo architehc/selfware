@@ -270,6 +270,7 @@ fn test_total_usage_sums_tokens_and_cost() {
             prompt_tokens_details: Some(PromptTokensDetails {
                 cached_tokens: Some(4),
             }),
+            estimated_reasoning_tokens: None,
         })),
         make(Some(Usage {
             prompt_tokens: 2,
@@ -285,6 +286,7 @@ fn test_total_usage_sums_tokens_and_cost() {
             prompt_tokens_details: Some(PromptTokensDetails {
                 cached_tokens: Some(1),
             }),
+            estimated_reasoning_tokens: None,
         })),
         make(None),
     ];

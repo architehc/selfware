@@ -1031,3 +1031,123 @@ fn test_run_projecte2e_lease_heal_fires_warning_and_locks_when_held_1_spoofed_un
         stdout
     );
 }
+
+#[test]
+fn test_run_full_sab_scenario_git_isolation_leaves_parent_untouched() {
+    let script_content = std::fs::read_to_string("system_tests/projecte2e/run_full_sab.sh")
+        .expect("must read run_full_sab.sh");
+    assert!(
+        script_content.contains("git init -q")
+            && script_content.contains("SAB Benchmark")
+            && script_content.contains("GIT_CEILING_DIRECTORIES"),
+        "run_full_sab.sh must configure isolated git repo and GIT_CEILING_DIRECTORIES for scenarios"
+    );
+
+    let temp_parent = tempfile::tempdir().unwrap();
+    let parent_root = temp_parent.path();
+
+    let run = |dir: &std::path::Path, args: &[&str]| -> String {
+        let out = StdCommand::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} in {:?} failed: {}",
+            args,
+            dir,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    run(parent_root, &["init", "-q", "-b", "main"]);
+    run(parent_root, &["config", "user.name", "Parent Dev"]);
+    run(parent_root, &["config", "user.email", "dev@parent.repo"]);
+    std::fs::write(parent_root.join("src_file.rs"), "pub fn main_code() {}\n").unwrap();
+    run(parent_root, &["add", "src_file.rs"]);
+    run(
+        parent_root,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "initial parent commit",
+            "--no-gpg-sign",
+        ],
+    );
+
+    let parent_head_before = run(parent_root, &["rev-parse", "HEAD"]);
+
+    // Create scenario directory beneath parent checkout
+    let scenario_dir =
+        parent_root.join("system_tests/projecte2e/reports/sab-test/work/hard_scheduler");
+    std::fs::create_dir_all(&scenario_dir).unwrap();
+    std::fs::write(scenario_dir.join("duration.rs"), "// buggy duration\n").unwrap();
+
+    // Run scenario isolation setup (as in run_full_sab.sh)
+    run(&scenario_dir, &["init", "-q"]);
+    run(&scenario_dir, &["config", "user.name", "SAB Benchmark"]);
+    run(
+        &scenario_dir,
+        &["config", "user.email", "sab@benchmark.local"],
+    );
+    run(&scenario_dir, &["config", "commit.gpgSign", "false"]);
+    run(&scenario_dir, &["add", "-A"]);
+    run(
+        &scenario_dir,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "initial scenario baseline",
+            "--no-gpg-sign",
+        ],
+    );
+
+    // Benchmark agent actions inside scenario directory
+    let scenario_toplevel = run(&scenario_dir, &["rev-parse", "--show-toplevel"]);
+    assert_eq!(
+        std::fs::canonicalize(&scenario_toplevel).unwrap(),
+        std::fs::canonicalize(&scenario_dir).unwrap(),
+        "rev-parse --show-toplevel must return scenario dir, not parent checkout"
+    );
+
+    // Agent modifies code and runs git commit
+    std::fs::write(
+        scenario_dir.join("duration.rs"),
+        "// fixed duration with d-unit\n",
+    )
+    .unwrap();
+    run(&scenario_dir, &["add", "-A"]);
+    run(
+        &scenario_dir,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "fix: parse_duration supports d-unit",
+            "--no-gpg-sign",
+        ],
+    );
+
+    // Verify parent checkout is COMPLETELY untouched
+    let parent_head_after = run(parent_root, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        parent_head_before, parent_head_after,
+        "parent repository HEAD must remain unchanged after benchmark commits"
+    );
+
+    let parent_diff_cached = run(parent_root, &["diff", "--cached", "--name-only"]);
+    assert!(
+        parent_diff_cached.is_empty(),
+        "parent repository index must have no staged changes: {parent_diff_cached}"
+    );
+
+    let parent_status = run(parent_root, &["status", "--porcelain"]);
+    assert!(
+        !parent_status.contains("duration.rs"),
+        "parent repository status must not contain scenario files: {parent_status}"
+    );
+}

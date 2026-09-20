@@ -1901,6 +1901,59 @@ async fn test_streaming_response_collect_with_reasoning() {
         chat_resp.choices[0].message.reasoning_content,
         Some("Let me think".to_string())
     );
+    assert!(chat_resp.usage.is_estimated_reasoning());
+    assert!(chat_resp.usage.estimated_reasoning_tokens.is_some());
+    assert_eq!(chat_resp.usage.reported_reasoning_tokens(), None);
+    assert_eq!(
+        chat_resp.usage.reasoning_tokens(),
+        chat_resp.usage.estimated_reasoning_tokens
+    );
+
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn test_streaming_response_preserves_authoritative_reasoning() {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        drain_http_request(&mut socket).await;
+        let events = vec![
+            r#"data: {"choices":[{"delta":{"reasoning_content":"Step 1..."}}]}"#,
+            r#"data: {"choices":[{"delta":{"content":"Done"}}],"usage":{"prompt_tokens":10,"completion_tokens":25,"total_tokens":35,"completion_tokens_details":{"reasoning_tokens":18}}}"#,
+            "data: [DONE]",
+        ];
+
+        let mut full_body = String::new();
+        for event in &events {
+            full_body.push_str(event);
+            full_body.push_str("\n\n");
+        }
+
+        let chunk = format!("{:X}\r\n{}\r\n", full_body.len(), full_body);
+        let end_chunk = "0\r\n\r\n";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{}{}",
+            chunk, end_chunk
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+
+    let response = reqwest::get(format!("http://{}", addr)).await.unwrap();
+    let stream = StreamingResponse::new(response, Duration::from_secs(5), None);
+    let result = stream.collect().await;
+    assert!(result.is_ok());
+    let chat_resp = result.unwrap();
+    assert_eq!(chat_resp.choices[0].message.content, "Done");
+    assert_eq!(chat_resp.usage.reported_reasoning_tokens(), Some(18));
+    assert_eq!(chat_resp.usage.reasoning_tokens(), Some(18));
+    assert_eq!(chat_resp.usage.estimated_reasoning_tokens, None);
+    assert!(!chat_resp.usage.is_estimated_reasoning());
 
     let _ = server.await;
 }
@@ -4669,12 +4722,58 @@ async fn test_chat_unattributed_reasoning_tokens_falls_back_to_estimate() {
         .expect("chat should succeed");
 
     assert_eq!(result.choices[0].message.content, "4");
-    // Wire returned reasoning_tokens: 0, but harness falls back to measured estimate
+    // Wire returned reasoning_tokens: 0, which is preserved in wire field:
+    assert_eq!(result.usage.reasoning_tokens, Some(0));
+    assert_eq!(result.usage.reported_reasoning_tokens(), None);
+    assert!(result.usage.is_estimated_reasoning());
+    assert!(result.usage.estimated_reasoning_tokens.is_some());
+    // Usage::reasoning_tokens() falls back to the separately attributed estimate
     let r_tokens = result.usage.reasoning_tokens();
     assert!(
         r_tokens.is_some() && r_tokens.unwrap() > 0,
         "reasoning tokens should be estimated when wire reports 0 with non-empty reasoning content, got: {:?}",
         r_tokens
+    );
+    assert_eq!(r_tokens, result.usage.estimated_reasoning_tokens);
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn test_chat_preserves_authoritative_nested_reasoning_without_estimate() {
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bodies = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    // Response with authoritative nested details, no top-level flat reasoning_tokens
+    let body = r#"{"id":"c-openai","object":"chat.completion","created":123,"model":"test","choices":[{"index":0,"message":{"role":"assistant","content":"4","reasoning_content":"Let me think carefully about this math problem..."},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":56,"total_tokens":76,"completion_tokens_details":{"reasoning_tokens":42}}}"#;
+    let server = reasoning_mock_server!(listener, bodies.clone(), [body]);
+
+    let config = crate::config::Config {
+        endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config).unwrap();
+
+    let result = client
+        .chat(vec![Message::user("q")], None, ThinkingMode::Enabled)
+        .await
+        .expect("chat should succeed");
+
+    // Authoritative nested count MUST NOT be overwritten by a local estimate
+    assert_eq!(result.usage.reported_reasoning_tokens(), Some(42));
+    assert_eq!(result.usage.reasoning_tokens(), Some(42));
+    assert_eq!(result.usage.estimated_reasoning_tokens, None);
+    assert!(!result.usage.is_estimated_reasoning());
+    assert_eq!(
+        result
+            .usage
+            .completion_tokens_details
+            .as_ref()
+            .and_then(|d| d.reasoning_tokens),
+        Some(42)
     );
     let _ = server.await;
 }

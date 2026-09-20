@@ -356,6 +356,14 @@ impl AttemptGuard {
             usage.prompt_tokens_details.as_ref(),
         );
 
+        let current_estimated_reasoning = match (
+            prior.estimated_reasoning_tokens,
+            usage.estimated_reasoning_tokens,
+        ) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+
         let current = Usage {
             prompt_tokens: current_prompt,
             completion_tokens: current_completion,
@@ -368,6 +376,7 @@ impl AttemptGuard {
                 (a, b) => a.or(b),
             },
             reasoning_tokens: current_reasoning,
+            estimated_reasoning_tokens: current_estimated_reasoning,
             completion_tokens_details: current_completion_details.clone(),
             prompt_tokens_details: current_prompt_details.clone(),
         };
@@ -443,6 +452,15 @@ impl AttemptGuard {
                 (None, _) => None,
             };
 
+        let delta_estimated_reasoning = match (
+            current.estimated_reasoning_tokens,
+            prior.estimated_reasoning_tokens,
+        ) {
+            (Some(c), Some(p)) => Some(c.saturating_sub(p)),
+            (Some(c), None) => Some(c),
+            (None, _) => None,
+        };
+
         let delta = Usage {
             prompt_tokens: current.prompt_tokens.saturating_sub(prior.prompt_tokens),
             completion_tokens: current
@@ -451,6 +469,7 @@ impl AttemptGuard {
             total_tokens: current.total_tokens.saturating_sub(prior.total_tokens),
             cost: current.cost.map(|c| c - prior.cost.unwrap_or(0.0)),
             reasoning_tokens: delta_reasoning,
+            estimated_reasoning_tokens: delta_estimated_reasoning,
             completion_tokens_details: delta_completion_details,
             prompt_tokens_details: delta_prompt_details,
         };
@@ -577,6 +596,13 @@ pub(crate) fn add_usage(total: &mut Usage, additional: &Usage) {
         (a, b) => a.or(b),
     };
     total.reasoning_tokens = match (total.reasoning_tokens, additional.reasoning_tokens) {
+        (Some(a), Some(b)) => Some(a.saturating_add(b)),
+        (a, b) => a.or(b),
+    };
+    total.estimated_reasoning_tokens = match (
+        total.estimated_reasoning_tokens,
+        additional.estimated_reasoning_tokens,
+    ) {
         (Some(a), Some(b)) => Some(a.saturating_add(b)),
         (a, b) => a.or(b),
     };

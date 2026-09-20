@@ -1964,6 +1964,7 @@ async fn test_sync_api_usage_accumulates_nested_only_reasoning_tokens() {
             rejected_prediction_tokens: None,
         }),
         prompt_tokens_details: None,
+        estimated_reasoning_tokens: None,
     };
     let coverage = crate::api::UsageCoverage::all();
 

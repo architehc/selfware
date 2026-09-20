@@ -4664,7 +4664,7 @@ pub(crate) fn extract_mcp_path_candidate(tok: &str) -> Option<&str> {
 }
 
 /// Check if an MCP generic argument token qualifies as a filesystem path candidate.
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn looks_like_mcp_path_token(tok: &str) -> bool {
     extract_mcp_path_candidate(tok).is_some()
 }

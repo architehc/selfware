@@ -16,6 +16,14 @@ fn rotation_test_guard() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Guard for tests that assert exact counts on METRICS to prevent concurrent conflicts.
+fn metrics_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[test]
 fn test_record_state_transition_does_not_panic() {
     // Just ensure the function doesn't panic
@@ -607,6 +615,7 @@ fn test_max_log_entries_constant() {
 
 #[test]
 fn test_increment_functions_update_metrics() {
+    let _guard = metrics_test_guard();
     let before_api = METRICS.api_requests.load(Ordering::Relaxed);
     increment_api_requests();
     assert_eq!(METRICS.api_requests.load(Ordering::Relaxed), before_api + 1);
@@ -1168,6 +1177,7 @@ fn test_sampling_rate_precision() {
 
 #[test]
 fn test_metrics_concurrent_increments() {
+    let _guard = metrics_test_guard();
     use std::thread;
 
     let before_api = METRICS.api_requests.load(Ordering::Relaxed);
@@ -1279,6 +1289,7 @@ fn test_redact_then_sanitize_order_independence() {
 
 #[test]
 fn test_get_metrics_is_same_as_static() {
+    let _guard = metrics_test_guard();
     let m = get_metrics();
     // Increment via the function
     let before = m.tool_errors.load(Ordering::Relaxed);
@@ -1291,6 +1302,7 @@ fn test_get_metrics_is_same_as_static() {
 
 #[test]
 fn test_increment_api_requests_multiple() {
+    let _guard = metrics_test_guard();
     let before = METRICS.api_requests.load(Ordering::Relaxed);
     for _ in 0..5 {
         increment_api_requests();
@@ -1300,6 +1312,7 @@ fn test_increment_api_requests_multiple() {
 
 #[test]
 fn test_increment_api_errors_multiple() {
+    let _guard = metrics_test_guard();
     let before = METRICS.api_errors.load(Ordering::Relaxed);
     for _ in 0..3 {
         increment_api_errors();
@@ -1309,6 +1322,7 @@ fn test_increment_api_errors_multiple() {
 
 #[test]
 fn test_increment_tool_executions_multiple() {
+    let _guard = metrics_test_guard();
     let before = METRICS.tool_executions.load(Ordering::Relaxed);
     for _ in 0..7 {
         increment_tool_executions();
@@ -1318,6 +1332,7 @@ fn test_increment_tool_executions_multiple() {
 
 #[test]
 fn test_increment_tool_errors_multiple() {
+    let _guard = metrics_test_guard();
     let before = METRICS.tool_errors.load(Ordering::Relaxed);
     for _ in 0..4 {
         increment_tool_errors();
