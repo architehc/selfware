@@ -384,7 +384,15 @@ impl YoloManager {
 
         // Check destructive shell commands + protected-path targets + sensitive-path reads.
         if tool_name == "shell_exec" {
-            if let Some(cmd) = args.get("command").and_then(|c| c.as_str()) {
+            let cmd_str = crate::safety::checker::validation::command_arg_string(args);
+            let cmd_to_check = if !cmd_str.is_empty() {
+                Some(cmd_str)
+            } else {
+                args.get("command")
+                    .and_then(|c| c.as_str())
+                    .map(|s| s.to_string())
+            };
+            if let Some(cmd) = cmd_to_check.as_deref() {
                 if let Some(p) = targets_protected_path(cmd, &self.config.protected_paths) {
                     return YoloDecision::Block(format!(
                         "Shell command targets protected path '{p}'"
@@ -707,6 +715,8 @@ fn collect_all_paths(args: &serde_json::Value, paths: &mut Vec<String>) {
                                 crate::safety::checker::validation::extract_mcp_path_candidate(s)
                             {
                                 paths.push(candidate.to_string());
+                            } else if s.contains('/') || s.contains('\\') || s.starts_with('.') {
+                                paths.push(s.to_string());
                             }
                         } else {
                             collect_all_paths(item, paths);
@@ -724,6 +734,8 @@ fn collect_all_paths(args: &serde_json::Value, paths: &mut Vec<String>) {
                         crate::safety::checker::validation::extract_mcp_path_candidate(s)
                     {
                         paths.push(candidate.to_string());
+                    } else if s.contains('/') || s.contains('\\') || s.starts_with('.') {
+                        paths.push(s.to_string());
                     }
                 } else {
                     collect_all_paths(item, paths);

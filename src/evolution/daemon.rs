@@ -1079,7 +1079,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
     let start = Instant::now();
     let mut hall_of_fame: Vec<GenerationWinner> = Vec::new();
     let mut generation: usize = 0;
+    let mut total_candidates_attempted: usize = 0;
     let mut total_candidates_evaluated: usize = 0;
+    let mut total_infrastructure_failures: usize = 0;
 
     // Initialize durable attempt tree log directory and run file
     let run_id = format!(
@@ -2132,7 +2134,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 "  Testing '{}' [{}]...",
                 hypothesis.description, hypothesis.id
             ));
-            total_candidates_evaluated += 1;
+            total_candidates_attempted += 1;
 
             // Create worktree restored to the selected parent's exact source state.
             // The guard removes it on EVERY exit path from this iteration.
@@ -2144,6 +2146,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 Ok(w) => w,
                 Err(e) => {
                     log_warning(&format!("  Worktree failed: {}", e));
+                    total_infrastructure_failures += 1;
                     let node = AttemptNode {
                         id: attempt_id.clone(),
                         parent_id: hyp_parent_id.clone(),
@@ -2187,6 +2190,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 }
             };
             let _worktree_guard = WorktreeGuard::new(repo_root, worktree.clone());
+            total_candidates_evaluated += 1;
 
             // Apply edits (search-and-replace or unified diff)
             if !apply_patch_to_worktree(&worktree, &hypothesis.patch) {
@@ -3391,21 +3395,12 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         }
     }
 
-    let (outcome, stop_reason) = if crate::is_shutdown_requested() {
-        (
-            "killed".to_string(),
-            Some("process terminated by shutdown signal".to_string()),
-        )
-    } else if let Some(reason) = policy_stopped_reason {
-        ("policy_stopped".to_string(), Some(reason))
-    } else if total_candidates_evaluated == 0 {
-        (
-            "failed".to_string(),
-            Some("No candidates were evaluated during evolution run".to_string()),
-        )
-    } else {
-        ("completed".to_string(), None)
-    };
+    let (outcome, stop_reason) = compute_run_outcome(
+        crate::is_shutdown_requested(),
+        policy_stopped_reason,
+        total_candidates_evaluated,
+        total_infrastructure_failures,
+    );
 
     log_event(
         repo_root,
@@ -3417,6 +3412,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             "outcome": &outcome,
             "stop_reason": &stop_reason,
             "generations_run": generation,
+            "candidates_attempted": total_candidates_attempted,
+            "candidates_evaluated": total_candidates_evaluated,
+            "infrastructure_failures": total_infrastructure_failures,
             "final_sab_score": current_baseline_metrics.sab_score,
             "duration_secs": start.elapsed().as_secs_f64(),
         }),
@@ -3445,6 +3443,33 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 // ═══════════════════════════════════════════════════════
 // HELPER FUNCTIONS
 // ═══════════════════════════════════════════════════════
+
+pub(crate) fn compute_run_outcome(
+    shutdown_requested: bool,
+    policy_stopped_reason: Option<String>,
+    total_candidates_evaluated: usize,
+    total_infrastructure_failures: usize,
+) -> (String, Option<String>) {
+    if shutdown_requested {
+        (
+            "killed".to_string(),
+            Some("process terminated by shutdown signal".to_string()),
+        )
+    } else if let Some(reason) = policy_stopped_reason {
+        ("policy_stopped".to_string(), Some(reason))
+    } else if total_candidates_evaluated == 0 {
+        let reason = if total_infrastructure_failures > 0 {
+            format!(
+                "All attempted candidates failed due to infrastructure errors ({total_infrastructure_failures} worktree failures)"
+            )
+        } else {
+            "No candidates were evaluated during evolution run".to_string()
+        };
+        ("failed".to_string(), Some(reason))
+    } else {
+        ("completed".to_string(), None)
+    }
+}
 
 async fn generate_single_action_hypothesis(
     config: &EvolutionConfig,
@@ -5008,8 +5033,17 @@ pub(crate) async fn commit_scoped_paths_isolated(
         .args(["commit", "-m", commit_msg])
         .current_dir(repo_root);
 
-    let commit_res =
-        run_cancellable_subprocess(commit_cmd, std::time::Duration::from_secs(600)).await;
+    let timeout_secs = std::env::var("SELFWARE_COMMIT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(600);
+    let timeout_dur = if timeout_secs == 0 {
+        std::time::Duration::from_secs(86400) // effectively unlimited
+    } else {
+        std::time::Duration::from_secs(timeout_secs)
+    };
+
+    let commit_res = run_cancellable_subprocess(commit_cmd, timeout_dur).await;
 
     let head_after = tokio::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -5025,23 +5059,70 @@ pub(crate) async fn commit_scoped_paths_isolated(
             }
         });
 
-    let head_advanced = head_after.is_some() && head_before != head_after;
+    let mut our_commit_succeeded = false;
+    if head_after.is_some() && head_before != head_after {
+        // Verify that HEAD really is the commit we created:
+        // 1. Commit tree MUST match promoted_tree produced from isolated index
+        let head_tree = tokio::process::Command::new("git")
+            .args(["rev-parse", "HEAD^{tree}"])
+            .current_dir(repo_root)
+            .output()
+            .await
+            .ok()
+            .and_then(|o| {
+                if o.status.success() {
+                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                } else {
+                    None
+                }
+            });
+
+        // 2. Parent commit MUST match head_before
+        let head_parent = tokio::process::Command::new("git")
+            .args(["rev-parse", "HEAD^"])
+            .current_dir(repo_root)
+            .output()
+            .await
+            .ok()
+            .and_then(|o| {
+                if o.status.success() {
+                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                } else {
+                    None
+                }
+            });
+
+        let tree_matches = head_tree.as_deref() == Some(&promoted_tree);
+        let parent_matches = match (&head_before, &head_parent) {
+            (Some(before), Some(parent)) => before == parent,
+            (None, None) => true, // initial commit
+            _ => false,
+        };
+
+        if tree_matches && parent_matches {
+            our_commit_succeeded = true;
+        } else {
+            log_warning(&format!(
+                "HEAD moved during git commit but does not match candidate commit (tree match: {tree_matches}, parent match: {parent_matches}); refusing to attribute unrelated HEAD movement to this promotion"
+            ));
+        }
+    }
 
     match commit_res {
         Ok(out) if out.status.success() => {}
         Err(SubprocessError::ShutdownRequested) => {
-            if head_advanced {
+            if our_commit_succeeded {
                 log_warning(
-                    "Shutdown requested during git commit hook, but HEAD was updated; reconciling index",
+                    "Shutdown requested during git commit hook, but candidate commit succeeded at HEAD; reconciling index",
                 );
             } else {
                 return Err("Shutdown requested during git commit hook; commit aborted".to_string());
             }
         }
         Ok(out) => {
-            if head_advanced {
+            if our_commit_succeeded {
                 log_warning(&format!(
-                    "git commit hook exited non-zero ({}), but HEAD was updated from {head_before:?} to {head_after:?}; reconciling index",
+                    "git commit hook exited non-zero ({}), but candidate commit succeeded at HEAD (matching tree {promoted_tree}); reconciling index",
                     String::from_utf8_lossy(&out.stderr).trim()
                 ));
             } else {
@@ -5052,18 +5133,18 @@ pub(crate) async fn commit_scoped_paths_isolated(
             }
         }
         Err(SubprocessError::Timeout) => {
-            if head_advanced {
+            if our_commit_succeeded {
                 log_warning(&format!(
-                    "git commit hook timed out after 600s, but HEAD was updated from {head_before:?} to {head_after:?}; reconciling index"
+                    "git commit hook timed out after {timeout_secs}s, but candidate commit succeeded at HEAD (matching tree {promoted_tree}); reconciling index"
                 ));
             } else {
-                return Err("git commit timed out after 600s".to_string());
+                return Err(format!("git commit timed out after {timeout_secs}s"));
             }
         }
         Err(SubprocessError::Io(e)) => {
-            if head_advanced {
+            if our_commit_succeeded {
                 log_warning(&format!(
-                    "git commit subprocess I/O error ({e}), but HEAD was updated; reconciling index"
+                    "git commit subprocess I/O error ({e}), but candidate commit succeeded at HEAD; reconciling index"
                 ));
             } else {
                 return Err(format!(

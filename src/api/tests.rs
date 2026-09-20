@@ -2610,6 +2610,25 @@ fn test_merge_extra_body_rejects_top_level_xhigh_and_high_reasoning_effort_for_q
     .expect("non-SGLang endpoint should allow xhigh for Qwen");
     assert_eq!(body_openrouter["reasoning_effort"], "xhigh");
 
+    // Unverified endpoint rejects xhigh
+    let mut body_unverified = serde_json::json!({
+        "model": "qwen38-flash-next",
+        "messages": [],
+    });
+    let err_unverified = merge_extra_body(
+        &mut body_unverified,
+        Some(&extra_xhigh),
+        "chat request",
+        Some("http://192.168.1.50:8000/v1"),
+    )
+    .expect_err("unverified endpoint must reject xhigh");
+    assert!(
+        err_unverified
+            .to_string()
+            .contains("cannot set reasoning_effort to 'xhigh' at top-level on unverified endpoint"),
+        "error should cite unverified endpoint: {err_unverified}"
+    );
+
     // low and medium accepted on SGLang
     for allowed in ["low", "medium"] {
         let mut body_ok = serde_json::json!({

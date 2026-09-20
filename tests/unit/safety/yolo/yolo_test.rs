@@ -718,6 +718,7 @@ fn test_yolo_mcp_arguments_blocked() {
         "nested/.selfware/active_policy.json",
         "sub/secrets/key.txt",
         "--file=nested/.env",
+        "image/.admitted_ledger.json",
     ] {
         let mcp_nested_items = serde_json::json!({ "items": [nested] });
         let decision = manager.should_auto_approve("mcp_custom_tool", &mcp_nested_items);
@@ -726,4 +727,20 @@ fn test_yolo_mcp_arguments_blocked() {
             "MCP generic items array with nested relative path '{nested}' must be blocked by YOLO"
         );
     }
+
+    // Single-token argv destructive command in shell_exec must require confirmation in YOLO
+    let single_token_cmd = serde_json::json!({ "command": ["rm -rf ./test"] });
+    let decision = manager.should_auto_approve("shell_exec", &single_token_cmd);
+    assert!(
+        matches!(decision, YoloDecision::RequireConfirmation(_)),
+        "Single-token argv destructive shell command must require confirmation in YOLO"
+    );
+
+    // Single-token argv forbidden command in shell_exec must be blocked in YOLO
+    let forbidden_cmd = serde_json::json!({ "command": ["rm -rf /"] });
+    let decision_forbidden = manager.should_auto_approve("shell_exec", &forbidden_cmd);
+    assert!(
+        matches!(decision_forbidden, YoloDecision::Block(_)),
+        "Single-token argv forbidden shell command must be blocked in YOLO"
+    );
 }

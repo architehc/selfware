@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.6] - 2026-09-20
+
+### Added
+- **Fail-closed commit recovery verification**: Verified both tree (`HEAD^{tree} == promoted_tree`) and parent (`HEAD^ == head_before`) during post-commit hook timeout/error recovery, preventing unrelated concurrent commits from being falsely reported as candidate promotions.
+- **Infrastructure failure tracking in evolution (AGENTS.md Rule 3)**: Separated attempted candidates from completed evaluations and infrastructure failures (`total_infrastructure_failures`). When all candidates fail due to worktree infrastructure errors, the run reports `outcome: "failed"` with explicit error details rather than misleadingly reporting `"completed"`.
+- **Configurable commit hook timeout**: Added `SELFWARE_COMMIT_TIMEOUT_SECS` environment variable to configure the commit timeout (defaults to 600s).
+
+### Fixed
+- **Protected path priority over MIME exemptions**: Configured denied paths and sensitive files (e.g. `image/.admitted_ledger.json`, `text/.env`) are evaluated before MIME type heuristics, preventing path checks from being bypassed by MIME-like path segments. Reject MIME subtypes starting with `.` or containing `..`.
+- **Single-element argv raw string parsing**: Single-element argv arrays (`{"command": ["rm -rf /"]}`) are parsed as raw commands so single quotes do not mask dangerous patterns from safety validation or YOLO.
+- **Binary path traversal prevention**: Hardened index-0 command binary parsing (`is_cmd_binary`) against path traversal components (`..`) such as `{"args": ["/bin/../../etc/passwd"]}`.
+- **SGLang capability fail-closed for unverified endpoints**: Synchronous configuration validation and live request merging fail closed on unverified endpoints (`None` capability probe) when `reasoning_effort = "xhigh"`, while recognizing known cloud endpoints (`openrouter.ai`, etc.).
+- **Killswitch test isolation**: Executed `test_killswitch_cwd_ambient_file_isolated_from_checker_tests` in an isolated temporary directory subprocess, ensuring no live checkout `.selfware/KILLSWITCH` file bleed occurs.
+
 ## [0.7.5] - 2026-09-20
 
 ### Added

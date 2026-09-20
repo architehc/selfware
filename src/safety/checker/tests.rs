@@ -3878,4 +3878,51 @@ fn test_mcp_nested_relative_paths_and_argv_quoting() {
             .is_ok(),
         "System executable binary in command position must not be treated as a forbidden path"
     );
+
+    // 6. Single-element argv array must be treated as unquoted raw command string
+    let single_token_dangerous = serde_json::json!({
+        "command": ["rm -rf /"]
+    })
+    .to_string();
+    assert!(
+        checker
+            .check_tool_call(&create_test_call("mcp_exec", &single_token_dangerous))
+            .is_err(),
+        "Single-token argv array with rm -rf / must be blocked"
+    );
+
+    // 7. System binary path traversal at index 0 must be rejected
+    let traversal_binary_exec = serde_json::json!({
+        "args": ["/bin/../../etc/passwd"]
+    })
+    .to_string();
+    assert!(
+        checker
+            .check_tool_call(&create_test_call("mcp_exec", &traversal_binary_exec))
+            .is_err(),
+        "Traversal via binary prefix /bin/../../etc/passwd must be blocked"
+    );
+
+    // 8. Protected ledger and sensitive files under MIME-like prefixes must NOT be bypassed
+    let mime_bypass_ledger = serde_json::json!({
+        "items": ["image/.admitted_ledger.json"]
+    })
+    .to_string();
+    assert!(
+        checker
+            .check_tool_call(&create_test_call("mcp_custom_tool", &mime_bypass_ledger))
+            .is_err(),
+        "Protected ledger under image/ prefix must be blocked"
+    );
+
+    let mime_bypass_env = serde_json::json!({
+        "items": ["text/.env"]
+    })
+    .to_string();
+    assert!(
+        checker
+            .check_tool_call(&create_test_call("mcp_custom_tool", &mime_bypass_env))
+            .is_err(),
+        "Sensitive .env under text/ prefix must be blocked"
+    );
 }

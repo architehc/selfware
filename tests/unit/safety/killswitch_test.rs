@@ -448,27 +448,46 @@ fn test_killswitch_root_override_isolates_from_cwd() {
 
 #[test]
 fn test_killswitch_cwd_ambient_file_isolated_from_checker_tests() {
-    let _lock = KILLSWITCH_TEST_LOCK.lock();
-    set_test_root_override(None);
+    let tmp = tempdir().unwrap();
+    let tmp_path = tmp.path().to_path_buf();
 
+    // Create the ambient .selfware/KILLSWITCH inside the isolated temporary directory
+    let ks_dir = tmp_path.join(".selfware");
+    std::fs::create_dir_all(&ks_dir).unwrap();
+    std::fs::write(
+        ks_dir.join(KILLSWITCH_FILE_NAME),
+        "Ambient repo killswitch for test",
+    )
+    .unwrap();
+
+    let exe = std::env::current_exe().unwrap();
+    let output = std::process::Command::new(exe)
+        .arg("--exact")
+        .arg("safety::killswitch::tests::test_killswitch_cwd_ambient_worker")
+        .env("SELFWARE_KILLSWITCH_SUBPROCESS_WORKER", "1")
+        .current_dir(&tmp_path)
+        .output()
+        .expect("failed to execute worker subprocess");
+
+    assert!(
+        output.status.success(),
+        "Worker subprocess failed in isolated tempdir: stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_killswitch_cwd_ambient_worker() {
+    if std::env::var("SELFWARE_KILLSWITCH_SUBPROCESS_WORKER").as_deref() != Ok("1") {
+        return;
+    }
     let cwd = std::env::current_dir().unwrap();
     let ks_path = cwd.join(".selfware").join(KILLSWITCH_FILE_NAME);
-    let existed_before = ks_path.exists();
-
-    if !existed_before {
-        std::fs::create_dir_all(ks_path.parent().unwrap()).unwrap();
-        std::fs::write(&ks_path, "Ambient repo killswitch for test").unwrap();
-    }
-
-    struct Cleanup(PathBuf, bool);
-    impl Drop for Cleanup {
-        fn drop(&mut self) {
-            if !self.1 && self.0.exists() {
-                let _ = std::fs::remove_file(&self.0);
-            }
-        }
-    }
-    let _cleanup = Cleanup(ks_path.clone(), existed_before);
+    assert!(
+        ks_path.exists(),
+        "Expected ambient killswitch in subprocess tempdir"
+    );
 
     // In tests, passing cwd explicitly (like SafetyChecker::new does) must NOT trip on ambient cwd killswitch
     let res_explicit_cwd = check_killswitch(Some(&cwd));

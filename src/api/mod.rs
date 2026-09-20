@@ -236,22 +236,28 @@ pub(crate) fn merge_extra_body(
                 );
             }
 
-            // 2. xhigh rejected on SGLang detected behaviourally
+            // 2. xhigh rejected on SGLang or unverified endpoints
             if val.eq_ignore_ascii_case("xhigh") {
-                let is_sglang = endpoint
-                    .map(|ep| {
-                        crate::config::check_sglang_backend(ep) == Some(true)
-                            || crate::config::is_sglang_serving_deployment(ep)
-                    })
-                    .unwrap_or(false);
-                if is_sglang {
-                    bail!(
-                        "{} extra_body cannot set reasoning_effort to 'xhigh' at top-level on SGLang. \
-                         Top-level reasoning_effort only accepts 'low' or 'medium' ('xhigh' is rejected by SGLang schema). \
-                         For xhigh reasoning, place it in chat_template_kwargs.reasoning_effort \
-                         or omit the field (default is xhigh).",
-                        context
-                    );
+                match endpoint.and_then(crate::config::check_sglang_backend) {
+                    Some(true) => {
+                        bail!(
+                            "{} extra_body cannot set reasoning_effort to 'xhigh' at top-level on SGLang. \
+                             Top-level reasoning_effort only accepts 'low' or 'medium' ('xhigh' is rejected by SGLang schema). \
+                             For xhigh reasoning, place it in chat_template_kwargs.reasoning_effort \
+                             or omit the field (default is xhigh).",
+                            context
+                        );
+                    }
+                    None => {
+                        bail!(
+                            "{} extra_body cannot set reasoning_effort to 'xhigh' at top-level on unverified endpoint. \
+                             Top-level reasoning_effort is rejected by SGLang schema. \
+                             For xhigh reasoning, place it in chat_template_kwargs.reasoning_effort \
+                             or omit the field (default is xhigh).",
+                            context
+                        );
+                    }
+                    Some(false) => {}
                 }
             }
         }

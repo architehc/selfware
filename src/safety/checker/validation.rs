@@ -270,11 +270,7 @@ where
         .join(" ")
 }
 
-/// Extract a shell command from tool arguments in either wire form: a plain
-/// string ("command": "cargo test") or an argv array ("command":
-/// ["/bin/sh", "-c", "..."]). The array form previously skipped the shell
-/// check entirely because only `as_str()` was consulted (red-team finding).
-fn command_arg_string(args: &serde_json::Value) -> String {
+pub(crate) fn command_arg_string(args: &serde_json::Value) -> String {
     // "command" is the tool-schema key; fall back to "cmd" so a near-miss
     // key still gets checked instead of sailing through unexamined
     // (red-team wave-88: redis-cli flushall hidden behind "cmd").
@@ -282,7 +278,12 @@ fn command_arg_string(args: &serde_json::Value) -> String {
     match value {
         Some(serde_json::Value::String(s)) => s.clone(),
         Some(serde_json::Value::Array(items)) => {
-            shell_quote_argv(items.iter().filter_map(|v| v.as_str()))
+            let strs: Vec<&str> = items.iter().filter_map(|v| v.as_str()).collect();
+            if strs.len() == 1 {
+                strs[0].to_string()
+            } else {
+                shell_quote_argv(strs)
+            }
         }
         _ => String::new(),
     }
@@ -1263,13 +1264,28 @@ impl SafetyChecker {
                                 if let Some(s) = item.as_str() {
                                     str_tokens.push(s);
                                     let is_cmd_binary = idx == 0
-                                        && (s.starts_with("/bin/")
-                                            || s.starts_with("/usr/bin/")
-                                            || s.starts_with("/usr/local/bin/")
-                                            || s.starts_with("/opt/homebrew/bin/"));
+                                        && !s.contains("..")
+                                        && [
+                                            "/bin/",
+                                            "/usr/bin/",
+                                            "/usr/local/bin/",
+                                            "/opt/homebrew/bin/",
+                                        ]
+                                        .iter()
+                                        .any(|&prefix| {
+                                            if let Some(rest) = s.strip_prefix(prefix) {
+                                                !rest.is_empty()
+                                                    && !rest.contains('/')
+                                                    && !rest.contains('\\')
+                                            } else {
+                                                false
+                                            }
+                                        });
                                     if !is_cmd_binary {
                                         if let Some(candidate) = extract_mcp_path_candidate(s) {
                                             self.check_path(candidate)?;
+                                        } else if self.matches_configured_path_rule(s) {
+                                            self.check_path(s)?;
                                         }
                                     }
                                     self.check_content_for_secrets(s)?;
@@ -1288,9 +1304,14 @@ impl SafetyChecker {
                             }
                             // Check reconstructed command line
                             if !str_tokens.is_empty() {
-                                let joined = shell_quote_argv(str_tokens.iter().copied());
-                                self.check_shell_command(&joined)?;
-                                self.check_shell_command_paths(&joined)?;
+                                if str_tokens.len() == 1 {
+                                    self.check_shell_command(str_tokens[0])?;
+                                    self.check_shell_command_paths(str_tokens[0])?;
+                                } else {
+                                    let joined = shell_quote_argv(str_tokens.iter().copied());
+                                    self.check_shell_command(&joined)?;
+                                    self.check_shell_command_paths(&joined)?;
+                                }
                             }
                         } else if let Some(s) = value.as_str() {
                             self.check_shell_command(s)?;
@@ -1335,6 +1356,8 @@ impl SafetyChecker {
                         self.check_content_for_secrets(s)?;
                         if let Some(candidate) = extract_mcp_path_candidate(s) {
                             self.check_path(candidate)?;
+                        } else if self.matches_configured_path_rule(s) {
+                            self.check_path(s)?;
                         }
                     } else {
                         self.check_generic_mcp_arguments(item)?;
@@ -3482,6 +3505,27 @@ impl SafetyChecker {
         })
     }
 
+    /// Check whether a raw argument token targets a configured denied path rule,
+    /// ensuring configured security policies outrank MIME-type exemptions.
+    fn matches_configured_path_rule(&self, token: &str) -> bool {
+        let clean = token.trim().trim_start_matches("./");
+        if clean.is_empty() {
+            return false;
+        }
+        for pat in &self.config.denied_paths {
+            let pat_clean = pat.trim_start_matches("**/").trim_start_matches("./");
+            if clean == pat_clean
+                || clean.ends_with(&format!("/{pat_clean}"))
+                || clean.starts_with(&format!("{pat_clean}/"))
+                || clean.contains(&format!("/{pat_clean}/"))
+                || clean.split('/').any(|seg| seg == pat_clean)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Check if path is in allowed list (test helper)
     #[cfg(test)]
     #[allow(dead_code)]
@@ -4483,6 +4527,11 @@ pub(crate) fn is_mime_type_token(tok: &str) -> bool {
     if sub.contains('/') || sub.contains('\\') {
         return false;
     }
+    // Subtypes can NEVER start with a dot (dotfiles are filesystem paths, not MIME types)
+    // and cannot contain directory traversal.
+    if sub.starts_with('.') || sub.contains("..") {
+        return false;
+    }
     let sub_lower = sub.to_ascii_lowercase();
     if sub_lower.contains(".env")
         || sub_lower.contains("secret")
@@ -4497,6 +4546,9 @@ pub(crate) fn is_mime_type_token(tok: &str) -> bool {
         || sub_lower.contains(".git")
         || sub_lower.contains(".ssh")
         || sub_lower.contains(".selfware")
+        || sub_lower.contains(".aws")
+        || sub_lower.contains("admitted_ledger")
+        || sub_lower.contains("ledger")
     {
         return false;
     }
@@ -4542,29 +4594,51 @@ pub(crate) fn extract_mcp_path_candidate(tok: &str) -> Option<&str> {
         }
         return None;
     }
-    if is_mime_type_token(trimmed) {
-        return None;
-    }
+
+    // 1. Check explicit paths, sensitive targets, dotfiles, and traversal FIRST
+    // BEFORE MIME exemptions, ensuring protected/denied paths under MIME-like
+    // directory names (e.g. `image/.admitted_ledger.json`, `text/.env`) are never bypassed.
     if looks_like_explicit_path(trimmed) {
         return Some(trimmed);
     }
-    if trimmed.starts_with('.') {
+    if trimmed.starts_with('.') || trimmed.contains("..") {
         return Some(trimmed);
     }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let is_sensitive_target = lower.contains(".admitted_ledger")
+        || lower.contains("admitted_ledger.json")
+        || lower.contains(".env")
+        || lower.contains(".git")
+        || lower.contains(".ssh")
+        || lower.contains(".selfware")
+        || lower.contains(".aws")
+        || lower.contains("secrets")
+        || lower == "id_rsa"
+        || lower.ends_with("/id_rsa")
+        || lower == "id_ed25519"
+        || lower.ends_with("/id_ed25519")
+        || lower == "credentials"
+        || lower.ends_with("/credentials")
+        || lower == "shadow"
+        || lower.ends_with("/shadow")
+        || lower == "passwd"
+        || lower.ends_with("/passwd");
+
+    if is_sensitive_target {
+        return Some(trimmed);
+    }
+
+    // 2. Standard MIME exemptions only apply to non-sensitive tokens
+    if is_mime_type_token(trimmed) {
+        return None;
+    }
+
+    // 3. Any remaining token with path separators qualifies as a path candidate
     if trimmed.contains('/') || trimmed.contains('\\') {
         return Some(trimmed);
     }
-    let lower = trimmed.to_ascii_lowercase();
-    if lower == "id_rsa"
-        || lower == "id_ed25519"
-        || lower == "credentials"
-        || lower.ends_with(".env")
-        || lower.starts_with(".env")
-        || lower == "shadow"
-        || lower == "passwd"
-    {
-        return Some(trimmed);
-    }
+
     None
 }
 

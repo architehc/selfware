@@ -2868,11 +2868,15 @@ async fn test_sync_load_under_tokio_does_not_block_and_uses_cached_capability() 
     );
     let (_dir, path) = write_temp_config(&content, "sync_load_sglang.toml");
 
-    // 1. Under an active Tokio runtime, synchronous Config::load on an unfamiliar endpoint
-    // must NOT block worker threads with a synchronous network probe.
-    let unprobed_config = Config::load(Some(path.to_str().unwrap()))
-        .expect("sync load under Tokio must not block on unfamiliar endpoint");
-    assert_eq!(unprobed_config.endpoint, endpoint);
+    // 1. Under an active Tokio runtime, synchronous Config::load on an unfamiliar unprobed endpoint
+    // fails closed when top-level reasoning_effort is "xhigh".
+    let unprobed_err = Config::load(Some(path.to_str().unwrap()))
+        .expect_err("sync load under Tokio on unverified endpoint with xhigh must fail closed")
+        .to_string();
+    assert!(
+        unprobed_err.contains("cannot be 'xhigh' at top-level for unverified endpoint"),
+        "error should cite unverified endpoint: {unprobed_err}"
+    );
 
     // 2. Discover capabilities properly using the async loader
     let err = Config::load_async(Some(path.to_str().unwrap()))

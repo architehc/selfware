@@ -50,8 +50,9 @@ pub use resources::*;
 pub use safety::*;
 pub use types::*;
 pub use validation::{
-    check_sglang_backend, clear_sglang_capability_cache, get_sglang_capability, is_sglang_backend,
-    is_sglang_server_info_body, is_sglang_serving_deployment, set_sglang_capability,
+    check_sglang_backend, clear_sglang_capability_cache, get_sglang_capability,
+    is_known_non_sglang_endpoint, is_sglang_backend, is_sglang_server_info_body,
+    is_sglang_serving_deployment, set_sglang_capability,
 };
 
 use anyhow::{bail, Result};

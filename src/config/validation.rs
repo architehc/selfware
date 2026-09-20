@@ -327,8 +327,11 @@ impl Config {
                             );
                         }
                         None => {
-                            tracing::debug!(
-                                "Endpoint '{}' was unprobed during synchronous validation with reasoning_effort='xhigh'",
+                            bail!(
+                                "Config error: extra_body.reasoning_effort cannot be 'xhigh' at top-level for unverified endpoint '{}'. \
+                                 Top-level 'xhigh' is rejected by SGLang deployments. \
+                                 For xhigh reasoning, place it under [extra_body.chat_template_kwargs.reasoning_effort] \
+                                 or omit the field (default is xhigh).",
                                 self.endpoint
                             );
                         }
@@ -379,9 +382,12 @@ impl Config {
                                 );
                             }
                             None => {
-                                tracing::debug!(
-                                    "Endpoint '{}' for model '{}' was unprobed during synchronous validation with reasoning_effort='xhigh'",
-                                    profile.endpoint, name
+                                bail!(
+                                    "Config error: models.{}.extra_body.reasoning_effort cannot be 'xhigh' at top-level for unverified endpoint '{}'. \
+                                     Top-level 'xhigh' is rejected by SGLang deployments. \
+                                     For xhigh reasoning, place it under [models.{}.extra_body.chat_template_kwargs.reasoning_effort] \
+                                     or omit the field (default is xhigh).",
+                                    name, profile.endpoint, name
                                 );
                             }
                             Some(false) => {}
@@ -568,6 +574,10 @@ pub fn check_sglang_backend(endpoint: &str) -> Option<bool> {
         set_sglang_capability(&base, true);
         return Some(true);
     }
+    if is_known_non_sglang_endpoint(&base) {
+        set_sglang_capability(&base, false);
+        return Some(false);
+    }
 
     // 3. Do not block inside an async Tokio runtime.
     // In async contexts, capability discovery is performed non-blockingly via `validate_async`.
@@ -591,6 +601,21 @@ pub fn check_sglang_backend(endpoint: &str) -> Option<bool> {
 /// when probing is unavailable or inconclusive without matching heuristics, this helper conservatively returns false.
 pub fn is_sglang_backend(endpoint: &str) -> bool {
     check_sglang_backend(endpoint).unwrap_or(false)
+}
+
+/// Returns true if the endpoint domain corresponds to a well-known public cloud provider
+/// (e.g. OpenRouter, OpenAI, Anthropic, Gemini, Groq, Mistral, Together, DeepSeek)
+/// that does not run an SGLang serving stack.
+pub fn is_known_non_sglang_endpoint(endpoint: &str) -> bool {
+    let lower = endpoint.to_ascii_lowercase();
+    lower.contains("openrouter.ai")
+        || lower.contains("api.openai.com")
+        || lower.contains("api.anthropic.com")
+        || lower.contains("generativelanguage.googleapis.com")
+        || lower.contains("api.groq.com")
+        || lower.contains("api.mistral.ai")
+        || lower.contains("api.together.xyz")
+        || lower.contains("api.deepseek.com")
 }
 
 /// Returns true if the endpoint URL indicates an SGLang serving deployment

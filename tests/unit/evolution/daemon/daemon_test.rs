@@ -3687,6 +3687,63 @@ async fn test_commit_scoped_paths_isolated_post_commit_hook_reconciles_head() {
 }
 
 #[tokio::test]
+async fn test_commit_scoped_paths_isolated_rejects_unrelated_head_movement() {
+    let _exec = crate::test_support::ExecGuard::hold();
+    crate::reset_shutdown_for_test();
+
+    let dir = setup_winner_repo();
+    let root = dir.path();
+
+    // Install a pre-commit hook that creates an UNRELATED commit on the side and then exits 1.
+    // This simulates concurrent/unrelated HEAD movement occurring during the commit window.
+    let hook_dir = root.join(".git").join("hooks");
+    std::fs::create_dir_all(&hook_dir).unwrap();
+    let hook_path = hook_dir.join("pre-commit");
+    std::fs::write(
+        &hook_path,
+        "#!/bin/sh\n\
+         # Advancing HEAD with an unrelated commit whose tree and message differ\n\
+         TREE=$(git hash-object -t tree /dev/null)\n\
+         COMMIT=$(git commit-tree \"$TREE\" -m 'unrelated concurrent commit')\n\
+         git update-ref HEAD \"$COMMIT\"\n\
+         echo 'pre-commit gate failed' >&2\n\
+         exit 1\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&hook_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&hook_path, perms).unwrap();
+    }
+
+    let head_before = git_stdout(root, &["rev-parse", "HEAD"]);
+    let test_file = root.join("src/lib.rs");
+    std::fs::write(&test_file, "pub fn candidate_code() -> usize { 999 }\n").unwrap();
+
+    let res = commit_scoped_paths_isolated(
+        root,
+        &[std::path::PathBuf::from("src/lib.rs")],
+        None,
+        "test candidate commit",
+    )
+    .await;
+
+    // Must fail closed because the advanced HEAD has an unrelated tree/commit!
+    assert!(
+        res.is_err(),
+        "commit_scoped_paths_isolated must reject promotion when HEAD advanced with an unrelated commit"
+    );
+
+    let head_after = git_stdout(root, &["rev-parse", "HEAD"]);
+    assert_ne!(
+        head_before, head_after,
+        "HEAD was moved by the hook, but should not be reconciled as our promotion"
+    );
+}
+
+#[tokio::test]
 async fn test_run_cancellable_subprocess_inflight_kill_on_shutdown() {
     let _exec = crate::test_support::ExecGuard::hold();
     crate::reset_shutdown_for_test();
@@ -3841,4 +3898,48 @@ fn test_run_lock_guard_permanent_lock_file_overlapping_acquisitions() {
         global_lock.exists(),
         "active_evolution.lock must still exist after second drop"
     );
+}
+
+#[test]
+fn test_compute_run_outcome_permutations() {
+    // 1. Shutdown requested produces killed
+    let (outcome, reason) = compute_run_outcome(true, None, 5, 0);
+    assert_eq!(outcome, "killed");
+    assert!(reason.unwrap().contains("shutdown signal"));
+
+    // 2. Policy stopped takes precedence over candidates evaluated
+    let (outcome, reason) = compute_run_outcome(false, Some("max spend reached".into()), 2, 0);
+    assert_eq!(outcome, "policy_stopped");
+    assert_eq!(reason.unwrap(), "max spend reached");
+
+    // 3. 0 evaluated and 0 failures -> failed ("No candidates were evaluated")
+    let (outcome, reason) = compute_run_outcome(false, None, 0, 0);
+    assert_eq!(outcome, "failed");
+    assert_eq!(
+        reason.unwrap(),
+        "No candidates were evaluated during evolution run"
+    );
+
+    // 4. 0 evaluated and >0 infrastructure failures -> failed with infrastructure error details
+    let (outcome, reason) = compute_run_outcome(false, None, 0, 3);
+    assert_eq!(outcome, "failed");
+    let err_str = reason.unwrap();
+    assert!(
+        err_str.contains("infrastructure errors"),
+        "Expected infrastructure error mention: {err_str}"
+    );
+    assert!(
+        err_str.contains("3 worktree failures"),
+        "Expected count of failures: {err_str}"
+    );
+
+    // 5. Positive evaluated candidates -> completed
+    let (outcome, reason) = compute_run_outcome(false, None, 1, 0);
+    assert_eq!(outcome, "completed");
+    assert!(reason.is_none());
+
+    // 6. Positive evaluated candidates with prior infrastructure failure -> completed
+    let (outcome, reason) = compute_run_outcome(false, None, 2, 1);
+    assert_eq!(outcome, "completed");
+    assert!(reason.is_none());
 }
