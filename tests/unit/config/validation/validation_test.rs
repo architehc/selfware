@@ -1351,3 +1351,39 @@ async fn test_check_sglang_backend_tri_state() {
     assert_eq!(check_sglang_backend(endpoint), Some(false));
     assert!(!is_sglang_backend(endpoint));
 }
+
+#[test]
+fn test_is_known_non_sglang_endpoint_strict_url_parsing() {
+    // Exact domain matches
+    assert!(is_known_non_sglang_endpoint("https://openrouter.ai/api/v1"));
+    assert!(is_known_non_sglang_endpoint("https://api.openai.com/v1"));
+    assert!(is_known_non_sglang_endpoint("https://api.anthropic.com/v1"));
+    assert!(is_known_non_sglang_endpoint(
+        "https://api.groq.com/openai/v1"
+    ));
+
+    // Subdomains match
+    assert!(is_known_non_sglang_endpoint(
+        "https://chat.openrouter.ai/v1"
+    ));
+
+    // Lookalike domains MUST NOT match
+    assert!(!is_known_non_sglang_endpoint(
+        "https://openrouter.ai.evil.example/api/v1"
+    ));
+    assert!(!is_known_non_sglang_endpoint(
+        "https://api.openai.com.attacker.com/v1"
+    ));
+    assert!(!is_known_non_sglang_endpoint(
+        "https://anthropic.com.phishing.io/v1"
+    ));
+
+    // SGLang deployments
+    assert!(is_sglang_serving_deployment(
+        "https://llm.selfware.design/v1"
+    ));
+    assert!(is_sglang_serving_deployment("http://localhost:30000/v1"));
+    assert!(!is_sglang_serving_deployment(
+        "https://selfware.design.evil.com/v1"
+    ));
+}

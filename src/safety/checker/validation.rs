@@ -3512,8 +3512,29 @@ impl SafetyChecker {
         if clean.is_empty() {
             return false;
         }
+        let clean_glob = crate::safety::checker::to_glob_form(clean);
+        let path_obj = std::path::Path::new(clean);
+        let file_name = path_obj
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or(clean);
+
         for pat in &self.config.denied_paths {
+            let pat_glob = crate::safety::checker::to_glob_form(pat);
+            if let Ok(matcher) = glob::Pattern::new(&pat_glob) {
+                if matcher.matches(&clean_glob) {
+                    return true;
+                }
+                if !pat.contains('/') && !pat.contains('\\') && matcher.matches(file_name) {
+                    return true;
+                }
+            }
             let pat_clean = pat.trim_start_matches("**/").trim_start_matches("./");
+            if let Ok(matcher) = glob::Pattern::new(pat_clean) {
+                if matcher.matches(file_name) || matcher.matches(&clean_glob) {
+                    return true;
+                }
+            }
             if clean == pat_clean
                 || clean.ends_with(&format!("/{pat_clean}"))
                 || clean.starts_with(&format!("{pat_clean}/"))

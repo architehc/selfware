@@ -1210,7 +1210,8 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             "endpoint": config.llm.endpoint,
             "model": config.llm.model,
             "negative_feedback_history": true,
-            "sab_noise_margin": DEFAULT_SAB_NOISE_MARGIN,
+            "sab_noise_margin_mode": "empirical",
+            "sab_noise_margin_default": DEFAULT_SAB_NOISE_MARGIN,
             "active_policy": active_policy_name,
             "active_policy_beta": active_policy_beta,
             "active_policy_evidence_hash": active_policy_evidence_hash,
@@ -2506,6 +2507,8 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         git_tree_id: None,
                         created_at: chrono_now(),
                     };
+                    total_infrastructure_failures += 1;
+                    total_candidates_evaluated = total_candidates_evaluated.saturating_sub(1);
                     if let Err(err) = log_and_append_attempt(
                         &attempts_file,
                         &node,
@@ -2553,6 +2556,8 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         "Tests failed without summary (harness/environment failure): {}",
                         hypothesis.id
                     ));
+                    total_infrastructure_failures += 1;
+                    total_candidates_evaluated = total_candidates_evaluated.saturating_sub(1);
                     (
                         AttemptStatus::InternalError,
                         Some(FailureClass::EnvironmentError),
@@ -2830,6 +2835,8 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             git_tree_id: None,
                             created_at: chrono_now(),
                         };
+                        total_infrastructure_failures += 1;
+                        total_candidates_evaluated = total_candidates_evaluated.saturating_sub(1);
                         if let Err(err) = log_and_append_attempt(
                             &attempts_file,
                             &node,
@@ -3460,7 +3467,7 @@ pub(crate) fn compute_run_outcome(
     } else if total_candidates_evaluated == 0 {
         let reason = if total_infrastructure_failures > 0 {
             format!(
-                "All attempted candidates failed due to infrastructure errors ({total_infrastructure_failures} worktree failures)"
+                "All attempted candidates failed due to infrastructure errors ({total_infrastructure_failures} failures)"
             )
         } else {
             "No candidates were evaluated during evolution run".to_string()
@@ -5036,12 +5043,9 @@ pub(crate) async fn commit_scoped_paths_isolated(
     let timeout_secs = std::env::var("SELFWARE_COMMIT_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&s| s > 0 && s <= 86400)
         .unwrap_or(600);
-    let timeout_dur = if timeout_secs == 0 {
-        std::time::Duration::from_secs(86400) // effectively unlimited
-    } else {
-        std::time::Duration::from_secs(timeout_secs)
-    };
+    let timeout_dur = std::time::Duration::from_secs(timeout_secs);
 
     let commit_res = run_cancellable_subprocess(commit_cmd, timeout_dur).await;
 
@@ -5060,6 +5064,8 @@ pub(crate) async fn commit_scoped_paths_isolated(
         });
 
     let mut our_commit_succeeded = false;
+    let mut tree_matches = false;
+    let mut parent_matches = false;
     if head_after.is_some() && head_before != head_after {
         // Verify that HEAD really is the commit we created:
         // 1. Commit tree MUST match promoted_tree produced from isolated index
@@ -5092,8 +5098,8 @@ pub(crate) async fn commit_scoped_paths_isolated(
                 }
             });
 
-        let tree_matches = head_tree.as_deref() == Some(&promoted_tree);
-        let parent_matches = match (&head_before, &head_parent) {
+        tree_matches = head_tree.as_deref() == Some(&promoted_tree);
+        parent_matches = match (&head_before, &head_parent) {
             (Some(before), Some(parent)) => before == parent,
             (None, None) => true, // initial commit
             _ => false,
@@ -5109,7 +5115,13 @@ pub(crate) async fn commit_scoped_paths_isolated(
     }
 
     match commit_res {
-        Ok(out) if out.status.success() => {}
+        Ok(out) if out.status.success() => {
+            if !our_commit_succeeded {
+                return Err(format!(
+                    "git commit succeeded with status 0, but committed tree or parent does not match evaluated candidate (tree match: {tree_matches}, parent match: {parent_matches}); aborting promotion"
+                ));
+            }
+        }
         Err(SubprocessError::ShutdownRequested) => {
             if our_commit_succeeded {
                 log_warning(

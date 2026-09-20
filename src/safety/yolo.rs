@@ -195,6 +195,47 @@ impl YoloConfig {
 
         false
     }
+
+    /// Check whether a path matches any configured `denied_paths` glob pattern.
+    pub fn matches_denied_path(&self, path: &str) -> Option<String> {
+        let clean = path.trim().trim_start_matches("./");
+        if clean.is_empty() {
+            return None;
+        }
+        let clean_glob = crate::safety::checker::to_glob_form(clean);
+        let path_obj = std::path::Path::new(clean);
+        let file_name = path_obj
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or(clean);
+
+        for pat in &self.denied_paths {
+            let pat_glob = crate::safety::checker::to_glob_form(pat);
+            if let Ok(matcher) = glob::Pattern::new(&pat_glob) {
+                if matcher.matches(&clean_glob) {
+                    return Some(pat.clone());
+                }
+                if !pat.contains('/') && !pat.contains('\\') && matcher.matches(file_name) {
+                    return Some(pat.clone());
+                }
+            }
+            let pat_clean = pat.trim_start_matches("**/").trim_start_matches("./");
+            if let Ok(matcher) = glob::Pattern::new(pat_clean) {
+                if matcher.matches(file_name) || matcher.matches(&clean_glob) {
+                    return Some(pat.clone());
+                }
+            }
+            if clean == pat_clean
+                || clean.ends_with(&format!("/{pat_clean}"))
+                || clean.starts_with(&format!("{pat_clean}/"))
+                || clean.contains(&format!("/{pat_clean}/"))
+                || clean.split('/').any(|seg| seg == pat_clean)
+            {
+                return Some(pat.clone());
+            }
+        }
+        None
+    }
 }
 
 /// Normalize input for security matching.
@@ -350,10 +391,16 @@ impl YoloManager {
             return YoloDecision::Block("Operation is in forbidden list".to_string());
         }
 
-        // Check protected paths across all extracted paths
+        // Check protected and denied paths across all extracted paths
         for path in extract_all_paths(args) {
             if self.config.is_protected_path(&path) {
                 return YoloDecision::Block(format!("Path '{}' is protected", path));
+            }
+            if let Some(denied) = self.config.matches_denied_path(&path) {
+                return YoloDecision::Block(format!(
+                    "Path '{}' matches denied pattern '{}'",
+                    path, denied
+                ));
             }
         }
 

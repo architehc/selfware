@@ -605,24 +605,50 @@ pub fn is_sglang_backend(endpoint: &str) -> bool {
 
 /// Returns true if the endpoint domain corresponds to a well-known public cloud provider
 /// (e.g. OpenRouter, OpenAI, Anthropic, Gemini, Groq, Mistral, Together, DeepSeek)
-/// that does not run an SGLang serving stack.
+/// that does not run an SGLang serving stack. Uses strict URL parsing to prevent
+/// lookalike hostname spoofing (e.g. `openrouter.ai.evil.com`).
 pub fn is_known_non_sglang_endpoint(endpoint: &str) -> bool {
-    let lower = endpoint.to_ascii_lowercase();
-    lower.contains("openrouter.ai")
-        || lower.contains("api.openai.com")
-        || lower.contains("api.anthropic.com")
-        || lower.contains("generativelanguage.googleapis.com")
-        || lower.contains("api.groq.com")
-        || lower.contains("api.mistral.ai")
-        || lower.contains("api.together.xyz")
-        || lower.contains("api.deepseek.com")
+    let Ok(url) = url::Url::parse(endpoint) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.to_ascii_lowercase();
+    const EXACT_DOMAINS: &[&str] = &[
+        "openrouter.ai",
+        "openai.com",
+        "anthropic.com",
+        "generativelanguage.googleapis.com",
+        "groq.com",
+        "mistral.ai",
+        "together.xyz",
+        "deepseek.com",
+    ];
+    EXACT_DOMAINS
+        .iter()
+        .any(|&domain| host == domain || host.ends_with(&format!(".{domain}")))
 }
 
 /// Returns true if the endpoint URL indicates an SGLang serving deployment
 /// where OpenAI schema enforcement and SGLang chat templates diverge on top-level `reasoning_effort`.
+/// Uses strict URL parsing to prevent hostname spoofing.
 pub fn is_sglang_serving_deployment(endpoint: &str) -> bool {
-    let lower = endpoint.to_ascii_lowercase();
-    lower.contains("sglang") || lower.contains("selfware.design") || lower.contains(":30000")
+    if let Ok(url) = url::Url::parse(endpoint) {
+        if let Some(host) = url.host_str() {
+            let host_lower = host.to_ascii_lowercase();
+            if host_lower == "selfware.design"
+                || host_lower.ends_with(".selfware.design")
+                || host_lower.split(['.', '-']).any(|part| part == "sglang")
+            {
+                return true;
+            }
+        }
+        if url.port() == Some(30000) {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]

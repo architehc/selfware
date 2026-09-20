@@ -1742,6 +1742,38 @@ impl ApiClient {
                             attempt_usage.complete();
                         }
                         chat_response.usage = super::usage::aggregate_receipts(&receipts);
+                        let has_reasoning_content = chat_response.choices.iter().any(|c| {
+                            c.reasoning_content
+                                .as_deref()
+                                .is_some_and(|r| !r.trim().is_empty())
+                                || c.message
+                                    .reasoning_content
+                                    .as_deref()
+                                    .is_some_and(|r| !r.trim().is_empty())
+                        });
+                        if (chat_response.usage.reasoning_tokens.is_none()
+                            || chat_response.usage.reasoning_tokens == Some(0))
+                            && has_reasoning_content
+                        {
+                            let mut est_reasoning = 0;
+                            for c in &chat_response.choices {
+                                if let Some(r) = c
+                                    .reasoning_content
+                                    .as_deref()
+                                    .or(c.message.reasoning_content.as_deref())
+                                {
+                                    est_reasoning += crate::token_count::estimate_content_tokens(r);
+                                }
+                            }
+                            if est_reasoning > 0 {
+                                chat_response.usage.reasoning_tokens = Some(est_reasoning);
+                                if let Some(details) =
+                                    &mut chat_response.usage.completion_tokens_details
+                                {
+                                    details.reasoning_tokens = Some(est_reasoning);
+                                }
+                            }
+                        }
                         return Ok(ChatCallResult {
                             response: chat_response,
                             body,

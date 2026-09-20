@@ -743,4 +743,24 @@ fn test_yolo_mcp_arguments_blocked() {
         matches!(decision_forbidden, YoloDecision::Block(_)),
         "Single-token argv forbidden shell command must be blocked in YOLO"
     );
+
+    // Denied wildcard paths (e.g. **/*.csv) must be blocked by YOLO even under MIME prefixes
+    let mut config_wildcard = YoloConfig::fully_autonomous();
+    config_wildcard.denied_paths.push("**/*.csv".to_string());
+    let manager_wildcard = YoloManager::new(config_wildcard);
+
+    let mcp_denied_csv = serde_json::json!({ "items": ["image/customer.csv"] });
+    let decision_csv = manager_wildcard.should_auto_approve("mcp_custom_tool", &mcp_denied_csv);
+    assert!(
+        matches!(decision_csv, YoloDecision::Block(_)),
+        "Wildcard **/*.csv under image/ prefix must be blocked by YOLO"
+    );
+
+    // Benign non-denied MIME item is auto-approved
+    let mcp_benign_png = serde_json::json!({ "items": ["image/valid.png"] });
+    let decision_png = manager_wildcard.should_auto_approve("mcp_custom_tool", &mcp_benign_png);
+    assert!(
+        matches!(decision_png, YoloDecision::AutoApprove),
+        "Benign image/valid.png must be auto-approved by YOLO"
+    );
 }

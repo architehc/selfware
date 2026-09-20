@@ -739,12 +739,18 @@ pub struct Usage {
 
 impl Usage {
     /// Returns reasoning tokens from either the flat field or nested details.
+    /// When an endpoint reports `Some(0)` reasoning tokens (e.g. SGLang 0.5.9 which does not attribute
+    /// reasoning tokens separately from completion tokens), treat `0` as unattributed.
     pub fn reasoning_tokens(&self) -> Option<usize> {
-        self.reasoning_tokens.or_else(|| {
+        let val = self.reasoning_tokens.or_else(|| {
             self.completion_tokens_details
                 .as_ref()
                 .and_then(|d| d.reasoning_tokens)
-        })
+        });
+        match val {
+            Some(0) => None,
+            other => other,
+        }
     }
 
     /// Verify honest token usage reconciliation:

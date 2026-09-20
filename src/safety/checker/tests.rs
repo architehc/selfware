@@ -3925,4 +3925,44 @@ fn test_mcp_nested_relative_paths_and_argv_quoting() {
             .is_err(),
         "Sensitive .env under text/ prefix must be blocked"
     );
+
+    // 9. Wildcard denied paths (e.g. **/*.csv) must not be bypassed under MIME-like prefixes
+    let mut config_wildcard = SafetyConfig::default();
+    config_wildcard.denied_paths.push("**/*.csv".to_string());
+    let checker_wildcard = SafetyChecker::new(&config_wildcard);
+
+    let mime_bypass_csv = serde_json::json!({
+        "items": ["image/customer.csv"]
+    })
+    .to_string();
+    assert!(
+        checker_wildcard
+            .check_tool_call(&create_test_call("mcp_custom_tool", &mime_bypass_csv))
+            .is_err(),
+        "Wildcard **/*.csv under image/ prefix must be blocked by denied path policy"
+    );
+
+    // Benign non-denied MIME tokens must still pass
+    let benign_png = serde_json::json!({
+        "items": ["image/valid_diagram.png"]
+    })
+    .to_string();
+    assert!(
+        checker_wildcard
+            .check_tool_call(&create_test_call("mcp_custom_tool", &benign_png))
+            .is_ok(),
+        "Benign image/valid_diagram.png must be allowed"
+    );
+
+    // 10. Single-element array with quoted prose commit message is accepted
+    let single_elem_quoted_commit = serde_json::json!({
+        "command": ["git commit -m 'revert the rm -rf / guard'"]
+    })
+    .to_string();
+    assert!(
+        checker
+            .check_tool_call(&create_test_call("mcp_exec", &single_elem_quoted_commit))
+            .is_ok(),
+        "Single-element argv with properly quoted message must be accepted"
+    );
 }

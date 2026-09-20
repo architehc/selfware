@@ -398,7 +398,7 @@ impl StreamingResponse {
                     reasoning_content: if reasoning.is_empty() {
                         None
                     } else {
-                        Some(reasoning)
+                        Some(reasoning.clone())
                     },
                     tool_calls: if tool_calls.is_empty() {
                         None
@@ -414,7 +414,21 @@ impl StreamingResponse {
                 finish_reason,
                 logprobs,
             }],
-            usage,
+            usage: {
+                let mut u = usage;
+                if (u.reasoning_tokens.is_none() || u.reasoning_tokens == Some(0))
+                    && !reasoning.is_empty()
+                {
+                    let est_tokens = crate::token_count::estimate_content_tokens(&reasoning);
+                    if est_tokens > 0 {
+                        u.reasoning_tokens = Some(est_tokens);
+                        if let Some(details) = &mut u.completion_tokens_details {
+                            details.reasoning_tokens = Some(est_tokens);
+                        }
+                    }
+                }
+                u
+            },
         })
     }
 }

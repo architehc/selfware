@@ -2629,6 +2629,25 @@ fn test_merge_extra_body_rejects_top_level_xhigh_and_high_reasoning_effort_for_q
         "error should cite unverified endpoint: {err_unverified}"
     );
 
+    // Lookalike endpoint spoofing (e.g. openrouter.ai.evil.example) must NOT be treated as verified cloud provider
+    let mut body_lookalike = serde_json::json!({
+        "model": "qwen38-flash-next",
+        "messages": [],
+    });
+    let err_lookalike = merge_extra_body(
+        &mut body_lookalike,
+        Some(&extra_xhigh),
+        "chat request",
+        Some("https://openrouter.ai.evil.example/api/v1"),
+    )
+    .expect_err("lookalike endpoint must reject top-level xhigh");
+    assert!(
+        err_lookalike
+            .to_string()
+            .contains("cannot set reasoning_effort to 'xhigh' at top-level on unverified endpoint"),
+        "error should reject lookalike domain as unverified: {err_lookalike}"
+    );
+
     // low and medium accepted on SGLang
     for allowed in ["low", "medium"] {
         let mut body_ok = serde_json::json!({
@@ -4621,6 +4640,41 @@ async fn test_chat_retries_once_with_bounded_reasoning_on_budget_exhaustion() {
     assert!(
         second.contains("\"reasoning_effort\":\"low\""),
         "retry must pin reasoning_effort=low: {second}"
+    );
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn test_chat_unattributed_reasoning_tokens_falls_back_to_estimate() {
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bodies = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    // Response with 0 reasoning_tokens reported by backend, but 72 chars of reasoning_content
+    let sglang_unattributed_body = r#"{"id":"c-sglang","object":"chat.completion","created":123,"model":"test","choices":[{"index":0,"message":{"role":"assistant","content":"4","reasoning_content":"Let me calculate: Alice has 12 apples, gives 6 to Bob, then eats 2, leaving 4."},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":56,"total_tokens":76,"reasoning_tokens":0}}"#;
+    let server = reasoning_mock_server!(listener, bodies.clone(), [sglang_unattributed_body]);
+
+    let config = crate::config::Config {
+        endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config).unwrap();
+
+    let result = client
+        .chat(vec![Message::user("q")], None, ThinkingMode::Enabled)
+        .await
+        .expect("chat should succeed");
+
+    assert_eq!(result.choices[0].message.content, "4");
+    // Wire returned reasoning_tokens: 0, but harness falls back to measured estimate
+    let r_tokens = result.usage.reasoning_tokens();
+    assert!(
+        r_tokens.is_some() && r_tokens.unwrap() > 0,
+        "reasoning tokens should be estimated when wire reports 0 with non-empty reasoning content, got: {:?}",
+        r_tokens
     );
     let _ = server.await;
 }

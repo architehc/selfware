@@ -8,16 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.7.6] - 2026-09-20
 
 ### Added
-- **Fail-closed commit recovery verification**: Verified both tree (`HEAD^{tree} == promoted_tree`) and parent (`HEAD^ == head_before`) during post-commit hook timeout/error recovery, preventing unrelated concurrent commits from being falsely reported as candidate promotions.
-- **Infrastructure failure tracking in evolution (AGENTS.md Rule 3)**: Separated attempted candidates from completed evaluations and infrastructure failures (`total_infrastructure_failures`). When all candidates fail due to worktree infrastructure errors, the run reports `outcome: "failed"` with explicit error details rather than misleadingly reporting `"completed"`.
-- **Configurable commit hook timeout**: Added `SELFWARE_COMMIT_TIMEOUT_SECS` environment variable to configure the commit timeout (defaults to 600s).
+- **Fail-closed commit recovery verification**: Enforced that `commit_scoped_paths_isolated` verifies candidate commit identity (`HEAD^{tree} == promoted_tree` and `HEAD^ == head_before`) on every success path (`Ok(out) if out.status.success()`), rejecting commits where pre-commit hooks alter the staged tree or move refs unexpectedly.
+- **Infrastructure failure tracking in evolution (AGENTS.md Rule 3)**: Swept `total_infrastructure_failures` tracking across worktree creation, test subprocess errors, test harness crashes, and SAB environment failures. When all attempted candidates fail due to infrastructure errors, the run reports `outcome: "failed"` with explicit error counts rather than misleadingly reporting `"completed"`.
+- **Unattributed reasoning-token recovery (AGENTS.md Rule 4)**: Added fallback measured-output estimation (`estimate_content_tokens`) for endpoints (such as SGLang 0.5.9) that return non-empty reasoning content but report `reasoning_tokens: 0`, ensuring reasoning tokens are honestly accounted for in cumulative token metrics and display.
+- **Configurable commit hook timeout**: Added `SELFWARE_COMMIT_TIMEOUT_SECS` environment variable with bounds validation (`1..=86400s`, default 600s).
+- **Empirical noise margin logging**: Recorded `sab_noise_margin_mode: "empirical"` alongside default fallback margin in daemon startup event telemetry.
 
 ### Fixed
+- **Wildcard denied path matching in MCP and YOLO**: Replaced literal string prefix/suffix matching with full glob pattern matching (`glob::Pattern` / `to_glob_form`) in `matches_configured_path_rule` and YOLO's `matches_denied_path`, ensuring wildcard policies like `**/*.csv` properly catch denied targets under MIME-like directory prefixes (`image/customer.csv`).
+- **Strict URL parsing for endpoint classification**: Replaced naive substring matching with strict URL parsing (`url::Url`) in `is_known_non_sglang_endpoint` and `is_sglang_serving_deployment`, preventing lookalike hostnames (e.g. `https://openrouter.ai.evil.example`) from spoofing known cloud providers and evading fail-closed `xhigh` validation.
 - **Protected path priority over MIME exemptions**: Configured denied paths and sensitive files (e.g. `image/.admitted_ledger.json`, `text/.env`) are evaluated before MIME type heuristics, preventing path checks from being bypassed by MIME-like path segments. Reject MIME subtypes starting with `.` or containing `..`.
-- **Single-element argv raw string parsing**: Single-element argv arrays (`{"command": ["rm -rf /"]}`) are parsed as raw commands so single quotes do not mask dangerous patterns from safety validation or YOLO.
+- **Single-element argv raw string parsing**: Single-element argv arrays (`{"command": ["rm -rf /"]}`) are parsed as raw commands so single quotes do not mask dangerous patterns from safety validation or YOLO; properly quoted message strings (e.g. `["git commit -m 'revert rm -rf /'"]`) remain accepted.
 - **Binary path traversal prevention**: Hardened index-0 command binary parsing (`is_cmd_binary`) against path traversal components (`..`) such as `{"args": ["/bin/../../etc/passwd"]}`.
-- **SGLang capability fail-closed for unverified endpoints**: Synchronous configuration validation and live request merging fail closed on unverified endpoints (`None` capability probe) when `reasoning_effort = "xhigh"`, while recognizing known cloud endpoints (`openrouter.ai`, etc.).
+- **SGLang capability fail-closed for unverified endpoints**: Synchronous configuration validation and live request merging fail closed on unverified endpoints (`None` capability probe) when `reasoning_effort = "xhigh"`, while recognizing verified cloud endpoints.
 - **Killswitch test isolation**: Executed `test_killswitch_cwd_ambient_file_isolated_from_checker_tests` in an isolated temporary directory subprocess, ensuring no live checkout `.selfware/KILLSWITCH` file bleed occurs.
+- **Endpoint integration test concurrency**: Added `--test-threads=1` to `selfware_design_endpoint_test` to prevent parallel test requests from saturating server capacity.
 
 ## [0.7.5] - 2026-09-20
 

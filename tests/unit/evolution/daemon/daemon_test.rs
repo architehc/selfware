@@ -3744,6 +3744,116 @@ async fn test_commit_scoped_paths_isolated_rejects_unrelated_head_movement() {
 }
 
 #[tokio::test]
+async fn test_commit_scoped_paths_isolated_rejects_zero_exit_tree_mutation() {
+    let _exec = crate::test_support::ExecGuard::hold();
+    crate::reset_shutdown_for_test();
+
+    let dir = setup_winner_repo();
+    let root = dir.path();
+
+    // Install a pre-commit hook that mutates the tree to an empty tree, moves HEAD to it, and exits 0!
+    // This tests the exact case where git commit returns status 0, but the committed tree does not match candidate.
+    let hook_dir = root.join(".git").join("hooks");
+    std::fs::create_dir_all(&hook_dir).unwrap();
+    let hook_path = hook_dir.join("pre-commit");
+    std::fs::write(
+        &hook_path,
+        "#!/bin/sh\n\
+         # Pre-commit hook mutates the staged tree by removing the candidate file from the index\n\
+         # and exiting 0. git commit produces a valid commit on HEAD, but its tree is NOT promoted_tree!\n\
+         git rm --cached -q src/lib.rs\n\
+         exit 0\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&hook_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&hook_path, perms).unwrap();
+    }
+
+    let head_before = git_stdout(root, &["rev-parse", "HEAD"]);
+    let test_file = root.join("src/lib.rs");
+    std::fs::write(&test_file, "pub fn candidate_code() -> usize { 777 }\n").unwrap();
+
+    let res = commit_scoped_paths_isolated(
+        root,
+        &[std::path::PathBuf::from("src/lib.rs")],
+        None,
+        "test candidate commit",
+    )
+    .await;
+
+    // Must fail closed even though hook exited 0, because the committed tree does not match promoted_tree!
+    assert!(
+        res.is_err(),
+        "commit_scoped_paths_isolated must reject promotion when hook exits 0 but tree does not match"
+    );
+    let err_msg = res.unwrap_err();
+    assert!(
+        err_msg.contains(
+            "git commit succeeded with status 0, but committed tree or parent does not match"
+        ),
+        "error message should cite status 0 and tree/parent mismatch: {err_msg}"
+    );
+
+    let head_after = git_stdout(root, &["rev-parse", "HEAD"]);
+    assert_ne!(head_before, head_after);
+}
+
+#[tokio::test]
+async fn test_commit_scoped_paths_isolated_timeout_arm() {
+    let _exec = crate::test_support::ExecGuard::hold();
+    crate::reset_shutdown_for_test();
+
+    let dir = setup_winner_repo();
+    let root = dir.path();
+
+    // Install a pre-commit hook that hangs for 10s
+    let hook_dir = root.join(".git").join("hooks");
+    std::fs::create_dir_all(&hook_dir).unwrap();
+    let hook_path = hook_dir.join("pre-commit");
+    std::fs::write(
+        &hook_path,
+        "#!/bin/sh\n\
+         sleep 10\n\
+         exit 0\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&hook_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&hook_path, perms).unwrap();
+    }
+
+    // Set timeout to 1s via environment variable
+    std::env::set_var("SELFWARE_COMMIT_TIMEOUT_SECS", "1");
+
+    let test_file = root.join("src/lib.rs");
+    std::fs::write(&test_file, "pub fn candidate_code() -> usize { 888 }\n").unwrap();
+
+    let res = commit_scoped_paths_isolated(
+        root,
+        &[std::path::PathBuf::from("src/lib.rs")],
+        None,
+        "test timeout candidate commit",
+    )
+    .await;
+
+    std::env::remove_var("SELFWARE_COMMIT_TIMEOUT_SECS");
+
+    assert!(res.is_err(), "must fail on timeout");
+    let err = res.unwrap_err();
+    assert!(
+        err.contains("timed out after 1s"),
+        "expected timeout error message: {err}"
+    );
+}
+
+#[tokio::test]
 async fn test_run_cancellable_subprocess_inflight_kill_on_shutdown() {
     let _exec = crate::test_support::ExecGuard::hold();
     crate::reset_shutdown_for_test();
@@ -3929,7 +4039,7 @@ fn test_compute_run_outcome_permutations() {
         "Expected infrastructure error mention: {err_str}"
     );
     assert!(
-        err_str.contains("3 worktree failures"),
+        err_str.contains("3 failures"),
         "Expected count of failures: {err_str}"
     );
 
