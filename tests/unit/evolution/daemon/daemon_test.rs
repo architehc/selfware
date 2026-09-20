@@ -175,7 +175,13 @@ fn test_format_recent_failure_history_extracts_recent_failures() {
         status: AttemptStatus::TestFailed,
         failure_class: Some(FailureClass::RepairableTestFailure),
         failure_reason: Some("cargo test failed".to_string()),
-        output_tail: None,
+        output_tail: Some(
+            "running 3 tests\ntest tools::code_metrics::tests::test_complexity ... FAILED\n\n\
+             ---- tools::code_metrics::tests::test_complexity stdout ----\n\
+             thread 'tools::code_metrics::tests::test_complexity' panicked at src/tools/code_metrics.rs:120:\n\
+             assertion `left == right` failed\n"
+                .to_string(),
+        ),
         binary_sha256: None,
         base_commit: None,
         committed_commit: None,
@@ -231,6 +237,67 @@ fn test_format_recent_failure_history_extracts_recent_failures() {
         history.contains("Re-wording an attempt does not make it new"),
         "the header must say that re-wording is not a new attempt"
     );
+    // The captured tail reaches the digest, so the model learns WHAT broke and
+    // not only that something did.
+    assert!(
+        history.contains("[why:"),
+        "the failure entry must carry one line of the captured output, got: {history}"
+    );
+    assert!(
+        history.contains("panicked at"),
+        "the excerpt must be the panic line, got: {history}"
+    );
+}
+
+/// The failing test names are in the output; the digest needs them, because a
+/// count cannot distinguish "broke something unrelated" from "missed the
+/// target".
+#[test]
+fn test_failing_test_names_extracts_cargo_failures() {
+    let output = "running 4 tests\n\
+         test a::b::passes ... ok\n\
+         test a::b::breaks ... FAILED\n\
+         test a::c::also_breaks ... FAILED\n\
+         test a::b::breaks ... FAILED\n\
+         \n\
+         failures:\n    a::b::breaks\n    a::c::also_breaks\n\
+         \n\
+         test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured\n";
+    let names = failing_test_names(output);
+    assert_eq!(
+        names,
+        vec!["a::b::breaks".to_string(), "a::c::also_breaks".to_string()],
+        "must extract each failing test once, in order"
+    );
+
+    // A run where everything passed has no names, and a stray summary line is
+    // not mistaken for a test name.
+    assert!(failing_test_names("test result: ok. 9 passed; 0 failed\n").is_empty());
+
+    // Bounded: the digest stays a digest.
+    let many = (0..20)
+        .map(|i| format!("test t{i} ... FAILED\n"))
+        .collect::<String>();
+    assert_eq!(failing_test_names(&many).len(), 5);
+}
+
+/// The excerpt is one informative line, not the tail: the tail is up to 50 lines
+/// of cargo noise.
+#[test]
+fn test_failure_excerpt_picks_the_diagnostic_line() {
+    let tail = "Compiling selfware v0.7.6\n\
+                error[E0599]: no method named `foo`\n\
+                warning: unused import\n\
+                thread 'tests::x' panicked at src/lib.rs:9:\n\
+                assertion `left == right` failed\n\
+                note: run with RUST_BACKTRACE=1\n";
+    let excerpt = failure_excerpt(tail).expect("a diagnostic line exists");
+    assert!(
+        excerpt.contains("panicked at"),
+        "must prefer the last diagnostic line, got: {excerpt}"
+    );
+    assert!(!excerpt.contains('\n'), "the excerpt must be one line");
+    assert!(failure_excerpt("all quiet\n").is_none());
 }
 
 /// The two breakers that bound an unattended daemon must fail safe: unset or

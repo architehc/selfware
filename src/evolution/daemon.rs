@@ -1112,6 +1112,65 @@ fn resolve_attempt_base_commit(
         .or_else(|| ast_tools::get_git_head_commit(repo_root))
 }
 
+/// Names of the tests that failed, from cargo's per-test result lines
+/// (`test some::module::case ... FAILED`).
+///
+/// The summary line only says how many failed. *Which* one failed is what tells
+/// the next generation whether its patch broke something unrelated or missed
+/// the target it was aiming at, and it is the cheapest useful fact available —
+/// it is already in the captured output.
+fn failing_test_names(output: &str) -> Vec<String> {
+    const MAX_NAMES: usize = 5;
+    let mut names: Vec<String> = Vec::new();
+    for line in output.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("test ") else {
+            continue;
+        };
+        let rest = rest.trim_end();
+        let Some(name) = rest.strip_suffix("FAILED") else {
+            continue;
+        };
+        let name = name.trim_end().trim_end_matches('.').trim();
+        if !name.is_empty() && !names.iter().any(|existing| existing == name) {
+            names.push(name.to_string());
+        }
+        if names.len() >= MAX_NAMES {
+            break;
+        }
+    }
+    names
+}
+
+/// The single most informative line from a captured output tail.
+///
+/// One line, so the failure digest stays a digest — the tail can be 50 lines of
+/// cargo noise. Ranked rather than positional: the panic location names the file
+/// and line, which is what the next attempt needs to look at, so it beats a
+/// compiler error, which in turn beats a bare assertion message.
+fn failure_excerpt(output_tail: &str) -> Option<String> {
+    const MAX_CHARS: usize = 200;
+    let rank = |line: &str| -> Option<u8> {
+        if line.contains("panicked at") {
+            Some(0)
+        } else if line.starts_with("error[") {
+            Some(1)
+        } else if line.starts_with("error: ") {
+            Some(2)
+        } else if line.starts_with("assertion") {
+            Some(3)
+        } else {
+            None
+        }
+    };
+    output_tail
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| rank(line).map(|r| (r, line)))
+        .min_by_key(|(r, _)| *r)
+        .map(|(_, line)| line.chars().take(MAX_CHARS).collect())
+}
+
 /// Format the structured failure history and context of a specific parent attempt
 /// to instruct the LLM on its refinement/repair task.
 fn format_parent_refinement_context(attempts_file: &Path, parent_id: &str) -> String {
@@ -2675,21 +2734,33 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 let stderr = String::from_utf8_lossy(&test_output.stderr);
                 let combined = format!("{}\n{}", stdout, stderr);
                 let has_test_summary = combined.lines().any(|l| l.contains("test result:"));
-                let fail_count = combined
+                let summary = combined
                     .lines()
                     .find(|l| l.contains("test result:"))
-                    .unwrap_or("unknown");
+                    .map(|l| l.trim().to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let names = failing_test_names(&combined);
                 let tail = tail_lines(&combined, 50);
 
                 let (status, failure_class, failure_reason) = if has_test_summary {
+                    // Name the failing tests, not just the counts. The digest the
+                    // next generation sees cannot act on "2 failed": it needs to
+                    // know whether the patch broke something unrelated or missed
+                    // the target it was aiming at — the difference between a
+                    // repairable attempt and a hopeless one.
+                    let failing = if names.is_empty() {
+                        String::new()
+                    } else {
+                        format!("; failing: {}", names.join(", "))
+                    };
                     log_frost(
                         generation,
-                        &format!("Tests failed: {} — {}", hypothesis.id, fail_count),
+                        &format!("Tests failed: {summary}{failing} — {}", hypothesis.id),
                     );
                     (
                         AttemptStatus::TestFailed,
                         Some(FailureClass::RepairableTestFailure),
-                        Some(format!("Tests failed: {fail_count}")),
+                        Some(format!("Tests failed: {summary}{failing}")),
                     )
                 } else {
                     log_warning(&format!(
@@ -3900,8 +3971,19 @@ pub fn format_recent_failure_history(attempts_file: &Path, max_entries: usize) -
                             .join(", ")
                     )
                 };
+                // One line of the captured tail, so the digest says WHAT broke
+                // and not only that something did. `output_tail` was captured on
+                // the test-failure path but never reached this digest — the
+                // model saw five restatements of failure with no detail.
+                let why_clause = node
+                    .output_tail
+                    .as_deref()
+                    .and_then(failure_excerpt)
+                    .map(|why| format!(" [why: {why}]"))
+                    .unwrap_or_default();
                 let entry = format!(
-                    "- Attempted: \"{desc}\"{where_clause} -> FAILED ({reason}). Do not repeat."
+                    "- Attempted: \"{desc}\"{where_clause} -> FAILED ({reason}).{why_clause} Do not \
+                     repeat."
                 );
                 if seen.insert(entry.clone()) {
                     failures.push(entry);
