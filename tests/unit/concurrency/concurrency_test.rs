@@ -198,3 +198,66 @@ async fn test_stream_waiters_do_not_starve_the_tool_category() {
         waiter.await.expect("stream waiter task must not panic");
     }
 }
+
+/// `try_acquire_stream` is the non-blocking counterpart of `acquire_stream`, and
+/// like `try_acquire_tool` it must not leak the category permit when the global
+/// ceiling is what refuses the request.
+#[tokio::test]
+async fn test_try_acquire_stream_is_non_blocking_and_leak_free() {
+    let gov = ConcurrencyGovernor::new(2, 8, 2);
+
+    let s1 = gov.try_acquire_stream().expect("first stream slot");
+    let s2 = gov.try_acquire_stream().expect("second stream slot");
+    assert_eq!(gov.stats().streams_available, 0);
+    assert_eq!(gov.stats().global_available, 0);
+
+    // At capacity it answers None instead of parking.
+    assert!(gov.try_acquire_stream().is_none());
+    drop(s1);
+    drop(s2);
+
+    // Global is the binding limit (2 globals, 8 tool slots): the refuse path
+    // must give the stream permit back.
+    let mut tools = Vec::new();
+    for _ in 0..2 {
+        tools.push(gov.acquire_tool().await.expect("tool slot"));
+    }
+    assert_eq!(gov.stats().global_available, 0);
+    assert!(
+        gov.try_acquire_stream().is_none(),
+        "the global ceiling must refuse the stream even though stream slots are free"
+    );
+    assert_eq!(
+        gov.stats().streams_available,
+        2,
+        "a refused try must not leak a stream permit"
+    );
+
+    drop(tools);
+    assert!(gov.try_acquire_stream().is_some());
+}
+
+/// Agents with the same limits share one process-wide budget. A per-agent
+/// governor let N swarm children each hold `max_streams`, so N agents put
+/// N×`max_streams` streams against an endpoint with a fixed slot count.
+#[test]
+fn test_shared_governor_is_one_budget_per_limit_set() {
+    let a = ConcurrencyGovernor::shared(16, 8, 24);
+    let b = ConcurrencyGovernor::shared(16, 8, 24);
+    assert!(
+        std::sync::Arc::ptr_eq(&a, &b),
+        "identical limits must resolve to the same shared governor"
+    );
+
+    let c = ConcurrencyGovernor::shared(4, 8, 12);
+    assert!(
+        !std::sync::Arc::ptr_eq(&a, &c),
+        "different limits must not silently share one ceiling"
+    );
+
+    // One handle's permit is visible through the other: it is one budget.
+    let held = a.try_acquire_stream().expect("stream slot");
+    assert_eq!(b.stats().streams_available, 15, "the budget is shared");
+    drop(held);
+    assert_eq!(b.stats().streams_available, 16);
+}

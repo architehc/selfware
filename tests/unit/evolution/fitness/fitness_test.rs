@@ -1,5 +1,34 @@
 use super::*;
 
+/// The host-side SAB watchdog is the only bound on a *runner* that wedges: the
+/// runner's own per-scenario ceilings live on the bash side, and the Rust
+/// `try_wait` poll otherwise sleeps forever. The parsing must therefore fail
+/// safe — an unparseable override keeps the bound rather than silently removing
+/// it, and only an explicit `0` disables the watchdog.
+#[test]
+fn test_parse_sab_deadline_default_override_and_disable() {
+    assert_eq!(parse_sab_deadline(None), Some(DEFAULT_SAB_DEADLINE));
+    assert_eq!(
+        parse_sab_deadline(Some("90")),
+        Some(Duration::from_secs(90))
+    );
+    assert_eq!(
+        parse_sab_deadline(Some("  90  ")),
+        Some(Duration::from_secs(90)),
+        "surrounding whitespace must not defeat the override"
+    );
+    assert_eq!(
+        parse_sab_deadline(Some("0")),
+        None,
+        "0 disables the watchdog"
+    );
+    assert_eq!(
+        parse_sab_deadline(Some("not-a-number")),
+        Some(DEFAULT_SAB_DEADLINE),
+        "an unparseable override must not silently drop the bound"
+    );
+}
+
 #[test]
 fn test_rating_thresholds() {
     let make_result = |score: f64| SabResult {

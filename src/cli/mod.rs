@@ -2475,13 +2475,28 @@ async fn handle_command(
                     return Ok(());
                 }
 
-                let mut orchestrator = RSIOrchestrator::new(repo_root);
+                let mut orchestrator =
+                    RSIOrchestrator::new(repo_root).with_max_iterations_per_run(generations);
+                if !quiet {
+                    // `-g/--generations` bounds the RSI workflow too: its
+                    // per-run iteration ceiling is what actually stops a run,
+                    // so ignoring the flag made `-g 1` a silent no-op here.
+                    println!(
+                        "   RSI per-run ceiling: {} iteration(s) (from -g/--generations); \
+                         --population/--parallel do not apply to this workflow.",
+                        generations
+                    );
+                }
                 match orchestrator.run_loop().await {
                     Ok(()) => {
                         println!("\n   {} RSI loop completed successfully.", Glyphs::bloom());
                     }
+                    // Propagate instead of printing: returning Ok on a stop
+                    // made a circuit-breaker halt indistinguishable from
+                    // success to whatever scheduled the command.
                     Err(e) => {
-                        println!("\n   {} RSI loop stopped: {}", Glyphs::frost(), e);
+                        eprintln!("\n   {} RSI loop stopped: {}", Glyphs::frost(), e);
+                        return Err(anyhow::anyhow!("RSI loop stopped: {e}"));
                     }
                 }
             } else if workflow == "replay" {

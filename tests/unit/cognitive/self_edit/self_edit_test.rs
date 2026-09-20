@@ -581,6 +581,41 @@ fn test_scan_code_quality_skips_comment_only_markers() {
     assert!(orchestrator.supports_target(target));
 }
 
+/// The line hint exists to absorb drift between scan and apply, but its
+/// fallback must land on a code-line marker — never on a whole-line comment,
+/// whose comment-only diff `mutation_is_trivial` discards before evaluation.
+/// Without this the scanner's honesty could be undone at apply time.
+#[test]
+fn test_rewrite_fallback_skips_comment_only_markers() {
+    // The target named line 2, which no longer holds a marker. The markers that
+    // remain are a whole-line comment (line 3) and an inline one (line 4).
+    let input = "fn demo() -> usize {\n    let first = 1;\n    // TODO: stale comment marker\n    let second = 2; // FIXME: real target\n    first + second\n}\n";
+    let (updated, line_number) =
+        rewrite_todo_fixme_marker(input, Some(2)).expect("a code-line marker exists to rewrite");
+
+    assert_eq!(
+        line_number, 4,
+        "must rewrite the code-line marker, not the comment"
+    );
+    assert!(
+        updated.contains("// TODO: stale comment marker"),
+        "the comment-only marker must be left alone"
+    );
+    assert!(
+        !updated.contains("FIXME"),
+        "the code-line marker must be rewritten"
+    );
+    // The hinted line held no marker at all, so it must come back
+    // byte-identical: the old guard compared the *post-whitespace-collapse*
+    // text, so `replaced != original` was true for any indented line and the
+    // drift case silently de-indented an unrelated line instead of falling
+    // through.
+    assert!(
+        updated.contains("\n    let first = 1;\n"),
+        "a marker-less hinted line must not be rewritten, got: {updated:?}"
+    );
+}
+
 #[test]
 fn test_introspect_performance_from_snapshots_detects_regression() {
     let orchestrator = SelfEditOrchestrator::new(PathBuf::from("/tmp/selfware_test"));

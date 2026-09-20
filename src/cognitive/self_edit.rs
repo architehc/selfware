@@ -784,29 +784,42 @@ fn rewrite_todo_fixme_marker(
             candidate_indices.push(idx);
         }
     }
+    // Fallback candidates are restricted to lines that carry code. If the hint
+    // misses (the file shifted between scan and apply, which is what the hint
+    // exists to absorb), falling through to a whole-line comment would produce
+    // a comment-only diff that `mutation_is_trivial` discards — the same no-op
+    // the scanner refuses to propose, arriving by a side door.
     candidate_indices.extend(
         lines
             .iter()
             .enumerate()
-            .filter(|(_, line)| line.contains("TODO") || line.contains("FIXME"))
+            .filter(|(_, line)| {
+                (line.contains("TODO") || line.contains("FIXME"))
+                    && !line_is_non_code(line, false, false)
+            })
             .map(|(idx, _)| idx),
     );
     candidate_indices.dedup();
 
     for idx in candidate_indices {
         let original = &lines[idx];
-        let replaced = todo_re
-            .replace(original, "Resolved: ")
-            .to_string()
-            .replace("  ", " ");
-        if replaced != *original {
-            lines[idx] = replaced;
-            let mut updated = lines.join("\n");
-            if content.ends_with('\n') {
-                updated.push('\n');
-            }
-            return Some((updated, idx + 1));
+        // Only a candidate whose marker the regex actually matched may be
+        // rewritten. The old guard was `replaced != original` computed *after* a
+        // blanket `.replace("  ", " ")`, which is true for ANY line holding two
+        // consecutive spaces — so a hint that had drifted onto an unrelated line
+        // was "rewritten" by collapsing its indentation and returned as a
+        // successful mutation. The marker match is the real condition, and the
+        // regex already swallows the marker's trailing `: `/`- `, so the blanket
+        // collapse only ever damaged whitespace outside the replacement.
+        if !todo_re.is_match(original) {
+            continue;
         }
+        lines[idx] = todo_re.replace(original, "Resolved: ").to_string();
+        let mut updated = lines.join("\n");
+        if content.ends_with('\n') {
+            updated.push('\n');
+        }
+        return Some((updated, idx + 1));
     }
 
     None

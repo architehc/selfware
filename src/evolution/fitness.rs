@@ -45,6 +45,40 @@ impl Default for SabConfig {
     }
 }
 
+/// Host-side watchdog on a whole SAB run.
+///
+/// The runner enforces per-scenario ceilings (a 300 s stall kill, and an
+/// absolute ceiling of the scenario timeout × 3), but nothing on this side
+/// bounded the *runner*: a wedged `timeout` child or a stuck container left the
+/// `try_wait` poll below sleeping forever, hanging the daemon until SIGTERM.
+/// The default is deliberately generous — it exists to bound the run, not to
+/// pace it — so it only fires once the runner's own ceilings have failed.
+/// Override with [`SAB_DEADLINE_ENV`]; `0` disables the watchdog.
+const DEFAULT_SAB_DEADLINE: Duration = Duration::from_secs(4 * 3600);
+
+/// Env override for [`DEFAULT_SAB_DEADLINE`], in seconds (`0` disables).
+const SAB_DEADLINE_ENV: &str = "SELFWARE_SAB_DEADLINE_SECS";
+
+fn sab_deadline() -> Option<Duration> {
+    parse_sab_deadline(std::env::var(SAB_DEADLINE_ENV).ok().as_deref())
+}
+
+/// Pure parsing core of [`sab_deadline`]: unset or unparseable falls back to the
+/// default, and `0` disables the watchdog.
+fn parse_sab_deadline(value: Option<&str>) -> Option<Duration> {
+    match value {
+        None => Some(DEFAULT_SAB_DEADLINE),
+        Some(raw) => match raw.trim().parse::<u64>() {
+            Ok(0) => None,
+            Ok(secs) => Some(Duration::from_secs(secs)),
+            Err(_) => {
+                tracing::warn!("ignoring unparseable {SAB_DEADLINE_ENV}={raw:?}");
+                Some(DEFAULT_SAB_DEADLINE)
+            }
+        },
+    }
+}
+
 /// Result of a full SAB evaluation
 #[derive(Debug, Clone)]
 pub struct SabResult {
@@ -425,6 +459,7 @@ pub fn run_sab(selfware_binary: &Path, config: &SabConfig) -> Result<SabResult, 
 
     let mut child_guard = SabProcessGroupGuard { child: Some(child) };
 
+    let deadline = sab_deadline().map(|window| start + window);
     let exit_status = loop {
         if let Some(ref mut c) = child_guard.child {
             match c.try_wait() {
@@ -437,6 +472,18 @@ pub fn run_sab(selfware_binary: &Path, config: &SabConfig) -> Result<SabResult, 
             return Err(FitnessError::SabRunFailed(
                 "cancelled by shutdown signal".to_string(),
             ));
+        }
+        if let Some(deadline) = deadline {
+            if Instant::now() >= deadline {
+                // Returning drops `child_guard`, whose Drop kills the runner's
+                // whole process group — so the hung tree goes with us.
+                return Err(FitnessError::SabRunFailed(format!(
+                    "SAB run exceeded the host watchdog deadline of {}s; the runner's own \
+                     per-scenario ceilings should have fired first (override with {SAB_DEADLINE_ENV}, \
+                     0 disables)",
+                    (deadline - start).as_secs()
+                )));
+            }
         }
         std::thread::sleep(Duration::from_millis(50));
     }?;

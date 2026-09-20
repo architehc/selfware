@@ -654,6 +654,81 @@ pub fn normalize_policy_name(raw: &str) -> String {
     snake
 }
 
+/// Consecutive non-improving generations the daemon's incumbent policy tolerates
+/// before it stops.
+///
+/// `FixedPopulationPolicy` has no plateau condition at all — its only Stop paths
+/// are an exhausted probes budget (which `for_daemon` deliberately sets to
+/// `None`) and an empty action set — so on a bad target the generation budget
+/// was the sole bound: `-g 50` burned ~15 h producing nothing (the observed run:
+/// 8 generations × 4 hypotheses, 30 of 33 patches against one function, 0
+/// survivors). `0` disables the breaker.
+const DEFAULT_PLATEAU_PATIENCE: usize = 5;
+
+/// Minimum score improvement that counts as progress for the plateau breaker.
+const PLATEAU_MIN_DELTA: f64 = 0.01;
+
+/// Env override for [`DEFAULT_PLATEAU_PATIENCE`] (`0` disables).
+const PLATEAU_PATIENCE_ENV: &str = "SELFWARE_PLATEAU_PATIENCE";
+
+fn plateau_patience() -> usize {
+    parse_plateau_patience(std::env::var(PLATEAU_PATIENCE_ENV).ok().as_deref())
+}
+
+/// Pure parsing core of [`plateau_patience`]: unset or unparseable falls back to
+/// the default, and `0` disables the breaker.
+fn parse_plateau_patience(value: Option<&str>) -> usize {
+    value
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_PLATEAU_PATIENCE)
+}
+
+/// Consecutive generations that produce no committed improvement before the
+/// daemon stops.
+///
+/// Dedup rejects only byte-identical diffs, so nothing else bounds a fixation
+/// loop: the observed run spent 8 generations and 2.5 h producing 0 survivors
+/// with 30 of 33 patches against a single function, and `-g 50` on that target
+/// would have cost ~15 h. `0` disables the breaker.
+const DEFAULT_BARREN_GENERATIONS: usize = 5;
+
+/// Env override for [`DEFAULT_BARREN_GENERATIONS`] (`0` disables).
+const BARREN_GENERATIONS_ENV: &str = "SELFWARE_BARREN_GENERATIONS";
+
+fn barren_generations_limit() -> usize {
+    parse_barren_generations(std::env::var(BARREN_GENERATIONS_ENV).ok().as_deref())
+}
+
+/// Pure parsing core of [`barren_generations_limit`]: unset or unparseable falls
+/// back to the default, and `0` disables the breaker.
+fn parse_barren_generations(value: Option<&str>) -> usize {
+    value
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_BARREN_GENERATIONS)
+}
+
+/// Stop reason for the barren-generation breaker, used both in the log line and
+/// as the run's `policy_stopped_reason`.
+fn barren_stop_reason(consecutive: usize) -> String {
+    format!("no committed improvement for {consecutive} consecutive generations")
+}
+
+/// The daemon's incumbent policy: `FixedPopulationPolicy`, wrapped in the
+/// plateau breaker unless that breaker is disabled.
+fn daemon_incumbent_policy(population_size: usize) -> Box<dyn SearchPolicy> {
+    let inner = Box::new(FixedPopulationPolicy::for_daemon(population_size));
+    let patience = plateau_patience();
+    if patience == 0 {
+        inner
+    } else {
+        Box::new(EarlyStopPlateauPolicy::new(
+            inner,
+            patience,
+            PLATEAU_MIN_DELTA,
+        ))
+    }
+}
+
 /// Instantiates a named search policy, falling back to [`FixedPopulationPolicy`].
 pub fn instantiate_search_policy(
     policy_name: &str,
@@ -665,7 +740,7 @@ pub fn instantiate_search_policy(
         | "fixed_population_policy"
         | "fixed"
         | "fixedpopulation"
-        | "fixedpopulationpolicy" => Box::new(FixedPopulationPolicy::for_daemon(population_size)),
+        | "fixedpopulationpolicy" => daemon_incumbent_policy(population_size),
 
         "breadth_first"
         | "breadth_first_policy"
@@ -699,7 +774,7 @@ pub fn instantiate_search_policy(
                 policy_name,
                 normalized
             );
-            Box::new(FixedPopulationPolicy::for_daemon(population_size))
+            daemon_incumbent_policy(population_size)
         }
     }
 }
@@ -716,7 +791,10 @@ pub struct LoadedActivePolicy {
 /// Loads and validates the promoted search policy from `.selfware/active_policy.json`.
 pub fn load_active_policy(active_policy_path: &Path, population_size: usize) -> LoadedActivePolicy {
     let fallback = |reason: Option<String>| LoadedActivePolicy {
-        policy: Box::new(FixedPopulationPolicy::for_daemon(population_size)),
+        // The plateau breaker matters most here: this is the policy a daemon
+        // falls back to when no policy was promoted, so it is the one that
+        // runs unattended in the default configuration.
+        policy: daemon_incumbent_policy(population_size),
         beta: 1.0,
         evidence_hash: None,
         policy_name: "FixedPopulation (Incumbent)".to_string(),
@@ -1443,6 +1521,11 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
     }
     let mut active_parent_id: Option<String> = Some(baseline_node.id.clone());
     let mut policy_stopped_reason: Option<String> = None;
+    // Generations since the last committed improvement. Fed by both the
+    // empty-generation path and the all-rejected path, so the two ways a
+    // generation can produce nothing share one breaker.
+    let mut consecutive_barren_generations: usize = 0;
+    let barren_limit = barren_generations_limit();
     let mut expected_head_commit = ast_tools::get_git_head_commit(repo_root);
 
     // ═══════════════════════════════════════════════════════
@@ -1717,6 +1800,14 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     }
                 };
 
+                // RAII: cleans the inspection worktree on an early `continue` and on
+                // panic unwind. The manual cleanup this replaces ran only on
+                // the straight-line path, so a panic here leaked worktrees
+                // under `.worktrees/` — the same failure the evaluation path's
+                // WorktreeGuard exists to prevent.
+                let _temp_worktree_guard = temp_worktree
+                    .as_ref()
+                    .map(|w| WorktreeGuard::new(repo_root, w.clone()));
                 let source_dir = temp_worktree.as_deref().unwrap_or(repo_root);
                 let hyp = generate_single_action_hypothesis(
                     &config,
@@ -1727,10 +1818,6 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     source_dir,
                 )
                 .await;
-
-                if let Some(ref w) = temp_worktree {
-                    let _ = ast_tools::cleanup_worktree(repo_root, w);
-                }
 
                 if let Some(mut h) = hyp {
                     h.id = format!("g{}-hyp{}", generation, action_idx);
@@ -1759,6 +1846,16 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             log_warning(
                 "No valid hypotheses generated after retries, continuing to next generation",
             );
+            consecutive_barren_generations += 1;
+            if barren_limit > 0 && consecutive_barren_generations >= barren_limit {
+                let reason = barren_stop_reason(consecutive_barren_generations);
+                log_warning(&format!(
+                    "{reason}; stopping early instead of cycling ({} changes this, 0 disables)",
+                    BARREN_GENERATIONS_ENV
+                ));
+                policy_stopped_reason = Some(reason);
+                break;
+            }
             continue;
         }
 
@@ -3351,6 +3448,8 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     if winner.sab_result.is_some() {
                         current_baseline_sab = winner.sab_result;
                     }
+                    // A committed improvement ends the fixation streak.
+                    consecutive_barren_generations = 0;
                 } else {
                     log_warning("Failed to commit winner diff to repository");
                     log_event(
@@ -3401,6 +3500,17 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         "duration_secs": gen_start.elapsed().as_secs_f64(),
                     }),
                 );
+                consecutive_barren_generations += 1;
+                if barren_limit > 0 && consecutive_barren_generations >= barren_limit {
+                    let reason = barren_stop_reason(consecutive_barren_generations);
+                    log_warning(&format!(
+                        "{reason}; stopping early instead of spending the rest of the generation \
+                         budget on the same targets ({} changes this, 0 disables)",
+                        BARREN_GENERATIONS_ENV
+                    ));
+                    policy_stopped_reason = Some(reason);
+                    break;
+                }
             }
         }
     }
@@ -3694,7 +3804,32 @@ pub fn format_recent_failure_history(attempts_file: &Path, max_entries: usize) -
             if node.status != AttemptStatus::Evaluated && node.status != AttemptStatus::Baseline {
                 let desc = node.description.trim();
                 let reason = node.failure_reason.as_deref().unwrap_or("failed");
-                let entry = format!("- Attempted: \"{desc}\" -> FAILED ({reason}). Do not repeat.");
+                // Name the files the patch ACTUALLY touched, not just the
+                // description. Dedup rejects only byte-identical diffs, so a
+                // re-worded attempt at the same function slips past it — the
+                // observed run re-attacked one function 30 times under 30
+                // descriptions. The file list is what makes the repeat visible
+                // to the next generation.
+                let touched = node
+                    .patch
+                    .as_deref()
+                    .map(patch_edited_paths)
+                    .unwrap_or_default();
+                let where_clause = if touched.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " [touched: {}]",
+                        touched
+                            .iter()
+                            .map(|p| p.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                };
+                let entry = format!(
+                    "- Attempted: \"{desc}\"{where_clause} -> FAILED ({reason}). Do not repeat."
+                );
                 if seen.insert(entry.clone()) {
                     failures.push(entry);
                     if failures.len() >= max_entries {
@@ -3709,7 +3844,9 @@ pub fn format_recent_failure_history(attempts_file: &Path, max_entries: usize) -
     } else {
         failures.reverse();
         format!(
-            "## Previous Failed Hypotheses (DO NOT REPEAT)\n{}\nExplore different functions, files, or optimization approaches.\n",
+            "## Previous Failed Hypotheses (DO NOT REPEAT)\n{}\nRe-wording an attempt does not make \
+             it new: entries naming the same file were the same target. Explore different \
+             functions, files, or optimization approaches.\n",
             failures.join("\n")
         )
     }

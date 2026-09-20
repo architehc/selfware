@@ -783,8 +783,13 @@ pub struct Agent {
     permission_store: crate::safety::permissions::PermissionStore,
     /// Unified cache manager for tool results and LLM responses (long-term memory)
     cache_manager: crate::session::cache::CacheManager,
-    /// Concurrency governor for limiting concurrent streams and tool executions
-    governor: ConcurrencyGovernor,
+    /// Concurrency governor for limiting concurrent streams and tool executions.
+    ///
+    /// Process-wide and shared: every agent built with the same limits gets the
+    /// same governor, so `max_streams` bounds the process instead of each
+    /// agent (a per-agent budget let N swarm children oversubscribe the
+    /// endpoint by N×).
+    governor: Arc<ConcurrencyGovernor>,
     /// Pause flag for the ESC listener — set when a confirmation prompt needs stdin
     esc_paused: Arc<AtomicBool>,
     /// Acknowledgement from the ESC listener that it observed the pause flag.
@@ -1419,7 +1424,7 @@ To call a tool, use this EXACT XML structure:
         // evicting file content after just a few tool calls.
         let compressor =
             ContextCompressor::with_content_ratio(max_context_tokens, compressor_content_ratio);
-        let governor = ConcurrencyGovernor::from_config(&config.concurrency);
+        let governor = ConcurrencyGovernor::shared_from_config(&config.concurrency);
 
         let tool_schema_in_prompt = !config.agent.native_function_calling;
         #[cfg(feature = "resilience")]

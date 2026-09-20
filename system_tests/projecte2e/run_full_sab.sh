@@ -76,6 +76,24 @@ ALL_SCENARIOS=(
   "actor_pdvr:hard:actor_pdvr.txt:900:cargo test -q"
 )
 
+# Kill a process and all of its descendants, children first.
+#
+# `kill "${pid}"` signals only the direct child. `selfware` spawns cargo/rustc,
+# so an orphaned compiler survives the kill and keeps holding target/ locks —
+# which the post-validation run started moments later then contends with (or
+# times out behind). `setsid` is not portable (it is absent on macOS), so walk
+# the tree with `pgrep -P` instead; killing children before the parent keeps
+# them attached and therefore findable.
+kill_tree() {
+  local pid="$1"
+  local sig="${2:-TERM}"
+  local child
+  for child in $(pgrep -P "${pid}" 2>/dev/null || true); do
+    kill_tree "${child}" "${sig}"
+  done
+  kill "-${sig}" "${pid}" 2>/dev/null || true
+}
+
 # Resolve timeout command
 if command -v gtimeout >/dev/null 2>&1; then
   TIMEOUT_CMD="gtimeout"
@@ -383,9 +401,9 @@ run_scenario() {
     if [[ ${idle_secs} -ge ${STALL_TIMEOUT} ]]; then
       kill_reason="stall"
       echo "[$(date +%H:%M:%S)] ${name}: STALLED for ${idle_secs}s — killing" >> "${progress_file}"
-      kill "${agent_pid}" 2>/dev/null || true
+      kill_tree "${agent_pid}" TERM
       sleep 2
-      kill -9 "${agent_pid}" 2>/dev/null || true
+      kill_tree "${agent_pid}" KILL
       break
     fi
 
@@ -394,9 +412,9 @@ run_scenario() {
       kill_reason="max_timeout"
       local elapsed=$((now - start_ts))
       echo "[$(date +%H:%M:%S)] ${name}: MAX TIMEOUT (${elapsed}s) — killing" >> "${progress_file}"
-      kill "${agent_pid}" 2>/dev/null || true
+      kill_tree "${agent_pid}" TERM
       sleep 2
-      kill -9 "${agent_pid}" 2>/dev/null || true
+      kill_tree "${agent_pid}" KILL
       break
     fi
   done

@@ -163,7 +163,10 @@ fn test_format_recent_failure_history_extracts_recent_failures() {
         hypothesis_id: "h1".to_string(),
         description: "Patch calculate_complexity in code_metrics.rs".to_string(),
         diff_sha256: "sha1".to_string(),
-        patch: None,
+        patch: Some(
+            "--- a/src/tools/code_metrics.rs\n+++ b/src/tools/code_metrics.rs\n@@ -1 +1 @@\n-old\n+new\n"
+                .to_string(),
+        ),
         sab_report_path: None,
         metrics: None,
         composite_score: None,
@@ -217,6 +220,52 @@ fn test_format_recent_failure_history_extracts_recent_failures() {
     assert!(history.contains("Previous Failed Hypotheses"));
     assert!(history.contains("calculate_complexity"));
     assert!(!history.contains("Evaluated mutation"));
+    // The files the patch actually touched, not just the description: dedup
+    // only rejects byte-identical diffs, so a re-worded attempt at the same
+    // function slips past it and the file list is what makes the repeat visible.
+    assert!(
+        history.contains("[touched: src/tools/code_metrics.rs]"),
+        "the failure entry must name the files the patch touched, got: {history}"
+    );
+    assert!(
+        history.contains("Re-wording an attempt does not make it new"),
+        "the header must say that re-wording is not a new attempt"
+    );
+}
+
+/// The two breakers that bound an unattended daemon must fail safe: unset or
+/// unparseable falls back to the default bound, and only `0` disables one.
+#[test]
+fn test_parse_plateau_and_barren_limits() {
+    assert_eq!(parse_plateau_patience(None), DEFAULT_PLATEAU_PATIENCE);
+    assert_eq!(parse_plateau_patience(Some("2")), 2);
+    assert_eq!(parse_plateau_patience(Some(" 2 ")), 2);
+    assert_eq!(
+        parse_plateau_patience(Some("0")),
+        0,
+        "0 disables the breaker"
+    );
+    assert_eq!(
+        parse_plateau_patience(Some("nope")),
+        DEFAULT_PLATEAU_PATIENCE
+    );
+
+    assert_eq!(parse_barren_generations(None), DEFAULT_BARREN_GENERATIONS);
+    assert_eq!(parse_barren_generations(Some("3")), 3);
+    assert_eq!(
+        parse_barren_generations(Some("0")),
+        0,
+        "0 disables the breaker"
+    );
+    assert_eq!(
+        parse_barren_generations(Some("")),
+        DEFAULT_BARREN_GENERATIONS
+    );
+
+    // The stop reason names the streak, so a stopped run explains itself.
+    let reason = barren_stop_reason(5);
+    assert!(reason.contains('5'), "got: {reason}");
+    assert!(reason.contains("consecutive"), "got: {reason}");
 }
 
 #[test]

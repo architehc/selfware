@@ -234,6 +234,53 @@ fn test_early_stop_plateau() {
     }
 }
 
+/// The daemon's incumbent policy has no plateau condition of its own: its only
+/// Stop paths are an exhausted probes budget (which `for_daemon` deliberately
+/// sets to `None`) and an empty action set. So the plateau decorator is the only
+/// thing that bounds a fixation loop — which is why the daemon now wraps it.
+/// This pins the contrast that fix relies on.
+#[test]
+fn test_plateau_decorator_is_what_bounds_the_daemon_incumbent() {
+    let obs = vec![make_obs(
+        "o1",
+        "b1",
+        0,
+        None,
+        Some(0.60),
+        AttemptStatus::Evaluated,
+        None,
+    )];
+    let prefix = PrefixView::new(obs, 0.5, 2);
+    let actions = vec![LegalAction::OpenRoot {
+        branch_id: "b2".into(),
+        node_id: "n2".into(),
+    }];
+
+    // Bare incumbent: a stagnant prefix never stops it.
+    let mut bare = FixedPopulationPolicy::for_daemon(5);
+    for round in 0..6 {
+        assert!(
+            matches!(
+                bare.decide(&prefix, &actions, 0.5),
+                PolicyDecision::SelectBatch(_)
+            ),
+            "round {round}: for_daemon has no plateau stop — the generation budget was the only bound"
+        );
+    }
+
+    // Wrapped with patience 1: the second stagnant round stops it.
+    let mut wrapped =
+        EarlyStopPlateauPolicy::new(Box::new(FixedPopulationPolicy::for_daemon(5)), 1, 0.01);
+    assert!(matches!(
+        wrapped.decide(&prefix, &actions, 0.5),
+        PolicyDecision::SelectBatch(_)
+    ));
+    match wrapped.decide(&prefix, &actions, 0.5) {
+        PolicyDecision::Stop { reason } => assert!(reason.contains("Terminating early")),
+        _ => panic!("the plateau breaker must stop a stagnant incumbent"),
+    }
+}
+
 #[test]
 fn test_refine_top1_policy_deterministic_tie_breaking() {
     // Both b1 and b2 have identical anchor scores (0.8)

@@ -7,8 +7,21 @@
 //!
 //! All permits are RAII guards that release automatically on drop.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+/// Process-wide governor cache, keyed by the three limits.
+///
+/// The endpoint's concurrency limit is a property of the *server*, not of an
+/// agent. A per-Agent governor let each swarm/multiagent child hold its own
+/// `max_streams`, so N agents put N×`max_streams` streams against a server with
+/// a fixed slot count — exactly the oversubscription that surfaced as server
+/// queueing and request timeouts. Agents that ask for the same limits now share
+/// one budget; distinct limits still get distinct governors so a deliberately
+/// different config is not silently merged into another's ceiling.
+static SHARED_GOVERNORS: LazyLock<Mutex<HashMap<(usize, usize, usize), Arc<ConcurrencyGovernor>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Governs concurrency across streaming, tool execution, and global operations.
 ///
@@ -75,6 +88,29 @@ impl ConcurrencyGovernor {
         Self::new(4, 8, 12)
     }
 
+    /// The process-wide governor for these limits.
+    ///
+    /// Every caller in this process asking for the same limits shares one
+    /// governor, so `max_streams` bounds the whole process rather than each
+    /// agent — see [`SHARED_GOVERNORS`]. Use [`Self::new`] for an isolated
+    /// governor (tests, tooling that wants its own budget).
+    pub fn shared(max_streams: usize, max_tools: usize, max_global: usize) -> Arc<Self> {
+        let key = (max_streams.max(1), max_tools.max(1), max_global.max(1));
+        let mut cache = SHARED_GOVERNORS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Arc::clone(
+            cache
+                .entry(key)
+                .or_insert_with(|| Arc::new(Self::new(key.0, key.1, key.2))),
+        )
+    }
+
+    /// [`Self::shared`] from a [`ConcurrencyConfig`](crate::config::ConcurrencyConfig).
+    pub fn shared_from_config(cfg: &crate::config::ConcurrencyConfig) -> Arc<Self> {
+        Self::shared(cfg.max_streams, cfg.max_tools, cfg.max_global)
+    }
+
     /// Acquire a stream permit, waiting if none are currently available.
     ///
     /// Returns a [`ConcurrencyPermit`] that holds both a stream-level and a
@@ -136,6 +172,26 @@ impl ConcurrencyGovernor {
                 _global: global,
             }),
             // `tool` drops here, releasing the category permit.
+            Err(_) => None,
+        }
+    }
+
+    /// Try to acquire a stream permit without blocking.
+    ///
+    /// Symmetric counterpart to [`Self::try_acquire_tool`]: a caller that must
+    /// stay non-blocking (a status refresh, a best-effort call) can probe the
+    /// stream pool instead of parking on it. Category first, then global, with
+    /// the category permit released when the global ceiling refuses.
+    pub fn try_acquire_stream(&self) -> Option<ConcurrencyPermit> {
+        let stream = Arc::clone(&self.stream_semaphore)
+            .try_acquire_owned()
+            .ok()?;
+        match Arc::clone(&self.global_semaphore).try_acquire_owned() {
+            Ok(global) => Some(ConcurrencyPermit {
+                _category: stream,
+                _global: global,
+            }),
+            // `stream` drops here, releasing the category permit.
             Err(_) => None,
         }
     }
