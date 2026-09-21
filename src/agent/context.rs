@@ -106,7 +106,14 @@ impl ContextCompressor {
 
         info!("Compressing context: {} messages", messages.len());
 
-        let system_msg = messages.first().cloned();
+        // Preserve the system message BY ROLE — the first message is not
+        // guaranteed to BE the system prompt (bootstrap noise can precede it),
+        // mirroring the hardened compaction path.
+        let system_msg = messages
+            .iter()
+            .find(|m| m.role == "system")
+            .cloned()
+            .or_else(|| messages.first().cloned());
         let recent_start = safe_tail_start(
             messages,
             messages.len().saturating_sub(self.min_messages_to_keep),
@@ -158,6 +165,22 @@ impl ContextCompressor {
             compressed.push(sys);
         }
 
+        // Preserve the ORIGINAL TASK — the first user message after the
+        // system prompt — so summarize-based compression of an autonomous
+        // long run can't erase the root objective (the anchor lives inside
+        // `to_summarize` otherwise and survives only at the summarizer's whim).
+        if let Some(task) = super::Agent::original_task_anchor(messages) {
+            if !recent_msgs
+                .iter()
+                .any(|r| r.content.text() == task.content.text())
+            {
+                compressed.push(Message::user(format!(
+                    "[ORIGINAL TASK]:\n{}",
+                    task.content.text()
+                )));
+            }
+        }
+
         compressed.push(Message::user(format!(
             "[CONTEXT SUMMARY - {} earlier messages compressed]:\n{}",
             to_summarize.len(),
@@ -170,6 +193,13 @@ impl ContextCompressor {
         ));
         // Keep messages in chronological order (recent_msgs is already chronological)
         compressed.extend(recent_msgs);
+
+        // Tool-call pairing invariants: `safe_tail_start` already stops the
+        // recent window from OPENING on an orphan tool result, but a dangling
+        // assistant `tool_calls` at the TAIL (e.g. an interrupted final turn)
+        // still 400s. Enforce the same invariants as the hardened compaction
+        // path so every compression route yields an API-valid message list.
+        let compressed = super::Agent::apply_tool_call_pair_invariants(compressed);
 
         let original_estimate = self.estimate_tokens(messages);
         let new_estimate = self.estimate_tokens(&compressed);
@@ -197,8 +227,16 @@ impl ContextCompressor {
 
     pub fn hard_compress(&self, messages: &[Message]) -> Vec<Message> {
         let mut result = Vec::new();
-        if let Some(first) = messages.first() {
-            result.push(first.clone()); // System
+        // Preserve the system message BY ROLE — a non-system bootstrap line can
+        // otherwise masquerade as the "system" message and the real prompt is
+        // dropped (mirrors the hardened compaction path).
+        if let Some(sys) = messages
+            .iter()
+            .find(|m| m.role == "system")
+            .cloned()
+            .or_else(|| messages.first().cloned())
+        {
+            result.push(sys);
         }
 
         // Preserve the original task objective (the first user message) so an
@@ -237,7 +275,10 @@ impl ContextCompressor {
             ));
         }
 
-        result
+        // The consecutive-assistant pruning above can strand a `tool` result
+        // whose assistant tool_call was skipped — drop any orphan, same
+        // invariants as every other compression path.
+        super::Agent::apply_tool_call_pair_invariants(result)
     }
 }
 

@@ -1,5 +1,54 @@
 use super::*;
 
+/// Build a bare assistant message that declares a single tool call.
+fn tool_call_message(id: &str, name: &str) -> Message {
+    let mut message = Message::assistant("");
+    message.tool_calls = Some(vec![crate::api::types::ToolCall {
+        id: id.to_string(),
+        call_type: "function".to_string(),
+        function: crate::api::types::ToolFunction {
+            name: name.to_string(),
+            arguments: "{}".to_string(),
+        },
+    }]);
+    message
+}
+
+/// Assert that a message list contains no orphaned tool-call messages: every
+/// `assistant` with `tool_calls` must have a later kept result per call, and
+/// every `tool` result must have an earlier kept assistant call.
+fn assert_valid_tool_pairing(messages: &[Message]) {
+    for (i, m) in messages.iter().enumerate() {
+        if let Some(calls) = m.tool_calls.as_deref() {
+            for call in calls {
+                let has_result = messages[i + 1..].iter().any(|r| {
+                    r.role == "tool" && r.tool_call_id.as_deref() == Some(call.id.as_str())
+                });
+                assert!(
+                    has_result,
+                    "assistant message #{i} declares tool_call {} but no result is kept",
+                    call.id
+                );
+            }
+        }
+        if m.role == "tool" {
+            let id = m
+                .tool_call_id
+                .as_deref()
+                .expect("tool message missing tool_call_id");
+            let has_call = messages[..i].iter().any(|a| {
+                a.tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| calls.iter().any(|call| call.id == *id))
+            });
+            assert!(
+                has_call,
+                "tool message #{i} (call {id}) has no kept assistant tool_call"
+            );
+        }
+    }
+}
+
 #[test]
 fn test_context_compressor_new() {
     let compressor = ContextCompressor::new(100000);
@@ -444,4 +493,111 @@ fn test_hard_compress_preserves_task_objective() {
             .map(|m| m.content.text().to_string())
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn test_hard_compress_drops_dangling_tool_calls() {
+    let compressor = ContextCompressor::new(100000);
+    // The kept 3-message tail closes on an assistant that declares a tool
+    // call whose result never arrived (interrupted final turn). The hard
+    // fallback must drop it — a dangling tool_call 400s every provider.
+    let messages = vec![
+        Message::system("sys"),
+        Message::user("THE ORIGINAL TASK: fix the bug"),
+        Message::user("u1"),
+        Message::assistant("a1"),
+        Message::user("u2"),
+        Message::user("u3"),
+        tool_call_message("call_Z", "file_write"),
+    ];
+
+    let compressed = compressor.hard_compress(&messages);
+
+    // (1) Task objective survives the emergency compaction.
+    assert!(
+        compressed
+            .iter()
+            .any(|m| m.content.text().contains("THE ORIGINAL TASK")),
+        "hard_compress dropped the original task objective: {:?}",
+        compressed
+            .iter()
+            .map(|m| m.content.text().to_string())
+            .collect::<Vec<_>>()
+    );
+    // (2) No orphaned tool-call messages anywhere in the result.
+    assert_valid_tool_pairing(&compressed);
+    assert!(
+        compressed
+            .iter()
+            .all(|m| m.tool_calls.as_ref().is_none_or(|calls| calls.is_empty())),
+        "dangling assistant tool_call (call_Z) must be dropped: {:?}",
+        compressed
+            .iter()
+            .map(|m| m.role.clone())
+            .collect::<Vec<_>>()
+    );
+    // The list must still end with a user prompt for the next assistant turn.
+    assert_eq!(
+        compressed.last().map(|m| m.role.as_str()),
+        Some("user"),
+        "hard_compress output must end with a user message"
+    );
+}
+
+#[tokio::test]
+async fn test_compress_summarize_preserves_task_anchor_and_pairing() {
+    // The autonomous-execution summarize path (ContextCompressor::compress):
+    // must keep the original task pinned AND drop both the orphaned tool
+    // result opening the recent window and the dangling trailing tool_call.
+    let server = crate::testing::mock_api::MockLlmServer::builder()
+        .with_response("Summary of earlier work")
+        .build()
+        .await;
+    let config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
+    let client = ApiClient::new(&config).unwrap();
+    let compressor = ContextCompressor::new(1_000_000);
+
+    let mut messages = vec![
+        Message::system("sys"),
+        Message::user(format!(
+            "CONTEXT COMPRESSOR TASK SENTINEL: audit the codebase {}",
+            "x".repeat(300)
+        )),
+        tool_call_message("call_A", "file_read"),
+        Message::tool(format!("result A {}", "y".repeat(500)), "call_A"),
+        tool_call_message("call_B", "file_write"),
+        Message::tool("orphaned result B", "call_B"),
+        Message::user("recent u0"),
+        Message::assistant("recent a0"),
+        Message::user("recent u1"),
+        Message::assistant("recent a1"),
+        tool_call_message("call_Z", "file_write"),
+    ];
+
+    let (compressed, _usage) = compressor.compress(&client, &messages).await.unwrap();
+    messages = compressed;
+
+    let joined = messages
+        .iter()
+        .map(|m| m.content.text_all())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // (1) Original task anchor survives the summarize path.
+    assert!(
+        joined.contains("CONTEXT COMPRESSOR TASK SENTINEL"),
+        "original task text must survive summarize compression"
+    );
+    // (2) No orphaned tool messages, no dangling tool_calls.
+    assert_valid_tool_pairing(&messages);
+    assert!(
+        messages.iter().all(|m| {
+            m.tool_calls
+                .as_ref()
+                .is_none_or(|calls| calls.iter().all(|c| c.id != "call_Z"))
+                && !m.content.text().contains("orphaned result B")
+        }),
+        "dangling call_Z and orphaned result B must both be gone: {joined}"
+    );
+    server.stop().await;
 }

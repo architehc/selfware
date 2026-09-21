@@ -34,6 +34,20 @@ impl Agent {
 
         let mut extracted = extract_tool_calls(&msg, self.effective_native_fc());
 
+        // Canonicalize alias argument spellings (old_string → old_str,
+        // file_path → path, cmd → command, ...) immediately after extraction:
+        // native calls are schema-validated before the tool deserializer, so
+        // the serde aliases on the Args structs alone cannot rescue an alias
+        // spelling. Doing it here keeps the early validation diagnostic below
+        // quiet and hands canonical arguments to dispatch, bookkeeping, and
+        // artifacts.
+        for tc in extracted.iter_mut() {
+            tc.function.arguments = crate::agent::tool_validator::normalize_tool_arg_aliases(
+                &tc.function.name,
+                &tc.function.arguments,
+            );
+        }
+
         // Validate native tool calls against the loaded schema for early
         // diagnostic.  Validation failures are logged but do not abort —
         // individual bad calls will still be rejected at dispatch time.

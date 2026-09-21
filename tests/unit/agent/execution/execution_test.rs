@@ -1,6 +1,6 @@
 use super::*;
 use crate::checkpoint::ToolCallLog;
-use crate::testing::mock_api::MockLlmServer;
+use crate::testing::mock_api::{MockLlmServer, MockToolCall};
 use chrono::Utc;
 use std::hash::{Hash, Hasher};
 
@@ -70,6 +70,103 @@ async fn count_source_files_skips_scaffold_target_and_excluded_dirs() {
     }
     cwd.switch_to(many.path());
     assert_eq!(count_source_files_in_workdir(3).await, 3);
+    // cwd restored on drop of `cwd`.
+}
+
+#[tokio::test]
+async fn rust_scaffold_allowed_respects_language_manifests() {
+    // Review findings: "no source files" is not "no language". A fresh dir
+    // that carries a non-Rust manifest (pyproject.toml, package.json,
+    // go.mod, ...) but no source files yet must NOT receive the Rust
+    // src/lib.rs scaffold; a Rust-shaped dir (Cargo.toml) still may. And (P2
+    // follow-up) a manifest-free EMPTY dir only scaffolds on POSITIVE Rust
+    // evidence — the task text naming a .rs target or cargo/rust vocabulary.
+    // "Create hello.py" in an empty dir must not get a Rust stub.
+    let cwd = crate::test_support::CwdGuard::hold();
+
+    // Fresh Python project declared by manifest alone → scaffold blocked,
+    // whatever the task says (the manifest wins).
+    let python = tempfile::tempdir().unwrap();
+    std::fs::write(
+        python.path().join("pyproject.toml"),
+        "[project]\nname = \"x\"\n",
+    )
+    .unwrap();
+    cwd.switch_to(python.path());
+    assert!(
+        !rust_scaffold_allowed("implement a python package").await,
+        "a pyproject.toml-only directory must not get a Rust scaffold"
+    );
+
+    // Fresh JS project → blocked.
+    let js = tempfile::tempdir().unwrap();
+    std::fs::write(js.path().join("package.json"), "{}\n").unwrap();
+    cwd.switch_to(js.path());
+    assert!(!rust_scaffold_allowed("write a node cli").await);
+
+    // Fresh Go project → blocked.
+    let go = tempfile::tempdir().unwrap();
+    std::fs::write(go.path().join("go.mod"), "module m\n").unwrap();
+    cwd.switch_to(go.path());
+    assert!(!rust_scaffold_allowed("build a go server").await);
+
+    // Rust-shaped → scaffold still allowed (Cargo.toml short-circuits, even
+    // for a task that says nothing about Rust).
+    let rust = tempfile::tempdir().unwrap();
+    std::fs::write(rust.path().join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+    cwd.switch_to(rust.path());
+    assert!(rust_scaffold_allowed("just make it work").await);
+
+    // Manifest-free EMPTY dir with an EXPLICIT non-Rust request → blocked
+    // (P2 finding: "Create hello.py" used to scaffold Rust).
+    let py_request = tempfile::tempdir().unwrap();
+    cwd.switch_to(py_request.path());
+    assert!(
+        !rust_scaffold_allowed("Create hello.py that prints a greeting").await,
+        "an empty dir with an explicit Python request must not get src/lib.rs"
+    );
+    assert!(
+        !rust_scaffold_allowed("write a bash script deploy.sh").await,
+        "an empty dir with an explicit bash request must not get src/lib.rs"
+    );
+
+    // Manifest-free dir with POSITIVE Rust evidence in the task → allowed.
+    let rust_task = tempfile::tempdir().unwrap();
+    std::fs::write(rust_task.path().join("hello.rs"), "fn main() {}\n").unwrap();
+    cwd.switch_to(rust_task.path());
+    assert!(
+        rust_scaffold_allowed("implement the greet function in hello.rs").await,
+        "a .rs target named by the task is positive Rust evidence"
+    );
+    let rust_task2 = tempfile::tempdir().unwrap();
+    cwd.switch_to(rust_task2.path());
+    assert!(
+        rust_scaffold_allowed("write a Rust CLI tool that sums numbers").await,
+        "explicit 'rust' in the task is positive evidence in an empty dir"
+    );
+    let rust_task3 = tempfile::tempdir().unwrap();
+    cwd.switch_to(rust_task3.path());
+    assert!(
+        rust_scaffold_allowed("Run cargo test to verify").await,
+        "cargo in the task is positive evidence in an empty dir"
+    );
+    // "rust" boundary check: "trust"/"thrust" must not read as Rust.
+    let trust_task = tempfile::tempdir().unwrap();
+    cwd.switch_to(trust_task.path());
+    assert!(
+        !rust_scaffold_allowed("fix the trust boundary in the auth flow").await,
+        "word-boundary: 'trust' is not positive Rust evidence"
+    );
+
+    // A Cargo.toml alongside a stray package.json stays Rust-shaped.
+    let mixed = tempfile::tempdir().unwrap();
+    std::fs::write(mixed.path().join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+    std::fs::write(mixed.path().join("package.json"), "{}\n").unwrap();
+    cwd.switch_to(mixed.path());
+    assert!(
+        rust_scaffold_allowed("update the docs").await,
+        "Cargo.toml presence must win over a stray non-Rust manifest"
+    );
     // cwd restored on drop of `cwd`.
 }
 
@@ -1532,11 +1629,14 @@ async fn stale_verification_rescue_reuses_models_own_command_outside_rust() {
         "fix the divide-by-zero bug in calc.py".to_string(),
     );
     // The most recent verification-framed command wins; non-verification
-    // commands around it are skipped.
+    // commands around it are skipped. A trailing `cat` is never verification,
+    // so the older test-calc run stays the rescue target (a trailing
+    // `python3 app.py` was the original non-verification filler, but finding
+    // #4 turned deliverable-script runs INTO verification — cat stays out).
     checkpoint.log_tool_call(checkpoint_shell_call("python3 test_calc.py", false));
     checkpoint.log_tool_call(checkpoint_shell_call("ls -la", true));
     checkpoint.log_tool_call(checkpoint_shell_call("python3 test_calc.py", true));
-    checkpoint.log_tool_call(checkpoint_shell_call("python3 app.py", true));
+    checkpoint.log_tool_call(checkpoint_shell_call("cat calc.py", true));
     agent.current_checkpoint = Some(checkpoint);
 
     let (tool, args, display) = agent
@@ -1553,7 +1653,10 @@ async fn stale_verification_rescue_reuses_models_own_command_outside_rust() {
 #[tokio::test]
 async fn stale_verification_rescue_is_none_without_any_verification_signal() {
     // No Cargo.toml and no verification-framed command in the run: there
-    // is no honest command to auto-run, so no rescue.
+    // is no honest command to auto-run, so no rescue. `ls -la` is never
+    // verification (the original `python3 app.py` filler became a
+    // deliverable-script verification signal under finding #4, so it would
+    // rescue now — see the deliverable-script rescue test below).
     let tmp = tempfile::tempdir().unwrap();
     let _guard = crate::test_support::CwdGuard::enter(tmp.path());
 
@@ -1564,10 +1667,45 @@ async fn stale_verification_rescue_is_none_without_any_verification_signal() {
         "python-task".to_string(),
         "fix the divide-by-zero bug in calc.py".to_string(),
     );
-    checkpoint.log_tool_call(checkpoint_shell_call("python3 app.py", true));
+    checkpoint.log_tool_call(checkpoint_shell_call("ls -la", true));
     agent.current_checkpoint = Some(checkpoint);
 
     assert!(agent.stale_verification_rescue_call().is_none());
+}
+
+#[tokio::test]
+async fn stale_verification_rescue_reuses_deliverable_script() {
+    // Review finding #4: a standalone deliverable script is now a
+    // verification signal, so the rescue re-runs the model's own
+    // deliverable-script command (a project with no test framework) instead
+    // of declaring no rescue — the StaleVerification deadlock is broken.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("solve.py"),
+        "#!/usr/bin/env python3\nprint('ok')\n",
+    )
+    .unwrap();
+    let _guard = crate::test_support::CwdGuard::enter(tmp.path());
+
+    let mut agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
+        .await
+        .unwrap();
+    let mut checkpoint = crate::checkpoint::TaskCheckpoint::new(
+        "py-task".to_string(),
+        "make solve.py print ok".to_string(),
+    );
+    checkpoint.log_tool_call(checkpoint_shell_call("python3 solve.py", true));
+    agent.current_checkpoint = Some(checkpoint);
+
+    let (tool, args, display) = agent
+        .stale_verification_rescue_call()
+        .expect("a clean deliverable-script run must rescue");
+    assert_eq!(tool, "shell_exec");
+    assert_eq!(display, "python3 solve.py");
+    assert_eq!(
+        args,
+        serde_json::json!({"command": "python3 solve.py"}).to_string()
+    );
 }
 
 #[tokio::test]
@@ -3499,6 +3637,74 @@ async fn test_step_with_empty_response() {
         msg.contains("non-streaming"),
         "the reason must state that the non-streaming retry was already tried, got: {msg}"
     );
+
+    server.stop().await;
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn empty_streak_resets_after_tool_progress() {
+    // Acceptance (defect 3): the consecutive-empty reset used to live inside
+    // the no-tools completion branch, so `empty → real tool call → empty`
+    // counted as TWO consecutive empties and tripped the breaker despite the
+    // intervening progress. A meaningful response (here: an executed tool
+    // call) must end the streak.
+    let temp = tempfile::NamedTempFile::new_in(std::env::current_dir().unwrap()).unwrap();
+    std::fs::write(temp.path(), "hello world\n").unwrap();
+    let path = temp.path().display().to_string();
+
+    let server = MockLlmServer::builder()
+        .with_response("") // turn 1: empty — counts 1, latches non-streaming
+        .with_tool_calls(vec![MockToolCall {
+            id: "call_read".to_string(),
+            name: "file_read".to_string(),
+            arguments: serde_json::json!({"path": &path}).to_string(),
+        }]) // turn 2: a REAL tool call — progress, must reset the streak
+        .with_response("") // turn 3: empty again — count 1, NOT the breaker
+        .build()
+        .await;
+
+    let mut config = test_config(format!("{}/v1", server.url()));
+    config.agent.streaming = true;
+    // The tool-call turn is exercised through the native function-calling
+    // parse path (MockResponse::ToolCalls); the default test_config disables
+    // native FC, which would drop the call and re-run the empty classification.
+    config.agent.native_function_calling = true;
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let first = agent.execute_step_internal(false).await;
+    assert!(first.is_ok() && !first.unwrap());
+    assert_eq!(agent.consecutive_empty_responses, 1);
+    assert!(agent.force_non_streaming);
+
+    // A tool call is meaningful progress: the step must not report done but
+    // must reset the empty streak so the NEXT empty is not "consecutive".
+    let second = agent.execute_step_internal(false).await;
+    assert!(second.is_ok(), "tool-call turn must not error");
+    assert_eq!(
+        agent.consecutive_empty_responses, 0,
+        "a real tool call must reset the empty streak"
+    );
+    assert!(
+        agent
+            .messages
+            .iter()
+            .any(|m| m.content.text().contains("hello world")),
+        "the file_read tool call must have executed and returned the file content"
+    );
+
+    // Now empty again: resets make this count 1 — the breaker (2 consecutive)
+    // must NOT trip even though this is the second empty of the whole run.
+    let third = agent.execute_step_internal(false).await;
+    assert!(
+        third.is_ok(),
+        "empty after tool progress must be treated as a fresh incident, not the breaker"
+    );
+    assert!(!third.unwrap());
+    assert_eq!(agent.consecutive_empty_responses, 1);
 
     server.stop().await;
 }

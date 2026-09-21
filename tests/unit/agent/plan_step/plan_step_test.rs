@@ -559,6 +559,59 @@ async fn test_plan_assistant_message_content_matches_response() {
     server.stop().await;
 }
 
+/// `plan` must classify empty responses the same way the execution step does:
+/// count toward the consecutive-empty streak, latch `force_non_streaming` so
+/// the retry goes out non-streaming, and after two consecutive empties stop
+/// with EMPTY_RESPONSE_LOOP instead of silently planning from nothing.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn test_plan_empty_response_latches_non_streaming_then_breaks() {
+    let server = MockLlmServer::builder()
+        .with_response("")
+        .with_response("")
+        .build()
+        .await;
+
+    let config = mock_agent_config(format!("{}/v1", server.url()), true);
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.messages.push(Message::user("Hello"));
+
+    // First empty planning turn: rejected as a provider hiccup, latches the
+    // non-streaming retry (streaming was the path that produced nothing), and
+    // returns "no tool calls" so the run can proceed — but does NOT push an
+    // empty assistant message into history.
+    let first = agent.plan().await;
+    assert!(first.is_ok());
+    assert!(!first.unwrap());
+    assert_eq!(agent.consecutive_empty_responses, 1);
+    assert!(
+        agent.force_non_streaming,
+        "an empty streamed planning response must latch the non-streaming retry"
+    );
+    assert!(
+        !agent
+            .messages
+            .iter()
+            .any(|m| m.role == "assistant" && m.content.text().is_empty()),
+        "an empty planning turn must not push an empty assistant message into history"
+    );
+
+    // Second consecutive empty: bounded recovery is exhausted — typed reason.
+    let err = agent
+        .plan()
+        .await
+        .expect_err("a persistently empty endpoint must stop planning");
+    assert!(
+        err.to_string().contains("EMPTY_RESPONSE_LOOP"),
+        "got: {err}"
+    );
+
+    server.stop().await;
+}
+
 /// `plan` with a 503 error returns an error whose message contains the
 /// status or error context.  We queue many errors to exhaust retries.
 #[tokio::test]

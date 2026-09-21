@@ -64,6 +64,18 @@ impl Agent {
     /// Clear all context (messages and memory)
     pub(super) fn clear_context(&mut self) {
         self.messages.retain(|m| m.role == "system");
+        // Same bug class as /clear: retaining by role keeps the system
+        // messages but leaves the previous task's focus overlay on
+        // messages[0] plus current_task_context / last_assistant_response
+        // / failure-mode counters, which would leak the old task into the
+        // next answer. Reset that per-task state explicitly.
+        if let Some(first) = self.messages.iter_mut().find(|m| m.role == "system") {
+            let clean = super::task_runner::strip_focus_overlay(first.content.text());
+            first.content = crate::api::types::MessageContent::from_text(clean);
+        }
+        self.current_task_context.clear();
+        self.last_assistant_response.clear();
+        self.reset_failure_mode_counters();
         self.memory.clear();
         self.file_tracker.context_files.clear();
         self.file_tracker.stale_files.clear();

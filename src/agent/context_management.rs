@@ -113,6 +113,81 @@ impl Agent {
         }
     }
 
+    /// The original task: the first USER message AFTER the system prompt (a
+    /// user message before the system prompt is bootstrap noise). Messages-
+    /// only fallback used by the free compression functions
+    /// (`compression.rs`), which have no access to agent state.
+    pub(super) fn original_task_anchor(messages: &[Message]) -> Option<Message> {
+        let system_idx = messages.iter().position(|m| m.role == "system");
+        messages
+            .iter()
+            .enumerate()
+            .find(|(i, m)| m.role == "user" && system_idx.is_none_or(|s| *i > s))
+            .map(|(_, m)| m.clone())
+    }
+
+    /// Resolve the index of the CURRENT task's prompt within `self.messages` —
+    /// the anchor every trim/compact path pins so a session never loses its
+    /// root objective.
+    ///
+    /// The primary rule matches the active checkpoint's task description
+    /// (`run_task` stamps a fresh checkpoint for every turn and queued task).
+    /// Interactive sessions reuse `self.messages` across turns, so the
+    /// historical "first user message" rule would pin turn 1's zombie task
+    /// while the agent works turn N — the anchor must follow the checkpoint
+    /// instead. Falls back to the historical rule (first user message after
+    /// the system prompt, identical to `original_task_anchor`) when there is
+    /// no checkpoint or its description no longer appears verbatim in the
+    /// history — exactly the pre-fix behavior on single-task runs.
+    pub(super) fn current_task_anchor_index(&self) -> Option<usize> {
+        if let Some(desc) = self
+            .current_checkpoint
+            .as_ref()
+            .map(|c| c.task_description.as_str())
+            .filter(|d| !d.trim().is_empty())
+        {
+            // rposition: pick the most recent copy when a user repeats the
+            // same prompt across turns.
+            if let Some(idx) = self
+                .messages
+                .iter()
+                .rposition(|m| m.role == "user" && m.content.text() == desc)
+            {
+                return Some(idx);
+            }
+        }
+        let system_idx = self.messages.iter().position(|m| m.role == "system");
+        self.messages
+            .iter()
+            .enumerate()
+            .find(|(i, m)| m.role == "user" && system_idx.is_none_or(|s| *i > s))
+            .map(|(i, _)| i)
+    }
+
+    /// The CURRENT task's prompt message (see
+    /// [`Self::current_task_anchor_index`]).
+    pub(super) fn current_task_anchor(&self) -> Option<Message> {
+        self.current_task_anchor_index()
+            .map(|idx| self.messages[idx].clone())
+    }
+
+    /// Filter a message list through the tool-call pairing invariants,
+    /// returning the list minus any orphaned `assistant` (dangling
+    /// `tool_calls` with no kept results) and `tool` result (no kept
+    /// matching assistant call) messages. Every compression path funnels
+    /// through this helper so `micro_compact`, `auto_compact`, and the
+    /// summarize compressor give providers the same pairing guarantee that
+    /// `trim_message_history` and `compress_to_structured_summary` enforce.
+    pub(super) fn apply_tool_call_pair_invariants(messages: Vec<Message>) -> Vec<Message> {
+        let mut keep = vec![true; messages.len()];
+        Self::enforce_tool_call_pair_invariants(&messages, &mut keep);
+        messages
+            .into_iter()
+            .zip(keep)
+            .filter_map(|(m, k)| k.then_some(m))
+            .collect()
+    }
+
     /// Per-message truncation cap for the over-budget fallback: 3/4 of the
     /// conversation budget, floored at 50K. A flat 50K silently destroyed
     /// deliberately injected large context — a 780K evolve-graph pack on a
@@ -147,12 +222,16 @@ impl Agent {
             .map(|(idx, _)| idx)
             .collect();
 
-        // Always pin the FIRST user message — the original task. pinned_critical
-        // above only keeps the 20 most-recent criticals, so on a long run the
-        // original objective is neither system nor recent-critical and gets
-        // evicted oldest-first, making the model lose the plot. Protect it.
-        if let Some(first_user) = self.messages.iter().position(|m| m.role == "user") {
-            pinned_critical.insert(first_user);
+        // Always pin the CURRENT task's prompt — the root objective.
+        // `pinned_critical` above only keeps the 20 most-recent criticals, so
+        // on a long run the objective is neither system nor recent-critical
+        // and gets evicted oldest-first, making the model lose the plot.
+        // Interactive sessions reuse `self.messages` across turns: pinning
+        // the FIRST user message left turn 1's zombie task in context forever
+        // while the agent worked turn N — the anchor follows the active
+        // checkpoint (the current task) and old turns become trimmable.
+        if let Some(anchor_idx) = self.current_task_anchor_index() {
+            pinned_critical.insert(anchor_idx);
         }
 
         // Walk non-system messages oldest-first and mark them for removal until
@@ -721,18 +800,13 @@ impl Agent {
                 .saturating_sub(recent.len())
                 .saturating_sub(usize::from(system_msg.is_some()));
 
-            // Preserve the ORIGINAL TASK so compression down to "system + last 4 +
-            // summary" doesn't drop the objective and make the model lose the plot
-            // on long runs. The task is the first USER message AFTER the system
-            // prompt (a user message before the system prompt is bootstrap noise).
-            // Skip if it's already within the recent window.
-            let system_idx = self.messages.iter().position(|m| m.role == "system");
-            let original_task = self
-                .messages
-                .iter()
-                .enumerate()
-                .find(|(i, m)| m.role == "user" && system_idx.is_none_or(|s| *i > s))
-                .map(|(_, m)| m.clone());
+            // Preserve the CURRENT TASK so compression down to
+            // "system + last 4 + summary" doesn't drop the objective and make
+            // the model lose the plot on long runs. The anchor follows the
+            // active checkpoint (current task), NOT the first user message —
+            // in an interactive session that would re-anchor turn 1's zombie
+            // task. Skip if it's already within the recent window.
+            let original_task = self.current_task_anchor();
             self.messages.clear();
             if let Some(sys) = system_msg {
                 self.messages.push(sys);
@@ -761,15 +835,8 @@ impl Agent {
             // assistant message fell outside the window). Providers 400 on
             // orphaned sequences — enforce the invariants like trim does
             // (review round 7).
-            let mut keep = vec![true; self.messages.len()];
-            Self::enforce_tool_call_pair_invariants(&self.messages, &mut keep);
-            self.messages = self
-                .messages
-                .iter()
-                .zip(&keep)
-                .filter(|(_, k)| **k)
-                .map(|(m, _)| m.clone())
-                .collect();
+            self.messages =
+                Self::apply_tool_call_pair_invariants(std::mem::take(&mut self.messages));
         }
     }
 

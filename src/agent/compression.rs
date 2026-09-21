@@ -321,7 +321,14 @@ pub fn micro_compact(messages: &mut Vec<Message>) -> CompressionMetrics {
     // Keep system message + last 10 pairs (20 messages) + user messages for context
     const MIN_MESSAGES_TO_KEEP: usize = 22;
 
-    let system_msg = messages.first().cloned();
+    // Preserve the system message BY ROLE — the first message is not
+    // guaranteed to BE the system prompt (bootstrap noise can precede it),
+    // mirroring the hardened compaction path.
+    let system_msg = messages
+        .iter()
+        .find(|m| m.role == "system")
+        .cloned()
+        .or_else(|| messages.first().cloned());
     let keep_start = messages.len().saturating_sub(MIN_MESSAGES_TO_KEEP);
 
     // Early return if there's nothing meaningful to compress
@@ -336,14 +343,6 @@ pub fn micro_compact(messages: &mut Vec<Message>) -> CompressionMetrics {
         );
     }
 
-    // Build new message list
-    let mut compressed = Vec::new();
-
-    // Always keep system message
-    if let Some(sys) = system_msg {
-        compressed.push(sys);
-    }
-
     // Process messages to compress
     // Ensure valid range - if keep_start <= 1, there's nothing to compress
     let to_compress = if keep_start > 1 {
@@ -352,6 +351,30 @@ pub fn micro_compact(messages: &mut Vec<Message>) -> CompressionMetrics {
         &[]
     };
     let recent = &messages[keep_start..];
+
+    // Build new message list
+    let mut compressed = Vec::new();
+
+    // Always keep system message
+    if let Some(sys) = system_msg {
+        compressed.push(sys);
+    }
+
+    // Preserve the ORIGINAL TASK — the first user message after the system
+    // prompt. `to_compress` slices `&messages[1..keep_start]` away, which
+    // destroys the user's initial prompt on a long run; pin it right after
+    // the system message so the model never loses its root objective.
+    if let Some(task) = super::Agent::original_task_anchor(messages) {
+        if !recent
+            .iter()
+            .any(|r| r.content.text() == task.content.text())
+        {
+            compressed.push(Message::user(format!(
+                "[ORIGINAL TASK]:\n{}",
+                task.content.text()
+            )));
+        }
+    }
 
     // Add compressed summary message for old content
     if !to_compress.is_empty() {
@@ -395,8 +418,15 @@ pub fn micro_compact(messages: &mut Vec<Message>) -> CompressionMetrics {
         compressed.push(cleaned);
     }
 
-    let tokens_after = compressed.iter().map(estimate_tokens).sum::<usize>();
-    let messages_after = compressed.len();
+    // The recent window can open on a `role: "tool"` message whose matching
+    // assistant tool_call was compacted away, and can hold an assistant
+    // `tool_calls` message whose results never landed — providers 400 on
+    // both. Enforce the same tool-call pairing invariants as the hardened
+    // compaction path so the post-compaction list is always API-valid.
+    let sanitized = super::Agent::apply_tool_call_pair_invariants(compressed);
+
+    let tokens_after = sanitized.iter().map(estimate_tokens).sum::<usize>();
+    let messages_after = sanitized.len();
 
     let metrics = CompressionMetrics::new(
         CompressionMethod::Micro,
@@ -407,7 +437,7 @@ pub fn micro_compact(messages: &mut Vec<Message>) -> CompressionMetrics {
         start.elapsed().as_millis() as u64,
     );
 
-    *messages = compressed;
+    *messages = sanitized;
     metrics
 }
 
@@ -437,7 +467,13 @@ pub async fn auto_compact(
     }
 
     // Keep system message and recent messages
-    let system_msg = messages.first().cloned();
+    // Preserve the system message BY ROLE so a leading non-system bootstrap
+    // line can never masquerade as (or displace) the real system prompt.
+    let system_msg = messages
+        .iter()
+        .find(|m| m.role == "system")
+        .cloned()
+        .or_else(|| messages.first().cloned());
     let keep_recent = 6;
     let recent_start = messages.len().saturating_sub(keep_recent);
     let recent_msgs: Vec<Message> = messages[recent_start..].to_vec();
@@ -495,6 +531,21 @@ pub async fn auto_compact(
         compressed.push(sys);
     }
 
+    // Preserve the ORIGINAL TASK — the first user message after the system
+    // prompt — so the LLM summary can't erase the root objective on a long
+    // run (the anchor message lives inside `to_summarize` otherwise).
+    if let Some(task) = super::Agent::original_task_anchor(messages) {
+        if !recent_msgs
+            .iter()
+            .any(|r| r.content.text() == task.content.text())
+        {
+            compressed.push(Message::user(format!(
+                "[ORIGINAL TASK]:\n{}",
+                task.content.text()
+            )));
+        }
+    }
+
     compressed.push(Message::user(format!(
         "[AUTO-COMPACT SUMMARY — {} earlier messages]:\n{}",
         to_summarize.len(),
@@ -503,8 +554,14 @@ pub async fn auto_compact(
 
     compressed.extend(recent_msgs);
 
-    let tokens_after = compressed.iter().map(estimate_tokens).sum::<usize>();
-    let messages_after = compressed.len();
+    // The recent window may open on a `role: "tool"` message whose matching
+    // assistant tool_call was summarized away, or hold an assistant with
+    // dangling tool_calls — providers 400 on both. Enforce the same tool-call
+    // pairing invariants as the hardened compaction path.
+    let sanitized = super::Agent::apply_tool_call_pair_invariants(compressed);
+
+    let tokens_after = sanitized.iter().map(estimate_tokens).sum::<usize>();
+    let messages_after = sanitized.len();
 
     let metrics = CompressionMetrics::new(
         CompressionMethod::Auto,
@@ -519,7 +576,7 @@ pub async fn auto_compact(
         response.usage.completion_tokens,
     );
 
-    *messages = compressed;
+    *messages = sanitized;
     Ok(metrics)
 }
 
@@ -556,8 +613,14 @@ async fn full_compact_with_safety(
     let tokens_before = messages.iter().map(estimate_tokens).sum::<usize>();
     let messages_before = messages.len();
 
-    // Always preserve system prompt and most recent user message
-    let system_msg = messages.first().cloned();
+    // Always preserve the system prompt (by role), the ORIGINAL TASK, and the
+    // most recent user message. The nuclear compaction must not erase the
+    // root objective either — the same anchor invariant as every other path.
+    let system_msg = messages
+        .iter()
+        .find(|m| m.role == "system")
+        .cloned()
+        .or_else(|| messages.first().cloned());
     let last_user_msg = messages.iter().rev().find(|m| m.role == "user").cloned();
 
     if messages.len() <= 4 {
@@ -609,6 +672,21 @@ async fn full_compact_with_safety(
     // 1. System prompt
     if let Some(sys) = system_msg {
         compressed.push(sys);
+    }
+
+    // 1b. Original task anchor — the nuclear compaction must not erase the
+    // root objective either. The whole conversation becomes a summary, so
+    // the anchor is the only verbatim trace of the original task that stays.
+    if let Some(task) = super::Agent::original_task_anchor(messages) {
+        let already_preserved = last_user_msg
+            .as_ref()
+            .is_some_and(|u| u.content.text() == task.content.text());
+        if !already_preserved {
+            compressed.push(Message::user(format!(
+                "[ORIGINAL TASK]:\n{}",
+                task.content.text()
+            )));
+        }
     }
 
     // 2. Full summary

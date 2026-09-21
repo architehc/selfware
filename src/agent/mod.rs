@@ -2221,7 +2221,8 @@ To call a tool, use this EXACT XML structure:
     /// 1. Read-only tools never need confirmation
     /// 2. Yolo / Daemon mode never asks
     /// 3. Tools in `safety.require_confirmation` config always ask (except Yolo/Daemon)
-    /// 4. Mode-specific rules (AutoEdit auto-approves file ops, Normal asks for everything)
+    /// 4. Mode-specific rules (AutoEdit auto-approves file ops + the checker-safe
+    ///    verification/introspection tools, Normal asks for everything)
     pub fn needs_confirmation(&self, tool_name: &str) -> bool {
         use crate::config::ExecutionMode;
 
@@ -2268,11 +2269,42 @@ To call a tool, use this EXACT XML structure:
         match self.config.execution_mode {
             ExecutionMode::Yolo | ExecutionMode::Daemon => false, // Already handled above
             ExecutionMode::AutoEdit => {
-                // Auto-approve file operations, ask for destructive operations
-                !matches!(
-                    tool_name,
-                    "file_write" | "file_edit" | "directory_tree" | "glob_find"
-                )
+                // Auto-approve file operations plus the tools the safety
+                // checker already classes as safe predefined subcommands, and
+                // ask for destructive operations. The sets below reuse the
+                // checker's own classification (src/safety/checker/validation.rs:
+                // cargo_* "run predefined cargo subcommands, not arbitrary
+                // shell"; lsp_* are read-only introspection) so the approval
+                // policy and the safety checker cannot drift apart.
+                //
+                // Headless `-m auto-edit` runs have no TTY to answer a
+                // confirmation prompt, so before this set existed a mutating
+                // task that edited a file and then needed `cargo check` /
+                // `cargo test` to verify hit an unconfirmable gate and looped
+                // for the whole turn budget (measured: 74 steps / 1.47M
+                // tokens). Auto-approving these makes the edit → verify loop
+                // finish headless.
+                let auto_approved = [
+                    // File operations (unchanged)
+                    "file_write",
+                    "file_edit",
+                    "directory_tree",
+                    "glob_find",
+                    // Checker-safe predefined cargo subcommands
+                    "cargo_test",
+                    "cargo_check",
+                    "cargo_clippy",
+                    "cargo_fmt",
+                    // Checker-classed read-only LSP introspection
+                    "lsp_diagnostics",
+                    "lsp_goto_definition",
+                    "lsp_goto_implementation",
+                    "lsp_find_references",
+                    "lsp_hover",
+                    "lsp_document_symbols",
+                    "lsp_workspace_symbols",
+                ];
+                !auto_approved.contains(&tool_name)
             }
             ExecutionMode::Normal => {
                 // Ask for all tools except safe ones

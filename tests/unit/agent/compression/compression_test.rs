@@ -505,9 +505,24 @@ fn test_micro_compact_with_tool_messages() {
     // Should have compressed
     assert!(metrics.messages_after < metrics.messages_before);
 
-    // Check that summary contains tool count
-    let summary_msg = &messages[1];
+    // The task anchor (the first user message) must pin before the summary.
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.content.text().starts_with("[ORIGINAL TASK]")),
+        "micro_compact must preserve the original task anchor"
+    );
+
+    // Check that the summary still reports the compressed tool count. The
+    // summary no longer sits at index 1 (the task anchor does) — locate it
+    // by content instead of by position.
+    let summary_msg = messages
+        .iter()
+        .find(|m| m.content.text().starts_with("[MICRO-COMPACT"))
+        .expect("micro-compact summary must be present");
     assert!(summary_msg.content.text().contains("tool"));
+    // No orphaned tool results may survive the compaction.
+    assert_valid_tool_pairing(&messages);
 }
 
 #[test]
@@ -714,5 +729,217 @@ async fn full_compact_reinjection_obeys_configured_paths_and_source_policy() {
     assert!(!combined.contains("CONFIG_DENIED_COMPACTION_SENTINEL"));
     assert!(!combined.contains("npm_H9vz"));
     assert!(!combined.contains("Ignore all previous instructions"));
+    server.stop().await;
+}
+
+// =====================================================================
+// Task-anchor preservation + tool-call pairing invariants (finding #1)
+// =====================================================================
+
+/// Build a bare assistant message that declares a single tool call.
+fn tool_call_message(id: &str, name: &str) -> Message {
+    let mut message = Message::assistant("");
+    message.tool_calls = Some(vec![crate::api::types::ToolCall {
+        id: id.to_string(),
+        call_type: "function".to_string(),
+        function: crate::api::types::ToolFunction {
+            name: name.to_string(),
+            arguments: "{}".to_string(),
+        },
+    }]);
+    message
+}
+
+/// Assert that a message list contains no orphaned tool-call messages: every
+/// `assistant` with `tool_calls` must have a later kept result per call, and
+/// every `tool` result must have an earlier kept assistant call. This is the
+/// exact property OpenAI/Anthropic/SGLang/vLLM enforce with HTTP 400.
+fn assert_valid_tool_pairing(messages: &[Message]) {
+    for (i, m) in messages.iter().enumerate() {
+        if let Some(calls) = m.tool_calls.as_deref() {
+            for call in calls {
+                let has_result = messages[i + 1..].iter().any(|r| {
+                    r.role == "tool" && r.tool_call_id.as_deref() == Some(call.id.as_str())
+                });
+                assert!(
+                    has_result,
+                    "assistant message #{i} declares tool_call {} but no result is kept",
+                    call.id
+                );
+            }
+        }
+        if m.role == "tool" {
+            let id = m
+                .tool_call_id
+                .as_deref()
+                .expect("tool message missing tool_call_id");
+            let has_call = messages[..i].iter().any(|a| {
+                a.tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| calls.iter().any(|call| call.id == *id))
+            });
+            assert!(
+                has_call,
+                "tool message #{i} (call {id}) has no kept assistant tool_call"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_micro_compact_preserves_task_anchor_and_pairing() {
+    // 33 messages: keep_start = 33 - 22 = 11. The recent window (idx 11..33)
+    // OPENS on the orphaned `tool` result for call_B (its assistant call sits
+    // at idx 10, inside the compressed region) and CLOSES on a dangling
+    // assistant tool_call (call_Z) with no result. Both must be dropped, the
+    // task anchor must survive, and call_A's pair must stay valid.
+    let mut messages = vec![Message::system("System prompt")];
+    messages.push(Message::user("MICRO TASK SENTINEL: implement feature X"));
+    messages.push(tool_call_message("call_A", "file_read"));
+    messages.push(Message::tool("result A", "call_A"));
+    for i in 0..3 {
+        messages.push(Message::user(format!("old u{}", i)));
+        messages.push(Message::assistant(format!("old a{}", i)));
+    }
+    messages.push(tool_call_message("call_B", "file_write"));
+    messages.push(Message::tool("orphaned result B", "call_B"));
+    for i in 0..10 {
+        messages.push(Message::user(format!("recent u{}", i)));
+        messages.push(Message::assistant(format!("recent a{}", i)));
+    }
+    messages.push(tool_call_message("call_Z", "file_write"));
+
+    assert_eq!(messages.len(), 33);
+    let metrics = micro_compact(&mut messages);
+
+    assert!(
+        metrics.messages_after < metrics.messages_before,
+        "micro_compact should have compressed ({})",
+        metrics.messages_after
+    );
+
+    // (1) Original task / user prompt survives compression.
+    let anchor = messages
+        .iter()
+        .find(|m| m.content.text().starts_with("[ORIGINAL TASK]"))
+        .unwrap_or_else(|| panic!("no [ORIGINAL TASK] anchor in {:?}", messages));
+    assert!(
+        anchor.content.text().contains("MICRO TASK SENTINEL"),
+        "original task text must survive micro_compact"
+    );
+
+    // (2) No orphaned tool messages and no dangling tool_calls.
+    assert_valid_tool_pairing(&messages);
+    assert!(
+        messages
+            .iter()
+            .all(|m| !m.content.text().contains("orphaned result B")),
+        "orphaned tool result at the recent-window head must be dropped"
+    );
+    assert!(
+        messages.iter().all(|m| m
+            .tool_calls
+            .as_ref()
+            .is_none_or(|calls| calls.iter().all(|c| c.id != "call_Z"))),
+        "dangling trailing assistant tool_call must be dropped"
+    );
+    // call_A's result survived only as a pair with its call, or both went away
+    // together — either way the pairing invariant holds (asserted above).
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.content.text().contains("recent u9")),
+        "recent traffic must still be preserved"
+    );
+}
+
+#[tokio::test]
+async fn test_auto_compact_preserves_task_anchor_and_pairing() {
+    let server = crate::testing::mock_api::MockLlmServer::builder()
+        .with_response("Summary of earlier work")
+        .build()
+        .await;
+    let config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
+    let client = ApiClient::new(&config).unwrap();
+
+    // 22 messages: recent window (last 6, idx 16..22) OPENS on the orphaned
+    // `tool` result for call_B; its assistant call sits at idx 15 (inside the
+    // summarized region). The task anchor lives at idx 1 (summarized region).
+    let mut messages = vec![Message::system("System prompt")];
+    messages.push(Message::user(
+        "AUTO TASK SENTINEL: bake the cake".to_string(),
+    ));
+    messages.push(tool_call_message("call_A", "file_read"));
+    messages.push(Message::tool("result A", "call_A"));
+    for i in 0..5 {
+        messages.push(Message::user(format!("prefix u{}", i)));
+        messages.push(Message::assistant(format!("prefix a{}", i)));
+    }
+    messages.push(Message::user("extra filler"));
+    messages.push(tool_call_message("call_B", "file_write"));
+    messages.push(Message::tool("orphaned result B", "call_B"));
+    for i in 0..2 {
+        messages.push(Message::user(format!("recent u{}", i)));
+        messages.push(Message::assistant(format!("recent a{}", i)));
+    }
+    messages.push(Message::user("recent u2"));
+    assert_eq!(messages.len(), 22);
+
+    let metrics = auto_compact(&client, &mut messages, &AutoCompactConfig::default())
+        .await
+        .expect("auto_compact should succeed against the mock server");
+    assert_eq!(metrics.method, CompressionMethod::Auto);
+
+    // (1) Original task / user prompt survives compression.
+    let joined: String = messages
+        .iter()
+        .map(|m| m.content.text_all())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        joined.contains("AUTO TASK SENTINEL"),
+        "original task text must survive auto_compact: {joined}"
+    );
+
+    // (2) No orphaned tool messages and no dangling tool_calls.
+    assert_valid_tool_pairing(&messages);
+    assert!(
+        !joined.contains("orphaned result B"),
+        "orphaned tool result at the recent-window head must be dropped"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn test_full_compact_preserves_task_anchor() {
+    let server = crate::testing::mock_api::MockLlmServer::builder()
+        .with_response("Summary of earlier work")
+        .build()
+        .await;
+    let config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
+    let client = ApiClient::new(&config).unwrap();
+    let tracker = FileAccessTracker::default();
+
+    let mut messages = vec![
+        Message::system("System prompt"),
+        Message::user("FULL TASK SENTINEL: refactor the storage layer"),
+        Message::assistant("Let me look at the code."),
+        Message::user("Here is the file."),
+        Message::assistant("I see the issue."),
+        Message::user("Please fix it."),
+    ];
+    full_compact(&client, &mut messages, &tracker, 50_000)
+        .await
+        .unwrap();
+
+    let joined: String = messages
+        .iter()
+        .map(|m| m.content.text_all())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        joined.contains("FULL TASK SENTINEL"),
+        "original task text must survive full_compact: {joined}"
+    );
     server.stop().await;
 }

@@ -246,10 +246,24 @@ impl Agent {
         // everything above is reference, everything below is active task.
         if self.context_map.file_count() > 0 && request_messages.len() > 8 {
             let boundary = self.context_map.render_boundary();
-            // Insert 6 messages from the end (before the recent window).
-            let insert_pos = request_messages.len().saturating_sub(6);
-            request_messages.insert(insert_pos, Message::user(boundary));
+            // Insert 6 messages from the end (before the recent window) — but
+            // NEVER split an assistant(tool_calls) / role=tool result pair:
+            // OpenAI-compatible endpoints (OpenAI/vLLM/SGLang) reject with
+            // HTTP 400 any payload whose tool results do not IMMEDIATELY
+            // follow their assistant message. When the history ends on an
+            // OPEN pair (assistant tool_calls whose results have not been
+            // appended yet), skip the insertion entirely so the results can
+            // land right behind the call on the next dispatch step.
+            if let Some(insert_pos) = context_boundary_insert_pos(&request_messages) {
+                request_messages.insert(insert_pos, Message::user(boundary));
+            }
         }
+
+        // Whatever the source history contained, the assembled request must
+        // keep every assistant(tool_calls) directly followed by its tool
+        // results — re-run the pairing invariants after boundary injection so
+        // an orphaned pair can never reach the provider (HTTP 400).
+        request_messages = Agent::apply_tool_call_pair_invariants(request_messages);
 
         // Captured per-call metadata (request body, finish_reason, tokens,
         // elapsed_ms) — populated by whichever branch makes the actual call.
@@ -745,6 +759,64 @@ pub(super) fn sanitize_tool_calls(
         .collect();
     let dropped = before - kept.len();
     (kept, dropped)
+}
+
+/// True when the history ends on an OPEN tool-call pair: the trailing message
+/// is an assistant that still carries `tool_calls`, so its role=tool results
+/// have not been appended yet and will land there on the next dispatch step.
+/// Any message inserted now would wedge itself between the call and its
+/// results.
+fn history_ends_on_open_pair(messages: &[crate::api::types::Message]) -> bool {
+    messages
+        .last()
+        .map(|m| m.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty()))
+        .unwrap_or(false)
+}
+
+/// True when inserting a message at `pos` (the index the new message would
+/// occupy in `messages`) would land INSIDE an assistant(tool_calls) →
+/// contiguous role=tool run. Splitting such a pair makes OpenAI-compatible
+/// endpoints reject the whole payload with HTTP 400 ("messages with role
+/// 'tool' must immediately follow an assistant message with 'tool_calls'").
+fn insertion_splits_tool_pair(messages: &[crate::api::types::Message], pos: usize) -> bool {
+    if pos == 0 || pos > messages.len() {
+        return false;
+    }
+    // The inserted message would land right before `messages[pos]`: nothing
+    // is split unless that message is a tool result of a pair starting
+    // further back.
+    if messages.get(pos).map(|m| m.role.as_str()) != Some("tool") {
+        return false;
+    }
+    // Walk back over the contiguous run of tool results to its head; a run
+    // whose head is an assistant carrying tool_calls is a live pair region.
+    let mut head = pos;
+    while head > 0 && messages[head - 1].role == "tool" {
+        head -= 1;
+    }
+    head > 0
+        && messages[head - 1]
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.is_empty())
+}
+
+/// Where may the user boundary message be inserted without splitting any
+/// assistant(tool_calls)/tool-result pair? Nominally 6 messages from the end
+/// (before the recent window); when that lands inside a pair it is pushed
+/// back to just before the pair's opening assistant message. Returns `None`
+/// when the history ends on an open pair — the results arrive on the next
+/// step, so NO insertion may happen (skip entirely).
+fn context_boundary_insert_pos(messages: &[crate::api::types::Message]) -> Option<usize> {
+    if history_ends_on_open_pair(messages) {
+        return None;
+    }
+    let desired = messages.len().saturating_sub(6);
+    let mut pos = desired;
+    while pos > 0 && insertion_splits_tool_pair(messages, pos) {
+        pos -= 1;
+    }
+    Some(pos)
 }
 
 /// Build the assistant `Message` for storage in agent history.

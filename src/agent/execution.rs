@@ -154,6 +154,85 @@ pub(super) async fn count_source_files_in_workdir(cap: usize) -> usize {
     .unwrap_or(0)
 }
 
+/// Manifests that declare the workdir's home language as something other than
+/// Rust. The ESCALATED progress guard consults these to stop the Rust scaffold
+/// (`src/lib.rs` + `cargo test`) from being injected into a fresh Python / JS /
+/// Go / ... project whose only sign of life is its manifest — writing a
+/// foreign-language stub into it pollutes real work and points the agent at a
+/// toolchain that cannot test its deliverable.
+const NON_RUST_WORKDIR_MANIFESTS: &[&str] = &[
+    // Python
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "requirements.txt",
+    "Pipfile",
+    "poetry.lock",
+    "uv.lock",
+    // JS / TS
+    "package.json",
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "bun.lockb",
+    "tsconfig.json",
+    // Go
+    "go.mod",
+    "go.work",
+    "Gopkg.toml",
+    // JVM
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    // Ruby / PHP / Swift / Kotlin / Dart / Elixir / Haskell / C / C++
+    "Gemfile",
+    "composer.json",
+    "Package.swift",
+    "pubspec.yaml",
+    "mix.exs",
+    "stack.yaml",
+    "cabal.project",
+    "CMakeLists.txt",
+    "meson.build",
+];
+
+/// Whether the ESCALATED progress guard may inject the Rust scaffold into the
+/// current workdir. Rust is scaffolded only on POSITIVE evidence that Rust is
+/// intended (P2 review finding): Cargo.toml present, or — when the workdir
+/// carries no manifest at all — the task text itself names a `.rs` target or
+/// cargo/rust vocabulary. Absence of a non-Rust manifest is NOT enough: an
+/// empty directory with an explicit non-Rust request ("create hello.py",
+/// "write a bash deploy script") must never receive a foreign-language stub
+/// and a `cargo test` directive.
+pub(super) async fn rust_scaffold_allowed(task_context: &str) -> bool {
+    let Ok(workdir) = std::env::current_dir() else {
+        return false;
+    };
+    if workdir.join("Cargo.toml").is_file() {
+        return true;
+    }
+    if NON_RUST_WORKDIR_MANIFESTS
+        .iter()
+        .any(|name| workdir.join(name).is_file())
+    {
+        return false;
+    }
+    task_specifies_rust(task_context)
+}
+
+/// Does the task text positively indicate Rust — a `.rs` file target or
+/// cargo / rustc / "rust" vocabulary? Boundary-checked so "trust"/"thrust"
+/// never count as "rust".
+fn task_specifies_rust(task_context: &str) -> bool {
+    let lower = task_context.to_lowercase();
+    if lower.contains(".rs") || lower.contains("cargo") || lower.contains("rustc") {
+        return true;
+    }
+    lower
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .any(|word| word == "rust")
+}
+
 /// Try to extract a `base64_png` field from a JSON tool result string.
 pub(super) fn try_extract_base64_png(result: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(result)
@@ -739,6 +818,60 @@ impl Agent {
         )
         .await;
 
+        // An empty response is a provider hiccup / dropped stream, not a valid
+        // completion — never accept it as the final answer (that would paint a
+        // ✅ banner with no content). Classified HERE, before the task-specific
+        // guards below (the intent-without-action handler, the completion
+        // gate): an empty answer on a mutation task must take the same bounded
+        // non-streaming recovery, not fall into the no-tool / NONTERM path that
+        // would retry the same streamed request forever.
+        //
+        // Any response that delivered content OR tool calls ends the streak, so
+        // `empty → tool call → empty` is two separate incidents, not two
+        // consecutive empties that trip the breaker.
+        let clean_final = super::recovery::strip_think_blocks(&content)
+            .trim()
+            .to_string();
+        if clean_final.is_empty() && tool_calls.is_empty() {
+            self.consecutive_empty_responses += 1;
+            // Bounded recovery. The provider closed a stream that generated
+            // tokens but delivered none (observed on llm.selfware.design: 74
+            // generated, zero deltas, finish_reason present — which is why
+            // `is_unexplained_empty_stream` deliberately stands down here).
+            // Retry once through the non-streaming path, then stop with a
+            // reason: nudging an endpoint that keeps answering empty burns
+            // the turn budget one empty turn at a time and never says why.
+            if self.consecutive_empty_responses >= super::recovery::MAX_CONSECUTIVE_EMPTY_RESPONSES
+            {
+                bail!(
+                    "EMPTY_RESPONSE_LOOP: {} consecutive empty assistant responses — the \
+                     provider returned no content, no reasoning and no tool calls each time. \
+                     The retry already went out non-streaming, so this is not a streaming \
+                     artifact: check the endpoint's parser / chat-template configuration.",
+                    self.consecutive_empty_responses
+                );
+            }
+            if self.config.agent.streaming && !self.force_non_streaming {
+                self.force_non_streaming = true;
+                info!(
+                    "Empty response — retrying the next turn with streaming disabled \
+                     (the streamed request produced nothing)"
+                );
+            }
+            info!("Rejected empty response as final answer — nudging for an actual answer");
+            self.messages.push(crate::api::types::Message::user(
+                "<selfware_system_directive>\n\
+                 Your last response was empty. Provide your actual final answer now \
+                 (a concise summary of the completed work).\n\
+                 </selfware_system_directive>"
+                    .to_string(),
+            ));
+            return Ok(false);
+        }
+        // Any response that delivered content or a tool call ends the empty
+        // streak — progress happened even if the next turn is empty again.
+        self.consecutive_empty_responses = 0;
+
         // Check if the response contains code alongside tool calls.
         // Models often output file_read tool calls AND code text in the same
         // response. The tool calls get executed, but the code gets ignored.
@@ -1188,50 +1321,11 @@ impl Agent {
                 return Ok(false);
             }
 
-            // An empty response is a provider hiccup / dropped stream, not a valid
-            // completion — never accept it as the final answer (that would paint a
-            // ✅ banner with no content). Nudge the model to actually answer.
-            let clean_final = super::recovery::strip_think_blocks(&content)
-                .trim()
-                .to_string();
-            if clean_final.is_empty() {
-                self.consecutive_empty_responses += 1;
-                // Bounded recovery. The provider closed a stream that generated
-                // tokens but delivered none (observed on llm.selfware.design: 74
-                // generated, zero deltas, finish_reason present — which is why
-                // `is_unexplained_empty_stream` deliberately stands down here).
-                // Retry once through the non-streaming path, then stop with a
-                // reason: nudging an endpoint that keeps answering empty burns
-                // the turn budget one empty turn at a time and never says why.
-                const MAX_CONSECUTIVE_EMPTY_RESPONSES: usize = 2;
-                if self.consecutive_empty_responses >= MAX_CONSECUTIVE_EMPTY_RESPONSES {
-                    bail!(
-                        "EMPTY_RESPONSE_LOOP: {} consecutive empty assistant responses — the \
-                         provider returned no content, no reasoning and no tool calls each time. \
-                         The retry already went out non-streaming, so this is not a streaming \
-                         artifact: check the endpoint's parser / chat-template configuration.",
-                        self.consecutive_empty_responses
-                    );
-                }
-                if self.config.agent.streaming && !self.force_non_streaming {
-                    self.force_non_streaming = true;
-                    info!(
-                        "Empty response — retrying the next turn with streaming disabled \
-                         (the streamed request produced nothing)"
-                    );
-                }
-                info!("Rejected empty response as final answer — nudging for an actual answer");
-                self.messages.push(crate::api::types::Message::user(
-                    "<selfware_system_directive>\n\
-                     Your last response was empty. Provide your actual final answer now \
-                     (a concise summary of the completed work).\n\
-                     </selfware_system_directive>"
-                        .to_string(),
-                ));
-                return Ok(false);
-            }
-            // Any non-empty response ends the empty streak.
-            self.consecutive_empty_responses = 0;
+            // NOTE: the empty-response classification now lives at the top of
+            // this function (before the no-action handler and the completion
+            // gate), so coding tasks recover the same way. `consecutive_empty_responses`
+            // is bumped/reset there on every turn; nothing below this point
+            // runs for a response that was empty and tool-less.
 
             // A response cut off by the token limit (finish_reason == "length") is
             // incomplete — don't accept the truncated text as the final answer; ask
@@ -1461,11 +1555,15 @@ impl Agent {
         }
 
         // TERMINAL PROGRESS GUARD: After N read-only steps, force synthesis.
-        // A read-only task (review/analysis/report) never mutates by design —
-        // reading IS the work — so the force-synthesis / scaffold machinery
-        // must not fire at all (4-model read-only study: every agent was
-        // killed fighting exactly this gate on a "do NOT edit" task).
-        if self.current_task_is_read_only() {
+        // Only a task that actually REQUIRES mutation may hit the
+        // force-synthesis / scaffold machinery. A read-only task
+        // (review/analysis/report — reading IS the work) never mutates by
+        // design, and neither does a plain status/question query — both must
+        // be spared (4-model read-only study: every agent was killed fighting
+        // exactly this gate on a "do NOT edit" task; review finding: the
+        // read-only check was false for status queries, so destructive
+        // synthesis fired on them).
+        if !self.current_task_requires_mutation() {
             return Ok(false);
         }
         // Use a relaxed threshold when the agent has already written source files —
@@ -1557,7 +1655,8 @@ impl Agent {
                              You just read `{path}`. Based on your investigation, make a TARGETED edit to that file.\n\
                              Use the file_edit tool with this exact format:\n\n\
                              <tool>\n\
-                             {{\"tool_type\": \"file_edit\", \"path\": \"{path}\", \"old_string\": \"...the exact original lines...\", \"new_string\": \"...the replacement lines...\"}}\n\
+                             <name>file_edit</name>\n\
+                             <arguments>{{\"path\": \"{path}\", \"old_str\": \"...the exact original lines...\", \"new_str\": \"...the replacement lines...\"}}</arguments>\n\
                              </tool>\n\n\
                              Then run the project's actual test command to verify.\n\
                              </selfware_system_directive>"
@@ -1582,16 +1681,45 @@ impl Agent {
                 // Greenfield project — src/lib.rs is minimal/empty AND the workdir
                 // has no other source files. Write the Rust scaffold (the existing
                 // SAB-style scratch-project behaviour).
-                info!(
-                    "ESCALATED progress guard: {} read-only steps, no writes ever — injecting scaffold",
-                    self.consecutive_read_only_steps
-                );
+                //
+                // Language-blind scaffold guard (review finding): "no source
+                // files" is not "no language". A fresh directory may declare
+                // its home language by manifest alone (pyproject.toml,
+                // package.json, go.mod, ...) before any source exists there,
+                // or by the task itself ("create hello.py") with no manifest at
+                // all; injecting a Rust stub into such a request pollutes it
+                // with a foreign-language file and sends the agent down
+                // `cargo test` for a deliverable it cannot test that way. Only
+                // scaffold on POSITIVE Rust evidence: Cargo.toml in the
+                // workdir, or (manifest-free dir) the task naming a .rs target.
                 let task = self
                     .messages
                     .iter()
                     .find(|m| m.role == "user")
                     .map(|m| m.content.to_string())
                     .unwrap_or_default();
+                if !rust_scaffold_allowed(&task).await {
+                    info!(
+                        "ESCALATED progress guard: {} read-only steps, but no positive Rust evidence (no Cargo.toml, matching manifest, or .rs/cargo in the task) — skipping the Rust scaffold; nudging targeted work",
+                        self.consecutive_read_only_steps
+                    );
+                    self.consecutive_read_only_steps = 0;
+                    self.messages.push(crate::api::types::Message::user(
+                        "<selfware_system_directive>\n\
+                         This project does not look like Rust (no Cargo.toml and nothing in the \
+                         task names a Rust target). Do NOT create src/lib.rs.\n\
+                         Implement the solution in the language the task requests and verify with \
+                         the project's own test command (pytest / npm test / go test / ...).\n\
+                         </selfware_system_directive>"
+                            .to_string(),
+                    ));
+                    return Ok(false);
+                }
+
+                info!(
+                    "ESCALATED progress guard: {} read-only steps, no writes ever — injecting scaffold",
+                    self.consecutive_read_only_steps
+                );
 
                 let scaffold = format!(
                     "// AUTO-SCAFFOLD: fill in the implementation\n\

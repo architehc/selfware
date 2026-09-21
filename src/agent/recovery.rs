@@ -18,6 +18,10 @@ pub(super) const FORCE_FALLBACK_AFTER: usize = 3;
 /// Smart fallbacks make real progress (reading files, exploring code) even
 /// though the model itself isn't producing tool calls directly.
 pub(super) const MAX_TOTAL_NO_ACTION_PROMPTS: usize = 500;
+/// Consecutive empty assistant responses allowed before the empty-response
+/// breaker aborts the run. Shared by the execution and planning paths so the
+/// two sides of the recovery story cannot drift apart.
+pub(super) const MAX_CONSECUTIVE_EMPTY_RESPONSES: usize = 2;
 pub(super) const FILE_DISCOVERY_TOOLS: &str = "directory_tree, glob_find, or grep_search";
 
 /// Result of the intent-without-action check.

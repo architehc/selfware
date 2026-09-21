@@ -37,6 +37,41 @@ fn assistant_tool_call(id: &str, name: &str) -> Message {
     message
 }
 
+/// Assert that a message list contains no orphaned tool-call messages: every
+/// `assistant` with `tool_calls` must have a later kept result per call, and
+/// every `tool` result must have an earlier kept assistant call.
+fn assert_valid_tool_pairing(messages: &[Message]) {
+    for (i, m) in messages.iter().enumerate() {
+        if let Some(calls) = m.tool_calls.as_deref() {
+            for call in calls {
+                let has_result = messages[i + 1..].iter().any(|r| {
+                    r.role == "tool" && r.tool_call_id.as_deref() == Some(call.id.as_str())
+                });
+                assert!(
+                    has_result,
+                    "assistant message #{i} declares tool_call {} but no result is kept",
+                    call.id
+                );
+            }
+        }
+        if m.role == "tool" {
+            let id = m
+                .tool_call_id
+                .as_deref()
+                .expect("tool message missing tool_call_id");
+            let has_call = messages[..i].iter().any(|a| {
+                a.tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| calls.iter().any(|call| call.id == *id))
+            });
+            assert!(
+                has_call,
+                "tool message #{i} (call {id}) has no kept assistant tool_call"
+            );
+        }
+    }
+}
+
 // =====================================================================
 // compress_to_structured_summary  (compaction end-to-end)
 // =====================================================================
@@ -114,6 +149,86 @@ async fn test_structured_compression_noop_when_under_target() {
         agent.messages.len(),
         before,
         "no compaction below the target"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn test_structured_compression_preserves_task_anchor_and_tool_pairing() {
+    let server = MockLlmServer::builder().build().await;
+    let mut agent = make_test_agent(&server).await;
+    agent.messages.clear();
+
+    // A bootstrap user line BEFORE the system prompt must not be mistaken
+    // for the task anchor; the real task sits right after the system prompt.
+    agent.messages.push(Message::user("stale bootstrap line"));
+    agent
+        .messages
+        .push(Message::system("SYSTEM_MARKER: obey the rules"));
+    agent
+        .messages
+        .push(Message::user("TASK ANCHOR SENTINEL: refactor the parser"));
+    agent
+        .messages
+        .push(assistant_tool_call("call_A", "file_read"));
+    agent.messages.push(Message::tool("result A", "call_A"));
+    for i in 0..9 {
+        agent
+            .messages
+            .push(Message::user(format!("filler user {i}")));
+        agent
+            .messages
+            .push(Message::assistant(format!("filler assistant {i}")));
+    }
+    agent.messages.push(Message::user("extra filler"));
+    // Tail: an assistant tool_call whose tool result OPENS the recent-4
+    // window — the call is outside the window, so the result would orphan.
+    agent
+        .messages
+        .push(assistant_tool_call("call_B", "file_write"));
+    agent
+        .messages
+        .push(Message::tool("orphaned result B", "call_B"));
+    agent.messages.push(Message::assistant("final assistant"));
+    agent.messages.push(Message::user("final user 1"));
+    agent.messages.push(Message::user("final user 2"));
+
+    agent.compress_to_structured_summary(1);
+
+    let joined: String = agent
+        .messages
+        .iter()
+        .map(|m| m.content.text_all())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // (1) Original task anchor survives (and is pinned after the by-role system).
+    assert!(
+        joined.contains("[ORIGINAL TASK]"),
+        "task must be pinned as [ORIGINAL TASK]: {joined}"
+    );
+    assert!(
+        joined.contains("TASK ANCHOR SENTINEL"),
+        "original task text must survive structured compression"
+    );
+    assert!(
+        joined.contains("SYSTEM_MARKER"),
+        "real system prompt (second message) must survive even when not first"
+    );
+    assert!(
+        !joined.contains("stale bootstrap line"),
+        "bootstrap line before the system prompt must be compacted away"
+    );
+    // (2) No orphaned tool messages, no dangling tool_calls.
+    assert_valid_tool_pairing(&agent.messages);
+    assert!(
+        !joined.contains("orphaned result B"),
+        "orphaned tool result opening the recent window must be dropped"
+    );
+    // The by-role system + anchor + summary headers must lead the list.
+    assert_eq!(
+        agent.messages[0].role, "system",
+        "system message must remain first"
     );
     server.stop().await;
 }
@@ -1899,4 +2014,154 @@ fn test_graph_summary_note_is_critical_context() {
     // matching everything).
     let ordinary = Message::user("please refactor the parser");
     assert!(!Agent::is_critical_context_message(&ordinary));
+}
+
+// =========================================================================
+// interactive zombie-task anchor: current task, not turn 1
+// =========================================================================
+
+#[tokio::test]
+async fn test_trim_pins_current_task_not_turn_one() {
+    let server = MockLlmServer::builder().with_response("ok").build().await;
+    let mut agent = make_test_agent(&server).await;
+    agent.messages.clear();
+    agent.messages.push(Message::system("SYS PROMPT"));
+
+    // Multi-turn interactive session: the agent reuses `self.messages` across
+    // turns, and each run_task stamps a fresh checkpoint for the CURRENT task.
+    let pad = "x".repeat(60);
+    let turn1 = format!("turn one task: fix login {}", pad);
+    let turn2 = format!("turn two task: refactor parser {}", pad);
+    let turn3 = format!("turn three task: write queue tests {}", pad);
+    agent.messages.push(Message::user(&turn1));
+    agent.messages.push(Message::assistant("did turn one"));
+    agent.messages.push(Message::user(&turn2));
+    agent.messages.push(Message::assistant("did turn two"));
+    agent.messages.push(Message::user(&turn3));
+    agent.messages.push(Message::assistant("did turn three"));
+
+    // The agent is now executing turn 3's task.
+    agent.current_checkpoint = Some(crate::checkpoint::TaskCheckpoint::new(
+        "interactive-trim-id".to_string(),
+        turn3.clone(),
+    ));
+
+    // Budget that only fits system + the pinned anchor, forcing the trim to
+    // evict everything older — including turn 1's task, which the old
+    // "pin the first user message" rule would have protected forever.
+    use crate::agent::context::estimate_message_tokens as emt;
+    let system_tokens = emt(&agent.messages[0]);
+    let anchor_tokens = emt(&agent.messages[5]); // the turn-3 user message
+    agent.max_context_tokens = system_tokens + anchor_tokens + 40;
+
+    agent.trim_message_history();
+
+    let contents: Vec<&str> = agent.messages.iter().map(|m| m.content.text()).collect();
+    assert!(
+        contents.iter().any(|c| c.contains("turn three task")),
+        "the CURRENT task's prompt must be pinned; remaining: {:?}",
+        contents
+    );
+    assert!(
+        !contents.iter().any(|c| c.contains("turn one task")),
+        "turn 1's zombie task must be trimmable once its turn is over; remaining: {:?}",
+        contents
+    );
+    assert_eq!(
+        agent.messages[0].role, "system",
+        "the system prompt must survive trimming"
+    );
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn test_trim_falls_back_to_first_user_when_no_checkpoint() {
+    // A fresh agent (current_checkpoint == None, e.g. bare unit-test setups)
+    // must keep the historical pin-the-first-user-message behavior: after
+    // trimming, the oldest user message survives as the root objective.
+    let server = MockLlmServer::builder().with_response("ok").build().await;
+    let mut agent = make_test_agent(&server).await;
+    agent.messages.clear();
+    agent.messages.push(Message::system("SYS PROMPT"));
+    let pad = "y".repeat(60);
+    agent
+        .messages
+        .push(Message::user(format!("first task {}", pad)));
+    agent.messages.push(Message::assistant("a"));
+    agent
+        .messages
+        .push(Message::user(format!("second task {}", pad)));
+    agent.messages.push(Message::assistant("b"));
+    // No checkpoint set: agent.current_checkpoint stays None.
+
+    // Budget exactly one message below the total, sized with the same
+    // estimator the trim eviction walks: forces the oldest non-anchor
+    // messages out while keeping system + the pinned first-user anchor.
+    use crate::agent::context::estimate_message_tokens as emt;
+    let total: usize = agent.messages.iter().map(emt).sum();
+    let second_tokens = emt(&agent.messages[3]); // the "second task" user message
+    agent.max_context_tokens = total - second_tokens;
+
+    agent.trim_message_history();
+
+    let contents: Vec<&str> = agent.messages.iter().map(|m| m.content.text()).collect();
+    assert!(
+        contents.iter().any(|c| c.contains("first task")),
+        "without a checkpoint the first user message must still be pinned; remaining: {:?}",
+        contents
+    );
+    assert!(
+        !contents.iter().any(|c| c.contains("second task")),
+        "newer non-anchor messages are the ones evicted; remaining: {:?}",
+        contents
+    );
+    assert_eq!(
+        agent.messages[0].role, "system",
+        "the system prompt must survive trimming"
+    );
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn test_structured_compression_anchors_current_task_not_turn_one() {
+    let server = MockLlmServer::builder().with_response("ok").build().await;
+    let mut agent = make_test_agent(&server).await;
+    agent.messages.clear();
+    agent.messages.push(Message::system("SYS"));
+    let t1 = "fix login bug";
+    let t2 = "refactor parser";
+    let t3 = "write queue tests";
+    agent.messages.push(Message::user(t1));
+    agent.messages.push(Message::assistant("a"));
+    agent.messages.push(Message::user(t2));
+    agent.messages.push(Message::assistant("b"));
+    agent.messages.push(Message::user(t3));
+    agent.messages.push(Message::assistant("c"));
+
+    // Interactive session now executing turn 3 — the checkpoint tracks it.
+    agent.current_checkpoint = Some(crate::checkpoint::TaskCheckpoint::new(
+        "structured-id".to_string(),
+        t3.to_string(),
+    ));
+
+    agent.compress_to_structured_summary(1);
+
+    let joined: String = agent
+        .messages
+        .iter()
+        .map(|m| m.content.text_all())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        joined.contains(t3),
+        "the CURRENT task must be the anchor after structured compression; got:\n{joined}"
+    );
+    assert!(
+        !joined.contains(t1),
+        "turn 1's zombie task must not be re-anchored as [ORIGINAL TASK]; got:\n{joined}"
+    );
+
+    server.stop().await;
 }

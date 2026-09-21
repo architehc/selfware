@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use tracing::{debug, info, warn};
 
 use super::*;
@@ -39,8 +39,14 @@ impl Agent {
         // assembled block below is only printed when nothing streamed it —
         // printing it after a streamed turn put the whole chain of thought in
         // the transcript twice.
+        //
+        // `force_non_streaming` latches after a streamed turn came back empty
+        // (the empty-response recovery in execution.rs): the streaming path is
+        // the one that produced nothing, so the planning retry must use the
+        // path that did rather than repeat the failing request. Ignoring the
+        // latch here re-burned the empty stream on the very next call.
         let mut reasoning_streamed = false;
-        let assistant_msg = if self.config.agent.streaming {
+        let assistant_msg = if self.config.agent.streaming && !self.force_non_streaming {
             match self
                 .chat_streaming(
                     request_messages.clone(),
@@ -248,6 +254,92 @@ impl Agent {
             (!kept.is_empty()).then_some(kept)
         });
 
+        // An empty planning response is a provider hiccup, not a plan. Apply
+        // the same bounded recovery the execution step uses (execution.rs):
+        // count it toward the consecutive-empty streak, latch
+        // `force_non_streaming` so the retry takes the path that delivered
+        // tokens, and after two consecutive empties stop with a typed reason
+        // instead of silently planning from nothing. Classified here — before
+        // the history push — so an empty planning turn leaves no garbage
+        // assistant message behind, and any non-empty planning response (with
+        // or without tool calls) ends the streak.
+        if !has_tool_calls {
+            let clean_final = super::recovery::strip_think_blocks(content.text())
+                .trim()
+                .to_string();
+            if clean_final.is_empty() {
+                // Record the empty provider attempt before any exit so the
+                // turn artifact and end event keep the request/finish-reason
+                // evidence for this provider failure (review: empty planning
+                // responses bypassed diagnostic recording).
+                self.turn_artifact_seq += 1;
+                let plan_step_idx = self.turn_artifact_seq;
+                let plan_meta_opt = if plan_meta.request_body.is_null()
+                    || plan_meta
+                        .request_body
+                        .as_object()
+                        .map(|o| o.is_empty())
+                        .unwrap_or(true)
+                {
+                    None
+                } else {
+                    Some(plan_meta.clone())
+                };
+                let empty_calls: Vec<crate::api::types::ToolCall> = Vec::new();
+                self.write_turn_artifact(
+                    plan_step_idx,
+                    plan_meta_opt.as_ref(),
+                    &empty_calls,
+                    super::turn_artifacts::AgentDecision::NoToolCall,
+                    "",
+                    None,
+                )
+                .await;
+                self.log_turn_end_event(
+                    "planning",
+                    false,
+                    true,
+                    turn_start.elapsed().as_millis() as u64,
+                    None,
+                    serde_json::json!({
+                        "content_chars": 0,
+                        "has_tool_calls": false,
+                        "rejected": "empty_planning_response",
+                    }),
+                );
+
+                self.consecutive_empty_responses += 1;
+                if self.consecutive_empty_responses
+                    >= super::recovery::MAX_CONSECUTIVE_EMPTY_RESPONSES
+                {
+                    bail!(
+                        "EMPTY_RESPONSE_LOOP: {} consecutive empty assistant responses — the \
+                         provider returned no content, no reasoning and no tool calls each time. \
+                         The retry already went out non-streaming, so this is not a streaming \
+                         artifact: check the endpoint's parser / chat-template configuration.",
+                        self.consecutive_empty_responses
+                    );
+                }
+                if self.config.agent.streaming && !self.force_non_streaming {
+                    self.force_non_streaming = true;
+                    info!(
+                        "Empty planning response — retrying the next turn with streaming \
+                         disabled (the streamed request produced nothing)"
+                    );
+                }
+                info!("Rejected empty planning response — nudging for an actual plan");
+                self.messages.push(Message::user(
+                    "<selfware_system_directive>\n\
+                     Your last planning response was empty. Provide your actual plan now: \
+                     name the files you will change and the tools you will call.\n\
+                     </selfware_system_directive>"
+                        .to_string(),
+                ));
+                return Ok(false);
+            }
+            // Any non-empty planning response ends the empty streak.
+            self.consecutive_empty_responses = 0;
+        }
         // Snapshot reasoning_content before the message-push moves it, so the
         // turn artifact can capture the model's <think> output too.
         let reasoning_for_artifact = assistant_msg.reasoning_content.clone();

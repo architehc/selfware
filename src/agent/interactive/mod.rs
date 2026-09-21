@@ -563,6 +563,12 @@ impl Agent {
 
             if input == "/clear" {
                 self.messages.retain(|m| m.role == "system");
+                // Retaining by role keeps the system messages but NOT the
+                // previous task's per-turn state: the accumulated focus
+                // overlay on messages[0], current_task_context, and
+                // last_assistant_response would otherwise leak the old task
+                // into the next answer. Reset that state explicitly.
+                self.reset_session_for_clear();
                 self.memory.clear();
                 println!("Conversation cleared (system prompt retained)");
                 continue;
@@ -1341,6 +1347,12 @@ impl Agent {
                     println!("{} Plan is already being executed.", "ℹ".bright_yellow());
                 } else {
                     self.approve_plan();
+                    // Mirror the CLI harness (/execute): the tool-execution
+                    // gate keys off `self.plan_mode`, so clearing it here is
+                    // what actually lets the approved plan's tool calls run —
+                    // without it every call was echoed as "proposed but NOT
+                    // executed" until max_iterations.
+                    self.set_plan_mode(false);
                     println!();
                     println!("{}", "✅ Plan Approved".bright_green().bold());
                     println!("{}", "─".repeat(50).bright_black());
@@ -1362,6 +1374,9 @@ impl Agent {
                     println!("{} Not in plan mode.", "ℹ".bright_yellow());
                 } else {
                     self.clear_plan();
+                    // Same dual-flag correction as /execute: clear the
+                    // execution-gate bool, not just the plan manager.
+                    self.set_plan_mode(false);
                     println!();
                     println!("{}", "📝 Plan Cancelled".bright_yellow().bold());
                     println!("{}", "─".repeat(50).bright_black());
@@ -2359,8 +2374,15 @@ impl Agent {
                 .await
             {
                 Ok(out) if out.status.success() => {
-                    // Change to the worktree directory
-                    match std::env::set_current_dir(&worktree_path) {
+                    // Change to the worktree directory. The cwd change goes
+                    // through the shared worktree state — the same bookkeeping
+                    // the enter_worktree/exit_worktree tools use — so the
+                    // process cwd can never be stranded inconsistently with it:
+                    // the underlying guard restores the previous cwd on every
+                    // exit path, including /worktree exit.
+                    match crate::tools::git_worktree::enter_worktree_dir(std::path::PathBuf::from(
+                        &worktree_path,
+                    )) {
                         Ok(_) => {
                             let branch_display = if branch_arg.is_empty() {
                                 "(detached)".dimmed()
@@ -2386,6 +2408,10 @@ impl Agent {
                                 e
                             );
                             println!("  You can manually cd to: {}", worktree_path);
+                            println!(
+                                "  (no cwd change was made — the previous directory was kept: {})",
+                                e
+                            );
                         }
                     }
                 }
@@ -2403,53 +2429,23 @@ impl Agent {
         }
 
         if args == "exit" {
-            // First, find if we're in a worktree
-            let current_dir = match std::env::current_dir() {
-                Ok(d) => d,
-                Err(e) => {
-                    println!(
-                        "{} Failed to get current directory: {}",
-                        "✗".bright_red(),
-                        e
-                    );
-                    return;
-                }
-            };
-
-            // Find git root (main repo)
-            let git_root = match tokio::process::Command::new("git")
-                .args(["rev-parse", "--show-toplevel"])
-                .output()
-                .await
-            {
-                Ok(out) if out.status.success() => {
-                    String::from_utf8_lossy(&out.stdout).trim().to_string()
-                }
-                _ => {
-                    println!("{} Not in a git repository", "✗".bright_red());
-                    return;
-                }
-            };
-
-            let current_dir_str = current_dir.to_string_lossy();
-            let is_worktree = current_dir_str != git_root && current_dir_str.starts_with(&git_root);
-
-            if !is_worktree {
-                println!("{} Not currently in a worktree", "ℹ".bright_yellow());
-                println!("  Current: {}", current_dir_str.bright_white());
-                println!("  Git root: {}", git_root.bright_white());
-                return;
-            }
-
-            // Get the worktree path before we change
-            let worktree_path = current_dir_str.to_string();
-
-            // Change back to git root
-            match std::env::set_current_dir(&git_root) {
-                Ok(_) => {
+            // Leave the worktree through the shared worktree state — the same
+            // RAII cwd guard the exit_worktree tool uses. It restores the
+            // previous working directory on every exit path, so the process
+            // cwd can never be stranded inside the worktree while the worktree
+            // state claims we are back at the root (a directory-comparison
+            // check cannot detect the TUI's own worktree, because a linked
+            // worktree is itself a git top-level).
+            match crate::tools::git_worktree::exit_worktree_dir() {
+                Ok((restored_dir, previous_worktree)) => {
                     println!("{} Exited worktree", "✓".bright_green());
-                    println!("  Previous: {}", worktree_path.dimmed());
-                    println!("  Current: {}", git_root.bright_white());
+                    if let Some(prev) = &previous_worktree {
+                        println!("  Previous: {}", prev.to_string_lossy().dimmed());
+                    }
+                    println!(
+                        "  Current: {}",
+                        restored_dir.to_string_lossy().bright_white()
+                    );
 
                     // Ask if user wants to remove the worktree
                     println!();
@@ -2457,10 +2453,23 @@ impl Agent {
 
                     // We can't easily do interactive input here, so just suggest the tool
                     println!("  Use the tool to remove: enter_worktree with remove=true");
-                    println!("  Or run: git worktree remove {}", worktree_path.dimmed());
+                    if let Some(prev) = &previous_worktree {
+                        println!(
+                            "  Or run: git worktree remove {}",
+                            prev.to_string_lossy().dimmed()
+                        );
+                    }
                 }
                 Err(e) => {
-                    println!("{} Failed to change directory: {}", "✗".bright_red(), e);
+                    println!("{} Not currently in a worktree", "ℹ".bright_yellow());
+                    if let Ok(current_dir) = std::env::current_dir() {
+                        println!(
+                            "  Current: {}",
+                            current_dir.to_string_lossy().bright_white()
+                        );
+                    }
+                    // No cwd change was attempted, so nothing was left stranded.
+                    println!("  (no cwd change was made: {})", e);
                 }
             }
             return;
@@ -2660,6 +2669,25 @@ impl Agent {
         crate::util::copy_to_clipboard(text).await
     }
 
+    /// Reset per-task state when the user runs /clear while preserving the
+    /// session context /clear documents keeping (the base system prompt and
+    /// any other system messages). `retain` by role keeps the system
+    /// messages but leaves the previous task's focus overlay on messages[0]
+    /// plus `current_task_context` / `last_assistant_response` in place — a
+    /// "cleared" chat still carried the old task into the next answer. Strip
+    /// the overlay (see `task_runner::strip_focus_overlay`), clear the two
+    /// per-task fields, and reset the per-task failure-mode counters exactly
+    /// as a fresh task would.
+    fn reset_session_for_clear(&mut self) {
+        if let Some(first) = self.messages.iter_mut().find(|m| m.role == "system") {
+            let clean = super::task_runner::strip_focus_overlay(first.content.text());
+            first.content = crate::api::types::MessageContent::from_text(clean);
+        }
+        self.current_task_context.clear();
+        self.last_assistant_response.clear();
+        self.reset_failure_mode_counters();
+    }
+
     /// Basic interactive mode (fallback when reedline unavailable)
     async fn interactive_basic(&mut self) -> Result<()> {
         use std::io::{self, Write};
@@ -2745,6 +2773,10 @@ impl Agent {
 
             if input == "/clear" {
                 self.messages.retain(|m| m.role == "system");
+                // Same semantics as the reedline /clear: retaining by role is
+                // not enough — drop the focus overlay on messages[0] and the
+                // per-task state so the next answer starts clean.
+                self.reset_session_for_clear();
                 self.memory.clear();
                 println!("Conversation cleared (system prompt retained)");
                 continue;
@@ -3122,10 +3154,42 @@ impl Agent {
                         match Agent::resume(self.config.clone(), &task_id).await {
                             Ok(resumed) => {
                                 let count = resumed.message_count();
-                                *self = resumed;
-                                println!(
-                                    "resumed '{title}' ({count} messages) — continue chatting"
-                                );
+                                // Agent::resume only returns a checkpoint-backed agent,
+                                // so the continuation path below is the rule, not the
+                                // exception (the chat-only branch is defensive).
+                                let resume_task = resumed.current_checkpoint.is_some();
+                                // Targeted restore INTO this live session: the
+                                // checkpoint's task state (messages, loop control,
+                                // checkpoint, cumulative budgets, guard counters)
+                                // replaces the pre-resume chat state, but the REPL's
+                                // own handles survive — the edit-history timeline,
+                                // TUI event/stream wiring, the session-log file
+                                // handle, and the Ctrl+C/ESC tokens this loop
+                                // captured at startup. The old `*self = resumed` swap
+                                // dropped all of them.
+                                self.restore_resumed_state(resumed);
+                                if resume_task {
+                                    println!(
+                                        "resumed '{title}' ({count} messages) — continuing task"
+                                    );
+                                    // Re-arm the stored task through the same public
+                                    // entry point the CLI `--continue` / `resume <id>`
+                                    // paths use: re-bases the task clock, arms the
+                                    // LoopMode::Resume execution loop, and runs the
+                                    // loop to completion before returning to chat.
+                                    match self.continue_execution().await {
+                                        Ok(()) => println!(
+                                            "  task finished — continue chatting, or /resume to pick another"
+                                        ),
+                                        Err(e) => {
+                                            println!("/resume: task continuation failed: {e}")
+                                        }
+                                    }
+                                } else {
+                                    println!(
+                                        "resumed '{title}' ({count} messages) — continue chatting"
+                                    );
+                                }
                             }
                             Err(e) => println!("/resume failed: {e}"),
                         }
@@ -3365,6 +3429,67 @@ impl Agent {
                 println!("{} Scan failed: {}", "x".bright_red(), e);
             }
         }
+    }
+
+    /// Targeted state restoration for the interactive `/resume <prefix>` path.
+    ///
+    /// `Agent::resume` rebuilds the task state into a FRESH agent (messages,
+    /// loop control, checkpoint, cumulative budgets, verification guard
+    /// counters, memory, cognitive state) via `Self::new(config)`. The REPL
+    /// used to swap the whole struct (`*self = resumed`), which silently
+    /// dropped this live session's handles:
+    ///
+    /// - `edit_history` / `redo_stack` — the /undo /redo /restore timeline
+    /// - `events` / `permission_response_rx` / `progress_emitter` — the TUI
+    ///   event-stream, permission-prompt and progress wiring
+    /// - `session_logger` / `audit_logger` — the session log and audit JSONL
+    ///   file handles (and their session ids)
+    /// - `chat_store` — the chat-session store
+    /// - `cancelled` / `esc_paused` / `esc_pause_ack` — the Ctrl+C and ESC
+    ///   tokens this loop and its listeners captured at startup; a fresh
+    ///   agent gets fresh Arcs that nothing ever signals
+    /// - `force_non_streaming` — the session's latched streaming decision
+    ///
+    /// The task state always comes from `resumed` (so anything `Agent::resume`
+    /// restores lands in the live struct by construction — this method never
+    /// needs to be taught the resume list); only the session-bound handles
+    /// above are carried over from `self`.
+    pub(crate) fn restore_resumed_state(&mut self, resumed: crate::agent::Agent) {
+        let mut resumed = resumed;
+        // Move the LIVE handles into the resumed agent; placeholders stand in
+        // `self` only for the instant before the swap below overwrites `self`.
+        resumed.edit_history = std::mem::take(&mut self.edit_history);
+        resumed.redo_stack = std::mem::take(&mut self.redo_stack);
+        resumed.events = std::mem::replace(
+            &mut self.events,
+            std::sync::Arc::new(crate::agent::tui_events::NoopEmitter),
+        );
+        resumed.permission_response_rx = std::mem::take(&mut self.permission_response_rx);
+        resumed.progress_emitter = std::mem::replace(
+            &mut self.progress_emitter,
+            std::sync::Arc::new(crate::agent::progress::NoopProgressEmitter),
+        );
+        resumed.session_logger = std::mem::take(&mut self.session_logger);
+        resumed.chat_store = std::mem::replace(
+            &mut self.chat_store,
+            crate::session::chat_store::ChatStore::fallback(),
+        );
+        resumed.audit_logger = std::mem::take(&mut self.audit_logger);
+        resumed.last_assistant_response = std::mem::take(&mut self.last_assistant_response);
+        resumed.cancelled = std::mem::replace(
+            &mut self.cancelled,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        resumed.esc_paused = std::mem::replace(
+            &mut self.esc_paused,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        resumed.esc_pause_ack = std::mem::replace(
+            &mut self.esc_pause_ack,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        resumed.force_non_streaming = self.force_non_streaming;
+        *self = resumed;
     }
 }
 

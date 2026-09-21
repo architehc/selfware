@@ -481,3 +481,287 @@ async fn esc_listener_cancel_while_paused() {
     cancel.store(true, Ordering::Relaxed);
     guard.stop().await;
 }
+
+// ── /clear per-task reset ──
+
+/// The exact sequence the two /clear handlers run (retain by role, then
+/// `reset_session_for_clear`), extracted so the reset semantics are testable
+/// without driving the real REPL loop.
+fn run_clear_reset(agent: &mut Agent) {
+    agent.messages.retain(|m| m.role == "system");
+    agent.reset_session_for_clear();
+}
+
+#[tokio::test]
+async fn clear_resets_per_task_state_keeping_system_prompt() {
+    let server = crate::testing::mock_api::MockLlmServer::builder()
+        .with_response("ok")
+        .build()
+        .await;
+    let config = crate::config::Config {
+        endpoint: format!("{}/v1", server.url()),
+        model: "mock-model".to_string(),
+        context_length: crate::config::default_context_length(),
+        agent: crate::config::AgentConfig {
+            max_iterations: 4,
+            step_timeout_secs: 5,
+            stream_stall_timeout_secs: None,
+            streaming: false,
+            native_function_calling: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut agent = Agent::new(config).await.expect("agent::new");
+
+    // Simulate a session where run_task stamped the TASK FOCUS overlay onto
+    // the base system prompt (current marking scheme) and left per-task state
+    // behind — the exact leak /clear must clean up.
+    let base_prompt = agent.messages[0].content.text().to_string();
+    let focus = "\n\n## TASK FOCUS (READ THIS FIRST)\nfix the parser now";
+    agent.messages[0] = crate::api::types::Message::system(format!(
+        "<selfware_focus_overlay>{focus}</selfware_focus_overlay>{}",
+        base_prompt
+    ));
+    agent.current_task_context = "fix the parser now".to_string();
+    agent.last_assistant_response = "final answer for the old task".to_string();
+    agent
+        .messages
+        .push(crate::api::types::Message::user("old turn"));
+    agent
+        .messages
+        .push(crate::api::types::Message::assistant("old reply"));
+    agent
+        .messages
+        .push(crate::api::types::Message::system("extra system guidance"));
+    // A failure-mode counter from the old task must also be reset.
+    agent.mutating_tool_call_count = 7;
+
+    run_clear_reset(&mut agent);
+
+    // Base system prompt preserved — overlay stripped, back to the clean base.
+    assert_eq!(
+        agent.messages[0].content.text(),
+        base_prompt,
+        "messages[0] must return to the clean base system prompt"
+    );
+    assert!(
+        !agent.messages[0].content.text().contains("TASK FOCUS"),
+        "no stale task focus overlay may survive /clear"
+    );
+    // Session/system context /clear documents keeping is preserved.
+    assert!(
+        agent
+            .messages
+            .iter()
+            .any(|m| m.role == "system" && m.content.text().contains("extra system guidance")),
+        "other system messages must survive /clear"
+    );
+    assert!(
+        agent.messages.iter().all(|m| m.role == "system"),
+        "all non-system turns must be dropped"
+    );
+    // Per-task state is gone.
+    assert!(
+        agent.current_task_context.is_empty(),
+        "current_task_context must be cleared"
+    );
+    assert!(
+        agent.last_assistant_response.is_empty(),
+        "last_assistant_response must be cleared"
+    );
+    assert_eq!(
+        agent.mutating_tool_call_count, 0,
+        "failure-mode counters must be reset for the next task"
+    );
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn clear_reset_strips_legacy_unmarked_overlay() {
+    let server = crate::testing::mock_api::MockLlmServer::builder()
+        .with_response("ok")
+        .build()
+        .await;
+    let config = crate::config::Config {
+        endpoint: format!("{}/v1", server.url()),
+        model: "mock-model".to_string(),
+        context_length: crate::config::default_context_length(),
+        agent: crate::config::AgentConfig {
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut agent = Agent::new(config).await.expect("agent::new");
+    let base_prompt = agent.messages[0].content.text().to_string();
+    // Old-scheme stamps have no marker; /clear must not corrupt messages[0].
+    let focus = "\n\n## TASK FOCUS (READ THIS FIRST)\nold-scheme overlay";
+    agent.messages[0] = crate::api::types::Message::system(format!("{}{}", focus, base_prompt));
+    agent.last_assistant_response = "stale".to_string();
+
+    run_clear_reset(&mut agent);
+
+    // No marker → strip is a no-op for content, but per-task state resets.
+    assert!(agent.messages[0].content.text().contains("TASK FOCUS"));
+    assert!(agent.last_assistant_response.is_empty());
+    server.stop().await;
+}
+
+// ── /resume targeted state restoration ──
+
+/// The interactive `/resume <prefix>` handler used to swap the whole agent
+/// struct (`*self = resumed`), silently dropping the live session's handles:
+/// the edit-history timeline, the TUI event/stream wiring, the session-log
+/// file handle, and the Ctrl+C/ESC tokens this loop captured at startup.
+/// `restore_resumed_state` must commit the resumed checkpoint state INTO the
+/// live session while keeping those handles.
+#[tokio::test]
+async fn resume_restore_replaces_task_state_but_keeps_live_handles() {
+    let server = crate::testing::mock_api::MockLlmServer::builder()
+        .with_response("ok")
+        .build()
+        .await;
+    let config = crate::config::Config {
+        endpoint: format!("{}/v1", server.url()),
+        model: "mock-model".to_string(),
+        context_length: crate::config::default_context_length(),
+        agent: crate::config::AgentConfig {
+            max_iterations: 4,
+            step_timeout_secs: 5,
+            stream_stall_timeout_secs: None,
+            streaming: false,
+            native_function_calling: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    // ── The live session (the pre-resume `self`) ──
+    let mut live = Agent::new(config.clone()).await.expect("agent::new");
+    // Chat history accumulated before the /resume.
+    live.messages
+        .push(crate::api::types::Message::user("old chat turn"));
+    // The REPL-side undo timeline built up over the session's edits.
+    live.edit_history
+        .create_checkpoint(crate::session::edit_history::EditAction::Manual {
+            description: "pre-resume edit checkpoint".to_string(),
+        });
+    assert!(
+        !live.edit_history.is_empty(),
+        "sanity: live timeline is non-empty"
+    );
+    live.redo_stack
+        .push(("undo entry".to_string(), std::collections::HashMap::new()));
+    // Session-bound handles/identity we must not lose.
+    let live_session_id = live
+        .session_logger
+        .as_ref()
+        .expect("sanity: live session logger")
+        .session_id()
+        .to_string();
+    let live_events = std::sync::Arc::clone(&live.events);
+    let live_cancel = std::sync::Arc::clone(&live.cancelled);
+    live.last_assistant_response = "pre-resume reply".to_string();
+    live.force_non_streaming = true;
+    // Stale task-budget/counters from earlier chat runs — must be replaced.
+    live.prior_elapsed_secs = 7;
+    live.cumulative_token_usage.total = 111;
+    live.mutation_sequence = 3;
+
+    // ── The resumed agent (what `Agent::resume` returns) ──
+    let mut resumed = Agent::new(config).await.expect("agent::new");
+    let expected_messages = vec![
+        crate::api::types::Message::system("checkpoint system".to_string()),
+        crate::api::types::Message::user("continue the checkpointed task".to_string()),
+    ];
+    resumed.messages = expected_messages.clone();
+    resumed.current_checkpoint = Some(crate::checkpoint::TaskCheckpoint::new(
+        "resume-test-task".to_string(),
+        "checkpointed task".to_string(),
+    ));
+    // Budgets / counters `Agent::resume` restores from the checkpoint.
+    resumed.prior_elapsed_secs = 42;
+    resumed.cumulative_token_usage.total = 999;
+    resumed.mutation_sequence = 7;
+    let resumed_session_id = resumed
+        .session_logger
+        .as_ref()
+        .expect("sanity: resumed session logger")
+        .session_id()
+        .to_string();
+    assert_ne!(
+        live_session_id, resumed_session_id,
+        "sanity: the fresh agent must have its own session id"
+    );
+
+    // ── The fix under test ──
+    live.restore_resumed_state(resumed);
+
+    // (a) Message history is replaced with the checkpoint's.
+    assert_eq!(
+        live.messages.len(),
+        expected_messages.len(),
+        "message history must be replaced by the checkpoint's"
+    );
+    for (got, want) in live.messages.iter().zip(&expected_messages) {
+        assert_eq!(got.role, want.role);
+        assert_eq!(got.content.text(), want.content.text());
+    }
+    // (c) Task timing/budget fields are re-based from the checkpoint — the
+    //     stale pre-resume chat values must not leak into the task run.
+    assert_eq!(
+        live.prior_elapsed_secs, 42,
+        "wall-clock baseline must be the checkpoint's"
+    );
+    assert_eq!(
+        live.cumulative_token_usage.total, 999,
+        "cumulative token total must be the checkpoint's"
+    );
+    assert_eq!(
+        live.mutation_sequence, 7,
+        "guard counters must be the checkpoint's"
+    );
+    // The task checkpoint itself is armed on the live struct.
+    assert!(live.current_checkpoint.is_some());
+    assert_eq!(
+        live.current_checkpoint.as_ref().unwrap().task_id,
+        "resume-test-task"
+    );
+
+    // (b) REPL-side handles survive (the old `*self = resumed` swap reset each
+    //     of these to a fresh agent's empty/new value).
+    assert!(
+        !live.edit_history.is_empty(),
+        "edit-history timeline must survive the restore"
+    );
+    assert_eq!(
+        live.redo_stack.len(),
+        1,
+        "redo stack must survive the restore"
+    );
+    assert!(live.session_logger.is_some());
+    assert_eq!(
+        live.session_logger.as_ref().unwrap().session_id(),
+        live_session_id,
+        "session-log handle must be the live session's, not the resumed agent's"
+    );
+    assert!(
+        std::sync::Arc::ptr_eq(&live.events, &live_events),
+        "TUI event-stream Arc must be preserved"
+    );
+    assert!(
+        std::sync::Arc::ptr_eq(&live.cancelled, &live_cancel),
+        "Ctrl+C token Arc must be preserved"
+    );
+    assert_eq!(
+        live.last_assistant_response, "pre-resume reply",
+        "session-owned /copy payload must survive"
+    );
+    assert!(
+        live.force_non_streaming,
+        "latched streaming decision must survive"
+    );
+
+    server.stop().await;
+}
