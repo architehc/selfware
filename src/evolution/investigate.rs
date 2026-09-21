@@ -328,7 +328,12 @@ pub fn read_file_content_at_revision(
         let trimmed_rev = rev.trim();
         if !trimmed_rev.is_empty() {
             let spec = format!("{trimmed_rev}:{file_path}");
-            let out = Command::new("git")
+            let mut cmd = Command::new("git");
+            // Sanitized env: git identity/proxy passthrough only (see
+            // safety::process_env); no inherited credentials, no operator
+            // GIT_* index overrides (env_remove retained for clarity).
+            crate::safety::process_env::sanitize_std_command_env_preserve(&mut cmd, &[]);
+            let out = cmd
                 .env_remove("GIT_INDEX_FILE")
                 .args(["show", &spec])
                 .current_dir(repo_root)
@@ -458,6 +463,9 @@ pub fn scan_patch_for_opaque_structures(
                 let snapshot_file = snapshot_dir.join(file_path);
 
                 let mut cmd = Command::new("git");
+                // Sanitized env (see safety::process_env): snapshot export
+                // must not inherit host credentials or operator GIT_* state.
+                crate::safety::process_env::sanitize_std_command_env_preserve(&mut cmd, &[]);
                 cmd.env_remove("GIT_INDEX_FILE");
                 cmd.args(["show", &format!("{commit}:{file_path}")]);
                 cmd.current_dir(repo_root);
@@ -1507,7 +1515,10 @@ pub fn investigate_attempt(node: &AttemptNode, repo_root: &Path) -> Investigativ
 
     let merkle_tree_equality = match (&node.git_tree_id, &node.committed_commit) {
         (Some(eval_tree), Some(commit)) => {
-            let commit_tree = Command::new("git")
+            let mut git_cmd = Command::new("git");
+            // Sanitized env (see safety::process_env).
+            crate::safety::process_env::sanitize_std_command_env_preserve(&mut git_cmd, &[]);
+            let commit_tree = git_cmd
                 .env_remove("GIT_INDEX_FILE")
                 .args(["rev-parse", &format!("{commit}^{{tree}}")])
                 .current_dir(repo_root)

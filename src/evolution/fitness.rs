@@ -418,8 +418,13 @@ pub fn run_sab(selfware_binary: &Path, config: &SabConfig) -> Result<SabResult, 
         }
     }
 
-    // Set up environment for SAB runner
+    // Set up environment for SAB runner. Sanitize FIRST (before the
+    // task-specific vars below): the runner script is project-controlled and
+    // a bare child would inherit every credential on the box. Only the vars
+    // the runner explicitly needs (scores, endpoint, model, pinned binary,
+    // timeouts) are re-added; nothing else from the parent env crosses over.
     let mut cmd = Command::new("bash");
+    crate::safety::process_env::sanitize_std_command_env_preserve(&mut cmd, &[]);
     cmd.arg(&config.runner_script)
         .env("OUT_DIR", &unique_out_dir)
         .env("SELFWARE_LEASE_HELD", "1")

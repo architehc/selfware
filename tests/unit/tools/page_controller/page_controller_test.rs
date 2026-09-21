@@ -310,3 +310,29 @@ fn extract_embedded_bridge_writes_and_is_idempotent() {
     assert_eq!(script, script2);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Regression (review finding P1): the Playwright dependency install
+/// (`npm install` / `npx playwright install`) runs against project-controlled
+/// package metadata, so the constructed command must not inherit host
+/// credentials. Inspects the command's env table directly (no spawn — a real
+/// install would hit the network).
+#[test]
+fn bridge_installer_command_sanitizes_env() {
+    let _env = crate::test_support::EnvGuard::capture(&["SELFWARE_BRIDGE_MARKER"]);
+    _env.set("SELFWARE_BRIDGE_MARKER", "synthetic-leak-marker");
+
+    let dir = std::env::temp_dir().join(format!("sw_bridge_env_{}", std::process::id()));
+    let cmd = PlaywrightBridge::bridge_installer_command("npm", &dir);
+    let envs: Vec<_> = cmd
+        .get_envs()
+        .map(|(k, _)| k.to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        !envs.iter().any(|k| k == "SELFWARE_BRIDGE_MARKER"),
+        "synthetic marker must not be forwarded to the npm child; saw: {envs:?}"
+    );
+    assert!(
+        envs.iter().any(|k| k == "PATH"),
+        "the shared allowlist (PATH) must still reach the child; saw: {envs:?}"
+    );
+}

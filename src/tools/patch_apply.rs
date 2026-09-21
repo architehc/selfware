@@ -60,6 +60,18 @@ fn parse_diff_stats(diff: &str) -> (usize, usize, usize, Vec<String>) {
     (files, insertions, deletions, targets)
 }
 
+/// Build a sanitized `git apply` invocation: the tool applies
+/// project-controlled diffs, so the child must not inherit host credentials
+/// (see `safety::process_env`). `kill_on_drop` ensures a dropped future (or
+/// early return) cannot leave a cached child holding repo locks.
+fn git_apply_command(args: &[&str]) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new("git");
+    crate::safety::process_env::sanitize_command_env(&mut cmd);
+    cmd.kill_on_drop(true);
+    cmd.args(args);
+    cmd
+}
+
 /// Apply a unified diff using `git apply` with validation and optional 3-way fallback.
 pub struct PatchApply;
 
@@ -130,24 +142,19 @@ impl Tool for PatchApply {
         let temp_path_str = temp_path.to_string_lossy().to_string();
 
         // Try git apply --check first
-        let check_output = tokio::process::Command::new("git")
-            .args(["apply", "--check", &temp_path_str])
+        let check_output = git_apply_command(&["apply", "--check", &temp_path_str])
             .output()
             .await;
 
         let applied = match check_output {
             Ok(ref out) if out.status.success() => {
                 // Check passed — apply for real
-                let apply_out = tokio::process::Command::new("git")
-                    .args(["apply", &temp_path_str])
-                    .output()
-                    .await;
+                let apply_out = git_apply_command(&["apply", &temp_path_str]).output().await;
                 matches!(apply_out, Ok(ref o) if o.status.success())
             }
             _ if allow_3way => {
                 // Try 3-way merge fallback
-                let apply3_out = tokio::process::Command::new("git")
-                    .args(["apply", "-3", &temp_path_str])
+                let apply3_out = git_apply_command(&["apply", "-3", &temp_path_str])
                     .output()
                     .await;
                 matches!(apply3_out, Ok(ref o) if o.status.success())

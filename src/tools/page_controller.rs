@@ -102,6 +102,18 @@ struct PlaywrightBridge {
 }
 
 impl PlaywrightBridge {
+    /// Build a sanitized `npm`/`npx` command for the Playwright bridge
+    /// install: the installer runs against project-controlled package
+    /// metadata and downloads dependencies, so it must not inherit host
+    /// credentials (see `safety::process_env`). No package install here is
+    /// credential-mediated, so nothing is preserved.
+    fn bridge_installer_command(program: &str, dir: &std::path::Path) -> std::process::Command {
+        let mut cmd = std::process::Command::new(program);
+        crate::safety::process_env::sanitize_std_command_env_preserve(&mut cmd, &[]);
+        cmd.current_dir(dir);
+        cmd
+    }
+
     /// Spawn the playwright-bridge.js process.
     async fn spawn() -> Result<Self> {
         let bridge_script = Self::find_bridge_script()?;
@@ -370,9 +382,8 @@ impl PlaywrightBridge {
             "Installing Playwright bridge dependencies in {} (first run — may take a minute)...",
             dir.display()
         );
-        let status = std::process::Command::new("npm")
+        let status = Self::bridge_installer_command("npm", dir)
             .arg("install")
-            .current_dir(dir)
             .status()
             .with_context(|| {
                 "running `npm install` for the Playwright bridge (is Node.js + npm installed?)"
@@ -387,9 +398,8 @@ impl PlaywrightBridge {
         }
         // Fetch the Chromium browser binary too (best-effort; the agent gets a
         // clear runtime error from the bridge if it is still missing).
-        let _ = std::process::Command::new("npx")
+        let _ = Self::bridge_installer_command("npx", dir)
             .args(["playwright", "install", "chromium"])
-            .current_dir(dir)
             .status();
         Ok(())
     }

@@ -4444,6 +4444,145 @@ async fn test_build_candidate_metrics_shutdown_returns_typed_shutdown_requested(
     crate::reset_shutdown_for_test();
 }
 
+/// Regression (review finding P1): evolution gate commands flow through
+/// `evolution_cargo_command`, which must not inherit host credentials while
+/// still allowing the caller's task-specific env (the isolated
+/// CARGO_TARGET_DIR) to be layered on afterwards. A pass-through `cargo` stub
+/// (intercepted only when a sentinel arg is present, delegating to the real
+/// cargo otherwise so concurrent tests never see it) dumps the child
+/// environment to a file.
+#[tokio::test]
+#[cfg(unix)]
+async fn evolution_cargo_command_sanitizes_env() {
+    let _env = crate::test_support::EnvGuard::capture(&["SELFWARE_DAEMON_MARKER", "PATH"]);
+    _env.set("SELFWARE_DAEMON_MARKER", "synthetic-leak-marker");
+
+    let dir = tempfile::tempdir().unwrap();
+    let dump = dir.path().join("child.env");
+    let real_cargo = std::process::Command::new("sh")
+        .args(["-c", "command -v cargo"])
+        .output()
+        .expect("resolve cargo")
+        .stdout;
+    let real_cargo = String::from_utf8_lossy(&real_cargo).trim().to_string();
+    assert!(!real_cargo.is_empty(), "real cargo must be resolvable");
+
+    let stub = dir.path().join("cargo");
+    std::fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\n\
+             for a in \"$@\"; do\n\
+               case \"$a\" in\n\
+                 --selfware-env-dump=*) dump=\"${{a#--selfware-env-dump=}}\"; env > \"$dump\"; exit 0 ;;\n\
+               esac\n\
+             done\n\
+             exec {real_cargo} \"$@\"\n"
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let stub_dir = dir.path().to_path_buf();
+    _env.set(
+        "PATH",
+        format!(
+            "{}:{}",
+            stub_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        ),
+    );
+
+    let dump_arg = format!("--selfware-env-dump={}", dump.display());
+    let mut cmd = evolution_cargo_command();
+    cmd.env("CARGO_TARGET_DIR", "/tmp/evolution-out");
+    cmd.arg(&dump_arg);
+    let output = cmd.output().await.expect("stub cargo must run");
+    assert!(
+        output.status.success(),
+        "stub should exit 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let child_env = std::fs::read_to_string(&dump).expect("stub must dump its env");
+    assert!(
+        !child_env.contains("SELFWARE_DAEMON_MARKER"),
+        "synthetic marker leaked to the cargo child; saw:\n{child_env}"
+    );
+    assert!(
+        child_env.contains("PATH="),
+        "the shared allowlist (PATH) must still reach the child; saw:\n{child_env}"
+    );
+    assert!(
+        child_env.contains("CARGO_TARGET_DIR=/tmp/evolution-out"),
+        "task-specific CARGO_TARGET_DIR must survive the clear; saw:\n{child_env}"
+    );
+}
+
+/// Regression (review finding P2): `run_cancellable_subprocess` must terminate
+/// the ENTIRE process group on timeout — a backgrounded grandchild
+/// (`sleep 30 &`) must be killed, not orphaned holding target/ locks.
+#[tokio::test]
+#[cfg(unix)]
+async fn run_cancellable_subprocess_timeout_reaps_process_group() {
+    let _exec = crate::test_support::ExecGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    let pidfile = dir.path().join("gc.pid");
+
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.args([
+        "-c",
+        &format!("sleep 30 & echo $! > {}; wait", pidfile.display()),
+    ]);
+
+    let start = std::time::Instant::now();
+    let res = run_cancellable_subprocess(cmd, std::time::Duration::from_secs(1)).await;
+    assert!(
+        matches!(res, Err(SubprocessError::Timeout)),
+        "subprocess must time out, got: {res:?}"
+    );
+    assert!(start.elapsed().as_secs() < 10, "must return at the timeout");
+
+    let gc_pid: i32 = std::fs::read_to_string(&pidfile)
+        .expect("grandchild wrote its pid")
+        .trim()
+        .parse()
+        .expect("valid pid");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+    let alive = kill(Pid::from_raw(gc_pid), None).is_ok();
+    assert!(
+        !alive,
+        "backgrounded grandchild pid {gc_pid} must be reaped after timeout"
+    );
+}
+
+/// Regression (review C3): the daemon's patch-application git spawns
+/// (`apply_unified_diff`, `capture_tested_diff`, `capture_worktree_tree_id`)
+/// must not inherit host credentials. `std::process::Command::get_envs` is
+/// inspected directly (no spawn — git against a real repo is not needed to
+/// prove the env table).
+#[test]
+fn evolution_git_command_sanitizes_env() {
+    let _env = crate::test_support::EnvGuard::capture(&["SELFWARE_DAEMON_GIT_MARKER"]);
+    _env.set("SELFWARE_DAEMON_GIT_MARKER", "synthetic-leak-marker");
+
+    let cmd = evolution_git_command();
+    let envs: Vec<_> = cmd
+        .get_envs()
+        .map(|(k, _)| k.to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        !envs.iter().any(|k| k == "SELFWARE_DAEMON_GIT_MARKER"),
+        "synthetic marker must not be forwarded to the git child; saw: {envs:?}"
+    );
+    assert!(
+        envs.iter().any(|k| k == "PATH"),
+        "the shared allowlist (PATH) must still reach the child; saw: {envs:?}"
+    );
+}
+
 #[tokio::test]
 async fn test_measure_compile_test_baseline_shutdown_aborts_promptly() {
     let _exec = crate::test_support::ExecGuard::hold();

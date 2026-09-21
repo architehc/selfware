@@ -1354,3 +1354,85 @@ fn test_parse_sab_report_content_rejects_wrong_binary_sha() {
     let err = parse_sab_report_content(&content, Some("expected_sha")).unwrap_err();
     assert!(matches!(err, FitnessError::WrongBinaryEvaluated { .. }));
 }
+
+/// Regression (review finding P1): `run_sab` executes the PROJECT-CONTROLLED
+/// runner script as a child; the child must not inherit host credentials. A
+/// stub runner dumps its env to a file and emits a valid sab-report/1 report;
+/// the synthetic marker must be absent while the deliberate runner vars
+/// (OUT_DIR, ENDPOINT, …) survive the sanitize.
+#[test]
+fn run_sab_sanitizes_runner_env() {
+    let _env = crate::test_support::EnvGuard::capture(&["SELFWARE_SAB_MARKER"]);
+    _env.set("SELFWARE_SAB_MARKER", "synthetic-leak-marker");
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    // Fake pinned "selfware binary" the runner would be scored against.
+    let binary = temp.path().join("selfware-candidate");
+    let contents = "#!/bin/sh\necho candidate-stub\n";
+    std::fs::write(&binary, contents).unwrap();
+    let bin_sha = sha256_hex(contents.as_bytes());
+
+    let report = serde_json::json!({
+        "schema": "sab-report/1",
+        "run_id": "stub-run",
+        "binary_sha256": bin_sha,
+        "scenarios_expected": 1,
+        "scenarios": [{
+            "name": "stub_scenario",
+            "difficulty": "easy",
+            "score": 50.0,
+            "tests_passed": true,
+            "broken_tests_fixed": false,
+            "clean_exit": true,
+            "duration_secs": 1,
+        }],
+    });
+
+    // Stub runner: dump the env the child actually sees, then emit the report.
+    let runner = temp.path().join("stub_runner.sh");
+    std::fs::write(
+        &runner,
+        format!(
+            "#!/bin/bash\nset -e\nenv > \"$OUT_DIR/child.env\"\n\
+             cat > \"$OUT_DIR/report.json\" <<'REPORT'\n{report}\nREPORT\n\
+             echo \"SAB_REPORT_JSON=$OUT_DIR/report.json\"\n"
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let config = SabConfig {
+        runner_script: runner,
+        max_parallel: 1,
+        scenario_timeout: Duration::from_secs(60),
+        ..Default::default()
+    };
+
+    let result = run_sab(&binary, &config).expect("stub runner must produce a valid report");
+
+    let child_env = std::fs::read_to_string(
+        result
+            .report_path
+            .parent()
+            .expect("report has a dir")
+            .join("child.env"),
+    )
+    .expect("stub must dump its env");
+    assert!(
+        !child_env.contains("SELFWARE_SAB_MARKER"),
+        "synthetic marker leaked to the SAB runner child; saw:\n{child_env}"
+    );
+    assert!(
+        child_env.contains("PATH="),
+        "the shared allowlist (PATH) must still reach the child; saw:\n{child_env}"
+    );
+    assert!(
+        child_env.contains("OUT_DIR="),
+        "the deliberate OUT_DIR runner var must survive the clear; saw:\n{child_env}"
+    );
+    assert_eq!(result.aggregate_score, 50.0);
+}

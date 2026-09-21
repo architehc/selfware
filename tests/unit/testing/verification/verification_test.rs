@@ -12,9 +12,100 @@ async fn run_reaped_times_out_and_does_not_report_success() {
         "should return at the timeout"
     );
     assert!(!out.success, "a timed-out check must not report success");
+    assert!(out.timed_out, "timed-out runs must carry the flag");
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("timed out"),
         "stderr should note the timeout"
+    );
+}
+
+/// Regression (review finding P1): verification executes project-controlled
+/// programs/linters, so run_reaped children must NOT inherit host
+/// credentials. A stub child dumps its env to a file; the synthetic marker
+/// must be absent while the shared allowlist (PATH) still reaches it.
+#[tokio::test]
+async fn run_reaped_drops_inherited_secrets() {
+    let _env = crate::test_support::EnvGuard::capture(&["SELFWARE_VERIFY_MARKER"]);
+    _env.set("SELFWARE_VERIFY_MARKER", "synthetic-leak-marker");
+
+    let dir = tempfile::tempdir().unwrap();
+    let outfile = dir.path().join("child.env");
+    let script = format!("env > {}", outfile.display());
+
+    let out = run_reaped("sh", &["-c", &script], dir.path(), 5)
+        .await
+        .expect("sh -c env must run");
+    assert!(out.success, "sh -c env must succeed: {:?}", out.stderr);
+
+    let child_env = std::fs::read_to_string(&outfile).expect("stub child must dump its env");
+    assert!(
+        !child_env.contains("SELFWARE_VERIFY_MARKER"),
+        "synthetic marker leaked to the verification child; saw:\n{child_env}"
+    );
+    assert!(
+        child_env.contains("PATH="),
+        "the shared allowlist (PATH) must still reach the child; saw:\n{child_env}"
+    );
+}
+
+/// Regression (review finding P2): a timed-out verification command must
+/// terminate its ENTIRE process group — a backgrounded grandchild
+/// (`sleep 30 &`) must be killed, not orphaned to keep holding target/ locks.
+#[tokio::test]
+#[cfg(unix)]
+async fn run_reaped_timeout_reaps_process_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let pidfile = dir.path().join("gc.pid");
+
+    let start = std::time::Instant::now();
+    let script = format!("sleep 30 & echo $! > {}; wait", pidfile.display());
+    let out = run_reaped("sh", &["-c", &script], dir.path(), 1)
+        .await
+        .unwrap();
+    assert!(
+        start.elapsed().as_secs() < 10,
+        "should return at the timeout"
+    );
+    assert!(out.timed_out, "must be reported as a timeout");
+
+    let gc_pid: i32 = std::fs::read_to_string(&pidfile)
+        .expect("grandchild wrote its pid")
+        .trim()
+        .parse()
+        .expect("valid pid");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+    let alive = kill(Pid::from_raw(gc_pid), None).is_ok();
+    assert!(
+        !alive,
+        "backgrounded grandchild pid {gc_pid} must be reaped after timeout"
+    );
+}
+
+/// Regression (follow-up finding, P2): the output-collection phase must be
+/// bounded by the SAME deadline as the child wait. A parent that EXITS
+/// normally while a backgrounded grandchild keeps the stdout pipe open would
+/// otherwise leave collection awaiting EOF forever — verification would
+/// stall past its timeout. `sleep 30 & echo done`: the child exits
+/// immediately, the sleeper retains the pipe, and run_reaped must still
+/// return in bounded time (reporting the drain timeout honestly).
+#[tokio::test]
+#[cfg(unix)]
+async fn run_reaped_collection_bounded_when_pipe_held() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let start = std::time::Instant::now();
+    let out = run_reaped("sh", &["-c", "sleep 30 & echo done"], dir.path(), 5)
+        .await
+        .unwrap();
+    assert!(
+        start.elapsed().as_secs() < 10,
+        "run_reaped must return in bounded time even when a pipe-holding grandchild lingers"
+    );
+    assert!(
+        out.timed_out,
+        "collection exceeded the deadline, so the run must be reported as timed out"
     );
 }
 

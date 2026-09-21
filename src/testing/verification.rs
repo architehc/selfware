@@ -17,6 +17,7 @@ use crate::tools::cargo::{parse_cargo_json_messages, CompilerError, Severity};
 /// Captured result of a reaped verification command (see `run_reaped`).
 struct ReapedOutput {
     success: bool,
+    timed_out: bool,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
 }
@@ -26,15 +27,38 @@ struct ReapedOutput {
 /// children it spawns) would otherwise stall the agent forever and leave
 /// orphaned processes holding `target/` locks — a self-reinforcing stall for
 /// unattended runs.
+///
+/// The child's environment is SANITIZED first (see
+/// `crate::safety::process_env`): verification executes project-controlled
+/// programs/linters, and an unsanitized child would inherit every credential
+/// on the box (`SELFWARE_API_KEY`, `AWS_*`, …). No verification command is
+/// credential-mediated, so nothing is preserved.
 async fn run_reaped(
     program: &str,
     args: &[&str],
     cwd: &Path,
     timeout_secs: u64,
 ) -> Result<ReapedOutput> {
+    run_reaped_args(program, args.iter().copied(), cwd, timeout_secs).await
+}
+
+/// Generic form of [`run_reaped`] accepting any args collection (e.g. a
+/// `Vec<String>` parsed from a config command string).
+async fn run_reaped_args<I, S>(
+    program: &str,
+    args: I,
+    cwd: &Path,
+    timeout_secs: u64,
+) -> Result<ReapedOutput>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
     use tokio::io::AsyncReadExt;
 
     let mut cmd = Command::new(program);
+    crate::safety::process_env::sanitize_command_env(&mut cmd);
+    cmd.kill_on_drop(true);
     cmd.args(args).current_dir(cwd);
     #[cfg(unix)]
     cmd.process_group(0);
@@ -49,14 +73,14 @@ async fn run_reaped(
 
     let mut so = child.stdout.take();
     let mut se = child.stderr.take();
-    let so_task = tokio::spawn(async move {
+    let mut so_task = tokio::spawn(async move {
         let mut b = Vec::new();
         if let Some(ref mut s) = so {
             let _ = s.read_to_end(&mut b).await;
         }
         b
     });
-    let se_task = tokio::spawn(async move {
+    let mut se_task = tokio::spawn(async move {
         let mut b = Vec::new();
         if let Some(ref mut s) = se {
             let _ = s.read_to_end(&mut b).await;
@@ -65,7 +89,12 @@ async fn run_reaped(
     });
 
     let timeout = tokio::time::Duration::from_secs(timeout_secs.max(1));
-    let (success, timed_out) = match tokio::time::timeout(timeout, child.wait()).await {
+    // ONE absolute deadline covers BOTH the wait and the output collection:
+    // a descendant that retained a pipe keeps it open even after the group
+    // was reaped, so an unbounded collection would stall verification
+    // indefinitely past its timeout (review finding: QA hang beyond timeout).
+    let deadline = std::time::Instant::now() + timeout;
+    let (success, wait_timed_out) = match tokio::time::timeout(timeout, child.wait()).await {
         Ok(Ok(status)) => (status.success(), false),
         Ok(Err(e)) => return Err(e).with_context(|| format!("{} wait failed", program)),
         Err(_) => {
@@ -81,8 +110,28 @@ async fn run_reaped(
         }
     };
 
-    let stdout = so_task.await.unwrap_or_default();
-    let mut stderr = se_task.await.unwrap_or_default();
+    // Bound the collection phase with the SAME absolute deadline; on
+    // collection timeout abort the drains and re-kill the group best-effort.
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    let (stdout, mut stderr, drain_timed_out) = match tokio::time::timeout(remaining, async {
+        tokio::join!(&mut so_task, &mut se_task)
+    })
+    .await
+    {
+        Ok((out, err)) => (out.unwrap_or_default(), err.unwrap_or_default(), false),
+        Err(_) => {
+            so_task.abort();
+            se_task.abort();
+            #[cfg(unix)]
+            if let Some(p) = pid {
+                use nix::sys::signal::{killpg, Signal};
+                use nix::unistd::Pid;
+                let _ = killpg(Pid::from_raw(p as i32), Signal::SIGKILL);
+            }
+            (Vec::new(), Vec::new(), true)
+        }
+    };
+    let timed_out = wait_timed_out || drain_timed_out;
     if timed_out {
         stderr.extend_from_slice(
             format!(
@@ -95,6 +144,7 @@ async fn run_reaped(
 
     Ok(ReapedOutput {
         success,
+        timed_out,
         stdout,
         stderr,
     })
@@ -620,38 +670,39 @@ impl VerificationGate {
                 )
             } else {
                 let program = parsed.remove(0);
-                let command_future = Command::new(&program)
-                    .args(&parsed)
-                    .current_dir(&self.project_root)
-                    .output();
-
-                match tokio::time::timeout(timeout_duration, command_future).await {
-                    Ok(Ok(output)) => {
-                        let stdout = String::from_utf8_lossy(&output.stdout);
-                        let stderr = String::from_utf8_lossy(&output.stderr);
+                // Sanitized env + whole-process-group reap via run_reaped: the
+                // post-edit command is project-controlled and may be arbitrary,
+                // so it must neither inherit host credentials nor survive its
+                // timeout to keep mutating files/holding locks downstream.
+                let reaped =
+                    run_reaped_args(&program, &parsed, &self.project_root, timeout_secs).await;
+                match reaped {
+                    Ok(out) if !out.timed_out => {
+                        let stdout = String::from_utf8_lossy(&out.stdout);
+                        let stderr = String::from_utf8_lossy(&out.stderr);
                         let combined = if stderr.is_empty() {
                             stdout.to_string()
                         } else {
                             format!("{}\n{}", stdout, stderr)
                         };
                         (
-                            output.status.success(),
+                            out.success,
                             truncate_str(&combined, 4000),
                             check_start.elapsed().as_millis() as u64,
                         )
                     }
-                    Ok(Err(e)) => (
-                        false,
-                        format!("Failed to run post-edit test command '{}': {}", cmd, e),
-                        check_start.elapsed().as_millis() as u64,
-                    ),
-                    Err(_) => (
+                    Ok(_) => (
                         false,
                         format!(
                             "Post-edit test command '{}' timed out after {} seconds",
                             cmd, timeout_secs
                         ),
                         timeout_duration.as_millis() as u64,
+                    ),
+                    Err(e) => (
+                        false,
+                        format!("Failed to run post-edit test command '{}': {}", cmd, e),
+                        check_start.elapsed().as_millis() as u64,
                     ),
                 }
             };
@@ -941,37 +992,36 @@ impl VerificationGate {
 
         // Apply timeout from config (default 5 minutes)
         let timeout_secs = self.config.check_timeout_secs.max(60); // At least 60 seconds
-        let timeout_duration = tokio::time::Duration::from_secs(timeout_secs);
 
-        let command_future = Command::new("cargo")
-            .args(["test", "--no-fail-fast"])
-            .current_dir(&self.project_root)
-            .output();
+        let output = run_reaped(
+            "cargo",
+            &["test", "--no-fail-fast"],
+            &self.project_root,
+            timeout_secs,
+        )
+        .await?;
 
-        let output = match tokio::time::timeout(timeout_duration, command_future).await {
-            Ok(Ok(output)) => output,
-            Ok(Err(e)) => return Err(e.into()),
-            Err(_) => {
-                // Timeout - return a graceful error
-                return Ok(CheckResult {
-                    check_type: CheckType::Test,
-                    passed: false,
-                    duration_ms: timeout_duration.as_millis() as u64,
-                    output: format!("Tests timed out after {} seconds", timeout_secs),
-                    errors: vec![VerificationError {
-                        file: "N/A".to_string(),
-                        line: None,
-                        column: None,
-                        message: format!("cargo test exceeded {}s timeout", timeout_secs),
-                        code: Some("TIMEOUT".to_string()),
-                        severity: ErrorSeverity::Error,
-                        suggestion: Some("Tests took too long. Run manually with `cargo test` or increase check_timeout_secs in config".to_string()),
-                    }],
-                    warnings: vec!["Tests were cancelled due to timeout. Press Ctrl+C to exit if stuck.".to_string()],
-                    suggestions: vec!["Consider running tests manually or increasing timeout".to_string()],
-                });
-            }
-        };
+        if output.timed_out {
+            // Timeout - the child was killed and reaped (see run_reaped);
+            // return a graceful error as before.
+            return Ok(CheckResult {
+                check_type: CheckType::Test,
+                passed: false,
+                duration_ms: timeout_secs * 1000,
+                output: format!("Tests timed out after {} seconds", timeout_secs),
+                errors: vec![VerificationError {
+                    file: "N/A".to_string(),
+                    line: None,
+                    column: None,
+                    message: format!("cargo test exceeded {}s timeout", timeout_secs),
+                    code: Some("TIMEOUT".to_string()),
+                    severity: ErrorSeverity::Error,
+                    suggestion: Some("Tests took too long. Run manually with `cargo test` or increase check_timeout_secs in config".to_string()),
+                }],
+                warnings: vec!["Tests were cancelled due to timeout. Press Ctrl+C to exit if stuck.".to_string()],
+                suggestions: vec!["Consider running tests manually or increasing timeout".to_string()],
+            });
+        }
 
         let duration = start.elapsed().as_millis() as u64;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -982,7 +1032,7 @@ impl VerificationGate {
 
         Ok(CheckResult {
             check_type: CheckType::Test,
-            passed: output.status.success(),
+            passed: output.success,
             duration_ms: duration,
             output: format!("{}\n{}", stdout, stderr),
             errors,
@@ -1471,7 +1521,12 @@ impl VerificationGate {
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| self.project_root.clone());
 
-        let output = Command::new(program)
+        let mut check_cmd = Command::new(program);
+        // The syntax checker consumes project-controlled files; sanitize its
+        // environment so it never inherits host credentials.
+        crate::safety::process_env::sanitize_command_env(&mut check_cmd);
+        check_cmd.kill_on_drop(true);
+        let output = check_cmd
             .args(&args)
             .current_dir(&check_dir)
             .output()
@@ -1633,42 +1688,30 @@ impl VerificationGate {
             }
         }
 
-        let command_future = Command::new(&program)
-            .args(&args)
-            .current_dir(&self.project_root)
-            .output();
+        let output = run_reaped_args(&program, &args, &self.project_root, timeout_secs).await?;
 
-        let output = match tokio::time::timeout(
-            tokio::time::Duration::from_secs(timeout_secs),
-            command_future,
-        )
-        .await
-        {
-            Ok(Ok(output)) => output,
-            Ok(Err(e)) => return Err(e.into()),
-            Err(_) => {
-                return Ok(CheckResult {
-                    check_type: CheckType::Test,
-                    passed: false,
-                    duration_ms: timeout_secs * 1000,
-                    output: format!("Tests timed out after {} seconds", timeout_secs),
-                    errors: vec![VerificationError {
-                        file: "N/A".to_string(),
-                        line: None,
-                        column: None,
-                        message: format!("{} test exceeded {}s timeout", lang, timeout_secs),
-                        code: Some("TIMEOUT".to_string()),
-                        severity: ErrorSeverity::Error,
-                        suggestion: Some(
-                            "Tests took too long. Run manually or increase check_timeout_secs in config"
-                                .to_string(),
-                        ),
-                    }],
-                    warnings: vec![],
-                    suggestions: vec![],
-                });
-            }
-        };
+        if output.timed_out {
+            return Ok(CheckResult {
+                check_type: CheckType::Test,
+                passed: false,
+                duration_ms: timeout_secs * 1000,
+                output: format!("Tests timed out after {} seconds", timeout_secs),
+                errors: vec![VerificationError {
+                    file: "N/A".to_string(),
+                    line: None,
+                    column: None,
+                    message: format!("{} test exceeded {}s timeout", lang, timeout_secs),
+                    code: Some("TIMEOUT".to_string()),
+                    severity: ErrorSeverity::Error,
+                    suggestion: Some(
+                        "Tests took too long. Run manually or increase check_timeout_secs in config"
+                            .to_string(),
+                    ),
+                }],
+                warnings: vec![],
+                suggestions: vec![],
+            });
+        }
 
         let duration = start.elapsed().as_millis() as u64;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1676,7 +1719,7 @@ impl VerificationGate {
 
         Ok(CheckResult {
             check_type: CheckType::Test,
-            passed: output.status.success(),
+            passed: output.success,
             duration_ms: duration,
             output: format!("{}\n{}", stdout, stderr),
             errors: vec![],
@@ -1686,7 +1729,9 @@ impl VerificationGate {
     }
 
     async fn command_exists(&self, cmd: &str) -> bool {
-        match Command::new("which").arg(cmd).output().await {
+        let mut which = Command::new("which");
+        crate::safety::process_env::sanitize_command_env(&mut which);
+        match which.arg(cmd).output().await {
             Ok(output) => output.status.success(),
             Err(_) => false,
         }

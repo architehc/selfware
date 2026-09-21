@@ -1226,3 +1226,46 @@ fn test_scan_patch_failed_snapshot_replacement_fails_closed() {
         citation.hyperlink
     );
 }
+
+/// Regression (review finding P1): the citation/snapshot `git show` helpers
+/// run inside a repo whose content the model produced/handles; their children
+/// are sanitized. Positive smoke test: with a synthetic marker in the parent
+/// env, `git show` must still resolve the revision content — the sanitized
+/// env must not break the tool. (The marker is deliberately a `SELFWARE_*`
+/// name no other code reads; a parent-level `GIT_INDEX_FILE` here would leak
+/// into the test's OWN unsanitized setup git calls and into concurrent
+/// unguarded git-spawning tests.)
+#[test]
+fn read_file_content_at_revision_works_with_sanitized_env() {
+    let _env = crate::test_support::EnvGuard::capture(&["SELFWARE_INVESTIGATE_MARKER"]);
+    _env.set("SELFWARE_INVESTIGATE_MARKER", "synthetic-leak-marker");
+
+    let temp = tempfile::tempdir().unwrap();
+    let repo_root = temp.path();
+
+    let _ = Command::new("git")
+        .args(["init"])
+        .current_dir(repo_root)
+        .output();
+    let _ = Command::new("git")
+        .args(["config", "user.email", "evo@test"])
+        .current_dir(repo_root)
+        .output();
+    let _ = Command::new("git")
+        .args(["config", "user.name", "Evo Test"])
+        .current_dir(repo_root)
+        .output();
+    std::fs::write(repo_root.join("lib.rs"), "fn hello() {}\n").unwrap();
+    let _ = Command::new("git")
+        .args(["add", "."])
+        .current_dir(repo_root)
+        .output();
+    let _ = Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(repo_root)
+        .output();
+
+    let content =
+        read_file_content_at_revision(repo_root, "lib.rs", Some("HEAD")).expect("must resolve");
+    assert_eq!(content, "fn hello() {}\n");
+}

@@ -123,3 +123,73 @@ async fn test_deletion_with_parent_escape_rejected() {
         "unexpected error: {err}"
     );
 }
+
+/// Regression (review finding P1): `git apply` runs against project-controlled
+/// diffs, so the constructed command must not inherit host credentials. A
+/// pass-through `git` stub (intercepted only when a sentinel arg is present,
+/// delegating to the real git otherwise so concurrent tests never see it)
+/// dumps the child environment to a file; the synthetic marker must be absent
+/// while the shared allowlist (PATH) still reaches the child.
+#[tokio::test]
+#[cfg(unix)]
+async fn git_apply_command_sanitizes_env() {
+    let _env = crate::test_support::EnvGuard::capture(&["SELFWARE_PATCH_MARKER", "PATH"]);
+    _env.set("SELFWARE_PATCH_MARKER", "synthetic-leak-marker");
+
+    let dir = tempfile::tempdir().unwrap();
+    let dump = dir.path().join("child.env");
+    let real_git = std::process::Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .expect("resolve git")
+        .stdout;
+    let real_git = String::from_utf8_lossy(&real_git).trim().to_string();
+    assert!(!real_git.is_empty(), "real git must be resolvable");
+
+    let stub = dir.path().join("git");
+    std::fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\n\
+             for a in \"$@\"; do\n\
+               case \"$a\" in\n\
+                 --selfware-env-dump=*) dump=\"${{a#--selfware-env-dump=}}\"; env > \"$dump\"; exit 0 ;;\n\
+               esac\n\
+             done\n\
+             exec {real_git} \"$@\"\n"
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let stub_dir = dir.path().to_path_buf();
+    _env.set(
+        "PATH",
+        format!(
+            "{}:{}",
+            stub_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        ),
+    );
+
+    let dump_arg = format!("--selfware-env-dump={}", dump.display());
+    let output = git_apply_command(&["apply", "--check", "/tmp/example.patch", &dump_arg])
+        .output()
+        .await
+        .expect("stub git must run");
+    assert!(
+        output.status.success(),
+        "stub should exit 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let child_env = std::fs::read_to_string(&dump).expect("stub must dump its env");
+    assert!(
+        !child_env.contains("SELFWARE_PATCH_MARKER"),
+        "synthetic marker leaked to the git child; saw:\n{child_env}"
+    );
+    assert!(
+        child_env.contains("PATH="),
+        "the shared allowlist (PATH) must still reach the child; saw:\n{child_env}"
+    );
+}

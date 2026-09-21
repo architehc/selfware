@@ -58,6 +58,14 @@ impl std::fmt::Display for QaLanguage {
 }
 
 /// Run a shell command and capture output, returning a QA stage result.
+///
+/// The child runs with a SANITIZED environment (see `safety::process_env`):
+/// QA stages execute project-controlled programs (`build.rs`, `setup.py`,
+/// `npm install`, test fixtures), and an unsanitized child would inherit
+/// every credential on the box. The child also runs in its own process group
+/// with `kill_on_drop`, and a timeout KILLS AND REAPS the whole group — a
+/// plain `timeout(Command::output())` only drops the future, leaving the
+/// timed-out process alive to keep mutating files or holding locks.
 async fn run_stage(
     stage: QaStage,
     program: &str,
@@ -65,63 +73,170 @@ async fn run_stage(
     project_root: &Path,
     timeout_secs: u64,
 ) -> QaStageResult {
+    use tokio::io::AsyncReadExt;
+
     let start = Instant::now();
+    let timeout = std::time::Duration::from_secs(timeout_secs.max(5));
+    // ONE absolute deadline covers BOTH the child wait and the output
+    // collection: a descendant that retained a pipe keeps it open even after
+    // the group was reaped, so the collection must be bounded too or the QA
+    // stage can stall indefinitely past its timeout.
+    let deadline = start + timeout;
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_secs.max(5)),
-        Command::new(program)
-            .args(args)
-            .current_dir(project_root)
-            .output(),
-    )
-    .await;
+    let mut cmd = Command::new(program);
+    crate::safety::process_env::sanitize_command_env(&mut cmd);
+    cmd.kill_on_drop(true);
+    cmd.args(args).current_dir(project_root);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
 
-    let duration_ms = start.elapsed().as_millis() as u64;
-
-    match result {
-        Ok(Ok(output)) => {
-            let stdout = String::from_utf8_lossy(
-                &output.stdout[..output.stdout.len().min(MAX_OUTPUT_BYTES)],
-            )
-            .to_string();
-            let stderr = String::from_utf8_lossy(
-                &output.stderr[..output.stderr.len().min(MAX_OUTPUT_BYTES)],
-            )
-            .to_string();
-            let combined = if stderr.is_empty() {
-                stdout
-            } else {
-                format!("{}\n{}", stdout, stderr)
-            };
-
-            let error_count = count_pattern(&combined, "error");
-            let warning_count = count_pattern(&combined, "warning");
-
-            QaStageResult {
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return QaStageResult {
                 stage,
-                passed: output.status.success(),
-                duration_ms,
-                output: combined,
-                error_count,
-                warning_count,
+                passed: false,
+                duration_ms: start.elapsed().as_millis() as u64,
+                output: format!("Failed to run {} {:?}: {}", program, args, e),
+                error_count: 1,
+                warning_count: 0,
             }
         }
-        Ok(Err(e)) => QaStageResult {
-            stage,
-            passed: false,
-            duration_ms,
-            output: format!("Failed to run {} {:?}: {}", program, args, e),
-            error_count: 1,
-            warning_count: 0,
-        },
-        Err(_) => QaStageResult {
+    };
+    let child_pid = child.id();
+
+    // Drain stdout/stderr concurrently so a chatty stage can't deadlock on a
+    // full pipe; keep only the display cap (matching the previous truncation).
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let mut stdout_task = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        let mut buf = [0u8; 8192];
+        if let Some(mut pipe) = stdout_pipe {
+            loop {
+                match pipe.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if bytes.len() < MAX_OUTPUT_BYTES {
+                            let take = n.min(MAX_OUTPUT_BYTES - bytes.len());
+                            bytes.extend_from_slice(&buf[..take]);
+                        }
+                        // Beyond the cap: keep draining so the child never blocks.
+                    }
+                }
+            }
+        }
+        bytes
+    });
+    let mut stderr_task = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        let mut buf = [0u8; 8192];
+        if let Some(mut pipe) = stderr_pipe {
+            loop {
+                match pipe.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if bytes.len() < MAX_OUTPUT_BYTES {
+                            let take = n.min(MAX_OUTPUT_BYTES - bytes.len());
+                            bytes.extend_from_slice(&buf[..take]);
+                        }
+                        // Beyond the cap: keep draining so the child never blocks.
+                    }
+                }
+            }
+        }
+        bytes
+    });
+
+    let wait_result = tokio::time::timeout(timeout, child.wait()).await;
+    let (passed, wait_timed_out) = match wait_result {
+        Ok(Ok(status)) => (status.success(), false),
+        Ok(Err(e)) => {
+            return QaStageResult {
+                stage,
+                passed: false,
+                duration_ms: start.elapsed().as_millis() as u64,
+                output: format!("Failed to run {} {:?}: {}", program, args, e),
+                error_count: 1,
+                warning_count: 0,
+            }
+        }
+        Err(_) => {
+            // Timed out: kill the ENTIRE process group, then reap the child
+            // so no descendant survives to touch project files afterwards.
+            #[cfg(unix)]
+            if let Some(pid) = child_pid {
+                use nix::sys::signal::{killpg, Signal};
+                use nix::unistd::Pid;
+                let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
+            }
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            (false, true)
+        }
+    };
+
+    // Bound the collection phase with the SAME absolute deadline. In the
+    // normal case the pipes EOF right after the child exits; but a
+    // backgrounded descendant that escaped the process-group kill still holds
+    // a write end, and an unbounded await here would stall the stage forever
+    // (review finding: QA can hang beyond its timeout). On collection
+    // timeout, abort the drains and re-kill the group best-effort.
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let (stdout_bytes, stderr_bytes, drain_timed_out) =
+        match tokio::time::timeout(remaining, async {
+            tokio::join!(&mut stdout_task, &mut stderr_task)
+        })
+        .await
+        {
+            Ok((out, err)) => (out.unwrap_or_default(), err.unwrap_or_default(), false),
+            Err(_) => {
+                stdout_task.abort();
+                stderr_task.abort();
+                #[cfg(unix)]
+                if let Some(pid) = child_pid {
+                    use nix::sys::signal::{killpg, Signal};
+                    use nix::unistd::Pid;
+                    let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
+                }
+                (Vec::new(), Vec::new(), true)
+            }
+        };
+    let timed_out = wait_timed_out || drain_timed_out;
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
+    let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
+    let combined = if stderr.is_empty() {
+        stdout
+    } else {
+        format!("{}\n{}", stdout, stderr)
+    };
+
+    if timed_out {
+        return QaStageResult {
             stage,
             passed: false,
             duration_ms,
             output: format!("{} {:?} timed out after {}s", program, args, timeout_secs),
             error_count: 1,
             warning_count: 0,
-        },
+        };
+    }
+
+    let error_count = count_pattern(&combined, "error");
+    let warning_count = count_pattern(&combined, "warning");
+
+    QaStageResult {
+        stage,
+        passed,
+        duration_ms,
+        output: combined,
+        error_count,
+        warning_count,
     }
 }
 
@@ -139,7 +254,9 @@ async fn try_run_stage(
     timeout_secs: u64,
 ) -> Option<QaStageResult> {
     // Quick check if the program exists
-    let check = Command::new("which").arg(program).output().await;
+    let mut which = Command::new("which");
+    crate::safety::process_env::sanitize_command_env(&mut which);
+    let check = which.arg(program).output().await;
     if check.is_err() || !check.unwrap().status.success() {
         debug!("{} not found, skipping {} stage", program, stage);
         return None;

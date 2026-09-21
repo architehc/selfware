@@ -7,7 +7,6 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -146,6 +145,17 @@ pub fn to_agent_prompt(snapshot: &TelemetrySnapshot) -> String {
     prompt
 }
 
+/// Build the cargo invocation for telemetry capture with a SANITIZED
+/// environment (see `safety::process_env`): telemetry runs `cargo` against
+/// project-controlled benchmarks/tests, and an unsanitized child would
+/// inherit every credential on the box.
+fn cargo_telemetry_command(repo_root: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new("cargo");
+    crate::safety::process_env::sanitize_std_command_env_preserve(&mut cmd, &[]);
+    cmd.current_dir(repo_root);
+    cmd
+}
+
 fn capture_cpu_hotspots(
     repo_root: &Path,
     bench_name: &str,
@@ -153,17 +163,17 @@ fn capture_cpu_hotspots(
     // Run cargo flamegraph and parse the folded stacks
     let flamegraph_path = repo_root.join("target").join("flamegraph.folded");
 
-    let _output = Command::new("cargo")
-        .args([
-            "flamegraph",
-            "--bench",
-            bench_name,
-            "--output",
-            flamegraph_path.to_str().unwrap_or("/dev/null"),
-            "--",
-            "--bench",
-        ])
-        .current_dir(repo_root)
+    let mut cmd = cargo_telemetry_command(repo_root);
+    cmd.args([
+        "flamegraph",
+        "--bench",
+        bench_name,
+        "--output",
+        flamegraph_path.to_str().unwrap_or("/dev/null"),
+        "--",
+        "--bench",
+    ]);
+    let _output = cmd
         .output()
         .map_err(|e| TelemetryError::ToolFailed("flamegraph".into(), e.to_string()))?;
 
@@ -547,16 +557,16 @@ fn parse_criterion_estimate(path: &Path) -> Result<f64, TelemetryError> {
 fn capture_test_summary(repo_root: &Path) -> Result<TestSummary, TelemetryError> {
     let start = std::time::Instant::now();
 
-    let output = Command::new("cargo")
-        .args([
-            "test",
-            "--all-features",
-            "--",
-            "--format=json",
-            "-Z",
-            "unstable-options",
-        ])
-        .current_dir(repo_root)
+    let mut cmd = cargo_telemetry_command(repo_root);
+    cmd.args([
+        "test",
+        "--all-features",
+        "--",
+        "--format=json",
+        "-Z",
+        "unstable-options",
+    ]);
+    let output = cmd
         .output()
         .map_err(|e| TelemetryError::ToolFailed("cargo test".into(), e.to_string()))?;
 

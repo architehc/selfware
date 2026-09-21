@@ -243,3 +243,27 @@ fn test_telemetry_error_display() {
     let e2 = TelemetryError::ParseFailed("bad format".into());
     assert!(format!("{}", e2).contains("bad format"));
 }
+
+/// Regression (review finding P1): telemetry's cargo invocations run against
+/// project-controlled benchmarks/tests, so the constructed command must not
+/// inherit host credentials. Inspects the command's env table directly (no
+/// spawn — running real cargo in a unit test would be far too heavy).
+#[test]
+fn cargo_telemetry_command_sanitizes_env() {
+    let _env = crate::test_support::EnvGuard::capture(&["SELFWARE_TELEMETRY_MARKER"]);
+    _env.set("SELFWARE_TELEMETRY_MARKER", "synthetic-leak-marker");
+
+    let cmd = cargo_telemetry_command(std::path::Path::new("/tmp/nonexistent-telemetry-repo"));
+    let envs: Vec<_> = cmd
+        .get_envs()
+        .map(|(k, _)| k.to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        !envs.iter().any(|k| k == "SELFWARE_TELEMETRY_MARKER"),
+        "synthetic marker must not be forwarded to the cargo child; saw: {envs:?}"
+    );
+    assert!(
+        envs.iter().any(|k| k == "PATH"),
+        "the shared allowlist (PATH) must still reach the child; saw: {envs:?}"
+    );
+}
