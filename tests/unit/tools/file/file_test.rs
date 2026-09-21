@@ -284,6 +284,192 @@ async fn test_file_edit_success() {
 }
 
 #[tokio::test]
+async fn test_file_edit_accepts_old_string_new_string_aliases() {
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("edit_alias.txt");
+    fs::write(&file_path, "Hello, World!").unwrap();
+
+    // Regression: FileEdit's Args consume old_str/new_str, but the field
+    // names `old_string`/`new_string` repeatedly appeared in system-injected
+    // file_edit guidance. A model mirroring them failed with
+    // "missing field 'old_str'". The aliases must make this work.
+    let tool = FileEdit::with_safety_config(permissive_safety_config());
+    let args = serde_json::json!({
+        "path": file_path.to_str().unwrap(),
+        "old_string": "World",
+        "new_string": "Rust"
+    });
+
+    let result = tool.execute(args).await.unwrap();
+    assert_eq!(result["success"], true);
+
+    let content = fs::read_to_string(&file_path).unwrap();
+    assert_eq!(content, "Hello, Rust!");
+}
+
+#[tokio::test]
+async fn test_file_edit_accepts_progress_guard_template_json() {
+    // The exact JSON shape the progress guard injected into the system
+    // context (src/agent/execution.rs): {"tool_type": "file_edit", "path":
+    // ..., "old_string": ..., "new_string": ...}. A model that faithfully
+    // mirrors that template must deserialize and perform the edit, not die
+    // with "missing field 'old_str'" (the reproduced failure).
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("guard.txt");
+    fs::write(&file_path, "fn old() {\n    println!(\"x\");\n}\n").unwrap();
+
+    let tool = FileEdit::with_safety_config(permissive_safety_config());
+    let args = serde_json::json!({
+        "tool_type": "file_edit",
+        "path": file_path.to_str().unwrap(),
+        "old_string": "fn old() {",
+        "new_string": "fn new() {"
+    });
+
+    let result = tool.execute(args).await.unwrap();
+    assert_eq!(result["success"], true);
+    assert_eq!(result["matches_found"], 1);
+
+    let content = fs::read_to_string(&file_path).unwrap();
+    assert!(content.contains("fn new() {"));
+    assert!(!content.contains("fn old() {"));
+}
+
+#[tokio::test]
+async fn test_file_edit_accepts_path_aliases() {
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("edit_alias_path.txt");
+    fs::write(&file_path, "before\nafter\n").unwrap();
+
+    for alias in ["file_path", "file", "filepath"] {
+        // Re-create the file for each alias iteration; a successful edit
+        // consumes the content.
+        fs::write(&file_path, "before\nafter\n").unwrap();
+        let mut map = serde_json::Map::new();
+        map.insert(
+            alias.to_string(),
+            serde_json::Value::String(file_path.to_str().unwrap().to_string()),
+        );
+        map.insert(
+            "old_str".to_string(),
+            serde_json::Value::String("before".to_string()),
+        );
+        map.insert(
+            "new_str".to_string(),
+            serde_json::Value::String("BEFORE".to_string()),
+        );
+
+        let tool = FileEdit::with_safety_config(permissive_safety_config());
+        let result = tool.execute(serde_json::Value::Object(map)).await.unwrap();
+        assert_eq!(result["success"], true, "alias {alias} failed");
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("BEFORE"), "alias {alias} did not edit");
+    }
+}
+
+#[tokio::test]
+async fn test_file_multi_edit_accepts_old_string_new_string_aliases() {
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("multi_alias.txt");
+    fs::write(&file_path, "alpha\nbeta\n").unwrap();
+
+    let tool = FileMultiEdit::with_safety_config(permissive_safety_config());
+    let args = serde_json::json!({
+        "edits": [
+            {"path": file_path.to_str().unwrap(), "old_string": "alpha", "new_string": "ALPHA"}
+        ]
+    });
+
+    let result = tool.execute(args).await.unwrap();
+    assert_eq!(result["success"], true);
+
+    let content = fs::read_to_string(&file_path).unwrap();
+    assert!(content.contains("ALPHA"));
+    assert!(!content.contains("alpha"));
+}
+
+#[tokio::test]
+async fn test_file_read_accepts_path_aliases() {
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("read_alias.txt");
+    fs::write(&file_path, "alpha\nbeta\n").unwrap();
+
+    for alias in ["file_path", "file", "filepath"] {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            alias.to_string(),
+            serde_json::Value::String(file_path.to_str().unwrap().to_string()),
+        );
+        map.insert("line_range".to_string(), serde_json::json!([1, 2]));
+
+        let tool = FileRead::with_safety_config(permissive_safety_config());
+        let result = tool.execute(serde_json::Value::Object(map)).await.unwrap();
+        assert!(
+            result["content"].as_str().unwrap().contains("alpha"),
+            "alias {alias} failed"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_file_write_accepts_path_content_aliases() {
+    let temp_dir = TempDir::new().unwrap();
+
+    // file_path + text
+    let file_path = temp_dir.path().join("write_text.txt");
+    let tool = FileWrite::with_safety_config(permissive_safety_config());
+    let args = serde_json::json!({
+        "file_path": file_path.to_str().unwrap(),
+        "text": "via text alias"
+    });
+    let result = tool.execute(args).await.unwrap();
+    assert_eq!(result["success"], true);
+    assert_eq!(fs::read_to_string(&file_path).unwrap(), "via text alias");
+
+    // file + body
+    let file_path = temp_dir.path().join("write_body.txt");
+    let tool = FileWrite::with_safety_config(permissive_safety_config());
+    let args = serde_json::json!({
+        "file": file_path.to_str().unwrap(),
+        "body": "via body alias"
+    });
+    let result = tool.execute(args).await.unwrap();
+    assert_eq!(result["success"], true);
+    assert_eq!(fs::read_to_string(&file_path).unwrap(), "via body alias");
+}
+
+#[tokio::test]
+async fn test_file_delete_accepts_path_aliases() {
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("delete_alias.txt");
+    fs::write(&file_path, "x").unwrap();
+
+    let tool = FileDelete::with_safety_config(permissive_safety_config());
+    let args = serde_json::json!({
+        "file_path": file_path.to_str().unwrap()
+    });
+
+    let result = tool.execute(args).await.unwrap();
+    assert_eq!(result["deleted"], true);
+    assert!(!file_path.exists());
+}
+
+#[tokio::test]
+async fn test_directory_tree_accepts_path_aliases() {
+    let temp_dir = TempDir::new().unwrap();
+    fs::write(temp_dir.path().join("file1.txt"), "").unwrap();
+
+    let tool = DirectoryTree::with_safety_config(permissive_safety_config());
+    let args = serde_json::json!({
+        "filepath": temp_dir.path().to_str().unwrap()
+    });
+
+    let result = tool.execute(args).await.unwrap();
+    assert!(result["total"].as_i64().unwrap() >= 1);
+}
+
+#[tokio::test]
 async fn test_file_edit_not_found() {
     let temp_dir = TempDir::new().unwrap();
     let file_path = temp_dir.path().join("edit.txt");

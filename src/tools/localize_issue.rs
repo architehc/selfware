@@ -2,6 +2,8 @@
 //! issue description using BM25-style keyword scoring, test-file proximity,
 //! and recent git change history.
 
+use crate::config::SafetyConfig;
+use crate::tools::file::{resolve_safety_config, validate_tool_path};
 use crate::tools::Tool;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -24,7 +26,24 @@ pub struct Candidate {
 }
 
 /// Tool implementation.
-pub struct LocalizeIssue;
+#[derive(Default)]
+pub struct LocalizeIssue {
+    /// Per-instance safety config for path-policy enforcement; falls back to
+    /// the process-global config when `None`.
+    pub safety_config: Option<SafetyConfig>,
+}
+
+impl LocalizeIssue {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
+    }
+}
 
 /// Tokenize text into lowercase alphanumeric terms (filters out short words).
 fn tokenize(text: &str) -> Vec<String> {
@@ -153,7 +172,15 @@ fn best_function_in_file(content: &str, query_terms: &[String]) -> String {
 }
 
 /// Run the localization heuristic and return ranked candidates.
-pub(crate) fn localize_issue_sync(issue: &str, repo_path: &str) -> Result<Vec<Candidate>> {
+///
+/// `policy` is the per-file path policy: when `Some`, every walked file must
+/// pass `validate_tool_path` (so a denied subdirectory inside the validated
+/// repo root is never read); the standalone helper callers pass `None`.
+pub(crate) fn localize_issue_sync(
+    issue: &str,
+    repo_path: &str,
+    policy: Option<&SafetyConfig>,
+) -> Result<Vec<Candidate>> {
     let query_terms = tokenize(issue);
     if query_terms.is_empty() {
         return Ok(vec![]);
@@ -177,6 +204,17 @@ pub(crate) fn localize_issue_sync(issue: &str, repo_path: &str) -> Result<Vec<Ca
     {
         let path = entry.path();
         let path_str = path.to_string_lossy();
+
+        // Enforce the per-file path policy: a denied subdirectory inside the
+        // validated repo root must not be read (the root itself was validated
+        // by the caller).
+        let policy_allows = match policy {
+            None => true,
+            Some(s) => validate_tool_path(&path_str, s).is_ok(),
+        };
+        if !policy_allows {
+            continue;
+        }
 
         // Skip common noise directories.
         if path_str.contains("/target/")
@@ -356,10 +394,18 @@ impl Tool for LocalizeIssue {
             .unwrap_or(".")
             .to_string();
 
-        let candidates =
-            tokio::task::spawn_blocking(move || localize_issue_sync(&issue, &repo_path))
-                .await
-                .context("localize_issue blocking task panicked")??;
+        // Enforce the workspace path policy before walking the repo: the tool
+        // reads every source file under `repo_path`, so the root must pass the
+        // same checks as `file_read`. The resolved config is also applied
+        // per-file during the walk so denied subdirectories leak nothing.
+        let safety = resolve_safety_config(self.safety_config.as_ref());
+        validate_tool_path(&repo_path, &safety)?;
+
+        let candidates = tokio::task::spawn_blocking(move || {
+            localize_issue_sync(&issue, &repo_path, Some(&safety))
+        })
+        .await
+        .context("localize_issue blocking task panicked")??;
 
         Ok(serde_json::json!({
             "candidates": candidates,

@@ -11,8 +11,11 @@
 //! This helper centralizes that policy so every spawn site applies the same
 //! allowlist and none silently drifts back to inheriting the full env.
 
-/// Clear a command's inherited environment and re-populate only a minimal,
-/// non-sensitive base (`PATH`, `HOME`, `LANG`).
+/// Clear a command's inherited environment and re-populate the shared
+/// non-sensitive allowlist ([`DEFAULT_KEEP`]: toolchain basics, git
+/// identity, proxy/TLS trust, temp locations, terminal type, Rust
+/// toolchain homes). Credential-bearing variables (`SELFWARE_API_KEY`,
+/// `AWS_*`, tokens) are deliberately absent and never forwarded.
 ///
 /// Call this immediately after constructing the `Command` and BEFORE adding
 /// any task-specific variables, so those additions survive the clear.
@@ -44,14 +47,94 @@ pub fn sanitize_std_command_env_preserve(cmd: &mut std::process::Command, preser
     }
 }
 
-/// The keep-list applied after `env_clear`: the minimal base plus any
+/// The baseline kept after `env_clear`: the shared non-sensitive allowlist
+/// that every sanitized spawn site forwards. Tools legitimately need these
+/// to function (git authorship in clean containers, corporate proxies,
+/// custom CA bundles, temp/scratch locations, terminal identity, Rust
+/// toolchains in non-default homes) without exposing credentials. Keys not
+/// present in the parent environment are simply skipped.
+///
+/// Proxy URLs may embed `user:password@` userinfo; that userinfo is stripped
+/// before forwarding (host:port only) unless the operator opts in with
+/// `SELFWARE_FORWARD_PROXY_CREDENTIALS=1` for deployments whose proxy
+/// requires authentication.
+const DEFAULT_KEEP: &[&str] = &[
+    "PATH",
+    "HOME",
+    "LANG",
+    "GIT_AUTHOR_NAME",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_COMMITTER_NAME",
+    "GIT_COMMITTER_EMAIL",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "TERM",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+];
+
+/// The keep-list applied after `env_clear`: [`DEFAULT_KEEP`] plus any
 /// caller-preserved names, resolved from the parent environment.
 fn kept_env<'a>(preserve: &'a [&'a str]) -> Vec<(&'a str, std::ffi::OsString)> {
-    ["PATH", "HOME", "LANG"]
-        .into_iter()
+    let proxy_credentials_opt_in = proxy_credentials_opt_in();
+    DEFAULT_KEEP
+        .iter()
+        .copied()
         .chain(preserve.iter().copied())
-        .filter_map(|key| std::env::var_os(key).map(|value| (key, value)))
+        .filter_map(|key| {
+            std::env::var_os(key).map(|value| {
+                let value = sanitize_kept_value(key, &value, proxy_credentials_opt_in);
+                (key, value)
+            })
+        })
         .collect()
+}
+
+/// Apply per-key sanitization to a kept value before it reaches a child.
+///
+/// Proxy URLs may embed `user:password@` credentials that would leak to
+/// every sanitized child (build scripts included); strip that userinfo
+/// unless the operator opted into forwarding credentials verbatim.
+fn sanitize_kept_value(
+    key: &str,
+    value: &std::ffi::OsString,
+    forward_proxy_credentials: bool,
+) -> std::ffi::OsString {
+    if !forward_proxy_credentials && matches!(key, "HTTP_PROXY" | "HTTPS_PROXY") {
+        if let Some(s) = value.to_str() {
+            if let Some(stripped) = strip_proxy_userinfo(s) {
+                return std::ffi::OsString::from(stripped);
+            }
+        }
+    }
+    value.clone()
+}
+
+/// Strip `user:password@` userinfo from a proxy URL, keeping host:port.
+///
+/// Only values that carry an explicit `scheme://` marker are treated as
+/// URLs; anything else (bare `host:port`, host lists) passes through
+/// unchanged, as do URLs without userinfo.
+fn strip_proxy_userinfo(value: &str) -> Option<String> {
+    let (prefix, rest) = value.split_once("://")?;
+    let host_start = rest.find('@')?;
+    Some(format!("{prefix}://{}", &rest[host_start + 1..]))
+}
+
+/// Whether the operator opted into forwarding proxy URL userinfo verbatim
+/// (`SELFWARE_FORWARD_PROXY_CREDENTIALS=1` / `=true`). Deployments whose
+/// proxy REQUIRES authentication set this; everyone else keeps the default
+/// userinfo-stripping behavior.
+fn proxy_credentials_opt_in() -> bool {
+    std::env::var("SELFWARE_FORWARD_PROXY_CREDENTIALS")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

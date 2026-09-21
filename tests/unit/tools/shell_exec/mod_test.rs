@@ -37,6 +37,23 @@ async fn test_shell_exec_echo() {
 }
 
 #[tokio::test]
+async fn test_shell_exec_accepts_cmd_alias() {
+    // Regression: models frequently emit `cmd` instead of the canonical
+    // `command`; that previously failed deserialization with
+    // "missing field 'command'".
+    let tool = ShellExec;
+    let args = serde_json::json!({
+        "cmd": "echo 'via cmd alias'",
+        "timeout_secs": 5
+    });
+
+    let result = tool.execute(args).await.unwrap();
+    assert_eq!(result["exit_code"], 0);
+    assert!(result["stdout"].as_str().unwrap().contains("via cmd alias"));
+    assert_eq!(result["timed_out"], false);
+}
+
+#[tokio::test]
 #[cfg(unix)]
 async fn registered_shell_exec_timeout_reaps_process_group() {
     // The REGISTERED shell tool must reap the whole tree on timeout — a

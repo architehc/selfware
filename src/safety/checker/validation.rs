@@ -921,13 +921,40 @@ impl SafetyChecker {
                     self.check_shell_command(script)?;
                 }
             }
-            "git_status" | "git_diff" | "grep_search" | "glob_find" | "symbol_search"
-            | "tool_search" | "process_list" | "process_logs" | "port_check" | "pip_list"
-            | "pip_freeze" | "npm_scripts" | "container_list" | "container_logs"
-            | "container_images" | "knowledge_query" | "knowledge_stats" | "knowledge_export"
-            => {
+            // Read-only operations that take no filesystem path. The search
+            // tools (grep_search / glob_find / symbol_search) walked and read
+            // arbitrary paths here — they now live in their own arm below that
+            // runs `check_path` on their `path` argument, so `/etc/passwd`,
+            // `..` escapes, and symlink escapes are rejected like `file_read`.
+            "git_status" | "git_diff" | "tool_search" | "process_list" | "process_logs"
+            | "port_check" | "pip_list" | "pip_freeze" | "npm_scripts" | "container_list"
+            | "container_logs" | "container_images" | "knowledge_query" | "knowledge_stats" => {
                 // These are read-only operations, safe to execute
             }
+            // Search tools walk and read the filesystem (ripgrep / built-in
+            // walker) on a user-supplied path — validate the search root with
+            // the workspace path policy.
+            "grep_search" | "glob_find" | "symbol_search" => {
+                let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
+                if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                    if !path.is_empty() {
+                        self.check_path(path)?;
+                    }
+                }
+            }
+            // knowledge_export writes a JSON file to `output_path` — the write
+            // target obeys the path policy like any other file write.
+            "knowledge_export" => {
+                let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
+                if let Some(path) = args.get("output_path").and_then(|v| v.as_str()) {
+                    if !path.is_empty() {
+                        self.check_path(path)?;
+                    }
+                }
+            }
+            // knowledge_add / relate / remove / clear mutate the in-memory
+            // graph only. knowledge_auto_extract READS `file_path`, so it is
+            // checked separately near the top-level file tools.
             "knowledge_add" | "knowledge_relate" | "knowledge_remove" | "knowledge_clear" => {
                 // Knowledge graph mutations are in-memory only, no filesystem risk
             }
@@ -1118,12 +1145,12 @@ impl SafetyChecker {
             | "lsp_workspace_symbols"
             | "lsp_diagnostics"
             // Analysis / context / interaction tools: no filesystem or shell
-            // mutation (metadata-classified read-only).
+            // mutation (metadata-classified read-only). context_action is
+            // handled separately — it resolves `target` to a real file path.
             | "code_metrics"
             | "code_map"
             | "code_diff_plan"
             | "context_budget"
-            | "context_action"
             | "graph_summary"
             | "context_pack"
             | "hotspots"
@@ -1132,11 +1159,41 @@ impl SafetyChecker {
             | "test_map"
             | "cycles"
             | "dups"
-            | "localize_issue"
-            | "ask_user"
-            | "knowledge_auto_extract" => {
+            | "ask_user" => {
                 // Metadata-classified as read-only / network probes; nothing to
                 // path- or command-check.
+            }
+            // context_action resolves its `target` to a filesystem path and
+            // opens it for a live token measurement — validate like file_read.
+            // Module-style targets ("tools::codemap") resolve to non-existent
+            // in-workspace paths and pass the policy.
+            "context_action" => {
+                let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
+                if let Some(target) = args.get("target").and_then(|v| v.as_str()) {
+                    if !target.is_empty() {
+                        self.check_path(target)?;
+                    }
+                }
+            }
+            // localize_issue walks and reads every source file under
+            // `repo_path` — validate the root with the workspace path policy.
+            "localize_issue" => {
+                let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
+                if let Some(path) = args.get("repo_path").and_then(|v| v.as_str()) {
+                    if !path.is_empty() {
+                        self.check_path(path)?;
+                    }
+                }
+            }
+            // knowledge_auto_extract READS `file_path` to parse symbols — not
+            // an in-memory-only mutation. Validate like file_read.
+            "knowledge_auto_extract" => {
+                let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
+                if let Some(path) = args.get("file_path").and_then(|v| v.as_str()) {
+                    if !path.is_empty() {
+                        self.check_path(path)?;
+                    }
+                }
             }
             unknown => {
                 // MCP tools are dynamically named `mcp_<server>_<tool>`; they are

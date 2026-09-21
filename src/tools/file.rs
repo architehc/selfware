@@ -320,6 +320,9 @@ impl Tool for FileRead {
     async fn execute(&self, args: Value) -> Result<Value> {
         #[derive(Deserialize)]
         struct Args {
+            /// `path` is the canonical field; aliases absorb the variations
+            /// models commonly emit for file paths.
+            #[serde(alias = "file_path", alias = "file", alias = "filepath")]
             path: String,
             line_range: Option<(usize, usize)>,
         }
@@ -419,7 +422,9 @@ impl Tool for FileWrite {
     async fn execute(&self, args: Value) -> Result<Value> {
         #[derive(Deserialize)]
         struct Args {
+            #[serde(alias = "file_path", alias = "file", alias = "filepath")]
             path: String,
+            #[serde(alias = "text", alias = "body")]
             content: String,
             #[serde(default = "default_true")]
             backup: bool,
@@ -519,8 +524,15 @@ impl Tool for FileEdit {
     async fn execute(&self, args: Value) -> Result<Value> {
         #[derive(Deserialize)]
         struct Args {
+            #[serde(alias = "file_path", alias = "file", alias = "filepath")]
             path: String,
+            /// `old_string` / `new_string` are accepted as aliases: several
+            /// system-injected file_edit templates historically showed those
+            /// names, and models mirroring them failed with
+            /// "missing field 'old_str'". Canonical is old_str/new_str.
+            #[serde(alias = "old_string")]
             old_str: String,
+            #[serde(alias = "new_string")]
             new_str: String,
         }
 
@@ -618,6 +630,7 @@ impl Tool for FileDelete {
     async fn execute(&self, args: Value) -> Result<Value> {
         #[derive(Deserialize)]
         struct Args {
+            #[serde(alias = "file_path", alias = "file", alias = "filepath")]
             path: String,
         }
 
@@ -702,8 +715,11 @@ impl Tool for FileMultiEdit {
     async fn execute(&self, args: Value) -> Result<Value> {
         #[derive(Deserialize)]
         struct EditItem {
+            #[serde(alias = "file_path", alias = "file", alias = "filepath")]
             path: String,
+            #[serde(alias = "old_string")]
             old_str: String,
+            #[serde(alias = "new_string")]
             new_str: String,
         }
 
@@ -990,6 +1006,7 @@ impl Tool for DirectoryTree {
     async fn execute(&self, args: Value) -> Result<Value> {
         #[derive(Deserialize)]
         struct Args {
+            #[serde(alias = "file_path", alias = "file", alias = "filepath")]
             path: String,
             #[serde(default = "default_three")]
             max_depth: usize,

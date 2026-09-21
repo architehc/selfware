@@ -422,9 +422,15 @@ impl ToolRegistry {
         registry.register_critical(ShellExec);
 
         // Critical: Search operations
-        registry.register_critical(GrepSearch);
-        registry.register_critical(GlobFind);
-        registry.register_critical(SymbolSearch);
+        if let Some(cfg) = safety_config {
+            registry.register_critical(GrepSearch::with_safety_config(cfg.clone()));
+            registry.register_critical(GlobFind::with_safety_config(cfg.clone()));
+            registry.register_critical(SymbolSearch::with_safety_config(cfg.clone()));
+        } else {
+            registry.register_critical(GrepSearch::new());
+            registry.register_critical(GlobFind::new());
+            registry.register_critical(SymbolSearch::new());
+        }
 
         // Critical: Routine git operations (always on; the rest of the git
         // toolset stays deferred behind tool_search)
@@ -516,13 +522,21 @@ impl ToolRegistry {
 
         // Deferred: Knowledge graph
         registry.register_deferred(KnowledgeAdd);
-        registry.register_deferred(KnowledgeAutoExtract);
+        registry.register_deferred(if let Some(cfg) = safety_config {
+            KnowledgeAutoExtract::with_safety_config(cfg.clone())
+        } else {
+            KnowledgeAutoExtract::new()
+        });
         registry.register_deferred(KnowledgeRelate);
         registry.register_deferred(KnowledgeQuery);
         registry.register_deferred(KnowledgeStatsTool);
         registry.register_deferred(KnowledgeClear);
         registry.register_deferred(KnowledgeRemove);
-        registry.register_deferred(KnowledgeExport);
+        registry.register_deferred(if let Some(cfg) = safety_config {
+            KnowledgeExport::with_safety_config(cfg.clone())
+        } else {
+            KnowledgeExport::new()
+        });
 
         // Deferred: Computer control (mouse, keyboard, screen, window)
         registry.register_deferred(computer::ComputerMouseTool);
@@ -531,7 +545,11 @@ impl ToolRegistry {
         registry.register_deferred(computer::ComputerWindowTool);
 
         // Deferred: Issue localization
-        registry.register_deferred(LocalizeIssue);
+        registry.register_deferred(if let Some(cfg) = safety_config {
+            LocalizeIssue::with_safety_config(cfg.clone())
+        } else {
+            LocalizeIssue::new()
+        });
 
         // Deferred: LSP code intelligence tools
         let project_root =

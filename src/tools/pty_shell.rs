@@ -54,6 +54,16 @@ static SESSIONS: Lazy<Arc<RwLock<HashMap<String, PtySession>>>> =
 pub struct PtySession {
     /// The child shell process.
     child: Child,
+    /// Process-group id of the session, captured at spawn.
+    ///
+    /// On unix the child is spawned with `process_group(0)`, making it the
+    /// leader of its own group, so the pgid equals the child's pid. We keep it
+    /// separately from the [`Child`] handle because `Child::id()` returns
+    /// `None` once the direct shell has been reaped — at which point surviving
+    /// background descendants of the group would become unreachable for
+    /// cleanup (see [`PtySession::kill_process_group`]).
+    #[cfg(unix)]
+    pgid: Option<u32>,
     /// Writer to the child's stdin.
     stdin: tokio::process::ChildStdin,
     /// Buffered reader for the child's stdout.
@@ -93,6 +103,14 @@ impl PtySession {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
 
+        // Run the child in its own process group so a timeout can reap the
+        // ENTIRE process tree (grandchildren included, e.g. an interactive
+        // python/node/cat stuck reading stdin), not just the direct shell —
+        // `kill_on_drop`/`child.kill()` only signal the immediate child, so an
+        // orphaned grandchild would otherwise keep the session poisoned.
+        #[cfg(unix)]
+        cmd.process_group(0);
+
         // Clear the inherited environment (SELFWARE_API_KEY, AWS_*, …) before
         // adding our own vars, matching shell_exec — an interactive shell must
         // not hand the agent's secrets to whatever the operator types.
@@ -123,8 +141,19 @@ impl PtySession {
 
         let now = Instant::now();
 
+        // Capture the process-group id at spawn. The session child runs in its
+        // own process group (see `process_group(0)` above), so the pgid equals
+        // the child's pid. It must be captured here rather than re-derived
+        // later from the Child handle: once the direct shell has been reaped,
+        // `Child::id()` returns None and any surviving background descendants
+        // of the group would become unreachable.
+        #[cfg(unix)]
+        let pgid = child.id();
+
         let mut session = Self {
             child,
+            #[cfg(unix)]
+            pgid,
             stdin,
             stdout: BufReader::new(stdout),
             stderr: BufReader::new(stderr),
@@ -220,12 +249,7 @@ impl PtySession {
         // Read until we see the completion marker.
         loop {
             if Instant::now() > deadline {
-                return Ok(CommandOutput {
-                    stdout: Self::collect_output(&output_lines),
-                    stderr: String::new(),
-                    exit_code: -1,
-                    timed_out: true,
-                });
+                return Ok(self.report_timeout(&output_lines).await);
             }
 
             line.clear();
@@ -252,13 +276,9 @@ impl PtySession {
                     bail!("Error reading shell output: {}", e);
                 }
                 Err(_) => {
-                    // Timeout
-                    return Ok(CommandOutput {
-                        stdout: Self::collect_output(&output_lines),
-                        stderr: String::new(),
-                        exit_code: -1,
-                        timed_out: true,
-                    });
+                    // Timeout: terminate the stuck child before reporting, so
+                    // the hung process cannot keep running behind the session.
+                    return Ok(self.report_timeout(&output_lines).await);
                 }
             }
         }
@@ -272,6 +292,77 @@ impl PtySession {
             exit_code: exit_code.unwrap_or(-1),
             timed_out: false,
         })
+    }
+
+    /// Report a timeout after terminating the stuck child process tree, so a
+    /// hung interactive command cannot keep running behind the session.
+    async fn report_timeout(&mut self, output_lines: &[String]) -> CommandOutput {
+        self.terminate_stuck_child().await;
+        CommandOutput {
+            stdout: Self::collect_output(output_lines),
+            stderr: String::new(),
+            exit_code: -1,
+            timed_out: true,
+        }
+    }
+
+    /// Terminate a stuck child process tree after a command times out.
+    ///
+    /// Escalation order:
+    /// 1. Cooperative interrupt — an ETX (`\x03`, Ctrl+C) is written to the
+    ///    child's stdin so an interactive program gets a chance to shut down
+    ///    cleanly.
+    /// 2. A short grace period (~500 ms) for the process to exit on its own.
+    /// 3. If the process tree is still alive, the ENTIRE process group is
+    ///    SIGKILLed and the shell reaped. The session child runs in its own
+    ///    process group (see [`PtySession::new`]), so the group kill reaches
+    ///    grandchildren — an interactive `python`/`node`/`cat` still reading
+    ///    stdin — instead of orphaning them behind a dead direct child.
+    ///
+    /// The group kill is attempted even when the shell itself has already
+    /// exited: background descendants may have outlived it (e.g. a background
+    /// job holding the pipes open, which is exactly when this path runs).
+    async fn terminate_stuck_child(&mut self) {
+        // 1. Cooperative interrupt: ETX (Ctrl+C) on the child's stdin.
+        let _ = self.stdin.write_all(b"\x03").await;
+        let _ = self.stdin.flush().await;
+
+        // 2. Short grace period for the shell to exit on its own. Note that an
+        //    exited shell does NOT end the cleanup: descendants may belong to
+        //    the process group, so we always fall through to the group kill.
+        let grace = Instant::now() + Duration::from_millis(500);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => break, // shell exited; descendants may remain.
+                Ok(None) => {}
+                Err(_) => break, // cannot determine state; still try the kill.
+            }
+            if Instant::now() >= grace {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // 3. Still alive (or its group is): kill the whole process tree and
+        //    reap the shell.
+        self.kill_process_group();
+        let _ = self.child.kill().await;
+        let _ = self.child.wait().await;
+    }
+
+    /// SIGKILL every remaining member of the session's process group.
+    ///
+    /// Uses the pgid captured at spawn rather than the live child pid: once
+    /// the shell has been reaped, `Child::id()` returns `None` and the group
+    /// (which may still contain backgrounded descendants) would be
+    /// unreachable.
+    fn kill_process_group(&self) {
+        #[cfg(unix)]
+        if let Some(pgid) = self.pgid {
+            use nix::sys::signal::{killpg, Signal};
+            use nix::unistd::Pid;
+            let _ = killpg(Pid::from_raw(pgid as i32), Signal::SIGKILL);
+        }
     }
 
     /// Try to parse the completion marker line, returning the exit code if matched.
@@ -366,10 +457,23 @@ impl PtySession {
         matches!(self.child.try_wait(), Ok(None))
     }
 
-    /// Terminate the session, killing the child process.
+    /// Terminate the session, killing the child process tree.
     pub async fn close(&mut self) {
+        // Kill the whole process group (shell plus anything it spawned) so no
+        // interactive grandchild survives the session, then reap the shell.
+        self.kill_process_group();
         let _ = self.child.kill().await;
         let _ = self.child.wait().await;
+    }
+}
+
+impl Drop for PtySession {
+    /// Last-resort teardown: if the session is dropped while its child (or a
+    /// grandchild from a backgrounded job) is still running, SIGKILL the whole
+    /// process group. `kill_on_drop` on the child would only signal the direct
+    /// shell, leaving grandchildren stranded.
+    fn drop(&mut self) {
+        self.kill_process_group();
     }
 }
 

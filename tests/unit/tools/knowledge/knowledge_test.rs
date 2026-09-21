@@ -150,7 +150,7 @@ fn test_tool_names() {
     assert_eq!(KnowledgeStats.name(), "knowledge_stats");
     assert_eq!(KnowledgeClear.name(), "knowledge_clear");
     assert_eq!(KnowledgeRemove.name(), "knowledge_remove");
-    assert_eq!(KnowledgeExport.name(), "knowledge_export");
+    assert_eq!(KnowledgeExport::new().name(), "knowledge_export");
 }
 
 #[test]
@@ -447,7 +447,7 @@ fn test_tool_descriptions() {
     assert!(!KnowledgeStats.description().is_empty());
     assert!(!KnowledgeClear.description().is_empty());
     assert!(!KnowledgeRemove.description().is_empty());
-    assert!(!KnowledgeExport.description().is_empty());
+    assert!(!KnowledgeExport::new().description().is_empty());
 }
 
 #[test]
@@ -625,9 +625,29 @@ async fn test_knowledge_remove_no_id() {
 
 #[tokio::test]
 async fn test_knowledge_export_no_path() {
-    let tool = KnowledgeExport;
+    let tool = KnowledgeExport::new();
     let result = tool.execute(json!({})).await;
     assert!(result.is_err());
+}
+
+/// knowledge_export writes to `output_path` — a relative path that stays
+/// inside the workspace (and thus passes the tool's own `..`/absolute check)
+/// must still be caught when the path policy rejects it, e.g. by the
+/// allowed-paths configuration (regression: the tool was previously exempted
+/// from the path policy entirely).
+#[tokio::test]
+async fn test_knowledge_export_rejects_path_outside_allowed_list() {
+    let tool = KnowledgeExport::with_safety_config(SafetyConfig {
+        allowed_paths: vec!["/definitely-not-this/**".to_string()],
+        ..SafetyConfig::default()
+    });
+    let result = tool.execute(json!({"output_path": "secret.json"})).await;
+    let err = result.expect_err("knowledge_export to a rejected path must fail");
+    assert!(
+        err.to_string().contains("not in allowed list"),
+        "expected a path-policy rejection, got: {}",
+        err
+    );
 }
 
 #[tokio::test]

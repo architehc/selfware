@@ -2,6 +2,16 @@ use super::*;
 use std::fs;
 use tempfile::TempDir;
 
+/// The tool now enforces the workspace path policy on `repo_path`; tests using
+/// temp-dir fixtures outside the workspace allow those fixtures explicitly
+/// (mirroring the file tool tests).
+fn permissive_safety_config() -> SafetyConfig {
+    SafetyConfig {
+        allowed_paths: vec!["/**".to_string()],
+        ..SafetyConfig::default()
+    }
+}
+
 #[test]
 fn test_tokenize_filters_short_words() {
     let terms = tokenize("The quick brown fox");
@@ -41,8 +51,12 @@ fn test_localize_issue_finds_relevant_file() {
     )
     .unwrap();
 
-    let candidates =
-        localize_issue_sync("process_data returns wrong value", repo.to_str().unwrap()).unwrap();
+    let candidates = localize_issue_sync(
+        "process_data returns wrong value",
+        repo.to_str().unwrap(),
+        None,
+    )
+    .unwrap();
     assert!(!candidates.is_empty(), "should find at least one candidate");
 
     // The lib.rs file should rank highest because it contains process_data.
@@ -60,7 +74,7 @@ fn test_localize_issue_finds_relevant_file() {
 #[test]
 fn test_localize_issue_empty_query() {
     let temp_dir = TempDir::new().unwrap();
-    let candidates = localize_issue_sync("a", temp_dir.path().to_str().unwrap()).unwrap();
+    let candidates = localize_issue_sync("a", temp_dir.path().to_str().unwrap(), None).unwrap();
     assert!(candidates.is_empty());
 }
 
@@ -79,7 +93,7 @@ async fn test_localize_issue_tool_execute() {
     fs::create_dir_all(repo.join("src")).unwrap();
     fs::write(repo.join("src/lib.rs"), "pub fn fix_me() {}\n").unwrap();
 
-    let tool = LocalizeIssue;
+    let tool = LocalizeIssue::with_safety_config(permissive_safety_config());
     let args = serde_json::json!({
         "issue": "fix_me is broken",
         "repo_path": repo.to_str().unwrap()
@@ -89,6 +103,70 @@ async fn test_localize_issue_tool_execute() {
     let candidates = result["candidates"].as_array().unwrap();
     assert!(!candidates.is_empty());
     assert!(candidates[0]["file"].as_str().unwrap().contains("lib.rs"));
+}
+
+/// localize_issue reads every source file under `repo_path` — an
+/// out-of-workspace root must be rejected with the path-policy error
+/// (regression for the read-only tools bypassing path validation).
+#[tokio::test]
+async fn test_localize_issue_rejects_out_of_workspace_repo() {
+    let tool = LocalizeIssue::with_safety_config(SafetyConfig::default());
+    let args = serde_json::json!({
+        "issue": "something is broken",
+        "repo_path": "/etc"
+    });
+
+    let result = tool.execute(args).await;
+    let err = result.expect_err("localize_issue on /etc must be rejected");
+    let message = err.to_string();
+    assert!(
+        message.contains("outside working directory")
+            || message.contains("not in allowed list")
+            || message.contains("protected system path"),
+        "expected a path-policy rejection, got: {}",
+        message
+    );
+}
+
+/// P1 regression: localize_issue reads every source file under the repo root —
+/// a denied subdirectory inside the allowed root must not be read, so no
+/// candidate from it is reported.
+#[tokio::test]
+async fn test_localize_issue_denied_child_excluded() {
+    let temp_dir = TempDir::new().unwrap();
+    let repo = temp_dir.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::create_dir_all(repo.join("denied_dir")).unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub fn process_broken() {}\n").unwrap();
+    // The denied file is a much stronger textual match than the allowed one —
+    // if it were read at all, it would rank first.
+    fs::write(
+        repo.join("denied_dir/lib.rs"),
+        "pub fn process_broken() {}\npub fn process_broken() {}\npub fn process_broken() {}\n",
+    )
+    .unwrap();
+
+    let tool = LocalizeIssue::with_safety_config(SafetyConfig {
+        allowed_paths: vec!["/**".to_string()],
+        denied_paths: vec!["denied_dir".to_string()],
+        ..SafetyConfig::default()
+    });
+    let args = serde_json::json!({
+        "issue": "process_broken is broken",
+        "repo_path": repo.to_str().unwrap()
+    });
+
+    let result = tool.execute(args).await.unwrap();
+    let candidates = result["candidates"].as_array().unwrap();
+    assert!(!candidates.is_empty(), "allowed files must still be ranked");
+    for c in candidates {
+        let file = c["file"].as_str().unwrap();
+        assert!(
+            !file.contains("denied_dir"),
+            "candidate from a denied subdirectory leaked: {}",
+            file
+        );
+    }
 }
 
 #[test]

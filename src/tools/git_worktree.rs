@@ -31,11 +31,86 @@ use std::sync::Mutex;
 
 static WORKTREE_STATE: Mutex<WorktreeState> = Mutex::new(WorktreeState::new());
 
-#[derive(Debug, Clone)]
+/// RAII guard that restores the process current directory to the directory
+/// that was current before [`CwdRestoreGuard::enter`] changed it.
+///
+/// The guard is stored in the worktree stack level it was created for. The
+/// normal exit path restores the cwd explicitly and propagates a failure (see
+/// [`WorktreeState::pop_worktree`]); this guard additionally re-applies the
+/// same restore when the level is dropped, covering panics and any early
+/// return between the explicit restore and the end of the exit path. The
+/// process cwd can therefore never be silently stranded inside a worktree
+/// while [`WorktreeState`] claims it is not there (or claimed "restored" while
+/// the cwd still points into the worktree).
+struct CwdRestoreGuard {
+    previous: PathBuf,
+}
+
+impl CwdRestoreGuard {
+    /// Record the current cwd as the restore target without changing it.
+    fn record() -> Result<Self> {
+        let previous = env::current_dir().context("Failed to get current directory")?;
+        Ok(Self { previous })
+    }
+
+    /// Change the process cwd into `target`, remembering where we came from.
+    /// On failure the cwd is left untouched and no guard is created.
+    fn enter(target: &Path) -> Result<Self> {
+        let guard = Self::record()?;
+        env::set_current_dir(target).with_context(|| {
+            format!(
+                "Failed to change to worktree directory: {}",
+                target.display()
+            )
+        })?;
+        Ok(guard)
+    }
+
+    /// The directory this guard will restore the cwd to.
+    fn previous(&self) -> &Path {
+        &self.previous
+    }
+}
+
+impl std::fmt::Debug for CwdRestoreGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CwdRestoreGuard")
+            .field("previous", &self.previous)
+            .finish()
+    }
+}
+
+impl Drop for CwdRestoreGuard {
+    fn drop(&mut self) {
+        // Restoring the process cwd can fail at the OS level; surface it
+        // loudly instead of silently leaving every later relative path
+        // resolved against the wrong directory.
+        if let Err(e) = env::set_current_dir(&self.previous) {
+            warn!(
+                "Failed to restore working directory to {}: {}",
+                self.previous.display(),
+                e
+            );
+        }
+    }
+}
+
+/// One level of worktree nesting. The level's guard restores the process cwd
+/// to the directory that was current before this level was entered. The exit
+/// path reads `cwd.previous()` to restore explicitly (propagating failure);
+/// the guard's `Drop` then re-applies the same restore as a panic/early-return
+/// fallback.
+#[derive(Debug)]
+struct WorktreeLevel {
+    path: PathBuf,
+    cwd: CwdRestoreGuard,
+}
+
+#[derive(Debug)]
 struct WorktreeState {
-    /// Stack of directories representing worktree entry history
+    /// Stack of directory levels representing worktree entry history
     /// The first element is always the original repo root
-    directory_stack: Vec<PathBuf>,
+    directory_stack: Vec<WorktreeLevel>,
     /// Currently active worktree path (if any)
     current_worktree: Option<PathBuf>,
 }
@@ -51,63 +126,73 @@ impl WorktreeState {
     fn initialize(&mut self) -> Result<()> {
         if self.directory_stack.is_empty() {
             let current = env::current_dir().context("Failed to get current directory")?;
-            self.directory_stack.push(current);
+            let cwd = CwdRestoreGuard::record()?;
+            self.directory_stack
+                .push(WorktreeLevel { path: current, cwd });
         }
         Ok(())
     }
 
     fn push_worktree(&mut self, worktree_path: PathBuf) -> Result<PathBuf> {
         self.initialize()?;
-        self.directory_stack.push(worktree_path.clone());
+        // Change the process cwd FIRST. `CwdRestoreGuard::enter` remembers the
+        // directory we leave and only mutates the cwd on success; if it fails,
+        // neither the cwd nor the stack was changed, so an early return here
+        // cannot leave the process stranded in (or out of) a worktree that is
+        // inconsistent with this state.
+        let cwd = CwdRestoreGuard::enter(&worktree_path)?;
+        self.directory_stack.push(WorktreeLevel {
+            path: worktree_path.clone(),
+            cwd,
+        });
         self.current_worktree = Some(worktree_path.clone());
-        env::set_current_dir(&worktree_path).with_context(|| {
-            format!(
-                "Failed to change to worktree directory: {}",
-                worktree_path.display()
-            )
-        })?;
         Ok(worktree_path)
     }
 
     fn pop_worktree(&mut self, remove: bool) -> Result<(PathBuf, Option<PathBuf>)> {
         self.initialize()?;
 
-        let current = self.directory_stack.pop();
-        let _previous_path = current.clone();
+        // The top level is the one being exited. Callers guard with
+        // `is_in_worktree()`; the check here is defensive.
+        let level = self
+            .directory_stack
+            .last()
+            .ok_or_else(|| anyhow::anyhow!("Not currently in a worktree"))?;
+        let restore_to = level.cwd.previous().to_path_buf();
+
+        // Restore the process cwd EXPLICITLY and BEFORE committing the state
+        // change. On failure the stack still says we are inside the worktree —
+        // consistent with the cwd — and the error reaches the caller, so an
+        // exit can never report success while every later relative path
+        // silently resolves against the wrong directory.
+        env::set_current_dir(&restore_to).with_context(|| {
+            format!(
+                "Failed to restore working directory to {}",
+                restore_to.display()
+            )
+        })?;
+
+        // Commit the state change now that the restore succeeded.
+        let popped = self
+            .directory_stack
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("Not currently in a worktree"))?;
+        self.current_worktree = self.directory_stack.last().map(|l| l.path.clone());
 
         // If we're removing the worktree, capture its path before we forget it
-        let removed_path = if remove { current } else { None };
+        let removed_path = if remove { Some(popped.path) } else { None };
 
-        // Update current worktree to the previous entry (or None if back at root)
-        self.current_worktree = self.directory_stack.last().cloned();
-
-        // Change back to the previous directory (root of the stack)
-        if let Some(ref root) = self.directory_stack.first() {
-            env::set_current_dir(root).with_context(|| {
-                format!(
-                    "Failed to change back to root directory: {}",
-                    root.display()
-                )
-            })?;
-        }
-
-        Ok((
-            self.directory_stack
-                .first()
-                .cloned()
-                .unwrap_or_else(|| PathBuf::from(".")),
-            removed_path,
-        ))
+        Ok((restore_to, removed_path))
     }
 
     #[allow(dead_code)]
     fn current(&self) -> Option<&PathBuf> {
-        self.directory_stack.last()
+        self.directory_stack.last().map(|l| &l.path)
     }
 
     #[allow(dead_code)]
     fn root(&self) -> Option<&PathBuf> {
-        self.directory_stack.first()
+        self.directory_stack.first().map(|l| &l.path)
     }
 
     fn is_in_worktree(&self) -> bool {
@@ -409,7 +494,10 @@ impl Tool for ExitWorktreeTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let (root_path, removed_path) = {
+        // `restored_path` is the directory the process cwd was actually
+        // restored to (see `pop_worktree`); for a single-level entry that is
+        // the repository root.
+        let (restored_path, removed_path) = {
             let mut state = WORKTREE_STATE
                 .lock()
                 .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
@@ -444,12 +532,12 @@ impl Tool for ExitWorktreeTool {
             }
         }
 
-        info!("Exited worktree, returned to: {}", root_path.display());
+        info!("Exited worktree, returned to: {}", restored_path.display());
 
         Ok(serde_json::json!({
             "success": true,
             "previous_path": removed_path.map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
-            "current_path": root_path.to_string_lossy().to_string(),
+            "current_path": restored_path.to_string_lossy().to_string(),
             "removed": removed
         }))
     }
@@ -581,6 +669,37 @@ pub fn is_in_worktree() -> bool {
         .lock()
         .map(|state| state.is_in_worktree())
         .unwrap_or(false)
+}
+
+/// Enter `worktree_path`: remember the directory that is currently current and
+/// change the process cwd into the worktree. Shared by the `enter_worktree`
+/// tool and the TUI `/worktree enter` handler so both observe one consistent
+/// worktree state — the cwd is restored again by [`exit_worktree_dir`] on
+/// every exit path (success, error, early return). Returns the directory now
+/// in effect.
+pub fn enter_worktree_dir(worktree_path: PathBuf) -> Result<PathBuf> {
+    let mut state = WORKTREE_STATE
+        .lock()
+        .map_err(|e| anyhow::anyhow!("Worktree state lock poisoned: {}", e))?;
+    state.push_worktree(worktree_path)
+}
+
+/// Leave the current worktree, restoring the process cwd to the directory that
+/// was current before this worktree was entered — on success, on error inside
+/// the exit path, and on early return alike. Returns the restored directory
+/// and the worktree just left (useful for a follow-up `git worktree remove`).
+pub fn exit_worktree_dir() -> Result<(PathBuf, Option<PathBuf>)> {
+    let mut state = WORKTREE_STATE
+        .lock()
+        .map_err(|e| anyhow::anyhow!("Worktree state lock poisoned: {}", e))?;
+    if !state.is_in_worktree() {
+        anyhow::bail!("Not currently in a worktree");
+    }
+    // Capture the worktree we are about to leave before popping it; the pop
+    // itself restores the process cwd via the level's guard.
+    let previous_worktree = state.current_worktree.clone();
+    let (restored, _removed) = state.pop_worktree(false)?;
+    Ok((restored, previous_worktree))
 }
 
 #[cfg(test)]

@@ -585,7 +585,7 @@ fn test_directory_tree_is_readonly() {
 #[test]
 fn test_grep_search_is_readonly() {
     use crate::tools::search::GrepSearch;
-    let tool = GrepSearch;
+    let tool = GrepSearch::new();
     assert!(tool.is_readonly());
     assert_eq!(tool.risk_level(), crate::safety::RiskLevel::Low);
 }

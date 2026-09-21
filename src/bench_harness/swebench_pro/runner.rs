@@ -1047,6 +1047,7 @@ fn run_one_candidate(
         match crate::tools::localize_issue::localize_issue_sync(
             &inst.problem_statement,
             workdir.to_str().unwrap_or("."),
+            None,
         ) {
             Ok(candidates) if !candidates.is_empty() => {
                 let top: Vec<String> = candidates

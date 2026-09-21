@@ -322,6 +322,10 @@ impl Tool for ShellExec {
     async fn execute(&self, args: Value) -> Result<Value> {
         #[derive(Deserialize)]
         struct Args {
+            /// `cmd` is accepted as an alias: models frequently emit it for
+            /// shell commands, and it previously failed with
+            /// "missing field 'command'".
+            #[serde(alias = "cmd")]
             command: String,
             cwd: Option<String>,
             #[serde(default = "default_timeout")]
@@ -443,17 +447,11 @@ impl Tool for ShellExec {
             cmd.current_dir(cwd);
         }
 
-        // Clear inherited environment to prevent secret leakage, then set a minimal base
-        cmd.env_clear();
-        if let Ok(path) = std::env::var("PATH") {
-            cmd.env("PATH", path);
-        }
-        if let Ok(home) = std::env::var("HOME") {
-            cmd.env("HOME", home);
-        }
-        if let Ok(lang) = std::env::var("LANG") {
-            cmd.env("LANG", lang);
-        }
+        // Clear inherited environment to prevent secret leakage, then re-add
+        // the shared non-sensitive allowlist (see safety::process_env) so a
+        // lone shell never inherits credentials; task-specific env vars are
+        // layered on afterwards and survive the clear.
+        crate::safety::process_env::sanitize_command_env(&mut cmd);
         cmd.envs(&args.env);
 
         // Run the child in its own process group so a timeout can reap the

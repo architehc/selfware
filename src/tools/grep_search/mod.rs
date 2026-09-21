@@ -4,6 +4,8 @@
 //! automatic exclusion of VCS/build directories and binary files.  If `rg` is
 //! not available the tool falls back to a built-in regex walker.
 
+use crate::config::SafetyConfig;
+use crate::tools::file::{resolve_safety_config, validate_tool_path};
 use crate::tools::Tool;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -90,6 +92,7 @@ fn run_ripgrep(
     skip_offset: usize,
     include_pattern: Option<&str>,
     exclude_pattern: Option<&str>,
+    safety: Option<&SafetyConfig>,
 ) -> Result<GrepSearchResult> {
     let mut cmd = std::process::Command::new("rg");
     cmd.arg("--json")
@@ -180,6 +183,23 @@ fn run_ripgrep(
             .and_then(|t| t.as_str())
             .unwrap_or("")
             .to_string();
+
+        // Enforce the per-file path policy: the search ROOT is validated up
+        // front, but a denied subdirectory inside an allowed root must not
+        // leak its contents. `file_read` rejects these files, so a match
+        // whose file the policy refuses is dropped here (before it is counted
+        // or read for context), keeping the results identical to what the
+        // policy permits.
+        if file.is_empty() {
+            continue;
+        }
+        let policy_allows = match safety {
+            None => true,
+            Some(s) => validate_tool_path(&file, s).is_ok(),
+        };
+        if !policy_allows {
+            continue;
+        }
 
         let line_num = data
             .get("line_number")
@@ -272,7 +292,25 @@ fn run_ripgrep(
 }
 
 /// Searches file contents for regex patterns, returning matching lines with context.
-pub struct GrepSearch;
+#[derive(Default)]
+pub struct GrepSearch {
+    /// Per-instance safety config for path-policy enforcement. When `Some`,
+    /// overrides the process-global `SAFETY_CONFIG`; when `None`, the global or
+    /// the default config is used (see [`resolve_safety_config`]).
+    pub safety_config: Option<SafetyConfig>,
+}
+
+impl GrepSearch {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
+    }
+}
 
 /// A single match result from grep search.
 #[derive(Debug, Serialize, Deserialize)]
@@ -355,6 +393,8 @@ impl Tool for GrepSearch {
 
     #[instrument(level = "info", skip(self, args), fields(tool_name = self.name()))]
     async fn execute(&self, args: Value) -> Result<Value> {
+        // Resolve the safety config before moving into the blocking task.
+        let safety = resolve_safety_config(self.safety_config.as_ref());
         let result = tokio::time::timeout(
             GREP_TIMEOUT,
             tokio::task::spawn_blocking(move || -> Result<Value> {
@@ -367,6 +407,13 @@ impl Tool for GrepSearch {
                     .get("path")
                     .and_then(|v| v.as_str())
                     .context("Missing required parameter: path")?;
+
+                // Enforce the workspace path policy before searching: grep
+                // walks and reads arbitrary files under `path`, so the search
+                // root must pass the same checks as `file_read` (outside
+                // workspace, `..` traversal, protected system paths, symlink
+                // escapes, denied patterns).
+                validate_tool_path(path_str, &safety)?;
 
                 let recursive = args
                     .get("recursive")
@@ -399,6 +446,7 @@ impl Tool for GrepSearch {
                         skip_offset,
                         include_pattern,
                         exclude_pattern,
+                        Some(&safety),
                     ) {
                         Ok(r) => r,
                         Err(e) => {
@@ -413,6 +461,7 @@ impl Tool for GrepSearch {
                                 skip_offset,
                                 include_pattern,
                                 exclude_pattern,
+                                Some(&safety),
                             )?
                         }
                     }
@@ -427,6 +476,7 @@ impl Tool for GrepSearch {
                         skip_offset,
                         include_pattern,
                         exclude_pattern,
+                        Some(&safety),
                     )?
                 };
 
@@ -471,6 +521,7 @@ fn run_builtin_grep(
     skip_offset: usize,
     include_pattern: Option<&str>,
     exclude_pattern: Option<&str>,
+    safety: Option<&SafetyConfig>,
 ) -> Result<GrepSearchResult> {
     let full_pattern = if case_insensitive {
         format!("(?i){}", pattern_str)
@@ -532,6 +583,17 @@ fn run_builtin_grep(
             .map(|e| e.path().to_path_buf())
             .collect()
     };
+
+    // Enforce the per-file path policy on every discovered file: a denied
+    // subdirectory inside an allowed root must not be searched or read (the
+    // root itself was validated before the walk).
+    let files: Vec<_> = files
+        .into_iter()
+        .filter(|p| match safety {
+            Some(s) => validate_tool_path(&p.to_string_lossy(), s).is_ok(),
+            None => true,
+        })
+        .collect();
 
     for file_path in files {
         let content = match tokio::task::block_in_place(|| std::fs::read_to_string(&file_path)) {
@@ -595,6 +657,9 @@ fn run_builtin_grep(
 
 /// Standalone function for grep search (for use in tests and other modules).
 /// Attempts ripgrep first, then falls back to the built-in walker.
+///
+/// This helper applies NO path policy (it has no config); the `Tool`
+/// implementation is the policy-enforcing entry point.
 pub fn grep_search(
     pattern: &str,
     path: &str,
@@ -603,7 +668,17 @@ pub fn grep_search(
     offset: usize,
 ) -> GrepSearchResult {
     if rg_available() {
-        if let Ok(result) = run_ripgrep(pattern, path, false, 0, max_matches, offset, None, None) {
+        if let Ok(result) = run_ripgrep(
+            pattern,
+            path,
+            false,
+            0,
+            max_matches,
+            offset,
+            None,
+            None,
+            None,
+        ) {
             return result;
         }
     }
@@ -616,6 +691,7 @@ pub fn grep_search(
         0,
         max_matches,
         offset,
+        None,
         None,
         None,
     ) {

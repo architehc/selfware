@@ -196,3 +196,96 @@ fn test_validate_structure_invalid_json() {
     let err = call.validate_structure().unwrap_err().to_string();
     assert!(err.contains("not valid JSON"));
 }
+
+// --- normalize_tool_arg_aliases ------------------------------------------
+
+/// Parse [`normalize_tool_arg_aliases`] output back into a JSON value.
+fn normalized(tool: &str, args: &str) -> serde_json::Value {
+    serde_json::from_str(&normalize_tool_arg_aliases(tool, args)).unwrap()
+}
+
+#[test]
+fn test_normalize_file_edit_old_string_new_string() {
+    // The exact spelling the progress guard guidance injected (with the
+    // stray tool_type field) — validation rejects this shape without
+    // normalization because the schema requires path/old_str/new_str.
+    let out = normalized(
+        "file_edit",
+        r#"{"tool_type":"file_edit","path":"src/a.rs","old_string":"x","new_string":"y"}"#,
+    );
+    assert_eq!(out["path"], "src/a.rs");
+    assert_eq!(out["old_str"], "x");
+    assert_eq!(out["new_str"], "y");
+    assert!(out.get("old_string").is_none());
+    assert!(out.get("new_string").is_none());
+    // The unknown tool_type field is preserved (later stages ignore it),
+    // keeping the normalization purely additive over mutation.
+    assert_eq!(out["tool_type"], "file_edit");
+}
+
+#[test]
+fn test_normalize_path_and_content_aliases() {
+    assert_eq!(
+        normalized("file_write", r#"{"file_path":"a.txt","text":"hi"}"#),
+        serde_json::json!({"path": "a.txt", "content": "hi"})
+    );
+    assert_eq!(
+        normalized("file_write", r#"{"file":"a.txt","body":"hi"}"#),
+        serde_json::json!({"path": "a.txt", "content": "hi"})
+    );
+    assert_eq!(
+        normalized("file_read", r#"{"filepath":"a.txt"}"#),
+        serde_json::json!({"path": "a.txt"})
+    );
+    assert_eq!(
+        normalized("directory_tree", r#"{"file":"a"}"#),
+        serde_json::json!({"path": "a"})
+    );
+}
+
+#[test]
+fn test_normalize_shell_exec_cmd() {
+    assert_eq!(
+        normalized("shell_exec", r#"{"cmd":"echo hi"}"#),
+        serde_json::json!({"command": "echo hi"})
+    );
+}
+
+#[test]
+fn test_normalize_multi_edit_edits_items() {
+    let out = normalized(
+        "file_multi_edit",
+        r#"{"path":"t","edits":[{"path":"a","old_string":"x","new_string":"y"},{"filepath":"b","old_string":"p","new_string":"q"}]}"#,
+    );
+    assert_eq!(out["edits"][0]["path"], "a");
+    assert_eq!(out["edits"][0]["old_str"], "x");
+    assert_eq!(out["edits"][0]["new_str"], "y");
+    assert_eq!(out["edits"][1]["path"], "b");
+    assert_eq!(out["edits"][1]["old_str"], "p");
+}
+
+#[test]
+fn test_normalize_is_idempotent_and_preserves_canonical() {
+    let input = r#"{"path":"a.txt","old_str":"x","new_str":"y","cmd":"keep"}"#;
+    let once = normalize_tool_arg_aliases("file_edit", input);
+    let twice = normalize_tool_arg_aliases("file_edit", &once);
+    assert_eq!(once, twice);
+    // Non-file_edit tools and canonical spellings pass through untouched.
+    assert_eq!(
+        normalize_tool_arg_aliases("git_status", input),
+        input.to_string()
+    );
+}
+
+#[test]
+fn test_normalize_passthrough_on_non_object_or_unparsable() {
+    assert_eq!(
+        normalize_tool_arg_aliases("file_edit", r#"{not json}"#),
+        r#"{not json}"#.to_string()
+    );
+    assert_eq!(
+        normalize_tool_arg_aliases("file_edit", "[1,2,3]"),
+        "[1,2,3]".to_string()
+    );
+    assert_eq!(normalize_tool_arg_aliases("file_edit", ""), "".to_string());
+}

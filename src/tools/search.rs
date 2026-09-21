@@ -9,6 +9,8 @@ use std::path::Path;
 use tracing::instrument;
 use walkdir::WalkDir;
 
+use crate::config::SafetyConfig;
+use crate::tools::file::{resolve_safety_config, validate_tool_path};
 use crate::tools::grep_search::cached_regex;
 #[cfg(test)]
 use crate::tools::grep_search::MAX_PATTERN_LENGTH;
@@ -18,9 +20,44 @@ use crate::tools::grep_search::MAX_PATTERN_LENGTH;
 pub use crate::tools::grep_search::{GrepMatch, GrepSearch, GrepSearchResult};
 
 /// Finds files by glob pattern (e.g. `**/*.rs`), returning paths with metadata.
-pub struct GlobFind;
+#[derive(Default)]
+pub struct GlobFind {
+    /// Per-instance safety config for path-policy enforcement; falls back to
+    /// the process-global config when `None`.
+    pub safety_config: Option<SafetyConfig>,
+}
+
+impl GlobFind {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
+    }
+}
+
 /// Finds Rust symbol definitions (functions, structs, enums, traits, etc.) by name.
-pub struct SymbolSearch;
+#[derive(Default)]
+pub struct SymbolSearch {
+    /// Per-instance safety config for path-policy enforcement; falls back to
+    /// the process-global config when `None`.
+    pub safety_config: Option<SafetyConfig>,
+}
+
+impl SymbolSearch {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
+    }
+}
 
 /// Result of a glob find operation
 #[derive(Debug, Serialize, Deserialize)]
@@ -75,6 +112,8 @@ impl Tool for GlobFind {
 
     #[instrument(level = "info", skip(self, args), fields(tool_name = self.name()))]
     async fn execute(&self, args: Value) -> Result<Value> {
+        // Resolve the safety config before moving into the blocking task.
+        let safety = resolve_safety_config(self.safety_config.as_ref());
         let result = tokio::task::spawn_blocking(move || -> Result<Value> {
             let pattern_str = args
                 .get("pattern")
@@ -82,6 +121,11 @@ impl Tool for GlobFind {
                 .context("Missing required parameter: pattern")?;
 
             let base_path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+
+            // Enforce the workspace path policy before walking: the base
+            // directory is user-controlled and the walk + metadata reads would
+            // otherwise reach any filesystem location the process can see.
+            validate_tool_path(base_path, &safety)?;
 
             let max_results = args
                 .get("max_results")
@@ -130,6 +174,13 @@ impl Tool for GlobFind {
 
                 let path = entry.path();
                 let path_str = path.to_string_lossy();
+
+                // Enforce the per-file path policy on every discovered entry:
+                // a denied subdirectory inside an allowed root must not even
+                // be enumerated (the root itself was validated up front).
+                if validate_tool_path(&path_str, &safety).is_err() {
+                    continue;
+                }
 
                 // Skip common directories
                 if path_str.contains("/.git/")
@@ -216,6 +267,8 @@ impl Tool for SymbolSearch {
 
     #[instrument(level = "info", skip(self, args), fields(tool_name = self.name()))]
     async fn execute(&self, args: Value) -> Result<Value> {
+        // Resolve the safety config before moving into the blocking task.
+        let safety = resolve_safety_config(self.safety_config.as_ref());
         let result = tokio::task::spawn_blocking(move || -> Result<Value> {
             let name_pattern = args
                 .get("name")
@@ -223,6 +276,10 @@ impl Tool for SymbolSearch {
                 .context("Missing required parameter: name")?;
 
             let base_path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+
+            // Enforce the workspace path policy before walking and reading:
+            // the base directory is user-controlled.
+            validate_tool_path(base_path, &safety)?;
 
             let symbol_type = args
                 .get("symbol_type")
@@ -254,6 +311,14 @@ impl Tool for SymbolSearch {
 
                 let path = entry.path();
                 let path_str = path.to_string_lossy();
+
+                // Enforce the per-file path policy before reading: symbol
+                // search reads every `.rs` descendant, so a denied
+                // subdirectory inside an allowed root must not be read (the
+                // root itself was validated up front).
+                if validate_tool_path(&path_str, &safety).is_err() {
+                    continue;
+                }
 
                 // Skip target directory
                 if path_str.contains("/target/") {

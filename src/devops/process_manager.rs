@@ -542,19 +542,11 @@ impl ProcessManager {
         }
 
         // Clear the inherited environment to prevent secret leakage (e.g.
-        // SELFWARE_API_KEY) into child processes, then set a minimal base. This
-        // matches spawn_child_process (the restart path already does this); the
+        // SELFWARE_API_KEY) into child processes, then re-add the shared
+        // non-sensitive allowlist (see safety::process_env). This matches
+        // spawn_child_process (the restart path already does this); the
         // initial spawn must be consistent.
-        cmd.env_clear();
-        if let Ok(path) = std::env::var("PATH") {
-            cmd.env("PATH", path);
-        }
-        if let Ok(home) = std::env::var("HOME") {
-            cmd.env("HOME", home);
-        }
-        if let Ok(lang) = std::env::var("LANG") {
-            cmd.env("LANG", lang);
-        }
+        crate::safety::process_env::sanitize_command_env(&mut cmd);
         for (key, value) in &config.env {
             cmd.env(key, value);
         }
@@ -1015,17 +1007,9 @@ async fn spawn_child_process(
         cmd.current_dir(cwd);
     }
 
-    // Clear inherited environment to prevent secret leakage, then set a minimal base
-    cmd.env_clear();
-    if let Ok(path) = std::env::var("PATH") {
-        cmd.env("PATH", path);
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        cmd.env("HOME", home);
-    }
-    if let Ok(lang) = std::env::var("LANG") {
-        cmd.env("LANG", lang);
-    }
+    // Clear inherited environment to prevent secret leakage, then re-add the
+    // shared non-sensitive allowlist (see safety::process_env).
+    crate::safety::process_env::sanitize_command_env(&mut cmd);
     for (key, value) in &config.env {
         cmd.env(key, value);
     }

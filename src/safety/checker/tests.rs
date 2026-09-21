@@ -562,6 +562,141 @@ fn test_read_only_tools_always_allowed() {
     }
 }
 
+// ── Search tools must honor the workspace path policy ──────────────────────
+//
+// Regression: grep_search/glob_find/symbol_search were previously exempted
+// from path validation ("read-only, so safe"), letting a model read
+// /etc/passwd via `grep_search {path: "/etc/passwd"}`. The tools now validate
+// their `path` argument like file_read.
+
+#[test]
+fn test_search_tools_reject_out_of_workspace_path() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+
+    for (tool, args) in [
+        (
+            "grep_search",
+            r#"{"pattern": "root", "path": "/etc/passwd"}"#,
+        ),
+        ("glob_find", r#"{"pattern": "*.conf", "path": "/etc"}"#),
+        ("symbol_search", r#"{"name": "root", "path": "/etc"}"#),
+    ] {
+        let call = create_test_call(tool, args);
+        let err = checker.check_tool_call(&call).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("outside working directory")
+                || message.contains("not in allowed list")
+                || message.contains("protected system path"),
+            "{} with an out-of-workspace path must be rejected, got: {}",
+            tool,
+            message
+        );
+    }
+
+    // The traversal form (`..` escape) must be rejected too.
+    let escape = create_test_call(
+        "grep_search",
+        r#"{"pattern": "root", "path": "../../etc/passwd"}"#,
+    );
+    assert!(
+        checker.check_tool_call(&escape).is_err(),
+        "grep_search with a .. escape must be rejected"
+    );
+}
+
+#[test]
+fn test_search_tools_allow_workspace_path() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+
+    for (tool, args) in [
+        ("grep_search", r#"{"pattern": "fn main", "path": "."}"#),
+        ("glob_find", r#"{"pattern": "*.rs", "path": "."}"#),
+        ("symbol_search", r#"{"name": "main", "path": "."}"#),
+    ] {
+        let call = create_test_call(tool, args);
+        match checker.check_tool_call(&call) {
+            Ok(()) => {}
+            Err(e) => panic!(
+                "{} with an in-workspace path should be allowed: {}",
+                tool, e
+            ),
+        }
+    }
+}
+
+#[test]
+fn test_localize_issue_rejects_out_of_workspace_repo() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call("localize_issue", r#"{"issue": "bug", "repo_path": "/etc"}"#);
+    assert!(
+        checker.check_tool_call(&call).is_err(),
+        "localize_issue with an out-of-workspace repo_path must be rejected"
+    );
+}
+
+#[test]
+fn test_knowledge_export_rejects_out_of_workspace_output() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call("knowledge_export", r#"{"output_path": "/tmp/leak.json"}"#);
+    assert!(
+        checker.check_tool_call(&call).is_err(),
+        "knowledge_export with an out-of-workspace output_path must be rejected"
+    );
+}
+
+#[test]
+fn test_knowledge_auto_extract_rejects_out_of_workspace_file() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call("knowledge_auto_extract", r#"{"file_path": "/etc/passwd"}"#);
+    assert!(
+        checker.check_tool_call(&call).is_err(),
+        "knowledge_auto_extract with an out-of-workspace file_path must be rejected"
+    );
+}
+
+#[test]
+fn test_context_action_validates_target() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+
+    // An absolute out-of-workspace target is rejected.
+    let call = create_test_call(
+        "context_action",
+        r#"{"action": "read", "target": "/etc/passwd"}"#,
+    );
+    assert!(
+        checker.check_tool_call(&call).is_err(),
+        "context_action with an out-of-workspace target must be rejected"
+    );
+
+    // An in-workspace file target and a module-style target both pass.
+    let workspace_call = create_test_call(
+        "context_action",
+        r#"{"action": "read", "target": "Cargo.toml"}"#,
+    );
+    match checker.check_tool_call(&workspace_call) {
+        Ok(()) => {}
+        Err(e) => panic!("context_action with a workspace target should pass: {}", e),
+    }
+    let module_call = create_test_call(
+        "context_action",
+        r#"{"action": "read", "target": "tools::codemap"}"#,
+    );
+    match checker.check_tool_call(&module_call) {
+        Ok(()) => {}
+        Err(e) => panic!(
+            "context_action with a module-style target should pass: {}",
+            e
+        ),
+    }
+}
+
 #[test]
 fn test_knowledge_mutations_allowed() {
     let config = SafetyConfig::default();

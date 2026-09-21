@@ -3,6 +3,8 @@
 //! Tools for building and querying a knowledge graph of code entities,
 //! relationships, and facts discovered during analysis.
 
+use crate::config::SafetyConfig;
+use crate::tools::file::{resolve_safety_config, validate_tool_path};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
@@ -716,7 +718,24 @@ impl Tool for KnowledgeRemove {
 // ============================================================================
 
 /// Export the knowledge graph to JSON
-pub struct KnowledgeExport;
+#[derive(Default)]
+pub struct KnowledgeExport {
+    /// Per-instance safety config for path-policy enforcement; falls back to
+    /// the process-global config when `None`.
+    pub safety_config: Option<SafetyConfig>,
+}
+
+impl KnowledgeExport {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
+    }
+}
 
 #[async_trait]
 impl Tool for KnowledgeExport {
@@ -752,6 +771,13 @@ impl Tool for KnowledgeExport {
                 "Invalid output_path: must be a relative path without traversal components"
             );
         }
+
+        // Enforce the workspace path policy on the write target so the export
+        // cannot land outside the workspace (or in a denied location) even
+        // through a relative path that survives the `..` check (e.g. via a
+        // symlinked subdirectory of the working dir).
+        let safety = resolve_safety_config(self.safety_config.as_ref());
+        validate_tool_path(output_path, &safety)?;
 
         let graph = KNOWLEDGE_GRAPH.read().await;
 
@@ -862,7 +888,24 @@ fn resolve_node_id(graph: &KnowledgeGraph, id_or_name: &str) -> Result<String> {
 // ============================================================================
 
 /// Auto-extract entities from a Rust file using LSP
-pub struct KnowledgeAutoExtract;
+#[derive(Default)]
+pub struct KnowledgeAutoExtract {
+    /// Per-instance safety config for path-policy enforcement; falls back to
+    /// the process-global config when `None`.
+    pub safety_config: Option<SafetyConfig>,
+}
+
+impl KnowledgeAutoExtract {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
+    }
+}
 
 #[async_trait]
 impl Tool for KnowledgeAutoExtract {
@@ -902,6 +945,12 @@ impl Tool for KnowledgeAutoExtract {
             .get("file_path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("file_path is required"))?;
+
+        // Enforce the workspace path policy before reading the file: the tool
+        // reads and parses `file_path`, so it must pass the same checks as
+        // `file_read`.
+        let safety = resolve_safety_config(self.safety_config.as_ref());
+        validate_tool_path(file_path, &safety)?;
 
         let add_relations = args
             .get("add_relations")

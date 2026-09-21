@@ -323,3 +323,291 @@ async fn test_resize_action() {
         }))
         .await;
 }
+
+/// Whether a (unix) process group with the given id still has members.
+///
+/// Used by the timeout tests to prove the whole process tree (not just the
+/// direct shell) was killed. `killpg` with signal 0 probes for existence
+/// without delivering a signal.
+#[cfg(unix)]
+fn process_group_exists(pgid: i32) -> bool {
+    use nix::errno::Errno;
+    use nix::sys::signal::killpg;
+    use nix::unistd::Pid;
+    match killpg(Pid::from_raw(pgid), None) {
+        // EPERM means at least one process is in the group (just not ours).
+        Ok(_) | Err(Errno::EPERM) => true,
+        Err(Errno::ESRCH) => false,
+        Err(_) => true,
+    }
+}
+
+/// Poll until the process group disappears (SIGKILLed members linger a few
+/// milliseconds as zombies until reparented and reaped).
+#[cfg(unix)]
+async fn wait_until_group_gone(pgid: i32) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if !process_group_exists(pgid) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
+/// The session shell is its own process-group leader (see `PtySession::new`),
+/// so the group id equals the shell pid.
+#[cfg(unix)]
+async fn session_process_group(session_id: &str) -> i32 {
+    let sessions = SESSIONS.read().await;
+    sessions
+        .get(session_id)
+        .expect("session should exist after start")
+        .child
+        .id()
+        .expect("session child should have a pid") as i32
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_timeout_terminates_stuck_child() {
+    let _guard = TEST_LOCK.lock().await;
+    clear_all_sessions().await;
+
+    let tool = PtyShellTool;
+
+    let result = tool
+        .execute(serde_json::json!({ "action": "start" }))
+        .await
+        .unwrap();
+    let session_id = result["session_id"].as_str().unwrap().to_string();
+    let shell_pid = session_process_group(&session_id).await;
+
+    // `exec cat` replaces the shell with a process that reads stdin forever
+    // and never runs the completion marker — the exact "interactive child
+    // consumes the marker" hang from the review finding. (A bare `cat` would
+    // not be reliable: bash buffers the pipe read-ahead, so the marker lines
+    // could still be executed by the shell itself.)
+    let result = tool
+        .execute(serde_json::json!({
+            "action": "send",
+            "session_id": &session_id,
+            "command": "exec cat",
+            "timeout_secs": 1
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["timed_out"], true);
+    assert_eq!(result["exit_code"], -1);
+
+    // The stuck child must have been terminated by the timeout path...
+    {
+        let mut sessions = SESSIONS.write().await;
+        let session = sessions
+            .get_mut(&session_id)
+            .expect("session should still be present after timeout");
+        assert!(
+            !session.is_alive(),
+            "stuck interactive child should be terminated after timeout"
+        );
+    }
+
+    // ...and the whole process group with it, not left running behind the
+    // session.
+    assert!(
+        wait_until_group_gone(shell_pid).await,
+        "process group of the stuck session should be killed, not left running"
+    );
+
+    // The session is dead and is reclaimed on the next use instead of feeding
+    // a hanging process.
+    let result = tool
+        .execute(serde_json::json!({
+            "action": "send",
+            "session_id": &session_id,
+            "command": "echo never_runs",
+            "timeout_secs": 5
+        }))
+        .await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("has terminated"));
+    assert!(
+        !SESSIONS.read().await.contains_key(&session_id),
+        "dead session should be removed from the store on next use"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_timeout_kills_grandchild_tree_and_close_works() {
+    let _guard = TEST_LOCK.lock().await;
+    clear_all_sessions().await;
+
+    let tool = PtyShellTool;
+
+    let result = tool
+        .execute(serde_json::json!({ "action": "start" }))
+        .await
+        .unwrap();
+    let session_id = result["session_id"].as_str().unwrap().to_string();
+    let shell_pid = session_process_group(&session_id).await;
+
+    // Block bash on a foreground grandchild that outlives the deadline.
+    // Killing only the direct shell would orphan `sleep 30`; the process
+    // group kill must reap it too.
+    let result = tool
+        .execute(serde_json::json!({
+            "action": "send",
+            "session_id": &session_id,
+            "command": "sleep 30",
+            "timeout_secs": 1
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["timed_out"], true);
+
+    // The whole group (bash + sleep) is gone — the grandchild is not orphaned.
+    assert!(
+        wait_until_group_gone(shell_pid).await,
+        "bash and its sleep grandchild should both be dead after timeout"
+    );
+
+    // A timed-out session must still be closable without hanging.
+    let result = tool
+        .execute(serde_json::json!({
+            "action": "close",
+            "session_id": &session_id
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["status"], "closed");
+}
+
+/// Poll until the process group appears (a backgrounded descendant exists).
+#[cfg(unix)]
+async fn wait_until_group_exists(pgid: i32) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if process_group_exists(pgid) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
+/// A shell that backgrounds a child and then exits must not leak the
+/// grandchild: the session remembers the process-group id from spawn, so
+/// `close()` can kill the surviving background job even after the direct
+/// shell has been reaped (when `Child::id()` returns `None`).
+#[cfg(unix)]
+#[tokio::test]
+async fn test_close_reaps_background_grandchild_after_shell_exits() {
+    let _guard = TEST_LOCK.lock().await;
+    clear_all_sessions().await;
+
+    let tool = PtyShellTool;
+
+    let result = tool
+        .execute(serde_json::json!({ "action": "start" }))
+        .await
+        .unwrap();
+    let session_id = result["session_id"].as_str().unwrap().to_string();
+    // Capture the pgid BEFORE the shell exits/reaps.
+    let shell_pid = session_process_group(&session_id).await;
+
+    // `sleep 300 >/dev/null 2>&1 & exit` backgrounds a long-lived grandchild,
+    // then the shell exits immediately. The completion marker is never echoed
+    // (bash exits with it still buffered), stdout reaches EOF once the shell
+    // dies (the sleep holds no pipe fd), so the send returns promptly without
+    // a timeout — and without any timeout-path cleanup.
+    let result = tool
+        .execute(serde_json::json!({
+            "action": "send",
+            "session_id": &session_id,
+            "command": "sleep 300 >/dev/null 2>&1 & exit",
+            "timeout_secs": 5
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["timed_out"], false);
+
+    // Inspecting the session reaps the shell...
+    {
+        let mut sessions = SESSIONS.write().await;
+        let session = sessions
+            .get_mut(&session_id)
+            .expect("session should still be present");
+        assert!(!session.is_alive(), "shell should have exited");
+    }
+
+    // ...while the background grandchild is still running in the group.
+    assert!(
+        wait_until_group_exists(shell_pid).await,
+        "background sleep grandchild should be alive after the shell exits"
+    );
+
+    // Closing the session must now terminate the surviving grandchild even
+    // though the direct shell pid is gone.
+    let result = tool
+        .execute(serde_json::json!({
+            "action": "close",
+            "session_id": &session_id
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["status"], "closed");
+    assert!(
+        wait_until_group_gone(shell_pid).await,
+        "background sleeping grandchild should be killed by session close"
+    );
+}
+
+/// The timeout path must also reap background descendants that outlived the
+/// direct shell: the shell exits, the grandchild keeps the pipes open (so no
+/// EOF and the read loop hits the deadline), and the group kill must still
+/// fire using the pgid captured at spawn.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_timeout_reaps_background_grandchild_after_shell_exits() {
+    let _guard = TEST_LOCK.lock().await;
+    clear_all_sessions().await;
+
+    let tool = PtyShellTool;
+
+    let result = tool
+        .execute(serde_json::json!({ "action": "start" }))
+        .await
+        .unwrap();
+    let session_id = result["session_id"].as_str().unwrap().to_string();
+    let shell_pid = session_process_group(&session_id).await;
+
+    // Unlike the close-path test, `sleep 300 & exit` leaves the sleep holding
+    // the session's stdout open, so the read loop never sees EOF: it runs to
+    // the deadline and the timeout cleanup must kill the whole group even
+    // though the shell itself has already exited by then.
+    let result = tool
+        .execute(serde_json::json!({
+            "action": "send",
+            "session_id": &session_id,
+            "command": "sleep 300 & exit",
+            "timeout_secs": 1
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["timed_out"], true);
+
+    {
+        let mut sessions = SESSIONS.write().await;
+        let session = sessions
+            .get_mut(&session_id)
+            .expect("session should still be present");
+        assert!(!session.is_alive(), "shell should have exited");
+    }
+
+    assert!(
+        wait_until_group_gone(shell_pid).await,
+        "background sleeping grandchild should be killed on the timeout path"
+    );
+}

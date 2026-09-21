@@ -218,6 +218,9 @@ async fn test_enter_worktree_validation() {
 
 #[tokio::test]
 async fn test_exit_worktree_not_in_worktree() {
+    // Hold the shared cwd lock while resetting the process-global worktree
+    // state so this cannot interleave with the enter/exit tests that mutate it.
+    let _g = crate::test_support::CwdGuard::hold();
     // Reset state to ensure we're not in a worktree
     {
         let mut state = WORKTREE_STATE.lock().unwrap();
@@ -238,7 +241,10 @@ async fn test_exit_worktree_not_in_worktree() {
 
 #[test]
 fn test_is_in_worktree_initially_false() {
-    // Reset state
+    // Reset state. Hold the shared cwd lock: the worktree session state is
+    // process-global, and enter/exit tests below mutate it together with the
+    // process cwd.
+    let _g = crate::test_support::CwdGuard::hold();
     {
         let mut state = WORKTREE_STATE.lock().unwrap();
         *state = WorktreeState::new();
@@ -249,11 +255,327 @@ fn test_is_in_worktree_initially_false() {
 
 #[test]
 fn test_get_current_worktree_initially_none() {
-    // Reset state
+    // Reset state (see note in test_is_in_worktree_initially_false)
+    let _g = crate::test_support::CwdGuard::hold();
     {
         let mut state = WORKTREE_STATE.lock().unwrap();
         *state = WorktreeState::new();
     }
 
     assert!(get_current_worktree().is_none());
+}
+
+/// Create an isolated git repository and chdir into it, returning the cwd
+/// guard (which restores the original directory on drop). Mirrors the helper
+/// in tests/unit/tools/git/git_test.rs.
+fn isolated_git_repo() -> (crate::test_support::CwdGuard, tempfile::TempDir) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let guard = crate::test_support::CwdGuard::enter(dir.path());
+    fn git(args: &[&str]) {
+        std::process::Command::new("git")
+            .args(args)
+            .status()
+            .unwrap();
+    }
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@t"]);
+    git(&["config", "user.name", "t"]);
+    std::fs::write(dir.path().join("f.txt"), "x").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "base"]);
+    (guard, dir)
+}
+
+/// Reset the process-global worktree state. Must be called while holding the
+/// shared cwd lock (see `CwdGuard`).
+fn reset_worktree_state() {
+    let mut state = WORKTREE_STATE.lock().unwrap();
+    *state = WorktreeState::new();
+}
+
+#[test]
+fn test_push_pop_roundtrip_restores_cwd() {
+    let _g = crate::test_support::CwdGuard::hold();
+    let mut state = WorktreeState::new();
+    let original = std::env::current_dir().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let canonical_tmp = tmp.path().canonicalize().unwrap();
+
+    state.push_worktree(tmp.path().to_path_buf()).unwrap();
+    assert_eq!(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        canonical_tmp
+    );
+    assert!(state.is_in_worktree());
+
+    state.pop_worktree(false).unwrap();
+    assert_eq!(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        original.canonicalize().unwrap()
+    );
+    assert!(!state.is_in_worktree());
+}
+
+#[test]
+fn test_push_failure_restores_cwd_and_leaves_state_consistent() {
+    let _g = crate::test_support::CwdGuard::hold();
+    let mut state = WorktreeState::new();
+    let original = std::env::current_dir().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let missing = tmp.path().join("does-not-exist");
+
+    // Entering a worktree that does not exist on disk fails. `initialize()`
+    // records the pre-existing directory as the stack root, but the failed
+    // push must not change the process cwd and must not record a worktree.
+    let res = state.push_worktree(missing);
+    assert!(res.is_err());
+    assert_eq!(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        original.canonicalize().unwrap()
+    );
+    assert!(!state.is_in_worktree());
+    assert!(state.current_worktree.is_none());
+    assert_eq!(state.directory_stack.len(), 1); // only the recorded root
+}
+
+#[tokio::test]
+async fn test_enter_exit_dir_roundtrip_restores_cwd() {
+    let _g = crate::test_support::CwdGuard::hold();
+    reset_worktree_state();
+    let original = std::env::current_dir().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let canonical_tmp = tmp.path().canonicalize().unwrap();
+
+    let entered = crate::tools::git_worktree::enter_worktree_dir(tmp.path().to_path_buf()).unwrap();
+    assert_eq!(entered, tmp.path().to_path_buf());
+    assert_eq!(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        canonical_tmp
+    );
+    assert!(crate::tools::git_worktree::is_in_worktree());
+
+    let (restored, previous) = crate::tools::git_worktree::exit_worktree_dir().unwrap();
+    assert_eq!(
+        restored.canonicalize().unwrap(),
+        original.canonicalize().unwrap()
+    );
+    assert_eq!(previous.as_deref(), Some(tmp.path()));
+    assert_eq!(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        original.canonicalize().unwrap()
+    );
+    assert!(!crate::tools::git_worktree::is_in_worktree());
+}
+
+#[tokio::test]
+async fn test_exit_dir_without_enter_errors_and_preserves_cwd() {
+    let _g = crate::test_support::CwdGuard::hold();
+    reset_worktree_state();
+    let original = std::env::current_dir().unwrap();
+
+    let res = crate::tools::git_worktree::exit_worktree_dir();
+    assert!(res.is_err());
+    assert!(res
+        .unwrap_err()
+        .to_string()
+        .contains("Not currently in a worktree"));
+    assert_eq!(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        original.canonicalize().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn test_concurrent_observer_never_observes_stranded_cwd() {
+    let _g = crate::test_support::CwdGuard::hold();
+    reset_worktree_state();
+    let original = std::env::current_dir().unwrap().canonicalize().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let canonical_tmp = tmp.path().canonicalize().unwrap();
+    let missing = tmp.path().join("does-not-exist");
+
+    // A background task that — like the concurrent file_read/file_write path
+    // resolution the mutation used to corrupt — samples the process cwd while
+    // the main task runs a failing enter and a full enter/exit cycle.
+    let observer = tokio::spawn(async move {
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..64 {
+            seen.insert(std::env::current_dir().unwrap().canonicalize().unwrap());
+            tokio::task::yield_now().await;
+        }
+        seen
+    });
+
+    // Error path: entering a worktree whose directory does not exist fails
+    // without changing the process cwd.
+    assert!(crate::tools::git_worktree::enter_worktree_dir(missing).is_err());
+    assert_eq!(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        original
+    );
+    tokio::task::yield_now().await;
+
+    // Success path: full enter/exit cycle; the cwd is restored on exit.
+    crate::tools::git_worktree::enter_worktree_dir(tmp.path().to_path_buf()).unwrap();
+    assert!(crate::tools::git_worktree::is_in_worktree());
+    tokio::task::yield_now().await;
+    crate::tools::git_worktree::exit_worktree_dir().unwrap();
+    assert_eq!(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        original
+    );
+    assert!(!crate::tools::git_worktree::is_in_worktree());
+    tokio::task::yield_now().await;
+
+    let seen = observer.await.unwrap();
+    // The observer only ever resolved against directories the worktree state
+    // knew about: the original directory or the temporarily entered worktree.
+    // Neither the missing enter target nor any other unknown directory could
+    // ever be observed as the process cwd.
+    assert!(
+        seen.iter().all(|c| c == &original || c == &canonical_tmp),
+        "observer saw an unexpected cwd: {:?}",
+        seen
+    );
+    assert!(seen.contains(&original));
+}
+
+#[tokio::test]
+async fn test_enter_exit_worktree_tool_restores_cwd() {
+    let (_g, dir) = isolated_git_repo();
+    reset_worktree_state();
+    let original = std::env::current_dir().unwrap();
+    let worktree = dir.path().join("wt");
+
+    let enter = EnterWorktreeTool::new();
+    let res = enter
+        .execute(serde_json::json!({ "path": worktree.to_string_lossy() }))
+        .await;
+    assert!(res.is_ok(), "enter_worktree failed: {:?}", res.err());
+    assert!(crate::tools::git_worktree::is_in_worktree());
+    assert_eq!(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        worktree.canonicalize().unwrap()
+    );
+    // The global state agrees with the process cwd: current worktree is the
+    // one just entered.
+    assert_eq!(
+        crate::tools::git_worktree::get_current_worktree().as_deref(),
+        Some(worktree.as_path())
+    );
+
+    let exit = ExitWorktreeTool::new();
+    let res = exit.execute(serde_json::json!({ "remove": false })).await;
+    assert!(res.is_ok(), "exit_worktree failed: {:?}", res.err());
+    assert_eq!(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        original.canonicalize().unwrap()
+    );
+    assert!(!crate::tools::git_worktree::is_in_worktree());
+}
+
+#[tokio::test]
+async fn test_enter_worktree_tool_error_preserves_cwd() {
+    let (_g, dir) = isolated_git_repo();
+    reset_worktree_state();
+    let blocker = dir.path().join("blocker");
+    std::fs::write(&blocker, "x").unwrap();
+    let original = std::env::current_dir().unwrap();
+
+    // Worktree path under a regular file: `create_dir_all` fails before any
+    // cwd change, and the failure must leave both the cwd and the state
+    // untouched.
+    let enter = EnterWorktreeTool::new();
+    let res = enter
+        .execute(serde_json::json!({ "path": blocker.join("child").to_string_lossy() }))
+        .await;
+    assert!(res.is_err());
+    assert_eq!(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        original.canonicalize().unwrap()
+    );
+    assert!(!crate::tools::git_worktree::is_in_worktree());
+    assert!(crate::tools::git_worktree::get_current_worktree().is_none());
+}
+
+#[test]
+fn test_pop_failure_when_previous_dir_deleted_is_propagated() {
+    let _g = crate::test_support::CwdGuard::hold();
+    let mut state = WorktreeState::new();
+    let previous = tempfile::tempdir().unwrap();
+    let worktree = tempfile::TempDir::new().unwrap();
+    let canonical_worktree = worktree.path().canonicalize().unwrap();
+
+    // Enter a worktree from `previous`: the level's guard records
+    // `previous` as the directory the exit must restore to.
+    state.push_worktree(previous.path().to_path_buf()).unwrap();
+    state.push_worktree(worktree.path().to_path_buf()).unwrap();
+    assert_eq!(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        canonical_worktree
+    );
+
+    // Delete the directory the exit would restore to.
+    drop(previous);
+
+    // Exit must FAIL rather than silently report success while the cwd is
+    // stranded (the previous behaviour: Drop only logged the failed restore).
+    let res = state.pop_worktree(false);
+    assert!(res.is_err());
+    let err_msg = res.err().unwrap().to_string();
+    assert!(
+        err_msg.contains("Failed to restore"),
+        "unexpected error: {:?}",
+        err_msg
+    );
+
+    // The failure left state and cwd consistent: still reported inside the
+    // worktree, still rooted in it — not popped underneath the caller.
+    assert!(state.is_in_worktree());
+    assert_eq!(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        canonical_worktree
+    );
+}
+
+#[test]
+fn test_nested_pop_restores_to_previous_level_not_stack_root() {
+    let _g = crate::test_support::CwdGuard::hold();
+    let mut state = WorktreeState::new();
+    let original = std::env::current_dir().unwrap();
+    let outer = tempfile::tempdir().unwrap();
+    let inner = tempfile::tempdir().unwrap();
+    let canonical_outer = outer.path().canonicalize().unwrap();
+    let canonical_inner = inner.path().canonicalize().unwrap();
+
+    state.push_worktree(outer.path().to_path_buf()).unwrap();
+    state.push_worktree(inner.path().to_path_buf()).unwrap();
+    assert_eq!(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        canonical_inner
+    );
+
+    // Exiting the inner worktree restores the process cwd to the OUTER
+    // worktree — the directory that was current before entering — and must
+    // report that directory, not the stack root (previously the exit returned
+    // the stack's first() entry regardless of what was actually restored).
+    let (restored, _removed) = state.pop_worktree(false).unwrap();
+    assert_eq!(restored.canonicalize().unwrap(), canonical_outer);
+    assert_eq!(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        canonical_outer
+    );
+    assert!(state.is_in_worktree()); // still inside the outer worktree
+
+    // The final exit restores the original directory and reports it.
+    let (restored, _removed) = state.pop_worktree(false).unwrap();
+    assert_eq!(
+        restored.canonicalize().unwrap(),
+        original.canonicalize().unwrap()
+    );
+    assert_eq!(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        original.canonicalize().unwrap()
+    );
+    assert!(!state.is_in_worktree());
 }

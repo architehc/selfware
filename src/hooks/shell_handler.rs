@@ -118,14 +118,9 @@ async fn run_shell_command(command: &str, timeout: Duration) -> Result<Option<Sh
     cmd.arg("-c").arg(command);
     // Hooks execute arbitrary repo-defined commands — do NOT hand them the
     // agent's full environment, which can carry API keys and other secrets.
-    // Start from an empty environment and re-add only a minimal safe allowlist
-    // (matches shell_exec / ProcessManager sanitization).
-    cmd.env_clear();
-    for key in ["PATH", "HOME", "LANG"] {
-        if let Ok(val) = std::env::var(key) {
-            cmd.env(key, val);
-        }
-    }
+    // Start from an empty environment and re-add the shared non-sensitive
+    // allowlist (matches shell_exec / ProcessManager sanitization).
+    crate::safety::process_env::sanitize_command_env(&mut cmd);
 
     // Kill the child if the future is dropped (defense in depth; the timeout
     // path also explicitly reaps the process group).
