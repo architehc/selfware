@@ -2902,3 +2902,57 @@ async fn test_sync_load_under_tokio_does_not_block_and_uses_cached_capability() 
         "sync load must use cached capability and reject xhigh on SGLang: {sync_err}"
     );
 }
+
+// =========================================================================
+// First-run protection (031c7b30): a bare install — no config file, no API
+// key — must fail fast BEFORE calling the built-in default remote endpoint
+// unauthenticated. BUT an endpoint the operator explicitly selected via
+// SELFWARE_ENDPOINT is an intentional choice and must NOT be rejected, even
+// with no config file and no key (its missing key stays a warning).
+// =========================================================================
+
+#[test]
+fn env_selected_endpoint_without_config_file_is_intentional_selection() {
+    let _env = clear_env();
+    // Isolate BOTH auto-discovery probes: cwd (`selfware.toml`) and HOME
+    // (`~/.config/selfware/config.toml`) so no config file is found at all.
+    let cwd = tempfile::tempdir().unwrap();
+    let _cwd = crate::test_support::CwdGuard::enter(cwd.path());
+    let home = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(home.path());
+    std::env::set_var("SELFWARE_ENDPOINT", "https://api.operator.example.com/v1");
+
+    // No config file, no key — but the endpoint came from the environment, so
+    // the first-run guard must NOT reject the run.
+    let config = Config::load(None)
+        .expect("an explicitly env-selected remote endpoint must load without a config file");
+    assert_eq!(
+        config.endpoint, "https://api.operator.example.com/v1",
+        "the env-selected endpoint must be honored"
+    );
+    assert!(
+        config.api_key.is_none(),
+        "no key anywhere — the missing-key path is now a warning, not a refusal"
+    );
+    assert!(matches!(
+        config.source_of("endpoint"),
+        ConfigSource::EnvVar(name) if name == "SELFWARE_ENDPOINT"
+    ));
+}
+
+#[test]
+fn bare_install_without_env_endpoint_still_fails_fast() {
+    let _env = clear_env();
+    let cwd = tempfile::tempdir().unwrap();
+    let _cwd = crate::test_support::CwdGuard::enter(cwd.path());
+    let home = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(home.path());
+
+    // Untouched built-in default, no config file, no key: the 031c7b30
+    // fast-fail must still trigger.
+    let err = Config::load(None).unwrap_err().to_string();
+    assert!(
+        err.contains("no config file found") && err.contains("built-in default endpoint"),
+        "a bare install must fail fast with the first-run message, got: {err}"
+    );
+}

@@ -36,7 +36,7 @@ fn test_safety_config_default() {
 #[test]
 fn test_agent_config_default() {
     let config = AgentConfig::default();
-    assert_eq!(config.max_iterations, 100);
+    assert_eq!(config.max_iterations, 400);
     assert_eq!(config.step_timeout_secs, 300);
     assert_eq!(
         config.token_budget,
@@ -615,7 +615,7 @@ fn test_default_helpers() {
     assert_eq!(default_model(), "nvidia/nemotron-3-ultra-550b-a55b:free");
     assert_eq!(default_max_tokens(), 65536);
     assert!((default_temperature() - 1.0).abs() < f32::EPSILON);
-    assert_eq!(default_max_iterations(), 100);
+    assert_eq!(default_max_iterations(), 400);
     assert_eq!(default_step_timeout(), 300);
     assert_eq!(
         default_token_budget(),
@@ -3090,7 +3090,7 @@ fn test_concurrency_config_boundary_values_accepted() {
 #[test]
 fn test_agent_config_all_defaults() {
     let config = AgentConfig::default();
-    assert_eq!(config.max_iterations, 100);
+    assert_eq!(config.max_iterations, 400);
     assert_eq!(config.step_timeout_secs, 300);
     assert_eq!(config.token_budget, default_max_tokens());
     assert_eq!(config.token_safety_margin, 8192);
@@ -3117,7 +3117,7 @@ fn test_agent_config_context_ratios() {
 
 #[test]
 fn test_default_agent_config_functions() {
-    assert_eq!(default_max_iterations(), 100);
+    assert_eq!(default_max_iterations(), 400);
     assert_eq!(default_step_timeout(), 300);
     assert_eq!(default_min_completion_steps(), 3);
     assert_eq!(default_token_budget(), 0); // sentinel value

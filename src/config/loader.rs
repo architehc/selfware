@@ -663,14 +663,17 @@ impl Config {
             } else {
                 ""
             };
-            // A bare install — no config file was found at all — has not chosen
-            // this endpoint: it is the built-in default, and the first request is
-            // guaranteed to fail with 401. Stopping here turns "type a prompt,
-            // get an auth error from a provider you never picked" into a
-            // two-line fix. A user who configured a remote endpoint themselves
-            // keeps the warning below: their endpoint with no key is their call,
-            // not ours to refuse.
-            if loaded_from_path.is_none() {
+            // A bare install — no config file was found at all AND no env var
+            // selected an endpoint — has not chosen this endpoint: it is the
+            // built-in default, and the first request is guaranteed to fail
+            // with 401. Stopping here turns "type a prompt, get an auth error
+            // from a provider you never picked" into a two-line fix. A user
+            // who configured a remote endpoint themselves — via a config file
+            // or via SELFWARE_ENDPOINT (the provenance map records the env
+            // selection as an intentional choice, even with no config file) —
+            // keeps the warning below: their endpoint with no key is their
+            // call, not ours to refuse.
+            if loaded_from_path.is_none() && sources.get("endpoint").is_none() {
                 bail!(
                     "no config file found and no API key configured, so this run would call the \
                      built-in default endpoint '{}' unauthenticated and fail with 401. Choose \

@@ -6,7 +6,7 @@ use super::*;
 
 #[test]
 fn test_default_max_iterations() {
-    assert_eq!(default_max_iterations(), 100);
+    assert_eq!(default_max_iterations(), 400);
 }
 
 #[test]

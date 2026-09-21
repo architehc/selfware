@@ -675,6 +675,7 @@ fn test_evaluate_candidate_promotion_gates() {
         Some(&cand_sab_ok),
         &base_metrics,
         &cand_metrics_ok,
+        &[],
     );
     assert!(matches!(
         decision,
@@ -689,6 +690,7 @@ fn test_evaluate_candidate_promotion_gates() {
         Some(&cand_sab_regressed),
         &base_metrics,
         &cand_metrics_ok,
+        &[],
     );
     assert!(matches!(
         decision,
@@ -703,6 +705,7 @@ fn test_evaluate_candidate_promotion_gates() {
         Some(&cand_sab_ok),
         &base_metrics,
         &cand_metrics_fewer_tests,
+        &[],
     );
     assert!(matches!(
         decision,
@@ -719,19 +722,31 @@ fn test_evaluate_candidate_promotion_gates() {
         Some(&cand_sab_ok),
         &base_metrics,
         &cand_metrics_capability,
+        &[],
     );
     assert_eq!(decision, PromotionDecision::Promote);
 
-    // 5a. Tied SAB and no token improvement -> Reject (noise-aware: latency cannot drive promotion)
+    // 5a. Tied SAB and no token term -> Reject (noise-aware: latency cannot drive
+    // promotion). With zero replicated arms the token term is untrusted and the
+    // score-tier decision (within noise) stands.
     let cand_metrics_tied_sab = make_metrics(100, 100);
-    let decision =
-        evaluate_candidate_promotion(0.8, 0.85, None, None, &base_metrics, &cand_metrics_tied_sab);
+    let decision = evaluate_candidate_promotion(
+        0.8,
+        0.85,
+        None,
+        None,
+        &base_metrics,
+        &cand_metrics_tied_sab,
+        &[],
+    );
     assert!(matches!(
         decision,
         PromotionDecision::Reject(r) if r.contains("latency and binary size are tie-breakers")
     ));
 
-    // 5b. Tied SAB with measured token efficiency gain -> Promote
+    // 5b. Tied SAB with measured token efficiency gain on BOTH replicated arms
+    // -> Promote. The >5% term is only trusted when two replicate arms agree on
+    // the reduction (user-approved policy: single readings carry ±18-37% noise).
     let mut cand_metrics_token_gain = make_metrics(100, 100);
     cand_metrics_token_gain.tokens_used = Some(800);
     let mut base_metrics_tokens = make_metrics(100, 100);
@@ -743,6 +758,7 @@ fn test_evaluate_candidate_promotion_gates() {
         None,
         &base_metrics_tokens,
         &cand_metrics_token_gain,
+        &[Some(800), Some(820)], // both arms: 20% / 18% reduction, above the 5% threshold
     );
     assert_eq!(decision, PromotionDecision::Promote);
 
@@ -754,6 +770,7 @@ fn test_evaluate_candidate_promotion_gates() {
         None,
         &base_metrics,
         &cand_metrics_ok,
+        &[],
     );
     assert!(matches!(
         decision,
@@ -770,6 +787,7 @@ fn test_evaluate_candidate_promotion_gates() {
         None,
         &base_metrics,
         &cand_metrics_sab_regressed,
+        &[],
     );
     assert!(matches!(
         decision,
@@ -786,8 +804,185 @@ fn test_evaluate_candidate_promotion_gates() {
         None,
         &base_metrics,
         &cand_metrics_sab_improved,
+        &[],
     );
     assert_eq!(decision, PromotionDecision::Promote);
+}
+
+// ─── Replicated token arms (user-approved promotion policy) ───
+//
+// The >5% token-reduction term is only trusted when the candidate was measured
+// with two replicated arms that AGREE on the reduction; measured replicate
+// noise is ±18-37%, so a single reading is a coin flip. When the arms disagree,
+// the term must neither block nor force promotion — the score-tier decision
+// stands — and the reject report must show the replicate count and per-arm
+// deltas so the noise reality stays visible.
+
+#[test]
+fn test_token_term_trusted_only_when_both_replicas_agree() {
+    // (a) Both arms measured and both above the 5% threshold -> trusted.
+    assert_eq!(
+        evaluate_token_term(Some(1000), &[Some(800), Some(820)]),
+        Some(true)
+    );
+    // Mean is NOT enough: 800+1000 averages to a 10% "reduction", but the
+    // replicate disagrees -> untrusted.
+    assert_eq!(
+        evaluate_token_term(Some(1000), &[Some(800), Some(1000)]),
+        None
+    );
+    // Only one arm shows the reduction -> untrusted.
+    assert_eq!(
+        evaluate_token_term(Some(1000), &[Some(800), Some(1050)]),
+        None
+    );
+    // (c) Both arms measured, neither reaches the threshold -> conclusively absent.
+    assert_eq!(
+        evaluate_token_term(Some(1000), &[Some(1010), Some(970)]),
+        Some(false)
+    );
+    // A single measurement is the coin flip the policy bans trusting.
+    assert_eq!(evaluate_token_term(Some(1000), &[Some(800)]), None);
+    // An arm whose runner observed no usage does not count as measured.
+    assert_eq!(evaluate_token_term(Some(1000), &[Some(800), None]), None);
+    assert_eq!(evaluate_token_term(Some(1000), &[]), None);
+    // No positive baseline to compare against -> untestable.
+    assert_eq!(evaluate_token_term(None, &[Some(800), Some(820)]), None);
+    assert_eq!(evaluate_token_term(Some(0), &[Some(800), Some(820)]), None);
+    // Exactly at the 5% boundary is NOT a reduction (strict >).
+    assert_eq!(
+        evaluate_token_term(Some(1000), &[Some(950), Some(960)]),
+        Some(false)
+    );
+}
+
+#[test]
+fn test_promotion_token_both_arms_agree_promotes() {
+    // (a) Score within noise + higher composite + BOTH replicated arms show
+    // >5% token reduction -> Promote.
+    let mut base = make_metrics(100, 100);
+    base.tokens_used = Some(1000);
+    let cand = make_metrics(100, 100);
+    let decision = evaluate_candidate_promotion(
+        0.8,
+        0.85,
+        None,
+        None,
+        &base,
+        &cand,
+        &[Some(800), Some(820)], // -20.0% and -18.0%
+    );
+    assert_eq!(decision, PromotionDecision::Promote);
+}
+
+#[test]
+fn test_promotion_token_single_arm_never_trusted() {
+    // One measurement is a coin flip (replicate noise ±18-37%): even an
+    // apparent 20% reduction on a single arm must not promote a within-noise
+    // candidate.
+    let mut base = make_metrics(100, 100);
+    base.tokens_used = Some(1000);
+    let cand = make_metrics(100, 100);
+    let decision = evaluate_candidate_promotion(0.8, 0.85, None, None, &base, &cand, &[Some(800)]);
+    assert!(matches!(
+        decision,
+        PromotionDecision::Reject(r) if r.contains("NOT trusted")
+    ));
+}
+
+#[test]
+fn test_promotion_token_arms_disagree_not_trusted() {
+    // (b) Only one replicate arm shows the reduction -> the term is NOT
+    // trusted; the score-tier decision (within noise) governs and the report
+    // names the replicate count and per-arm deltas.
+    let mut base = make_metrics(100, 100);
+    base.tokens_used = Some(1000);
+    let cand = make_metrics(100, 100);
+    let decision = evaluate_candidate_promotion(
+        0.8,
+        0.85,
+        None,
+        None,
+        &base,
+        &cand,
+        &[Some(800), Some(1050)], // arm 1: -20.0%, arm 2: +5.0%
+    );
+    match decision {
+        PromotionDecision::Reject(reason) => {
+            assert!(
+                reason.contains("NOT trusted"),
+                "must not claim a trusted token measurement, got: {reason}"
+            );
+            assert!(
+                reason.contains("2 replicated arms"),
+                "report must name the replicate count, got: {reason}"
+            );
+            assert!(
+                reason.contains("arm 1: +20.0%") && reason.contains("arm 2: -5.0%"),
+                "report must show per-arm deltas, got: {reason}"
+            );
+            assert!(
+                reason.contains("latency and binary size are tie-breakers"),
+                "the score-tier decision must stand, got: {reason}"
+            );
+        }
+        other => panic!("expected Reject (token term not trusted), got {other:?}"),
+    }
+}
+
+#[test]
+fn test_promotion_token_neither_arm_shows_reduction_rejects() {
+    // (c) Both arms measured, neither reaches the threshold -> no promotion on
+    // token grounds, with the measured per-arm deltas reported.
+    let mut base = make_metrics(100, 100);
+    base.tokens_used = Some(1000);
+    let cand = make_metrics(100, 100);
+    let decision = evaluate_candidate_promotion(
+        0.8,
+        0.85,
+        None,
+        None,
+        &base,
+        &cand,
+        &[Some(990), Some(1040)], // +1.0% and -4.0%: both below 5%
+    );
+    match decision {
+        PromotionDecision::Reject(reason) => {
+            assert!(
+                reason.contains("below the 5% reduction threshold on every replicated arm"),
+                "got: {reason}"
+            );
+            assert!(
+                reason.contains("arm 1: +1.0%") && reason.contains("arm 2: -4.0%"),
+                "report must show per-arm deltas, got: {reason}"
+            );
+        }
+        other => panic!("expected Reject, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_token_arm_report_helpers_expose_replicate_noise() {
+    // (d) The promotion report/log surface exposes the replicate count and the
+    // per-arm deltas, never a mean.
+    let pcts = per_arm_token_delta_pcts(Some(1000), &[Some(800), Some(1050)]);
+    assert!((pcts[0].expect("arm 1 measured") - 20.0).abs() < 1e-9);
+    assert!((pcts[1].expect("arm 2 measured") - (-5.0)).abs() < 1e-9);
+    // Unmeasurable sides stay null, never fabricated as a number.
+    assert_eq!(per_arm_token_delta_pcts(Some(0), &[Some(800)]), vec![None]);
+    assert_eq!(
+        per_arm_token_delta_pcts(None, &[Some(800), Some(820)]),
+        vec![None, None]
+    );
+
+    let summary = format_token_arms(Some(1000), &[Some(800), Some(1050)]);
+    assert!(summary.contains("2 replicated arms"), "got: {summary}");
+    assert!(summary.contains("arm 1: +20.0%"), "got: {summary}");
+    assert!(summary.contains("arm 2: -5.0%"), "got: {summary}");
+    assert_eq!(
+        format_token_arms(None, &[]),
+        "0 replicated arms (token term unmeasured)"
+    );
 }
 
 #[test]
@@ -813,6 +1008,7 @@ fn test_compute_empirical_noise_margin_calculation_and_gating() {
         Some(&cand_sab),
         &base_metrics,
         &cand_metrics,
+        &[],
     );
     assert!(matches!(
         decision,
@@ -1726,6 +1922,26 @@ fn test_capture_tested_diff_includes_new_files_and_edits() {
 }
 
 #[test]
+fn test_capture_tested_diff_zero_commit_repo_uses_empty_tree() {
+    // A freshly `git init`-ed repo has no HEAD, so `git diff --cached HEAD`
+    // fails and the tested diff would silently read as absent. It must diff
+    // against the standard empty-tree object instead, so staged content is
+    // captured as additions rather than dropped.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git_ok(root, &["init"]);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/new.rs"), "pub fn g() {}\n").unwrap();
+
+    let diff =
+        capture_tested_diff(root).expect("zero-commit repo must still capture staged content");
+    assert!(
+        diff.contains("src/new.rs"),
+        "staged file must appear as an addition, got: {diff}"
+    );
+}
+
+#[test]
 fn test_worktree_guard_cleans_up_on_drop() {
     let dir = setup_winner_repo();
     let root = dir.path();
@@ -2125,6 +2341,7 @@ fn test_ranked_candidate_promotion_runner_up_qualifies() {
             attempt_id: "att-1".into(),
             branch_id: "branch-1".into(),
             base_commit: None,
+            token_arm_tokens: Vec::new(),
         },
         EvaluatedCandidate {
             hypothesis: Hypothesis {
@@ -2142,6 +2359,7 @@ fn test_ranked_candidate_promotion_runner_up_qualifies() {
             attempt_id: "att-2".into(),
             branch_id: "branch-2".into(),
             base_commit: None,
+            token_arm_tokens: Vec::new(),
         },
     ];
 
@@ -2164,6 +2382,7 @@ fn test_ranked_candidate_promotion_runner_up_qualifies() {
         evaluated_candidates[0].sab_result.as_ref(),
         &base_metrics,
         &evaluated_candidates[0].metrics,
+        &evaluated_candidates[0].token_arm_tokens,
     );
     assert!(matches!(
         single_winner_decision,
@@ -2182,6 +2401,7 @@ fn test_ranked_candidate_promotion_runner_up_qualifies() {
             candidate.sab_result.as_ref(),
             &base_metrics,
             &candidate.metrics,
+            &candidate.token_arm_tokens,
         ) {
             PromotionDecision::Promote => {
                 promoted_winner = Some((rank, candidate));

@@ -330,6 +330,7 @@ fn test_task_summary_struct() {
         updated_at: Utc::now(),
         tool_call_count: 10,
         error_count: 2,
+        project_root: None,
     };
     assert_eq!(summary.current_step, 3);
     assert_eq!(summary.tool_call_count, 10);
@@ -1364,6 +1365,36 @@ fn save_final_makes_base_reflect_terminal_state() {
 }
 
 #[test]
+fn auto_continue_count_round_trips_through_save_and_delta() {
+    // Probe: the auto-continue chain count must survive full writes, the
+    // differential-save path, and load — including the detect-lost-field case
+    // (a delta that does not mention the field must keep the base's value).
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+    let mut cp = TaskCheckpoint::new("t-chain".to_string(), "d".to_string());
+    cp.auto_continue_count = 3;
+    manager.save(&cp).unwrap();
+
+    // A delta save advances unrelated fields; the count field stays put.
+    cp.set_step(4);
+    cp.set_iteration(7);
+    manager.save(&cp).unwrap();
+
+    let loaded = manager.load("t-chain").unwrap();
+    assert_eq!(loaded.auto_continue_count, 3);
+    assert_eq!(loaded.current_step, 4);
+    assert_eq!(loaded.current_iteration, 7);
+
+    // Full terminal write must also preserve it.
+    cp.set_status(TaskStatus::Completed);
+    manager.save_final(&cp).unwrap();
+    let loaded = manager.load("t-chain").unwrap();
+    assert_eq!(loaded.auto_continue_count, 3);
+    assert_eq!(loaded.status, TaskStatus::Completed);
+}
+
+#[test]
 fn test_unrecoverable_checkpoint_is_recovery_required_not_fresh_resume() {
     // Review finding: corrupt primary + corrupt backup used to return a
     // successful BLANK checkpoint, erasing the distinction between
@@ -1423,4 +1454,333 @@ fn test_backup_recovery_is_distinct_from_clean() {
         }
         other => panic!("expected RecoveredFromBackup, got {other:?}"),
     }
+}
+
+// ── --autocontinue selection (latest_autoresumable_task) ────────────
+//
+// Regression tests for the startup auto-resume feature. Selection is safe
+// only when BOTH gates hold: the checkpoint belongs to the CURRENT workspace
+// (recorded `project_root` equals the workspace passed in) and the task is
+// InProgress. Failed/Paused/Completed checkpoints — and checkpoints from
+// other workspaces or with no recorded workspace — must never be
+// auto-resumed (HIGH finding: a global "newest incomplete" pick resumed
+// repo A's task inside repo B).
+
+const WORKSPACE_A: &str = "/work/repo-a";
+const WORKSPACE_B: &str = "/work/repo-b";
+
+/// Fabricate a checkpoint pinned to `project_root` with a deterministic
+/// `updated_at`. `TaskCheckpoint::new` records the real test-process cwd as
+/// its workspace, so every fabricated checkpoint must override it explicitly.
+fn cp_in(
+    task_id: &str,
+    desc: &str,
+    status: TaskStatus,
+    project_root: &str,
+    rfc3339: &str,
+) -> TaskCheckpoint {
+    let mut cp = TaskCheckpoint::new(task_id.to_string(), desc.to_string());
+    cp.project_root = Some(project_root.to_string());
+    // set_status() bumps updated_at to now; override AFTER so the fabricated
+    // time ordering is deterministic.
+    cp.set_status(status);
+    cp.updated_at = chrono::DateTime::parse_from_rfc3339(rfc3339)
+        .unwrap()
+        .with_timezone(&Utc);
+    cp
+}
+
+#[test]
+fn autocontinue_selects_latest_inprogress_in_matching_workspace() {
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+    // Newest overall is Completed → skipped. Older InProgress → picked.
+    let done = cp_in(
+        "done-task",
+        "a finished task",
+        TaskStatus::Completed,
+        WORKSPACE_A,
+        "2024-01-03T00:00:00Z",
+    );
+    manager.save_final(&done).unwrap();
+    let running = cp_in(
+        "running-task",
+        "interrupted long task",
+        TaskStatus::InProgress,
+        WORKSPACE_A,
+        "2024-01-01T00:00:00Z",
+    );
+    manager.save(&running).unwrap();
+
+    let latest = manager
+        .latest_autoresumable_task(WORKSPACE_A)
+        .unwrap()
+        .expect("an eligible checkpoint must be discovered");
+    assert_eq!(latest.task_id, "running-task");
+    assert_eq!(latest.task_description, "interrupted long task");
+    assert_eq!(latest.status, TaskStatus::InProgress);
+    assert_eq!(latest.project_root.as_deref(), Some(WORKSPACE_A));
+}
+
+#[test]
+fn autocontinue_newer_failed_in_other_repository_never_leaks() {
+    // HIGH finding, case 1: a NEWER FAILED checkpoint recorded in repo A must
+    // never be auto-resumed by `--autocontinue` run in repo B — and not even
+    // by a run in A itself (Failed is excluded from AUTOMATIC resumption).
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+    // Repo A: newest checkpoint is Failed; older one is InProgress.
+    let failed_a = cp_in(
+        "failed-a",
+        "A task that failed",
+        TaskStatus::Failed,
+        WORKSPACE_A,
+        "2024-01-03T00:00:00Z",
+    );
+    manager.save_final(&failed_a).unwrap();
+    let running_a = cp_in(
+        "running-a",
+        "A task still running",
+        TaskStatus::InProgress,
+        WORKSPACE_A,
+        "2024-01-02T00:00:00Z",
+    );
+    manager.save(&running_a).unwrap();
+
+    // Running --autocontinue in repo B: nothing of A's may be resumed.
+    assert!(
+        manager
+            .latest_autoresumable_task(WORKSPACE_B)
+            .unwrap()
+            .is_none(),
+        "a FAILED checkpoint from repo A must never be auto-resumed in repo B"
+    );
+
+    // Running --autocontinue in repo A: the newer Failed is not eligible
+    // either; the older InProgress is what gets resumed.
+    let in_a = manager
+        .latest_autoresumable_task(WORKSPACE_A)
+        .unwrap()
+        .expect("repo A's InProgress task is eligible there");
+    assert_eq!(in_a.task_id, "running-a");
+}
+
+#[test]
+fn autocontinue_newer_inprogress_in_other_repository_never_leaks() {
+    // HIGH finding, case 2: even a NEWER InProgress checkpoint in repo A must
+    // not be auto-resumed while running in repo B — B's own older InProgress
+    // wins instead.
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+    let running_b = cp_in(
+        "running-b",
+        "B task still running",
+        TaskStatus::InProgress,
+        WORKSPACE_B,
+        "2024-01-01T00:00:00Z",
+    );
+    manager.save(&running_b).unwrap();
+    let running_a_newer = cp_in(
+        "running-a",
+        "A task still running",
+        TaskStatus::InProgress,
+        WORKSPACE_A,
+        "2024-01-03T00:00:00Z",
+    );
+    manager.save(&running_a_newer).unwrap();
+
+    let latest = manager
+        .latest_autoresumable_task(WORKSPACE_B)
+        .unwrap()
+        .expect("B's own InProgress task is eligible");
+    assert_eq!(
+        latest.task_id, "running-b",
+        "repo A's newer InProgress checkpoint must not leak into repo B"
+    );
+}
+
+#[test]
+fn autocontinue_failed_and_paused_in_current_workspace_not_autoresumed() {
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+    // Same workspace: newest Failed, mid Paused, oldest InProgress. Only the
+    // InProgress task may be auto-resumed; Failed/Paused need explicit resume.
+    let failed = cp_in(
+        "failed",
+        "failed task",
+        TaskStatus::Failed,
+        WORKSPACE_A,
+        "2024-01-03T00:00:00Z",
+    );
+    manager.save_final(&failed).unwrap();
+    let paused = cp_in(
+        "paused",
+        "paused task",
+        TaskStatus::Paused,
+        WORKSPACE_A,
+        "2024-01-02T00:00:00Z",
+    );
+    manager.save(&paused).unwrap();
+    let running = cp_in(
+        "running",
+        "running task",
+        TaskStatus::InProgress,
+        WORKSPACE_A,
+        "2024-01-01T00:00:00Z",
+    );
+    manager.save(&running).unwrap();
+
+    let latest = manager
+        .latest_autoresumable_task(WORKSPACE_A)
+        .unwrap()
+        .expect("the InProgress task is eligible");
+    assert_eq!(latest.task_id, "running");
+}
+
+#[test]
+fn autocontinue_only_failed_or_paused_returns_none() {
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+    let failed = cp_in(
+        "failed",
+        "failed task",
+        TaskStatus::Failed,
+        WORKSPACE_A,
+        "2024-01-02T00:00:00Z",
+    );
+    manager.save_final(&failed).unwrap();
+    let paused = cp_in(
+        "paused",
+        "paused task",
+        TaskStatus::Paused,
+        WORKSPACE_A,
+        "2024-01-01T00:00:00Z",
+    );
+    manager.save(&paused).unwrap();
+
+    assert!(
+        manager
+            .latest_autoresumable_task(WORKSPACE_A)
+            .unwrap()
+            .is_none(),
+        "Failed and Paused tasks require explicit `resume <id>`, never auto-resume"
+    );
+}
+
+#[test]
+fn autocontinue_skips_legacy_checkpoint_without_workspace_identity() {
+    // A checkpoint written before the project_root field existed cannot be
+    // validated against the current workspace → never auto-resumed (explicit
+    // `resume <id>` remains the only path to it).
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+    let mut legacy = TaskCheckpoint::new("legacy".to_string(), "pre-feature task".to_string());
+    legacy.project_root = None;
+    legacy.set_status(TaskStatus::InProgress);
+    manager.save(&legacy).unwrap();
+
+    assert!(
+        manager
+            .latest_autoresumable_task(WORKSPACE_A)
+            .unwrap()
+            .is_none(),
+        "legacy checkpoints without a workspace identity must not be auto-resumed"
+    );
+}
+
+#[test]
+fn autocontinue_all_completed_returns_none() {
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+    let one = cp_in(
+        "finished-a",
+        "done",
+        TaskStatus::Completed,
+        WORKSPACE_A,
+        "2024-01-01T00:00:00Z",
+    );
+    manager.save_final(&one).unwrap();
+    let two = cp_in(
+        "finished-b",
+        "done too",
+        TaskStatus::Completed,
+        WORKSPACE_A,
+        "2024-01-02T00:00:00Z",
+    );
+    manager.save_final(&two).unwrap();
+
+    assert!(
+        manager
+            .latest_autoresumable_task(WORKSPACE_A)
+            .unwrap()
+            .is_none(),
+        "completed checkpoints must never be auto-resumed"
+    );
+}
+
+#[test]
+fn autocontinue_empty_or_missing_dir_returns_none() {
+    // Missing directory → normal startup, no auto-resume.
+    let dir = tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    let manager = CheckpointManager::new(path.clone()).unwrap();
+    std::fs::remove_dir_all(&path).unwrap();
+    assert!(manager
+        .latest_autoresumable_task(WORKSPACE_A)
+        .unwrap()
+        .is_none());
+
+    // Empty directory → same.
+    let dir2 = tempdir().unwrap();
+    let manager2 = CheckpointManager::new(dir2.path().to_path_buf()).unwrap();
+    assert!(manager2
+        .latest_autoresumable_task(WORKSPACE_A)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn autocontinue_sees_completed_status_carried_by_delta() {
+    // A task flipped to Completed via an INCREMENTAL delta save leaves the
+    // base .json at InProgress. Selection must hydrate deltas, otherwise a
+    // completed task would be auto-resumed after a crash. (The manual
+    // --continue/journal paths already hydrate; this keeps the new helper
+    // consistent with them.)
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+    // Matching workspace, so ONLY the Completed status can exclude it.
+    let mut cp = TaskCheckpoint::new("delta-done".to_string(), "done via delta".to_string());
+    cp.project_root = Some(WORKSPACE_A.to_string());
+    manager.save(&cp).unwrap(); // base: InProgress
+    cp.set_status(TaskStatus::Completed); // touch() bumps version → delta
+    manager.save(&cp).unwrap();
+
+    // Sanity: the base file itself still says InProgress.
+    let loaded = manager.load("delta-done").unwrap();
+    assert_eq!(
+        loaded.status,
+        TaskStatus::Completed,
+        "hydrated status must be Completed"
+    );
+    let base_raw = std::fs::read_to_string(dir.path().join("delta-done.json")).unwrap();
+    assert!(
+        base_raw.contains("in_progress"),
+        "base file keeps stale InProgress: {base_raw}"
+    );
+
+    assert!(
+        manager
+            .latest_autoresumable_task(WORKSPACE_A)
+            .unwrap()
+            .is_none(),
+        "delta-completed task must not be auto-resumed"
+    );
 }

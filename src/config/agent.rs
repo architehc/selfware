@@ -151,8 +151,14 @@ impl Default for AgentConfig {
     }
 }
 
+/// Baseline per-run iteration ceiling.
+///
+/// USER-APPROVED long-task caps policy: raised from 100 to 400 so productive
+/// long-horizon runs get 4× the default budget before the adaptive +25%×4
+/// extension (and, past that, the auto-checkpoint-and-continue chain) is
+/// needed. Still configurable via `[agent] max_iterations`.
 pub fn default_max_iterations() -> usize {
-    100
+    400
 }
 pub fn default_step_timeout() -> u64 {
     300

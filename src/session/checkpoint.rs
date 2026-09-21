@@ -350,6 +350,12 @@ pub struct TaskCheckpoint {
     pub current_step: usize,
     #[serde(default)]
     pub current_iteration: usize,
+    /// Auto-continuation ("chain") count consumed by this task so far, so the
+    /// bounded auto-continue enforcement survives a process restart: a resumed
+    /// run keeps counting against `agent::loop_control::MAX_AUTO_CONTINUES`
+    /// instead of getting a fresh budget of 3 chains per restart.
+    #[serde(default)]
+    pub auto_continue_count: usize,
 
     // Context state
     pub messages: Vec<Message>,
@@ -405,6 +411,15 @@ pub struct TaskCheckpoint {
     pub max_wall_secs: Option<u64>,
     #[serde(default)]
     pub max_cost_usd: Option<f64>,
+    /// Workspace identity: the canonical absolute working directory the task
+    /// was created in. Startup auto-resume (`--autocontinue`) requires an
+    /// exact match against the CURRENT working directory, so a task created
+    /// in one repository can never be pulled into another. `None` on legacy
+    /// checkpoints written before the field existed — those are never
+    /// auto-resumed (their provenance cannot be validated), only resumed by
+    /// explicit `resume <id>`.
+    #[serde(default)]
+    pub project_root: Option<String>,
 }
 
 impl TaskCheckpoint {
@@ -592,6 +607,11 @@ pub struct TaskSummary {
     pub updated_at: DateTime<Utc>,
     pub tool_call_count: usize,
     pub error_count: usize,
+    /// Workspace the task was created in, when recorded (`None` for
+    /// pre-feature checkpoints). Used by startup auto-resume to refuse tasks
+    /// that do not belong to the current workspace.
+    #[serde(default)]
+    pub project_root: Option<String>,
 }
 
 impl TaskCheckpoint {
@@ -608,6 +628,7 @@ impl TaskCheckpoint {
             status: TaskStatus::InProgress,
             current_step: 0,
             current_iteration: 0,
+            auto_continue_count: 0,
             messages: Vec::new(),
             memory_entries: Vec::new(),
             estimated_tokens: 0,
@@ -623,6 +644,13 @@ impl TaskCheckpoint {
             max_budget_tokens: None,
             max_wall_secs: None,
             max_cost_usd: None,
+            // Record which workspace owns this task, canonicalized so a
+            // symlinked path (e.g. /tmp → /private/tmp on macOS) compares
+            // equal at selection time. None only when the cwd is unavailable.
+            project_root: std::env::current_dir()
+                .ok()
+                .and_then(|cwd| cwd.canonicalize().ok())
+                .map(|cwd| cwd.to_string_lossy().into_owned()),
         }
     }
 
@@ -637,6 +665,7 @@ impl TaskCheckpoint {
             updated_at: self.updated_at,
             tool_call_count: self.tool_calls.len(),
             error_count: self.errors.len(),
+            project_root: self.project_root.clone(),
         }
     }
 
@@ -1494,6 +1523,36 @@ impl CheckpointManager {
         summaries.sort_by_key(|x| std::cmp::Reverse(x.updated_at));
 
         Ok(summaries)
+    }
+
+    /// Find the most recently updated checkpoint that is SAFE to auto-resume at
+    /// startup — meaning it belongs to the CURRENT workspace and was left
+    /// mid-run.
+    ///
+    /// Two gates:
+    /// - **Workspace**: `workspace` is the canonical absolute working
+    ///   directory of the current process, and only checkpoints whose recorded
+    ///   `project_root` matches it exactly are eligible. A task created in
+    ///   another repository must never be pulled into this one — resuming
+    ///   project A's instructions inside project B would execute A's file
+    ///   edits against B's tree. Legacy checkpoints without a recorded
+    ///   `project_root` cannot be validated and are skipped (they remain
+    ///   reachable via explicit `resume <id>`).
+    /// - **Status**: only [`TaskStatus::InProgress`] qualifies. A crash or
+    ///   restart leaves the status InProgress; `Failed` and `Paused` tasks are
+    ///   deliberately excluded from AUTOMATIC resumption (the operator can
+    ///   still resume them explicitly).
+    ///
+    /// Ordering and hydration match [`Self::list_tasks`]: delta logs are
+    /// replayed (so a delta that flips a task to Completed is visible even
+    /// when the base file is stale), unreadable entries are skipped, and the
+    /// result is the newest eligible checkpoint by hydrated `updated_at`.
+    /// Returns `Ok(None)` when no eligible checkpoint exists.
+    pub fn latest_autoresumable_task(&self, workspace: &str) -> Result<Option<TaskSummary>> {
+        Ok(self.list_tasks()?.into_iter().find(|summary| {
+            summary.status == TaskStatus::InProgress
+                && summary.project_root.as_deref() == Some(workspace)
+        }))
     }
 
     /// Delete a checkpoint

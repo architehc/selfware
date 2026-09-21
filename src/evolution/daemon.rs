@@ -508,6 +508,14 @@ pub(crate) struct EvaluatedCandidate {
     /// The immutable source revision this candidate's arm was built from, for
     /// the base-revision arm-identity check.
     pub(crate) base_commit: Option<String>,
+    /// Per-arm total token usage of the candidate's replicated SAB arms
+    /// (index 0 is the canonical arm all other gate inputs are taken from).
+    /// Each `None` is an arm whose runner observed no usage; the LENGTH is the
+    /// replicate count. The >5% token-reduction term is only trusted when at
+    /// least two arms were measured and they agree — see [`evaluate_token_term`]
+    /// (user-approved policy: single token readings carry ±18-37% replicate
+    /// noise, so one measurement is a coin flip).
+    pub(crate) token_arm_tokens: Vec<Option<u64>>,
 }
 
 /// Default noise margin (epsilon) when empirical scenario variance is unmeasured.
@@ -591,6 +599,87 @@ pub(crate) fn is_candidate_better(
     ) == std::cmp::Ordering::Greater
 }
 
+/// Token-reduction threshold for the promotion token term.
+///
+/// The gate promotes a within-noise candidate on token grounds only when this
+/// reduction is exceeded on BOTH replicated arms (see [`evaluate_token_term`]).
+pub const TOKEN_REDUCTION_THRESHOLD: f64 = 0.05;
+
+/// Evaluate the >5% token-reduction term under the replicated-arm policy.
+///
+/// Baseline token usage is compared against each replicated candidate arm
+/// individually. Returns:
+/// - `Some(true)` — the term is TRUSTED: at least two arms were measured and
+///   EVERY measured arm shows a reduction beyond [`TOKEN_REDUCTION_THRESHOLD`].
+///   A mean across arms is explicitly NOT enough; the replicates must agree.
+/// - `Some(false)` — the term is conclusively absent: at least two arms were
+///   measured and NONE reaches the threshold.
+/// - `None` — the term is inconclusive and must neither block nor force
+///   promotion: the arms disagree, an arm went unmeasured, fewer than two arms
+///   exist, or the baseline usage is unavailable. The score-tier decision
+///   stands (user-approved policy: measured replicate noise is ±18-37%, so a
+///   single or disagreeing token reading is a coin flip and cannot be trusted).
+pub(crate) fn evaluate_token_term(base_tokens: Option<u64>, arms: &[Option<u64>]) -> Option<bool> {
+    let measured: Vec<u64> = arms.iter().filter_map(|t| *t).collect();
+    if measured.len() < 2 {
+        // One measurement is the coin flip the policy bans trusting.
+        return None;
+    }
+    let base = match base_tokens {
+        Some(b) if b > 0 => b as f64,
+        _ => return None, // no baseline to compare against: the term is untestable
+    };
+    let mut any_reduction = false;
+    let mut all_reduction = true;
+    for arm in &measured {
+        let is_reduction = (base - *arm as f64) / base > TOKEN_REDUCTION_THRESHOLD;
+        any_reduction |= is_reduction;
+        all_reduction &= is_reduction;
+    }
+    if all_reduction {
+        Some(true)
+    } else if !any_reduction {
+        Some(false)
+    } else {
+        None // the replicate arms disagree: a coin flip, so the term is untrusted
+    }
+}
+
+/// Per-arm token deltas as percentages of baseline usage, for the promotion
+/// report. `None` per arm when usage or a positive baseline is unmeasured —
+/// the noise reality must stay legible, never hidden behind a mean.
+pub(crate) fn per_arm_token_delta_pcts(
+    base_tokens: Option<u64>,
+    arms: &[Option<u64>],
+) -> Vec<Option<f64>> {
+    arms.iter()
+        .map(|arm| match (base_tokens, arm) {
+            (Some(base), Some(arm_tok)) if base > 0 => {
+                Some((base as f64 - *arm_tok as f64) / base as f64 * 100.0)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// One-line summary of the replicate arms for promotion reject reasons: the
+/// number of arms attempted plus each arm's measured delta (or `unmeasured`).
+fn format_token_arms(base_tokens: Option<u64>, arms: &[Option<u64>]) -> String {
+    let n = arms.len();
+    if n == 0 {
+        return "0 replicated arms (token term unmeasured)".to_string();
+    }
+    let parts: Vec<String> = per_arm_token_delta_pcts(base_tokens, arms)
+        .iter()
+        .enumerate()
+        .map(|(i, pct)| match pct {
+            Some(p) => format!("arm {}: {p:+.1}%", i + 1),
+            None => format!("arm {}: unmeasured", i + 1),
+        })
+        .collect();
+    format!("{n} replicated arms ({})", parts.join(", "))
+}
+
 /// Evaluates whether a candidate winner should be promoted to baseline:
 /// 1. Must not regress SAB capability beyond the noise margin (constant SAB_NOISE_MARGIN = 0.5).
 /// 2. Must pass the DarwinX non-regression gate over SAB results.
@@ -604,6 +693,7 @@ pub(crate) fn evaluate_candidate_promotion(
     cand_sab: Option<&SabResult>,
     base_metrics: &FitnessMetrics,
     winner_metrics: &FitnessMetrics,
+    token_arms: &[Option<u64>],
 ) -> PromotionDecision {
     let noise_margin = compute_empirical_noise_margin(base_sab, cand_sab);
     if winner_metrics.sab_score < base_metrics.sab_score - noise_margin {
@@ -627,7 +717,11 @@ pub(crate) fn evaluate_candidate_promotion(
     // drivers over baseline. Promotion requires either:
     // 1. A genuine SAB capability improvement beyond the noise margin (sab_delta > noise_margin).
     // 2. Or, if SAB capability is within noise margin, a significant measured token efficiency
-    //    improvement (> 5% reduction, with both arms measured), and higher composite.
+    //    improvement (> 5% reduction) and higher composite. The token term is only trusted when
+    //    the candidate was measured with replicated arms that AGREE on the reduction — a single
+    //    token reading carries ±18-37% replicate noise (user-approved policy), so when the arms
+    //    disagree or only one arm shows the reduction the term neither blocks nor forces
+    //    promotion: the score-tier decision stands.
     if sab_delta <= noise_margin {
         if winner_composite <= baseline_composite {
             return PromotionDecision::Reject(format!(
@@ -636,18 +730,27 @@ pub(crate) fn evaluate_candidate_promotion(
             ));
         }
 
-        let has_token_improvement = match (winner_metrics.tokens_used, base_metrics.tokens_used) {
-            (Some(w_tok), Some(b_tok)) if b_tok > 0 => {
-                (b_tok as f64 - w_tok as f64) / b_tok as f64 > 0.05
+        let token_arms_summary = format_token_arms(base_metrics.tokens_used, token_arms);
+        match evaluate_token_term(base_metrics.tokens_used, token_arms) {
+            Some(true) => {}
+            Some(false) => {
+                return PromotionDecision::Reject(format!(
+                    "winner SAB delta ({sab_delta:.2}) is within noise margin ({noise_margin:.2}); \
+                     measured token efficiency is below the {:.0}% reduction threshold on every \
+                     replicated arm ({token_arms_summary}); latency and binary size are \
+                     tie-breakers, not promotion drivers",
+                    TOKEN_REDUCTION_THRESHOLD * 100.0
+                ));
             }
-            _ => false,
-        };
-
-        if !has_token_improvement {
-            return PromotionDecision::Reject(format!(
-                "winner SAB delta ({:.2}) is within noise margin ({:.2}) and has no measured token efficiency improvement; latency and binary size are tie-breakers, not promotion drivers",
-                sab_delta, noise_margin
-            ));
+            None => {
+                return PromotionDecision::Reject(format!(
+                    "winner SAB delta ({sab_delta:.2}) is within noise margin ({noise_margin:.2}); \
+                     the >5% token-reduction term is NOT trusted: {token_arms_summary} — replicate \
+                     noise (±18-37%) makes a single or disagreeing reading a coin flip, so the \
+                     score-tier decision stands and latency and binary size are tie-breakers, not \
+                     promotion drivers"
+                ));
+            }
         }
     }
 
@@ -2894,7 +2997,11 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
             // Compute real fitness metrics. If SAB is available, run the full
             // benchmark; otherwise derive compile/test/binary-size metrics.
-            let (winner_metrics, winner_sab) = if sab_available {
+            // The third tuple element is the candidate's replicated token arms:
+            // when SAB is available the benchmark runs TWICE (cost is
+            // user-approved) so the >5% token term can require two agreeing
+            // arms; in compile-only mode no token usage is observed at all.
+            let (winner_metrics, winner_sab, token_arm_tokens) = if sab_available {
                 let mut build_cmd = tokio::process::Command::new("cargo");
                 build_cmd
                     .args(["build", "--release", "--features", "self-improvement"])
@@ -2997,14 +3104,47 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
                 let mutated_binary = worktree.join("target/release/selfware");
                 match fitness::run_sab(&mutated_binary, &sab_config) {
-                    Ok(r) => (
-                        metrics_from_sab_result(
-                            &r,
-                            &mutated_binary,
-                            config.safety.max_binary_size_mb,
-                        ),
-                        Some(r),
-                    ),
+                    Ok(r) => {
+                        // Second replicated arm, solely for the >5% token term
+                        // (user-approved policy: measured replicate noise is
+                        // ±18-37%, so one token reading is a coin flip and the
+                        // term is only trusted when two arms agree on the
+                        // reduction). The score tier is deliberately NOT
+                        // re-measured — score keeps its single-arm semantics;
+                        // the replicate exists to make the token term
+                        // trustworthy. If the second arm fails, the candidate
+                        // still evaluates (the score-tier path still works)
+                        // but the token term reports as untrusted.
+                        let arm2 = if crate::is_shutdown_requested() {
+                            log_warning(
+                                "Shutdown requested during SAB replicate arm; skipping second measurement",
+                            );
+                            None
+                        } else {
+                            match fitness::run_sab(&mutated_binary, &sab_config) {
+                                Ok(r2) => Some(r2),
+                                Err(e2) => {
+                                    log_warning(&format!(
+                                        "  SAB replicate arm failed; token term will be untrusted: {e2}"
+                                    ));
+                                    None
+                                }
+                            }
+                        };
+                        let token_arm_tokens = match &arm2 {
+                            Some(r2) => vec![r.total_tokens_used, r2.total_tokens_used],
+                            None => vec![r.total_tokens_used],
+                        };
+                        (
+                            metrics_from_sab_result(
+                                &r,
+                                &mutated_binary,
+                                config.safety.max_binary_size_mb,
+                            ),
+                            Some(r),
+                            token_arm_tokens,
+                        )
+                    }
                     Err(e) => {
                         if crate::is_shutdown_requested() {
                             log_warning(
@@ -3075,7 +3215,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 )
                 .await
                 {
-                    Ok(m) => (m, None),
+                    Ok(m) => (m, None, Vec::new()),
                     Err(SubprocessError::ShutdownRequested) => {
                         log_warning(
                             "Shutdown requested during candidate release build; halting cleanly",
@@ -3352,6 +3492,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 attempt_id: attempt_id.clone(),
                 branch_id: hyp_branch_id.clone(),
                 base_commit: attempt_base_commit.clone(),
+                token_arm_tokens,
             });
         }
 
@@ -3401,6 +3542,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 candidate.sab_result.as_ref(),
                 &current_baseline_metrics,
                 &candidate.metrics,
+                &candidate.token_arm_tokens,
             ) {
                 PromotionDecision::Promote => {
                     // Arm identity includes the SOURCE revision, not just the
@@ -3429,6 +3571,13 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                                 "sab_score": candidate.metrics.sab_score,
                                 "branch_id": candidate.branch_id,
                                 "reason": reason,
+                                "token_arms": serde_json::json!({
+                                    "count": candidate.token_arm_tokens.len(),
+                                    "per_arm_reduction_pct": per_arm_token_delta_pcts(
+                                        current_baseline_metrics.tokens_used,
+                                        &candidate.token_arm_tokens,
+                                    ),
+                                }),
                             }),
                         );
                         continue;
@@ -3454,6 +3603,13 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             "sab_score": candidate.metrics.sab_score,
                             "branch_id": candidate.branch_id,
                             "reason": reason,
+                            "token_arms": serde_json::json!({
+                                "count": candidate.token_arm_tokens.len(),
+                                "per_arm_reduction_pct": per_arm_token_delta_pcts(
+                                    current_baseline_metrics.tokens_used,
+                                    &candidate.token_arm_tokens,
+                                ),
+                            }),
                         }),
                     );
                 }
@@ -3585,6 +3741,13 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             "run_id": run_id,
                             "binary_sha256": binary_sha256,
                             "report_path": report_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+                            "token_arms": serde_json::json!({
+                                "count": winner.token_arm_tokens.len(),
+                                "per_arm_reduction_pct": per_arm_token_delta_pcts(
+                                    current_baseline_metrics.tokens_used,
+                                    &winner.token_arm_tokens,
+                                ),
+                            }),
                         }),
                     );
 
@@ -4884,6 +5047,12 @@ impl Drop for WorktreeGuard<'_> {
 /// `cargo fmt` auto-fix applied during evaluation, which the raw LLM patch
 /// lacks. Applying THIS diff to the repo is what makes the committed state
 /// byte-identical to the state that passed the gates.
+///
+/// A zero-commit repository has no resolvable HEAD, and `git diff --cached HEAD`
+/// fails there — the tested diff would silently read as absent and the candidate
+/// would be marked "no effective diff". Diff against the standard empty-tree
+/// object (the same fallback as `cli::headless::capture_patch`) so staged
+/// content is still captured as additions.
 fn capture_tested_diff(worktree: &Path) -> Option<String> {
     let add = Command::new("git")
         .env_remove("GIT_INDEX_FILE")
@@ -4894,9 +5063,29 @@ fn capture_tested_diff(worktree: &Path) -> Option<String> {
     if !add.status.success() {
         return None;
     }
+    // A freshly `git init`-ed repo has no HEAD: `git diff --cached HEAD` fails
+    // there and the candidate's tested diff would silently read as 'no
+    // effective diff' (PatchFailed) even for a staged change. Diff against the
+    // standard empty-tree object instead, so a zero-commit repo reports its
+    // staged files as additions — mirroring `cli::headless::capture_patch`. A
+    // genuine diff failure with a real HEAD still returns None.
+    let head_ok = Command::new("git")
+        .env_remove("GIT_INDEX_FILE")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(worktree)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    let diff_base = if head_ok {
+        "HEAD"
+    } else {
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    };
     let diff = Command::new("git")
         .env_remove("GIT_INDEX_FILE")
-        .args(["diff", "--cached", "--binary", "HEAD"])
+        .args(["diff", "--cached", "--binary", diff_base])
         .current_dir(worktree)
         .output()
         .ok()?;

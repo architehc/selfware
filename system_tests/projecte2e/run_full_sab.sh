@@ -8,6 +8,25 @@
 #
 # Compatible with bash 3.x (macOS default).
 #
+# Stall detection is LLM-progress-aware: a scenario is only killed as stalled
+# when BOTH agent-external progress (agent.log growth, source-file changes)
+# AND LLM progress have been silent for STALL_TIMEOUT seconds.  LLM progress
+# is a fresh <workdir>/.selfware/turns/turn_*.json when the per-turn artifact
+# stream is enabled (agent.disable_turn_artifacts=false), otherwise a fresh
+# write anywhere under the scenario workdir (git objects on commit, audit
+# spill, tool output).  A scenario that is actively driving the model —
+# emitting tokens to stdout, writing files, or completing LLM calls — is never
+# reaped for being quiet on one channel alone.
+#
+# Tunables (all env-overridable):
+#   MAX_PARALLEL=6        Peak concurrent scenarios
+#   POLL_INTERVAL=300     Top-level progress-report cadence (seconds)
+#   STALL_TIMEOUT=300     Stall window (seconds); both progress channels must
+#                         be silent this long before a scenario is killed
+#   MAX_TIMEOUT_MULT=5    Absolute ceiling = per-scenario timeout * this
+#                         (raised 3 -> 5 so long-thinking scenarios keep
+#                         headroom above the stall window; user-approved)
+#
 # Usage:
 #   ./run_full_sab.sh                      # Run all scenarios
 #   ./run_full_sab.sh expert_async_race    # Run a single scenario
@@ -47,8 +66,8 @@ PID_DIR="${OUT_DIR}/pids"
 
 MAX_PARALLEL="${MAX_PARALLEL:-6}"
 POLL_INTERVAL="${POLL_INTERVAL:-300}"  # 5 minutes
-STALL_TIMEOUT="${STALL_TIMEOUT:-300}"  # Kill after 5min of no progress
-MAX_TIMEOUT_MULT="${MAX_TIMEOUT_MULT:-3}"  # Absolute ceiling = timeout * multiplier
+STALL_TIMEOUT="${STALL_TIMEOUT:-300}"  # Kill after 5min of no progress (requires BOTH channels idle)
+MAX_TIMEOUT_MULT="${MAX_TIMEOUT_MULT:-5}"  # Absolute ceiling = timeout * multiplier
 
 # All scenarios: name:difficulty:prompt:timeout_secs:validate_cmd
 ALL_SCENARIOS=(
@@ -346,9 +365,11 @@ run_scenario() {
   start_ts="$(date +%s)"
   local max_deadline=$((start_ts + timeout_secs * MAX_TIMEOUT_MULT))
   local stall_marker="${log_dir}/.stall_marker"
+  local llm_marker="${log_dir}/.llm_marker"
   local progress_file="${log_dir}/progress_events.log"
 
   touch "${stall_marker}"
+  touch "${llm_marker}"
   : > "${progress_file}"
 
   # Launch agent in background with GIT_CEILING_DIRECTORIES to forbid upward git search
@@ -362,15 +383,27 @@ run_scenario() {
 
   echo "[$(date +%H:%M:%S)] ${name}: agent started (pid=${agent_pid}, stall=${STALL_TIMEOUT}s, max=$((timeout_secs * MAX_TIMEOUT_MULT))s)" >> "${progress_file}"
 
-  # Monitor progress: log growth + source file changes
+  # Monitor progress on two independent clocks:
+  #   - external clock: log growth + source file changes
+  #   - LLM clock:      fresh turn artifact under <workdir>/.selfware/turns/
+  #                     (selfware writes one after every LLM call when the
+  #                     debug artifact stream is enabled), else the newest
+  #                     file mtime anywhere under the scenario workdir
+  # A scenario is killed as stalled only when BOTH clocks have been idle for
+  # STALL_TIMEOUT — an actively-thinking agent (LLM requests in flight with no
+  # tokens or files yet) must never be reaped on one quiet channel alone.
   local last_log_size=0
   local last_activity_ts="${start_ts}"
+  local last_llm_ts="${start_ts}"
+  local external_progress=0
   local kill_reason=""
 
   while kill -0 "${agent_pid}" 2>/dev/null; do
     sleep 10
     local now
     now="$(date +%s)"
+    # Reset per-iteration external-progress flag (LLM-only logging gate)
+    external_progress=0
 
     # Progress signal 1: agent log file is growing
     local new_log_size=0
@@ -383,12 +416,31 @@ run_scenario() {
     src_changes="$(find "${work_dir}" -not -path '*/target/*' -not -name 'Cargo.lock' \
       -type f -newer "${stall_marker}" 2>/dev/null | head -1)" || true
 
+    # Progress signal 3: LLM progress.  selfware writes a fresh turn artifact
+    # under <workdir>/.selfware/turns/ after every LLM call — the strongest
+    # "the model is being called" evidence.  Turn-artifact capture is gated on
+    # agent.disable_turn_artifacts (off in the SAB config), so when that
+    # stream is absent fall back to the mtime of the newest file anywhere
+    # under the scenario workdir (git objects on commit, audit spill, tool
+    # output).  A fresh LLM-progress marker keeps the LLM clock alive even
+    # while stdout stays quiet.
+    local llm_change=""
+    if [[ -d "${work_dir}/.selfware/turns" ]]; then
+      llm_change="$(find "${work_dir}/.selfware/turns" -name 'turn_*.json' \
+        -newer "${llm_marker}" 2>/dev/null | head -1)" || true
+    fi
+    if [[ -z "${llm_change}" ]]; then
+      llm_change="$(find "${work_dir}" -type f -newer "${llm_marker}" \
+        2>/dev/null | head -1)" || true
+    fi
+
     if [[ ${new_log_size} -gt ${last_log_size} ]] || [[ -n "${src_changes}" ]]; then
-      # Progress detected — reset stall timer
+      # Progress detected — reset external stall timer
       local delta=$((new_log_size - last_log_size))
       last_log_size=${new_log_size}
       last_activity_ts=${now}
       touch "${stall_marker}"
+      external_progress=1
       if [[ -n "${src_changes}" ]]; then
         echo "[$(date +%H:%M:%S)] ${name}: progress — file change detected (log +${delta}B)" >> "${progress_file}"
       elif [[ ${delta} -gt 100 ]]; then
@@ -396,11 +448,23 @@ run_scenario() {
       fi
     fi
 
-    # Check stall timeout
-    local idle_secs=$((now - last_activity_ts))
-    if [[ ${idle_secs} -ge ${STALL_TIMEOUT} ]]; then
+    if [[ -n "${llm_change}" ]]; then
+      # LLM progress detected — reset LLM stall timer
+      last_llm_ts=${now}
+      touch "${llm_marker}"
+      if [[ ${external_progress} -eq 0 ]]; then
+        echo "[$(date +%H:%M:%S)] ${name}: LLM progress — ${llm_change}" >> "${progress_file}"
+      fi
+    fi
+
+    # Check stall timeout: only when BOTH the external clock (log growth /
+    # source changes) AND the LLM clock (fresh turn artifact / new workdir
+    # file) have been idle for the full stall period.
+    local ext_idle=$((now - last_activity_ts))
+    local llm_idle=$((now - last_llm_ts))
+    if [[ ${ext_idle} -ge ${STALL_TIMEOUT} && ${llm_idle} -ge ${STALL_TIMEOUT} ]]; then
       kill_reason="stall"
-      echo "[$(date +%H:%M:%S)] ${name}: STALLED for ${idle_secs}s — killing" >> "${progress_file}"
+      echo "[$(date +%H:%M:%S)] ${name}: STALLED (external ${ext_idle}s, LLM ${llm_idle}s idle) — killing" >> "${progress_file}"
       kill_tree "${agent_pid}" TERM
       sleep 2
       kill_tree "${agent_pid}" KILL
