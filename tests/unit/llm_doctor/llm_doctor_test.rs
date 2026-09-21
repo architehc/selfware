@@ -803,3 +803,519 @@ fn test_resolve_vision_target_precedence_and_credential_scoping() {
     let target_same = resolve_vision_target("qwen-vl-fast", &config).expect("must resolve target");
     assert_eq!(target_same.api_key, Some("primary-secret-key"));
 }
+
+// =========================================================================
+// Streamed tool-call probe: verdict classification (fixtures)
+// =========================================================================
+
+/// Raw SSE stream that delivers a native `tool_calls` delta (OpenAI-style).
+const SSE_NATIVE_TOOL_CALL: &str = r#"data: {"choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"calculator","arguments":""}}]},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"expression\":\"2+2\"}"}}]},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}
+
+data: [DONE]
+
+"#;
+
+/// Raw SSE stream that delivers a text/XML tool call inside streamed content
+/// (GLM/Qwen text-format models).
+const SSE_TEXT_XML_TOOL_CALL: &str = r#"data: {"choices":[{"index":0,"delta":{"content":"<tool>\n<name>calculator</name>\n<arguments>{\"expression\":\"2+2\"}</arguments>\n</tool>"},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}
+
+data: [DONE]
+
+"#;
+
+#[test]
+fn test_classify_streaming_tool_call_native_sse_delivered() {
+    assert_eq!(
+        classify_streaming_tool_call_body(SSE_NATIVE_TOOL_CALL),
+        StreamToolCallVerdict::Delivered
+    );
+}
+
+#[test]
+fn test_classify_streaming_tool_call_text_xml_delivered() {
+    assert_eq!(
+        classify_streaming_tool_call_body(SSE_TEXT_XML_TOOL_CALL),
+        StreamToolCallVerdict::Delivered
+    );
+}
+
+#[test]
+fn test_classify_streaming_tool_call_healthy_content_no_tool() {
+    let body = r#"data: {"choices":[{"index":0,"delta":{"content":"4"},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11}}
+
+data: [DONE]
+
+"#;
+    assert_eq!(
+        classify_streaming_tool_call_body(body),
+        StreamToolCallVerdict::NoToolCall
+    );
+}
+
+#[test]
+fn test_classify_streaming_tool_call_role_only_no_tool() {
+    // Deltas arrived (role + finish) but no content and no tool call.
+    let body = r#"data: {"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+"#;
+    assert_eq!(
+        classify_streaming_tool_call_body(body),
+        StreamToolCallVerdict::NoToolCall
+    );
+}
+
+#[test]
+fn test_classify_streaming_tool_call_empty_body_broken() {
+    assert_eq!(
+        classify_streaming_tool_call_body(""),
+        StreamToolCallVerdict::Broken
+    );
+}
+
+#[test]
+fn test_classify_streaming_tool_call_done_only_broken() {
+    let body = "data: [DONE]\n\n";
+    assert_eq!(
+        classify_streaming_tool_call_body(body),
+        StreamToolCallVerdict::Broken
+    );
+}
+
+#[test]
+fn test_classify_streaming_tool_call_plain_json_broken() {
+    // A server that ANSWERED a stream=true request with a plain JSON body
+    // (even one containing tool_calls) ignored `stream` — broken path.
+    let body = r#"{"id":"r","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"calculator","arguments":"{\"expression\":\"2+2\"}"}}]},"finish_reason":"tool_calls"}]}"#;
+    assert_eq!(
+        classify_streaming_tool_call_body(body),
+        StreamToolCallVerdict::Broken
+    );
+}
+
+#[test]
+fn test_classify_streaming_tool_call_malformed_json_broken() {
+    let body = "data: {not json}\n\ndata: [DONE]\n\n";
+    assert_eq!(
+        classify_streaming_tool_call_body(body),
+        StreamToolCallVerdict::Broken
+    );
+}
+
+// =========================================================================
+// Streamed tool-call probe: end-to-end against real HTTP servers
+// =========================================================================
+
+/// Drain one HTTP request (headers + Content-Length body) from the socket so
+/// the probe's POST is fully consumed before we answer.
+async fn drain_request_body(socket: &mut tokio::net::TcpStream) {
+    use tokio::io::AsyncReadExt;
+    let mut buf = [0u8; 8192];
+    let mut received: Vec<u8> = Vec::new();
+    let mut expected: Option<usize> = None;
+    loop {
+        let n = socket.read(&mut buf).await.unwrap();
+        if n == 0 {
+            break;
+        }
+        received.extend_from_slice(&buf[..n]);
+        if expected.is_none() {
+            if let Some(headers_end) = received.windows(4).position(|window| window == b"\r\n\r\n")
+            {
+                let headers = String::from_utf8_lossy(&received[..headers_end]).to_lowercase();
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse().ok())
+                    .unwrap_or(0);
+                expected = Some(headers_end + 4 + length);
+            }
+        }
+        if expected.is_some_and(|total| received.len() >= total) {
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_probe_streaming_tool_call_delivered_over_sse() {
+    use tokio::io::AsyncWriteExt;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        drain_request_body(&mut socket).await;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{}",
+            SSE_NATIVE_TOOL_CALL
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+
+    let probe =
+        probe_streaming_tool_call(&format!("http://{addr}"), "mock-model", &Config::default())
+            .await;
+    server.await.unwrap();
+
+    assert_eq!(
+        probe.verdict,
+        StreamToolCallVerdict::Delivered,
+        "streamed probe must classify a healthy SSE tool-call stream as Delivered; detail: {}",
+        probe.detail
+    );
+}
+
+#[tokio::test]
+async fn test_probe_streaming_tool_call_broken_when_server_ignores_stream() {
+    // MockLlmServer answers a stream=true request with a PLAIN JSON body
+    // containing tool_calls — the streaming path did not stream → Broken.
+    let server = crate::testing::mock_api::MockLlmServer::builder()
+        .with_tool_calls(vec![crate::testing::mock_api::MockToolCall {
+            id: "call_1".to_string(),
+            name: "calculator".to_string(),
+            arguments: "{\"expression\":\"2+2\"}".to_string(),
+        }])
+        .build()
+        .await;
+
+    let endpoint = format!("{}/v1", server.url());
+    let probe = probe_streaming_tool_call(&endpoint, "mock-model", &Config::default()).await;
+    server.stop().await;
+
+    assert_eq!(
+        probe.verdict,
+        StreamToolCallVerdict::Broken,
+        "a server that ignores `stream` must be classified Broken; detail: {}",
+        probe.detail
+    );
+}
+
+#[tokio::test]
+async fn test_probe_streaming_tool_call_broken_on_http_error() {
+    let server = crate::testing::mock_api::MockLlmServer::builder()
+        .with_error(500, "{\"error\": \"internal\"}")
+        .build()
+        .await;
+
+    let endpoint = format!("{}/v1", server.url());
+    let probe = probe_streaming_tool_call(&endpoint, "mock-model", &Config::default()).await;
+    server.stop().await;
+
+    assert_eq!(
+        probe.verdict,
+        StreamToolCallVerdict::Broken,
+        "an HTTP error on the streamed request must be classified Broken; detail: {}",
+        probe.detail
+    );
+}
+
+// =========================================================================
+// /get_server_info parsing
+// =========================================================================
+
+#[test]
+fn test_parse_server_info_sglang_full() {
+    let body = r#"{"sglang_version":"0.4.3.post2","max_total_num_tokens":32768,"max_running_requests":8,"tool_call_parser":"qwen","reasoning_parser":"qwen3"}"#;
+    let info = parse_server_info(body);
+    assert_eq!(info.context_length, Some(32768));
+    assert_eq!(info.max_streams, Some(8));
+    assert_eq!(info.tool_call_parser.as_deref(), Some("qwen"));
+}
+
+#[test]
+fn test_parse_server_info_alternative_field_names() {
+    let body = r#"{"context_length":8192,"max_streams":4,"max_concurrent_requests":2}"#;
+    let info = parse_server_info(body);
+    assert_eq!(info.context_length, Some(8192));
+    assert_eq!(info.max_streams, Some(4));
+    assert_eq!(info.tool_call_parser, None);
+}
+
+#[test]
+fn test_parse_server_info_tool_parser_empty() {
+    let body = r#"{"sglang_version":"0.4.0","tool_call_parser":"","reasoning_parser":"qwen3"}"#;
+    let info = parse_server_info(body);
+    assert_eq!(info.context_length, None);
+    assert_eq!(info.max_streams, None);
+    assert_eq!(info.tool_call_parser.as_deref(), Some(""));
+}
+
+#[test]
+fn test_parse_server_info_garbage_defaults() {
+    assert_eq!(parse_server_info("not json"), ServerInfo::default());
+    assert_eq!(parse_server_info("[]"), ServerInfo::default());
+    assert_eq!(parse_server_info(""), ServerInfo::default());
+}
+
+// =========================================================================
+// /get_server_info comparison vs configured model needs
+// =========================================================================
+
+fn capacity_names(rows: &[(String, DoctorCheckStatus, String, Option<String>)]) -> Vec<&str> {
+    rows.iter().map(|(name, _, _, _)| name.as_str()).collect()
+}
+
+fn capacity_warns(rows: &[(String, DoctorCheckStatus, String, Option<String>)]) -> Vec<&str> {
+    rows.iter()
+        .filter(|(_, status, _, _)| *status == DoctorCheckStatus::Warning)
+        .map(|(name, _, _, _)| name.as_str())
+        .collect()
+}
+
+#[test]
+fn test_server_capacity_warns_on_small_context_window() {
+    let info = ServerInfo {
+        context_length: Some(8192),
+        ..ServerInfo::default()
+    };
+    let config = Config {
+        context_length: 32768,
+        ..Config::default()
+    };
+    let rows = server_capacity_checks(&info, &config);
+    assert_eq!(
+        capacity_warns(&rows),
+        vec!["server context window (get_server_info)"]
+    );
+}
+
+#[test]
+fn test_server_capacity_silent_when_context_satisfies() {
+    let info = ServerInfo {
+        context_length: Some(65536),
+        ..ServerInfo::default()
+    };
+    let config = Config {
+        context_length: 32768,
+        ..Config::default()
+    };
+    let rows = server_capacity_checks(&info, &config);
+    assert!(
+        !rows
+            .iter()
+            .any(|(_, status, _, _)| *status == DoctorCheckStatus::Warning),
+        "satisfied context window must not warn: {:?}",
+        rows
+    );
+    assert!(capacity_names(&rows).contains(&"server context window (get_server_info)"));
+}
+
+#[test]
+fn test_server_capacity_warns_on_zero_streams_with_streaming_on() {
+    let info = ServerInfo {
+        max_streams: Some(0),
+        ..ServerInfo::default()
+    };
+    let config = Config {
+        agent: crate::config::AgentConfig {
+            streaming: true,
+            ..crate::config::AgentConfig::default()
+        },
+        ..Config::default()
+    };
+    let rows = server_capacity_checks(&info, &config);
+    assert_eq!(
+        capacity_warns(&rows),
+        vec!["server stream capacity (get_server_info)"]
+    );
+}
+
+#[test]
+fn test_server_capacity_warns_on_low_streams_with_streaming_on() {
+    // selfware default [concurrency] max_streams is 4; a server limit of 2
+    // cannot serve selfware's own concurrency demand.
+    let info = ServerInfo {
+        max_streams: Some(2),
+        ..ServerInfo::default()
+    };
+    let config = Config {
+        agent: crate::config::AgentConfig {
+            streaming: true,
+            ..crate::config::AgentConfig::default()
+        },
+        ..Config::default()
+    };
+    assert_eq!(config.concurrency.max_streams, 4);
+    let rows = server_capacity_checks(&info, &config);
+    assert_eq!(
+        capacity_warns(&rows),
+        vec!["server stream capacity (get_server_info)"]
+    );
+}
+
+#[test]
+fn test_server_capacity_no_stream_row_when_streaming_disabled() {
+    let info = ServerInfo {
+        max_streams: Some(0),
+        ..ServerInfo::default()
+    };
+    let config = Config {
+        agent: crate::config::AgentConfig {
+            streaming: false,
+            ..crate::config::AgentConfig::default()
+        },
+        ..Config::default()
+    };
+    let rows = server_capacity_checks(&info, &config);
+    assert!(
+        !capacity_names(&rows).contains(&"server stream capacity (get_server_info)"),
+        "streaming disabled → no stream-capacity row"
+    );
+    assert!(rows.is_empty());
+}
+
+#[test]
+fn test_server_capacity_silent_when_stream_capacity_satisfies() {
+    let info = ServerInfo {
+        max_streams: Some(16),
+        ..ServerInfo::default()
+    };
+    let config = Config {
+        agent: crate::config::AgentConfig {
+            streaming: true,
+            ..crate::config::AgentConfig::default()
+        },
+        ..Config::default()
+    };
+    let rows = server_capacity_checks(&info, &config);
+    assert!(
+        !rows
+            .iter()
+            .any(|(_, status, _, _)| *status == DoctorCheckStatus::Warning),
+        "adequate stream capacity with streaming on must not warn: {:?}",
+        rows
+    );
+}
+
+#[test]
+fn test_server_capacity_warns_on_missing_tool_parser_with_native_fc() {
+    let info = ServerInfo {
+        tool_call_parser: None,
+        ..ServerInfo::default()
+    };
+    let config = Config {
+        agent: crate::config::AgentConfig {
+            native_function_calling: true,
+            ..crate::config::AgentConfig::default()
+        },
+        ..Config::default()
+    };
+    let rows = server_capacity_checks(&info, &config);
+    assert_eq!(
+        capacity_warns(&rows),
+        vec!["server tool-call parser (get_server_info)"]
+    );
+}
+
+#[test]
+fn test_server_capacity_silent_on_tool_parser_with_native_fc() {
+    let info = ServerInfo {
+        tool_call_parser: Some("qwen".to_string()),
+        ..ServerInfo::default()
+    };
+    let config = Config {
+        agent: crate::config::AgentConfig {
+            native_function_calling: true,
+            ..crate::config::AgentConfig::default()
+        },
+        ..Config::default()
+    };
+    let rows = server_capacity_checks(&info, &config);
+    assert!(
+        !rows
+            .iter()
+            .any(|(_, status, _, _)| *status == DoctorCheckStatus::Warning),
+        "server tool-call parser present → must not warn: {:?}",
+        rows
+    );
+}
+
+#[test]
+fn test_server_capacity_silent_without_native_fc() {
+    // No native FC in config → no tool-parser row at all.
+    let info = ServerInfo {
+        tool_call_parser: None,
+        ..ServerInfo::default()
+    };
+    let config = Config {
+        agent: crate::config::AgentConfig {
+            native_function_calling: false,
+            ..crate::config::AgentConfig::default()
+        },
+        ..Config::default()
+    };
+    let rows = server_capacity_checks(&info, &config);
+    assert!(!capacity_names(&rows).contains(&"server tool-call parser (get_server_info)"));
+    assert!(
+        !rows
+            .iter()
+            .any(|(_, status, _, _)| *status == DoctorCheckStatus::Warning),
+        "native FC off → no tool-parser row and no warnings: {:?}",
+        rows
+    );
+}
+
+#[test]
+fn test_server_capacity_satisfied_model_stays_silent() {
+    // All three capabilities satisfy the model → zero warnings.
+    let info = ServerInfo {
+        context_length: Some(131072),
+        max_streams: Some(64),
+        tool_call_parser: Some("qwen".to_string()),
+    };
+    let config = Config {
+        context_length: 32768,
+        agent: crate::config::AgentConfig {
+            streaming: true,
+            native_function_calling: true,
+            ..crate::config::AgentConfig::default()
+        },
+        ..Config::default()
+    };
+    let rows = server_capacity_checks(&info, &config);
+    assert!(
+        rows.iter()
+            .all(|(_, status, _, _)| *status == DoctorCheckStatus::Ok),
+        "all satisfied → every row passes (no warnings), got: {:?}",
+        rows
+    );
+}
+
+// =========================================================================
+// "disable thinking" advice gating
+// =========================================================================
+
+#[test]
+fn test_thinking_disable_advice_only_on_endpoint_rejection() {
+    // Endpoint accepts thinking control → NO advice (the stale-advice fix).
+    assert_eq!(thinking_disable_advice(Some(true), Some(true)), None);
+    assert_eq!(thinking_disable_advice(None, Some(true)), None);
+    assert_eq!(thinking_disable_advice(Some(true), Some(false)), Some(
+        "Endpoint rejects thinking control — disable chat_template_kwargs.enable_thinking in selfware config"
+    ));
+    assert_eq!(thinking_disable_advice(None, Some(false)), Some(
+        "Endpoint rejects thinking control — add chat_template_kwargs.enable_thinking = false for tool-heavy Qwen requests"
+    ));
+    // No typed signal (probe skipped) → NO advice.
+    assert_eq!(thinking_disable_advice(Some(true), None), None);
+    assert_eq!(thinking_disable_advice(None, None), None);
+    // Config already disabled → no advice regardless of the endpoint signal.
+    assert_eq!(thinking_disable_advice(Some(false), Some(false)), None);
+    assert_eq!(thinking_disable_advice(Some(false), Some(true)), None);
+    assert_eq!(thinking_disable_advice(Some(false), None), None);
+}

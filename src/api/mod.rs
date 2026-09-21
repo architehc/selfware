@@ -99,7 +99,21 @@ fn canonicalize_message_order(messages: &mut Vec<Message>) {
     // OpenRouter 400'd on every request once a recovery path left the history
     // trailing on assistant). Ending on a user message is accepted by every
     // provider, so close the turn with a minimal continuation.
-    if messages.last().map(|m| m.role.as_str()) == Some("assistant") {
+    //
+    // Exception: an assistant that still carries `tool_calls` is an OPEN pair —
+    // its role=tool results arrive on the next dispatch step. Wedging a user
+    // message between the call and its future results would produce the exact
+    // "messages with role 'tool' must immediately follow an assistant message
+    // with 'tool_calls'" rejection OpenAI-compatible endpoints raise (HTTP
+    // 400); skip the continuation so the results can land right behind the
+    // call. (A dangling call is dropped upstream by the caller's pair
+    // invariants before this point; the provider still rejects a genuinely
+    // orphaned tail pair either way.)
+    let tail_is_open_pair = messages
+        .last()
+        .map(|m| m.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty()))
+        .unwrap_or(false);
+    if !tail_is_open_pair && messages.last().map(|m| m.role.as_str()) == Some("assistant") {
         messages.push(Message::user("Continue with the task."));
     }
 }

@@ -103,6 +103,15 @@ pub(crate) struct Cli {
     #[arg(long = "continue")]
     pub(crate) continue_flag: bool,
 
+    /// Auto-resume the most recent INCOMPLETE task at startup, so a long
+    /// task interrupted mid-run (crash/restart) picks up from its
+    /// checkpoint. Implicit and conservative: an explicit task or resume
+    /// argument (a subcommand, `-p` prompt, `--continue`, `--resume-session`)
+    /// always wins and suppresses auto-resume; if no incomplete checkpoint
+    /// exists, startup proceeds normally.
+    #[arg(long)]
+    pub(crate) autocontinue: bool,
+
     /// Multi-chat: assign each task to role-matched idle swarm agents by trust.
     ///
     /// Only meaningful with `multi-chat`. The coordinator's assignment gates

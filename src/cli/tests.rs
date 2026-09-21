@@ -1397,6 +1397,28 @@ fn cli_continue_flag_parses_and_keeps_dash_c_for_config() {
 }
 
 #[test]
+fn cli_autocontinue_flag_parses() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from(["selfware", "--autocontinue"]).unwrap();
+    assert!(cli.autocontinue);
+    let cli = Cli::try_parse_from(["selfware"]).unwrap();
+    assert!(!cli.autocontinue);
+}
+
+#[test]
+fn autocontinue_explicit_task_or_resume_argument_wins() {
+    // --autocontinue is an implicit fallback: any explicit task or resume
+    // argument must suppress it (the explicit intent wins).
+    assert!(!autocontinue_should_run(true, false, false, false)); // a subcommand
+    assert!(!autocontinue_should_run(false, true, false, false)); // -p prompt
+    assert!(!autocontinue_should_run(false, false, true, false)); // --continue
+    assert!(!autocontinue_should_run(false, false, false, true)); // --resume-session
+    assert!(!autocontinue_should_run(true, true, true, true)); // everything at once
+                                                               // No explicit task/resume argument → the auto-resume may run.
+    assert!(autocontinue_should_run(false, false, false, false));
+}
+
+#[test]
 fn cli_mcp_add_remove_parse() {
     use clap::Parser;
     let cli = Cli::try_parse_from([
@@ -1624,4 +1646,73 @@ fn run_summary_labels_partial_provider_costs() {
     let report = render_run_summary(&summary, None);
     assert!(report.contains("known cost $0.0123"), "{report}");
     assert!(report.contains("billing incomplete"), "{report}");
+}
+
+// ── resume_named_session_or_bail ────────────────────────────────────
+
+#[test]
+fn resume_missing_session_bails_instead_of_starting_empty() {
+    // Regression: a typo'd/unknown `--resume-session` used to print "Failed
+    // to resume session" and then CONTINUE with a fresh empty session —
+    // burning a full headless run on a session that never existed. It must
+    // now bail with a session-not-found error.
+    let err = resume_named_session_or_bail(
+        || Err(anyhow::anyhow!("Chat 'ghost' not found")),
+        "ghost",
+        false,
+    )
+    .expect_err("a missing named session must bail, not silently continue");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("does not exist") && msg.contains("ghost"),
+        "expected a session-not-found diagnostic naming the session, got: {}",
+        msg
+    );
+    assert!(
+        msg.contains("refusing to start with an empty session"),
+        "must name the refusal explicitly, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn resume_load_failure_bails_with_load_error() {
+    // Corrupt / undecryptable / malformed chat files are a different failure
+    // from a missing session: the diagnostic must say "load failed", not
+    // "does not exist".
+    let err = resume_named_session_or_bail(
+        || Err(anyhow::anyhow!("Chat file is not valid UTF-8")),
+        "good-name",
+        false,
+    )
+    .expect_err("a corrupt session must bail, not silently continue");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("load failed") && msg.contains("good-name"),
+        "expected a load-failure diagnostic naming the session, got: {}",
+        msg
+    );
+    assert!(
+        !msg.contains("does not exist"),
+        "a load failure must not be reported as a missing session, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn resume_existing_session_continues_and_announces() {
+    // The legit path is preserved: an existing session resumes successfully
+    // (announcement when requested, otherwise silent) and the run continues.
+    let ok = resume_named_session_or_bail(|| Ok(3), "existing", false);
+    assert!(
+        ok.is_ok(),
+        "existing session must resume, got: {:?}",
+        ok.err()
+    );
+    let ok = resume_named_session_or_bail(|| Ok(5), "existing", true);
+    assert!(
+        ok.is_ok(),
+        "existing session must resume with announce, got: {:?}",
+        ok.err()
+    );
 }

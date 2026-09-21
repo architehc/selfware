@@ -4040,6 +4040,53 @@ fn test_canonicalize_only_tool_messages() {
 }
 
 #[test]
+fn test_canonicalize_skips_continuation_after_open_tool_pair() {
+    // A trailing assistant that still carries `tool_calls` is an OPEN pair:
+    // its role=tool results arrive on the next dispatch step. Wedging the
+    // user continuation between the call and its future results would produce
+    // the "messages with role 'tool' must immediately follow an assistant
+    // message with 'tool_calls'" HTTP 400 on the next request — skip it.
+    let mut msgs = vec![
+        Message::system("sys".to_string()),
+        Message::user("task".to_string()),
+        Message {
+            role: "assistant".to_string(),
+            content: types::MessageContent::Text(String::new()),
+            reasoning_content: None,
+            tool_calls: Some(vec![types::ToolCall {
+                id: "call_1".to_string(),
+                call_type: "function".to_string(),
+                function: types::ToolFunction {
+                    name: "shell_exec".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }]),
+            tool_call_id: None,
+            name: None,
+        },
+    ];
+    canonicalize_message_order(&mut msgs);
+    assert_eq!(
+        msgs.len(),
+        3,
+        "no continuation may be appended after an open pair"
+    );
+    assert_eq!(msgs.last().unwrap().role, "assistant");
+    assert!(msgs.last().unwrap().tool_calls.is_some());
+
+    // Control: a plain trailing assistant still gets its continuation.
+    let mut control = vec![
+        Message::system("sys".to_string()),
+        Message::user("task".to_string()),
+        Message::assistant("plain text".to_string()),
+    ];
+    canonicalize_message_order(&mut control);
+    assert_eq!(control.len(), 4);
+    assert_eq!(control.last().unwrap().role, "user");
+    assert_eq!(control.last().unwrap().content, "Continue with the task.");
+}
+
+#[test]
 fn test_canonicalize_system_after_user_single() {
     // Single system message after user/assistant is NOT moved
     let mut msgs = vec![
@@ -4300,6 +4347,103 @@ async fn test_chat_with_profile_honors_native_function_calling_false() {
     assert!(
         body.get("tool_choice").is_none(),
         "profile native FC=false must omit tool_choice, body was: {}",
+        bodies[0]
+    );
+
+    server.stop().await;
+}
+
+/// Regression: with native function calling OFF, the main `chat()` wire body
+/// must not carry the OpenAI `tools` schema — reasoning / non-FC models and
+/// minimalist servers reject the field with HTTP 400. Tool definitions still
+/// reach the model through the XML-protocol system prompt.
+#[tokio::test]
+async fn test_chat_xml_mode_wire_body_carries_no_tools_schema() {
+    use crate::testing::mock_api::MockLlmServer;
+
+    let server = MockLlmServer::builder()
+        .with_response("text-mode ack")
+        .build()
+        .await;
+
+    let mut config = crate::config::Config {
+        endpoint: format!("{}/v1", server.url()),
+        ..Default::default()
+    };
+    config.agent.native_function_calling = false;
+    let client = ApiClient::new(&config).unwrap();
+
+    let result = client
+        .chat(
+            vec![Message::user("call a tool")],
+            Some(vec![dummy_shell_tool()]),
+            ThinkingMode::Enabled,
+        )
+        .await;
+    assert!(result.is_ok(), "chat failed: {:?}", result.err());
+
+    let bodies = server.captured_request_bodies().await;
+    assert!(!bodies.is_empty(), "no request captured");
+    let body: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+    assert!(
+        body.get("tools").is_none(),
+        "XML path must NOT carry the tools schema, body was: {}",
+        bodies[0]
+    );
+    assert!(
+        body.get("tool_choice").is_none(),
+        "XML path must NOT carry tool_choice, body was: {}",
+        bodies[0]
+    );
+    // The tool definitions still reached the model via the protocol prompt.
+    let system_text = body["messages"][0]["content"].as_str().unwrap_or_default();
+    assert!(
+        system_text.contains("Tool protocol") && system_text.contains("shell_exec"),
+        "XML protocol prompt must embed the tool schemas, system was: {}",
+        system_text
+    );
+
+    server.stop().await;
+}
+
+/// Regression: with native function calling ON, the main `chat()` wire body
+/// carries both `tools` and `tool_choice: "auto"`.
+#[tokio::test]
+async fn test_chat_native_fc_wire_body_carries_tools_and_tool_choice() {
+    use crate::testing::mock_api::MockLlmServer;
+
+    let server = MockLlmServer::builder()
+        .with_response("native fc ack")
+        .build()
+        .await;
+
+    let mut config = crate::config::Config {
+        endpoint: format!("{}/v1", server.url()),
+        ..Default::default()
+    };
+    config.agent.native_function_calling = true;
+    let client = ApiClient::new(&config).unwrap();
+
+    let result = client
+        .chat(
+            vec![Message::user("call a tool")],
+            Some(vec![dummy_shell_tool()]),
+            ThinkingMode::Enabled,
+        )
+        .await;
+    assert!(result.is_ok(), "chat failed: {:?}", result.err());
+
+    let bodies = server.captured_request_bodies().await;
+    assert!(!bodies.is_empty(), "no request captured");
+    let body: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+    assert!(
+        body["tools"].is_array(),
+        "native FC wire body must carry tools, body was: {}",
+        bodies[0]
+    );
+    assert_eq!(
+        body["tool_choice"], "auto",
+        "native FC wire body must carry tool_choice: auto, body was: {}",
         bodies[0]
     );
 

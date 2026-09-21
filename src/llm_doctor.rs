@@ -76,6 +76,52 @@ struct ConnectionTestResult {
     tool_calling_works: Option<bool>,
 }
 
+// ── Streamed tool-call probe ────────────────────────────────────────────────
+
+/// Verdict of the streamed tool-call probe.
+///
+/// The probe issues ONE `stream: true` chat-completions request whose payload
+/// includes a native tool definition, then inspects the raw streamed body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum StreamToolCallVerdict {
+    /// The streamed response delivered a tool call (native `tool_calls` delta
+    /// or a text/XML tool call inside streamed content).
+    Delivered,
+    /// The streaming path failed: transport error, HTTP error, a non-SSE
+    /// response to the streamed request, or a stream with no usable
+    /// completion chunks for the tool-call payload.
+    Broken,
+    /// The stream completed healthily but delivered no tool call — the
+    /// streaming path works, tool calling on it could not be confirmed.
+    NoToolCall,
+}
+
+/// Structured result of the streamed tool-call probe.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StreamingToolCallProbe {
+    /// Typed verdict (see [`StreamToolCallVerdict`]).
+    pub verdict: StreamToolCallVerdict,
+    /// Human-readable detail describing what was observed.
+    pub detail: String,
+}
+
+// ── Server capacity (`/get_server_info`) ────────────────────────────────────
+
+/// Server-level capabilities parsed out of `/get_server_info` (SGLang
+/// exposes this route; other OpenAI-compatible backends 404 on it).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ServerInfo {
+    /// Server context window in tokens
+    /// (`max_total_num_tokens` / `max_model_len` / `context_length`).
+    pub context_length: Option<u64>,
+    /// Concurrent request/stream limit
+    /// (`max_running_requests` / `max_streams` / `max_concurrent_requests`).
+    pub max_streams: Option<u64>,
+    /// Configured tool-call parser name (`tool_call_parser`), if any.
+    /// An empty string means the field is present but no parser is set.
+    pub tool_call_parser: Option<String>,
+}
+
 // ── Structured report ────────────────────────────────────────────────────────
 
 /// Status of an individual doctor check.
@@ -137,8 +183,13 @@ pub struct DoctorReport {
     pub tokens_per_second: Option<f64>,
     /// Whether tool calling produced tool_calls (Step 5).
     pub tool_calling_works: Option<bool>,
+    /// Result of the streamed tool-call probe (Step 7): one `stream: true`
+    /// request whose payload includes a tool call.
+    pub streaming_tool_call: Option<StreamingToolCallProbe>,
     /// Capability matrix (Step 7).
     pub capabilities: Vec<DoctorCheckResult>,
+    /// `/get_server_info` capacity comparisons vs the configured model (Step 8).
+    pub server_capacity_checks: Vec<DoctorCheckResult>,
     /// `true` if any check had a FAIL outcome.
     pub had_failures: bool,
 }
@@ -155,7 +206,9 @@ impl DoctorReport {
             latency_ms: None,
             tokens_per_second: None,
             tool_calling_works: None,
+            streaming_tool_call: None,
             capabilities: Vec::new(),
+            server_capacity_checks: Vec::new(),
             had_failures: false,
         }
     }
@@ -334,6 +387,11 @@ async fn run_llm_doctor_inner(config: &Config) -> Result<(DoctorReport, bool)> {
 
     let det = detection.unwrap();
 
+    // Thinking-control support is probed once, right after detection, so the
+    // Step 3/6 recommendations and the Step 7 matrix all see the same typed
+    // signal without re-issuing the request.
+    let thinking_support = probe_thinking_support(&endpoint, &model_name, config).await;
+
     // Step 2: Model Analysis
     println!("{}", "Step 2: Model Analysis".bold().underline());
     analyse_model(&det, config);
@@ -344,7 +402,7 @@ async fn run_llm_doctor_inner(config: &Config) -> Result<(DoctorReport, bool)> {
         "{}",
         "Step 3: Template / Chat Format Check".bold().underline()
     );
-    check_template(&det, config);
+    check_template(&det, config, thinking_support);
     println!();
 
     // Step 4: Capability Assessment
@@ -413,12 +471,13 @@ async fn run_llm_doctor_inner(config: &Config) -> Result<(DoctorReport, bool)> {
 
     // Step 6: Recommendations Tree
     println!("{}", "Step 6: Recommendations".bold().underline());
-    print_recommendations(&det, config, conn_result.as_ref().ok());
+    print_recommendations(&det, config, conn_result.as_ref().ok(), thinking_support);
     println!();
 
-    // Step 7: Capabilities matrix (tools / streaming / thinking / multimodal)
+    // Step 7: Capabilities matrix (tools / streaming / thinking / multimodal /
+    // streamed tool calling)
     println!("{}", "Step 7: Capabilities Matrix".bold().underline());
-    let caps = probe_capabilities(&endpoint, &model_name, config).await;
+    let caps = probe_capabilities(&endpoint, &model_name, config, thinking_support).await;
     let tools_status = match (
         conn_result.as_ref().ok().and_then(|r| r.tool_calling_works),
         caps.tools,
@@ -520,7 +579,57 @@ async fn run_llm_doctor_inner(config: &Config) -> Result<(DoctorReport, bool)> {
         detail: mm_detail,
         fix_hint: mm_fix,
     });
+
+    // ── streamed tool-call probe: one `stream: true` request whose payload
+    // carries a tool definition, so a server whose streaming path mishandles
+    // tool-calling cannot be reported healthy.
+    let stream_tc = probe_streaming_tool_call(&endpoint, &model_name, config).await;
+    let (stc_status, stc_detail, stc_fix) = match stream_tc.verdict {
+        StreamToolCallVerdict::Delivered => (
+            DoctorCheckStatus::Ok,
+            "streamed request with a tool call delivered the tool call",
+            None,
+        ),
+        StreamToolCallVerdict::Broken => (
+            DoctorCheckStatus::Warning,
+            "streaming path did not deliver a tool call (no usable SSE completion for the tool-call payload)",
+            Some("vLLM: pass `--enable-auto-tool-choice --tool-call-parser hermes`. SGLang: ensure a tool-aware chat template. Check that the proxy does not buffer/convert SSE.")
+        ),
+        StreamToolCallVerdict::NoToolCall => (
+            DoctorCheckStatus::Warning,
+            "stream completed but produced no tool call — tool calling on the streaming path not confirmed",
+            Some("The streamed request was answered without a tool call. Confirm the backend's chat template supports tool calling and retry.")
+        ),
+    };
+    had_fail |= print_unified_check("streamed tool calling", stc_status, stc_detail, stc_fix);
+    report.capabilities.push(DoctorCheckResult {
+        name: "streamed tool calling".to_string(),
+        status: stc_status.into(),
+        detail: stc_detail.to_string(),
+        fix_hint: stc_fix.map(String::from),
+    });
+    report.streaming_tool_call = Some(stream_tc);
     println!();
+
+    // Step 8: Server capacity check — compare /get_server_info (SGLang)
+    // against the configured model's needs. Silent when the server does not
+    // expose the route or the config has no matching demand.
+    if let Some(info) = fetch_server_info(&endpoint).await {
+        let capacity_rows = server_capacity_checks(&info, config);
+        if !capacity_rows.is_empty() {
+            println!("{}", "Step 8: Server Capacity Check".bold().underline());
+            for (name, status, detail, fix_hint) in capacity_rows {
+                had_fail |= print_unified_check(&name, status, &detail, fix_hint.as_deref());
+                report.server_capacity_checks.push(DoctorCheckResult {
+                    name,
+                    status: status.into(),
+                    detail,
+                    fix_hint,
+                });
+            }
+            println!();
+        }
+    }
 
     report.had_failures = had_fail;
 
@@ -743,8 +852,55 @@ pub(crate) fn resolve_vision_target<'a>(
     None
 }
 
-async fn probe_capabilities(endpoint: &str, model: &str, config: &Config) -> Capabilities {
-    let mut caps = Capabilities::default();
+/// Probe whether the backend accepts `chat_template_kwargs` (Qwen-style
+/// thinking control). Sends one request with `enable_thinking: false`; a
+/// 2xx response means the backend accepts thinking control, a rejection or
+/// transport error means it cannot consume it.
+async fn probe_thinking_support(endpoint: &str, model: &str, config: &Config) -> Option<bool> {
+    let probe_timeout = connection_test_timeout(config);
+    let client = match Client::builder().timeout(probe_timeout).build() {
+        Ok(c) => c,
+        Err(_) => return None,
+    };
+
+    let base = endpoint.trim_end_matches('/');
+    let url = format!("{}/chat/completions", base);
+    let api_key = config.api_key.as_ref().map(|k| k.expose().to_string());
+
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": "Reply with the single word: ok"}],
+        "max_tokens": 8,
+        "temperature": 0.0,
+        "chat_template_kwargs": { "enable_thinking": false }
+    });
+    let mut req = client.post(&url).json(&body);
+    if let Some(ref k) = api_key {
+        // Don't leak the key over plaintext HTTP to a remote host / userinfo URL.
+        if crate::config::api_key::assert_credential_endpoint_safe(&url, true).is_ok() {
+            req = req.bearer_auth(k);
+        } else {
+            eprintln!("  ⚠ not sending API key to unsafe endpoint {url}");
+        }
+    }
+    match req.send().await {
+        Ok(resp) => Some(resp.status().is_success()),
+        Err(_) => Some(false),
+    }
+}
+
+async fn probe_capabilities(
+    endpoint: &str,
+    model: &str,
+    config: &Config,
+    thinking_support: Option<bool>,
+) -> Capabilities {
+    let mut caps = Capabilities {
+        thinking: thinking_support,
+        ..Capabilities::default()
+    };
+    // Thinking-control signal comes from the probe hoisted to run before
+    // Steps 3/6 so the recommendations and the matrix agree.
 
     let probe_timeout = connection_test_timeout(config);
     let client = match Client::builder().timeout(probe_timeout).build() {
@@ -783,28 +939,6 @@ async fn probe_capabilities(endpoint: &str, model: &str, config: &Config) -> Cap
         Err(_) => Some(false),
     };
 
-    // ── chat_template_kwargs (thinking) probe ──
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [{"role": "user", "content": "Reply with the single word: ok"}],
-        "max_tokens": 8,
-        "temperature": 0.0,
-        "chat_template_kwargs": { "enable_thinking": false }
-    });
-    let mut req = client.post(&url).json(&body);
-    if let Some(ref k) = api_key {
-        // Don't leak the key over plaintext HTTP to a remote host / userinfo URL.
-        if crate::config::api_key::assert_credential_endpoint_safe(&url, true).is_ok() {
-            req = req.bearer_auth(k);
-        } else {
-            eprintln!("  ⚠ not sending API key to unsafe endpoint {url}");
-        }
-    }
-    caps.thinking = match req.send().await {
-        Ok(resp) => Some(resp.status().is_success()),
-        Err(_) => Some(false),
-    };
-
     // ── behavioral vision conditioning probe ──
     if let Some(target) = resolve_vision_target(model, config) {
         let target_base = target.endpoint.trim_end_matches('/');
@@ -816,6 +950,224 @@ async fn probe_capabilities(endpoint: &str, model: &str, config: &Config) -> Cap
     }
 
     caps
+}
+
+// ── Streamed tool-call probe ────────────────────────────────────────────────
+
+/// Classify the raw body of a `stream: true` chat-completions response that
+/// carried a tool-call payload. Pure so the verdict logic is fixture-testable.
+///
+/// - Native `tool_calls` deltas or a text/XML tool call inside streamed
+///   content → [`StreamToolCallVerdict::Delivered`].
+/// - A response with no SSE `data:` events (plain JSON, error payloads, empty
+///   bodies) → [`StreamToolCallVerdict::Broken`] — the streaming path did not
+///   behave like a streaming endpoint.
+/// - A healthy SSE stream whose deltas contain neither a tool call nor
+///   parseable tool-call content → [`StreamToolCallVerdict::NoToolCall`].
+fn classify_streaming_tool_call_body(body: &str) -> StreamToolCallVerdict {
+    // A streamed request must be answered with SSE. A plain JSON body
+    // (even one containing tool_calls) means the server ignored `stream`.
+    if !body.contains("data:") {
+        return StreamToolCallVerdict::Broken;
+    }
+
+    let mut content = String::new();
+    let mut saw_delta = false;
+    let mut native_tool_call_name: Option<String> = None;
+
+    for line in body.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let payload = rest.trim();
+        if payload == "[DONE]" {
+            continue;
+        }
+        let Ok(event) = serde_json::from_str::<Value>(payload) else {
+            continue;
+        };
+        let Some(delta) = event
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|choice| choice.get("delta"))
+            .and_then(|d| d.as_object())
+        else {
+            continue;
+        };
+        saw_delta = true;
+        if let Some(text) = delta.get("content").and_then(|v| v.as_str()) {
+            if !text.is_empty() {
+                content.push_str(text);
+            }
+        }
+        if let Some(tool_deltas) = delta.get("tool_calls").and_then(|v| v.as_array()) {
+            for tc in tool_deltas {
+                if let Some(name) = tc
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+                {
+                    if !name.is_empty() && native_tool_call_name.is_none() {
+                        native_tool_call_name = Some(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    if native_tool_call_name.is_some() {
+        return StreamToolCallVerdict::Delivered;
+    }
+
+    if !content.trim().is_empty() {
+        // GLM/Qwen and other text-format models emit tool calls as text/XML
+        // inside the content field even on the streaming path.
+        let parsed = crate::tool_parser::parse_tool_calls(&content);
+        if !parsed.tool_calls.is_empty() {
+            return StreamToolCallVerdict::Delivered;
+        }
+        return StreamToolCallVerdict::NoToolCall;
+    }
+
+    if saw_delta {
+        // Deltas arrived (e.g. role + finish_reason) but no content and no
+        // tool call: the stream completed healthily without calling a tool.
+        StreamToolCallVerdict::NoToolCall
+    } else {
+        StreamToolCallVerdict::Broken
+    }
+}
+
+/// Run the streamed tool-call probe against the configured endpoint: ONE
+/// `stream: true` request whose payload includes a native tool definition.
+///
+/// The probe verifies that the streaming path actually delivers the tool call
+/// (native `tool_calls` delta or text/XML tool call in streamed content) and
+/// returns a typed verdict; it never reports a healthy stream on a broken
+/// tool-calling path.
+async fn probe_streaming_tool_call(
+    endpoint: &str,
+    model: &str,
+    config: &Config,
+) -> StreamingToolCallProbe {
+    let probe_timeout = connection_test_timeout(config);
+    let client = match Client::builder().timeout(probe_timeout).build() {
+        Ok(c) => c,
+        Err(e) => {
+            return StreamingToolCallProbe {
+                verdict: StreamToolCallVerdict::Broken,
+                detail: format!("probe client could not be built: {e}"),
+            };
+        }
+    };
+
+    let base = endpoint.trim_end_matches('/');
+    let url = format!("{}/chat/completions", base);
+    let api_key = config.api_key.as_ref().map(|k| k.expose().to_string());
+
+    let mut body = serde_json::json!({
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": "When a suitable tool is provided, call it instead of answering directly."
+            },
+            {"role": "user", "content": "What is 2 + 2? Use the calculator tool."}
+        ],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "calculator",
+                    "description": "Perform arithmetic calculations",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "expression": {
+                                "type": "string",
+                                "description": "The arithmetic expression to evaluate"
+                            }
+                        },
+                        "required": ["expression"]
+                    }
+                }
+            }
+        ],
+        "max_tokens": 128,
+        "temperature": 0.0,
+        "stream": true
+    });
+    if let Err(e) = merge_extra_body(
+        &mut body,
+        config.extra_body.as_ref(),
+        "llm doctor streamed tool-call probe",
+        Some(&config.endpoint),
+    ) {
+        return StreamingToolCallProbe {
+            verdict: StreamToolCallVerdict::Broken,
+            detail: format!("probe payload rejected by config: {e}"),
+        };
+    }
+
+    let mut req = client.post(&url).json(&body);
+    if let Some(ref key) = api_key {
+        // Don't leak the key over plaintext HTTP to a remote host / userinfo URL.
+        if crate::config::api_key::assert_credential_endpoint_safe(&url, true).is_ok() {
+            req = req.bearer_auth(key);
+        } else {
+            eprintln!("  ⚠ not sending API key to unsafe endpoint {url}");
+        }
+    }
+
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return StreamingToolCallProbe {
+                verdict: StreamToolCallVerdict::Broken,
+                detail: format!("stream request failed: {e}"),
+            };
+        }
+    };
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return StreamingToolCallProbe {
+            verdict: StreamToolCallVerdict::Broken,
+            detail: format!(
+                "stream request returned HTTP {}: {}",
+                status,
+                truncate_str(&err_body, 200)
+            ),
+        };
+    }
+
+    let text = match resp.text().await {
+        Ok(t) => t,
+        Err(e) => {
+            return StreamingToolCallProbe {
+                verdict: StreamToolCallVerdict::Broken,
+                detail: format!("could not read stream body: {e}"),
+            };
+        }
+    };
+
+    let verdict = classify_streaming_tool_call_body(&text);
+    let detail = match verdict {
+        StreamToolCallVerdict::Delivered => {
+            "streamed request with a tool call delivered the tool call".to_string()
+        }
+        StreamToolCallVerdict::Broken => {
+            "streaming path did not deliver a tool call (no usable SSE completion for the tool-call payload)"
+                .to_string()
+        }
+        StreamToolCallVerdict::NoToolCall => {
+            "stream completed but produced no tool call".to_string()
+        }
+    };
+    StreamingToolCallProbe { verdict, detail }
 }
 
 /// Check if configuration specifies vision modality for the given model.
@@ -1007,6 +1359,174 @@ pub(crate) fn looks_multimodal(model: &str) -> bool {
         || l.contains("claude-3")
         || l.contains("qvq")
         || l.contains("122b") // selfware-hosted Qwen3.5-VL family commonly uses this size tag
+}
+
+// ── Server capacity (`/get_server_info`) helpers ────────────────────────────
+
+/// Pick the first present numeric field from the object.
+fn first_u64(obj: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| obj.get(*key).and_then(|v| v.as_u64()))
+}
+
+/// Parse SGLang `/get_server_info` body into typed server capabilities.
+/// Unknown/missing fields stay `None`; a body that is not JSON yields the
+/// default (all-`None`) struct.
+fn parse_server_info(body: &str) -> ServerInfo {
+    let Ok(json) = serde_json::from_str::<Value>(body) else {
+        return ServerInfo::default();
+    };
+    let Some(obj) = json.as_object() else {
+        return ServerInfo::default();
+    };
+    ServerInfo {
+        context_length: first_u64(
+            obj,
+            &["max_total_num_tokens", "max_model_len", "context_length"],
+        ),
+        max_streams: first_u64(
+            obj,
+            &[
+                "max_running_requests",
+                "max_streams",
+                "max_concurrent_requests",
+            ],
+        ),
+        tool_call_parser: obj
+            .get("tool_call_parser")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+    }
+}
+
+/// Fetch `/get_server_info` (SGLang) and parse it. Returns `None` when the
+/// route is missing (404 — non-SGLang backend), unreachable, or not JSON.
+async fn fetch_server_info(endpoint: &str) -> Option<ServerInfo> {
+    let base = endpoint.trim_end_matches('/');
+    let base_no_v1 = base.trim_end_matches("/v1");
+    let url = format!("{}/get_server_info", base_no_v1);
+
+    let client = Client::builder().timeout(HTTP_TIMEOUT).build().ok()?;
+    let resp = client.get(&url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let text = resp.text().await.ok()?;
+    Some(parse_server_info(&text))
+}
+
+/// Effective native-function-calling flag for the primary model, mirroring
+/// `crate::api::client`'s profile resolution.
+fn effective_native_fc(config: &Config) -> bool {
+    config
+        .resolve_model(None)
+        .map_or(config.agent.native_function_calling, |profile| {
+            profile.effective_native_function_calling(config.agent.native_function_calling)
+        })
+}
+
+/// Compare `/get_server_info` capabilities against the configured model's
+/// needs. Pure: returns typed check rows only for demands the config
+/// actually has, so a report stays silent when the server satisfies the
+/// model or reports nothing comparable.
+fn server_capacity_checks(
+    info: &ServerInfo,
+    config: &Config,
+) -> Vec<(String, DoctorCheckStatus, String, Option<String>)> {
+    let mut rows = Vec::new();
+
+    // Server context window vs configured context_length.
+    if let Some(server_ctx) = info.context_length {
+        let server_ctx = server_ctx as usize;
+        if server_ctx < config.context_length {
+            rows.push((
+                "server context window (get_server_info)".to_string(),
+                DoctorCheckStatus::Warning,
+                format!(
+                    "server context window {server_ctx} < configured context_length {}",
+                    config.context_length
+                ),
+                Some(
+                    "Raise the backend's context limit (sglang --context-length / vLLM --max-model-len) or lower selfware.toml\n\
+                     context_length to fit the server window."
+                        .to_string(),
+                ),
+            ));
+        } else {
+            rows.push((
+                "server context window (get_server_info)".to_string(),
+                DoctorCheckStatus::Ok,
+                format!(
+                    "server context window {server_ctx} >= configured context_length {}",
+                    config.context_length
+                ),
+                None,
+            ));
+        }
+    }
+
+    // Server concurrent-stream limit vs selfware's own streaming demand.
+    // Only relevant while streaming is enabled.
+    if config.agent.streaming {
+        if let Some(server_streams) = info.max_streams {
+            let cfg_streams = config.concurrency.max_streams as u64;
+            if server_streams == 0 || server_streams < cfg_streams {
+                rows.push((
+                    "server stream capacity (get_server_info)".to_string(),
+                    DoctorCheckStatus::Warning,
+                    format!(
+                        "server max concurrent streams {server_streams} < selfware [concurrency] max_streams {cfg_streams}",
+                    ),
+                    Some(
+                        "Raise the server's request limit (sglang --max-running-requests) or lower [concurrency] max_streams in selfware.toml."
+                            .to_string(),
+                    ),
+                ));
+            } else {
+                rows.push((
+                    "server stream capacity (get_server_info)".to_string(),
+                    DoctorCheckStatus::Ok,
+                    format!(
+                        "server concurrent stream capacity {server_streams} >= selfware [concurrency] max_streams {cfg_streams}",
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+
+    // Server tool-call parser vs native function calling in config.
+    if effective_native_fc(config) {
+        let parser_ok = info
+            .tool_call_parser
+            .as_deref()
+            .is_some_and(|p| !p.trim().is_empty());
+        if parser_ok {
+            rows.push((
+                "server tool-call parser (get_server_info)".to_string(),
+                DoctorCheckStatus::Ok,
+                format!(
+                    "server tool-call parser '{}' supports native function calling",
+                    info.tool_call_parser.as_deref().unwrap_or("")
+                ),
+                None,
+            ));
+        } else {
+            rows.push((
+                "server tool-call parser (get_server_info)".to_string(),
+                DoctorCheckStatus::Warning,
+                "config uses native function calling but the server reports no tool-call parser"
+                    .to_string(),
+                Some(
+                    "sglang: start with `--tool-call-parser` (e.g. `--tool-call-parser qwen` / `hermes`).\n\
+                     vLLM: pass `--enable-auto-tool-choice --tool-call-parser hermes`."
+                        .to_string(),
+                ),
+            ));
+        }
+    }
+
+    rows
 }
 
 // ── Step 1 implementation ────────────────────────────────────────────────────
@@ -1398,7 +1918,7 @@ fn print_context_extension_help(backend: &Backend) {
 
 // ── Step 3 implementation ────────────────────────────────────────────────────
 
-fn check_template(det: &DetectionResult, config: &Config) {
+fn check_template(det: &DetectionResult, config: &Config, thinking_support: Option<bool>) {
     let model_name = config.model.as_str();
     let is_qwen = is_qwen_model(model_name);
 
@@ -1430,29 +1950,29 @@ fn check_template(det: &DetectionResult, config: &Config) {
                             "chat_template_kwargs.enable_thinking = false".bright_white()
                         );
                     }
-                    Some(true) => {
-                        println!(
-                            "  {} Selfware config enables thinking. For Qwen tool use on sglang, disable it.",
-                            "!!".yellow().bold()
-                        );
-                        println!(
-                            "     Add {}",
-                            "[extra_body]\nchat_template_kwargs = { enable_thinking = false }"
-                                .bright_white()
-                        );
-                    }
-                    None => {
-                        println!(
-                            "  {} Selfware config does not set {}",
-                            ">>".yellow(),
-                            "chat_template_kwargs.enable_thinking".bright_white()
-                        );
-                        println!(
-                            "     Add {} for faster, more reliable tool-heavy requests.",
-                            "[extra_body]\nchat_template_kwargs = { enable_thinking = false }"
-                                .bright_white()
-                        );
-                    }
+                    configured => match thinking_disable_advice(configured, thinking_support) {
+                        Some(advice) => {
+                            println!("  {} {}", "!!".yellow().bold(), advice.yellow().bold());
+                            println!(
+                                "     Add {}",
+                                "[extra_body]\nchat_template_kwargs = { enable_thinking = false }"
+                                    .bright_white()
+                            );
+                        }
+                        None if thinking_support == Some(true) => {
+                            println!(
+                                "  {} Endpoint accepts chat_template_kwargs — thinking control available (no need to disable).",
+                                "ok".green().bold()
+                            );
+                        }
+                        None => {
+                            // No typed signal (probe skipped) — no advice.
+                            println!(
+                                "  {} Thinking-control support could not be probed — no recommendation.",
+                                "--".dimmed()
+                            );
+                        }
+                    },
                 }
             } else {
                 println!(
@@ -1908,6 +2428,7 @@ fn print_recommendations(
     det: &DetectionResult,
     config: &Config,
     conn: Option<&ConnectionTestResult>,
+    thinking_support: Option<bool>,
 ) {
     let model_name = config.model.as_str();
     // Find the model in the list
@@ -2009,16 +2530,16 @@ fn print_recommendations(
                         CheckStatus::Ok,
                         "Qwen/SGLang thinking is disabled in selfware extra_body".to_string(),
                     )),
-                    Some(true) => checks.push((
-                        CheckStatus::Warn,
-                        "Disable chat_template_kwargs.enable_thinking for Qwen/SGLang tool workflows"
-                            .to_string(),
-                    )),
-                    None => checks.push((
-                        CheckStatus::Warn,
-                        "Add chat_template_kwargs.enable_thinking = false to match the runtime path"
-                            .to_string(),
-                    )),
+                    configured => match thinking_disable_advice(configured, thinking_support) {
+                        Some(advice) => checks.push((CheckStatus::Warn, advice.to_string())),
+                        None if thinking_support == Some(true) => checks.push((
+                            CheckStatus::Ok,
+                            "Endpoint accepts chat_template_kwargs thinking control".to_string(),
+                        )),
+                        None => {
+                            // No typed signal (probe skipped) — no advice.
+                        }
+                    },
                 }
             }
             if model_name.to_lowercase().contains("vision")
@@ -2140,6 +2661,31 @@ fn configured_enable_thinking(config: &Config) -> Option<bool> {
         .as_object()?
         .get("enable_thinking")?
         .as_bool()
+}
+
+/// Decide whether the doctor should advise disabling thinking for a
+/// Qwen/SGLang tool workflow, based on the typed thinking-control probe
+/// signal.
+///
+/// The advice fires ONLY when the endpoint rejects thinking control — the
+/// typed signal that the provider cannot consume it ([`Some(false)`] from
+/// [`probe_thinking_support`]). It never fires when the endpoint accepts
+/// thinking control ([`Some(true)`]) and never when no typed signal is
+/// available (`None`): in both of those cases the old unconditional advice
+/// was noise.
+fn thinking_disable_advice(
+    configured: Option<bool>,
+    support: Option<bool>,
+) -> Option<&'static str> {
+    match (configured, support) {
+        (Some(true), Some(false)) => Some(
+            "Endpoint rejects thinking control — disable chat_template_kwargs.enable_thinking in selfware config",
+        ),
+        (None, Some(false)) => Some(
+            "Endpoint rejects thinking control — add chat_template_kwargs.enable_thinking = false for tool-heavy Qwen requests",
+        ),
+        _ => None,
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

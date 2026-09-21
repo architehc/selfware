@@ -50,6 +50,7 @@ fn test_session_result_round_trip() {
         duration_ms: 30000,
         failure_mode: None,
         artifact_dir: Some(PathBuf::from("/tmp/artifacts")),
+        answer: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     let de: SessionResult = serde_json::from_str(&json).unwrap();
@@ -82,6 +83,7 @@ fn test_session_result_with_failure_mode() {
         duration_ms: 5000,
         failure_mode: Some("timeout".to_string()),
         artifact_dir: None,
+        answer: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     let de: SessionResult = serde_json::from_str(&json).unwrap();
@@ -105,6 +107,7 @@ fn test_session_result_json_fields() {
         duration_ms: 60000,
         failure_mode: Some("loop_guard".to_string()),
         artifact_dir: Some(PathBuf::from("/out")),
+        answer: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     let v: Value = serde_json::from_str(&json).unwrap();
@@ -334,8 +337,110 @@ fn test_emit_result_does_not_panic() {
         duration_ms: 0,
         failure_mode: None,
         artifact_dir: None,
+        answer: None,
     };
     emit_result(&result);
+}
+
+// ── SessionResult answer (final assistant response) ─────────────────
+
+#[test]
+fn test_session_result_serializes_final_answer() {
+    // Regression: the headless JSON result previously carried no final
+    // answer, so machine consumers could never see what the agent concluded.
+    let result = SessionResult {
+        session_id: "answer-session".to_string(),
+        exit_status: 0,
+        stop_reason: "completed".to_string(),
+        num_turns: 7,
+        patch_bytes: 0,
+        patch_lines: 0,
+        usage: TokenUsage::default(),
+        model: "test-model".to_string(),
+        duration_ms: 12000,
+        failure_mode: None,
+        artifact_dir: None,
+        answer: Some("Fixed the lint and verified with cargo test.".to_string()),
+    };
+    let json = serde_json::to_string(&result).unwrap();
+    let v: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        v["answer"], "Fixed the lint and verified with cargo test.",
+        "JSON output must carry the final answer"
+    );
+    let de: SessionResult = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        de.answer.as_deref(),
+        Some("Fixed the lint and verified with cargo test.")
+    );
+}
+
+#[test]
+fn test_session_result_omits_answer_when_none() {
+    // Pre-existing consumers see a byte-identical shape for runs without an
+    // answer: the key must not appear at all.
+    let result = SessionResult {
+        session_id: "no-answer".to_string(),
+        exit_status: 0,
+        stop_reason: "completed".to_string(),
+        num_turns: 1,
+        patch_bytes: 0,
+        patch_lines: 0,
+        usage: TokenUsage::default(),
+        model: "m".to_string(),
+        duration_ms: 1,
+        failure_mode: None,
+        artifact_dir: None,
+        answer: None,
+    };
+    let json = serde_json::to_string(&result).unwrap();
+    assert!(
+        !json.contains("\"answer\""),
+        "None answer must not be serialized, got: {}",
+        json
+    );
+    // Legacy streams (no `answer` key) still deserialize — answer defaults None.
+    let de: SessionResult = serde_json::from_str(&json).unwrap();
+    assert!(de.answer.is_none());
+}
+
+#[test]
+fn test_answer_capture_emitter_records_completed_message() {
+    // The headless runner attaches the capture emitter before the run; the
+    // run-end `Completed` event carries `last_assistant_response.trim()`.
+    let capture = AnswerCapture::new();
+    capture.emitter().emit(AgentEvent::Completed {
+        message: "The bug was a signed-offset read.".to_string(),
+    });
+    assert_eq!(
+        capture.take().as_deref(),
+        Some("The bug was a signed-offset read.")
+    );
+}
+
+#[test]
+fn test_answer_capture_trims_whitespace() {
+    let capture = AnswerCapture::new();
+    capture.emitter().emit(AgentEvent::Completed {
+        message: "  Final answer.  \n".to_string(),
+    });
+    assert_eq!(capture.take().as_deref(), Some("Final answer."));
+}
+
+#[test]
+fn test_answer_capture_ignores_errors_and_empty_messages() {
+    // A failed run emits `Error` (the run's diagnostic, not the agent's
+    // conclusion) and a streamed-commit completion may emit an empty
+    // `Completed`; neither may become an answer.
+    let capture = AnswerCapture::new();
+    let emitter = capture.emitter();
+    emitter.emit(AgentEvent::Error {
+        message: "boom".to_string(),
+    });
+    emitter.emit(AgentEvent::Completed {
+        message: "   ".to_string(),
+    });
+    assert!(capture.take().is_none());
 }
 
 // ── JsonlProgressEmitter ─────────────────────────────────────────────
@@ -682,6 +787,67 @@ fn test_capture_patch_excludes_internal_dirs() {
         !patch.contains("secret cache"),
         "patch should exclude .selfware/, got: {}",
         patch
+    );
+}
+
+#[test]
+fn test_capture_patch_works_on_repo_with_no_commits() {
+    // Review finding: a freshly `git init`-ed repo has no HEAD, so the
+    // headless capture's `git diff --cached --binary HEAD` failed and a
+    // fully-successful task was reported as patch_capture_failed. The diff
+    // must fall back to the empty tree object and return a valid patch.
+    if !git_available() {
+        eprintln!("Skipping: git not available");
+        return;
+    }
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "selfware_cp_nocommits_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let _cleanup = TempDirCleanup(tmp_dir.clone());
+    let _guard = crate::test_support::CwdGuard::hold();
+    let original_dir = std::env::current_dir().unwrap();
+
+    // `git init` only — NO commit, so HEAD does not exist.
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(&tmp_dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+
+    // One new file, staged implicitly by the capture's `git add -A`.
+    std::fs::write(tmp_dir.join("hello.txt"), "hello world\n").unwrap();
+
+    std::env::set_current_dir(&tmp_dir).unwrap();
+    let result = capture_patch();
+    std::env::set_current_dir(&original_dir).unwrap();
+
+    let patch =
+        result.unwrap_or_else(|e| panic!("capture_patch failed on a zero-commit repo: {e}"));
+    assert!(
+        patch.contains("hello world"),
+        "a brand-new file in a zero-commit repo must appear in the patch (as an addition):\n{}",
+        patch
+    );
+
+    // And an EMPTY zero-commit repo is a valid EMPTY patch, not an error.
+    std::fs::remove_file(tmp_dir.join("hello.txt")).unwrap();
+    std::env::set_current_dir(&tmp_dir).unwrap();
+    let empty_result = capture_patch();
+    std::env::set_current_dir(&original_dir).unwrap();
+    let empty_patch =
+        empty_result.unwrap_or_else(|e| panic!("empty zero-commit repo must not error: {e}"));
+    assert!(
+        empty_patch.trim().is_empty(),
+        "an empty zero-commit repo must yield an empty patch, got:\n{}",
+        empty_patch
     );
 }
 

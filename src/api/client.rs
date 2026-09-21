@@ -124,8 +124,24 @@ fn measured_chat_tokens(body: &serde_json::Value, response: &ChatResponse) -> (u
 
 /// Change the complete wire protocol together: schema, instructions, and history.
 /// Image blocks and ordinary user/assistant text retain their original provenance.
-fn convert_body_to_xml(body: &mut serde_json::Value, context_limit: usize) -> Result<()> {
-    let tools = body.get("tools").cloned();
+///
+/// Tool definitions come from `tools` (the caller's authoritative list, which
+/// `attach_tools` no longer writes into the body when native FC is off) and
+/// fall back to `body["tools"]` for call sites that only hold a wire body —
+/// the tool-mode-400 retry / latched paths, where native FC was on so the
+/// field is still present. The definitions are embedded into the XML-protocol
+/// system prompt and are removed from the final wire body.
+fn convert_body_to_xml(
+    body: &mut serde_json::Value,
+    tools: &Option<Vec<ToolDefinition>>,
+    context_limit: usize,
+) -> Result<()> {
+    let tools = if tools.is_some() {
+        tools.clone()
+    } else {
+        body.get("tools")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    };
     let mut messages: Vec<Message> = serde_json::from_value(body["messages"].clone())?;
     if tools.is_none()
         && !messages
@@ -168,8 +184,9 @@ fn convert_body_to_xml(body: &mut serde_json::Value, context_limit: usize) -> Re
         message.name = None;
     }
     if let Some(tools) = tools {
+        let tools_json = serde_json::to_string(&tools).unwrap_or_default();
         messages.insert(0, Message::system(format!(
-            "Tool protocol: this provider uses XML tool calls. To invoke a tool, output <tool><name>TOOL_NAME</name><arguments>{{JSON_ARGUMENTS}}</arguments></tool>. Use the exact names and JSON parameter schemas below. Tool results arrive as user messages labeled Tool result.\nAvailable tools (JSON schemas):\n{tools}"
+            "Tool protocol: this provider uses XML tool calls. To invoke a tool, output <tool><name>TOOL_NAME</name><arguments>{{JSON_ARGUMENTS}}</arguments></tool>. Use the exact names and JSON parameter schemas below. Tool results arrive as user messages labeled Tool result.\nAvailable tools (JSON schemas):\n{tools_json}"
         )));
     }
     canonicalize_message_order(&mut messages);
@@ -936,7 +953,7 @@ impl ApiClient {
         )?;
 
         if !self.effective_native_fc() {
-            convert_body_to_xml(&mut body, self.config.context_length)?;
+            convert_body_to_xml(&mut body, &tools, self.config.context_length)?;
         }
         Ok(body)
     }
@@ -1146,7 +1163,7 @@ impl ApiClient {
                             && body.get("tools").is_some()
                         {
                             self.latch_tool_mode(&self.base_url, &self.config.model);
-                            convert_body_to_xml(&mut body, self.config.context_length)?;
+                            convert_body_to_xml(&mut body, &None, self.config.context_length)?;
                             tool_mode_retry = true;
                             continue;
                         }
@@ -1503,6 +1520,7 @@ impl ApiClient {
         if self.tool_mode_latched(endpoint, body["model"].as_str().unwrap_or_default()) {
             convert_body_to_xml(
                 &mut body,
+                &None,
                 timeout_overrides.map_or(self.config.context_length, |p| p.context_length),
             )?;
         }
@@ -1841,6 +1859,7 @@ impl ApiClient {
                         self.latch_tool_mode(endpoint, model);
                         convert_body_to_xml(
                             &mut body,
+                            &None,
                             timeout_overrides
                                 .map_or(self.config.context_length, |p| p.context_length),
                         )?;
@@ -1962,7 +1981,7 @@ impl ApiClient {
         )?;
 
         if !native_fc || self.tool_mode_latched(&profile.endpoint, &profile.model) {
-            convert_body_to_xml(&mut body, profile.context_length)?;
+            convert_body_to_xml(&mut body, &tools, profile.context_length)?;
         }
         if profile.endpoint.contains("openrouter.ai") {
             body["usage"] = serde_json::json!({ "include": true });

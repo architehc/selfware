@@ -584,6 +584,86 @@ fn apply_session_model_overrides(cli: &Cli, config: &mut Config) -> Result<()> {
     Ok(())
 }
 
+/// Decide whether `--autocontinue` should run at startup, given which
+/// explicit task/resume arguments are present.
+///
+/// Auto-resume is an implicit fallback (resume whatever long task was left
+/// unfinished after a crash/restart) and must never override explicit intent:
+/// a subcommand or `-p` prompt names a concrete task, while `--continue` and
+/// `--resume-session` name a concrete session to resume. Returns `false`
+/// (suppress auto-resume) when any of them is present, `true` otherwise.
+pub(crate) fn autocontinue_should_run(
+    has_subcommand: bool,
+    has_prompt: bool,
+    has_continue_flag: bool,
+    has_resume_session: bool,
+) -> bool {
+    !(has_subcommand || has_prompt || has_continue_flag || has_resume_session)
+}
+
+/// Canonical, absolute identity of the current workspace, used by
+/// `--autocontinue` to match a checkpoint's recorded `project_root`.
+///
+/// Mirrors how `TaskCheckpoint::new` records the identity (both canonicalize),
+/// so two processes in the same physical directory — even reached via a
+/// symlink — produce the same string, and a different directory always
+/// produces a different one. A checkpoint from another workspace is never
+/// auto-resumed.
+fn current_workspace_identity() -> Result<String> {
+    let cwd = std::env::current_dir()?;
+    let canonical = cwd.canonicalize().unwrap_or(cwd);
+    Ok(canonical.to_string_lossy().into_owned())
+}
+
+/// Resume a named session for the CLI run paths, or BAIL instead of silently
+/// continuing with a fresh EMPTY session.
+///
+/// `--resume-session` explicitly asks to continue a specific conversation.
+/// Previously a typo'd (or purged) name printed "Failed to resume session" and
+/// then ran the task/chat on an empty context — burning a full run on a
+/// session that never existed. Named-chat resume now fails closed, mirroring
+/// the task-resume path (missing checkpoint = hard error). When the session
+/// exists and loads, behaviour is unchanged: the resume is announced (when
+/// `announce`) and the run proceeds with the restored messages.
+///
+/// The session-not-found vs load-failure distinction is mirrored from the
+/// chat store, which strings a missing file as "Chat '<name>' not found"
+/// (`fs::read` context) and everything else (corrupt / undecryptable /
+/// malformed JSON) as a load error. Both bail, with different diagnostics.
+fn resume_named_session_or_bail(
+    resume: impl FnOnce() -> anyhow::Result<usize>,
+    session_name: &str,
+    announce: bool,
+) -> Result<()> {
+    match resume() {
+        Ok(msg_count) => {
+            if announce {
+                println!(
+                    "▶ Resumed session '{}' ({} messages)",
+                    session_name, msg_count
+                );
+            }
+            Ok(())
+        }
+        Err(e) => {
+            let detail = crate::observability::telemetry::redact_secrets(&e.to_string());
+            if detail.contains("not found") {
+                anyhow::bail!(
+                    "cannot resume session '{}': it does not exist ({}) — \
+                     refusing to start with an empty session",
+                    session_name,
+                    detail
+                );
+            }
+            anyhow::bail!(
+                "cannot resume session '{}': load failed ({})",
+                session_name,
+                detail
+            );
+        }
+    }
+}
+
 pub async fn run() -> Result<()> {
     // Initialize telemetry
     init_tracing();
@@ -932,6 +1012,67 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
 
+    // --autocontinue: resume the most recent unfinished task of THIS workspace
+    // at startup so a long task interrupted mid-run (crash/restart/machine
+    // hiccup) survives via its checkpoint, using the exact same resume+continue
+    // path as `selfware resume <id>`. Implicit and conservative on three axes:
+    // an explicit subcommand, -p prompt, --continue, or --resume-session
+    // argument always wins and suppresses the auto-resume; only checkpoints
+    // recorded for the CURRENT working directory are eligible (a task from
+    // another repository must never be pulled into this one); and only
+    // InProgress checkpoints qualify (Failed/Paused stay explicit-`resume`
+    // territory). Nothing eligible → normal startup (announced).
+    if cli.autocontinue {
+        if !autocontinue_should_run(
+            cli.command.is_some(),
+            cli.prompt.is_some(),
+            cli.continue_flag,
+            cli.resume_session.is_some(),
+        ) {
+            if !cli.quiet {
+                println!(
+                    "{} --autocontinue ignored — explicit task/resume argument given",
+                    Glyphs::sprout()
+                );
+            }
+        } else {
+            let workspace = current_workspace_identity()?;
+            let checkpoint_manager = crate::checkpoint::CheckpointManager::default_path()?;
+            match checkpoint_manager.latest_autoresumable_task(&workspace)? {
+                Some(latest) => {
+                    if !cli.quiet {
+                        println!(
+                            "{} Auto-resuming task {} from checkpoint — {}",
+                            Glyphs::bookmark(),
+                            latest.task_id.as_str().emphasis(),
+                            journal_title(&latest.task_description, 60)
+                        );
+                    }
+                    tracing::info!(
+                        task_id = %latest.task_id,
+                        workspace = %workspace,
+                        "auto-resuming in-progress task from this workspace"
+                    );
+                    let mut agent = Agent::resume(config, &latest.task_id).await?;
+                    agent.continue_execution().await?;
+                    return Ok(());
+                }
+                None => {
+                    tracing::info!(
+                        workspace = %workspace,
+                        "no in-progress task from this workspace found; starting normally"
+                    );
+                    if !cli.quiet {
+                        println!(
+                            "{} --autocontinue: no in-progress task in this workspace to resume — starting normally",
+                            Glyphs::sprout()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // Headless mode: run prompt directly and exit (like qwen -p)
     if let Some(prompt) = cli.prompt {
         use std::io::IsTerminal;
@@ -1009,21 +1150,11 @@ pub async fn run() -> Result<()> {
         let mut agent = Agent::new(config).await?;
         // Resume named session if --resume-session was provided (headless path)
         if let Some(ref session_name) = cli.resume_session {
-            match agent.resume_named_session(session_name) {
-                Ok(msg_count) => {
-                    if !cli.quiet && !is_structured {
-                        println!(
-                            "▶ Resumed session '{}' ({} messages)",
-                            session_name, msg_count
-                        );
-                    }
-                }
-                Err(e) => {
-                    if !cli.quiet && !is_structured {
-                        eprintln!("Failed to resume session '{}': {}", session_name, e);
-                    }
-                }
-            }
+            resume_named_session_or_bail(
+                || agent.resume_named_session(session_name),
+                session_name,
+                !cli.quiet && !is_structured,
+            )?;
         }
         let mut emitters: Vec<std::sync::Arc<dyn crate::agent::progress::ProgressEmitter>> =
             Vec::new();
@@ -1052,6 +1183,12 @@ pub async fn run() -> Result<()> {
                 crate::agent::progress::MultiProgressEmitter::new(emitters),
             ));
         }
+        // Capture the agent's final answer for the structured result. The
+        // answer text is only reachable through the terminal `Completed`
+        // event (the public conduit to `last_assistant_response`), so the
+        // capture emitter is attached before the run starts.
+        let answer_capture = headless::AnswerCapture::new();
+        agent = agent.with_event_emitter(std::sync::Arc::new(answer_capture.emitter()));
         let run_result = agent.run_task(&actual_prompt).await;
         let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -1067,7 +1204,8 @@ pub async fn run() -> Result<()> {
         }
 
         if is_structured {
-            let result = build_session_result(&agent, &run_result, duration_ms);
+            let result =
+                build_session_result(&agent, &run_result, duration_ms, answer_capture.take());
             headless::emit_result(&result);
         } else if !cli.quiet && run_result.is_ok() {
             println!("{}", render_task_complete(start.elapsed()));
@@ -1133,6 +1271,7 @@ fn build_session_result(
     agent: &Agent,
     run_result: &Result<()>,
     duration_ms: u64,
+    answer: Option<String>,
 ) -> headless::SessionResult {
     let exit_status = if run_result.is_ok() { 0 } else { 1 };
     let stop_reason = match run_result {
@@ -1194,6 +1333,7 @@ fn build_session_result(
         duration_ms,
         failure_mode,
         artifact_dir,
+        answer,
     }
 }
 
@@ -1781,19 +1921,11 @@ async fn handle_command(
             let mut agent = Agent::new(config).await?;
             // Resume named session if --resume-session was provided
             if let Some(ref session_name) = resume_session {
-                match agent.resume_named_session(session_name) {
-                    Ok(msg_count) => {
-                        if !quiet {
-                            println!(
-                                "▶ Resumed session '{}' ({} messages)",
-                                session_name, msg_count
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to resume session '{}': {}", session_name, e);
-                    }
-                }
+                resume_named_session_or_bail(
+                    || agent.resume_named_session(session_name),
+                    session_name,
+                    !quiet,
+                )?;
             }
             agent.interactive().await?;
         }
@@ -1925,21 +2057,11 @@ async fn handle_command(
             let mut agent = Agent::new(config).await?;
             // Resume named session if --resume-session was provided
             if let Some(ref session_name) = resume_session {
-                match agent.resume_named_session(session_name) {
-                    Ok(msg_count) => {
-                        if !quiet && !is_structured {
-                            println!(
-                                "▶ Resumed session '{}' ({} messages)",
-                                session_name, msg_count
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        if !quiet && !is_structured {
-                            eprintln!("Failed to resume session '{}': {}", session_name, e);
-                        }
-                    }
-                }
+                resume_named_session_or_bail(
+                    || agent.resume_named_session(session_name),
+                    session_name,
+                    !quiet && !is_structured,
+                )?;
             }
             let mut emitters: Vec<std::sync::Arc<dyn crate::agent::progress::ProgressEmitter>> =
                 Vec::new();
@@ -1971,6 +2093,10 @@ async fn handle_command(
                     crate::agent::progress::MultiProgressEmitter::new(emitters),
                 ));
             }
+            // Capture the agent's final answer for the structured result (see
+            // the `-p` headless path for why this uses the event channel).
+            let answer_capture = headless::AnswerCapture::new();
+            agent = agent.with_event_emitter(std::sync::Arc::new(answer_capture.emitter()));
             let run_result = agent.run_task(&task).await;
             let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -1986,7 +2112,8 @@ async fn handle_command(
             }
 
             if is_structured {
-                let result = build_session_result(&agent, &run_result, duration_ms);
+                let result =
+                    build_session_result(&agent, &run_result, duration_ms, answer_capture.take());
                 headless::emit_result(&result);
             } else if !quiet && run_result.is_ok() {
                 println!("{}", render_task_complete(start.elapsed()));

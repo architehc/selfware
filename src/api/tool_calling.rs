@@ -29,10 +29,12 @@ use crate::tool_parser::{parse_tool_calls, ParsedToolCall};
 /// - `body.tools` = the JSON-serialized tool definitions
 /// - `body.tool_choice` = `"auto"`
 ///
-/// When `native_function_calling` is false, tools are still attached to
-/// the request body so backends that auto-detect them can use them, but
-/// `tool_choice` is omitted (the model is expected to emit XML in
-/// `content` instead, prompted by the system message).
+/// When `native_function_calling` is false, nothing is attached. The XML
+/// prompt path must NOT carry the OpenAI `tools` schema: reasoning / non-FC
+/// models and minimalist servers reject the field outright with HTTP 400
+/// ("tools parameter is not supported by this model"). Tool definitions
+/// reach those models through the XML-protocol system message built by
+/// `convert_body_to_xml`, not through the wire body.
 ///
 /// When `tools` is `None`, this is a no-op.
 pub fn attach_tools(
@@ -41,10 +43,11 @@ pub fn attach_tools(
     native_function_calling: bool,
 ) {
     let Some(tools) = tools else { return };
-    body["tools"] = serde_json::json!(tools);
-    if native_function_calling {
-        body["tool_choice"] = serde_json::json!("auto");
+    if !native_function_calling {
+        return;
     }
+    body["tools"] = serde_json::json!(tools);
+    body["tool_choice"] = serde_json::json!("auto");
 }
 
 /// Extract tool calls from a returned assistant message.

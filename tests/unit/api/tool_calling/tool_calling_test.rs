@@ -46,11 +46,18 @@ fn attach_tools_native_sets_tool_choice() {
 }
 
 #[test]
-fn attach_tools_text_mode_omits_tool_choice() {
+fn attach_tools_text_mode_omits_tools_and_tool_choice() {
+    // XML-prompt path: the wire body must not carry the OpenAI tools
+    // schema — reasoning / non-FC models and minimalist servers reject
+    // `tools` outright with HTTP 400. Tool definitions reach the model
+    // through the XML-protocol system prompt instead.
     let mut body = serde_json::json!({"model": "x"});
     let tools = Some(vec![dummy_tool_def("foo")]);
     attach_tools(&mut body, &tools, false);
-    assert!(body["tools"].is_array());
+    assert!(
+        body.get("tools").is_none(),
+        "tools must NOT be sent when native FC is off"
+    );
     assert!(
         body.get("tool_choice").is_none(),
         "tool_choice must NOT be sent when native FC is off"
@@ -61,6 +68,9 @@ fn attach_tools_text_mode_omits_tool_choice() {
 fn attach_tools_none_is_noop() {
     let mut body = serde_json::json!({"model": "x"});
     attach_tools(&mut body, &None, true);
+    assert!(body.get("tools").is_none());
+    assert!(body.get("tool_choice").is_none());
+    attach_tools(&mut body, &None, false);
     assert!(body.get("tools").is_none());
     assert!(body.get("tool_choice").is_none());
 }
@@ -254,6 +264,10 @@ fn test_tool_calling_roundtrip_both_tool_choice_settings() {
     let mut body_prompt = serde_json::json!({"model": "test"});
     attach_tools(&mut body_prompt, &tools, false);
     assert!(body_prompt.get("tool_choice").is_none());
+    assert!(
+        body_prompt.get("tools").is_none(),
+        "XML prompt path must not carry the OpenAI tools schema"
+    );
 
     // Structured response
     let structured_call = ToolCall {

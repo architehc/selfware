@@ -7,9 +7,10 @@
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::agent::progress::{ProgressEmitter, ProgressEvent};
+use crate::agent::tui_events::{AgentEvent, EventEmitter};
 use crate::config::ExecutionMode;
 use crate::observability::dashboard::TokenUsage;
 
@@ -50,6 +51,14 @@ pub struct SessionResult {
     pub duration_ms: u64,
     pub failure_mode: Option<String>,
     pub artifact_dir: Option<PathBuf>,
+    /// What the agent concluded: the final assistant response, trimmed.
+    ///
+    /// `None` when the run ended without a text answer (never started, failed
+    /// before answering, or completed with an empty terminal message). Omitted
+    /// from the JSON when `None`, so pre-existing consumers keep seeing a
+    /// byte-identical shape for runs without an answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
 }
 
 /// Individual event emitted in `--output-format stream-json` mode.
@@ -193,6 +202,68 @@ pub fn emit_result(result: &SessionResult) {
     }
 }
 
+/// Captures the agent's final answer for the structured [`SessionResult`].
+///
+/// The answer text lives in the agent's private `last_assistant_response`
+/// field, which the CLI cannot read directly. The one public conduit is the
+/// [`EventEmitter`] channel attached with `Agent::with_event_emitter`: the
+/// run-end wrapper emits `AgentEvent::Completed { message }` whose `message`
+/// IS `last_assistant_response.trim()` (see `run_execution_loop` in
+/// `task_runner.rs`). Attach [`AnswerCapture::emitter`] to the agent before
+/// the run and read [`AnswerCapture::take`] afterwards — the headless runner
+/// then serializes exactly what the agent concluded as `SessionResult.answer`.
+pub struct AnswerCapture {
+    last: Arc<Mutex<Option<String>>>,
+}
+
+impl AnswerCapture {
+    pub fn new() -> Self {
+        Self {
+            last: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// An emitter to wire into the agent via `Agent::with_event_emitter`.
+    pub fn emitter(&self) -> AnswerCaptureEmitter {
+        AnswerCaptureEmitter {
+            last: Arc::clone(&self.last),
+        }
+    }
+
+    /// Take the captured final answer (one-shot; `None` when the run never
+    /// completed with a non-empty response, e.g. a failed run).
+    pub fn take(&self) -> Option<String> {
+        self.last.lock().ok().and_then(|mut guard| guard.take())
+    }
+}
+
+impl Default for AnswerCapture {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The [`EventEmitter`] half of [`AnswerCapture`] — see its docs.
+pub struct AnswerCaptureEmitter {
+    last: Arc<Mutex<Option<String>>>,
+}
+
+impl EventEmitter for AnswerCaptureEmitter {
+    fn emit(&self, event: AgentEvent) {
+        // Only the terminal `Completed` event carries the answer; `Error` is
+        // the run's diagnostic, not what the agent concluded, so it is not
+        // captured as an answer.
+        if let AgentEvent::Completed { message } = event {
+            let trimmed = message.trim().to_string();
+            if !trimmed.is_empty() {
+                if let Ok(mut guard) = self.last.lock() {
+                    *guard = Some(trimmed);
+                }
+            }
+        }
+    }
+}
+
 /// Capture `git diff` from the current working directory, including newly
 /// added files and excluding selfware-internal scratch directories.
 /// Whether the repository in the current directory has a resolvable `HEAD`
@@ -256,13 +327,24 @@ pub fn capture_patch() -> anyhow::Result<String> {
         anyhow::bail!("git add -A failed while staging the patch");
     }
 
+    // A freshly `git init`-ed repo has no HEAD: `git diff --cached HEAD`
+    // fails there and a fully-successful headless task would be reported as
+    // patch_capture_failed. Diff against the standard empty-tree object
+    // instead, so a brand-new repo reports its staged files as additions (or
+    // an empty patch when nothing exists) rather than erroring. A genuine
+    // diff failure with a real HEAD still bails below.
+    let diff_base = if head_exists() {
+        "HEAD"
+    } else {
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    };
     let out = std::process::Command::new("git")
         .env("GIT_INDEX_FILE", &tmp_index)
         .args([
             "diff",
             "--cached",
             "--binary",
-            "HEAD",
+            diff_base,
             "--",
             ".",
             ":(exclude).selfware/**",

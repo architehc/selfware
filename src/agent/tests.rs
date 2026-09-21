@@ -601,19 +601,59 @@ fn test_execution_mode_yolo_no_confirmation() {
 }
 
 #[test]
-fn test_execution_mode_auto_edit_file_ops() {
+fn test_execution_mode_auto_edit_approval_policy() {
     let config = Config {
         execution_mode: ExecutionMode::AutoEdit,
         ..Default::default()
     };
 
-    // Auto-edit mode auto-approves file operations
+    // Auto-edit mode auto-approves file operations (unchanged).
     assert!(!needs_confirmation_for_tool(&config, "file_write"));
     assert!(!needs_confirmation_for_tool(&config, "file_edit"));
+    assert!(!needs_confirmation_for_tool(&config, "directory_tree"));
+    assert!(!needs_confirmation_for_tool(&config, "glob_find"));
 
-    // But still asks for other operations
-    assert!(needs_confirmation_for_tool(&config, "shell_exec"));
-    assert!(needs_confirmation_for_tool(&config, "git_commit"));
+    // …and the tools the safety checker classes as safe predefined
+    // subcommands: cargo_* (fixed subcommands, not arbitrary shell) and lsp_*
+    // (read-only introspection). A headless `-m auto-edit` run editing a file
+    // must be able to run `cargo check`/`cargo test` afterwards — before this
+    // set, that confirm gate had no TTY to answer and the run looped (74
+    // steps / 1.47M tokens).
+    let checker_safe_tools = [
+        "cargo_test",
+        "cargo_check",
+        "cargo_clippy",
+        "cargo_fmt",
+        "lsp_diagnostics",
+        "lsp_goto_definition",
+        "lsp_goto_implementation",
+        "lsp_find_references",
+        "lsp_hover",
+        "lsp_document_symbols",
+        "lsp_workspace_symbols",
+    ];
+    for tool in &checker_safe_tools {
+        assert!(
+            !needs_confirmation_for_tool(&config, tool),
+            "{} should be auto-approved in AutoEdit mode",
+            tool
+        );
+    }
+
+    // Destructive / arbitrary-shell operations still ask.
+    for tool in &[
+        "shell_exec",
+        "git_commit",
+        "git_push",
+        "process_stop",
+        "file_delete",
+    ] {
+        assert!(
+            needs_confirmation_for_tool(&config, tool),
+            "{} should still require confirmation in AutoEdit mode",
+            tool
+        );
+    }
 }
 
 #[test]
@@ -669,10 +709,30 @@ fn needs_confirmation_for_tool(config: &Config, tool_name: &str) -> bool {
 
     match config.execution_mode {
         ExecutionMode::Yolo | ExecutionMode::Daemon => false,
-        ExecutionMode::AutoEdit => !matches!(
-            tool_name,
-            "file_write" | "file_edit" | "directory_tree" | "glob_find"
-        ),
+        ExecutionMode::AutoEdit => {
+            // Mirror of `Agent::needs_confirmation`'s AutoEdit branch: the
+            // four file tools plus the checker-safe predefined-subcommand
+            // tools (cargo_* / lsp_*). Keep in sync with
+            // src/agent/mod.rs `needs_confirmation`.
+            let auto_approved = [
+                "file_write",
+                "file_edit",
+                "directory_tree",
+                "glob_find",
+                "cargo_test",
+                "cargo_check",
+                "cargo_clippy",
+                "cargo_fmt",
+                "lsp_diagnostics",
+                "lsp_goto_definition",
+                "lsp_goto_implementation",
+                "lsp_find_references",
+                "lsp_hover",
+                "lsp_document_symbols",
+                "lsp_workspace_symbols",
+            ];
+            !auto_approved.contains(&tool_name)
+        }
         ExecutionMode::Normal => !safe_tools.contains(&tool_name),
     }
 }
@@ -1307,4 +1367,241 @@ async fn test_detect_project_type_nested_scoping() {
         ProjectType::Rust,
         "parent with Cargo.toml must be detected as Rust"
     );
+}
+
+// =========================================================================
+// Test: Headless AutoEdit approval of checker-safe tools (the 74-step loop)
+// =========================================================================
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn test_auto_edit_headless_approves_checker_safe_tools_in_real_predicate() {
+    // Real `Agent::needs_confirmation` (not the test-fixture mirror): the
+    // checker-safe predefined-subcommand tools (cargo_* / lsp_*) must be
+    // auto-approved in AutoEdit mode — the predicate the confirm gate consults,
+    // which runs identically headless (no TTY) and interactive.
+    let _g = crate::test_support::ExecGuard::hold();
+    let server = MockLlmServer::builder().with_response("ok").build().await;
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.execution_mode = ExecutionMode::AutoEdit;
+    let agent = Agent::new(config).await.unwrap();
+
+    for tool in [
+        // The four originally-auto-approved tools stay approved.
+        "file_write",
+        "file_edit",
+        "directory_tree",
+        "glob_find",
+        // Checker-safe predefined subcommands (the fix).
+        "cargo_test",
+        "cargo_check",
+        "cargo_clippy",
+        "cargo_fmt",
+        "lsp_diagnostics",
+        "lsp_hover",
+        "lsp_goto_definition",
+    ] {
+        assert!(
+            !agent.needs_confirmation(tool),
+            "{tool} must be auto-approved in AutoEdit"
+        );
+    }
+    // Confirm-gated tools stay confirm-gated even in AutoEdit.
+    for tool in ["shell_exec", "git_commit", "git_push", "process_stop"] {
+        assert!(
+            agent.needs_confirmation(tool),
+            "{tool} must remain confirm-gated in AutoEdit"
+        );
+    }
+
+    server.stop().await;
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn test_headless_auto_edit_reaches_cargo_check_after_edit_and_completes() {
+    // Regression (a): a headless AutoEdit run whose plan needs a command
+    // after an edit — `cargo_check` — must now reach AND perform it and
+    // complete. Before the fix, cargo_check was not in the AutoEdit
+    // auto-approved set, the headless confirm gate had no TTY to answer,
+    // and the run looped for the whole turn budget (measured: 74 steps /
+    // 1.47M tokens on exactly this edit → verify shape).
+    let _g = crate::test_support::ExecGuard::hold();
+
+    // Scratch deliverable inside docs/ (created mid-run so it is NOT part of
+    // the checkpoint's baseline dirty set and IS shown by `git ls-files
+    // --others`), auto-removed on drop. Cargo ignores non-Rust content, so
+    // the real `cargo check` that the agent runs cannot be affected by it.
+    let scratch_dir = std::env::current_dir()
+        .expect("current dir")
+        .join("docs")
+        .join(format!(".sw_e2e_scratch_{}", std::process::id()));
+    std::fs::create_dir_all(&scratch_dir).expect("create scratch dir");
+    struct ScratchCleanup(std::path::PathBuf);
+    impl Drop for ScratchCleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = ScratchCleanup(scratch_dir);
+    let scratch_rel = format!("docs/.sw_e2e_scratch_{}/notes.md", std::process::id());
+
+    let task = format!(
+        "Fix task: update {} (scratch notes file) then run cargo check to verify the project still compiles.",
+        scratch_rel
+    );
+
+    let server = MockLlmServer::builder()
+        // FILES: line in the assistant text so the edit guard is satisfied,
+        // plus the edit itself; then verification, a readback, and a final.
+        .with_response(format!(
+            "FILES: {}\n\n<tool>\n<name>file_write</name>\n<arguments>{{\"path\":\"{}\",\"content\":\"scratch summary\\n\"}}</arguments>\n</tool>",
+            scratch_rel, scratch_rel
+        ))
+        .with_response(
+            "<tool>\n<name>cargo_check</name>\n<arguments>{\"all_targets\":false,\"all_features\":false}</arguments>\n</tool>",
+        )
+        .with_response(format!(
+            "<tool>\n<name>file_read</name>\n<arguments>{{\"path\":\"{}\"}}</arguments>\n</tool>",
+            scratch_rel
+        ))
+        .with_response("Final answer: notes updated and cargo check passed.")
+        .build()
+        .await;
+
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.execution_mode = ExecutionMode::AutoEdit;
+    // The agent runs a REAL `cargo check` here (the whole point — the command
+    // must be reachable and performable). The mock config's 30s per-tool
+    // bound cuts a cold check build short under lock contention (measured:
+    // "Tool 'cargo_check' timed out after 30s"), so raise it.
+    config.agent.step_timeout_secs = 900;
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let result = agent.run_task(&task).await;
+    assert!(
+        result.is_ok(),
+        "headless AutoEdit run must complete after edit + cargo_check (was the command denied?): {:?}",
+        result.err()
+    );
+    let joined: String = agent
+        .messages
+        .iter()
+        .map(|m| m.content.text().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !joined.contains("requires confirmation"),
+        "no confirmation denial may appear in headless AutoEdit for checker-safe tools:\n{}",
+        joined
+    );
+    // cargo_check must actually have been dispatched and executed (auto
+    // -approved in headless AutoEdit instead of confirm-denied). The
+    // post-run `messages` serialize each turn into text (no structured
+    // `tool_calls` are retained), so assert the determinate mock sequence
+    // instead: this run's mock offers exactly file_write → cargo_check →
+    // file_read, so a completed run with exactly 3 tool calls proves the
+    // auto-approved cargo_check executed (nothing else in the sequence could
+    // consume the middle turn), and the scratch file proves the mutation.
+    assert!(
+        std::env::current_dir()
+            .expect("current dir")
+            .join(&scratch_rel)
+            .exists(),
+        "file_write must have landed the scratch notes file:\n{}",
+        joined
+    );
+    assert_eq!(
+        agent.total_tool_call_count(),
+        3,
+        "the mock sequence file_write -> cargo_check -> file_read must have all executed (3 total calls); rendered chain:\n{}",
+        joined
+    );
+
+    server.stop().await;
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn test_headless_auto_edit_confirm_gated_tool_stops_with_typed_outcome() {
+    // Regression (b): a headless run requesting a tool that is neither
+    // auto-approved nor checker-safe (git_commit) must stop with the typed
+    // `ConfirmationRequired` outcome instead of looping to the iteration
+    // ceiling. `is_confirmation_error` drives the run-loop's terminal
+    // `Failed` state and the CLI's EXIT_CONFIRMATION_REQUIRED exit code.
+    let _g = crate::test_support::ExecGuard::hold();
+    let server = MockLlmServer::builder()
+        .with_response(
+            "<tool>\n<name>git_commit</name>\n<arguments>{\"message\":\"wip\"}</arguments>\n</tool>",
+        )
+        .with_default_response(crate::testing::mock_api::MockResponse::Text(
+            "done".to_string(),
+        ))
+        .build()
+        .await;
+
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.execution_mode = ExecutionMode::AutoEdit;
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let result = agent.run_task("Commit the current state to git.").await;
+    let err = result.expect_err(
+        "a confirm-gated tool in headless AutoEdit must stop the run with the typed error",
+    );
+    // The run-loop lowered the TYPED `AgentError::ConfirmationRequired` to a
+    // terminal `Failed` state (see `is_confirmation_error` in task_runner):
+    // run_task stops immediately. The final message keeps the typed denial's
+    // wording even though task_runner stringifies the `Failed` reason.
+    // (The strict type assertion lives in
+    // `tool_dispatch::tests::confirmation_error_in_batch_is_typed_and_stops_the_run`,
+    // where the error is still typed.)
+    let msg = err.to_string();
+    assert!(
+        msg.contains("requires confirmation"),
+        "expected the typed confirmation stop, got: {:?}",
+        err
+    );
+    assert!(
+        msg.contains("git_commit"),
+        "the denial must name the denied tool, got: {:?}",
+        err
+    );
+    assert!(
+        !msg.contains("Max iterations"),
+        "the run must fail fast instead of looping to the iteration ceiling: {:?}",
+        err
+    );
+
+    server.stop().await;
+}
+
+#[test]
+fn test_headless_confirmation_denial_error_is_typed() {
+    // The headless denial produced by `prompt_tool_confirmation` is the
+    // TYPED `ConfirmationRequired` (previously an untyped anyhow): the
+    // run-loop lowers it to a terminal Failed state and the CLI maps it to
+    // EXIT_CONFIRMATION_REQUIRED — the "typed stop" the run-level regression
+    // tests above depend on.
+    let err: anyhow::Error = AgentError::ConfirmationRequired {
+        tool_name: "shell_exec".to_string(),
+    }
+    .into();
+    assert!(crate::errors::is_confirmation_error(&err));
+    assert_eq!(
+        crate::errors::get_exit_code(&err),
+        crate::errors::EXIT_CONFIRMATION_REQUIRED
+    );
+    // Display names the denied tool and the documented escape hatch.
+    let msg = err.to_string();
+    assert!(msg.contains("shell_exec"), "got: {msg}");
+    assert!(msg.contains("--yolo"), "got: {msg}");
 }
