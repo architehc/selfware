@@ -738,15 +738,19 @@ impl Config {
         }
 
         // Credential-origin gate: refuse to send a GLOBALLY-exported credential
-        // (SELFWARE_API_KEY) to a REMOTE endpoint that an untrusted, checkout-
-        // local `selfware.toml` selected. Local endpoints are exempt (no login
-        // for local models). Explicit --config / home-config endpoints are not
-        // "selfware.toml" and so are unaffected. Trust a repo by adding its
+        // (SELFWARE_API_KEY / OPENROUTER_API_KEY in the environment) to an
+        // endpoint that an untrusted, checkout-local `selfware.toml` selected —
+        // REGARDLESS of whether that endpoint is local. Localhost is NOT proof
+        // of authorization: an untrusted repo can choose
+        // `http://127.0.0.1:<port>/v1` and a listener on that port receives the
+        // global credential on the first request (2026-09-21 review finding).
+        // The gate is deliberately independent of the plaintext-transport check
+        // above: it answers "is the endpoint authorized", not "is the transport
+        // safe". Explicit --config / home-config endpoints are not
+        // "selfware.toml" and so are unaffected — as is SELFWARE_ENDPOINT
+        // (operator naming the endpoint directly). Trust a repo by adding its
         // config's canonical path to ~/.selfware/trusted_repos.
-        if config.api_key.is_some()
-            && matches!(api_key_source, ApiKeySource::EnvVar)
-            && !is_local_endpoint(&config.endpoint)
-        {
+        if config.api_key.is_some() && matches!(api_key_source, ApiKeySource::EnvVar) {
             if let Some(ConfigSource::ConfigFile(p)) = sources.get("endpoint") {
                 if config_is_checkout_local(p) && !super::trust::is_config_trusted(p) {
                     let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
@@ -757,6 +761,30 @@ impl Config {
                         config.endpoint,
                         canon.display()
                     );
+                }
+            }
+            // Profile endpoints (`[models.*] endpoint`) need the same gate:
+            // profile-routed requests (`chat_with_profile` via `resolve_model`,
+            // swarm/verification paths) send the resolved credential to the
+            // profile's OWN endpoint, so an untrusted checkout could otherwise
+            // aim a profile at a local listener while the top-level endpoint
+            // stays legitimate. Localhost profile endpoints stay allowed only
+            // when they did NOT originate from an untrusted checkout (operator
+            // env / home-config / trusted-repo endpoints pass here).
+            for (name, profile) in &config.models {
+                let key = format!("models.{name}.endpoint");
+                if let Some(ConfigSource::ConfigFile(p)) = sources.get(&key) {
+                    if config_is_checkout_local(p) && !super::trust::is_config_trusted(p) {
+                        let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+                        bail!(
+                            "Refusing to send the global SELFWARE_API_KEY to profile endpoint '{}' \
+                             selected by the project's selfware.toml: this repository is not \
+                             trusted. If you trust it, add this path to \
+                             ~/.selfware/trusted_repos:\n  {}",
+                            profile.endpoint,
+                            canon.display()
+                        );
+                    }
                 }
             }
         }

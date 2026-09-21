@@ -2044,6 +2044,150 @@ fn env_selected_config_file_is_operator_choice_for_endpoint_gate() {
 }
 
 // =========================================================================
+// Credential-origin gate (2026-09-21 review, critical): a GLOBALLY-exported
+// credential must not be sent to an endpoint an untrusted checkout-local
+// `selfware.toml` selects — even a localhost one. Local is NOT proof of
+// authorization: a listener bound to 127.0.0.1:<port> would receive the
+// key on the first request. This gate is independent of the plaintext-
+// transport check: https:// remote AND localhost endpoints both fall under
+// it when selected by an untrusted checkout.
+// =========================================================================
+
+#[test]
+fn untrusted_checkout_config_with_localhost_endpoint_and_global_key_refused() {
+    let _guard = clear_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(home.path());
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "http://127.0.0.1:18091/v1"
+        model = "anything"
+        "#,
+        "selfware.toml",
+    );
+    std::env::set_var("SELFWARE_API_KEY", "sk-global-test-secret");
+    let err = Config::load(Some(path.to_str().unwrap())).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("not trusted"),
+        "a localhost endpoint selected by an untrusted checkout must not receive the \
+         global credential, got: {msg}"
+    );
+    assert!(
+        msg.contains("SELFWARE_API_KEY"),
+        "the refusal must name the global credential, got: {msg}"
+    );
+}
+
+#[test]
+fn untrusted_checkout_config_with_localhost_profile_endpoint_and_global_key_refused() {
+    let _guard = clear_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(home.path());
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "http://localhost:9999/v1"
+        model = "anything"
+
+        [models.default]
+        endpoint = "http://127.0.0.1:18091/v1"
+        model = "anything"
+        "#,
+        "selfware.toml",
+    );
+    // The TOP-LEVEL endpoint is named by the OPERATOR (SELFWARE_ENDPOINT),
+    // so only the PROFILE endpoint originates from the untrusted checkout —
+    // the profile branch of the credential-origin gate must refuse it.
+    std::env::set_var("SELFWARE_ENDPOINT", "http://localhost:9999/v1");
+    std::env::set_var("SELFWARE_API_KEY", "sk-global-test-secret");
+    let err = Config::load(Some(path.to_str().unwrap())).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("not trusted"),
+        "a localhost PROFILE endpoint selected by an untrusted checkout must not receive \
+         the global credential, got: {msg}"
+    );
+    assert!(
+        msg.contains("profile endpoint"),
+        "the refusal must name the PROFILE endpoint, got: {msg}"
+    );
+    assert!(
+        msg.contains("SELFWARE_API_KEY"),
+        "the refusal must name the global credential, got: {msg}"
+    );
+}
+
+#[test]
+fn trusted_checkout_config_with_localhost_endpoint_and_global_key_allowed() {
+    let _guard = clear_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(home.path());
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "http://localhost:9999/v1"
+        model = "anything"
+        "#,
+        "selfware.toml",
+    );
+    std::env::set_var("SELFWARE_API_KEY", "sk-global-test-secret");
+    crate::config::trust::add_trusted_config(&path).unwrap();
+    let config = Config::load(Some(path.to_str().unwrap()))
+        .expect("a TRUSTED repo's localhost endpoint may receive the operator credential");
+    assert_eq!(config.endpoint, "http://localhost:9999/v1");
+    assert_eq!(
+        config.api_key.as_ref().map(|k| k.expose()),
+        Some("sk-global-test-secret")
+    );
+}
+
+#[test]
+fn operator_named_localhost_endpoint_with_global_key_allowed() {
+    let _guard = clear_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(home.path());
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "http://localhost:9999/v1"
+        model = "anything"
+        "#,
+        "operator_env.toml",
+    );
+    // The endpoint is named by the OPERATOR via SELFWARE_ENDPOINT (same
+    // trust level as --config / home config): its source is EnvVar, so the
+    // credential-origin gate must not fire even though the token is local.
+    std::env::set_var("SELFWARE_ENDPOINT", "http://127.0.0.1:18091/v1");
+    std::env::set_var("SELFWARE_API_KEY", "sk-global-test-secret");
+    let config = Config::load(Some(path.to_str().unwrap()))
+        .expect("an operator-named localhost endpoint must load");
+    assert_eq!(config.endpoint, "http://127.0.0.1:18091/v1");
+    assert_eq!(
+        config.api_key.as_ref().map(|k| k.expose()),
+        Some("sk-global-test-secret")
+    );
+}
+
+#[test]
+fn explicit_non_checkout_config_with_localhost_and_global_key_allowed() {
+    let _guard = clear_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(home.path());
+    // An explicitly-named config (`--config myconfig.toml`) is the operator's
+    // own file: not checkout-local, so the credential-origin gate does not
+    // apply (transport checks still do).
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "http://localhost:1234/v1"
+        model = "anything"
+        "#,
+        "operator_local.toml",
+    );
+    std::env::set_var("SELFWARE_API_KEY", "sk-global-test-secret");
+    let config = Config::load(Some(path.to_str().unwrap()))
+        .expect("an operator-named config's localhost endpoint must load");
+    assert_eq!(config.endpoint, "http://localhost:1234/v1");
+}
+
+// =========================================================================
 // Profile endpoints ([models.*]) go through the same untrusted-endpoint
 // gate: profile-routed requests (chat_with_profile via resolve_model) use
 // the profile's endpoint, so a gate that only checks the top-level key is

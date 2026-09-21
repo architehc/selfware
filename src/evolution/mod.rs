@@ -61,7 +61,14 @@ use std::path::PathBuf;
 /// safety mechanisms must be externally defined and immutable from the agent's
 /// perspective. A mutation cannot edit the auditor to return Ok or the orchestrator
 /// to skip verification.
+///
+/// Repository instruction files ("AGENTS.md") are included: an agent that is
+/// improving its own codebase must not be able to rewrite the file that governs
+/// how it behaves (P2 finding, 2026-09-21 review). The bare file entry matches
+/// at ANY depth via `is_protected`'s `/AGENTS.md` suffix check, so nested
+/// instruction files under `src/` or `docs/` are protected too.
 pub const PROTECTED_PATHS: &[&str] = &[
+    "AGENTS.md",
     "src/evolution/",
     "src/safety/",
     "src/evolve/",
@@ -357,6 +364,13 @@ impl std::fmt::Display for GenerationRating {
 ///
 /// Uses proper path prefix matching with canonicalization to prevent bypasses
 /// via symlinks, relative paths, or substring tricks.
+///
+/// This is the SHARED protected-path policy for every self-modification entry
+/// point: the evolution daemon's hypothesis / apply gates and the `selfware
+/// improve` command all call this function, so a path added to
+/// [`PROTECTED_PATHS`] (e.g. a repository instruction file like `AGENTS.md`)
+/// is refused by every gate at once. Existing call sites must never be
+/// weakened around it.
 pub fn is_protected(path: &std::path::Path) -> bool {
     // Canonicalize the path to resolve symlinks and normalize separators.
     // We use the safety-checker normalize_path so the Windows `\\?\` UNC

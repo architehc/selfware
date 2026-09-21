@@ -249,3 +249,37 @@ fn test_tool_metadata_builder() {
     assert!(meta.network_access);
     assert!(!meta.shell_execution);
 }
+
+/// browser_eval executes arbitrary JS inside the page and can mutate DOM,
+/// storage and remote state, so it is NOT read-only — the old network()
+/// classification labelled it read-only and let it execute over MCP without
+/// the write opt-in (2026-09-21 review finding).
+#[test]
+fn test_browser_eval_classified_as_write_capable() {
+    let meta = default_tool_metadata("browser_eval");
+    assert!(!meta.read_only, "browser_eval must be write-capable");
+    assert!(meta.network_access, "browser_eval talks to the browser");
+    assert!(
+        !meta.destructive,
+        "browser_eval is not in the destructive class — only the write class covers it"
+    );
+}
+
+/// pip_freeze and knowledge_export can WRITE (output_file / output_path) and
+/// must be write-capable, not read-only: the MCP write gate keys on read_only
+/// (2026-09-21 follow-up review finding — freeze-to-file rode through without
+/// the opt-in).
+#[test]
+fn test_pip_freeze_and_knowledge_export_classified_as_write_capable() {
+    let freeze = default_tool_metadata("pip_freeze");
+    assert!(!freeze.read_only, "pip_freeze must be write-capable");
+    assert_eq!(freeze.risk_level, RiskLevel::Medium);
+
+    let export = default_tool_metadata("knowledge_export");
+    assert!(!export.read_only, "knowledge_export must be write-capable");
+    assert_eq!(export.risk_level, RiskLevel::Medium);
+
+    // Sibling reads keep their read-only classification.
+    assert!(default_tool_metadata("pip_list").read_only);
+    assert!(default_tool_metadata("knowledge_query").read_only);
+}

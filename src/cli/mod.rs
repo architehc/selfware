@@ -213,6 +213,246 @@ fn build_workflow_llm_handler(
     })
 }
 
+#[cfg(feature = "self-improvement")]
+/// Parse `git status --porcelain` stdout into the working-tree paths it
+/// reports (tracked modifications AND untracked files). Rename entries
+/// (`R  orig -> new`) yield BOTH the source and the destination: renaming a
+/// protected path to an unprotected name is still a modification of the
+/// protected path, so the source must be swept too (2026-09-21 follow-up
+/// review finding). Kept pure so the improve gate's protected-path sweep is
+/// unit-testable without a real repository.
+fn porcelain_paths(stdout: &[u8]) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for line in String::from_utf8_lossy(stdout).lines() {
+        // Porcelain lines are `XY <path>` (path starts at byte 3).
+        let Some(p) = line.get(3..) else { continue };
+        if p.is_empty() {
+            continue;
+        }
+        match p.split_once(" -> ") {
+            Some((src, dest)) => {
+                out.push(std::path::PathBuf::from(src));
+                out.push(std::path::PathBuf::from(dest));
+            }
+            None => out.push(std::path::PathBuf::from(p)),
+        }
+    }
+    out
+}
+
+#[cfg(feature = "self-improvement")]
+/// Parse `git diff --name-status --no-renames` stdout into the paths it
+/// touches. Every status line is `<status>\t<path>` and deletions are listed
+/// like any other change; `--no-renames` renders a rename as a delete + add
+/// pair so BOTH the original and the new path appear in the sweep.
+fn diff_name_status_paths(stdout: &[u8]) -> Vec<std::path::PathBuf> {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .filter_map(|line| {
+            let path = line.rsplit_once('\t').map(|(_, p)| p).unwrap_or(line);
+            let path = path.trim();
+            if path.is_empty() {
+                None
+            } else {
+                Some(std::path::PathBuf::from(path))
+            }
+        })
+        .collect()
+}
+
+#[cfg(feature = "self-improvement")]
+/// The repository's current HEAD sha, or `None` when the checkout is not a
+/// git repo or has an unborn HEAD. Used by the improve gate to sweep
+/// changes the agent COMMITTED (they vanish from `git status --porcelain`).
+async fn current_head_sha(project_root: &std::path::Path) -> Option<String> {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.args(["rev-parse", "HEAD"]).current_dir(project_root);
+    crate::safety::process_env::sanitize_command_env(&mut cmd);
+    let output = cmd.output().await.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&output.stdout);
+    let sha = sha.trim();
+    if sha.is_empty() {
+        None
+    } else {
+        Some(sha.to_string())
+    }
+}
+
+#[cfg(feature = "self-improvement")]
+/// Tail of a failed gate's output (the full `cargo clippy` stderr on a big
+/// tree is hundreds of lines; the CLI message only needs the end).
+fn gate_failure_tail(stderr: &[u8], max_lines: usize) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let lines: Vec<&str> = text.lines().collect();
+    let tail = lines.len().saturating_sub(max_lines);
+    lines[tail..].join("\n")
+}
+
+#[cfg(feature = "self-improvement")]
+/// Spawn a gate command with a SANITIZED environment and process-group
+/// isolation, and wait for it with a deadline.
+///
+/// Sanitization: gate children run project-controlled code and must never
+/// inherit the operator's credentials (`SELFWARE_API_KEY`, exported tokens),
+/// exactly like the evolution daemon's cargo commands. The sanitizer is
+/// applied BEFORE any task-specific env so the allowlist survives.
+///
+/// Timeout: the child is spawned in its own process group (`process_group(0)`)
+/// and the WHOLE group — cargo plus its rustc/test grandchildren — is
+/// SIGKILLed when the deadline passes; `kill_on_drop` kills the direct child
+/// and the tokio runtime's SIGCHLD handler reaps the zombie, so a 600s gate
+/// cannot leak subprocesses (2026-09-21 follow-up review finding).
+async fn run_gate_command(
+    program: &str,
+    args: &[&str],
+    project_root: &std::path::Path,
+    within: std::time::Duration,
+) -> anyhow::Result<std::process::Output> {
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args)
+        .current_dir(project_root)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    crate::safety::process_env::sanitize_command_env(&mut cmd);
+    cmd.kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("'{program} {}' failed to spawn: {e}", args.join(" ")))?;
+    let child_pid = child.id();
+
+    let wait_fut = tokio::time::timeout(within, child.wait_with_output());
+    tokio::pin!(wait_fut);
+
+    match wait_fut.await {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(e)) => anyhow::bail!("'{program} {}' failed to run: {e}", args.join(" ")),
+        Err(_) => {
+            #[cfg(unix)]
+            if let Some(pid) = child_pid {
+                let _ = nix::sys::signal::killpg(
+                    nix::unistd::Pid::from_raw(pid as i32),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+            }
+            anyhow::bail!(
+                "'{program} {}' timed out after {}s — the process group was terminated",
+                args.join(" "),
+                within.as_secs()
+            )
+        }
+    }
+}
+
+#[cfg(feature = "self-improvement")]
+/// Pre-commit-style gate for `selfware improve`: the same checks the repo's
+/// pre-commit hook enforces — `cargo fmt --check`, `cargo clippy --all-targets
+/// -- -D warnings`, `cargo test --lib` — plus a protected-path sweep of the
+/// working tree that covers UNCOMMITTED/untracked changes (`git status
+/// --porcelain`) AND changes the agent COMMITTED since `pre_run_head` (`git
+/// diff` against that tree — committed edits no longer appear in porcelain).
+/// `improve` runs the agent on the LIVE checkout with no sandbox (2026-09-21
+/// review, critical), so an Ok from the agent only means "task finished"; a
+/// success claim is only printed after every check actually ran and passed
+/// here, mirroring what the evolution daemon's candidate evaluation enforces
+/// in its shadow worktree.
+///
+/// Returns Ok(()) only when every check ran and passed; otherwise the failing
+/// gate's output.
+async fn run_improvement_gates(
+    project_root: &std::path::Path,
+    pre_run_head: Option<&str>,
+) -> anyhow::Result<()> {
+    use std::time::Duration;
+
+    async fn run_cargo_gate(
+        project_root: &std::path::Path,
+        args: &[&str],
+        within: Duration,
+    ) -> anyhow::Result<()> {
+        let output = run_gate_command("cargo", args, project_root, within).await?;
+        if !output.status.success() {
+            let tail = gate_failure_tail(&output.stderr, 40);
+            let tail = if tail.trim().is_empty() {
+                String::from_utf8_lossy(&output.stdout).trim().to_string()
+            } else {
+                tail
+            };
+            anyhow::bail!(
+                "'cargo {}' failed ({}):\n{}",
+                args.join(" "),
+                output.status,
+                tail.trim()
+            );
+        }
+        Ok(())
+    }
+
+    run_cargo_gate(
+        project_root,
+        &["fmt", "--", "--check"],
+        Duration::from_secs(120),
+    )
+    .await?;
+    run_cargo_gate(
+        project_root,
+        &["clippy", "--all-targets", "--", "-D", "warnings"],
+        Duration::from_secs(300),
+    )
+    .await?;
+    run_cargo_gate(project_root, &["test", "--lib"], Duration::from_secs(600)).await?;
+
+    // Protected-path sweep #1: uncommitted / untracked working-tree changes.
+    let status = run_gate_command(
+        "git",
+        &["status", "--porcelain"],
+        project_root,
+        Duration::from_secs(30),
+    )
+    .await?;
+    if !status.status.success() {
+        anyhow::bail!("git status failed ({})", status.status);
+    }
+    let mut dirtied = porcelain_paths(&status.stdout);
+
+    // Protected-path sweep #2: changes the agent COMMITTED during the run —
+    // those no longer appear in `git status --porcelain`. A diff against the
+    // pre-run HEAD tree captures them; an unborn/absent HEAD falls back to
+    // the porcelain sweep alone.
+    if let Some(head) = pre_run_head {
+        let diff = run_gate_command(
+            "git",
+            &["diff", "--name-status", "--no-renames", head],
+            project_root,
+            Duration::from_secs(30),
+        )
+        .await?;
+        if !diff.status.success() {
+            anyhow::bail!("git diff against the pre-run HEAD failed ({})", diff.status);
+        }
+        dirtied.extend(diff_name_status_paths(&diff.stdout));
+    }
+
+    let touched: Vec<_> = dirtied
+        .into_iter()
+        .filter(|p| crate::evolution::is_protected(p))
+        .collect();
+    if let Some(p) = touched.first() {
+        anyhow::bail!(
+            "the agent modified protected path '{}' — the change is refused and left \
+             unverified in the working tree",
+            p.display()
+        );
+    }
+    Ok(())
+}
+
 /// Build a [`ToolHandler`](crate::workflows::ToolHandler) that dispatches Tool
 /// steps to the real [`ToolRegistry`] behind the safety gate.
 ///
@@ -2555,6 +2795,25 @@ async fn handle_command(
                     break;
                 };
 
+                // Protected-path gate, shared with the evolution daemon
+                // (evolution::is_protected): never run the improvement agent
+                // against a repository instruction file or any other
+                // protected path. The target file is checked BEFORE the run;
+                // the post-run gate re-sweeps the whole working tree.
+                if target
+                    .file
+                    .as_deref()
+                    .is_some_and(|f| crate::evolution::is_protected(std::path::Path::new(f)))
+                {
+                    println!(
+                        "   {} Skipping target: '{}' is a protected path (self-modification \
+                         safety policy) — the improvement agent must not edit it.",
+                        Glyphs::frost(),
+                        target.file.as_deref().unwrap_or("(no file)")
+                    );
+                    continue;
+                }
+
                 println!(
                     "\n   {} Cycle {}/{}: applying '{}'",
                     Glyphs::gear(),
@@ -2563,10 +2822,39 @@ async fn handle_command(
                     target.description
                 );
 
+                // Capture the pre-run HEAD so the post-run gate can also see
+                // changes the agent COMMITTED during the run (those vanish
+                // from `git status --porcelain`; follow-up review finding).
+                let pre_run_head = current_head_sha(&project_root).await;
+
                 let prompt = orchestrator.build_improvement_prompt(target);
                 match agent.run_task(&prompt).await {
                     Ok(()) => {
-                        println!("   {} Improvement applied successfully.", Glyphs::bloom());
+                        // Ok from the agent means "task finished", not "the
+                        // codebase still passes the gates". `improve` runs on
+                        // the live checkout, so a pre-commit-style gate runs
+                        // HERE (fmt/clippy/test + protected-path sweep) before
+                        // any success is printed; a run whose tree fails the
+                        // gate is reported as failed, never as applied.
+                        match run_improvement_gates(&project_root, pre_run_head.as_deref()).await {
+                            Ok(()) => {
+                                println!(
+                                    "   {} Improvement applied successfully.",
+                                    Glyphs::bloom()
+                                );
+                            }
+                            Err(gate_err) => {
+                                // A failed gate must NOT end in overall
+                                // success: propagate as a CLI failure
+                                // (non-zero exit) so automation cannot see
+                                // exit 0 despite failed checks (follow-up
+                                // review finding P2).
+                                return Err(anyhow::anyhow!(
+                                    "improvement gate failed — changes are left unverified in \
+                                     the working tree: {gate_err:#}"
+                                ));
+                            }
+                        }
                     }
                     Err(e) => {
                         println!("   {} Improvement failed: {}", Glyphs::frost(), e);

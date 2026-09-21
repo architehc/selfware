@@ -51,6 +51,23 @@ fn test_protected_paths() {
     assert!(!is_protected(std::path::Path::new("src/memory.rs")));
 }
 
+/// Repository instruction files are part of the shared protected-path policy:
+/// the root AGENTS.md and any NESTED AGENTS.md (src/, docs/, any depth) must
+/// be immutable from self-modification, and lookalike names must not match.
+#[test]
+fn test_repository_instruction_files_protected() {
+    assert!(is_protected(std::path::Path::new("AGENTS.md")));
+    assert!(is_protected(std::path::Path::new("./AGENTS.md")));
+    assert!(is_protected(std::path::Path::new("src/AGENTS.md")));
+    assert!(is_protected(std::path::Path::new("src/deep/AGENTS.md")));
+    assert!(is_protected(std::path::Path::new("docs/AGENTS.md")));
+    // Lookalike / suffix-trick names must NOT match.
+    assert!(!is_protected(std::path::Path::new("AGENTS.md.bak")));
+    assert!(!is_protected(std::path::Path::new("AGENTS_md")));
+    assert!(!is_protected(std::path::Path::new("src/AGENTS.md.bak")));
+    assert!(!is_protected(std::path::Path::new("my_AGENTS.md")));
+}
+
 #[test]
 fn test_fitness_weights_default() {
     let w = FitnessWeights::default();

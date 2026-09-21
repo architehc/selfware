@@ -1716,3 +1716,139 @@ fn resume_existing_session_continues_and_announces() {
         ok.err()
     );
 }
+
+// =========================================================================
+// `selfware improve` gate helpers (2026-09-21 review, critical): the
+// improvement command used to print "Improvement applied successfully" on
+// any agent Ok. The pre-commit-style gate and its pure parsers live in
+// cli::run_improvement_gates / porcelain_paths / gate_failure_tail.
+// =========================================================================
+
+#[cfg(feature = "self-improvement")]
+#[test]
+fn porcelain_paths_parses_plain_modified_and_untracked() {
+    let out = b" M src/foo.rs\n?? new_file.txt\n D deleted.rs\n";
+    let paths = porcelain_paths(out);
+    assert_eq!(
+        paths,
+        vec![
+            std::path::PathBuf::from("src/foo.rs"),
+            std::path::PathBuf::from("new_file.txt"),
+            std::path::PathBuf::from("deleted.rs"),
+        ]
+    );
+}
+
+#[cfg(feature = "self-improvement")]
+#[test]
+fn porcelain_paths_rename_yields_source_and_destination() {
+    // `R  orig -> new`: the protected-path sweep must check BOTH paths —
+    // renaming a protected path (e.g. AGENTS.md) to an unprotected name is
+    // still a modification of the protected path (follow-up review finding).
+    let out = b"R  src/old.rs -> src/new.rs\nR  AGENTS.md -> notes.md\n";
+    let paths = porcelain_paths(out);
+    assert_eq!(
+        paths,
+        vec![
+            std::path::PathBuf::from("src/old.rs"),
+            std::path::PathBuf::from("src/new.rs"),
+            std::path::PathBuf::from("AGENTS.md"),
+            std::path::PathBuf::from("notes.md"),
+        ]
+    );
+}
+
+#[cfg(feature = "self-improvement")]
+#[test]
+fn porcelain_paths_rename_dodge_is_caught() {
+    // The attack the follow-up review described: renaming a protected file
+    // to an unprotected name. The SOURCE must trip the sweep.
+    let out = b"R  AGENTS.md -> README_backup.md\n";
+    let touched: Vec<_> = porcelain_paths(out)
+        .into_iter()
+        .filter(|p| crate::evolution::is_protected(p))
+        .collect();
+    assert_eq!(
+        touched,
+        vec![std::path::PathBuf::from("AGENTS.md")],
+        "renaming a protected path away must still be caught via its source"
+    );
+}
+
+#[cfg(feature = "self-improvement")]
+#[test]
+fn porcelain_paths_empty_and_garbage_lines() {
+    assert!(porcelain_paths(b"").is_empty());
+    // Short/garbage lines (fewer than the `XY ` prefix) must be skipped —
+    // porcelain v1 never emits header lines, so every line carries a path.
+    assert!(porcelain_paths(b"!!\n").is_empty());
+    assert!(porcelain_paths(b"X\n").is_empty());
+}
+
+#[cfg(feature = "self-improvement")]
+#[test]
+fn porcelain_paths_feeds_protected_path_sweep() {
+    // The exact integration the improve gate relies on: porcelain output
+    // naming a protected path must be caught by evolution::is_protected.
+    let out = b" M src/safety/sandbox.rs\n M AGENTS.md\n M src/agent/agent.rs\n";
+    let touched: Vec<_> = porcelain_paths(out)
+        .into_iter()
+        .filter(|p| crate::evolution::is_protected(p))
+        .collect();
+    assert_eq!(
+        touched,
+        vec![
+            std::path::PathBuf::from("src/safety/sandbox.rs"),
+            std::path::PathBuf::from("AGENTS.md"),
+        ],
+        "the improve gate sweep must flag every protected path in porcelain output"
+    );
+}
+
+#[cfg(feature = "self-improvement")]
+#[test]
+fn gate_failure_tail_keeps_the_end() {
+    let stderr = b"line1\nline2\nline3\nline4\nline5\n";
+    assert_eq!(gate_failure_tail(stderr, 2), "line4\nline5");
+    // More lines than the input means the whole input.
+    assert_eq!(
+        gate_failure_tail(stderr, 100),
+        "line1\nline2\nline3\nline4\nline5"
+    );
+    assert_eq!(gate_failure_tail(b"", 10), "");
+}
+
+#[cfg(feature = "self-improvement")]
+#[test]
+fn diff_name_status_paths_parses_committed_changes() {
+    // `git diff --name-status --no-renames <head>` output: status TAB path.
+    let out = b"M\tsrc/foo.rs\nA\tsrc/new.rs\nD\tsrc/old.rs\n";
+    let paths = diff_name_status_paths(out);
+    assert_eq!(
+        paths,
+        vec![
+            std::path::PathBuf::from("src/foo.rs"),
+            std::path::PathBuf::from("src/new.rs"),
+            std::path::PathBuf::from("src/old.rs"),
+        ]
+    );
+    assert!(diff_name_status_paths(b"").is_empty());
+}
+
+#[cfg(feature = "self-improvement")]
+#[test]
+fn diff_name_status_paths_feeds_protected_path_sweep() {
+    // The committed-changes sweep: an agent that COMMITTED an edit to a
+    // protected path (e.g. AGENTS.md) and then left a clean porcelain must
+    // still be caught by the diff-against-pre-run-HEAD sweep.
+    let out = b"M\tAGENTS.md\nM\tsrc/memory.rs\n";
+    let touched: Vec<_> = diff_name_status_paths(out)
+        .into_iter()
+        .filter(|p| crate::evolution::is_protected(p))
+        .collect();
+    assert_eq!(
+        touched,
+        vec![std::path::PathBuf::from("AGENTS.md")],
+        "committed edits to protected paths must be caught by the diff sweep"
+    );
+}

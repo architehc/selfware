@@ -1082,8 +1082,123 @@ env = { GITHUB_TOKEN = "ghp-test-secret-67890" }
     );
 }
 
-/// Destructive tools are refused over MCP by default: the protocol has
+/// A minimal Tool carrying only a name: exercises the write-class classifier
+/// (`mcp_tool_call_is_write`) without executing anything. Its metadata comes
+/// from the shared `default_tool_metadata(name)` classification.
+struct NamedTool<'a>(&'a str);
+
+#[async_trait::async_trait]
+impl<'a> crate::tools::Tool for NamedTool<'a> {
+    fn name(&self) -> &str {
+        self.0
+    }
+
+    fn description(&self) -> &str {
+        "classification test tool"
+    }
+
+    fn schema(&self) -> Value {
+        serde_json::json!({"type": "object"})
+    }
+
+    async fn execute(&self, _args: Value) -> anyhow::Result<Value> {
+        Ok(serde_json::json!({}))
+    }
+}
+
+/// The MCP write class covers per-call writes even when the metadata type is
+/// read-only: pip_freeze / knowledge_export now carry write-capable metadata,
+/// page_control mutating actions are rejected, read actions are not, and the
+/// http method split keeps working (2026-09-21 follow-up review finding).
+#[test]
+fn mcp_write_class_classifies_per_call_writes() {
+    // A plain fn, not a closure: a closure borrowing its `&str` parameter
+    // would demand a 'static bound from the borrow checker.
+    fn is_write(name: &str, args: Value) -> bool {
+        let tool = NamedTool(name);
+        mcp_tool_call_is_write(&tool, &args)
+    }
+
+    // Write-capable metadata: refused regardless of arguments.
+    assert!(is_write("file_write", serde_json::json!({})));
+    assert!(is_write("git_commit", serde_json::json!({})));
+    assert!(is_write(
+        "pip_freeze",
+        serde_json::json!({"output_file": "req.txt"})
+    ));
+    assert!(is_write("pip_freeze", serde_json::json!({})));
+    assert!(is_write(
+        "knowledge_export",
+        serde_json::json!({"output_path": "k.json"})
+    ));
+
+    // page_control: mutating actions are writes…
+    for action in [
+        "goto",
+        "click",
+        "type",
+        "fill",
+        "select",
+        "check",
+        "uncheck",
+        "press",
+        "evaluate",
+        "new_tab",
+        "close_tab",
+        "shutdown",
+    ] {
+        assert!(
+            is_write(
+                "page_control",
+                serde_json::json!({"action": action, "selector": "x"})
+            ),
+            "page_control '{action}' must classify as a write"
+        );
+    }
+    // …read actions are not.
+    for action in [
+        "title",
+        "url",
+        "text",
+        "html",
+        "value",
+        "visible",
+        "list_tabs",
+        "screenshot",
+    ] {
+        assert!(
+            !is_write("page_control", serde_json::json!({"action": action})),
+            "page_control '{action}' must classify as a read"
+        );
+    }
+    // An absent action defaults to read (schema requires action, so a live
+    // call never reaches the gate without one).
+    assert!(!is_write("page_control", serde_json::json!({})));
+
+    // http_request method split.
+    assert!(is_write(
+        "http_request",
+        serde_json::json!({"method": "POST"})
+    ));
+    assert!(!is_write(
+        "http_request",
+        serde_json::json!({"method": "GET"})
+    ));
+    assert!(!is_write(
+        "http_request",
+        serde_json::json!({"method": "head"})
+    ));
+    assert!(!is_write("http_request", serde_json::json!({})));
+
+    // Plain reads stay out of the write class.
+    assert!(!is_write("file_read", serde_json::json!({})));
+    assert!(!is_write("grep_search", serde_json::json!({})));
+}
+
+/// Write-capable tools are refused over MCP by default: the protocol has
 /// no confirmation channel, so the refusal payload documents the opt-in.
+/// The gate covers the whole write class (destructive AND merely
+/// state-modifying tools), not just `is_destructive`.
 #[tokio::test]
 async fn test_tools_call_destructive_refused_without_opt_in() {
     let _guard = DESTRUCTIVE_ENV_LOCK.lock().await;
@@ -1110,13 +1225,291 @@ async fn test_tools_call_destructive_refused_without_opt_in() {
     assert_eq!(result.get("isError").and_then(|v| v.as_bool()), Some(true));
     let text = result["content"][0]["text"].as_str().unwrap_or("");
     assert!(
-        text.contains("destructive"),
+        text.contains("can modify state"),
         "refusal must say why, got: {text}"
     );
     assert!(
         text.contains("SELFWARE_MCP_ALLOW_DESTRUCTIVE"),
         "refusal must document the opt-in, got: {text}"
     );
+}
+
+/// The write class is broader than the destructive class: file_write is
+/// `destructive: false` but still wrote to disk over live MCP with no opt-in
+/// (2026-09-21 review finding). It must be refused without the opt-in, and
+/// actually write nothing.
+#[tokio::test]
+async fn test_tools_call_file_write_refused_without_opt_in() {
+    let _guard = DESTRUCTIVE_ENV_LOCK.lock().await;
+    set_destructive_opt_in(None);
+    // Hermetic safety config so the local developer's denied_paths cannot
+    // interfere; a target/tmp path (relative, allowed by the default config)
+    // so nothing ever touches the real repo.
+    let dir = std::path::Path::new("target/tmp").join(format!("mcp-write-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("leak.txt");
+    let server = McpServer::with_explicit_safety_config(crate::config::SafetyConfig::default());
+    initialize_server(&server).await;
+
+    let request = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(Value::from(35)),
+        method: "tools/call".to_string(),
+        params: Some(serde_json::json!({
+            "name": "file_write",
+            "arguments": {"path": path.to_string_lossy(), "content": "pwned"}
+        })),
+    };
+
+    let response = server.handle_request(&request).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(response.error.is_none());
+    let result = response.result.unwrap();
+    assert_eq!(result.get("isError").and_then(|v| v.as_bool()), Some(true));
+    let text = result["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        text.contains("can modify state"),
+        "file_write must be refused as write-capable, got: {text}"
+    );
+    assert!(
+        !path.exists(),
+        "the refused write must never reach the disk, got: {}",
+        path.display()
+    );
+}
+
+/// git_commit shares the `git()` metadata with read-only git tools but
+/// rewrites git history — it is write-capable and needs the opt-in.
+#[tokio::test]
+async fn test_tools_call_git_commit_refused_without_opt_in() {
+    let _guard = DESTRUCTIVE_ENV_LOCK.lock().await;
+    set_destructive_opt_in(None);
+    let server = McpServer::with_explicit_safety_config(crate::config::SafetyConfig::default());
+    initialize_server(&server).await;
+
+    let request = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(Value::from(36)),
+        method: "tools/call".to_string(),
+        params: Some(serde_json::json!({
+            "name": "git_commit",
+            "arguments": {"message": "mcp write gate test"}
+        })),
+    };
+    let response = server.handle_request(&request).await.unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(result.get("isError").and_then(|v| v.as_bool()), Some(true));
+    let text = result["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        text.contains("can modify state"),
+        "git_commit must be refused as write-capable, got: {text}"
+    );
+}
+
+/// http_request carries read-only metadata (GET is a read), but a non-GET
+/// method changes server state: the gate must inspect the METHOD.
+#[tokio::test]
+async fn test_tools_call_http_post_refused_without_opt_in() {
+    let _guard = DESTRUCTIVE_ENV_LOCK.lock().await;
+    set_destructive_opt_in(None);
+    let server = McpServer::with_explicit_safety_config(crate::config::SafetyConfig::default());
+    initialize_server(&server).await;
+
+    let request = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(Value::from(37)),
+        method: "tools/call".to_string(),
+        params: Some(serde_json::json!({
+            "name": "http_request",
+            "arguments": {"url": "http://127.0.0.1:9/x", "method": "POST", "body": "x"}
+        })),
+    };
+    let response = server.handle_request(&request).await.unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(result.get("isError").and_then(|v| v.as_bool()), Some(true));
+    let text = result["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        text.contains("can modify state"),
+        "a non-GET http_request must be refused as write-capable, got: {text}"
+    );
+}
+
+/// A GET http_request is a read and must pass the write gate (it still has
+/// to survive the safety checker for localhost, which is allowed by default).
+#[tokio::test]
+async fn test_tools_call_http_get_not_gated() {
+    let _guard = DESTRUCTIVE_ENV_LOCK.lock().await;
+    set_destructive_opt_in(None);
+    let server = McpServer::with_explicit_safety_config(crate::config::SafetyConfig::default());
+    initialize_server(&server).await;
+
+    let request = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(Value::from(38)),
+        method: "tools/call".to_string(),
+        params: Some(serde_json::json!({
+            "name": "http_request",
+            "arguments": {"url": "http://127.0.0.1:9/x", "method": "GET"}
+        })),
+    };
+    let response = server.handle_request(&request).await.unwrap();
+    let result = response.result.unwrap();
+    let text = result["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        !text.contains("can modify state"),
+        "a GET http_request must not hit the write gate, got: {text}"
+    );
+}
+
+/// browser_eval executes arbitrary JS in the page (mutating DOM/server
+/// state); its metadata is no longer read-only so the write gate refuses it.
+#[tokio::test]
+async fn test_tools_call_browser_eval_refused_without_opt_in() {
+    let _guard = DESTRUCTIVE_ENV_LOCK.lock().await;
+    set_destructive_opt_in(None);
+    let server = McpServer::with_explicit_safety_config(crate::config::SafetyConfig::default());
+    initialize_server(&server).await;
+
+    let request = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(Value::from(39)),
+        method: "tools/call".to_string(),
+        params: Some(serde_json::json!({
+            "name": "browser_eval",
+            "arguments": {"url": "http://127.0.0.1:9/", "script": "document.title = 'x'"}
+        })),
+    };
+    let response = server.handle_request(&request).await.unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(result.get("isError").and_then(|v| v.as_bool()), Some(true));
+    let text = result["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        text.contains("can modify state"),
+        "browser_eval must be refused as write-capable, got: {text}"
+    );
+}
+
+/// pip_freeze is read by default but its `output_file` argument writes to
+/// disk — it is write-capable and needs the opt-in (2026-09-21 follow-up
+/// review finding).
+#[tokio::test]
+async fn test_tools_call_pip_freeze_with_output_file_refused_without_opt_in() {
+    let _guard = DESTRUCTIVE_ENV_LOCK.lock().await;
+    set_destructive_opt_in(None);
+    let server = McpServer::with_explicit_safety_config(crate::config::SafetyConfig::default());
+    initialize_server(&server).await;
+
+    let request = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(Value::from(41)),
+        method: "tools/call".to_string(),
+        params: Some(serde_json::json!({
+            "name": "pip_freeze",
+            "arguments": {"output_file": "requirements.txt"}
+        })),
+    };
+    let response = server.handle_request(&request).await.unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(result.get("isError").and_then(|v| v.as_bool()), Some(true));
+    let text = result["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        text.contains("can modify state"),
+        "pip_freeze with output_file must be refused as write-capable, got: {text}"
+    );
+}
+
+/// knowledge_export's whole purpose is writing `output_path` to disk — the
+/// write gate must refuse it without the opt-in.
+#[tokio::test]
+async fn test_tools_call_knowledge_export_refused_without_opt_in() {
+    let _guard = DESTRUCTIVE_ENV_LOCK.lock().await;
+    set_destructive_opt_in(None);
+    let server = McpServer::with_explicit_safety_config(crate::config::SafetyConfig::default());
+    initialize_server(&server).await;
+
+    let request = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(Value::from(42)),
+        method: "tools/call".to_string(),
+        params: Some(serde_json::json!({
+            "name": "knowledge_export",
+            "arguments": {"output_path": "knowledge.json"}
+        })),
+    };
+    let response = server.handle_request(&request).await.unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(result.get("isError").and_then(|v| v.as_bool()), Some(true));
+    let text = result["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        text.contains("can modify state"),
+        "knowledge_export must be refused as write-capable, got: {text}"
+    );
+}
+
+/// A mutating page_control action (click) changes browser state — refused
+/// without the opt-in even though page_control metadata is read-only.
+#[tokio::test]
+async fn test_tools_call_page_control_click_refused_without_opt_in() {
+    let _guard = DESTRUCTIVE_ENV_LOCK.lock().await;
+    set_destructive_opt_in(None);
+    let server = McpServer::with_explicit_safety_config(crate::config::SafetyConfig::default());
+    initialize_server(&server).await;
+
+    let request = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(Value::from(43)),
+        method: "tools/call".to_string(),
+        params: Some(serde_json::json!({
+            "name": "page_control",
+            "arguments": {"action": "click", "selector": "button#submit"}
+        })),
+    };
+    let response = server.handle_request(&request).await.unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(result.get("isError").and_then(|v| v.as_bool()), Some(true));
+    let text = result["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        text.contains("can modify state"),
+        "a mutating page_control action must be refused as write-capable, got: {text}"
+    );
+}
+
+/// With the operator opt-in, a write-capable tool executes.
+#[tokio::test]
+async fn test_tools_call_file_write_allowed_with_opt_in() {
+    let _guard = DESTRUCTIVE_ENV_LOCK.lock().await;
+    set_destructive_opt_in(Some("1"));
+    let dir =
+        std::path::Path::new("target/tmp").join(format!("mcp-write-opt-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("optin.txt");
+    let server = McpServer::with_explicit_safety_config(crate::config::SafetyConfig::default());
+    initialize_server(&server).await;
+
+    let request = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(Value::from(40)),
+        method: "tools/call".to_string(),
+        params: Some(serde_json::json!({
+            "name": "file_write",
+            "arguments": {"path": path.to_string_lossy(), "content": "hello"}
+        })),
+    };
+    let response = server.handle_request(&request).await.unwrap();
+    let write_landed = path.exists();
+    let _ = std::fs::remove_dir_all(&dir);
+    let result = response.result.unwrap();
+    let text = result["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        !text.contains("can modify state"),
+        "with the opt-in set the write must execute, got: {text}"
+    );
+    assert!(
+        write_landed,
+        "the write must land with the opt-in set: {}",
+        path.display()
+    );
+    set_destructive_opt_in(None);
 }
 
 /// With the operator opt-in set, a destructive-classified tool executes.

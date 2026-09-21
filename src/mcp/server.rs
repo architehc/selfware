@@ -172,16 +172,98 @@ fn load_mcp_safety_config(config_path: Option<&str>) -> crate::config::SafetyCon
     }
 }
 
-/// Whether destructive tools may execute over MCP. Off by default: the MCP
-/// channel has no confirmation prompt, so tools classified destructive
-/// (`Tool::is_destructive`) are refused unless the operator opts in by
-/// starting the server with `SELFWARE_MCP_ALLOW_DESTRUCTIVE=1` (also
-/// accepts "true"). Read per call so a long-running server picks up the
-/// value its spawning client injected without a code change.
+/// Whether write-capable tools may execute over MCP. Off by default: the MCP
+/// channel has no confirmation prompt, so ANY tool that can modify state — the
+/// destructive class (`Tool::is_destructive`) AND the broader write class
+/// (file writes, git commits/pushes, non-GET http_request, browser_eval,
+/// computer control, shell, process/container/package mutation) — is refused
+/// unless the operator opts in by starting the server with
+/// `SELFWARE_MCP_ALLOW_DESTRUCTIVE=1` (also accepts "true"). Read per call so
+/// a long-running server picks up the value its spawning client injected
+/// without a code change.
 fn mcp_destructive_tools_allowed() -> bool {
     std::env::var("SELFWARE_MCP_ALLOW_DESTRUCTIVE")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+/// `page_control` actions that MUTATE browser state: navigation, page
+/// interaction, JS evaluation, tab management, and bridge shutdown. The
+/// content-extraction / info actions (text, html, attribute, value, count,
+/// visible, title, url, screenshot, pdf, list_tabs) and wait_for are reads
+/// and stay outside the write class. Mirrors VALID_ACTIONS in
+/// src/tools/page_controller.rs; kept here (not in the tool) because the
+/// MCP gate is the consumer and the tool file is not part of this change's
+/// write scope.
+const MUTATING_PAGE_CONTROL_ACTIONS: &[&str] = &[
+    // Navigation
+    "goto",
+    "back",
+    "forward",
+    "reload",
+    // Interaction
+    "click",
+    "type",
+    "fill",
+    "select",
+    "check",
+    "uncheck",
+    "hover",
+    "press",
+    // JavaScript
+    "evaluate",
+    "evaluate_handle",
+    // Multi-tab
+    "new_tab",
+    "switch_tab",
+    "close_tab",
+    // Lifecycle
+    "shutdown",
+];
+
+/// The write class for the MCP gate: `true` when executing this call can
+/// modify persistent or remote state. Keyed on the tool's safety metadata
+/// (`read_only == false` covers file_write/file_edit/git_commit/git_push/
+/// pip_freeze/knowledge_export/shell_exec/computer_* etc.), plus per-call
+/// write detection for tools whose METADATA TYPE is read-only but whose
+/// call can still write — a GET `http_request` reads while a
+/// POST/PUT/PATCH/DELETE changes server state, and most `page_control`
+/// actions navigate/interact/evaluate while a few just read the page; the
+/// metadata cannot know the method/action. `is_destructive` alone is NOT
+/// the boundary: file_write/browser_eval/git_commit modified the disk, git
+/// history or remote state while carrying `destructive: false` (2026-09-21
+/// review finding — live file_write over MCP wrote to disk with no opt-in).
+fn mcp_tool_call_is_write(tool: &dyn crate::tools::Tool, args: &serde_json::Value) -> bool {
+    let metadata = tool.metadata();
+    if !metadata.read_only {
+        return true;
+    }
+    match tool.name() {
+        // Read-only metadata class, but the METHOD decides: GET/HEAD read,
+        // everything else mutates server state.
+        "http_request" => !http_method_is_read(args.get("method")),
+        // Read-only metadata class, but the ACTION decides (see
+        // MUTATING_PAGE_CONTROL_ACTIONS). The schema requires `action`, so
+        // an absent/unknown action cannot reach this point.
+        "page_control" => args
+            .get("action")
+            .and_then(|a| a.as_str())
+            .is_some_and(|action| MUTATING_PAGE_CONTROL_ACTIONS.contains(&action)),
+        _ => false,
+    }
+}
+
+/// Whether the `method` argument of an http_request is a read-only verb.
+/// Absent or unparsable method defaults to GET (the tool's schema default);
+/// the comparison is case-insensitive (the tool uppercases the method).
+fn http_method_is_read(method: Option<&serde_json::Value>) -> bool {
+    match method.and_then(|m| m.as_str()) {
+        Some(m) => {
+            let up = m.to_ascii_uppercase();
+            up == "GET" || up == "HEAD"
+        }
+        None => true, // schema default is GET
+    }
 }
 
 impl McpServer {
@@ -492,27 +574,33 @@ impl McpServer {
         // MCP has no interactive confirmation channel: a connected client
         // can be ANY external AI tool, and the agent loop's destructive-op
         // confirmation prompt (src/safety/confirm.rs) cannot run over
-        // stdio JSON-RPC. Refuse tools the registry classifies as
-        // destructive (the same Tool::is_destructive metadata the CLI
-        // confirmation gate uses) unless the operator explicitly opted in
-        // by starting the server with SELFWARE_MCP_ALLOW_DESTRUCTIVE=1.
-        // The refusal is a normal tool result (isError: true), not a
-        // protocol error, so the client can surface the reason to its user.
+        // stdio JSON-RPC. Refuse every WRITE-CAPABLE tool — not just the
+        // destructive class — unless the operator explicitly opted in by
+        // starting the server with SELFWARE_MCP_ALLOW_DESTRUCTIVE=1. The
+        // write class is keyed on the tool's safety metadata (read_only)
+        // plus per-call method detection for http_request (see
+        // mcp_tool_call_is_write); `is_destructive` alone is not the
+        // boundary because file_write/file_edit/git_commit/browser_eval
+        // modify disk, git history or remote state while being non-
+        // destructive, and http_request/browser_eval carried read-only
+        // metadata (2026-09-21 review finding). The refusal is a normal
+        // tool result (isError: true), not a protocol error, so the client
+        // can surface the reason to its user.
         if !mcp_destructive_tools_allowed() {
-            let is_destructive = {
+            let is_write = {
                 let registry = self.registry.read().await;
                 registry
                     .get(tool_name)
-                    .is_some_and(|tool| tool.is_destructive())
+                    .is_some_and(|tool| mcp_tool_call_is_write(tool, &arguments))
             };
-            if is_destructive {
+            if is_write {
                 let response = serde_json::json!({
                     "content": [
                         {
                             "type": "text",
                             "text": format!(
-                                "Refused: tool '{}' is classified as destructive and MCP provides no confirmation channel. \
-                                 To allow destructive tools over MCP, restart the server with SELFWARE_MCP_ALLOW_DESTRUCTIVE=1.",
+                                "Refused: tool '{}' can modify state and MCP provides no confirmation channel. \
+                                 To allow write-capable tools over MCP, restart the server with SELFWARE_MCP_ALLOW_DESTRUCTIVE=1.",
                                 tool_name
                             )
                         }

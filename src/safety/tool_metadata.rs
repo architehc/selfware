@@ -380,9 +380,17 @@ pub fn classify_tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
             ToolMetadata::custom(false, true, RiskLevel::High, false, false)
         }
 
-        // Browser operations (network + potentially destructive)
-        "browser_fetch" | "browser_screenshot" | "browser_pdf" | "browser_eval"
-        | "browser_links" => ToolMetadata::network(),
+        // Browser operations
+        "browser_fetch" | "browser_screenshot" | "browser_pdf" | "browser_links" => {
+            ToolMetadata::network()
+        }
+        // browser_eval executes arbitrary JS inside the page — it can mutate
+        // DOM, storage, navigation and remote state — so it is NOT read-only.
+        // The network() classification used here before silently classed it as
+        // read-only, so the MCP write gate (keyed on read_only) let it execute
+        // without the operator opt-in (2026-09-21 review finding). Risk stays
+        // Medium so the Normal-mode confirmation UX is unchanged.
+        "browser_eval" => ToolMetadata::custom(false, false, RiskLevel::Medium, true, false),
 
         // Process management
         "process_list" | "port_check" => ToolMetadata::read_only(),
@@ -394,10 +402,19 @@ pub fn classify_tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
         "npm_install" | "npm_run" | "pip_install" | "yarn_install" => {
             ToolMetadata::custom(false, false, RiskLevel::Medium, true, false)
         }
-        "npm_scripts" | "pip_list" | "pip_freeze" => ToolMetadata::read_only(),
+        "npm_scripts" | "pip_list" => ToolMetadata::read_only(),
+        // pip_freeze can WRITE: its optional `output_file` argument dumps the
+        // requirements list to disk. read_only() classified it as a pure read,
+        // so the MCP write gate (keyed on read_only) let a freeze-to-file ride
+        // through without the operator opt-in (2026-09-21 review finding).
+        "pip_freeze" => ToolMetadata::file_write(),
 
         // Knowledge graph
-        "knowledge_query" | "knowledge_stats" | "knowledge_export" => ToolMetadata::read_only(),
+        "knowledge_query" | "knowledge_stats" => ToolMetadata::read_only(),
+        // knowledge_export's whole purpose is writing `output_path` to disk —
+        // same write class as file_write (2026-09-21 review finding: it sat
+        // in the read-only group and bypassed the MCP write gate).
+        "knowledge_export" => ToolMetadata::file_write(),
         "knowledge_add" | "knowledge_relate" | "knowledge_clear" | "knowledge_remove" => {
             ToolMetadata::file_write()
         }
