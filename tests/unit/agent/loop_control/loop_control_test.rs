@@ -384,3 +384,72 @@ fn reset_for_task_restores_original_budget_and_extension() {
         "a new task gets its own extension budget"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Auto-checkpoint-and-continue (long-task caps, USER-APPROVED policy)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn auto_continue_count_lifecycle_is_bounded_and_per_task() {
+    let mut loop_ctrl = AgentLoop::new(10);
+    assert_eq!(loop_ctrl.auto_continue_count(), 0);
+
+    // Registering returns the new count; the chain bound is 3 by policy.
+    assert_eq!(loop_ctrl.register_auto_continue(), 1);
+    assert_eq!(loop_ctrl.register_auto_continue(), 2);
+    assert_eq!(loop_ctrl.register_auto_continue(), 3);
+    assert_eq!(loop_ctrl.auto_continue_count(), 3);
+    assert_eq!(loop_ctrl.auto_continue_count(), MAX_AUTO_CONTINUES);
+
+    // A new task (run_task's reset_for_task) gets a fresh chain budget.
+    loop_ctrl.reset_for_task();
+    assert_eq!(loop_ctrl.auto_continue_count(), 0);
+}
+
+#[test]
+fn extension_ceiling_reached_after_four_grants() {
+    let mut loop_ctrl = AgentLoop::new(20);
+    assert!(!loop_ctrl.extension_ceiling_reached());
+    for _ in 0..4 {
+        assert!(loop_ctrl.extend_budget_once().is_some());
+    }
+    assert!(loop_ctrl.extension_ceiling_reached());
+    assert_eq!(loop_ctrl.extend_budget_once(), None);
+}
+
+#[test]
+fn reset_budget_for_resume_mirrors_manual_resume() {
+    // A run partway through a segment: step 5, iteration 150, cap extended
+    // twice (+25% of the original 100 → 150), state Executing.
+    let mut loop_ctrl = AgentLoop::new(100);
+    loop_ctrl.restore_progress(5, 150);
+    loop_ctrl.extend_budget_once();
+    loop_ctrl.extend_budget_once();
+    assert_eq!(loop_ctrl.max_iterations(), 150);
+    loop_ctrl.register_auto_continue();
+
+    // Exactly what `Agent::resume` re-creates: fresh iteration + extension
+    // budget at the ORIGINAL cap, while the step counter keeps counting and
+    // the chain counter is NOT reset (it bounds the whole task).
+    loop_ctrl.reset_budget_for_resume();
+    assert_eq!(loop_ctrl.current_iteration(), 0);
+    assert_eq!(
+        loop_ctrl.current_step(),
+        5,
+        "steps keep counting across the chain"
+    );
+    assert_eq!(loop_ctrl.max_iterations(), 100);
+    assert!(!loop_ctrl.extension_ceiling_reached());
+    assert_eq!(
+        loop_ctrl.auto_continue_count(),
+        1,
+        "the chain counter bounds the whole task, not one segment"
+    );
+    assert!(matches!(loop_ctrl.current_state_label(), "executing"));
+
+    // The fresh segment runs: iteration 1 fits inside the restored cap.
+    assert!(matches!(
+        loop_ctrl.next_state(),
+        Some(AgentState::Executing { .. })
+    ));
+}

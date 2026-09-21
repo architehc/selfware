@@ -25,6 +25,18 @@ pub struct InvalidStateTransition {
     to: &'static str,
 }
 
+/// Maximum number of adaptive budget extensions a task may earn in place.
+/// Each grant is +25% of the ORIGINAL cap (4 × +25% = +100% ceiling); a run
+/// that is still productive after the ceiling falls to the auto-continue
+/// chain (`maybe_auto_continue` in task_runner.rs).
+const MAX_GRANTS: usize = 4;
+
+/// Maximum number of auto-continuations ("chains") a single task may take
+/// past its iteration cap. Bounded so a task that keeps reporting progress
+/// forever gets a typed stop (`AUTO_CONTINUE_LIMIT`) instead of a
+/// pathological infinite chain (USER-APPROVED long-task caps policy).
+pub const MAX_AUTO_CONTINUES: usize = 3;
+
 impl std::fmt::Display for InvalidStateTransition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -49,6 +61,13 @@ pub struct AgentLoop {
     /// cap while still productive, 2 died even after the old one-shot +50%)
     /// need sustained progress to keep earning budget, not one blind bump.
     extensions_granted: usize,
+    /// In-process auto-continuations ("chains") taken on this task, bounded
+    /// by [`MAX_AUTO_CONTINUES`]. Each chain resets the iteration budget via
+    /// `reset_budget_for_resume` and reuses the exact manual-`resume` path
+    /// (`continue_execution`); this counter is the guard that turns a run
+    /// which keeps "making progress" forever into a typed stop rather than
+    /// an unbounded chain.
+    auto_continue_count: usize,
     current_step: usize,
     iteration: usize,
 }
@@ -93,6 +112,7 @@ impl AgentLoop {
             max_iterations,
             original_max: max_iterations,
             extensions_granted: 0,
+            auto_continue_count: 0,
             current_step: 0,
             iteration: 0,
         }
@@ -104,7 +124,6 @@ impl AgentLoop {
     /// exceeds +100% of the original cap. Returns the added iterations, or
     /// `None` once the extension ceiling is reached.
     pub fn extend_budget_once(&mut self) -> Option<usize> {
-        const MAX_GRANTS: usize = 4; // 4 × +25% = +100% ceiling
         if self.extensions_granted >= MAX_GRANTS {
             return None;
         }
@@ -112,6 +131,54 @@ impl AgentLoop {
         let added = (self.original_max / 4).max(1);
         self.max_iterations += added;
         Some(added)
+    }
+
+    /// Whether the +25%×4 adaptive-extension ceiling has been reached (no
+    /// further in-place grant is owed).
+    pub fn extension_ceiling_reached(&self) -> bool {
+        self.extensions_granted >= MAX_GRANTS
+    }
+
+    /// How many auto-continuations ("chains") have fired on the current task.
+    pub fn auto_continue_count(&self) -> usize {
+        self.auto_continue_count
+    }
+
+    /// Record one more auto-continuation on this task; returns the new count.
+    pub fn register_auto_continue(&mut self) -> usize {
+        self.auto_continue_count += 1;
+        self.auto_continue_count
+    }
+
+    /// Undo a failed auto-continuation registration. Called only when the
+    /// chain's boundary checkpoint could not be persisted — the chain never
+    /// ran, so it must not consume the per-task chain budget.
+    pub fn unregister_auto_continue(&mut self) {
+        self.auto_continue_count = self.auto_continue_count.saturating_sub(1);
+    }
+
+    /// Restore the auto-continue chain count persisted at checkpoint time
+    /// (the `Agent::resume` path) so the per-task chain bound survives a
+    /// process restart instead of granting a fresh budget of chains.
+    pub fn set_auto_continue_count(&mut self, count: usize) {
+        self.auto_continue_count = count;
+    }
+
+    /// Reset the iteration budget exactly as a manual `Agent::resume` would
+    /// re-create it (`AgentLoop::new` + `restore_progress(step, 0)`):
+    /// iteration returns to 0, the cap returns to the ORIGINAL configured
+    /// value, and the adaptive-extension budget is fresh — while the step
+    /// counter keeps counting and the state returns to `Executing`. The
+    /// in-process auto-continue chain mirrors this, so a chained segment is
+    /// indistinguishable from a resumed one. The auto-continue counter is
+    /// deliberately NOT reset: it bounds the whole task, not one segment.
+    pub fn reset_budget_for_resume(&mut self) {
+        self.iteration = 0;
+        self.max_iterations = self.original_max;
+        self.extensions_granted = 0;
+        self.state = AgentState::Executing {
+            step: self.current_step,
+        };
     }
 
     pub fn next_state(&mut self) -> Option<AgentState> {
@@ -263,6 +330,8 @@ impl AgentLoop {
         // A new task gets a fresh budget: extensions are per-task.
         self.max_iterations = self.original_max;
         self.extensions_granted = 0;
+        // And a fresh auto-continue chain budget (bounded chains are per-task).
+        self.auto_continue_count = 0;
     }
 }
 

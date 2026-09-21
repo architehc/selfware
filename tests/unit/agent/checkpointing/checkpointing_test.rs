@@ -78,3 +78,36 @@ async fn cancellation_bypasses_continuous_checkpoint_cadence() {
         .iter()
         .any(|message| message.content.contains("latest resumable evidence")));
 }
+
+/// Review fix: `save_checkpoint_forced` (the auto-continue boundary write)
+/// must FAIL with a typed error when no checkpoint manager is configured —
+/// reporting Ok there would let a chained run claim "checkpointed" with
+/// nothing on disk (honest status, AGENTS.md rule 3). The best-effort
+/// periodic `save_checkpoint` keeps its silent no-op: it is not a boundary
+/// guarantee, and its cadence/cancel callers are fine with skipping.
+/// (The auto-continue consequence — the chain must not fire — is asserted
+/// in auto_continue_aborts_without_claim_when_checkpoint_save_fails and
+/// forced_checkpoint_without_manager_fails_typed in task_runner_test.rs.)
+#[tokio::test]
+async fn forced_checkpoint_without_manager_fails_typed() {
+    let mut agent =
+        crate::agent::Agent::new(crate::test_support::mock_agent_config("http://127.0.0.1:1"))
+            .await
+            .unwrap();
+    agent.checkpoint_manager = None; // Agent::new may have defaulted one
+    agent.current_checkpoint = Some(TaskCheckpoint::new(
+        "forced-no-mgr".into(),
+        "Review files".into(),
+    ));
+    let err = agent
+        .save_checkpoint_forced("Review files")
+        .expect_err("a forced checkpoint without a manager must be a typed error");
+    assert!(
+        err.to_string().contains("no checkpoint manager"),
+        "the error must name the missing manager, got: {}",
+        err
+    );
+
+    // The regular periodic save still no-ops, unchanged.
+    agent.save_checkpoint("Review files").unwrap();
+}

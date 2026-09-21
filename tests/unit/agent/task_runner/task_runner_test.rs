@@ -98,6 +98,12 @@ fn fatal_loop_errors_are_not_recoverable() {
     assert!(is_fatal_loop_error(&anyhow::anyhow!(
         "NONTERM_PROSE_NO_TOOL: mutation-required task produced 6 consecutive no-tool turns"
     )));
+    // Regression: empty-response recovery exhaustion must be terminal — it
+    // already retried once non-streaming, so the outer runner recovering it
+    // only burns the turn budget one empty turn at a time (LOOP-EMPTY-NOTFATAL).
+    assert!(is_fatal_loop_error(&anyhow::anyhow!(
+        "EMPTY_RESPONSE_LOOP: 2 consecutive empty assistant responses"
+    )));
     // Typed killswitch downcasting checks
     let ks_err = crate::safety::killswitch::KillswitchError::InProcess {
         reason: "unit test halt".to_string(),
@@ -636,6 +642,62 @@ async fn test_run_task_completes_with_plain_text() {
         result.err()
     );
     assert!(agent.current_checkpoint.is_some());
+    server.stop().await;
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn run_task_persistent_empty_responses_terminate_as_loop_break() {
+    // Acceptance (defects 1 + 2 from the empty-response follow-up review):
+    //
+    // 1. The mutation no-action handler used to run BEFORE the empty-response
+    //    check, so a coding task whose model answered empty never latched the
+    //    non-streaming retry and could fall into NONTERM_PROSE_NO_TOOL instead.
+    //    Classifying at the top of the step (planning AND execution) closes it.
+    // 2. EMPTY_RESPONSE_LOOP was missing from is_fatal_loop_error, so after
+    //    the breaker fired the outer runner "recovered" and kept requesting.
+    //    It must be terminal: this run makes exactly TWO requests (one empty
+    //    streamed planning turn → one non-streaming execution retry) and then
+    //    stops with the typed reason.
+    let server = MockLlmServer::builder()
+        .with_response("") // planning (streamed): counted; latches force_non_streaming
+        .with_response("") // execution (non-streaming retry): 2nd consecutive empty → EMPTY_RESPONSE_LOOP
+        .build()
+        .await;
+
+    let config = mock_agent_config(format!("{}/v1", server.url()), true);
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let result = agent.run_task("Fix the off-by-one bug in src/lib.rs").await;
+    let err = result.expect_err("a persistently empty endpoint must stop the run");
+    let err_msg = err.to_string();
+    assert!(
+        err_msg.contains("EMPTY_RESPONSE_LOOP"),
+        "the run must stop with the typed loop break, got: {err_msg}"
+    );
+    assert!(
+        !err_msg.contains("NONTERM_PROSE_NO_TOOL"),
+        "an empty response is a provider hiccup, not prose-without-tools — got: {err_msg}"
+    );
+    assert!(
+        agent.force_non_streaming,
+        "the empty stream must latch the non-streaming retry even on a coding task"
+    );
+    assert_eq!(
+        agent.consecutive_empty_responses, 2,
+        "both the empty planning turn and the empty execution turn must count"
+    );
+    let requests = server.captured_request_bodies().await;
+    assert_eq!(
+        requests.len(),
+        2,
+        "EMPTY_RESPONSE_LOOP is terminal: no requests after the second empty, got {}",
+        requests.len()
+    );
+
     server.stop().await;
 }
 
@@ -2715,4 +2777,681 @@ fn swarm_verdict_flags_phases_that_never_ran() {
         "{verdict}"
     );
     assert!(!verdict.contains("Architect"), "{verdict}");
+}
+
+// =========================================================================
+// task-focus mentioned-file extraction + focus overlay no-compounding
+// =========================================================================
+
+#[test]
+fn mentioned_file_tokens_include_paths_extensions_and_existing_files() {
+    // (a) Path-shaped tokens — historical behavior preserved.
+    assert!(is_mentioned_file_token("src/lib.rs"));
+    assert!(is_mentioned_file_token("a/b/"));
+    // (b) Extension-bearing ROOT-FILE tokens — the old blindness fix:
+    // "Create a python script hello.py …" now mentions hello.py.
+    assert!(is_mentioned_file_token("hello.py"));
+    assert!(is_mentioned_file_token("main.rs"));
+    assert!(is_mentioned_file_token("Cargo.toml"));
+    assert!(is_mentioned_file_token("README.md"));
+    assert!(is_mentioned_file_token("schema.json"));
+    // Trailing punctuation must not disqualify a mention.
+    assert!(is_mentioned_file_token("hello.py,"));
+    assert!(is_mentioned_file_token("(main.rs)"));
+}
+
+#[test]
+fn mentioned_file_tokens_reject_plain_words() {
+    assert!(!is_mentioned_file_token("hello"));
+    assert!(!is_mentioned_file_token("create"));
+    assert!(!is_mentioned_file_token("the"));
+    assert!(!is_mentioned_file_token("v1.2.3")); // version-like, no known extension
+    assert!(!is_mentioned_file_token("e.g"));
+    assert!(!is_mentioned_file_token("."));
+    assert!(!is_mentioned_file_token(""));
+}
+
+#[test]
+fn mentioned_file_metadata_branch_resolves_existing_workspace_files() {
+    // Serialize on the shared cwd lock: the metadata branch resolves against
+    // current_project_root() (derived from the current directory).
+    use crate::test_support::CwdGuard;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("calculator"), "def add(a,b): return a+b").unwrap();
+    let _guard = CwdGuard::enter(dir.path());
+
+    // Extension rule still fires without touching the filesystem.
+    assert!(is_mentioned_file_token("hello.py"));
+    // Bare filenames that EXIST in the workspace resolve by metadata.
+    assert!(is_mentioned_file_token("calculator"));
+    // Bare filenames that do NOT exist are not mentioned files.
+    assert!(!is_mentioned_file_token("nonexistent_file_xyz"));
+}
+
+#[test]
+fn focus_overlay_rebuilds_from_clean_base_across_turns() {
+    let base = Message::system("BASE SYSTEM PROMPT");
+    let overlay_one = "\n\n## TASK FOCUS (READ THIS FIRST)\nworkflow one";
+    let overlay_two = "\n\n## TASK FOCUS (READ THIS FIRST)\nworkflow two";
+
+    let turn_1 = stamped_system_message(&base, overlay_one);
+    let turn_2 = stamped_system_message(&turn_1, overlay_two);
+    let turn_3 = stamped_system_message(&turn_2, overlay_one);
+
+    // The rendered system context must NOT grow across turns: base + exactly
+    // ONE overlay, whatever the overlay text is. (The old prefix-on-prefix
+    // stamp doubled the mandate every turn.)
+    assert_eq!(
+        turn_1.content.text().len(),
+        turn_2.content.text().len(),
+        "messages[0] must not grow between turns"
+    );
+    assert_eq!(
+        turn_2.content.text().len(),
+        turn_3.content.text().len(),
+        "messages[0] must stay the same size across many turns"
+    );
+
+    // The base is always recoverable in full…
+    assert_eq!(
+        strip_focus_overlay(turn_3.content.text()),
+        "BASE SYSTEM PROMPT"
+    );
+    // …and the overlay is the CURRENT turn's, never an accumulation.
+    assert!(
+        turn_3.content.text().contains("workflow one"),
+        "current overlay must be present"
+    );
+    assert!(
+        !turn_3.content.text().contains("workflow two"),
+        "no stale overlay from a previous turn may remain"
+    );
+
+    // A turn with an empty overlay leaves the clean base only (and drops any
+    // stale overlay from an earlier task).
+    let cleared = stamped_system_message(&turn_3, "");
+    assert_eq!(cleared.content.text(), "BASE SYSTEM PROMPT");
+}
+
+#[test]
+fn focus_overlay_different_lengths_still_do_not_compound() {
+    let base = Message::system("BASE");
+    // Turns with wildly different overlay sizes: the result must stay
+    // bounded by base + the CURRENT overlay, not base + accumulated copies.
+    let small_overlay = "short";
+    let big_overlay = &"long ".repeat(200);
+    let turn_1 = stamped_system_message(&base, small_overlay);
+    let turn_2 = stamped_system_message(&turn_1, big_overlay);
+    // Turn 3 shrinks back down — length must track the current overlay only.
+    let turn_3 = stamped_system_message(&turn_2, small_overlay);
+    assert_eq!(turn_3.content.text().len(), turn_1.content.text().len());
+    let expected = format!("<selfware_focus_overlay>{small_overlay}</selfware_focus_overlay>BASE");
+    assert_eq!(turn_3.content.text(), expected);
+}
+
+// =========================================================================
+// Auto-checkpoint-and-continue (long-task caps, USER-APPROVED policy)
+//
+// When the iteration cap is reached on a PRODUCTIVE run whose +25%×4
+// adaptive extensions are exhausted, the run checkpoints and chains
+// `continue_execution` (the manual-resume path) instead of dying at
+// `Failed{Max iterations exceeded}`. The chain is bounded at 3 per task,
+// then the run stops with the typed AUTO_CONTINUE_LIMIT outcome.
+// Unproductive runs keep the existing typed MaxIterations failure.
+// =========================================================================
+
+/// One mock response that performs an XML file_read of `./path`. Distinct
+/// files give every turn a non-repeating signature, which is exactly what
+/// keeps the loop "productive" at the cap.
+fn file_read_tool_call(path: &str) -> String {
+    format!(
+        "<tool>\n<name>file_read</name>\n<arguments>{}</arguments>\n</tool>",
+        serde_json::json!({ "path": format!("./{path}") })
+    )
+}
+
+/// Create `count` probe files (f000.rs …) in `dir` and return their names —
+/// novel reads keep `consecutive_read_only_steps` at zero (investigation
+/// reset) and give the productive streak distinct signatures.
+fn create_probe_files(dir: &std::path::Path, count: usize) -> Vec<String> {
+    (0..count)
+        .map(|i| {
+            let name = format!("f{i:03}.rs");
+            std::fs::write(dir.join(&name), "// probe\n").unwrap();
+            name
+        })
+        .collect()
+}
+
+/// Productive-run E2E: base cap 4 → the +25%×4 adaptive grants take the cap
+/// to 8; the 5th trip (iteration 9, after 1 planning + 8 executing turns)
+/// must checkpoint and chain `continue_execution` instead of failing. The
+/// chained segment finalizes on the default response, so `run_task` returns
+/// Ok — a task that previously died at `Failed{Max iterations exceeded}`.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn auto_continue_chains_once_on_productive_cap_and_writes_checkpoint() {
+    let cwd = crate::test_support::CwdGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    let files = create_probe_files(dir.path(), 12);
+    cwd.switch_to(dir.path());
+
+    let mut builder = MockLlmServer::builder();
+    // Segment 0 consumes exactly 10 responses: 1 planning turn + 8 executing
+    // turns (iterations 1-8 across the four +25% adaptive grants) + ONE
+    // hidden LLM reflection call (reflect_on_step fires at step 5, a
+    // multiple of 5). Anything past that is the chained segment's first
+    // turn, which must hit the default (plain "done") so the chain
+    // finalizes instead of re-tripping. Provisioning one fewer (9) makes
+    // the 4th extension-resumed turn consume the default "Hello" text and
+    // "complete" the task naturally at the cap — the auto-continue never
+    // fires and the run looks like an early natural completion.
+    for f in files.iter().take(10) {
+        builder = builder.with_response(file_read_tool_call(f));
+    }
+    let server = builder.build().await;
+
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.agent.max_iterations = 4;
+    let mut agent = Agent::new(config).await.unwrap();
+    let chkpts = dir.path().join(".chkpts");
+    agent.checkpoint_manager = Some(CheckpointManager::new(chkpts.clone()).unwrap());
+
+    let result = agent.run_task("Never completes").await;
+    server.stop().await;
+
+    assert!(
+        result.is_ok(),
+        "a productive run at the cap must chain to completion, got: {:?}",
+        result.err()
+    );
+    assert_eq!(
+        agent.loop_control.auto_continue_count(),
+        1,
+        "exactly one auto-continuation must fire on the first cap trip past the extensions"
+    );
+    assert!(
+        agent.loop_control.current_step() >= 8,
+        "step counting must survive the chain, got step {}",
+        agent.loop_control.current_step()
+    );
+
+    // The auto-continue boundary persisted a real checkpoint (bypassing the
+    // continuous-work cadence), and the chained run finalized it.
+    let manager = CheckpointManager::new(chkpts.clone()).unwrap();
+    let tasks = manager.list_tasks().unwrap();
+    assert!(
+        tasks
+            .iter()
+            .any(|t| t.status == crate::checkpoint::TaskStatus::Completed),
+        "the chained run must finalize its checkpoint as Completed, got {:?}",
+        tasks
+            .iter()
+            .map(|t| (&t.task_id, &t.status))
+            .collect::<Vec<_>>()
+    );
+    // The boundary checkpoint itself carries the chain count, so a later
+    // process restart can keep enforcing the per-task bound.
+    let task_id = agent
+        .current_checkpoint
+        .as_ref()
+        .map(|c| c.task_id.clone())
+        .unwrap();
+    let persisted = manager.load(&task_id).unwrap();
+    assert_eq!(
+        persisted.auto_continue_count, 1,
+        "the checkpoint must persist the chain count"
+    );
+}
+
+/// Chain-bound E2E: three productive segments each exhaust their fresh
+/// budget and chain; the FOURTH cap trip must NOT chain again — it stops
+/// with the typed AUTO_CONTINUE_LIMIT outcome instead of looping forever.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn auto_continue_stops_with_typed_limit_after_three_chains() {
+    let cwd = crate::test_support::CwdGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    // Far more distinct files than the run can possibly consume.
+    let files = create_probe_files(dir.path(), 80);
+    cwd.switch_to(dir.path());
+
+    let mut builder = MockLlmServer::builder();
+    for f in files.iter().take(60) {
+        builder = builder.with_response(file_read_tool_call(f));
+    }
+    let server = builder.build().await;
+
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.agent.max_iterations = 4;
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let result = agent.run_task("Never completes").await;
+    server.stop().await;
+
+    assert_eq!(
+        agent.loop_control.auto_continue_count(),
+        3,
+        "the bound allows exactly 3 auto-continuations per task"
+    );
+    let err = result.expect_err("the chain bound must stop the run, not chain forever");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("AUTO_CONTINUE_LIMIT"),
+        "the 4th cap trip must stop with the typed outcome, got: {msg}"
+    );
+}
+
+/// Unproductive runs keep the existing typed failure: with no successful
+/// tool streak in the window, the cap hit must NOT chain — it falls through
+/// to the plain `Failed{Max iterations exceeded}` path.
+#[tokio::test]
+async fn auto_continue_refuses_unproductive_runs_at_the_cap() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = Agent::new(mock_agent_config(format!("{}/v1", server.url()), false))
+        .await
+        .unwrap();
+
+    // Error-only streak at the cap with the extension ceiling spent.
+    for i in 0..5u64 {
+        agent
+            .recent_turn_progress
+            .push_back(crate::agent::loop_control::TurnProgress {
+                had_success: false,
+                signatures: vec![("file_read".to_string(), i)],
+            });
+    }
+    agent.loop_control = crate::agent::loop_control::AgentLoop::new(4);
+    for _ in 0..4 {
+        agent.loop_control.extend_budget_once();
+    }
+    agent.loop_control.restore_progress(0, 8);
+    let capped = agent.loop_control.next_state();
+    assert!(matches!(capped, Some(AgentState::Failed { .. })));
+
+    let chained = agent.maybe_auto_continue("Never completes").await;
+    assert!(
+        chained.is_none(),
+        "unproductive runs must keep the typed MaxIterations failure"
+    );
+    assert_eq!(agent.loop_control.auto_continue_count(), 0);
+    server.stop().await;
+}
+
+/// Layering: while any +25% adaptive extension is still available the chain
+/// must NOT fire — the cheaper in-place grant is the first-line mechanism
+/// (the +25%×4 grant behavior is preserved byte-for-byte).
+#[tokio::test]
+async fn auto_continue_defers_to_adaptive_extensions_while_available() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = Agent::new(mock_agent_config(format!("{}/v1", server.url()), false))
+        .await
+        .unwrap();
+
+    // Productive window, but zero extensions granted yet.
+    for (i, name) in ["a", "b", "c", "d", "e"].iter().enumerate() {
+        agent
+            .recent_turn_progress
+            .push_back(productive_turn(name, i as u64));
+    }
+    agent.loop_control = crate::agent::loop_control::AgentLoop::new(4);
+    agent.loop_control.restore_progress(0, 4);
+    let capped = agent.loop_control.next_state();
+    assert!(matches!(capped, Some(AgentState::Failed { .. })));
+
+    let chained = agent.maybe_auto_continue("Never completes").await;
+    assert!(
+        chained.is_none(),
+        "chaining must wait for the extension ceiling"
+    );
+    assert_eq!(agent.loop_control.auto_continue_count(), 0);
+    // The adaptive grant is the first-line response on the same streak.
+    assert!(agent.maybe_extend_iteration_budget().is_some());
+    server.stop().await;
+}
+
+/// The chain count is persisted into the task checkpoint by `to_checkpoint`
+/// and restored onto the loop exactly as `Agent::resume` does — the
+/// field-level contract behind the restart E2E.
+#[tokio::test]
+async fn auto_continue_count_persists_and_restores_via_checkpoint() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = Agent::new(mock_agent_config(format!("{}/v1", server.url()), false))
+        .await
+        .unwrap();
+    agent.loop_control.register_auto_continue();
+    agent.loop_control.register_auto_continue();
+
+    let checkpoint = agent.to_checkpoint("test-chain", "Never completes");
+    assert_eq!(
+        checkpoint.auto_continue_count, 2,
+        "the checkpoint must carry the chain count"
+    );
+
+    // Mirrors the Agent::resume restore line: a BRAND-NEW loop created for a
+    // restarted process receives the persisted balance (1 of 3 consumed →
+    // the resumed run may chain at most 2 more).
+    let mut restored_loop = crate::agent::loop_control::AgentLoop::new(4);
+    restored_loop.set_auto_continue_count(checkpoint.auto_continue_count);
+    assert_eq!(restored_loop.auto_continue_count(), 2);
+    server.stop().await;
+}
+
+/// Review fix: a task that chained continuations keeps its chain balance
+/// across a process RESTART. The boundary checkpoint persists
+/// `auto_continue_count`, `Agent::resume` restores it onto the fresh loop,
+/// and the next cap trips chain 2 more times and then stop with the typed
+/// AUTO_CONTINUE_LIMIT — a fresh process must NOT receive a fresh budget of
+/// 3 chains (which would let 3×N restarts multiply the ceiling forever).
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn auto_continue_chain_bound_survives_process_restart() {
+    // Point CheckpointManager::default_path() ($HOME/.selfware/checkpoints)
+    // at a temp home so the whole task store (phase-1 writes, phase-2
+    // resume reads) is isolated from the real user data dir.
+    let fake_home = tempfile::tempdir().unwrap();
+    let env = crate::test_support::EnvGuard::capture(&["HOME"]);
+    env.set("HOME", fake_home.path().as_os_str());
+
+    let cwd = crate::test_support::CwdGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    let files = create_probe_files(dir.path(), 200);
+    cwd.switch_to(dir.path());
+
+    // ---- Phase 1: one productive segment chains once and completes. ----
+    // Segment 0 consumes exactly 10 responses (1 planning + 8 executing
+    // across the 4 adaptive grants + 1 reflection call at step 5; see
+    // auto_continue_chains_once_on_productive_cap_and_writes_checkpoint);
+    // the chained segment's first turn hits the default response and
+    // finalizes the run.
+    let mut b1 = MockLlmServer::builder();
+    for f in files.iter().take(10) {
+        b1 = b1.with_response(file_read_tool_call(f));
+    }
+    let server1 = b1.build().await;
+    let mut config = mock_agent_config(format!("{}/v1", server1.url()), false);
+    config.agent.max_iterations = 4;
+    let mut agent = Agent::new(config.clone()).await.unwrap();
+    let result = agent.run_task("Never completes").await;
+    server1.stop().await;
+    assert!(
+        result.is_ok(),
+        "phase 1 must complete via the chain: {:?}",
+        result.err()
+    );
+    assert_eq!(agent.loop_control.auto_continue_count(), 1);
+    let task_id = agent
+        .current_checkpoint
+        .as_ref()
+        .map(|c| c.task_id.clone())
+        .unwrap();
+    // Diagnostic: the run's in-memory checkpoint object and the raw JSON the
+    // boundary save wrote must both carry the chain count before the load
+    // assertion (isolates write-side loss from load-side loss).
+    assert_eq!(
+        agent
+            .current_checkpoint
+            .as_ref()
+            .unwrap()
+            .auto_continue_count,
+        1,
+        "the in-memory checkpoint must carry the chain count"
+    );
+    let raw_path = fake_home
+        .path()
+        .join(".selfware/checkpoints")
+        .join(format!("{task_id}.json"));
+    let raw = std::fs::read_to_string(&raw_path)
+        .unwrap_or_else(|e| panic!("boundary checkpoint file missing at {:?}: {e}", raw_path));
+    assert!(
+        raw.contains("\"auto_continue_count\": 1"),
+        "boundary checkpoint JSON must persist the count, got: {}",
+        raw
+    );
+    let persisted = CheckpointManager::default_path()
+        .unwrap()
+        .load(&task_id)
+        .unwrap();
+    assert_eq!(
+        persisted.auto_continue_count, 1,
+        "the checkpoint on disk must carry the chain count"
+    );
+
+    // ---- Phase 2: a "restarted process" resumes the same task. ----
+    // The second mock server owns the resumed process: the config MUST
+    // point at server2 — resuming with phase 1's config (server1, already
+    // stopped) makes every model call in the restarted run fail (review
+    // finding: the resume path pointed at the first mock server's config).
+    let mut b2 = MockLlmServer::builder();
+    // Generous provision: after the restart the run stops deterministically
+    // at the AUTO_CONTINUE_LIMIT after roughly 58 requests (two more chains
+    // at 16 turns each plus per-step reflection calls at continuing step
+    // multiples of 5); unconsumed responses are harmless — the visit count
+    // below is what matters.
+    //
+    // Cap 8 (not 4) on purpose: `recent_turn_progress` is in-memory only, so
+    // a restarted process starts with an EMPTY productive window. With the
+    // mocked cap of 4 the first cap trip arrives after 4 turns — fewer than
+    // the 5-turn productive window — so the resumed run aborts unproductively
+    // before it can chain. Production caps (default 400) always let the
+    // window fill long before the first trip, so the small-cap abort is a
+    // test-scale artifact: the restart semantics under test are the RESTORED
+    // chain balance and the typed stop, not window reconstruction. Cap 8
+    // gives the resumed run 8 turns before the first trip — a full window —
+    // so both continuation chains fire and the bound stops the 4th trip.
+    for f in files.iter().skip(100).take(70) {
+        b2 = b2.with_response(file_read_tool_call(f));
+    }
+    let server2 = b2.build().await;
+    let recorder = std::sync::Arc::new(RecordingEventEmitter::default());
+    let mut config2 = mock_agent_config(format!("{}/v1", server2.url()), false);
+    config2.agent.max_iterations = 8;
+    let mut agent2 = Agent::resume(config2, &task_id)
+        .await
+        .unwrap()
+        .with_event_emitter(recorder.clone());
+    assert_eq!(
+        agent2.loop_control.auto_continue_count(),
+        1,
+        "the restart must restore the chain balance, not reset it"
+    );
+    let result2 = agent2.continue_execution().await;
+    server2.stop().await;
+
+    assert_eq!(
+        agent2.loop_control.auto_continue_count(),
+        3,
+        "the restored balance must keep counting to the per-task bound"
+    );
+    let err = result2.expect_err("the resumed run must hit the chain bound");
+    assert!(
+        err.to_string().contains("AUTO_CONTINUE_LIMIT"),
+        "the 4th cap trip (2 chained this process + 1 restored) must stop typed, got: {}",
+        err
+    );
+    // Exactly TWO continuations chained after the restart (phase 1's chain
+    // was restored, so the budget was 2 — a restart granting a fresh budget
+    // of 3 would have chained three times).
+    assert_eq!(
+        recorder
+            .events()
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Status { message }
+                if message.contains("continuing automatically")))
+            .count(),
+        2,
+        "the post-restart segment must fire exactly 2 of the 3 allowed chains"
+    );
+}
+
+/// Review fix: the auto-continue boundary folds the current segment's wall
+/// time into the cumulative counter BEFORE the chain re-baselines the
+/// per-segment clock, so the task-wide wall budget and the persisted
+/// `elapsed_wall_secs` keep accumulating across segments — mirroring the
+/// total a manual `Agent::resume` restores from a checkpoint.
+#[tokio::test]
+async fn auto_continue_folds_segment_elapsed_into_cumulative_wall_clock() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = Agent::new(mock_agent_config(format!("{}/v1", server.url()), false))
+        .await
+        .unwrap();
+    agent.prior_elapsed_secs = 0;
+    // Segment 0 already consumed 5s of active wall time.
+    agent.task_start_time = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(5))
+        .expect("clock is sane");
+    assert!(
+        agent.budget_elapsed_secs() >= 5,
+        "the current segment's elapsed must be counted"
+    );
+
+    // The exact fold `maybe_auto_continue` performs at the chain boundary:
+    // accumulate the closing segment AND re-baseline the per-segment clock
+    // TOGETHER (review fix — folding without the reset would count the
+    // segment once in the fold and AGAIN in the persisted total)...
+    agent.prior_elapsed_secs = agent.budget_elapsed_secs();
+    agent.task_start_time = std::time::Instant::now();
+
+    // The cumulative total must include segment 0's 5s — not reset to ~0.
+    assert!(
+        agent.budget_elapsed_secs() >= 5,
+        "the fold must preserve prior-segment wall time across the chain"
+    );
+    // And it must NOT count the segment twice: with the clock re-baselined
+    // at the fold, the checkpointed total is 5s + the (tiny) time since,
+    // far below the 10s a double count would produce.
+    let checkpoint = agent.to_checkpoint("test-wall", "Never completes");
+    assert!(
+        checkpoint.elapsed_wall_secs >= 5,
+        "the persisted elapsed must include prior segments, got {}",
+        checkpoint.elapsed_wall_secs
+    );
+    assert!(
+        checkpoint.elapsed_wall_secs < 10,
+        "the closing segment must be counted exactly once (5s + ε), got {} — \
+         a double count points at a fold that left the per-segment clock \
+         running into persistence",
+        checkpoint.elapsed_wall_secs
+    );
+    server.stop().await;
+}
+
+/// Review fix: when the boundary checkpoint cannot be persisted, the
+/// auto-continue must NOT fire and must NOT claim to have checkpointed —
+/// the run falls back to the existing typed cap failure, because without a
+/// written resume point the "chain" would be a lie (and a crash would lose
+/// everything).
+#[tokio::test]
+async fn auto_continue_aborts_without_claim_when_checkpoint_save_fails() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = Agent::new(mock_agent_config(format!("{}/v1", server.url()), false))
+        .await
+        .unwrap();
+
+    // Productive streak + extension ceiling spent — the chain would fire
+    // normally, except the checkpoint write is sabotaged below.
+    for (i, name) in ["a", "b", "c", "d", "e"].iter().enumerate() {
+        agent
+            .recent_turn_progress
+            .push_back(productive_turn(name, i as u64));
+    }
+    agent.loop_control = crate::agent::loop_control::AgentLoop::new(4);
+    for _ in 0..4 {
+        agent.loop_control.extend_budget_once();
+    }
+    agent.loop_control.restore_progress(0, 8);
+    let capped = agent.loop_control.next_state();
+    assert!(matches!(capped, Some(AgentState::Failed { .. })));
+
+    // Sabotage the checkpoint directory: swap it for a regular file so every
+    // persist attempt fails with an IO error.
+    let tmp = tempfile::tempdir().unwrap();
+    let ck_dir = tmp.path().join("chkpts");
+    agent.checkpoint_manager = Some(CheckpointManager::new(ck_dir.clone()).unwrap());
+    std::fs::remove_dir_all(&ck_dir).unwrap();
+    std::fs::write(&ck_dir, "in the way").unwrap();
+
+    let recorder = std::sync::Arc::new(RecordingEventEmitter::default());
+    agent = agent.with_event_emitter(recorder.clone());
+
+    let chained = agent.maybe_auto_continue("Never completes").await;
+    assert!(
+        chained.is_none(),
+        "a failed boundary checkpoint must stop the continuation"
+    );
+    assert_eq!(
+        agent.loop_control.auto_continue_count(),
+        0,
+        "the failed chain must not consume the per-task chain budget"
+    );
+    assert!(
+        !recorder
+            .events()
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Status { message }
+                if message.contains("continuing automatically"))),
+        "no 'checkpointed and continuing' claim may be emitted when the save failed"
+    );
+    server.stop().await;
+}
+
+/// Review fix: a MISSING checkpoint store is the same lie as a failing one —
+/// `save_checkpoint_forced` now errors when no manager is configured, and
+/// `maybe_auto_continue` must not fire a chain it cannot hand a resume point
+/// to. Same observable contract as the IO-failure test above: no chain, no
+/// consumed budget, no "checkpointed and continuing" claim.
+#[tokio::test]
+async fn auto_continue_aborts_without_manager_at_the_boundary() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = Agent::new(mock_agent_config(format!("{}/v1", server.url()), false))
+        .await
+        .unwrap();
+    agent.checkpoint_manager = None; // strip whatever Agent::new defaulted
+
+    // Productive streak + extension ceiling spent — the chain would fire
+    // normally, except there is nowhere to persist the boundary checkpoint.
+    for (i, name) in ["a", "b", "c", "d", "e"].iter().enumerate() {
+        agent
+            .recent_turn_progress
+            .push_back(productive_turn(name, i as u64));
+    }
+    agent.loop_control = crate::agent::loop_control::AgentLoop::new(4);
+    for _ in 0..4 {
+        agent.loop_control.extend_budget_once();
+    }
+    agent.loop_control.restore_progress(0, 8);
+    let capped = agent.loop_control.next_state();
+    assert!(matches!(capped, Some(AgentState::Failed { .. })));
+
+    let recorder = std::sync::Arc::new(RecordingEventEmitter::default());
+    agent = agent.with_event_emitter(recorder.clone());
+
+    let chained = agent.maybe_auto_continue("Never completes").await;
+    assert!(
+        chained.is_none(),
+        "no checkpoint manager must stop the continuation"
+    );
+    assert_eq!(
+        agent.loop_control.auto_continue_count(),
+        0,
+        "the aborted chain must not consume the per-task chain budget"
+    );
+    assert!(
+        !recorder
+            .events()
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Status { message }
+                if message.contains("continuing automatically"))),
+        "no 'checkpointed and continuing' claim may be emitted without a store"
+    );
+    server.stop().await;
 }

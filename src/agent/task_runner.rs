@@ -8,6 +8,87 @@ use crate::orchestration::swarm::{create_dev_swarm, AgentRole, Swarm, SwarmTask}
 use super::failure_mode::{FailureKind, FailureMode, RunOutcome};
 use super::tui_events::AgentEvent;
 
+/// Marker delimiters for the per-turn TASK FOCUS overlay stamped onto the
+/// leading system prompt by `run_task`. The overlay is per-task, so every
+/// run_task call rebuilds it — interactive sessions and queued tasks reuse
+/// `self.messages` across calls, and prefixing overlay-on-overlay compounded
+/// N copies of the workflow mandate into messages[0] after N turns
+/// (interactive context rot). The markers make the overlay self-identifying
+/// so the next stamp (or `/clear`) can strip it and rebuild from the clean
+/// base, keeping the rendered prompt after N turns identical to after 1,
+/// modulo the current overlay's own content.
+const FOCUS_OVERLAY_START: &str = "<selfware_focus_overlay>";
+const FOCUS_OVERLAY_END: &str = "</selfware_focus_overlay>";
+
+/// Recover the clean base system prompt by dropping the TASK FOCUS overlay a
+/// previous turn stamped in. The overlay is always a PREFIX of `content`,
+/// wrapped between [`FOCUS_OVERLAY_START`]/[`FOCUS_OVERLAY_END`]; everything
+/// after the end marker is the untouched base. Content without the markers
+/// passes through unchanged (fresh sessions, resumed pre-marker checkpoints).
+pub(super) fn strip_focus_overlay(content: &str) -> String {
+    match content.strip_prefix(FOCUS_OVERLAY_START) {
+        Some(rest) => match rest.find(FOCUS_OVERLAY_END) {
+            Some(end) => rest[end + FOCUS_OVERLAY_END.len()..].to_string(),
+            None => content.to_string(),
+        },
+        None => content.to_string(),
+    }
+}
+
+/// Rebuild the leading system message for THIS turn: strip any previous
+/// overlay, then stamp the current one onto the clean base. An empty overlay
+/// leaves exactly the base (and removes a stale overlay from an earlier
+/// task). After N turns messages[0] is base + exactly ONE current overlay.
+fn stamped_system_message(current: &Message, focus_block: &str) -> Message {
+    let base = strip_focus_overlay(current.content.text());
+    Message::system(if focus_block.is_empty() {
+        base
+    } else {
+        format!("{FOCUS_OVERLAY_START}{focus_block}{FOCUS_OVERLAY_END}{base}")
+    })
+}
+
+/// Extensions that mark a bare task token as a mentioned file even without a
+/// '/'. Root-file blindness: "Create a python script hello.py …" ignored
+/// hello.py entirely under the old '/' filter, so no context preloading or
+/// target tracking ever saw it.
+const MENTIONED_FILE_EXTENSIONS: &[&str] = &[
+    ".c", ".cc", ".cpp", ".css", ".go", ".h", ".html", ".java", ".js", ".json", ".md", ".php",
+    ".py", ".rb", ".rs", ".sh", ".swift", ".toml", ".ts", ".txt", ".yaml", ".yml",
+];
+
+/// Drop trailing punctuation so "hello.py," and "(main.rs)" still resolve to
+/// hello.py / main.rs.
+fn trim_mention_punctuation(token: &str) -> &str {
+    token.trim_end_matches(|c: char| {
+        matches!(
+            c,
+            ',' | ';' | ':' | ')' | ']' | '}' | '"' | '\'' | '`' | '.' | '!' | '?' | '>'
+        )
+    })
+}
+
+/// A task-text token counts as a mentioned file when it (a) looks like a path
+/// ("src/lib.rs", "a/b/") — the historical rule, (b) carries a file
+/// extension ("hello.py", "main.rs", "Cargo.toml"), or (c) resolves to a real
+/// file in the workspace (`std::fs::metadata` against the project root, so
+/// bare filenames like "calculator" or "README" surface only when they exist).
+fn is_mentioned_file_token(token: &str) -> bool {
+    let token = trim_mention_punctuation(token);
+    if token.contains('/') && (token.contains('.') || token.ends_with('/')) {
+        return true;
+    }
+    if MENTIONED_FILE_EXTENSIONS
+        .iter()
+        .any(|ext| token.ends_with(ext))
+    {
+        return true;
+    }
+    std::path::Path::new(&super::current_project_root())
+        .join(token)
+        .is_file()
+}
+
 enum PlannedToolExecution {
     NoToolCalls,
     Completed,
@@ -48,6 +129,11 @@ pub(super) fn is_fatal_loop_error(error: &anyhow::Error) -> bool {
         // this list nor matched by is_no_action_error, so self-healing "recovered"
         // it and retried at the same frozen step ~7× (LOOP-NONTERM-NOTFATAL).
         || msg.contains("NONTERM_PROSE_NO_TOOL")
+        // Recovery exhaustion for empty responses: EMPTY_RESPONSE_LOOP already
+        // retried once non-streaming; letting the outer runner "recover" and
+        // request again just burns the turn budget one empty turn at a time
+        // (LOOP-EMPTY-NOTFATAL). Terminal like NONTERM above.
+        || msg.contains("EMPTY_RESPONSE_LOOP")
 }
 
 /// Human-facing end-of-run summary (headless text mode). Every field comes
@@ -315,9 +401,17 @@ impl Agent {
         let preamble = task_type.preamble();
         if !self.messages.is_empty() && self.messages[0].role == "system" {
             // Extract file paths mentioned in the task for explicit targeting.
-            let mentioned_files: Vec<&str> = task_description
+            // Root-file mentions ("Create a python script hello.py …") were
+            // invisible to the historical '/' filter, so no context preloading
+            // or target tracking ever saw them. Match (a) path-shaped tokens
+            // (the historical rule), (b) extension-bearing tokens
+            // ("hello.py", "main.rs", "Cargo.toml"), and (c) tokens that
+            // resolve to a real file in the workspace. Trailing punctuation is
+            // ignored, so "hello.py," still counts.
+            let mentioned_files: Vec<String> = task_description
                 .split_whitespace()
-                .filter(|w| w.contains('/') && (w.contains('.') || w.ends_with('/')))
+                .filter(|w| is_mentioned_file_token(w))
+                .map(|w| trim_mention_punctuation(w).to_string())
                 .collect();
             let file_hint = if !mentioned_files.is_empty() {
                 format!(
@@ -407,10 +501,16 @@ impl Agent {
                     primary_tools.join(", ")
                 )
             };
-            if !focus_block.is_empty() {
-                let current = self.messages[0].content.to_string();
-                self.messages[0] = Message::system(format!("{}{}", focus_block, current));
-            }
+            // Stamp THIS turn's focus overlay onto the base system prompt
+            // without compounding. Interactive sessions and queued tasks reuse
+            // `self.messages` across run_task calls; the old prefix-on-prefix
+            // left messages[0] carrying N copies of the workflow mandate after
+            // N turns. Rebuild from the clean base instead (see
+            // `stamped_system_message`): after N turns the rendered system
+            // prompt is byte-identical in structure to after 1, differing only
+            // in the current overlay's own content.
+            let stamped = stamped_system_message(&self.messages[0], &focus_block);
+            self.messages[0] = stamped;
         }
 
         let msg = Message::user(task);
@@ -826,6 +926,107 @@ impl Agent {
         Some(AgentState::Executing { step })
     }
 
+    /// Auto-checkpoint-and-continue (long-task caps, USER-APPROVED policy):
+    /// the iteration cap was just tripped on a run still showing real forward
+    /// progress, and the +25%×4 adaptive-extension ceiling is already spent.
+    /// Instead of aborting with `Failed{Max iterations exceeded}` the run
+    /// persists a checkpoint and immediately chains `continue_execution` —
+    /// the exact machinery a manual `selfware resume` uses — so the step
+    /// counter and the cumulative token/cost/wall budgets keep accumulating
+    /// across the chain.
+    ///
+    /// Returns `Some(chain_result)` when a continuation ran; the caller must
+    /// propagate that result verbatim because the chain already emitted the
+    /// single terminal event and recorded the run outcome. Returns `None`
+    /// when no continuation should fire (the run is unproductive, or the
+    /// adaptive-extension ceiling was not actually reached) and the caller
+    /// falls through to the existing typed-failure path.
+    async fn maybe_auto_continue(&mut self, task_description: &str) -> Option<Result<()>> {
+        // Same progress criterion as the adaptive extension (loop 13): the
+        // last turns must each show a non-error tool result with no repeated
+        // identical call. Anything less is not progress and keeps the
+        // existing MaxIterations failure for unproductive runs.
+        const PROGRESS_WINDOW: usize = 5;
+        if !super::loop_control::productive_streak(&self.recent_turn_progress, PROGRESS_WINDOW) {
+            return None;
+        }
+        // Only chain after the cheaper in-place mechanism is spent: while any
+        // +25% adaptive grant is still available the pre-arm extension check
+        // consumes it instead. This guard is defensive — the pre-arm check
+        // runs first, so a productive cap-hit with room left never reaches
+        // here — and keeps the +25%×4 grant behavior byte-for-byte intact.
+        if !self.loop_control.extension_ceiling_reached() {
+            return None;
+        }
+
+        // Fold the current segment's wall time into the cumulative counter
+        // AND re-baseline the per-segment clock TOGETHER, THEN persist the
+        // boundary checkpoint: the wall budget is measured as
+        // `prior_elapsed_secs + task_start_time.elapsed()`, so folding
+        // without resetting the clock would count the closing segment once
+        // in the fold and AGAIN in the persisted `elapsed_wall_secs` (and in
+        // the chained segment's in-process enforcement) — the double-count
+        // review finding. The later `continue_execution` re-baseline is
+        // harmless: the accumulated total already lives in
+        // `prior_elapsed_secs`, and a manual `Agent::resume` receives the
+        // same total via the checkpoint.
+        self.prior_elapsed_secs = self.budget_elapsed_secs();
+        self.task_start_time = std::time::Instant::now();
+
+        // Register the chain BEFORE the write so the persisted checkpoint
+        // carries the count INCLUDING this continuation (a crash mid-chain
+        // must restore a budget that already accounts for it). If the write
+        // fails, the chain never ran: revert the registration and stop — the
+        // run falls back to the existing typed failure WITHOUT the
+        // "checkpointed and continuing" claim (honest status, AGENTS.md rule
+        // 3: never claim a checkpoint that was not persisted).
+        let chain_number = self.loop_control.register_auto_continue();
+        if let Err(e) = self.save_checkpoint_forced(task_description) {
+            self.loop_control.unregister_auto_continue();
+            warn!(
+                "Auto-continue aborted: failed to persist the boundary checkpoint ({}) — stopping instead of continuing without a resume point",
+                e
+            );
+            return None;
+        }
+
+        info!(
+            "Auto-continue {}/{}: iteration cap reached on a productive run with the extension ceiling exhausted — chaining continue_execution",
+            chain_number,
+            super::loop_control::MAX_AUTO_CONTINUES
+        );
+        self.emit_progress(super::progress::ProgressEvent::GuardFired {
+            kind: "auto_continue_chain".to_string(),
+            count: chain_number,
+        });
+        self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+            decision: "auto_continue".to_string(),
+            detail: format!(
+                "checkpointed and chaining continue_execution ({}/{})",
+                chain_number,
+                super::loop_control::MAX_AUTO_CONTINUES
+            ),
+        });
+        self.emit_event(AgentEvent::Status {
+            message: format!(
+                "Iteration cap reached on a productive run — checkpointing and continuing automatically (continuation {}/{})",
+                chain_number,
+                super::loop_control::MAX_AUTO_CONTINUES
+            ),
+        });
+
+        // Mirror `Agent::resume`: the continued segment gets a fresh iteration
+        // budget (iteration → 0, cap → original, adaptive extensions → fresh)
+        // while the step counter keeps counting across the chain.
+        self.loop_control.reset_budget_for_resume();
+
+        // `continue_execution` re-enters `run_execution_loop_inner`, whose
+        // `Failed` arm calls back into this helper — a type-level recursive
+        // future. Box the edge so the future has finite size; runtime depth
+        // stays bounded by [`MAX_AUTO_CONTINUES`] (3 chains per task).
+        Some(Box::pin(self.continue_execution()).await)
+    }
+
     async fn run_execution_loop(&mut self, task_description: &str, mode: LoopMode) -> Result<()> {
         let result = self.run_execution_loop_inner(task_description, mode).await;
         match &result {
@@ -1071,11 +1272,18 @@ impl Agent {
                                     // succeed on retry — fail fast so the user
                                     // sees the remediation hint immediately
                                     // instead of after duplicated retries.
+                                    // Fatal loop errors (EMPTY_RESPONSE_LOOP,
+                                    // NONTERM_PROSE_NO_TOOL, ...) are terminal
+                                    // for the same reason: their recovery was
+                                    // already exhausted inside the step, so
+                                    // retrying planning only duplicates a
+                                    // request that is going to fail again.
                                     let terminal_client_error =
                                         super::assistant_response::is_terminal_api_client_error(&e);
                                     if self.is_cancelled()
                                         || planning_attempt >= MAX_PLANNING_RETRIES
                                         || terminal_client_error
+                                        || is_fatal_loop_error(&e)
                                     {
                                         if mode == LoopMode::NewTask {
                                             self.emit_event(AgentEvent::Error {
@@ -1767,7 +1975,39 @@ impl Agent {
                     }
                     return Ok(());
                 }
-                AgentState::Failed { reason } => {
+                AgentState::Failed { mut reason } => {
+                    // Auto-checkpoint-and-continue (long-task caps,
+                    // USER-APPROVED policy): a PRODUCTIVE run that already
+                    // exhausted the +25%×4 adaptive extensions checkpoints and
+                    // chains `continue_execution` — the manual-`resume` path —
+                    // instead of dying at the cap. The chain is bounded at
+                    // [`MAX_AUTO_CONTINUES`] per task; past that the run stops
+                    // with the typed AUTO_CONTINUE_LIMIT reason rather than
+                    // looping forever. Unproductive runs keep the existing
+                    // typed MaxIterations failure unchanged.
+                    if reason == "Max iterations exceeded" {
+                        if self.loop_control.auto_continue_count()
+                            >= super::loop_control::MAX_AUTO_CONTINUES
+                        {
+                            // Note: do NOT `set_state` here — the loop is
+                            // already `Failed`, and the state machine rejects
+                            // a `Failed → Failed` transition (set_state would
+                            // panic). The local `reason` binding carries the
+                            // typed stop through the failure machinery below.
+                            reason = format!(
+                                "AUTO_CONTINUE_LIMIT: automatic continuation chained {} times on this task and the iteration cap was reached again",
+                                super::loop_control::MAX_AUTO_CONTINUES
+                            );
+                        } else if let Some(chained) =
+                            self.maybe_auto_continue(task_description).await
+                        {
+                            // The chain already emitted the single terminal
+                            // event and recorded the run outcome — propagate
+                            // exactly what it produced instead of re-running
+                            // the failure machinery here.
+                            return chained;
+                        }
+                    }
                     record_state_transition("Executing", "Failed");
                     if mode == LoopMode::NewTask {
                         progress.fail_phase();

@@ -270,6 +270,13 @@ impl Agent {
                 step: checkpoint.current_step,
             });
         }
+        // The auto-continue chain bound is per-TASK, not per-process: a task
+        // resumed after chaining continuations keeps counting against
+        // `MAX_AUTO_CONTINUES` instead of receiving a fresh budget of 3
+        // chains on every restart. Legacy checkpoints predate the field and
+        // deserialize it as 0, which grants a fresh budget — acceptable for
+        // old data, never for new checkpoints.
+        restored_loop.set_auto_continue_count(checkpoint.auto_continue_count);
 
         let checkpoint_tool_calls = checkpoint.tool_calls.len();
 
@@ -428,6 +435,9 @@ impl Agent {
 
         checkpoint.set_step(self.loop_control.current_step());
         checkpoint.set_iteration(self.loop_control.current_iteration());
+        // Persist the auto-continue chain count so the per-task chain bound
+        // survives a restart (`Agent::resume` restores it onto the new loop).
+        checkpoint.auto_continue_count = self.loop_control.auto_continue_count();
         checkpoint.set_messages(self.messages.clone());
         checkpoint.set_estimated_tokens(self.memory.total_tokens());
 
@@ -487,30 +497,78 @@ impl Agent {
         checkpoint
     }
 
-    /// Save current state to checkpoint
+    /// Save current state to checkpoint (subject to the continuous-work
+    /// cadence policy — see [`should_persist_checkpoint`]).
     pub(crate) fn save_checkpoint(&mut self, task_description: &str) -> Result<()> {
-        if let Some(ref manager) = self.checkpoint_manager {
-            if !self.should_persist_checkpoint() {
-                debug!("Checkpoint skipped by continuous-work policy");
-                return Ok(());
-            }
-
-            let task_id = self
-                .current_checkpoint
-                .as_ref()
-                .map(|c| c.task_id.clone())
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-            let checkpoint = self.to_checkpoint(&task_id, task_description);
-            manager.save(&checkpoint)?;
-            self.last_checkpoint_tool_calls = checkpoint.tool_calls.len();
-            self.last_checkpoint_persisted_at = Instant::now();
-            self.checkpoint_persisted_once = true;
-            self.current_checkpoint = Some(checkpoint);
-            #[cfg(feature = "resilience")]
-            self.record_self_healing_checkpoint(task_description);
-            debug!("Checkpoint saved for task: {}", task_id);
+        if self.checkpoint_manager.is_none() {
+            return Ok(());
         }
+        if !self.should_persist_checkpoint() {
+            debug!("Checkpoint skipped by continuous-work policy");
+            return Ok(());
+        }
+        self.persist_checkpoint(task_description, false)
+    }
+
+    /// Save a checkpoint unconditionally, as a FULL write, bypassing the
+    /// continuous-work cadence policy.
+    ///
+    /// Used at auto-continue boundaries (long-task caps): the in-process
+    /// chain hands off to the same machinery as a manual `selfware resume`,
+    /// so the on-disk state MUST be fresh before the next segment starts —
+    /// the same guarantee the cancellation path enforces with its final
+    /// save. A mid-chain crash (or an explicit resume) resumes from this
+    /// write, not from a stale periodic checkpoint. The full-write (not
+    /// delta) form guarantees the boundary-only fields — the persisted
+    /// auto-continue chain count and the cumulative wall-clock total — land
+    /// in the base checkpoint file rather than a differential log.
+    ///
+    /// Fails with a typed error when no checkpoint manager is configured
+    /// (review finding): the auto-continue boundary is the ONE write whose
+    /// absence would let a chained run claim "checkpointed" with nothing on
+    /// disk, so unlike the best-effort periodic [`save_checkpoint`] this
+    /// caller cannot silently no-op. The caller (maybe_auto_continue) treats
+    /// the error as "the chain must not fire — there is no resume point to
+    /// hand off to".
+    pub(super) fn save_checkpoint_forced(&mut self, task_description: &str) -> Result<()> {
+        if self.checkpoint_manager.is_none() {
+            anyhow::bail!(
+                "cannot persist a forced checkpoint: no checkpoint manager is configured"
+            );
+        }
+        self.persist_checkpoint(task_description, true)
+    }
+
+    /// Shared persist half of [`save_checkpoint`] / [`save_checkpoint_forced`].
+    /// Callers guarantee a checkpoint manager is configured. `full_write`
+    /// forces a complete base-file write ([`CheckpointManager::save_final`])
+    /// instead of the differential save.
+    fn persist_checkpoint(&mut self, task_description: &str, full_write: bool) -> Result<()> {
+        let task_id = self
+            .current_checkpoint
+            .as_ref()
+            .map(|c| c.task_id.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+        let checkpoint = self.to_checkpoint(&task_id, task_description);
+        // The manager borrow (and its IO) completes before any of the mutable
+        // bookkeeping below touches the agent.
+        let manager = self
+            .checkpoint_manager
+            .as_ref()
+            .expect("caller checked manager");
+        if full_write {
+            manager.save_final(&checkpoint)?;
+        } else {
+            manager.save(&checkpoint)?;
+        }
+        self.last_checkpoint_tool_calls = checkpoint.tool_calls.len();
+        self.last_checkpoint_persisted_at = Instant::now();
+        self.checkpoint_persisted_once = true;
+        self.current_checkpoint = Some(checkpoint);
+        #[cfg(feature = "resilience")]
+        self.record_self_healing_checkpoint(task_description);
+        debug!("Checkpoint saved for task: {}", task_id);
         Ok(())
     }
 
