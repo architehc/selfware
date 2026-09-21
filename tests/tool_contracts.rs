@@ -368,7 +368,7 @@ async fn directory_tree_invalid_args() {
 
 #[tokio::test]
 async fn grep_search_schema_contract() {
-    let tool = GrepSearch;
+    let tool = GrepSearch::new();
     assert_metadata(&tool);
     assert_valid_schema(&tool.schema(), tool.name());
 
@@ -387,7 +387,11 @@ async fn grep_search_valid_execution() {
     std::fs::write(&file_path, "line one\nfind_this_needle\nline three\n")
         .expect("create searchable file");
 
-    let tool = GrepSearch;
+    // grep_search enforces the workspace path policy on `path`; the temp-dir
+    // fixture lives outside the workspace, so allow it explicitly.
+    let canonical_parent = safe_canonical(dir.path());
+    let parent = canonical_parent.to_str().unwrap().to_string();
+    let tool = GrepSearch::with_safety_config(permissive_safety(&parent));
     let result = tool
         .execute(json!({
             "pattern": "find_this_needle",
@@ -410,7 +414,7 @@ async fn grep_search_valid_execution() {
 
 #[tokio::test]
 async fn grep_search_invalid_args() {
-    let tool = GrepSearch;
+    let tool = GrepSearch::new();
     // Missing required fields
     let result = tool.execute(json!({})).await;
     assert!(
@@ -476,7 +480,7 @@ async fn all_core_tools_schema_has_required_subset_of_properties() {
         Box::new(FileEdit::new()),
         Box::new(DirectoryTree::new()),
         Box::new(ShellExec),
-        Box::new(GrepSearch),
+        Box::new(GrepSearch::new()),
         Box::new(GitStatus::default()),
     ];
 

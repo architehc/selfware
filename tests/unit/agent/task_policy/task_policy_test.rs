@@ -101,3 +101,55 @@ async fn read_only_classification_gates_requires_mutation_everywhere() {
     agent.start_learning_session("s2", "Fix the bug in parse_port.");
     assert!(agent.current_task_requires_mutation());
 }
+
+#[tokio::test]
+async fn plain_status_query_does_not_require_mutation() {
+    // Review finding #2 (task-policy inversion): two guards used to check
+    // `current_task_is_read_only()`, which is FALSE for a plain status /
+    // question query — so destructive synthesis (script / assumed-edit
+    // synthesis) fired on status queries. Both now consult
+    // `!current_task_requires_mutation()`, which is true for read-only tasks
+    // AND plain queries. Assert the guard function outcomes for the three
+    // task classes the review's matrix calls out: mutation task, review
+    // task, plain query.
+    let mut agent = Agent::new(crate::config::Config::default())
+        .await
+        .expect("agent should build");
+
+    // Mutation task: requires mutation → the synthesis guards stay armed.
+    agent.start_learning_session("m", "Fix the bug in parse_port.");
+    assert!(
+        agent.current_task_requires_mutation(),
+        "a mutation task must require mutation (guards stay armed)"
+    );
+
+    // Review task: read-only classified → requires_mutation is false, so the
+    // force-synthesis / scaffold machinery must not fire.
+    agent.start_learning_session(
+        "r",
+        "Review the code in src/agent/ and report findings. Do NOT edit any files.",
+    );
+    assert!(agent.current_task_is_read_only());
+    assert!(
+        !agent.current_task_requires_mutation(),
+        "a read-only review task must never require mutation"
+    );
+
+    // Plain status/question query: NOT read-only-classified and NOT
+    // mutation-requiring — the exact class that previously slipped past the
+    // read-only guard and hit destructive synthesis.
+    agent.start_learning_session(
+        "q",
+        "What is the status of the test suite? List the failing tests.",
+    );
+    assert!(
+        !agent.current_task_is_read_only(),
+        "a status query is not branded read-only, yet ..."
+    );
+    assert!(
+        !agent.current_task_requires_mutation(),
+        "... a status query must still NOT require mutation — the guards that
+         gate destructive synthesis check `requires_mutation`, so synthesis
+         must not fire on it"
+    );
+}

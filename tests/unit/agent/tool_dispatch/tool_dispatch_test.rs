@@ -238,15 +238,307 @@ fn test_shell_verification_credits_direct_test_script_runs() {
     assert!(shell_command_is_verification("/usr/bin/python3 test_x.py"));
     assert!(shell_command_is_verification("cd sub && python3 test_x.py"));
     assert!(shell_command_is_verification("python3 -u test_x.py"));
-    // NOT verification: running the app, arbitrary inline code, or a
-    // non-test script that merely takes a test-named data file.
-    assert!(!shell_command_is_verification("python3 app.py"));
+    // NOT verification: arbitrary inline code (no script file) and bare
+    // interpreters.
     assert!(!shell_command_is_verification("python3 -c \"print('hi')\""));
-    assert!(!shell_command_is_verification(
+    assert!(!shell_command_is_verification("node -e \"1 + 1\""));
+    assert!(!shell_command_is_verification("python3"));
+    // Deliverable-script runs (review finding #4): a project with no test
+    // framework verifies by running its deliverable script — a clean run
+    // must be credited or a correct fix deadlocks on StaleVerification.
+    // These were previously pinned as NOT verification; the finding flips
+    // them (see test_shell_verification_credits_deliverable_script_runs).
+    assert!(shell_command_is_verification("python3 app.py"));
+    assert!(shell_command_is_verification(
         "python3 process.py test_data.csv"
     ));
-    assert!(!shell_command_is_verification("node server.js"));
-    assert!(!shell_command_is_verification("bash deploy.sh"));
+    assert!(shell_command_is_verification("node server.js"));
+    assert!(shell_command_is_verification("bash deploy.sh"));
+}
+
+#[test]
+fn test_shell_verification_credits_deliverable_script_runs() {
+    // Review finding #4 (standalone-script verification deadlock): a
+    // deliverable script run is only credited when its path matches
+    // test*/spec*, so a standalone deliverable script (bash deploy.sh,
+    // python3 solve.py) that runs clean on a project with no test framework
+    // was refused at the completion gate. The verification classifier now
+    // credits interpreter+script-file and direct ./script runs — gated by
+    // the same `&&` authority rule as every other runner.
+    assert!(shell_command_is_verification("bash deploy.sh"));
+    assert!(shell_command_is_verification("sh run_me.sh"));
+    assert!(shell_command_is_verification("python3 solve.py"));
+    assert!(shell_command_is_verification("python main.py --input data"));
+    assert!(shell_command_is_verification("node app.js"));
+    assert!(shell_command_is_verification("ruby script.rb"));
+    assert!(shell_command_is_verification("php tool.php"));
+    assert!(shell_command_is_verification("./generate.py"));
+    assert!(shell_command_is_verification(
+        "/usr/bin/python3 /tmp/fix.py"
+    ));
+    assert!(shell_command_is_verification(
+        "cd project && python3 solver.py"
+    ));
+
+    // Static syntax/type checks for the language are credited too, as
+    // CompileOrLint: node --check, bash -n, sh -n, ruff, mypy (alongside the
+    // pre-existing python -m py_compile).
+    assert!(shell_command_is_verification("node --check app.js"));
+    assert!(shell_command_is_verification("bash -n deploy.sh"));
+    assert!(shell_command_is_verification("sh -n run_me.sh"));
+    assert!(shell_command_is_verification("ruff check solve.py"));
+    assert!(shell_command_is_verification("ruff lint ."));
+    assert!(shell_command_is_verification("mypy solve.py"));
+    assert_eq!(
+        shell_command_verification_kind("node --check app.js"),
+        Some(VerificationKind::CompileOrLint)
+    );
+    assert_eq!(
+        shell_command_verification_kind("bash -n deploy.sh"),
+        Some(VerificationKind::CompileOrLint)
+    );
+    assert_eq!(
+        shell_command_verification_kind("python3 solve.py"),
+        Some(VerificationKind::SmokeRun),
+        "a bare deliverable run asserts nothing — smoke tier, not test execution"
+    );
+    assert_eq!(
+        shell_command_verification_kind("bash deploy.sh"),
+        Some(VerificationKind::SmokeRun)
+    );
+    assert_eq!(
+        shell_command_verification_kind("cd project && python3 solver.py"),
+        Some(VerificationKind::SmokeRun)
+    );
+
+    // P1 finding: a plain exit-0 run must NOT be labelled TestExecution. Only
+    // chains with an EXPLICIT expected result — an exit-code assertion
+    // (`$?`) or an output predicate (grep/diff/test) — earn that tier.
+    assert_eq!(
+        shell_command_verification_kind("python3 solve.py && test $? -eq 0"),
+        Some(VerificationKind::TestExecution)
+    );
+    assert_eq!(
+        shell_command_verification_kind(
+            "python3 generate.py > out.txt && diff out.txt expected.txt"
+        ),
+        Some(VerificationKind::TestExecution)
+    );
+    assert_eq!(
+        shell_command_verification_kind("bash deploy.sh && grep -q deployed out.txt"),
+        Some(VerificationKind::TestExecution)
+    );
+    // A deliverable script reached through `|`/`;` into an explicit checker:
+    // the checker decides the overall status, so the chain is authoritative
+    // (unlike `cargo test | true`, which masks the runner).
+    assert_eq!(
+        shell_command_verification_kind("python3 app.py | grep -q hello"),
+        Some(VerificationKind::TestExecution)
+    );
+    assert_eq!(
+        shell_command_verification_kind("bash deploy.sh; test -f out.txt"),
+        Some(VerificationKind::TestExecution)
+    );
+    assert!(shell_command_is_verification(
+        "python3 solve.py && test $? -eq 0"
+    ));
+    assert!(shell_command_is_verification(
+        "python3 app.py | grep -q hello"
+    ));
+    // A check followed by filler still couples: the grep decides the outcome,
+    // the trailing echo is commentary.
+    assert_eq!(
+        shell_command_verification_kind("python3 app.py | grep -q pattern && echo pass"),
+        Some(VerificationKind::TestExecution)
+    );
+
+    // HIGH follow-up (word-trigger hardening): trigger words in QUOTED
+    // arguments or filler commands are NOT checks — these stay smoke.
+    assert_eq!(
+        shell_command_verification_kind("python3 app.py && printf 'grep\\n'"),
+        Some(VerificationKind::SmokeRun),
+        "a quoted keyword inside printf checks nothing — smoke tier"
+    );
+    assert_eq!(
+        shell_command_verification_kind("python3 app.py && echo \"see diff docs\""),
+        Some(VerificationKind::SmokeRun),
+        "a quoted keyword inside echo checks nothing — smoke tier"
+    );
+    // A bare `rc=$?` capture asserts nothing and does NOT credit on its own.
+    assert!(!shell_command_is_verification("python3 app.py; rc=$?"));
+    assert_eq!(
+        shell_command_verification_kind("python3 app.py && rc=$?"),
+        Some(VerificationKind::SmokeRun),
+        "an exit-code assignment without a predicate is not a check"
+    );
+
+    // Test-named scripts still execute tests (unchanged verdict).
+    assert_eq!(
+        shell_command_verification_kind("python3 test_calc.py"),
+        Some(VerificationKind::TestExecution)
+    );
+    assert_eq!(
+        shell_command_verification_kind("./test_x.py"),
+        Some(VerificationKind::TestExecution)
+    );
+
+    // The authority gate binds the deliverable fallback exactly like every
+    // other runner: a masked or skipped script is not evidence.
+    assert!(!shell_command_is_verification(
+        "bash deploy.sh || echo done"
+    ));
+    assert!(!shell_command_is_verification("bash deploy.sh; true"));
+    assert!(!shell_command_is_verification("true || python3 solve.py"));
+    assert!(!shell_command_is_verification("python3 solve.py | tee log"));
+    // A checker behind `||` still forfeits credit (the script may have been
+    // skipped entirely).
+    assert!(!shell_command_is_verification(
+        "python3 solve.py || grep -q x out.txt"
+    ));
+
+    // Inline code, module invocations, and non-script targets stay out.
+    assert!(!shell_command_is_verification("python3 -c \"print('hi')\""));
+    assert!(!shell_command_is_verification("node -e \"1 + 1\""));
+    assert!(!shell_command_is_verification("python3 -m http.server"));
+    assert!(!shell_command_is_verification("python3"));
+    assert!(!shell_command_is_verification("echo python3 solve.py"));
+
+    // Test-named scripts keep their existing verdict (test-script fallback).
+    assert!(shell_command_is_verification("python3 test_calc.py"));
+    assert!(shell_command_is_verification("./test_x.py"));
+    assert!(!shell_command_is_verification(
+        "./solve.py test_data.csv || true"
+    ));
+}
+
+#[test]
+fn test_shell_verification_kind_normalizes_environment_wrappers() {
+    // Review finding #1: `CARGO_TERM_COLOR=never cargo check` matched the
+    // `cargo check` PREFIX through the boundary matcher but failed the
+    // compile branch's starts_with on the raw segment, so it fell through to
+    // "a verification prefix in command position" and was labelled
+    // TestExecution — compilation discharging test obligations. Wrapped
+    // forms must classify exactly like the plain form.
+    for command in [
+        "cargo check",
+        "CARGO_TERM_COLOR=never cargo check",
+        "env CARGO_TERM_COLOR=never cargo check",
+        "sudo cargo check",
+        "/usr/bin/cargo check",
+        "FOO=1 /usr/bin/cargo check",
+        "env FOO=1 BAR=2 cargo clippy",
+    ] {
+        assert_eq!(
+            shell_command_verification_kind(command),
+            Some(VerificationKind::CompileOrLint),
+            "{command} compiles and executes no tests"
+        );
+    }
+    // The same wrappers must not demote a real test run.
+    for command in [
+        "CARGO_TERM_COLOR=never cargo test",
+        "env RUST_LOG=debug cargo test",
+        "/usr/bin/cargo test",
+        "sudo CARGO_TERM_COLOR=never python3 -m pytest",
+    ] {
+        assert_eq!(
+            shell_command_verification_kind(command),
+            Some(VerificationKind::TestExecution),
+            "{command} runs tests"
+        );
+    }
+}
+
+#[test]
+fn test_shell_verification_rejects_filler_masking_a_failed_check() {
+    // Review finding #2: the old `|`/`;` branch looked for the LAST
+    // non-filler segment and required it to be a checker. In `python3
+    // app.py; test 1 = 2; true` that is `test 1 = 2` — but the command's own
+    // final status is decided by the trailing `true` (always 0), so the
+    // failed check was masked and still earned verification credit. A
+    // checker decoupled from the final status by `;`/`|` filler must not
+    // decide the chain's credit.
+    assert!(!shell_command_is_verification(
+        "python3 app.py; test 1 = 2; true"
+    ));
+    assert!(!shell_command_is_verification(
+        "python3 app.py; test -f out.txt; echo done"
+    ));
+    assert!(!shell_command_is_verification(
+        "python3 app.py | grep -q pattern | cat"
+    ));
+    assert_eq!(
+        shell_command_verification_kind("python3 app.py; test 1 = 2; true"),
+        None
+    );
+    // `&&`-reached commentary is genuinely coupled: the echo runs only when
+    // the check passed, so the check still decides the outcome.
+    assert!(shell_command_is_verification(
+        "python3 app.py | grep -q pattern && echo pass"
+    ));
+    assert_eq!(
+        shell_command_verification_kind("python3 app.py | grep -q pattern && echo pass"),
+        Some(VerificationKind::TestExecution)
+    );
+    // A checker as the LAST segment still decides the outcome.
+    assert!(shell_command_is_verification(
+        "python3 app.py; test -f out.txt"
+    ));
+    assert_eq!(
+        shell_command_verification_kind("bash deploy.sh; test -f out.txt"),
+        Some(VerificationKind::TestExecution)
+    );
+}
+
+#[test]
+fn deliverable_script_segments_carry_the_mutational_signal() {
+    // Review finding #3 (the predicate split): the SmokeRun arm widened
+    // shell_command_is_verification to credit bare deliverable runs, and the
+    // observer's command_may_mutate, delegating to that gate, called them
+    // clean — so `python3 fix.py && pytest -q` lost the OpaqueRun flag that
+    // says the tree may have moved. The mutational question must consume the
+    // WITHOUT-deliverable predicate instead: runner prefixes and test scripts
+    // stay harmless, deliverable-script executions do not.
+    assert!(shell_segment_is_verification_without_deliverable(
+        "pytest -q"
+    ));
+    assert!(shell_segment_is_verification_without_deliverable(
+        "cargo test"
+    ));
+    assert!(shell_segment_is_verification_without_deliverable(
+        "cargo check"
+    ));
+    assert!(shell_segment_is_verification_without_deliverable(
+        "python3 -c 'assert add(1, 1) == 2'"
+    ));
+    assert!(shell_segment_is_verification_without_deliverable(
+        "python3 test_calc.py"
+    ));
+    assert!(!shell_segment_is_verification_without_deliverable(
+        "python3 fix.py"
+    ));
+    assert!(!shell_segment_is_verification_without_deliverable(
+        "bash deploy.sh"
+    ));
+    assert!(!shell_segment_is_verification_without_deliverable(
+        "node server.js"
+    ));
+}
+
+#[test]
+fn test_observational_does_not_credit_deliverable_scripts() {
+    // A deliverable script is a VERIFICATION credit only — it must NOT turn
+    // the script run read-only/observational, or a mutating deliverable
+    // (`bash deploy.sh` writing files) would vanish from mutation
+    // accounting. The observational classifier consults only the test-script
+    // predicate, which still requires test*/spec* names.
+    assert!(!shell_command_is_observational("bash deploy.sh"));
+    assert!(!shell_command_is_observational("python3 app.py"));
+    assert!(!shell_command_is_observational("node server.js"));
+    assert!(!shell_command_is_observational("./generate.py"));
+    // Test-named runs stay observational (pre-existing verdict).
+    assert!(shell_command_is_observational("python3 test_calc.py"));
+    assert!(shell_command_is_observational("./test_x.py"));
 }
 
 #[test]
@@ -296,9 +588,14 @@ fn test_pty_shell_verification_credited_like_shell_exec() {
     let verification = r#"{"command":"python3 test_calc.py"}"#;
     assert!(tool_call_is_verification("shell_exec", verification));
     assert!(tool_call_is_verification("pty_shell", verification));
+    assert!(tool_call_is_verification(
+        "pty_shell",
+        r#"{"command":"python3 solve.py"}"#
+    ));
+    // Inline code (no script file) is still not a verification run.
     assert!(!tool_call_is_verification(
         "pty_shell",
-        r#"{"command":"python3 app.py"}"#
+        r#"{"command":"python3 -c \"print('hi')\""}"#
     ));
 }
 
@@ -617,6 +914,214 @@ async fn mutating_file_tools_dispatch_sets_written_file_ledger() {
         agent.has_written_any_file,
         "a successful patch_apply must set the durable write ledger"
     );
+}
+
+// =========================================================================
+// P2: alias spellings must survive schema validation (native FC)
+// =========================================================================
+//
+// Native function calls are schema-validated BEFORE the tool deserializer
+// runs (validate_tool_call on the parallel path, validate_tool_arguments_schema
+// on the sequential path), so the serde aliases on the Args structs alone
+// cannot rescue an alias spelling like old_string/new_string — it died with
+// "Missing required argument 'old_str'". Dispatch-time normalization must
+// make the end-to-end path work.
+
+#[tokio::test]
+async fn native_file_edit_with_old_string_new_string_passes_validation_and_executes() {
+    // The exact argument shape the progress guard used to inject: a
+    // tool_type marker plus old_string/new_string instead of the canonical
+    // old_str/new_str. Schema validation would reject this verbatim; the
+    // dispatch funnel must normalize it first.
+    let _g = crate::test_support::ExecGuard::hold();
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut config = test_config(format!("{}/v1", server.url()));
+    config.agent.native_function_calling = true;
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("edit.txt");
+    std::fs::write(&file, "Hello, World!\n").unwrap();
+
+    let args = serde_json::json!({
+        "tool_type": "file_edit",
+        "path": file.to_str().unwrap(),
+        "old_string": "World",
+        "new_string": "Rust"
+    });
+    agent
+        .execute_tool_batch(vec![(
+            "file_edit".to_string(),
+            args.to_string(),
+            Some("call_native_edit_alias".to_string()),
+        )])
+        .await
+        .expect("the batch must run without a validation rejection");
+
+    let all_text: String = agent
+        .messages
+        .iter()
+        .map(|m| m.content.text())
+        .collect::<Vec<_>>()
+        .join("\n---\n");
+    assert!(
+        !all_text.contains("validation failed") && !all_text.contains("Missing required argument"),
+        "alias-spelled native file_edit must pass schema validation; got: {all_text}"
+    );
+
+    // And it must actually have executed the edit.
+    let content = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(content, "Hello, Rust!\n");
+
+    // The tool result must reflect execution, not rejection.
+    assert!(
+        all_text.contains("matches_found") || all_text.contains("success"),
+        "expected an executed tool result; got: {all_text}"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn native_parallel_file_read_with_file_path_alias_passes_validation() {
+    // file_read is parallel-safe, so a two-read batch takes the PARALLEL path,
+    // whose validate_tool_call (tool_dispatch mod.rs) is the exact validation
+    // point the review cited. Aliased `file_path`/`file` spellings must pass
+    // it and still execute. Tempdir root is read via directory-free files.
+    let _g = crate::test_support::ExecGuard::hold();
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut config = test_config(format!("{}/v1", server.url()));
+    config.agent.native_function_calling = true;
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.txt");
+    std::fs::write(&a, "alpha-content\n").unwrap();
+    let b = dir.path().join("b.txt");
+    std::fs::write(&b, "beta-content\n").unwrap();
+
+    let args_a = serde_json::json!({"file_path": a.to_str().unwrap()});
+    let args_b = serde_json::json!({"file": b.to_str().unwrap()});
+    agent
+        .execute_tool_batch(vec![
+            (
+                "file_read".to_string(),
+                args_a.to_string(),
+                Some("call_ra".to_string()),
+            ),
+            (
+                "file_read".to_string(),
+                args_b.to_string(),
+                Some("call_rb".to_string()),
+            ),
+        ])
+        .await
+        .expect("the batch must run without a validation rejection");
+
+    let all_text: String = agent
+        .messages
+        .iter()
+        .map(|m| m.content.text())
+        .collect::<Vec<_>>()
+        .join("\n---\n");
+    assert!(
+        !all_text.contains("validation failed") && !all_text.contains("Missing required argument"),
+        "alias-spelled parallel native file_reads must pass validation; got: {all_text}"
+    );
+    assert!(
+        all_text.contains("alpha-content") && all_text.contains("beta-content"),
+        "both reads must have executed; got: {all_text}"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn native_file_write_with_path_content_aliases_executes() {
+    let _g = crate::test_support::ExecGuard::hold();
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut config = test_config(format!("{}/v1", server.url()));
+    config.agent.native_function_calling = true;
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("written.txt");
+    let args = serde_json::json!({
+        "file_path": file.to_str().unwrap(),
+        "body": "written via aliases\n"
+    });
+    agent
+        .execute_tool_batch(vec![(
+            "file_write".to_string(),
+            args.to_string(),
+            Some("call_write_alias".to_string()),
+        )])
+        .await
+        .expect("the batch must run without a validation rejection");
+
+    let content = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(content, "written via aliases\n");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn native_shell_exec_with_cmd_alias_executes() {
+    let _g = crate::test_support::ExecGuard::hold();
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut config = test_config(format!("{}/v1", server.url()));
+    config.agent.native_function_calling = true;
+    let mut agent = Agent::new(config).await.unwrap();
+
+    agent
+        .execute_tool_batch(vec![(
+            "shell_exec".to_string(),
+            serde_json::json!({"cmd": "echo native-cmd-alias", "timeout_secs": 5}).to_string(),
+            Some("call_shell_alias".to_string()),
+        )])
+        .await
+        .expect("the batch must run without a validation rejection");
+
+    let all_text: String = agent
+        .messages
+        .iter()
+        .map(|m| m.content.text())
+        .collect::<Vec<_>>()
+        .join("\n---\n");
+    assert!(
+        all_text.contains("native-cmd-alias"),
+        "the cmd-aliased shell_exec must have run; got: {all_text}"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn native_file_multi_edit_with_old_string_new_string_aliases_executes() {
+    let _g = crate::test_support::ExecGuard::hold();
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut config = test_config(format!("{}/v1", server.url()));
+    config.agent.native_function_calling = true;
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("multi.txt");
+    std::fs::write(&file, "one\ntwo\n").unwrap();
+
+    let args = serde_json::json!({
+        "edits": [
+            {"filepath": file.to_str().unwrap(), "old_string": "one", "new_string": "ONE"},
+            {"filepath": file.to_str().unwrap(), "old_string": "two", "new_string": "TWO"}
+        ]
+    });
+    agent
+        .execute_tool_batch(vec![(
+            "file_multi_edit".to_string(),
+            args.to_string(),
+            Some("call_multi_alias".to_string()),
+        )])
+        .await
+        .expect("the batch must run without a validation rejection");
+
+    let content = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(content, "ONE\nTWO\n");
+    server.stop().await;
 }
 
 // =========================================================================
@@ -2550,59 +3055,99 @@ async fn git_push_to_protected_branch_is_blocked_even_with_git_push_allowed() {
 }
 
 #[tokio::test]
-async fn confirmation_error_in_batch_still_pushes_tool_result() {
-    // Regression: when execute_single_tool_in_batch returns Err BEFORE
-    // pushing a tool-result (e.g. confirmation rejection in non-YOLO
-    // headless mode), the catch-and-continue loop must push a synthetic
-    // error result for that tool_call_id so native-FC history stays
-    // balanced (N calls → N results).  Without the fix, the tool_call_id
-    // had NO result → 400 on the next API call.
+async fn confirmation_error_in_batch_is_typed_and_stops_the_run() {
+    // A headless confirmation denial is now the TYPED
+    // `AgentError::ConfirmationRequired`, and `execute_tool_batch` re-raises
+    // it from its per-tool catch instead of converting it to a synthetic
+    // (retryable) tool result. The run-loop catch recognizes the type and
+    // transitions to a terminal `Failed` state — the model never sees the
+    // denial as a recoverable error, so it cannot loop the whole turn budget
+    // like the previous untyped anyhow did in headless AutoEdit runs that
+    // needed `cargo_test` after an edit (measured: 74 steps / 1.47M tokens).
+    // Native-FC history stays balanced because the run stops: there is no
+    // later API call expecting a result.
     //
     // We use Normal mode (not Yolo) so confirmation is required for
-    // file_write.  In the test runner stdin is not a terminal, so
-    // confirm_tool_execution returns Err("requires confirmation but
-    // cannot prompt in headless mode").  The fix pushes a synthetic
-    // error result and the batch continues with the second tool.
+    // file_write; in the test runner stdin is not a terminal.
     let server = MockLlmServer::builder().with_response("done").build().await;
     let mut config = test_config(format!("{}/v1", server.url()));
     config.execution_mode = crate::config::ExecutionMode::Normal;
     let mut agent = Agent::new(config).await.unwrap();
 
-    agent
-        .execute_tool_batch(vec![
-            (
-                "file_write".to_string(),
-                r#"{"path":"/tmp/selfware-test-confirm.txt","content":"x"}"#.to_string(),
-                Some("call_confirm_err".to_string()),
-            ),
-            // A second tool that should still execute.
-            (
-                "shell_exec".to_string(),
-                r#"{"command":"echo hello"}"#.to_string(),
-                Some("call_after_err".to_string()),
-            ),
-        ])
+    let err = agent
+        .execute_tool_batch(vec![(
+            "file_write".to_string(),
+            r#"{"path":"/tmp/selfware-test-confirm.txt","content":"x"}"#.to_string(),
+            Some("call_confirm_err".to_string()),
+        )])
         .await
-        .unwrap();
+        .expect_err("a headless confirmation denial must stop the batch");
 
-    let all_text: String = agent
-        .messages
-        .iter()
-        .map(|m| m.content.text())
-        .collect::<Vec<_>>()
-        .join("\n---\n");
-
-    // The confirmation-errored tool must have a synthetic error result
-    // pushed (contains "headless mode" from the error message).
     assert!(
-        all_text.contains("headless mode"),
-        "expected a synthetic error result for the confirmation-errored tool; got: {all_text}"
+        crate::errors::is_confirmation_error(&err),
+        "the batch error must be the typed confirmation error: {err:?}"
     );
-    // The second tool should also have executed (its result present).
+    let msg = err.to_string();
     assert!(
-            all_text.contains("hello"),
-            "expected the second tool in the batch to still execute after the first errored; got: {all_text}"
+        msg.contains("requires confirmation"),
+        "typed confirmation message expected, got: {msg}"
+    );
+    assert!(
+        msg.contains("file_write"),
+        "the denial must name the denied tool, got: {msg}"
+    );
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn auto_edit_headless_auto_approves_checker_safe_tools_at_the_confirm_gate() {
+    // The exact gate that used to loop: a checker-safe `cargo_*` / `lsp_*`
+    // call in headless AutoEdit reaches the confirm gate and must be
+    // auto-approved (Ok(true)) — no TTY exists to answer a prompt. Before
+    // the fix this fell through to `prompt_tool_confirmation`, which errored
+    // in headless mode, and a mutating task needing `cargo_test` after an
+    // edit looped for the whole turn budget (measured: 74 steps / 1.47M
+    // tokens). No tool is executed here — this test pins only the approval
+    // decision, so it is deterministic and requires no cargo subprocess.
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut config = test_config(format!("{}/v1", server.url()));
+    config.execution_mode = crate::config::ExecutionMode::AutoEdit;
+    let mut agent = Agent::new(config).await.unwrap();
+
+    for (tool, args) in [
+        (
+            "cargo_check",
+            r#"{"all_targets":false,"all_features":false}"#,
+        ),
+        ("cargo_test", r#"{}"#),
+        ("cargo_clippy", r#"{}"#),
+        ("cargo_fmt", r#"{}"#),
+        ("lsp_diagnostics", r#"{"path":"src/lib.rs"}"#),
+        // The four originally-auto-approved tools stay approved.
+        ("file_write", r#"{"path":"/tmp/x","content":"x"}"#),
+    ] {
+        let approved = agent
+            .confirm_tool_execution(tool, args, "call_test", false)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("{tool} must be auto-approved (no error) at the AutoEdit confirm gate: {e}")
+            });
+        assert!(
+            approved,
+            "{tool} must be auto-approved in headless AutoEdit"
         );
+    }
+
+    // A confirm-gated tool still stops with the TYPED error in headless mode.
+    let err = agent
+        .confirm_tool_execution("shell_exec", r#"{"command":"rm -rf /"}"#, "call_x", false)
+        .await
+        .expect_err("shell_exec must remain confirm-gated in headless AutoEdit");
+    assert!(
+        crate::errors::is_confirmation_error(&err),
+        "the headless denial must be the typed confirmation error: {err:?}"
+    );
 
     server.stop().await;
 }

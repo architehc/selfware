@@ -932,10 +932,14 @@ impl Agent {
 
         // After suppressed rereads, trigger phase-2 synthesis early.
         // The model has the data in context — force it to produce code.
-        // Read-only task: never — the synthesis consumer in task_runner
-        // auto-writes any code it extracts to disk, which is exactly the
-        // forced mutation a "do NOT edit" task must be spared.
-        if read_count >= 3 && self.pending_synthesis.is_none() && !self.current_task_is_read_only()
+        // A task that does not require mutation: never — the synthesis
+        // consumer in task_runner auto-writes any code it extracts to disk,
+        // which is the forced mutation a "do NOT edit" task must be spared;
+        // and a plain status/question query must be spared it too (review
+        // finding: the read-only check was false there, so synthesis fired).
+        if read_count >= 3
+            && self.pending_synthesis.is_none()
+            && self.current_task_requires_mutation()
         {
             info!(
                 "Triggering phase-2 synthesis after {} suppressed rereads",
@@ -1281,6 +1285,26 @@ impl Agent {
         &mut self,
         tool_calls: Vec<super::execution::CollectedToolCall>,
     ) -> Result<()> {
+        // Canonicalize alias argument spellings (old_string → old_str,
+        // file_path → path, cmd → command, ...) at the dispatch funnel so
+        // EVERY later stage — schema validation (tool_validator here and the
+        // sequential path's validate_tool_arguments_schema), the safety
+        // checker, bookkeeping, parallel-batch path-conflict detection, and
+        // the tool deserializer — sees the schema's canonical field names.
+        // Native function calls are schema-validated BEFORE the deserializer
+        // runs, so the serde aliases on the Args structs alone cannot rescue
+        // an alias spelling (observed: progress-guard-injected
+        // old_string/new_string guidance failing with "missing field
+        // 'old_str'"). Idempotent: canonical spellings pass through.
+        let tool_calls: Vec<super::execution::CollectedToolCall> = tool_calls
+            .into_iter()
+            .map(|(name, args_str, id)| {
+                let args_str =
+                    crate::agent::tool_validator::normalize_tool_arg_aliases(&name, &args_str);
+                (name, args_str, id)
+            })
+            .collect();
+
         // Central hard-budget enforcement: the assistant response, planning, or
         // synthesis call that produced these tool calls was billable. Enforce
         // the token/cost/wall caps HERE — before ANY tool (model-requested,
@@ -1365,9 +1389,10 @@ impl Agent {
                 // Clone name/tool_call_id before execute_single_tool_in_batch
                 // takes them by value — we need them in the catch to push a
                 // synthetic error result if the fn returns Err BEFORE pushing
-                // any tool-result (e.g. confirmation rejection, pre-execution
-                // safety gate). Without this, native-FC history gets N calls
-                // but k<N results → 400.
+                // any tool-result (e.g. a pre-execution safety gate). Without
+                // this, native-FC history gets N calls but k<N results → 400.
+                // (Headless confirmation denials are excluded — they re-raise
+                // because the run must stop, so no later API call exists.)
                 let name_clone = name.clone();
                 let args_str_clone = args_str.clone();
                 let id_clone = tool_call_id.clone();
@@ -1375,7 +1400,15 @@ impl Agent {
                     .execute_single_tool_in_batch(name, args_str, tool_call_id)
                     .await
                 {
-                    if super::task_runner::is_fatal_loop_error(&e) {
+                    // Headless confirmation denial (no operator to ask): the
+                    // run must STOP with the typed error instead of the model
+                    // receiving a "retryable" synthetic result and looping.
+                    // (`is_confirmation_error` → terminal `Failed` state at
+                    // the run-loop catch; never produced interactively, where
+                    // denials are plain skips.)
+                    if crate::errors::is_confirmation_error(&e)
+                        || super::task_runner::is_fatal_loop_error(&e)
+                    {
                         return Err(e);
                     }
                     // Non-fatal tool error that returned Err before pushing a
@@ -1420,7 +1453,11 @@ impl Agent {
                 .execute_single_tool_in_batch(name, args_str, tool_call_id)
                 .await
             {
-                if super::task_runner::is_fatal_loop_error(&e) {
+                // Headless confirmation denial: stop with the typed error (see
+                // the same catch in Phase 2). Never produced interactively.
+                if crate::errors::is_confirmation_error(&e)
+                    || super::task_runner::is_fatal_loop_error(&e)
+                {
                     return Err(e);
                 }
                 // Push a synthetic error result so native-FC history stays
@@ -2724,12 +2761,26 @@ impl Agent {
         }
 
         if !self.is_interactive() {
-            return Err(anyhow::anyhow!(
-                "Tool '{}' requires confirmation but cannot prompt in headless mode. \
-                 Re-run with --yolo to auto-approve all tool calls, \
-                 or use interactive/TUI mode for manual confirmation.",
-                name
-            ));
+            // Fail closed with the TYPED confirmation error, not an untyped
+            // anyhow. `AgentError::ConfirmationRequired` is recognised
+            // (it is produced nowhere else at runtime) in exactly two places:
+            //
+            // 1. `errors::is_confirmation_error` — the run-loop catch turns
+            //    it into a terminal `AgentState::Failed` (typed stop) and the
+            //    CLI maps it to the `EXIT_CONFIRMATION_REQUIRED` exit code.
+            // 2. `execute_tool_batch` now re-raises it from its per-tool
+            //    catch so the confirmation never reaches the model as a
+            //    "retryable" tool error.
+            //
+            // The previous untyped anyhow was treated as a recoverable tool
+            // failure and re-fed to the model, so a headless AutoEdit run
+            // that needed `cargo_test` after an edit looped for the whole
+            // turn budget (measured: 74 steps / 1.47M tokens) instead of
+            // stopping.
+            return Err(crate::errors::AgentError::ConfirmationRequired {
+                tool_name: name.to_string(),
+            }
+            .into());
         }
 
         // Leading newline separates the block from any unterminated streaming

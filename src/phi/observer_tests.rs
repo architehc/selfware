@@ -538,6 +538,45 @@ fn a_compound_command_that_ends_in_tests_counts_and_flags_the_mutation() {
 }
 
 #[test]
+fn smoke_deliverable_run_is_not_recorded_as_test_execution() {
+    // P1 finding: a bare exit-0 deliverable-script run (no explicit expected
+    // result) proves the process launched — it must NOT discharge a test
+    // obligation via RunFinished. It is an OpaqueRun (smoke tier). The same
+    // script WITH an explicit expected-output check IS a test execution.
+    let args = json!({"command": "bash deploy.sh"});
+    let events = classify(&shell_call(
+        "shell_exec",
+        &args,
+        r#"{"exit_code":0,"stdout":"deployed","stderr":""}"#,
+    ));
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, ObservedEvent::RunFinished { .. })),
+        "a bare exit-0 deliverable run must not be recorded as a test execution: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ObservedEvent::OpaqueRun { .. })),
+        "the smoke run must still be observed, as an opaque run: {events:?}"
+    );
+
+    let args = json!({"command": "bash deploy.sh && grep -q deployed out.txt"});
+    let events = classify(&shell_call(
+        "shell_exec",
+        &args,
+        r#"{"exit_code":0,"stdout":"deployed","stderr":""}"#,
+    ));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ObservedEvent::RunFinished { .. })),
+        "a deliverable run WITH an explicit expected-output check executes a test: {events:?}"
+    );
+}
+
+#[test]
 fn a_mixed_patch_records_deleted_files_too() {
     // A deletion is `+++ /dev/null`. Keying only on the destination header
     // dropped removed files entirely, with no unattributed event to show it.
@@ -705,6 +744,85 @@ fn a_mixed_command_both_runs_tests_and_flags_the_mutation() {
             ..
         }
     )));
+}
+
+#[test]
+fn env_wrapped_compile_is_not_recorded_as_a_test_run() {
+    // Review finding #1: `CARGO_TERM_COLOR=never cargo check` fell through
+    // the compile branch (a starts_with on the raw segment saw no `cargo
+    // check` at position 0) and was classified as TestExecution — a compile
+    // discharging test obligations. Wrapped forms must classify like their
+    // plain form.
+    for command in [
+        "CARGO_TERM_COLOR=never cargo check",
+        "env CARGO_TERM_COLOR=never cargo check",
+        "/usr/bin/cargo check",
+        "sudo cargo check",
+    ] {
+        let args = json!({"command": command});
+        let events = classify(&call("shell_exec", &args, 1));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ObservedEvent::RunFinished { .. })),
+            "{command} compiles but was recorded as a test run: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ObservedEvent::OpaqueRun { .. })),
+            "{command} must still be observed: {events:?}"
+        );
+    }
+    // The same wrapper on a real test run keeps its credit.
+    let args = json!({"command": "CARGO_TERM_COLOR=never cargo test"});
+    assert!(classify(&call("shell_exec", &args, 1))
+        .iter()
+        .any(|e| matches!(e, ObservedEvent::RunFinished { .. })));
+}
+
+#[test]
+fn trailing_filler_that_masks_a_failed_check_gets_no_credit() {
+    // Review finding #2: `python3 app.py; test 1 = 2; true` exits 0 thanks to
+    // the trailing `true`, which decides the command's final status. The
+    // classifier credited the (already failed, now masked) check as a
+    // successful verification — failure-masking filler earned credit.
+    let args = json!({"command": "python3 app.py; test 1 = 2; true"});
+    let events = classify(&call("shell_exec", &args, 1));
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, ObservedEvent::RunFinished { .. })),
+        "a masked failed check must not be recorded as a test run: {events:?}"
+    );
+    // The check still decides the outcome when it IS the last segment.
+    let args = json!({"command": "python3 app.py; test -f out.txt"});
+    let events = classify(&call("shell_exec", &args, 1));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ObservedEvent::RunFinished { .. })),
+        "a trailing explicit check still counts: {events:?}"
+    );
+}
+
+#[test]
+fn a_smoke_run_of_a_deliverable_script_keeps_its_mutational_signal() {
+    // Review finding #3 (the predicate split): the SmokeRun arm made `bash
+    // deploy.sh` "verification" in credit terms, and command_may_mutate
+    // delegating to the widened gate then called it clean — the new arm's
+    // mutational signal never reached OpaqueRun. A deliverable-script
+    // execution may write files; it must keep may_have_mutated: true.
+    let args = json!({"command": "bash deploy.sh"});
+    let out = r#"{"exit_code":0,"stdout":"deployed","stderr":""}"#;
+    match classify(&shell_call("shell_exec", &args, out)).as_slice() {
+        [ObservedEvent::OpaqueRun {
+            may_have_mutated, ..
+        }] => {
+            assert!(*may_have_mutated, "a deliverable run may write files")
+        }
+        other => panic!("expected OpaqueRun, got {other:?}"),
+    }
 }
 
 #[test]

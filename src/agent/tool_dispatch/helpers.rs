@@ -1059,10 +1059,19 @@ pub(crate) fn tool_call_is_mutating(name: &str, args: &serde_json::Value) -> boo
 /// split existed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VerificationKind {
-    /// Executes tests.
+    /// Executes tests, or runs a deliverable script WITH an explicit expected
+    /// result (exit-code assertion and/or expected-output check) — assertions
+    /// demonstrably ran.
     TestExecution,
     /// Compiles, type-checks or lints. Proves the code builds, not that it works.
     CompileOrLint,
+    /// A deliverable script ran and exited 0 with NO explicit expected result
+    /// checked — no `$?`/`rc=` exit-code assertion, no grep/diff/`test` on its
+    /// output (P1 review finding: a successful launch got TestExecution
+    /// credit without anything being asserted). Lesser credit than
+    /// TestExecution: the process started cleanly, nothing about its output
+    /// was verified.
+    SmokeRun,
 }
 
 /// Commands that check without executing tests. Subset of the prefixes below,
@@ -1072,6 +1081,12 @@ const COMPILE_OR_LINT_PREFIXES: &[&str] = &[
     "cargo clippy",
     "python -m py_compile",
     "python3 -m py_compile",
+    "node --check",
+    "bash -n",
+    "sh -n",
+    "ruff check",
+    "ruff lint",
+    "mypy",
     "npx tsc",
     "tsc ",
     "go build",
@@ -1083,6 +1098,115 @@ const COMPILE_OR_LINT_PREFIXES: &[&str] = &[
     "lake build",
 ];
 
+/// Every verification-runner prefix (superset of [`COMPILE_OR_LINT_PREFIXES`];
+/// the two lists are documented to drift only via that comment). Hoisted so
+/// both the recognition gate and the per-segment kind classifier consult the
+/// SAME runner set.
+const VERIFICATION_PREFIXES: &[&str] = &[
+    "cargo check",
+    "cargo test",
+    "cargo clippy",
+    "pytest",
+    "python -m pytest",
+    "python3 -m pytest",
+    "python -m unittest",
+    "python3 -m unittest",
+    "python -m py_compile",
+    "python3 -m py_compile",
+    "python -m test",
+    "python3 -m test",
+    "node --test",
+    "npm test",
+    "pnpm test",
+    "yarn test",
+    "bun test",
+    "deno test",
+    "npx jest",
+    "npx mocha",
+    "npx vitest",
+    "npx ava",
+    "npx tsc",
+    "tsc ",
+    "go test",
+    "go build",
+    "javac",
+    "mvn test",
+    "mvn verify",
+    "gradle test",
+    "./gradlew test",
+    "dotnet build",
+    "dotnet test",
+    "cmake --build",
+    "make test",
+    "ctest",
+    "swift build",
+    "swift test",
+    "sqlfluff lint",
+    // Lean 4 (vero/proof repos): the build IS the proof check.
+    "lake build",
+    "lake exe",
+    "lake test",
+    // Coq (TB4 coq-block-bound used `coqc -Q . Top Main.v`).
+    "coqc",
+    // Static syntax/type checks for script languages, credited the same
+    // way `python -m py_compile` already was (review finding: bare
+    // `node --check` / `bash -n` runs on deliverable scripts should count).
+    "node --check",
+    "bash -n",
+    "sh -n",
+    "ruff check",
+    "ruff lint",
+    "mypy",
+];
+
+/// The command with leading wrapper prefixes removed, so classification keys
+/// off the program actually run. Strips leading `NAME=value` environment
+/// assignments, leading `sudo` / `env` words, and any path prefix on the
+/// first remaining word: `CARGO_TERM_COLOR=never cargo check`, `sudo cargo
+/// check` and `/usr/bin/cargo check` all normalize to `cargo check`.
+///
+/// The kind classifier used to match compile prefixes against the raw
+/// segment with `starts_with`; nothing survived a wrapper, so an
+/// env-prefixed `cargo check` fell through to "a verification prefix in
+/// command position" and earned TestExecution credit — compilation
+/// discharging test obligations (review finding #1).
+fn strip_leading_wrappers(segment: &str) -> &str {
+    let mut rest = segment.trim_start();
+    // `sudo` / `env` words and `NAME=value` assignments, in any order:
+    // `env FOO=1 cargo check` and `FOO=1 env cargo check` are the same
+    // command. An assignment's NAME must be a bare identifier (`find = x`
+    // and `echo foo=bar` are commands, not assignments).
+    loop {
+        let word_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let word = &rest[..word_end];
+        let basename = word.rsplit('/').next().unwrap_or(word);
+        let is_assignment = word
+            .split_once('=')
+            .map(|(name, _)| {
+                !name.is_empty()
+                    && !name.contains(char::is_whitespace)
+                    && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+                    && !name.starts_with(|c: char| c.is_ascii_digit())
+            })
+            .unwrap_or(false);
+        if matches!(basename, "sudo" | "env") || is_assignment {
+            rest = rest[word_end..].trim_start();
+            continue;
+        }
+        break;
+    }
+    // A path prefix on the first word: `/usr/bin/cargo check` and
+    // `~/.cargo/bin/cargo check` key off `cargo`, not the full path.
+    let word_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let word = &rest[..word_end];
+    if let Some((_, prog)) = word.rsplit_once('/') {
+        if !prog.is_empty() {
+            rest = &rest[word_end - prog.len()..];
+        }
+    }
+    rest
+}
+
 /// Classify a verification command by kind. `None` when it is not verification
 /// at all.
 pub(crate) fn shell_command_verification_kind(command: &str) -> Option<VerificationKind> {
@@ -1090,8 +1214,12 @@ pub(crate) fn shell_command_verification_kind(command: &str) -> Option<Verificat
         return None;
     }
     let normalized = command.trim().to_lowercase();
-    // A compound command is judged by its LAST verification segment: in
-    // `cargo check && cargo test` the tests did run.
+    // A compound command is judged by its LAST runner-prefix verification
+    // segment: in `cargo check && cargo test` the tests did run. Segments
+    // that only qualify through the script-interpreter / deliverable-script
+    // FALLBACKS are not classified per segment — their tier is decided as a
+    // whole command below (a `bash deploy.sh` smoke segment must never flip
+    // a compound command to TestExecution on its own).
     let mut kind = VerificationKind::CompileOrLint;
     let mut saw_any = false;
     let segments: Vec<&str> = normalized
@@ -1105,28 +1233,45 @@ pub(crate) fn shell_command_verification_kind(command: &str) -> Option<Verificat
         if segment.is_empty() || !shell_command_is_verification(segment) {
             continue;
         }
-        saw_any = true;
-        kind = if COMPILE_OR_LINT_PREFIXES
+        // Match against the program actually run, wrappers stripped:
+        // `CARGO_TERM_COLOR=never cargo check` and `/usr/bin/cargo check`
+        // classify exactly like `cargo check`. starts_with on the raw
+        // segment let env-wrapped compiles fall through to the runner branch
+        // below and earn TestExecution credit (review finding #1).
+        let run_command = strip_leading_wrappers(segment);
+        if COMPILE_OR_LINT_PREFIXES
             .iter()
-            .any(|prefix| segment.starts_with(prefix))
+            .any(|prefix| run_command.starts_with(prefix))
         {
-            VerificationKind::CompileOrLint
-        } else {
-            VerificationKind::TestExecution
-        };
-        if kind == VerificationKind::TestExecution {
-            return Some(kind);
+            saw_any = true;
+            kind = VerificationKind::CompileOrLint;
+        } else if segment_verification_prefix(segment, VERIFICATION_PREFIXES).is_some() {
+            // A genuine test-runner prefix in command position.
+            return Some(VerificationKind::TestExecution);
         }
+        // Fallback-only segments (test scripts, inline asserts, deliverable
+        // smoke runs) are handled by the whole-command classifier below.
     }
     if saw_any {
         Some(kind)
     } else if COMPILE_OR_LINT_PREFIXES
         .iter()
-        .any(|prefix| normalized.starts_with(prefix))
+        .any(|prefix| strip_leading_wrappers(&normalized).starts_with(prefix))
     {
         Some(VerificationKind::CompileOrLint)
     } else {
-        Some(VerificationKind::TestExecution)
+        // No runner prefix matched; the command qualified through the
+        // script-interpreter / deliverable-script fallbacks. Tests and
+        // explicit-result deliverable checks are TestExecution; a bare
+        // exit-0 deliverable run is only a SmokeRun (P1 review finding).
+        let op_segments = shell_segments_with_operators(&normalized);
+        if script_runner_status_is_authoritative(&op_segments)
+            || deliverable_check_status_is_authoritative(&op_segments)
+        {
+            Some(VerificationKind::TestExecution)
+        } else {
+            Some(VerificationKind::SmokeRun)
+        }
     }
 }
 
@@ -1138,54 +1283,6 @@ pub(crate) fn shell_command_is_verification(command: &str) -> bool {
     if command_is_noop_verification(&normalized) {
         return false;
     }
-
-    let verification_prefixes = [
-        "cargo check",
-        "cargo test",
-        "cargo clippy",
-        "pytest",
-        "python -m pytest",
-        "python3 -m pytest",
-        "python -m unittest",
-        "python3 -m unittest",
-        "python -m py_compile",
-        "python3 -m py_compile",
-        "python -m test",
-        "python3 -m test",
-        "node --test",
-        "npm test",
-        "pnpm test",
-        "yarn test",
-        "bun test",
-        "deno test",
-        "npx jest",
-        "npx mocha",
-        "npx vitest",
-        "npx ava",
-        "npx tsc",
-        "tsc ",
-        "go test",
-        "go build",
-        "javac",
-        "mvn test",
-        "mvn verify",
-        "gradle test",
-        "./gradlew test",
-        "dotnet build",
-        "dotnet test",
-        "cmake --build",
-        "make test",
-        "ctest",
-        "swift build",
-        "swift test",
-        "sqlfluff lint",
-        // Lean 4 (vero/proof repos): the build IS the proof check.
-        "lake build",
-        "lake exe",
-        "lake test",
-        // Coq (TB4 coq-block-bound used `coqc -Q . Top Main.v`).
-        "coqc",
-    ];
 
     // A verification prefix only counts when it appears in a pipeline segment
     // whose FIRST shell word (after optional `sudo` / `env` / `VAR=value`
@@ -1200,7 +1297,7 @@ pub(crate) fn shell_command_is_verification(command: &str) -> bool {
     // EXECUTE — this gate only decides what the ledger may trust.
     let segments = shell_segments_with_operators(&normalized);
     segments.iter().enumerate().any(|(i, (_op, segment))| {
-        match segment_verification_prefix(segment, &verification_prefixes) {
+        match segment_verification_prefix(segment, VERIFICATION_PREFIXES) {
             Some(prefix) => {
                 !segment_is_info_only_invocation(segment, prefix)
                     && runner_status_is_authoritative(&segments, i)
@@ -1208,6 +1305,24 @@ pub(crate) fn shell_command_is_verification(command: &str) -> bool {
             None => false,
         }
     }) || script_runner_status_is_authoritative(&segments)
+        || deliverable_check_status_is_authoritative(&segments)
+        || deliverable_smoke_status_is_authoritative(&segments)
+}
+
+/// A verification segment that does NOT execute a deliverable script — the
+/// SmokeRun arm's mutational signal, split off from the credit gate.
+///
+/// The credit gate grew a SmokeRun arm: a bare deliverable-script run
+/// (`bash deploy.sh`) is now "verification" in credit terms — and those
+/// exact runs are the most likely to write files. The mutational question
+/// (Phi's `command_may_mutate`) must not inherit that widening, or every
+/// deploy script reads as read-only and the new arm's mutational signal
+/// never reaches OpaqueRun (`python3 fix.py && pytest -q` lost its
+/// may_have_mutated flag). Runner prefixes, test scripts and syntax checks
+/// keep their pre-existing verdict; deliverable-script executions — smoke
+/// tier or checked tier — run arbitrary project code and may write.
+pub(crate) fn shell_segment_is_verification_without_deliverable(segment: &str) -> bool {
+    shell_command_is_verification(segment) && !segment_runs_deliverable_script(segment)
 }
 
 /// Does the runner segment's exit status determine the command's final
@@ -1268,6 +1383,171 @@ fn segment_runs_test_script(segment: &str) -> bool {
         return shell_command_runs_test_script(segment);
     }
     (word.starts_with("./") || word.starts_with('/')) && Agent::gate_path_is_test(word)
+}
+
+/// Fallbacks for DELIVERABLE scripts — the standalone-script-verification
+/// deadlock fix (review finding): a project with no test framework verifies
+/// by running its own deliverable script (`bash deploy.sh`, `python3
+/// solve.py`, `./generate.py`), and a clean run of it was refused because the
+/// script's path is not test*/spec*. Only consulted when NO test-runner
+/// prefix matched, so existing test-framework verdicts are untouched.
+///
+/// Deliberately SEPARATE from `shell_command_runs_test_script`: that one is
+/// also consulted by the observational classifier, where crediting an
+/// arbitrary script run as read-only would hide a mutating deliverable
+/// (`bash deploy.sh` usually writes files) from mutation accounting. The
+/// verification classifier alone credits deliverable runs.
+///
+/// Two credit tiers (P1 + HIGH follow-up review findings): a bare exit-0
+/// deliverable run proves the process launched cleanly but asserts NOTHING
+/// about its output — a SMOKE run, lesser credit than a test execution and
+/// never labelled TestExecution. TestExecution requires a REAL check
+/// construct, structurally coupled to the command's outcome: a predicate in
+/// COMMAND position (grep/diff/cmp/comm/test/`[`/`[[`) whose failure gates
+/// the chain's success (`python3 app.py && grep -q x out.txt`,
+/// `python3 app.py | grep -q x`, `python3 app.py; [ $? -eq 0 ]`). Trigger
+/// words inside QUOTED arguments or filler commands are not signals:
+/// `python3 app.py && printf 'grep\n'` and a bare `rc=$?` capture check
+/// nothing and stay smoke.
+///
+/// All-`&&` deliverable chain WITH a real check: every segment's failure
+/// fails the chain, so a predicate segment's non-zero exit decides the
+/// outcome → tests tier.
+fn deliverable_check_status_is_authoritative(segments: &[(String, String)]) -> bool {
+    if segments.iter().any(|(op, _)| op.contains("||")) {
+        // `||` can skip the script or the check entirely — never evidence.
+        return false;
+    }
+    if !segments
+        .iter()
+        .any(|(_, segment)| segment_runs_deliverable_script(segment))
+    {
+        return false;
+    }
+    let all_authoritative = segments
+        .iter()
+        .all(|(op, _)| op.is_empty() || op.trim() == "&&");
+    if all_authoritative {
+        return segments
+            .iter()
+            .any(|(_, segment)| segment_is_expected_result_checker(segment));
+    }
+    // `|`/`;` chain: the command's final status is the LAST segment's exit,
+    // so a checker only decides the outcome when it IS last, or when every
+    // segment after it is reached through `&&` — the one connector under
+    // which overall success implies the checker ran and passed
+    // (`cmd | grep -q x && echo pass`: the echo runs only when the grep
+    // passed). A `;`/`|` segment after the checker hands the final status to
+    // a command that always exits 0 (`python3 app.py; test 1 = 2; true`) —
+    // the check's failure is masked and must not earn verification credit
+    // (review finding #2). Unlike `cargo test | true`, this is about the
+    // checker being decoupled from the outcome, not about masking a runner.
+    segments.iter().enumerate().any(|(i, (_, segment))| {
+        segment_is_expected_result_checker(segment)
+            && segments[i + 1..].iter().all(|(op, _)| op.trim() == "&&")
+    })
+}
+
+/// All-`&&` deliverable chain WITHOUT any real check: the run exited 0 but
+/// nothing about its output was asserted → smoke tier.
+fn deliverable_smoke_status_is_authoritative(segments: &[(String, String)]) -> bool {
+    let all_authoritative = segments
+        .iter()
+        .all(|(op, _)| op.is_empty() || op.trim() == "&&");
+    all_authoritative
+        && segments
+            .iter()
+            .any(|(_, segment)| segment_runs_deliverable_script(segment))
+        && !segments
+            .iter()
+            .any(|(_, segment)| segment_is_expected_result_checker(segment))
+}
+
+/// Is this pipeline segment a real check construct — a predicate over the
+/// command's exit status or output (grep/diff/cmp/comm/test/`[`/`[[`) in
+/// COMMAND position? Quoted keywords and filler carry the words but never the
+/// check: `printf 'grep\n'` and `echo "see diff docs"` are not checks.
+fn segment_is_expected_result_checker(segment: &str) -> bool {
+    let Some(word) = first_shell_word(segment) else {
+        return false;
+    };
+    let basename = word.rsplit('/').next().unwrap_or(word);
+    matches!(
+        basename,
+        "grep" | "egrep" | "fgrep" | "diff" | "cmp" | "comm" | "test" | "[" | "[["
+    )
+}
+
+/// Does this single segment execute a deliverable script — an interpreter
+/// with a script-file argument, or a direct `./script` — whose path is not
+/// test*/spec* (those are the test-script predicate's job)?
+fn segment_runs_deliverable_script(segment: &str) -> bool {
+    let Some(word) = first_shell_word(segment) else {
+        return false;
+    };
+    let basename = word.rsplit('/').next().unwrap_or(word);
+    let is_interpreter = basename.starts_with("python")
+        || basename.starts_with("pypy")
+        || matches!(
+            basename,
+            "node" | "nodejs" | "deno" | "bun" | "ruby" | "perl" | "php" | "bash" | "sh"
+        );
+    if is_interpreter {
+        return shell_command_runs_deliverable_script(segment);
+    }
+    (word.starts_with("./") || word.starts_with('/')) && shell_path_is_deliverable_script(word)
+}
+
+/// A path names a deliverable script when it carries a known script extension
+/// and is NOT a test* / spec* file. Test-named paths are the test-script
+/// predicate's business and would otherwise be counted by both.
+fn shell_path_is_deliverable_script(path: &str) -> bool {
+    const SCRIPT_EXTENSIONS: &[&str] = &[
+        "py", "pyw", "js", "mjs", "cjs", "ts", "rb", "pl", "pm", "php", "sh",
+    ];
+    let has_script_ext = path
+        .rsplit_once('.')
+        .map(|(_, ext)| SCRIPT_EXTENSIONS.contains(&ext))
+        .unwrap_or(false);
+    has_script_ext && !Agent::gate_path_is_test(path)
+}
+
+/// Interpreter-in-command-position scan for a DELIVERABLE script: the first
+/// non-flag argument must be a script FILE. Inline `-c`/`-e`/`--eval` code
+/// and `-m` module invocations are not script files (and are already handled
+/// by the assert/`-m unittest`/`--test` test-script and prefix paths), so
+/// they never earn deliverable credit.
+fn shell_command_runs_deliverable_script(command: &str) -> bool {
+    let tokens: Vec<&str> = command
+        .split(|c: char| c.is_whitespace() || matches!(c, '&' | ';' | '|' | '(' | ')'))
+        .filter(|token| !token.is_empty())
+        .collect();
+
+    for (index, token) in tokens.iter().enumerate() {
+        let basename = token.rsplit('/').next().unwrap_or(token);
+        let is_interpreter = basename.starts_with("python")
+            || basename.starts_with("pypy")
+            || matches!(
+                basename,
+                "node" | "nodejs" | "deno" | "bun" | "ruby" | "perl" | "php" | "bash" | "sh"
+            );
+        if !is_interpreter {
+            continue;
+        }
+        for arg in &tokens[index + 1..] {
+            if matches!(*arg, "-c" | "-e" | "--eval" | "-m") {
+                break;
+            }
+            if arg.starts_with('-') {
+                continue;
+            }
+            if shell_path_is_deliverable_script(arg) {
+                return true;
+            }
+            break;
+        }
+    }
+    false
 }
 
 /// Split a shell command into segments at top-level connectors (`&&`, `||`,

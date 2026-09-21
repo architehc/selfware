@@ -265,6 +265,16 @@ fn segment_is_read_only(segment: &str) -> bool {
 /// An earlier version flagged EVERY non-verification shell command, so a bare
 /// `ls` inflated possible_unrecorded_mutations. It now inspects each segment
 /// and preserves uncertainty only where it genuinely exists.
+///
+/// Deliberately NOT the credit gate predicate. The gate grew a SmokeRun arm
+/// that credits a bare deliverable-script run (`bash deploy.sh`) — and those
+/// runs are exactly the ones most likely to write files. Delegating here
+/// made every deliverable script read as read-only, so the new arm's
+/// mutational signal never reached OpaqueRun (`python3 fix.py && pytest -q`
+/// lost its may_have_mutated flag). The verification arm of this function is
+/// therefore the classifier's WITHOUT-deliverable predicate: runner prefixes,
+/// test scripts and syntax checks stay clean, a deliverable-script execution
+/// stays potentially mutating.
 pub fn command_may_mutate(command: &str) -> bool {
     // Use the dispatcher's splitter rather than a second, naive one. This
     // split on every `|`, so `jq '.nodes | length' f` became two fragments —
@@ -273,7 +283,9 @@ pub fn command_may_mutate(command: &str) -> bool {
     let segments = crate::agent::tool_dispatch::helpers::split_shell_segments(command);
     !segments.iter().all(|segment| {
         segment_is_read_only(segment)
-            || crate::agent::tool_dispatch::helpers::shell_command_is_verification(segment.trim())
+            || crate::agent::tool_dispatch::helpers::shell_segment_is_verification_without_deliverable(
+                segment,
+            )
     })
 }
 
@@ -351,6 +363,18 @@ pub fn classify(call: &ToolCallRecord<'_>) -> Vec<ObservedEvent> {
                     });
                 }
                 return events;
+            }
+            Some(VerificationKind::SmokeRun) => {
+                // A bare deliverable-script run (exit 0, no explicit expected
+                // result checked) is a smoke run: the process launched
+                // cleanly but no assertion ran, so it must NOT discharge a
+                // test obligation (P1 finding: a successful launch used to
+                // earn TestExecution credit).
+                return vec![ObservedEvent::OpaqueRun {
+                    command: command.to_string(),
+                    outcome,
+                    may_have_mutated,
+                }];
             }
             Some(VerificationKind::CompileOrLint) => {
                 return vec![ObservedEvent::OpaqueRun {
