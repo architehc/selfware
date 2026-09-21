@@ -56,3 +56,39 @@ fn test_tool_metadata() {
     assert!(schema.get("required").is_some());
     assert!(schema.get("properties").unwrap().get("file_path").is_some());
 }
+
+// ── file_path path policy (2026-09-21 review sweep) ──────────────────────
+//
+// code_metrics reads `file_path` wholesale; the path must obey the same
+// workspace path policy as file_read.
+
+#[tokio::test]
+async fn test_code_metrics_file_path_policy() {
+    let tool = CodeMetricsTool::new();
+
+    // Out-of-workspace file_path is refused by the path policy before any
+    // filesystem read.
+    let err = tool
+        .execute(serde_json::json!({"file_path": "/etc/passwd"}))
+        .await
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("not allowed")
+            || msg.contains("not in allowed")
+            || msg.contains("outside working")
+            || msg.contains("protected"),
+        "out-of-workspace file_path must be refused, got: {msg}"
+    );
+
+    // A workspace path that fails to exist passes the policy and then fails
+    // with the ordinary read error.
+    let err2 = tool
+        .execute(serde_json::json!({"file_path": "definitely-missing-file.rs"}))
+        .await
+        .unwrap_err();
+    assert!(
+        err2.to_string().contains("Failed to read file"),
+        "missing workspace file should surface the read error, got: {err2}"
+    );
+}

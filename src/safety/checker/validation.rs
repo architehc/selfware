@@ -507,6 +507,38 @@ fn mutation_content_candidates<'a>(
         .collect()
 }
 
+/// Known credential prefixes that fire the outbound-content secret policy.
+///
+/// The full-token `SecurityScanner` (used by `check_content_for_secrets`)
+/// needs complete tokens before it reports a high-severity hardcoded secret,
+/// so payload locations in OUTBOUND requests — URL, request body, request
+/// headers — match known credential PREFIXES with a minimal body instead.
+/// This is the same approach as the historical URL-only check
+/// (`http://evil.com/log?secret=ghp_abc123`), widened to the full prefix
+/// list (GitLab `glpat-`, OpenAI `sk-proj-`/`sk-ant-`/`sk-svcacct-`, …) and
+/// applied to every payload location, because the checker and the
+/// `http_request` tool both forward those locations to the network.
+///
+/// Operator-configured authentication is handled by SHAPE, not by header
+/// name: a value the operator deliberately provisions (e.g. a bearer token
+/// in config) is still refused if it matches a known leaked-credential
+/// prefix, while values with no known shape (JWTs, random bearer tokens)
+/// pass. The alternative — whitelisting by header name — would re-open the
+/// exact hole this closes (`headers: {"Authorization": "Bearer ghp_…"}` is
+/// the same exfiltration channel as a URL query parameter).
+pub(crate) static OUTBOUND_CREDENTIAL_SHAPE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)(ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|gldt-|AKIA|ASIA|sk_live_|sk_test_|rk_live_|pk_live_|sk-proj-|sk-ant-|sk-svcacct-|xox[baprs]-|SG\.|AIza|pypi-|sq[up]_|sntrys_|npm_)[A-Za-z0-9_\-]{4,}",
+    )
+    .expect("Invalid regex")
+});
+
+/// True when `text` carries a known credential SHAPE that must not leave
+/// the workspace in an outbound HTTP payload (URL, body, or header value).
+pub(crate) fn contains_outbound_credential_shape(text: &str) -> bool {
+    OUTBOUND_CREDENTIAL_SHAPE.is_match(text)
+}
+
 impl SafetyChecker {
     /// Create a safety checker with the given configuration
     pub fn new(config: &SafetyConfig) -> Self {
@@ -836,13 +868,7 @@ impl SafetyChecker {
                     // SSRF checks see the destination, not the payload. The
                     // secret scanner needs full-length tokens, so match the
                     // known credential PREFIXES with a minimal body instead.
-                    static URL_SECRET_SHAPE: LazyLock<Regex> = LazyLock::new(|| {
-                        Regex::new(
-                            r"(?i)(ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|AKIA|ASIA|sk_live_|sk_test_|rk_live_|pk_live_|xox[baprs]-|SG\.|AIza|pypi-|sq[up]_|sntrys_|npm_)[A-Za-z0-9_\-]{4,}",
-                        )
-                        .expect("Invalid regex")
-                    });
-                    if URL_SECRET_SHAPE.is_match(url) {
+                    if contains_outbound_credential_shape(url) {
                         return Err(SelfwareError::Safety(SafetyError::SecretDetected {
                             finding: "credential-shaped value in outbound URL".to_string(),
                         }));
@@ -877,6 +903,36 @@ impl SafetyChecker {
                             return Err(SelfwareError::Safety(SafetyError::SecretDetected {
                                 finding: "credential in URL userinfo".to_string(),
                             }));
+                        }
+                    }
+                }
+                // Outbound-content policy for the OTHER payload locations
+                // (2026-09-21 review, P2): the same `ghp_…` value was
+                // rejected in the URL but accepted in a POST body and a
+                // custom header, and the http_request tool then forwarded
+                // both. A credential-shaped value must be refused wherever
+                // it sits — body and every header value get the identical
+                // shape check as the URL. Operator-configured auth values
+                // with no known shape (e.g. Bearer JWTs) pass; known leaked
+                // credential prefixes are refused even in Authorization
+                // (whitelisting that header by name would re-open the hole).
+                if let Some(body) = args.get("body").and_then(|v| v.as_str()) {
+                    if contains_outbound_credential_shape(body) {
+                        return Err(SelfwareError::Safety(SafetyError::SecretDetected {
+                            finding: "credential-shaped value in outbound request body".to_string(),
+                        }));
+                    }
+                }
+                if let Some(headers) = args.get("headers").and_then(|v| v.as_object()) {
+                    for (name, value) in headers {
+                        if let Some(val) = value.as_str() {
+                            if contains_outbound_credential_shape(val) {
+                                return Err(SelfwareError::Safety(SafetyError::SecretDetected {
+                                    finding: format!(
+                                        "credential-shaped value in outbound header {name}"
+                                    ),
+                                }));
+                            }
                         }
                     }
                 }
@@ -915,10 +971,37 @@ impl SafetyChecker {
                     self.check_browser_eval(code)?;
                 }
             }
-            "npm_install" | "pip_install" | "yarn_install" => {
+            "npm_install" | "pip_install" | "yarn_install" | "npm_run" | "npm_scripts" => {
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
                 if let Some(script) = args.get("script").and_then(|v| v.as_str()) {
                     self.check_shell_command(script)?;
+                }
+                // Package tools take path operands too: the install cwd
+                // (`path` — the directory that gets mutated), pip's
+                // `requirements` file (read), and the package.json dir
+                // (`path` on npm_run/npm_scripts). All obey the workspace
+                // path policy like every other tool path.
+                if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                    if !path.is_empty() {
+                        self.check_path(path)?;
+                    }
+                }
+                if let Some(req) = args.get("requirements").and_then(|v| v.as_str()) {
+                    if !req.is_empty() {
+                        self.check_path(req)?;
+                    }
+                }
+            }
+            // pip_freeze WRITES `output_file` when provided — the write
+            // target obeys the path policy like any other file write
+            // (2026-09-21 review: the path was forwarded unvalidated).
+            // With no `output_file` it is a plain read-only listing.
+            "pip_freeze" => {
+                let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
+                if let Some(path) = args.get("output_file").and_then(|v| v.as_str()) {
+                    if !path.is_empty() {
+                        self.check_path(path)?;
+                    }
                 }
             }
             // Read-only operations that take no filesystem path. The search
@@ -927,7 +1010,7 @@ impl SafetyChecker {
             // runs `check_path` on their `path` argument, so `/etc/passwd`,
             // `..` escapes, and symlink escapes are rejected like `file_read`.
             "git_status" | "git_diff" | "tool_search" | "process_list" | "process_logs"
-            | "port_check" | "pip_list" | "pip_freeze" | "npm_scripts" | "container_list"
+            | "port_check" | "pip_list" | "container_list"
             | "container_logs" | "container_images" | "knowledge_query" | "knowledge_stats" => {
                 // These are read-only operations, safe to execute
             }
@@ -960,12 +1043,6 @@ impl SafetyChecker {
             }
             "cargo_test" | "cargo_check" | "cargo_clippy" | "cargo_fmt" => {
                 // These run predefined cargo subcommands, not arbitrary shell
-            }
-            "npm_run" => {
-                let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
-                if let Some(script) = args.get("script").and_then(|v| v.as_str()) {
-                    self.check_shell_command(script)?;
-                }
             }
             "process_stop" | "process_restart" => {
                 // These affect running processes by ID, no shell injection risk
@@ -1000,14 +1077,24 @@ impl SafetyChecker {
                     self.check_shell_command(app)?;
                 }
             }
-            "code_introspect" | "code_query" | "code_plan" => {
-                // These tools accept filesystem paths — validate them.
+            "code_introspect" | "code_query" | "code_plan" | "code_diff_plan" => {
+                // These tools accept filesystem paths — validate them. Each
+                // tool's path fields are checked by their actual arg names
+                // (`target`, `scope`, `codebase_root`, `target_file`); the
+                // generic `path` spelling covers legacy callers.
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
-                if let Some(path) = args.get("target").and_then(|v| v.as_str()) {
-                    self.check_path(path)?;
-                }
-                if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                    self.check_path(path)?;
+                for key in [
+                    "target",
+                    "scope",
+                    "codebase_root",
+                    "target_file",
+                    "path",
+                ] {
+                    if let Some(path) = args.get(key).and_then(|v| v.as_str()) {
+                        if !path.is_empty() {
+                            self.check_path(path)?;
+                        }
+                    }
                 }
             }
             "context_load_skeleton" => {
@@ -1147,9 +1234,10 @@ impl SafetyChecker {
             // Analysis / context / interaction tools: no filesystem or shell
             // mutation (metadata-classified read-only). context_action is
             // handled separately — it resolves `target` to a real file path.
-            | "code_metrics"
+            // code_diff_plan is handled in the introspection arm above and
+            // code_metrics in the arm below — both take paths that must be
+            // checked.
             | "code_map"
-            | "code_diff_plan"
             | "context_budget"
             | "graph_summary"
             | "context_pack"
@@ -1162,6 +1250,16 @@ impl SafetyChecker {
             | "ask_user" => {
                 // Metadata-classified as read-only / network probes; nothing to
                 // path- or command-check.
+            }
+            // code_metrics READS `file_path` wholesale — same path policy as
+            // file_read (2026-09-21 review sweep).
+            "code_metrics" => {
+                let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
+                if let Some(path) = args.get("file_path").and_then(|v| v.as_str()) {
+                    if !path.is_empty() {
+                        self.check_path(path)?;
+                    }
+                }
             }
             // context_action resolves its `target` to a filesystem path and
             // opens it for a live token measurement — validate like file_read.
@@ -1934,18 +2032,28 @@ impl SafetyChecker {
     ///   allows scratch writes like `2> /tmp/x.log`), and `tee`/`sponge`
     ///   operands (owned by the tee guard above) are excluded.
     /// - Each candidate is matched against `denied_paths` with the same
-    ///   matcher the redirect guard uses, and — only when `allowed_paths`
-    ///   is non-empty — must match the allow-list after lexical resolution
-    ///   against the working dir (with a leading `~` expanded). Failures
-    ///   return the same errors the file tools return
-    ///   (`PathDeniedPattern`/`PathNotAllowed`).
-    /// - Operands of READ-ONLY commands (see [`READ_ONLY_COMMANDS`] — and
-    ///   `find` without `-delete`/`-exec`) are exempt from the allow-list:
-    ///   reads can't destroy anything, so `cat /etc/hosts`,
-    ///   `tail /tmp/build.log`, or `ls /usr/local/bin` work even with the
-    ///   default `allowed_paths = ["./**"]`. The `denied_paths` check
-    ///   (`.env`, `.ssh`, `secrets`, …) still fires on those reads.
-    ///   Write/execute verbs keep full allow-list enforcement.
+    ///   matcher the redirect guard uses, and must then pass the FULL
+    ///   workspace path policy ([`Self::check_path`] — the same validation
+    ///   the file tools apply to `file_read`/`file_write`): out-of-workspace
+    ///   paths, `..` escapes, symlink escapes, protected system paths, and
+    ///   the allow-list. Failures return the same errors the file tools
+    ///   return (`PathDeniedPattern`/`PathNotAllowed`/`PathOutsideWorkspace`).
+    /// - Policy flip (2026-09-21 review, Critical): operands of
+    ///   READ-ONLY commands (see [`READ_ONLY_COMMANDS`], and `find` without
+    ///   `-delete`/`-exec`) are NO LONGER exempt from the allow-list.
+    ///   Reads previously ran with `enforce_allowlist = false`, so
+    ///   `shell_exec: grep root /etc/passwd` returned the line while the
+    ///   dedicated `grep_search` tool refused the identical read. Reads
+    ///   now obey the same `allowed_paths` as the dedicated tools: with the
+    ///   default `allowed_paths = ["./**"]`, `cat /etc/hosts` and
+    ///   `tail /tmp/build.log` are refused just like `file_read` of the
+    ///   same paths; in-workspace reads (`cat src/main.rs`) keep working.
+    ///   The `denied_paths` check (`.env`, `.ssh`, `secrets`, …) fires on
+    ///   reads as before, and — matching file-tool parity — when
+    ///   `allowed_paths` is EMPTY the shell now restricts reads to the
+    ///   working dir instead of failing open (the old
+    ///   `test_shell_exec_body_allowcheck_skipped_without_allowlist`
+    ///   behavior is gone).
     ///
     /// Documented fail-open gaps: paths hidden in `--flag=VALUE` pairs,
     /// command substitution `$(…)`, nested `sh -c '…'`, and remote
@@ -2027,17 +2135,8 @@ impl SafetyChecker {
             if verb == "tee" || verb == "sponge" {
                 continue;
             }
-            // Read-only commands may read absolute paths outside the cwd;
-            // `find` only when it can't write/execute (`-delete`, `-exec`).
-            let read_only = READ_ONLY_COMMANDS.contains(&verb)
-                || (verb == "find"
-                    && !tokens.iter().any(|t| {
-                        matches!(
-                            t.as_str(),
-                            "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir"
-                        )
-                    }));
-            let enforce_allowlist = !read_only;
+            // Every operand is a full path-policy candidate — read-verb
+            // operands included (policy flip, see the doc comment above).
             let is_file_verb = FILE_TARGET_VERBS.contains(&verb);
             let mut chmod_mode_seen = false;
             let mut flags_done = false;
@@ -2062,7 +2161,7 @@ impl SafetyChecker {
                     }
                     Redirect::Take => {
                         pending = Redirect::None;
-                        self.check_shell_path_candidate(tok, enforce_allowlist)?;
+                        self.check_shell_path_candidate(tok)?;
                         continue;
                     }
                     Redirect::None => {}
@@ -2082,7 +2181,7 @@ impl SafetyChecker {
                     if rest.is_empty() {
                         pending = Redirect::Take;
                     } else {
-                        self.check_shell_path_candidate(rest, enforce_allowlist)?;
+                        self.check_shell_path_candidate(rest)?;
                     }
                     continue;
                 }
@@ -2126,10 +2225,9 @@ impl SafetyChecker {
                                 || trimmed_val.starts_with("./")
                                 || trimmed_val.starts_with("../")
                                 || trimmed_val.starts_with('~');
-                            self.check_shell_path_candidate(
-                                trimmed_val,
-                                enforce_allowlist && (is_path_flag || looks_like_path),
-                            )?;
+                            if is_path_flag || looks_like_path {
+                                self.check_shell_path_candidate(trimmed_val)?;
+                            }
                         }
                     }
                     continue;
@@ -2138,7 +2236,7 @@ impl SafetyChecker {
                     if verb == "dd" {
                         if let Some(v) = tok.strip_prefix("if=").or_else(|| tok.strip_prefix("of="))
                         {
-                            self.check_shell_path_candidate(v, enforce_allowlist)?;
+                            self.check_shell_path_candidate(v)?;
                         }
                         continue; // bs=/count=/… operands are not paths
                     }
@@ -2146,25 +2244,33 @@ impl SafetyChecker {
                         chmod_mode_seen = true; // the mode operand is not a path
                         continue;
                     }
-                    self.check_shell_path_candidate(tok, enforce_allowlist)?;
+                    self.check_shell_path_candidate(tok)?;
                     continue;
                 }
                 if looks_like_explicit_path(tok) {
-                    self.check_shell_path_candidate(tok, enforce_allowlist)?;
+                    self.check_shell_path_candidate(tok)?;
                 }
             }
         }
         Ok(())
     }
 
-    /// Validate one extracted shell-command path token against
-    /// `denied_paths` (same matcher as redirect targets) and, when
-    /// `allowed_paths` is non-empty AND `enforce_allowlist` is set, against
-    /// the allow-list. A leading `~` is expanded so home-relative tokens
-    /// see the same absolute path the shell would use. Operands of
-    /// read-only commands pass `enforce_allowlist = false` (reads can't
-    /// destroy; the denied-path check still applies).
-    fn check_shell_path_candidate(&self, candidate: &str, enforce_allowlist: bool) -> Result<()> {
+    /// Validate one extracted shell-command path token against the FULL
+    /// workspace path policy — the same validation the dedicated file tools
+    /// apply to `file_read`/`file_write` ([`Self::check_path`]):
+    /// denied `denied_paths` patterns, out-of-workspace paths, `..`
+    /// escapes, symlink escapes, protected system paths, and the
+    /// allow-list, for reads and writes alike (policy flip, see the
+    /// `check_shell_command_paths` doc comment). A leading `~` is expanded
+    /// so home-relative tokens see the same absolute path the shell would
+    /// use.
+    ///
+    /// The `denied_paths` matcher runs FIRST so denied reads keep failing
+    /// with the distinct `PathDeniedPattern` error (`.env`, `.ssh`,
+    /// `secrets`, …) even when the path would otherwise fail the
+    /// allow-list check that runs before the deny-glob pass inside
+    /// `PathValidator::validate`.
+    fn check_shell_path_candidate(&self, candidate: &str) -> Result<()> {
         let expanded = expand_home_token(candidate);
         {
             let forms: &[&str] = if expanded == candidate {
@@ -2184,21 +2290,7 @@ impl SafetyChecker {
                 }
             }
         }
-        if !enforce_allowlist || self.config.allowed_paths.is_empty() {
-            return Ok(());
-        }
-        let resolved = resolve_redirect_target_lexical(&expanded, &self.working_dir);
-        use crate::safety::path_validator::PathValidator;
-        let validator = PathValidator::new(&self.config, self.working_dir.clone());
-        let allowed = validator
-            .is_path_in_allowed_list(&resolved, candidate)
-            .unwrap_or(false);
-        if !allowed {
-            return Err(SelfwareError::Safety(SafetyError::PathNotAllowed {
-                path: resolved,
-            }));
-        }
-        Ok(())
+        self.check_path(&expanded)
     }
 
     /// Scan content for hardcoded secrets
@@ -4543,14 +4635,22 @@ const FILE_TARGET_VERBS: &[&str] = &[
     "base64", "xxd", "od", "hexdump",
 ];
 
-/// Commands whose operands are only ever READ: their absolute-path operands
-/// outside the working dir are exempt from the `allowed_paths` allow-list
-/// (`cat /etc/hosts`, `tail /tmp/build.log`, `ls /usr/local/bin` are
-/// everyday reads). `denied_paths` still applies to them. `find` is NOT in
-/// this list — it is handled separately because `-delete`/`-exec` make it
-/// a write/execute primitive; only find invocations without those flags
-/// get the read-only exemption.
-const READ_ONLY_COMMANDS: &[&str] = &[
+/// Commands whose operands are only ever READ. This classification is kept
+/// for documentation (and the tests that pin it), but it no longer grants
+/// any exemption: since the 2026-09-21 review's policy flip, read-verb
+/// operands pass the SAME full workspace path policy as every other shell
+/// operand and file-tool path — `cat /etc/hosts`, `tail /tmp/build.log`
+/// and `ls /usr/local/bin` are refused under the default
+/// `allowed_paths = ["./**"]`, exactly like `file_read` of the same
+/// paths. The `denied_paths` check applies to them as before. `find` is
+/// NOT in this list — with or without `-delete`/`-exec`, its operands are
+/// ordinary path-policy candidates.
+///
+/// Kept as documentation-only after the 2026-09-21 policy flip removed the
+/// read exemption: no code path consumes it in the non-test build (tests
+/// pin the classification), hence `dead_code` is allowed.
+#[allow(dead_code)]
+pub(crate) const READ_ONLY_COMMANDS: &[&str] = &[
     "cat",
     "head",
     "tail",

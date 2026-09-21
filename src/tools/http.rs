@@ -2,6 +2,7 @@
 
 use super::net_policy::{self, NetworkPolicy};
 use super::Tool;
+use crate::safety::checker::validation::contains_outbound_credential_shape;
 use crate::safety::PinnedDnsResolver;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -104,6 +105,21 @@ impl Tool for HttpRequest {
         let allow_private =
             std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1";
         let policy = validate_http_request_target(&url, allow_private)?;
+
+        // Outbound-content secret policy — enforced HERE at request
+        // construction, not just by the safety checker on tool calls, so a
+        // direct invocation can't bypass it by payload location. A
+        // credential-shaped value (ghp_…, sk_live_…, …) must not leave the
+        // workspace in the URL, the body, or any header value. The checker
+        // alongside this tool uses the same shape oracle
+        // (`contains_outbound_credential_shape`). Operator-configured
+        // authentication is treated by shape, not by header name: a value
+        // the operator deliberately provisions is refused only when it
+        // matches a known leaked-credential prefix (whitelisting
+        // `Authorization` by name would re-open the URL/body/header bypass
+        // this closes); bearer tokens with no known shape (JWTs, random
+        // session keys) pass.
+        reject_outbound_credential_shapes(&args.url, &args.headers, args.body.as_deref())?;
 
         // SSRF protection: use PinnedDnsResolver to resolve DNS once and reject
         // private/internal IPs at resolution time. This prevents DNS rebinding
@@ -265,6 +281,40 @@ fn validate_http_request_target(
 ) -> Result<HttpTargetPolicy> {
     // `url::Url` and `reqwest::Url` are the same type (reqwest re-exports url).
     net_policy::validate_url_target(url, allow_private)
+}
+
+/// Refuse an outgoing request when any payload location — URL, header
+/// value, or body — carries a known credential shape. This is the
+/// http_request tool's half of the outbound-content policy; the safety
+/// checker applies the identical oracle to tool calls, and this covers
+/// direct invocations that skip the gate.
+///
+/// Authentication that the operator deliberately configured is honored by
+/// SHAPE: values with no known leaked-credential prefix (JWT bearer tokens,
+/// random keys, `Basic base64` for an internal service) pass; values that
+/// match a known credential prefix are refused wherever they appear,
+/// including an `Authorization` header — the model's tool-call payload is
+/// attacker-controlled, and whitelisting that header name would restore the
+/// URL-vs-body/header bypass this policy closes.
+fn reject_outbound_credential_shapes(
+    url: &str,
+    headers: &HashMap<String, String>,
+    body: Option<&str>,
+) -> Result<()> {
+    if contains_outbound_credential_shape(url) {
+        anyhow::bail!("Refusing outbound request: credential-shaped value in URL");
+    }
+    if let Some(body) = body {
+        if contains_outbound_credential_shape(body) {
+            anyhow::bail!("Refusing outbound request: credential-shaped value in request body");
+        }
+    }
+    for (name, value) in headers {
+        if contains_outbound_credential_shape(value) {
+            anyhow::bail!("Refusing outbound request: credential-shaped value in header {name}");
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

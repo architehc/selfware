@@ -87,6 +87,54 @@ fn test_validate_branch_name_long() {
     assert!(validate_branch_name(&long_name).is_err());
 }
 
+// ── validate_path (2026-09-21 review sweep) ──────────────────────────────
+//
+// The stub used to ignore the safety config and only reject literal null
+// bytes; enter_worktree now validates its path with the workspace path
+// policy (the path becomes a new directory and the process cwd).
+
+#[test]
+fn test_validate_path_allows_workspace_relative_path() {
+    // The default config (allowed_paths = ["./**"]) accepts a workspace
+    // relative worktree target — the tool's everyday usage.
+    let config = SafetyConfig::default();
+    assert!(validate_path("feature-branch", Some(&config)).is_ok());
+    assert!(validate_path(".selfware/worktrees/x", Some(&config)).is_ok());
+}
+
+#[test]
+fn test_validate_path_refuses_out_of_workspace_absolute_path() {
+    let config = SafetyConfig::default();
+    assert!(
+        validate_path("/etc/evil", Some(&config)).is_err(),
+        "out-of-workspace worktree path must be refused"
+    );
+}
+
+#[test]
+fn test_validate_path_refuses_escape_and_denied_components() {
+    let config = SafetyConfig::default();
+    // `..` escape chains out of the workspace lexical root.
+    assert!(validate_path("../outside", Some(&config)).is_err());
+    // Worktrees may not land on a denied path (.env / .ssh shapes).
+    assert!(validate_path(".env", Some(&config)).is_err());
+}
+
+#[test]
+fn test_validate_path_refuses_null_bytes() {
+    let config = SafetyConfig::default();
+    assert!(validate_path("worktree\0x", Some(&config)).is_err());
+}
+
+#[test]
+fn test_validate_path_allows_explicit_allowlist() {
+    let config = SafetyConfig {
+        allowed_paths: vec!["/sandbox/worktrees/**".to_string()],
+        ..SafetyConfig::default()
+    };
+    assert!(validate_path("/sandbox/worktrees/wt-1", Some(&config)).is_ok());
+}
+
 #[test]
 fn test_parse_worktree_list_empty() {
     let result = parse_worktree_list("");
@@ -447,7 +495,16 @@ async fn test_enter_exit_worktree_tool_restores_cwd() {
     let original = std::env::current_dir().unwrap();
     let worktree = dir.path().join("wt");
 
-    let enter = EnterWorktreeTool::new();
+    // These tests exercise CWD-restore semantics, not path policy — pin an
+    // explicit permissive config so the ambient (global) safety config and
+    // the concurrent-cwd state cannot route the tempdir worktree path into
+    // a PathNotAllowed refusal (2026-09-21: validate_path became real, and
+    // the pre-existing same-thread cwd race surfaced through it).
+    let permissive = SafetyConfig {
+        allowed_paths: vec!["/**".to_string()],
+        ..SafetyConfig::default()
+    };
+    let enter = EnterWorktreeTool::with_safety_config(permissive.clone());
     let res = enter
         .execute(serde_json::json!({ "path": worktree.to_string_lossy() }))
         .await;
@@ -484,8 +541,12 @@ async fn test_enter_worktree_tool_error_preserves_cwd() {
 
     // Worktree path under a regular file: `create_dir_all` fails before any
     // cwd change, and the failure must leave both the cwd and the state
-    // untouched.
-    let enter = EnterWorktreeTool::new();
+    // untouched. Pinned permissive config — see the enter/exit test above.
+    let permissive = SafetyConfig {
+        allowed_paths: vec!["/**".to_string()],
+        ..SafetyConfig::default()
+    };
+    let enter = EnterWorktreeTool::with_safety_config(permissive);
     let res = enter
         .execute(serde_json::json!({ "path": blocker.join("child").to_string_lossy() }))
         .await;

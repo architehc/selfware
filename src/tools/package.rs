@@ -15,13 +15,32 @@ use std::process::Stdio;
 use tokio::process::Command;
 
 use super::Tool;
+use crate::config::SafetyConfig;
+use crate::tools::file::{resolve_safety_config, validate_tool_path};
 
 // ============================================================================
 // NPM Tools
 // ============================================================================
 
 /// Install npm packages
-pub struct NpmInstall;
+#[derive(Default)]
+pub struct NpmInstall {
+    /// Per-instance safety config for path-policy enforcement; falls back to
+    /// the process-global config when `None`.
+    pub safety_config: Option<SafetyConfig>,
+}
+
+impl NpmInstall {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
+    }
+}
 
 #[async_trait]
 impl Tool for NpmInstall {
@@ -81,6 +100,12 @@ impl Tool for NpmInstall {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+        // The install MUTATES the working directory (writes node_modules,
+        // package-lock.json) — the cwd must obey the workspace path policy
+        // like any other write target (2026-09-21 review sweep).
+        let safety = resolve_safety_config(self.safety_config.as_ref());
+        validate_tool_path(path, &safety)?;
+
         let mut cmd = Command::new("npm");
         crate::safety::process_env::sanitize_command_env(&mut cmd);
         cmd.arg("install");
@@ -132,7 +157,23 @@ impl Tool for NpmInstall {
 }
 
 /// Run npm scripts
-pub struct NpmRun;
+#[derive(Default)]
+pub struct NpmRun {
+    /// Per-instance safety config for path-policy enforcement.
+    pub safety_config: Option<SafetyConfig>,
+}
+
+impl NpmRun {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
+    }
+}
 
 #[async_trait]
 impl Tool for NpmRun {
@@ -193,6 +234,11 @@ impl Tool for NpmRun {
             .and_then(|v| v.as_u64())
             .unwrap_or(300);
 
+        // The script runs with `path` as its working directory, and scripts
+        // may mutate the tree — the cwd obeys the workspace path policy.
+        let safety = resolve_safety_config(self.safety_config.as_ref());
+        validate_tool_path(path, &safety)?;
+
         let mut cmd = Command::new("npm");
         crate::safety::process_env::sanitize_command_env(&mut cmd);
         cmd.arg("run");
@@ -230,7 +276,23 @@ impl Tool for NpmRun {
 }
 
 /// List available npm scripts
-pub struct NpmScripts;
+#[derive(Default)]
+pub struct NpmScripts {
+    /// Per-instance safety config for path-policy enforcement.
+    pub safety_config: Option<SafetyConfig>,
+}
+
+impl NpmScripts {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
+    }
+}
 
 #[async_trait]
 impl Tool for NpmScripts {
@@ -256,6 +318,11 @@ impl Tool for NpmScripts {
 
     async fn execute(&self, args: Value) -> Result<Value> {
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+
+        // The tool READS package.json under `path` — the directory obeys the
+        // same workspace path policy as file_read.
+        let safety = resolve_safety_config(self.safety_config.as_ref());
+        validate_tool_path(path, &safety)?;
 
         let package_json_path = Path::new(path).join("package.json");
 
@@ -300,7 +367,23 @@ impl Tool for NpmScripts {
 // ============================================================================
 
 /// Install Python packages with pip
-pub struct PipInstall;
+#[derive(Default)]
+pub struct PipInstall {
+    /// Per-instance safety config for path-policy enforcement.
+    pub safety_config: Option<SafetyConfig>,
+}
+
+impl PipInstall {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
+    }
+}
 
 #[async_trait]
 impl Tool for PipInstall {
@@ -361,6 +444,16 @@ impl Tool for PipInstall {
 
         if packages.is_empty() && requirements.is_none() {
             anyhow::bail!("Either 'packages' or 'requirements' must be specified");
+        }
+
+        // The `requirements` file is READ and pip installs packages globally
+        // or into the active environment — validate the requirements path
+        // against the workspace policy (2026-09-21 review sweep).
+        if let Some(req_file) = requirements {
+            if !req_file.is_empty() {
+                let safety = resolve_safety_config(self.safety_config.as_ref());
+                validate_tool_path(req_file, &safety)?;
+            }
         }
 
         // Try python3 first, then python
@@ -489,7 +582,23 @@ impl Tool for PipList {
 }
 
 /// Freeze pip packages to requirements.txt format
-pub struct PipFreeze;
+#[derive(Default)]
+pub struct PipFreeze {
+    /// Per-instance safety config for path-policy enforcement.
+    pub safety_config: Option<SafetyConfig>,
+}
+
+impl PipFreeze {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
+    }
+}
 
 #[async_trait]
 impl Tool for PipFreeze {
@@ -532,6 +641,12 @@ impl Tool for PipFreeze {
         let packages: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
 
         if let Some(file_path) = output_file {
+            // Arbitrary-write fix (2026-09-21 review): `output_file` was
+            // forwarded to fs::write unvalidated, so `pip_freeze` could
+            // overwrite any path the process could write. The write target
+            // now obeys the same workspace path policy as file_write.
+            let safety = resolve_safety_config(self.safety_config.as_ref());
+            validate_tool_path(file_path, &safety)?;
             tokio::fs::write(file_path, &stdout)
                 .await
                 .context("Failed to write requirements file")?;
@@ -553,7 +668,23 @@ impl Tool for PipFreeze {
 // ============================================================================
 
 /// Install packages with Yarn
-pub struct YarnInstall;
+#[derive(Default)]
+pub struct YarnInstall {
+    /// Per-instance safety config for path-policy enforcement.
+    pub safety_config: Option<SafetyConfig>,
+}
+
+impl YarnInstall {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
+    }
+}
 
 #[async_trait]
 impl Tool for YarnInstall {
@@ -600,6 +731,12 @@ impl Tool for YarnInstall {
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
         let dev = args.get("dev").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        // `yarn add/install` mutates the working directory (node_modules,
+        // yarn.lock) — the cwd obeys the workspace path policy like other
+        // package-manager write targets (2026-09-21 review sweep).
+        let safety = resolve_safety_config(self.safety_config.as_ref());
+        validate_tool_path(path, &safety)?;
 
         let mut cmd = Command::new("yarn");
         crate::safety::process_env::sanitize_command_env(&mut cmd);

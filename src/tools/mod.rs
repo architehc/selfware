@@ -468,7 +468,11 @@ impl ToolRegistry {
         registry.register_deferred(CargoFmt);
 
         // Deferred: System operations
-        registry.register_deferred(PtyShellTool);
+        registry.register_deferred(if let Some(cfg) = safety_config {
+            PtyShellTool::with_safety_config(cfg.clone())
+        } else {
+            PtyShellTool::new()
+        });
 
         // Deferred: HTTP/Web operations
         registry.register_deferred(HttpRequest);
@@ -482,13 +486,37 @@ impl ToolRegistry {
         registry.register_deferred(PortCheck);
 
         // Deferred: Package manager operations
-        registry.register_deferred(NpmInstall);
-        registry.register_deferred(NpmRun);
-        registry.register_deferred(NpmScripts);
-        registry.register_deferred(PipInstall);
+        registry.register_deferred(if let Some(cfg) = safety_config {
+            NpmInstall::with_safety_config(cfg.clone())
+        } else {
+            NpmInstall::new()
+        });
+        registry.register_deferred(if let Some(cfg) = safety_config {
+            NpmRun::with_safety_config(cfg.clone())
+        } else {
+            NpmRun::new()
+        });
+        registry.register_deferred(if let Some(cfg) = safety_config {
+            NpmScripts::with_safety_config(cfg.clone())
+        } else {
+            NpmScripts::new()
+        });
+        registry.register_deferred(if let Some(cfg) = safety_config {
+            PipInstall::with_safety_config(cfg.clone())
+        } else {
+            PipInstall::new()
+        });
         registry.register_deferred(PipList);
-        registry.register_deferred(PipFreeze);
-        registry.register_deferred(YarnInstall);
+        registry.register_deferred(if let Some(cfg) = safety_config {
+            PipFreeze::with_safety_config(cfg.clone())
+        } else {
+            PipFreeze::new()
+        });
+        registry.register_deferred(if let Some(cfg) = safety_config {
+            YarnInstall::with_safety_config(cfg.clone())
+        } else {
+            YarnInstall::new()
+        });
 
         // Deferred: Container operations (Docker/Podman)
         registry.register_deferred(ContainerRun);
@@ -568,13 +596,33 @@ impl ToolRegistry {
         registry.register_deferred(lsp_impl);
 
         // Deferred: Code introspection tools for evolution
-        registry.register_deferred(introspect::CodeIntrospect::new());
-        registry.register_deferred(introspect::CodeQuery::new());
-        registry.register_deferred(introspect::CodePlan::new());
-        registry.register_deferred(introspect::CodeDiffPlan::new());
+        registry.register_deferred(if let Some(cfg) = safety_config {
+            introspect::CodeIntrospect::with_safety_config(cfg.clone())
+        } else {
+            introspect::CodeIntrospect::new()
+        });
+        registry.register_deferred(if let Some(cfg) = safety_config {
+            introspect::CodeQuery::with_safety_config(cfg.clone())
+        } else {
+            introspect::CodeQuery::new()
+        });
+        registry.register_deferred(if let Some(cfg) = safety_config {
+            introspect::CodePlan::with_safety_config(cfg.clone())
+        } else {
+            introspect::CodePlan::new()
+        });
+        registry.register_deferred(if let Some(cfg) = safety_config {
+            introspect::CodeDiffPlan::with_safety_config(cfg.clone())
+        } else {
+            introspect::CodeDiffPlan::new()
+        });
 
         // Deferred: Code metrics tool
-        registry.register_deferred(code_metrics::CodeMetricsTool::new());
+        registry.register_deferred(if let Some(cfg) = safety_config {
+            code_metrics::CodeMetricsTool::with_safety_config(cfg.clone())
+        } else {
+            code_metrics::CodeMetricsTool::new()
+        });
 
         // Deferred: Code map / context budget tools
         registry.register_deferred(codemap::CodeMapTool);

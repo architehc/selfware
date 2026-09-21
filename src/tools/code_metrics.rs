@@ -10,6 +10,8 @@ use serde_json::Value;
 use tracing::debug;
 
 use super::Tool;
+use crate::config::SafetyConfig;
+use crate::tools::file::{resolve_safety_config, validate_tool_path};
 
 /// Cyclomatic complexity threshold levels
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -96,12 +98,24 @@ pub struct MetricsSummary {
 }
 
 /// Code metrics analysis tool
-pub struct CodeMetricsTool;
+#[derive(Default)]
+pub struct CodeMetricsTool {
+    /// Per-instance safety config for path-policy enforcement; falls back to
+    /// the process-global config when `None`.
+    pub safety_config: Option<SafetyConfig>,
+}
 
 impl CodeMetricsTool {
     /// Create a new code metrics tool
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Create the tool with an explicit safety config.
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
     }
 
     /// Calculate cyclomatic complexity for a function body
@@ -143,12 +157,6 @@ impl CodeMetricsTool {
     }
 }
 
-impl Default for CodeMetricsTool {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[async_trait]
 impl Tool for CodeMetricsTool {
     fn name(&self) -> &str {
@@ -181,6 +189,12 @@ impl Tool for CodeMetricsTool {
             .ok_or_else(|| anyhow::anyhow!("Missing required 'file_path' argument"))?;
 
         debug!("Analyzing code metrics for: {}", file_path);
+
+        // The tool READS the file wholesale — the path must obey the same
+        // workspace path policy as file_read (2026-09-21 review sweep:
+        // file_path was forwarded to read_to_string unvalidated).
+        let safety = resolve_safety_config(self.safety_config.as_ref());
+        validate_tool_path(file_path, &safety)?;
 
         // Read the file
         let content = std::fs::read_to_string(file_path)

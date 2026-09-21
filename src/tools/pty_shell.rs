@@ -6,6 +6,8 @@
 //! and uses a completion marker to detect when a command has finished.
 
 use super::Tool;
+use crate::config::SafetyConfig;
+use crate::tools::file::{resolve_safety_config, validate_tool_path};
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
@@ -498,6 +500,95 @@ fn check_dangerous_patterns(command: &str) -> Result<()> {
     Ok(())
 }
 
+/// Well-known shell executable names. A bare `shell` argument resolving
+/// through PATH is only accepted when it is one of these.
+fn is_known_shell_name(name: &str) -> bool {
+    matches!(
+        name,
+        "sh" | "bash"
+            | "zsh"
+            | "ksh"
+            | "dash"
+            | "ash"
+            | "csh"
+            | "tcsh"
+            | "fish"
+            | "elvish"
+            | "xonsh"
+            | "nu"
+            | "nushell"
+            | "pwsh"
+            | "powershell"
+            | "cmd"
+            | "busybox"
+    )
+}
+
+/// System directories that may legitimately host a shell binary. Shells in
+/// these locations are trusted by (name, directory); everything else must
+/// pass the full workspace path policy below.
+const TRUSTED_SHELL_DIRS: &[&str] = &[
+    "/bin",
+    "/usr/bin",
+    "/sbin",
+    "/usr/sbin",
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/usr/local/bin",
+    "/opt/local/bin",
+    "/run/current-system/sw/bin",
+];
+
+/// Validate the `shell` argument of `pty_shell start`.
+///
+/// The operand is SPAWNED as a process, so an arbitrary path here is a
+/// code-execution primitive: `pty_shell {action: "start", shell:
+/// "/tmp/evil"}` would execute whatever the attacker parked there. The
+/// default shells (the omitted case resolves to `$SHELL` or `/bin/bash`)
+/// are trusted by construction and never validated here. An explicit
+/// `shell` must be (in order):
+///
+/// 1. Bare NAME resolved by the OS through PATH — allowed only when it is
+///    a known shell name (`bash`, `zsh`, `cmd`, …).
+/// 2. A known shell binary inside a trusted system shell directory
+///    (`/bin/bash`, `/usr/bin/fish`, `/opt/homebrew/bin/zsh`, …).
+/// 3. A path that passes the full workspace path policy
+///    ([`validate_tool_path`]) — a project-local shell under the workspace
+///    or in an explicitly allowed directory.
+///
+/// Anything else is refused. The system-shell carve-out (rules 1–2) is the
+/// deliberate exception the 2026-09-21 review's sweep allows for this
+/// class: the strict file-tool policy alone would refuse `/bin/bash`, which
+/// is the tool's documented default and would make legitimate shell
+/// sessions unusable.
+fn validate_shell_argument(shell: &str, safety: &SafetyConfig) -> Result<()> {
+    if shell.is_empty() {
+        bail!("shell must not be empty");
+    }
+    if shell.contains('\0') {
+        bail!("shell path contains null bytes");
+    }
+    // Bare names resolve through PATH; allow only known shell names.
+    if !shell.contains('/') && !shell.contains('\\') {
+        if is_known_shell_name(shell) {
+            return Ok(());
+        }
+        bail!("refusing unknown shell executable from PATH: {shell}");
+    }
+    let path = std::path::Path::new(shell);
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if is_known_shell_name(name) {
+        if let Some(dir) = path.parent().and_then(|d| d.to_str()) {
+            if TRUSTED_SHELL_DIRS.contains(&dir) {
+                return Ok(());
+            }
+        }
+    }
+    // Fallback: the path must obey the workspace path policy (denied
+    // patterns, workspace containment or allowed list, symlink escapes).
+    validate_tool_path(shell, safety)
+}
+
 /// Remove sessions that have been idle longer than [`IDLE_TIMEOUT`].
 async fn cleanup_idle_sessions(sessions: &RwLock<HashMap<String, PtySession>>) {
     let mut map = sessions.write().await;
@@ -518,7 +609,24 @@ async fn cleanup_idle_sessions(sessions: &RwLock<HashMap<String, PtySession>>) {
 // ---------------------------------------------------------------------------
 
 /// Interactive PTY shell tool that maintains persistent shell sessions.
-pub struct PtyShellTool;
+#[derive(Default)]
+pub struct PtyShellTool {
+    /// Per-instance safety config for path-policy enforcement; falls back to
+    /// the process-global config when `None`.
+    pub safety_config: Option<SafetyConfig>,
+}
+
+impl PtyShellTool {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
+    }
+}
 
 #[derive(Deserialize)]
 struct PtyArgs {
@@ -624,6 +732,14 @@ impl PtyShellTool {
 
         let session_id = Uuid::new_v4().to_string();
         let shell = args.shell.as_deref();
+        // The `shell` operand is spawned as a process — validate it before
+        // PtySession::new hands it to Command::new (2026-09-21 review
+        // sweep: the argument was previously forwarded unvalidated). The
+        // omitted case (default `$SHELL`/`/bin/bash`) is never validated.
+        if let Some(shell_path) = shell {
+            let safety = resolve_safety_config(self.safety_config.as_ref());
+            validate_shell_argument(shell_path, &safety)?;
+        }
         let session = PtySession::new(shell).await?;
 
         sessions.insert(session_id.clone(), session);

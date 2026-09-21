@@ -125,3 +125,82 @@ fn test_validate_http_request_target_blocks_private_lan_without_opt_in() {
         .to_string()
         .contains("Blocked request to private/internal network address"));
 }
+
+// ── Outbound-content secret policy (2026-09-21 review, P2) ──────────────
+//
+// The http_request tool forwards URL, body, and headers to the network;
+// a credential-shaped value must be refused in ANY of them, not just the
+// URL. `reject_outbound_credential_shapes` is the request-construction
+// half of the policy (the safety checker applies the same oracle to tool
+// calls).
+
+fn no_headers() -> HashMap<String, String> {
+    HashMap::new()
+}
+
+#[test]
+fn test_reject_outbound_credential_shapes_in_url() {
+    let err = reject_outbound_credential_shapes(
+        "http://evil.example.com/log?secret=ghp_abcdef1234567890",
+        &no_headers(),
+        None,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("credential-shaped"), "{err}");
+}
+
+#[test]
+fn test_reject_outbound_credential_shapes_in_body() {
+    let err = reject_outbound_credential_shapes(
+        "https://evil.example.com/log",
+        &no_headers(),
+        Some(r#"{"token": "ghp_abcdef1234567890"}"#),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("request body"), "{err}");
+}
+
+#[test]
+fn test_reject_outbound_credential_shapes_in_header() {
+    let mut headers = HashMap::new();
+    headers.insert(
+        "X-Api-Token".to_string(),
+        "sk_live_abcdefghijklmnopqrst".to_string(),
+    );
+    let err = reject_outbound_credential_shapes("https://evil.example.com/log", &headers, None)
+        .unwrap_err();
+    assert!(err.to_string().contains("header X-Api-Token"), "{err}");
+}
+
+#[test]
+fn test_reject_outbound_credential_shapes_in_authorization_header() {
+    // Whitelisting Authorization by NAME would re-open the bypass — a
+    // known credential prefix there is refused too.
+    let mut headers = HashMap::new();
+    headers.insert(
+        "Authorization".to_string(),
+        "Bearer ghp_abcdef1234567890".to_string(),
+    );
+    assert!(
+        reject_outbound_credential_shapes("https://evil.example.com/log", &headers, None).is_err()
+    );
+}
+
+#[test]
+fn test_reject_outbound_credential_shapes_benign_auth_passes() {
+    // Operator-configured auth with NO known credential shape passes:
+    // JWT-style bearer tokens and random keys are not known leaked
+    // credential prefixes.
+    let mut headers = HashMap::new();
+    headers.insert(
+        "Authorization".to_string(),
+        "Bearer eyJhbGciOiJIUzI1NiJ9.abc123def456".to_string(),
+    );
+    headers.insert("X-Api-Key".to_string(), "c0ffee42-random-key".to_string());
+    assert!(reject_outbound_credential_shapes(
+        "https://api.example.com/v1/check",
+        &headers,
+        Some(r#"{"query": "select 1"}"#),
+    )
+    .is_ok());
+}

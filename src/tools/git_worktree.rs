@@ -17,6 +17,7 @@
 
 use super::Tool;
 use crate::config::SafetyConfig;
+use crate::tools::file::{resolve_safety_config, validate_tool_path};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -252,26 +253,17 @@ fn validate_branch_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Validate a path for security
-fn validate_path(path: &str, _safety_config: Option<&SafetyConfig>) -> Result<()> {
-    // Basic validation - prevent path traversal
-    if path.contains("..") {
-        // Allow .. in the middle but not at the start or as escape attempts
-        let normalized = Path::new(path).components().collect::<PathBuf>();
-        if normalized
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-        {
-            // This is ok - it's a relative path that happens to have ..
-        }
-    }
-
-    // Check for null bytes
-    if path.contains('\0') {
-        anyhow::bail!("Path contains null bytes");
-    }
-
-    Ok(())
+/// Validate a path for security: the `enter_worktree` path becomes a NEW
+/// directory (`git worktree add` creates it) and the process cwd moves
+/// into it, so the path obeys the same workspace path policy as every
+/// other tool path — workspace containment or allowed list, `..` escapes,
+/// symlink escapes, protected system paths, null bytes, and denied
+/// patterns (2026-09-21 review: this was a stub that ignored the safety
+/// config and only rejected literal null bytes, so a worktree could be
+/// created and entered outside the workspace).
+fn validate_path(path: &str, safety_config: Option<&SafetyConfig>) -> Result<()> {
+    let safety = resolve_safety_config(safety_config);
+    validate_tool_path(path, &safety)
 }
 
 /// Output from git worktree list --porcelain

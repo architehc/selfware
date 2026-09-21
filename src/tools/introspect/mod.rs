@@ -27,7 +27,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
+use crate::config::SafetyConfig;
 use crate::token_count::estimate_content_tokens;
+use crate::tools::file::{resolve_safety_config, validate_tool_path};
 use crate::tools::Tool;
 
 /// Result of a code introspection operation
@@ -71,11 +73,23 @@ pub struct FileInfo {
 // ============================================================================
 
 /// Primary introspection tool - smart code reading with budget awareness
-pub struct CodeIntrospect;
+#[derive(Default)]
+pub struct CodeIntrospect {
+    /// Per-instance safety config for path-policy enforcement; falls back to
+    /// the process-global config when `None`.
+    pub safety_config: Option<SafetyConfig>,
+}
 
 impl CodeIntrospect {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Create the tool with an explicit safety config.
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
     }
 
     async fn execute_internal(&self, args: Value) -> Result<IntrospectResult> {
@@ -100,6 +114,12 @@ impl CodeIntrospect {
 
         let args: Args = serde_json::from_value(args)?;
         let target_path = PathBuf::from(&args.target);
+
+        // The tool WALKS and READS every source file under `target` — the
+        // root must obey the same workspace path policy as file_read
+        // (2026-09-21 review sweep).
+        let safety = resolve_safety_config(self.safety_config.as_ref());
+        validate_tool_path(&args.target, &safety)?;
 
         // Initialize budget manager
         let mut budget = TokenBudget::new(args.max_tokens);
@@ -375,22 +395,27 @@ impl Tool for CodeIntrospect {
     }
 }
 
-impl Default for CodeIntrospect {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 // ============================================================================
 // Code Query Tool
 // ============================================================================
 
 /// Semantic code query tool
-pub struct CodeQuery;
+#[derive(Default)]
+pub struct CodeQuery {
+    /// Per-instance safety config for path-policy enforcement.
+    pub safety_config: Option<SafetyConfig>,
+}
 
 impl CodeQuery {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Create the tool with an explicit safety config.
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
     }
 }
 
@@ -453,6 +478,13 @@ impl Tool for CodeQuery {
         let args: Args = serde_json::from_value(args)?;
         let scope = args.scope.unwrap_or_else(|| ".".to_string());
         let scope_path = PathBuf::from(&scope);
+
+        // code_query WALKS and READS every source file under `scope` — the
+        // scope root must obey the same workspace path policy as file_read
+        // (2026-09-21 review: `scope` was forwarded to a recursive walk
+        // unvalidated, unlike the checker's `path`-key checks).
+        let safety = resolve_safety_config(self.safety_config.as_ref());
+        validate_tool_path(&scope, &safety)?;
 
         // Collect files in scope
         let mut files = Vec::new();
@@ -522,22 +554,27 @@ impl CodeQuery {
     }
 }
 
-impl Default for CodeQuery {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 // ============================================================================
 // Code Plan Tool
 // ============================================================================
 
 /// Evolution planning tool
-pub struct CodePlan;
+#[derive(Default)]
+pub struct CodePlan {
+    /// Per-instance safety config for path-policy enforcement.
+    pub safety_config: Option<SafetyConfig>,
+}
 
 impl CodePlan {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Create the tool with an explicit safety config.
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
     }
 }
 
@@ -617,6 +654,13 @@ impl Tool for CodePlan {
         let args: Args = serde_json::from_value(args)?;
         let root = PathBuf::from(&args.codebase_root);
 
+        // code_plan WALKS and READS the codebase under `codebase_root` — the
+        // root must obey the same workspace path policy as file_read
+        // (2026-09-21 review: `codebase_root` was forwarded to the planner
+        // unvalidated).
+        let safety = resolve_safety_config(self.safety_config.as_ref());
+        validate_tool_path(&args.codebase_root, &safety)?;
+
         let planner = EvolutionPlanner::new(
             args.goal.clone(),
             args.budget_iterations,
@@ -630,22 +674,27 @@ impl Tool for CodePlan {
     }
 }
 
-impl Default for CodePlan {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 // ============================================================================
 // Code Diff Plan Tool
 // ============================================================================
 
 /// Change impact analysis tool
-pub struct CodeDiffPlan;
+#[derive(Default)]
+pub struct CodeDiffPlan {
+    /// Per-instance safety config for path-policy enforcement.
+    pub safety_config: Option<SafetyConfig>,
+}
 
 impl CodeDiffPlan {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Create the tool with an explicit safety config.
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
     }
 }
 
@@ -710,14 +759,20 @@ impl Tool for CodeDiffPlan {
         let target = PathBuf::from(&args.target_file);
         let root = PathBuf::from(&args.codebase_root);
 
+        // code_diff_plan READS the target file and walks the codebase under
+        // `codebase_root` for impact analysis — both must obey the same
+        // workspace path policy as file_read (2026-09-21 review sweep; the
+        // checker's introspection arm already covers these keys).
+        let safety = resolve_safety_config(self.safety_config.as_ref());
+        validate_tool_path(&args.target_file, &safety)?;
+        validate_tool_path(&args.codebase_root, &safety)?;
+
         let analysis = analyze_impact(&target, args.affected_symbol.as_deref(), &root).await?;
 
         Ok(serde_json::to_value(analysis)?)
     }
 }
 
-impl Default for CodeDiffPlan {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+#[cfg(test)]
+#[path = "../../../tests/unit/tools/introspect/mod_test.rs"]
+mod tests;

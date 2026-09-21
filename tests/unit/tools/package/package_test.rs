@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn test_npm_install_schema() {
-    let tool = NpmInstall;
+    let tool = NpmInstall::new();
     let schema = tool.schema();
     assert!(schema.get("properties").is_some());
     assert!(schema["properties"].get("packages").is_some());
@@ -12,7 +12,7 @@ fn test_npm_install_schema() {
 fn install_tools_expose_timeout_secs() {
     // The hang-prevention timeout must be a real, discoverable arg so the
     // model (and operators) can override the default bound.
-    for schema in [NpmInstall.schema(), PipInstall.schema()] {
+    for schema in [NpmInstall::new().schema(), PipInstall::new().schema()] {
         assert!(
             schema["properties"].get("timeout_secs").is_some(),
             "install tool should expose timeout_secs: {schema}"
@@ -22,7 +22,7 @@ fn install_tools_expose_timeout_secs() {
 
 #[test]
 fn test_npm_run_schema() {
-    let tool = NpmRun;
+    let tool = NpmRun::new();
     let schema = tool.schema();
     assert!(schema.get("required").is_some());
     assert!(schema["required"]
@@ -33,7 +33,7 @@ fn test_npm_run_schema() {
 
 #[test]
 fn test_pip_install_schema() {
-    let tool = PipInstall;
+    let tool = PipInstall::new();
     let schema = tool.schema();
     assert!(schema["properties"].get("packages").is_some());
     assert!(schema["properties"].get("requirements").is_some());
@@ -88,34 +88,37 @@ fn test_truncate_output_long() {
 
 #[test]
 fn test_tool_names() {
-    assert_eq!(NpmInstall.name(), "npm_install");
-    assert_eq!(NpmRun.name(), "npm_run");
-    assert_eq!(NpmScripts.name(), "npm_scripts");
-    assert_eq!(PipInstall.name(), "pip_install");
+    assert_eq!(NpmInstall::new().name(), "npm_install");
+    assert_eq!(NpmRun::new().name(), "npm_run");
+    assert_eq!(NpmScripts::new().name(), "npm_scripts");
+    assert_eq!(PipInstall::new().name(), "pip_install");
     assert_eq!(PipList.name(), "pip_list");
-    assert_eq!(PipFreeze.name(), "pip_freeze");
-    assert_eq!(YarnInstall.name(), "yarn_install");
+    assert_eq!(PipFreeze::new().name(), "pip_freeze");
+    assert_eq!(YarnInstall::new().name(), "yarn_install");
 }
 
 #[test]
 fn test_tool_descriptions() {
-    assert!(!NpmInstall.description().is_empty());
-    assert!(!NpmRun.description().is_empty());
-    assert!(!PipInstall.description().is_empty());
-    assert!(PipInstall.description().contains("pip"));
+    assert!(!NpmInstall::new().description().is_empty());
+    assert!(!NpmRun::new().description().is_empty());
+    assert!(!PipInstall::new().description().is_empty());
+    assert!(PipInstall::new().description().contains("pip"));
 }
 
 #[tokio::test]
 async fn test_npm_scripts_no_package_json() {
-    let tool = NpmScripts;
-    let result = tool.execute(json!({"path": "/nonexistent/path"})).await;
+    let tool = NpmScripts::new();
+    // An in-workspace path (not an out-of-workspace one) exercises the
+    // missing-package.json error; out-of-workspace paths are now refused
+    // by the path policy before any filesystem access.
+    let result = tool.execute(json!({"path": "no-such-dir-anywhere"})).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("not found"));
 }
 
 #[tokio::test]
 async fn test_pip_install_no_packages() {
-    let tool = PipInstall;
+    let tool = PipInstall::new();
     let result = tool.execute(json!({})).await;
     assert!(result.is_err());
     assert!(result
@@ -145,7 +148,7 @@ async fn npm_install_timeout_kills_child_process() {
     // restore PATH immediately after the call, before any assertions.
     let old_path = std::env::var("PATH").unwrap_or_default();
     std::env::set_var("PATH", format!("{}:{}", dir.path().display(), old_path));
-    let tool = NpmInstall;
+    let tool = NpmInstall::new();
     let start = std::time::Instant::now();
     let result = tool
         .execute(json!({"packages": ["express"], "timeout_secs": 1}))
@@ -204,4 +207,84 @@ async fn npm_install_timeout_kills_child_process() {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
     assert!(!alive, "timed-out npm child pid {child_pid} must be killed");
+}
+
+// ── Path-policy enforcement (2026-09-21 review sweep) ────────────────────
+//
+// Package-manager tools take path operands (install cwd, requirements
+// file, freeze output); each must obey the workspace path policy BEFORE
+// spawning the child or writing the file. The policy refusal surfaces as a
+// path error, not "npm/pip failed".
+
+fn is_path_policy_error(msg: &str) -> bool {
+    msg.contains("not allowed")
+        || msg.contains("not in allowed")
+        || msg.contains("outside working")
+        || msg.contains("protected")
+        || msg.contains("denied pattern")
+}
+
+#[tokio::test]
+async fn test_pip_freeze_output_file_policy() {
+    let tool = PipFreeze::new();
+    let err = tool
+        .execute(json!({"output_file": "/etc/freeze-out.txt"}))
+        .await
+        .unwrap_err();
+    assert!(
+        is_path_policy_error(&err.to_string()),
+        "pip_freeze output_file outside the workspace must be refused, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_npm_install_path_policy() {
+    let tool = NpmInstall::new();
+    let err = tool
+        .execute(json!({"packages": ["express"], "path": "/etc"}))
+        .await
+        .unwrap_err();
+    assert!(
+        is_path_policy_error(&err.to_string()),
+        "npm_install path outside the workspace must be refused, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_pip_install_requirements_policy() {
+    let tool = PipInstall::new();
+    let err = tool
+        .execute(json!({"requirements": "/etc/requirements.txt"}))
+        .await
+        .unwrap_err();
+    assert!(
+        is_path_policy_error(&err.to_string()),
+        "pip_install requirements outside the workspace must be refused, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_yarn_install_path_policy() {
+    let tool = YarnInstall::new();
+    let err = tool
+        .execute(json!({"packages": ["x"], "path": "/etc"}))
+        .await
+        .unwrap_err();
+    assert!(
+        is_path_policy_error(&err.to_string()),
+        "yarn_install path outside the workspace must be refused, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_npm_run_path_policy() {
+    let tool = NpmRun::new();
+    let err = tool
+        .execute(json!({"script": "test", "path": "/etc"}))
+        .await
+        .unwrap_err();
+    assert!(
+        is_path_policy_error(&err.to_string()),
+        "npm_run path outside the workspace must be refused, got: {err}"
+    );
 }

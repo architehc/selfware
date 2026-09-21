@@ -68,6 +68,75 @@ fn test_check_dangerous_whitespace_bypass() {
     assert!(check_dangerous_patterns("echo x |  bash  -i").is_err());
 }
 
+// ── shell-argument path policy (2026-09-21 review sweep) ─────────────────
+//
+// The `start` action's `shell` operand is spawned as a process; the
+// validate_shell_argument policy allows default/known system shells and
+// workspace-allowable paths, and refuses arbitrary executables.
+
+#[test]
+fn test_validate_shell_argument_accepts_known_bare_names() {
+    let config = SafetyConfig::default();
+    for shell in ["bash", "zsh", "sh", "fish", "cmd", "pwsh"] {
+        assert!(
+            validate_shell_argument(shell, &config).is_ok(),
+            "bare known shell name must be accepted: {shell}"
+        );
+    }
+}
+
+#[test]
+fn test_validate_shell_argument_refuses_unknown_bare_name() {
+    let config = SafetyConfig::default();
+    let err = validate_shell_argument("my-script", &config).unwrap_err();
+    assert!(
+        err.to_string().contains("unknown shell executable"),
+        "unknown PATH-resolved name must be refused: {err}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_validate_shell_argument_accepts_system_shell_paths() {
+    let config = SafetyConfig::default();
+    for shell in ["/bin/bash", "/usr/bin/zsh", "/bin/sh"] {
+        assert!(
+            validate_shell_argument(shell, &config).is_ok(),
+            "known system shell path must be accepted: {shell}"
+        );
+    }
+}
+
+#[test]
+fn test_validate_shell_argument_refuses_arbitrary_paths() {
+    // An attacker-controlled executable outside the trusted shell dirs and
+    // the workspace must be refused (default allowed_paths = ["./**"]).
+    let config = SafetyConfig::default();
+    for shell in ["/tmp/evil", "/var/tmp/evil-sh", "/etc/hosts"] {
+        assert!(
+            validate_shell_argument(shell, &config).is_err(),
+            "arbitrary shell path must be refused: {shell}"
+        );
+    }
+}
+
+#[test]
+fn test_validate_shell_argument_refuses_empty_and_null() {
+    let config = SafetyConfig::default();
+    assert!(validate_shell_argument("", &config).is_err());
+    assert!(validate_shell_argument("/bin/b\0ash", &config).is_err());
+}
+
+#[test]
+fn test_validate_shell_argument_accepts_workspace_path_with_allowlist() {
+    let config = SafetyConfig {
+        allowed_paths: vec!["/workspace-proj/**".to_string()],
+        ..SafetyConfig::default()
+    };
+    // A shell under an explicitly allowed directory passes the path policy.
+    assert!(validate_shell_argument("/workspace-proj/bin/my-shell", &config).is_ok());
+}
+
 #[test]
 fn test_collect_output_truncation() {
     let long_lines: Vec<String> = (0..2000).map(|i| format!("line {}", i)).collect();
@@ -78,13 +147,13 @@ fn test_collect_output_truncation() {
 
 #[test]
 fn test_tool_name() {
-    let tool = PtyShellTool;
+    let tool = PtyShellTool::new();
     assert_eq!(tool.name(), "pty_shell");
 }
 
 #[test]
 fn test_tool_schema() {
-    let tool = PtyShellTool;
+    let tool = PtyShellTool::new();
     let schema = tool.schema();
     assert_eq!(schema["type"], "object");
     assert!(schema["properties"]["action"].is_object());
@@ -98,7 +167,7 @@ async fn test_start_and_close_session() {
     let _guard = TEST_LOCK.lock().await;
     clear_all_sessions().await;
 
-    let tool = PtyShellTool;
+    let tool = PtyShellTool::new();
 
     // Start a session.
     let result = tool
@@ -125,7 +194,7 @@ async fn test_send_echo_command() {
     let _guard = TEST_LOCK.lock().await;
     clear_all_sessions().await;
 
-    let tool = PtyShellTool;
+    let tool = PtyShellTool::new();
 
     // Start.
     let result = tool
@@ -166,7 +235,7 @@ async fn test_send_dangerous_command_blocked() {
     let _guard = TEST_LOCK.lock().await;
     clear_all_sessions().await;
 
-    let tool = PtyShellTool;
+    let tool = PtyShellTool::new();
 
     let result = tool
         .execute(serde_json::json!({ "action": "start" }))
@@ -199,7 +268,7 @@ async fn test_command_too_long_rejected() {
     let _guard = TEST_LOCK.lock().await;
     clear_all_sessions().await;
 
-    let tool = PtyShellTool;
+    let tool = PtyShellTool::new();
 
     let result = tool
         .execute(serde_json::json!({ "action": "start" }))
@@ -231,7 +300,7 @@ async fn test_command_too_long_rejected() {
 
 #[tokio::test]
 async fn test_unknown_session_id() {
-    let tool = PtyShellTool;
+    let tool = PtyShellTool::new();
 
     let result = tool
         .execute(serde_json::json!({
@@ -246,7 +315,7 @@ async fn test_unknown_session_id() {
 
 #[tokio::test]
 async fn test_unknown_action() {
-    let tool = PtyShellTool;
+    let tool = PtyShellTool::new();
 
     let result = tool
         .execute(serde_json::json!({ "action": "explode" }))
@@ -264,7 +333,7 @@ async fn test_status_action() {
     let _guard = TEST_LOCK.lock().await;
     clear_all_sessions().await;
 
-    let tool = PtyShellTool;
+    let tool = PtyShellTool::new();
 
     let result = tool
         .execute(serde_json::json!({ "action": "start" }))
@@ -296,7 +365,7 @@ async fn test_resize_action() {
     let _guard = TEST_LOCK.lock().await;
     clear_all_sessions().await;
 
-    let tool = PtyShellTool;
+    let tool = PtyShellTool::new();
 
     let result = tool
         .execute(serde_json::json!({ "action": "start" }))
@@ -375,7 +444,7 @@ async fn test_timeout_terminates_stuck_child() {
     let _guard = TEST_LOCK.lock().await;
     clear_all_sessions().await;
 
-    let tool = PtyShellTool;
+    let tool = PtyShellTool::new();
 
     let result = tool
         .execute(serde_json::json!({ "action": "start" }))
@@ -444,7 +513,7 @@ async fn test_timeout_kills_grandchild_tree_and_close_works() {
     let _guard = TEST_LOCK.lock().await;
     clear_all_sessions().await;
 
-    let tool = PtyShellTool;
+    let tool = PtyShellTool::new();
 
     let result = tool
         .execute(serde_json::json!({ "action": "start" }))
@@ -507,7 +576,7 @@ async fn test_close_reaps_background_grandchild_after_shell_exits() {
     let _guard = TEST_LOCK.lock().await;
     clear_all_sessions().await;
 
-    let tool = PtyShellTool;
+    let tool = PtyShellTool::new();
 
     let result = tool
         .execute(serde_json::json!({ "action": "start" }))
@@ -574,7 +643,7 @@ async fn test_timeout_reaps_background_grandchild_after_shell_exits() {
     let _guard = TEST_LOCK.lock().await;
     clear_all_sessions().await;
 
-    let tool = PtyShellTool;
+    let tool = PtyShellTool::new();
 
     let result = tool
         .execute(serde_json::json!({ "action": "start" }))
