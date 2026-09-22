@@ -190,11 +190,12 @@ fn mcp_destructive_tools_allowed() -> bool {
 /// `page_control` actions that MUTATE browser state: navigation, page
 /// interaction, JS evaluation, tab management, and bridge shutdown. The
 /// content-extraction / info actions (text, html, attribute, value, count,
-/// visible, title, url, screenshot, pdf, list_tabs) and wait_for are reads
-/// and stay outside the write class. Mirrors VALID_ACTIONS in
-/// src/tools/page_controller.rs; kept here (not in the tool) because the
-/// MCP gate is the consumer and the tool file is not part of this change's
-/// write scope.
+/// visible, title, url, list_tabs) and wait_for are reads and stay outside
+/// the write class; screenshot/pdf are reads UNLESS a destination `path` is
+/// given (handled per-call in [`mcp_tool_call_is_write`]). Mirrors
+/// VALID_ACTIONS in src/tools/page_controller.rs; kept here (not in the
+/// tool) because the MCP gate is the consumer and the tool file is not part
+/// of this change's write scope.
 const MUTATING_PAGE_CONTROL_ACTIONS: &[&str] = &[
     // Navigation
     "goto",
@@ -245,10 +246,18 @@ fn mcp_tool_call_is_write(tool: &dyn crate::tools::Tool, args: &serde_json::Valu
         // Read-only metadata class, but the ACTION decides (see
         // MUTATING_PAGE_CONTROL_ACTIONS). The schema requires `action`, so
         // an absent/unknown action cannot reach this point.
-        "page_control" => args
-            .get("action")
-            .and_then(|a| a.as_str())
-            .is_some_and(|action| MUTATING_PAGE_CONTROL_ACTIONS.contains(&action)),
+        "page_control" => {
+            let action = args.get("action").and_then(|a| a.as_str());
+            match action {
+                Some(a) if MUTATING_PAGE_CONTROL_ACTIONS.contains(&a) => true,
+                // screenshot/pdf write a destination file only when `path`
+                // is given; without it they capture into the result (read).
+                Some("screenshot") | Some("pdf") => {
+                    args.get("path").and_then(|p| p.as_str()).is_some()
+                }
+                _ => false,
+            }
+        }
         _ => false,
     }
 }

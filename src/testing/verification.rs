@@ -15,6 +15,12 @@ use tokio::process::Command;
 use crate::tools::cargo::{parse_cargo_json_messages, CompilerError, Severity};
 
 /// Captured result of a reaped verification command (see `run_reaped`).
+///
+/// `success` means the run ACTUALLY COMPLETED: the child exited
+/// successfully AND its output was fully collected within the deadline.
+/// Whenever `timed_out` is set the verdict is fail-closed — `success` is
+/// false even if the parent exited 0, because the invocation was killed and
+/// its output never fully collected. Consumers gate on `success` alone.
 struct ReapedOutput {
     success: bool,
     timed_out: bool,
@@ -132,6 +138,12 @@ where
         }
     };
     let timed_out = wait_timed_out || drain_timed_out;
+    // Fail-closed: a timed-out run (wait OR collection) never reports
+    // success, even when the parent exited 0 — the invocation was killed and
+    // its output was never fully collected. success therefore means "the run
+    // actually completed"; consumers (check/fmt/clippy/custom gates) derive
+    // their verdict from `success` alone and must not see a timeout as green.
+    let success = success && !timed_out;
     if timed_out {
         stderr.extend_from_slice(
             format!(

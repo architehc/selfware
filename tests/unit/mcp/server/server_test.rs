@@ -1164,13 +1164,30 @@ fn mcp_write_class_classifies_per_call_writes() {
         "value",
         "visible",
         "list_tabs",
-        "screenshot",
     ] {
         assert!(
             !is_write("page_control", serde_json::json!({"action": action})),
             "page_control '{action}' must classify as a read"
         );
     }
+    // screenshot/pdf are reads WITHOUT a destination path, writes WITH one
+    // (2026-09-21 review finding).
+    assert!(!is_write(
+        "page_control",
+        serde_json::json!({"action": "screenshot"})
+    ));
+    assert!(is_write(
+        "page_control",
+        serde_json::json!({"action": "screenshot", "path": "out.png"})
+    ));
+    assert!(!is_write(
+        "page_control",
+        serde_json::json!({"action": "pdf"})
+    ));
+    assert!(is_write(
+        "page_control",
+        serde_json::json!({"action": "pdf", "path": "out.pdf"})
+    ));
     // An absent action defaults to read (schema requires action, so a live
     // call never reaches the gate without one).
     assert!(!is_write("page_control", serde_json::json!({})));
@@ -1189,6 +1206,20 @@ fn mcp_write_class_classifies_per_call_writes() {
         serde_json::json!({"method": "head"})
     ));
     assert!(!is_write("http_request", serde_json::json!({})));
+
+    // browser_screenshot / browser_pdf ALWAYS write a file (output_path
+    // defaults even when omitted) → write-capable regardless of arguments.
+    assert!(is_write(
+        "browser_screenshot",
+        serde_json::json!({"url": "http://127.0.0.1:9/"})
+    ));
+    assert!(is_write(
+        "browser_pdf",
+        serde_json::json!({"url": "http://127.0.0.1:9/"})
+    ));
+    // Sibling browser reads stay reads.
+    assert!(!is_write("browser_fetch", serde_json::json!({})));
+    assert!(!is_write("browser_links", serde_json::json!({})));
 
     // Plain reads stay out of the write class.
     assert!(!is_write("file_read", serde_json::json!({})));
@@ -1471,6 +1502,168 @@ async fn test_tools_call_page_control_click_refused_without_opt_in() {
     assert!(
         text.contains("can modify state"),
         "a mutating page_control action must be refused as write-capable, got: {text}"
+    );
+}
+
+/// A page_control screenshot WITH a destination `path` writes to disk — it
+/// is write-capable and needs the opt-in (2026-09-21 review finding). The
+/// screenshot alone (without `path`) stays a read.
+#[tokio::test]
+async fn test_tools_call_page_control_screenshot_with_path_refused_without_opt_in() {
+    let _guard = DESTRUCTIVE_ENV_LOCK.lock().await;
+    set_destructive_opt_in(None);
+    let server = McpServer::with_explicit_safety_config(crate::config::SafetyConfig::default());
+    initialize_server(&server).await;
+
+    let request = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(Value::from(44)),
+        method: "tools/call".to_string(),
+        params: Some(serde_json::json!({
+            "name": "page_control",
+            "arguments": {"action": "screenshot", "path": "target/tmp/page-shot.png", "url": "http://127.0.0.1:9/"}
+        })),
+    };
+    let response = server.handle_request(&request).await.unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(result.get("isError").and_then(|v| v.as_bool()), Some(true));
+    let text = result["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        text.contains("can modify state"),
+        "a screenshot with a destination path must be refused as write-capable, got: {text}"
+    );
+}
+
+/// browser_screenshot ALWAYS writes a destination file (output_path has a
+/// default) — write-capable, refused without the opt-in.
+#[tokio::test]
+async fn test_tools_call_browser_screenshot_refused_without_opt_in() {
+    let _guard = DESTRUCTIVE_ENV_LOCK.lock().await;
+    set_destructive_opt_in(None);
+    let server = McpServer::with_explicit_safety_config(crate::config::SafetyConfig::default());
+    initialize_server(&server).await;
+
+    let request = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(Value::from(45)),
+        method: "tools/call".to_string(),
+        params: Some(serde_json::json!({
+            "name": "browser_screenshot",
+            "arguments": {"url": "http://127.0.0.1:9/", "output_path": "target/tmp/shot.png"}
+        })),
+    };
+    let response = server.handle_request(&request).await.unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(result.get("isError").and_then(|v| v.as_bool()), Some(true));
+    let text = result["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        text.contains("can modify state"),
+        "browser_screenshot must be refused as write-capable, got: {text}"
+    );
+}
+
+/// Whether a Chrome/Chromium binary that headless `browser_screenshot` can
+/// drive directly is installed; mirrors the e2e tests' skip guard.
+fn chrome_executable_available() -> bool {
+    const CHROME_CANDIDATES: &[&str] = &[
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium",
+        "google-chrome",
+        "chromium",
+    ];
+    CHROME_CANDIDATES.iter().any(|c| {
+        std::path::Path::new(c).exists()
+            || std::process::Command::new(c)
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+    })
+}
+
+/// Tiny HTTP server serving one HTML page, for the opt-in screenshot test.
+/// Chrome headless needs a real HTTP target (file:// and data: URLs are
+/// refused by the tool's SSRF pinning).
+async fn serve_one_html_page() -> (String, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let endpoint = format!("http://{addr}/");
+    let body = "<html><head><title>mcp write test</title></head><body><h1>hi</h1></body></html>";
+    let handle = tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf).await;
+            let wire = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = socket.write_all(wire.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        }
+    });
+    (endpoint, handle)
+}
+
+/// With the operator opt-in, the write class executes and the destination
+/// file actually lands on disk. Browser-dependent: headless Chrome drives
+/// `browser_screenshot` directly (no Playwright needed), so this runs for
+/// real when Chrome exists and skips honestly otherwise (the e2e pattern).
+#[tokio::test]
+async fn test_tools_call_browser_screenshot_with_opt_in_writes_file() {
+    if !chrome_executable_available() {
+        eprintln!("skipping browser_screenshot opt-in test: no Chrome/Chromium");
+        return;
+    }
+    let _guard = DESTRUCTIVE_ENV_LOCK.lock().await;
+    set_destructive_opt_in(Some("1"));
+    let prev_no_sandbox = std::env::var("SELFWARE_BROWSER_NO_SANDBOX").ok();
+    std::env::set_var("SELFWARE_BROWSER_NO_SANDBOX", "1");
+
+    let dir =
+        std::path::Path::new("target/tmp").join(format!("mcp-browser-shot-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = dir.join("shot.png");
+    let (endpoint, _server) = serve_one_html_page().await;
+
+    let server = McpServer::with_explicit_safety_config(crate::config::SafetyConfig::default());
+    initialize_server(&server).await;
+    let request = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(Value::from(46)),
+        method: "tools/call".to_string(),
+        params: Some(serde_json::json!({
+            "name": "browser_screenshot",
+            "arguments": {"url": endpoint, "output_path": out.to_string_lossy(), "timeout_secs": 30}
+        })),
+    };
+    let response = server.handle_request(&request).await.unwrap();
+    let result = response.result.unwrap();
+    let text = result["content"][0]["text"].as_str().unwrap_or("");
+
+    // Restore env and capture the file state before any assertion.
+    match prev_no_sandbox {
+        Some(v) => std::env::set_var("SELFWARE_BROWSER_NO_SANDBOX", v),
+        None => std::env::remove_var("SELFWARE_BROWSER_NO_SANDBOX"),
+    }
+    let file_written = out.exists()
+        && std::fs::metadata(&out)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false);
+    let _ = std::fs::remove_dir_all(&dir);
+    set_destructive_opt_in(None);
+
+    assert!(
+        !text.contains("can modify state"),
+        "with the opt-in the screenshot must execute, got: {text}"
+    );
+    assert!(
+        file_written,
+        "the opt-in screenshot must write a non-empty file (tool result: {text})"
     );
 }
 

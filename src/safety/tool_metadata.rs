@@ -381,8 +381,15 @@ pub fn classify_tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
         }
 
         // Browser operations
-        "browser_fetch" | "browser_screenshot" | "browser_pdf" | "browser_links" => {
-            ToolMetadata::network()
+        "browser_fetch" | "browser_links" => ToolMetadata::network(),
+        // browser_screenshot / browser_pdf ALWAYS write a destination file
+        // (output_path defaults to `.selfware/browser-output/…` even when
+        // omitted) — they are write-capable, not read-only; the network()
+        // classification labelled them as reads and let them ride through
+        // the MCP write gate without the opt-in (2026-09-21 review finding).
+        // Risk stays Medium so the Normal-mode confirmation UX is unchanged.
+        "browser_screenshot" | "browser_pdf" => {
+            ToolMetadata::custom(false, false, RiskLevel::Medium, true, false)
         }
         // browser_eval executes arbitrary JS inside the page — it can mutate
         // DOM, storage, navigation and remote state — so it is NOT read-only.

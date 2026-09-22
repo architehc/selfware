@@ -90,6 +90,10 @@ async fn run_reaped_timeout_reaps_process_group() {
 /// stall past its timeout. `sleep 30 & echo done`: the child exits
 /// immediately, the sleeper retains the pipe, and run_reaped must still
 /// return in bounded time (reporting the drain timeout honestly).
+///
+/// Regression (follow-up P1): a drain timeout must be FAIL-CLOSED — the
+/// parent exited 0 here, yet the verdict must not be success, because the
+/// output was never collected and the group was killed.
 #[tokio::test]
 #[cfg(unix)]
 async fn run_reaped_collection_bounded_when_pipe_held() {
@@ -106,6 +110,10 @@ async fn run_reaped_collection_bounded_when_pipe_held() {
     assert!(
         out.timed_out,
         "collection exceeded the deadline, so the run must be reported as timed out"
+    );
+    assert!(
+        !out.success,
+        "a timed-out run must NEVER report success, even though the parent exited 0"
     );
 }
 

@@ -283,3 +283,27 @@ fn test_pip_freeze_and_knowledge_export_classified_as_write_capable() {
     assert!(default_tool_metadata("pip_list").read_only);
     assert!(default_tool_metadata("knowledge_query").read_only);
 }
+
+/// browser_screenshot / browser_pdf ALWAYS write a destination file
+/// (output_path defaults even when omitted) — they are write-capable, not
+/// read-only; the old network() label let them ride through the MCP write
+/// gate without the opt-in (2026-09-21 review finding).
+#[test]
+fn test_browser_screenshot_and_pdf_classified_as_write_capable() {
+    let shot = default_tool_metadata("browser_screenshot");
+    assert!(!shot.read_only, "browser_screenshot must be write-capable");
+    assert!(
+        shot.network_access,
+        "browser_screenshot egresses to the browser"
+    );
+    assert_eq!(shot.risk_level, RiskLevel::Medium);
+
+    let pdf = default_tool_metadata("browser_pdf");
+    assert!(!pdf.read_only, "browser_pdf must be write-capable");
+    assert!(pdf.network_access, "browser_pdf egresses to the browser");
+    assert_eq!(pdf.risk_level, RiskLevel::Medium);
+
+    // Sibling browser reads keep their read-only classification.
+    assert!(default_tool_metadata("browser_fetch").read_only);
+    assert!(default_tool_metadata("browser_links").read_only);
+}
