@@ -468,6 +468,53 @@ pub struct VerificationGate {
     working_dir: Option<PathBuf>,
 }
 
+/// Verdict on a non-zero `rustfmt --check` run. rustfmt exits 1 both for
+/// genuine parse failures and for formatting differences, so the cheap Rust
+/// "syntax" check must classify by OUTPUT, not by exit code. The split fixes
+/// a false negative (finding C, review item #5): a run over unformatted-but-
+/// valid Rust failed the syntax gate ("Fix Rust syntax errors") and marked
+/// verification FAILED even though every test passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RustfmtFailureKind {
+    /// rustfmt reported formatting differences only (`Diff in ...` hunks)
+    /// with no error-shaped lines: the code is syntactically valid. The
+    /// result is an advisory format note, not a blocking syntax failure.
+    FormattingDiff,
+    /// Genuine parse error, operational error (missing/unreadable file), or
+    /// any failure that does not match the pure-diff shape. Fail-closed:
+    /// never turn a real syntax error green.
+    SyntaxFailure,
+}
+
+/// Classify a failed `rustfmt --check` run from its combined output.
+///
+/// Only a run whose output consists PURELY of `Diff in ...` formatting hunks
+/// (no `error:`/`Error:` lines — rustfmt prints parse errors to its stderr,
+/// and an unreadable/missing file prints `Error: ...`) classifies as
+/// [`RustfmtFailureKind::FormattingDiff`]. Any error-shaped line (a mixed run
+/// with a parse error in one file and diffs in another counts as an error) or
+/// any unclassifiable failure stays a blocking `SyntaxFailure`.
+fn classify_rustfmt_failure(combined: &str) -> RustfmtFailureKind {
+    let saw_diff = combined
+        .lines()
+        .any(|l| l.trim_start().starts_with("Diff in "));
+    // Diff hunks always prefix changed lines with `+`/`-`, so a trimmed line
+    // starting with an error marker can only be real error output, never a
+    // source line copied into the diff.
+    let saw_error_line = combined.lines().any(|l| {
+        let t = l.trim_start();
+        t.starts_with("error:")
+            || t.starts_with("error[")
+            || t.starts_with("Error:")
+            || t.starts_with("Error during parsing")
+    });
+    if saw_diff && !saw_error_line {
+        RustfmtFailureKind::FormattingDiff
+    } else {
+        RustfmtFailureKind::SyntaxFailure
+    }
+}
+
 impl VerificationGate {
     pub fn new(project_root: impl AsRef<Path>, config: VerificationConfig) -> Self {
         Self {
@@ -1553,6 +1600,47 @@ impl VerificationGate {
         } else {
             format!("{}\n{}", stdout, stderr)
         };
+
+        // rustfmt shares exit code 1 between parse failures and formatting
+        // differences, so a non-zero `rustfmt --check` over valid-but-
+        // unformatted code used to fail the SYNTAX gate and block the whole
+        // verification run even though the code parses and every test passes
+        // (finding C). Pure formatting diffs become an advisory note here;
+        // parse failures and any unclassifiable failure still block below.
+        // Rule 2: this changes one verification semantic on purpose — for
+        // Rust, "syntax" means parseable, "format" means rustfmt-clean — and
+        // formatting remains enforced by the separate cargo-fmt check when
+        // `format_on_edit` is enabled. A real parse error NEVER goes green.
+        if !output.status.success()
+            && program == "rustfmt"
+            && classify_rustfmt_failure(&combined) == RustfmtFailureKind::FormattingDiff
+        {
+            return Ok(CheckResult {
+                check_type: CheckType::TypeCheck,
+                passed: true,
+                duration_ms: duration,
+                output: combined,
+                errors: vec![VerificationError {
+                    file: files.first().cloned().unwrap_or_default(),
+                    line: None,
+                    column: None,
+                    message: format!(
+                        "{} formatting differs (rustfmt --check reported diffs, not a syntax error); run cargo fmt to apply",
+                        lang
+                    ),
+                    code: Some("FORMATTING_DIFF".to_string()),
+                    severity: ErrorSeverity::Note,
+                    suggestion: Some(
+                        "Run `cargo fmt` (or `rustfmt`) to apply the formatting".to_string(),
+                    ),
+                }],
+                warnings: vec![format!(
+                    "{} syntax is valid; rustfmt --check only reports formatting differences",
+                    lang
+                )],
+                suggestions: vec!["Run `cargo fmt` to fix formatting before committing".to_string()],
+            });
+        }
 
         Ok(CheckResult {
             check_type: CheckType::TypeCheck,

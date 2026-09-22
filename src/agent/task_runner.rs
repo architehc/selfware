@@ -88,6 +88,62 @@ fn progress_guidance(pct: f64, cargo_applies: bool) -> &'static str {
     }
 }
 
+/// Minimum count of accumulated safety denials (blocked/skipped/denied tool
+/// outcomes) at which the periodic progress injection stops pushing
+/// "keep going / verify" and switches to an honest blocker note (finding D,
+/// review item #10). The live /etc/passwd probe was refused correctly 8×
+/// while the harness burned 154k tokens / 17 iterations re-injecting
+/// positive progress and verification directives against that wall.
+const SAFETY_DENIAL_THRESHOLD: usize = 3;
+
+/// Status line for the periodic progress injection. Once safety denials
+/// accumulate past [`SAFETY_DENIAL_THRESHOLD`], the "Verification: NOT YET
+/// RUN (required before completion)" nudge is itself a push against a wall
+/// (verification commands are among the denied tools), so the line names the
+/// blocker instead. With zero denials the historical wording is unchanged.
+fn progress_injection_status(has_verification: bool, denials: usize) -> String {
+    if denials >= SAFETY_DENIAL_THRESHOLD {
+        format!("Safety: {denials} tool call(s) denied/blocked — path blocked")
+    } else if has_verification {
+        "Verification: PASSED".to_string()
+    } else {
+        "Verification: NOT YET RUN (required before completion)".to_string()
+    }
+}
+
+/// Honest blocker guidance that replaces the positive-reinforcement bands
+/// once safety denials have accumulated. It names the blocker, states that
+/// retrying is futile, and offers the two honest exits (different approach,
+/// or stop) — it never says "keep going" or pushes verification.
+fn denial_blocker_guidance(denials: usize) -> String {
+    format!(
+        "Tool calls have been denied or blocked {denials} times. This path is not proceeding — \
+         retrying the same denied calls will keep failing. Change to a different approach that \
+         stays within the allowed operations, or if the denials block the task entirely, stop \
+         and report that outcome instead."
+    )
+}
+
+/// Count operator/safety denials surfaced as skipped tool outcomes in the
+/// run's message history: `<tool_result><skipped>…</skipped></tool_result>`
+/// (non-native function calling) or `{"skipped": "…"}` (native FC). Those
+/// markers are produced ONLY by the confirmation/YOLO denial paths
+/// (`tool_dispatch::push_tool_skip_message` — YOLO gate blocks, headless
+/// "no operator to confirm" denials, TUI/interactive skips), never by
+/// ordinary tool failures, so every match is a denial. The counter is
+/// lifetime-of-history rather than per-task: denials stay visible to the
+/// model in context, and an aged-out history only delays the threshold.
+fn count_safety_denials(messages: &[crate::api::types::Message]) -> usize {
+    messages
+        .iter()
+        .filter(|m| {
+            let text = m.content.text();
+            (m.role == "user" && text.contains("<tool_result><skipped>"))
+                || (m.role == "tool" && text.contains("\"skipped\":"))
+        })
+        .count()
+}
+
 /// The verification directive appended after a synthesized answer's code is
 /// auto-written to a file. Project-aware: a Python task must not be told to
 /// run `cargo check` (finding 1a).
@@ -732,19 +788,27 @@ impl Agent {
             })
             .unwrap_or(false);
 
-        let verification_status = if has_verification {
-            "Verification: PASSED"
-        } else {
-            "Verification: NOT YET RUN (required before completion)"
-        };
+        // Safety-denial awareness (finding D, review item #10): once tool
+        // calls keep being denied/blocked, the positive "Good progress /
+        // plenty of budget / verify with cargo" bands read as pushes against
+        // a wall and burn tokens (measured 154k / 17 iterations on the live
+        // /etc/passwd probe). Past the threshold the status line and guidance
+        // are replaced by an honest blocker note. With zero denials this is
+        // byte-for-byte the pre-fix injection (existing tests pin the wording).
+        let denials = count_safety_denials(&self.messages);
+        let verification_status = progress_injection_status(has_verification, denials);
 
-        // Cargo-specific guidance only when cargo applies to THIS task; a
-        // Python task kept being told to "verify with cargo_check/cargo_test"
-        // in every injection — even after Green Verdict PASSED — and dutifully
-        // probed cargo, which cannot pass without a manifest (finding 1).
-        let cargo_applies =
-            super::verification_scope::cargo_applies_to_task(&self.verification_task_root());
-        let guidance = progress_guidance(pct, cargo_applies);
+        let guidance = if denials >= SAFETY_DENIAL_THRESHOLD {
+            denial_blocker_guidance(denials)
+        } else {
+            // Cargo-specific guidance only when cargo applies to THIS task; a
+            // Python task kept being told to "verify with cargo_check/cargo_test"
+            // in every injection — even after Green Verdict PASSED — and dutifully
+            // probed cargo, which cannot pass without a manifest (finding 1).
+            let cargo_applies =
+                super::verification_scope::cargo_applies_to_task(&self.verification_task_root());
+            progress_guidance(pct, cargo_applies).to_string()
+        };
 
         Some(format!(
             "[Progress: step {}/{} ({:.0}% budget used) | {}]\n{}",

@@ -188,28 +188,54 @@ fn fatal_loop_errors_are_not_recoverable() {
 // build_progress_injection -- exhaustive branch coverage (standalone)
 // =========================================================================
 
-fn build_progress_injection_standalone(
+/// Mirror of the production status line (see `progress_injection_status`).
+/// Mirrored here — like the guidance string below — so the message-level
+/// tests below do not need a full Agent; the real-Agent tests further down
+/// exercise the production function end-to-end.
+fn progress_injection_status_standalone(has_verification: bool, denials: usize) -> String {
+    if denials >= SAFETY_DENIAL_THRESHOLD {
+        format!("Safety: {denials} tool call(s) denied/blocked \u{2014} path blocked")
+    } else if has_verification {
+        "Verification: PASSED".to_string()
+    } else {
+        "Verification: NOT YET RUN (required before completion)".to_string()
+    }
+}
+
+/// Mirror of the production blocker guidance (see `denial_blocker_guidance`).
+fn denial_blocker_guidance_standalone(denials: usize) -> String {
+    format!(
+        "Tool calls have been denied or blocked {denials} times. This path is not proceeding \u{2014} \
+         retrying the same denied calls will keep failing. Change to a different approach that \
+         stays within the allowed operations, or if the denials block the task entirely, stop \
+         and report that outcome instead."
+    )
+}
+
+fn build_progress_injection_standalone_with_denials(
     step: usize,
     max_iterations: usize,
     has_verification: bool,
+    denials: usize,
 ) -> Option<String> {
     if step == 0 || !(step + 1).is_multiple_of(5) {
         return None;
     }
     let pct = ((step + 1) as f64 / max_iterations as f64 * 100.0).min(100.0);
-    let verification_status = if has_verification {
-        "Verification: PASSED"
-    } else {
-        "Verification: NOT YET RUN (required before completion)"
-    };
-    let guidance = if pct < 30.0 {
+    let verification_status = progress_injection_status_standalone(has_verification, denials);
+    let guidance = if denials >= SAFETY_DENIAL_THRESHOLD {
+        denial_blocker_guidance_standalone(denials)
+    } else if pct < 30.0 {
         "You have plenty of budget remaining. Be thorough \u{2014} read relevant code, \
              implement carefully, and verify each change."
+            .to_string()
     } else if pct < 70.0 {
         "Good progress. Continue implementing and make sure to verify with cargo_check/cargo_test."
+            .to_string()
     } else {
         "You are using most of your budget. Wrap up: ensure all changes compile \
              and tests pass, then provide your final summary."
+            .to_string()
     };
     Some(format!(
         "[Progress: step {}/{} ({:.0}% budget used) | {}]\n{}",
@@ -219,6 +245,16 @@ fn build_progress_injection_standalone(
         verification_status,
         guidance
     ))
+}
+
+fn build_progress_injection_standalone(
+    step: usize,
+    max_iterations: usize,
+    has_verification: bool,
+) -> Option<String> {
+    // Clean-run path (finding D): zero denials must be byte-for-byte the
+    // pre-fix injection, so the existing tests pin denials=0 wording.
+    build_progress_injection_standalone_with_denials(step, max_iterations, has_verification, 0)
 }
 
 #[test]
@@ -362,6 +398,205 @@ fn test_progress_injection_large_step_numbers() {
 #[test]
 fn test_progress_injection_exactly_at_boundary_29_not_multiple() {
     assert!(build_progress_injection_standalone(28, 100, false).is_none());
+}
+
+// =========================================================================
+// build_progress_injection -- safety-denial awareness (finding D)
+// =========================================================================
+
+#[test]
+fn test_progress_injection_denials_suppress_positive_guidance_all_bands() {
+    // Finding D (review item #10): after safety denials accumulate past the
+    // threshold (3), the injection must STOP pushing "keep going / verify" —
+    // low, mid, AND high budget bands — and name the blocker instead. The
+    // "Verification: NOT YET RUN (required before completion)" nudge is itself
+    // a push when the denied tool is the verifier, so it is suppressed too.
+    let low = build_progress_injection_standalone_with_denials(4, 100, false, 3).unwrap();
+    assert!(
+        !low.contains("plenty of budget"),
+        "low-band positive reinforcement must be suppressed: {low}"
+    );
+    assert!(!low.contains("Be thorough"), "{low}");
+    assert!(!low.contains("Good progress"), "{low}");
+    assert!(
+        !low.contains("Verification: NOT YET RUN"),
+        "the 'required before completion' nudge is a push against a wall: {low}"
+    );
+    assert!(
+        low.contains("denied or blocked"),
+        "the blocker must be named: {low}"
+    );
+
+    let mid = build_progress_injection_standalone_with_denials(49, 100, false, 3).unwrap();
+    assert!(!mid.contains("Good progress"), "{mid}");
+    assert!(!mid.contains("cargo_check"), "{mid}");
+    assert!(mid.contains("denied or blocked"), "{mid}");
+
+    let high = build_progress_injection_standalone_with_denials(69, 100, true, 3).unwrap();
+    assert!(
+        !high.contains("Wrap up"),
+        "wrap-up direction is itself a push: {high}"
+    );
+    assert!(!high.contains("tests pass"), "{high}");
+    assert!(!high.contains("Verification: PASSED"), "{high}");
+    assert!(high.contains("denied or blocked"), "{high}");
+}
+
+#[test]
+fn test_progress_injection_denials_named_in_message_and_status() {
+    let msg = build_progress_injection_standalone_with_denials(14, 100, false, 3).unwrap();
+    assert!(
+        msg.contains("3 times"),
+        "the denial directive must state the count: {msg}"
+    );
+    assert!(
+        msg.contains("Safety: 3 tool call(s) denied/blocked"),
+        "the status line must name the blocker: {msg}"
+    );
+}
+
+#[test]
+fn test_progress_injection_below_denial_threshold_unchanged() {
+    // 1-2 denials are below the threshold: the historical guidance stays.
+    let msg = build_progress_injection_standalone_with_denials(49, 100, false, 2).unwrap();
+    assert!(msg.contains("Good progress"), "{msg}");
+    assert!(msg.contains("cargo_check/cargo_test"), "{msg}");
+    assert!(!msg.contains("denied or blocked"), "{msg}");
+    let one = build_progress_injection_standalone_with_denials(49, 100, false, 1).unwrap();
+    assert!(one.contains("Good progress"), "{one}");
+    assert!(
+        one.contains("Verification: NOT YET RUN (required before completion)"),
+        "{one}"
+    );
+}
+
+#[test]
+fn test_progress_injection_zero_denials_unchanged() {
+    // Zero behavior change on a clean run: denials=0 output carries the exact
+    // pre-fix wording (the historical tests above also pin these strings).
+    let msg = build_progress_injection_standalone_with_denials(49, 100, false, 0).unwrap();
+    assert!(msg.contains("Good progress"), "{msg}");
+    assert!(msg.contains("cargo_check/cargo_test"), "{msg}");
+    assert!(
+        msg.contains("Verification: NOT YET RUN (required before completion)"),
+        "{msg}"
+    );
+    assert!(!msg.contains("denied or blocked"), "{msg}");
+}
+
+#[test]
+fn test_progress_injection_status_and_guidance_production_fns() {
+    // The production status/guidance functions own the wording the standalone
+    // mirrors replicate; pin them here so mirror drift is caught.
+    assert_eq!(
+        progress_injection_status(false, 3),
+        "Safety: 3 tool call(s) denied/blocked \u{2014} path blocked"
+    );
+    assert_eq!(
+        progress_injection_status(true, 3),
+        progress_injection_status(false, 3)
+    );
+    assert_eq!(
+        progress_injection_status(false, 2),
+        "Verification: NOT YET RUN (required before completion)"
+    );
+    assert_eq!(progress_injection_status(true, 2), "Verification: PASSED");
+    let blocker = denial_blocker_guidance(3);
+    assert!(blocker.contains("3 times"), "{blocker}");
+    assert!(
+        !blocker.contains("keep going") && !blocker.contains("verify"),
+        "the blocker note must not push the model onward: {blocker}"
+    );
+}
+
+#[test]
+fn test_count_safety_denials_only_counts_skipped_denials() {
+    // The counter must match ONLY the denial markers produced by
+    // push_tool_skip_message — never ordinary tool results, system messages,
+    // or assistant turns.
+    let messages = vec![
+        crate::api::types::Message::system("system prompt"),
+        crate::api::types::Message::user(
+            "<tool_result><skipped>Blocked by YOLO safety gate: /etc/passwd</skipped></tool_result>",
+        ),
+        crate::api::types::Message::user(
+            "<tool_result><skipped>Denied (unattended session, no operator to confirm): /etc/shadow</skipped></tool_result>",
+        ),
+        crate::api::types::Message::user(
+            "<tool_result><skipped>Tool execution denied via TUI permission prompt</skipped></tool_result>",
+        ),
+        // Ordinary tool result that merely mentions "skipped" as data:
+        crate::api::types::Message::user(
+            "<tool_result><output>skipped_entries: 4</output></tool_result>",
+        ),
+        crate::api::types::Message::tool(
+            "{\"skipped\": \"Blocked by YOLO safety gate: /etc/passwd\"}",
+            "call_x",
+        ),
+        crate::api::types::Message::tool("{\"output\": \"ok\"}", "call_y"),
+        crate::api::types::Message::assistant("Good progress, keep going"),
+    ];
+    assert_eq!(count_safety_denials(&messages), 4);
+    assert_eq!(count_safety_denials(&[]), 0);
+}
+
+#[test]
+fn test_count_safety_denials_threshold_rule() {
+    // 3 consecutive denials trip the threshold; the counter is cumulative.
+    let two_denials = vec![
+        crate::api::types::Message::user(
+            "<tool_result><skipped>Blocked by YOLO safety gate</skipped></tool_result>",
+        ),
+        crate::api::types::Message::user(
+            "<tool_result><skipped>Blocked by YOLO safety gate</skipped></tool_result>",
+        ),
+    ];
+    assert!(count_safety_denials(&two_denials) < SAFETY_DENIAL_THRESHOLD);
+    let mut three_denials = two_denials;
+    three_denials.push(crate::api::types::Message::user(
+        "<tool_result><skipped>Blocked by YOLO safety gate</skipped></tool_result>",
+    ));
+    assert!(count_safety_denials(&three_denials) >= SAFETY_DENIAL_THRESHOLD);
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn test_progress_injection_agent_denial_aware_from_message_history() {
+    // End-to-end on a real Agent: 3 consecutive skipped denials in the
+    // message history (the live /etc/passwd probe shape) must flip the next
+    // injection to the honest blocker note — no "Good progress", no
+    // "Verification: NOT YET RUN (required before completion)" nudge — while
+    // a clean Agent keeps the historical wording.
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = mock_agent_config(format!("{}/v1", server.url()), false);
+    let mut agent = Agent::new(config).await.unwrap();
+    let clean = agent.build_progress_injection(4).unwrap();
+    assert!(
+        clean.contains("Good progress"),
+        "a clean run keeps the historical guidance: {clean}"
+    );
+
+    for i in 0..3 {
+        agent.messages.push(crate::api::types::Message::user(format!(
+            "<tool_result><skipped>Blocked by YOLO safety gate: /etc/passwd probe {i}</skipped></tool_result>"
+        )));
+    }
+    let msg = agent.build_progress_injection(4).unwrap();
+    assert!(
+        !msg.contains("Good progress"),
+        "no positive reinforcement after 3 denials: {msg}"
+    );
+    assert!(!msg.contains("plenty of budget"), "{msg}");
+    assert!(
+        !msg.contains("Verification: NOT YET RUN"),
+        "the verification nudge is suppressed under denials: {msg}"
+    );
+    assert!(msg.contains("denied or blocked"), "{msg}");
+    assert!(msg.contains("3 times"), "{msg}");
+    server.stop().await;
 }
 
 // =========================================================================

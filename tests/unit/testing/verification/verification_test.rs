@@ -2150,6 +2150,166 @@ async fn cheap_syntax_check_python() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+#[test]
+fn classify_rustfmt_failure_pure_diff_is_formatting() {
+    // A pure `rustfmt --check` diff means the code PARSES — the failure is a
+    // formatting difference, not a syntax error (finding C).
+    let out = "Diff in /tmp/unformatted.rs:1:\n-fn main(){println!(\"hi\");}\n+fn main() {\n+    println!(\"hi\");\n+}\n \n";
+    assert_eq!(
+        classify_rustfmt_failure(out),
+        RustfmtFailureKind::FormattingDiff
+    );
+}
+
+#[test]
+fn classify_rustfmt_failure_parse_error_is_syntax_failure() {
+    // A genuine parse error must NEVER classify as a formatting diff — the
+    // invariant that a real syntax error stays red is the whole point of the
+    // classifier (finding C).
+    let out = "error: expected expression, found `;`\n --> /tmp/broken.rs:2:13\n  |\n2 |     let x = ;\n  |             ^ expected expression\n";
+    assert_eq!(
+        classify_rustfmt_failure(out),
+        RustfmtFailureKind::SyntaxFailure
+    );
+}
+
+#[test]
+fn classify_rustfmt_failure_mixed_diff_and_error_is_syntax_failure() {
+    // A run touching several files can print a parse error for one file and a
+    // diff for another; the error line must dominate (fail-closed).
+    let out = "error: expected expression, found `;`\n --> /tmp/a.rs:2:13\n\nDiff in /tmp/b.rs:1:\n-fn main(){}\n+fn main() {}\n";
+    assert_eq!(
+        classify_rustfmt_failure(out),
+        RustfmtFailureKind::SyntaxFailure
+    );
+}
+
+#[test]
+fn classify_rustfmt_failure_operational_or_empty_is_syntax_failure() {
+    // Missing/unreadable files and unclassifiable failures stay blocking.
+    assert_eq!(
+        classify_rustfmt_failure("Error: file `nonexistent.rs` does not exist"),
+        RustfmtFailureKind::SyntaxFailure
+    );
+    assert_eq!(
+        classify_rustfmt_failure(""),
+        RustfmtFailureKind::SyntaxFailure
+    );
+    assert_eq!(
+        classify_rustfmt_failure("rustfmt: could not read some files"),
+        RustfmtFailureKind::SyntaxFailure
+    );
+}
+
+#[tokio::test]
+async fn cheap_syntax_check_rust_formatting_diff_is_advisory() {
+    // Finding C: `rustfmt --check` exits 1 for formatting diffs too, so a run
+    // over unformatted-but-VALID Rust used to fail the syntax gate and block
+    // verification even though every test passed. It must now PASS the syntax
+    // gate and surface the formatting as an advisory note instead.
+    let tmp = std::env::temp_dir().join(format!(
+        "selfware_verify_rust_fmt_syntax_test_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("unformatted.rs"), "fn main(){println!(\"hi\");}\n").unwrap();
+
+    let gate = VerificationGate::new(&tmp, VerificationConfig::default());
+    let result = gate
+        .run_cheap_syntax_check(RepoLanguage::Rust, &["unformatted.rs".to_string()])
+        .await
+        .unwrap();
+    if result
+        .errors
+        .iter()
+        .any(|e| e.code.as_deref() == Some("VERIFIER_NOT_FOUND"))
+    {
+        eprintln!("rustfmt not installed — skipping Rust syntax-check tests");
+        let _ = std::fs::remove_dir_all(&tmp);
+        return;
+    }
+
+    assert!(
+        result.passed,
+        "unformatted-but-valid Rust must NOT fail the syntax gate: {}",
+        result.output
+    );
+    assert_eq!(result.check_type, CheckType::TypeCheck);
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|e| e.code.as_deref() == Some("FORMATTING_DIFF")),
+        "the advisory FORMATTING_DIFF note must be present: {:?}",
+        result.errors
+    );
+    assert!(
+        result
+            .errors
+            .iter()
+            .all(|e| !e.message.contains("syntax") || e.message.contains("not a syntax error")),
+        "no check may claim a syntax failure for a formatting diff: {:?}",
+        result.errors
+    );
+    assert!(
+        result.warnings.iter().any(|w| w.contains("formatting")),
+        "a warning must name the formatting difference: {:?}",
+        result.warnings
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[tokio::test]
+async fn cheap_syntax_check_rust_parse_error_still_fails() {
+    // Invariant of the format/syntax split (finding C): a REAL parse error
+    // must still fail the syntax gate with the syntax message — the split
+    // never turns a syntax error green.
+    let tmp = std::env::temp_dir().join(format!(
+        "selfware_verify_rust_err_syntax_test_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("bad.rs"), "fn main() {\n    let x = ;\n}\n").unwrap();
+
+    let gate = VerificationGate::new(&tmp, VerificationConfig::default());
+    let result = gate
+        .run_cheap_syntax_check(RepoLanguage::Rust, &["bad.rs".to_string()])
+        .await
+        .unwrap();
+    if result
+        .errors
+        .iter()
+        .any(|e| e.code.as_deref() == Some("VERIFIER_NOT_FOUND"))
+    {
+        eprintln!("rustfmt not installed — skipping Rust syntax-check tests");
+        let _ = std::fs::remove_dir_all(&tmp);
+        return;
+    }
+
+    assert!(
+        !result.passed,
+        "a genuine parse error must still fail the syntax gate: {}",
+        result.output
+    );
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("syntax check failed")),
+        "the failure message must still be a syntax failure: {:?}",
+        result.errors
+    );
+    assert!(
+        result
+            .errors
+            .iter()
+            .all(|e| e.code.as_deref() != Some("FORMATTING_DIFF")),
+        "a parse error must never be labeled a formatting diff: {:?}",
+        result.errors
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 #[tokio::test]
 async fn targeted_test_command_python() {
     let tmp = std::env::temp_dir().join(format!(
