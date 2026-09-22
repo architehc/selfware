@@ -529,6 +529,30 @@ impl Agent {
             (content, reasoning)
         };
 
+        // A response cut off by the completion budget (finish_reason ==
+        // "length") whose only output is a reasoning trace — no answer text —
+        // is a TRUNCATED turn, not a deliverable. The reasoning is a partial
+        // trace, and feeding it through the promotion below would store the
+        // truncated reasoning as the final answer (2026-09-21 review, P2:
+        // on the streamed path the length-truncated reasoning was promoted
+        // to content and accepted by the earlier completion gates, bypassing
+        // execution's length rejection). Fail typed here — same contract as
+        // the non-streaming client's `reasoning_budget_exhausted` — so the
+        // two paths share one semantic: reasoning-only + length is
+        // `ReasoningBudgetExhausted`, never a completed turn.
+        if chat_metadata
+            .as_ref()
+            .and_then(|m| m.finish_reason.as_deref())
+            == Some("length")
+            && content.trim().is_empty()
+            && reasoning.as_ref().is_some_and(|r| !r.trim().is_empty())
+        {
+            let reasoning_chars = reasoning.as_ref().map(|r| r.trim().len()).unwrap_or(0);
+            return Err(
+                crate::errors::ApiError::ReasoningBudgetExhausted { reasoning_chars }.into(),
+            );
+        }
+
         // Tag-free abliterated models: the qwen3 reasoning parser can
         // classify the ENTIRE response as reasoning_content, leaving content
         // empty — a loop reading only content sees a zero-turn forever

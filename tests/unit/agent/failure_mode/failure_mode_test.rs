@@ -144,6 +144,65 @@ async fn classify_retry_loop_on_permanently_blocked_tool_calls() {
     assert!(mode.evidence.contains("3 tool call"));
 }
 
+/// A permission/operator-approval stop must NEVER be mislabeled
+/// MAX_ITERATIONS (2026-09-21 review, P2): the headless AutoEdit CLI stop —
+/// `shell_exec` required confirmation in a non-interactive run — was
+/// classified `MAX_ITERATIONS` after only 3 iterations, with the wrong
+/// "raise max_iterations" recovery advice. The stop was deliberate: a tool
+/// needed interactive approval the mode could not provide.
+#[tokio::test]
+async fn classify_permission_required_instead_of_max_iterations() {
+    let mut agent = make_agent().await;
+    // The exact stop shape from the review's auto-edit CLI probe (3 turns,
+    // zero tool calls executed).
+    agent.test_set_mutating_count(0);
+    agent.test_set_total_tool_calls(0);
+
+    let reason = "Agent failed: Tool 'shell_exec' requires confirmation but running in \
+                  non-interactive mode. Use --yolo to auto-approve tools, or run interactively."
+        .to_string();
+    let mode = FailureMode::classify(&agent, RunOutcome::Failed { reason });
+
+    assert_eq!(
+        mode.kind,
+        FailureKind::PermissionRequired,
+        "a permission stop must not be filed as iteration exhaustion; evidence: {}",
+        mode.evidence
+    );
+    assert_eq!(mode.kind.tag(), "PERMISSION_REQUIRED");
+    // The JSON artifact must carry the honest category — never
+    // MAX_ITERATIONS with its wrong advice.
+    let json = serde_json::to_string(&mode).unwrap();
+    assert!(
+        json.contains("PermissionRequired"),
+        "failure_mode.json must say PermissionRequired, got: {json}"
+    );
+    assert!(
+        !json.contains("MaxIterations"),
+        "failure_mode.json must not claim MaxIterations, got: {json}"
+    );
+    assert!(
+        mode.advice.contains("--yolo") || mode.advice.contains("interactive"),
+        "advice must point at operator action: {}",
+        mode.advice
+    );
+    // The remedy must be operator action, never the iteration-cap advice
+    // that MAX_ITERATIONS would have given. The advice may *warn* against
+    // raising the cap ("do NOT raise max_iterations"); it must not present
+    // that action as the fix.
+    let lower_advice = mode.advice.to_lowercase();
+    assert!(
+        !lower_advice.contains("raise max_iterations or split"),
+        "advice must not recommend raising the cap: {}",
+        mode.advice
+    );
+    assert!(
+        mode.cli_banner().contains("PERMISSION_REQUIRED"),
+        "the CLI banner must tag the permission stop: {}",
+        mode.cli_banner()
+    );
+}
+
 #[tokio::test]
 async fn classify_prefill_breaker_when_circuit_open() {
     let mut agent = make_agent().await;

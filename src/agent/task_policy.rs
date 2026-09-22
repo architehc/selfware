@@ -62,7 +62,10 @@ impl PolicyKind {
 /// flips them to mutation-required — arming every force-mutation and
 /// stagnation guard against a task that must never edit (4-model read-only
 /// A/B: exactly this misclassification killed a "do NOT edit" review run
-/// with WORKSPACE_STAGNATION at 20 read-only calls).
+/// with WORKSPACE_STAGNATION at 20 read-only calls). The winning
+/// prohibition must be GLOBAL (see `global_no_edit_prohibition`): a scoped
+/// "do not modify <specific file>" constrains one protected path and must
+/// not flip the task read-only (2026-09-21 review, P2).
 pub(crate) fn task_is_read_only(task_context: &str) -> bool {
     let ctx = task_context.trim();
     if ctx.is_empty() {
@@ -99,13 +102,59 @@ pub(crate) fn task_is_read_only(task_context: &str) -> bool {
     ]
     .iter()
     .any(|needle| lower.contains(needle));
+    // Only a GLOBAL prohibition — not a scoped "do not modify X" that names
+    // a protected file — may flip a mutation task read-only.
+    let forbids_globally = global_no_edit_prohibition(&lower);
     if task_requires_mutation(ctx) {
         // The override needs BOTH signals: a scoped "do not change X" inside
         // an implementation task ("implement Y, do not change the public
-        // API") carries no report deliverable and must stay mutation.
-        return asks_for_report && forbids_editing;
+        // API") carries no report deliverable and must stay mutation; and a
+        // GLOBAL prohibition is what declares the run read-only — a scoped
+        // "do not modify test_calculator.py" still leaves the task mutating
+        // other files, so its mutation-required safeguards must stay armed
+        // (2026-09-21 review, P2: "fix calculator.py, do not modify
+        // test_calculator.py, report the result" was wrongly gated
+        // read-only-report).
+        return asks_for_report && forbids_globally;
     }
     asks_for_report || forbids_editing
+}
+
+/// True when the task text carries a GLOBAL no-edit prohibition, as opposed
+/// to a scoped constraint that names one protected artifact ("do not modify
+/// test_calculator.py", "do not change the public API"). A global
+/// prohibition quantifies over ALL files ("any", "anything", "no changes"),
+/// or is the bare self-describing "read-only"/"read only" marker.
+fn global_no_edit_prohibition(lower: &str) -> bool {
+    const GLOBAL_MARKERS: &[&str] = &[
+        "read-only",
+        "read only",
+        "do not edit any",
+        "don't edit any",
+        "do not edit anything",
+        "don't edit anything",
+        "do not modify any",
+        "don't modify any",
+        "do not modify anything",
+        "don't modify anything",
+        "do not change any",
+        "don't change any",
+        "do not change anything",
+        "don't change anything",
+        "do not touch any",
+        "don't touch any",
+        "do not touch anything",
+        "don't touch anything",
+        "without editing any",
+        "without editing anything",
+        "make no changes",
+        "no file changes",
+        "do not make any changes",
+        "do not write any files",
+        "no files may be changed",
+        "no files should be changed",
+    ];
+    GLOBAL_MARKERS.iter().any(|marker| lower.contains(marker))
 }
 
 /// True when a task asks about *this* workspace's code, so an answer must be
@@ -299,6 +348,49 @@ mod tests {
         ));
         assert!(!task_is_read_only(
             "Fix the parser bug; do not edit the config file."
+        ));
+    }
+
+    #[test]
+    fn scoped_prohibition_with_report_word_does_not_flip_an_edit_task() {
+        // 2026-09-21 review, P2 (the live prompt): "fix calculator.py, do
+        // not modify test_calculator.py, report the result". The raw
+        // classifier saw a report word + the prohibition and wrongly applied
+        // the read-only override, arming a read-only-report gate on a task
+        // that explicitly requires an edit. A PROTECTED-FILE constraint is
+        // not a GLOBAL prohibition: the task still mutates other files.
+        let prompt = "fix calculator.py, do not modify test_calculator.py, report the result";
+        assert!(
+            task_requires_mutation(prompt),
+            "the task explicitly requires an edit"
+        );
+        assert!(
+            !task_is_read_only(prompt),
+            "a scoped 'do not modify X' must NOT flip an edit task read-only \
+             (its mutation-required safeguards stay armed)"
+        );
+
+        // Sibling scoped shapes must behave identically.
+        assert!(!task_is_read_only(
+            "Fix the bug in parser.rs and report the result; do not touch lexer.rs."
+        ));
+        assert!(!task_is_read_only(
+            "Fix the API handler and report the fix; do not change src/lib.rs."
+        ));
+    }
+
+    #[test]
+    fn global_prohibition_with_report_deliverable_still_wins() {
+        // The read-only override must survive the scoped-vs-global split:
+        // a GLOBAL "do not edit anything" + report deliverable is read-only.
+        assert!(task_is_read_only(
+            "Review the code in src/agent/ and report findings. Do NOT edit any files."
+        ));
+        assert!(task_is_read_only(
+            "Fix the bug in parse_port, do not edit anything, then report the result."
+        ));
+        assert!(task_is_read_only(
+            "Audit the auth module and write a report. Read-only: make no changes."
         ));
     }
 

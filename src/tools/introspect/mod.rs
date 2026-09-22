@@ -133,8 +133,9 @@ impl CodeIntrospect {
             budget.suggest_depth(&[])
         };
 
-        // Collect target files
-        let files = self.collect_files(&target_path).await?;
+        // Collect target files (every discovered candidate is validated
+        // against the same path policy before it is read).
+        let files = self.collect_files(&target_path, &safety).await?;
         let total_files = files.len();
 
         // If we have a query, rank files by relevance
@@ -225,7 +226,7 @@ impl CodeIntrospect {
         })
     }
 
-    async fn collect_files(&self, target: &Path) -> Result<Vec<PathBuf>> {
+    async fn collect_files(&self, target: &Path, safety: &SafetyConfig) -> Result<Vec<PathBuf>> {
         let mut files = Vec::new();
 
         if target.is_file() {
@@ -234,11 +235,25 @@ impl CodeIntrospect {
             let mut entries = tokio::fs::read_dir(target).await?;
             while let Some(entry) = entries.next_entry().await? {
                 let path = entry.path();
+                // Every candidate that the walk will actually READ is
+                // validated against the same workspace path policy as the
+                // target itself (containment + symlink resolution, via
+                // `validate_tool_path`) BEFORE the read happens
+                // (2026-09-21 review P2: only the ROOT target was
+                // validated; a denied source file nested inside an allowed
+                // directory, or a symlink escaping the workspace, was read
+                // unvalidated). Directories are validated before descent so
+                // an escaping symlink directory is refused at the boundary;
+                // non-source files are never read and need no validation
+                // (skipping them keeps a `.env.example` from breaking the
+                // walk).
                 if path.is_file() && Self::is_source_file(&path) {
+                    validate_tool_path(&path.to_string_lossy(), safety)?;
                     files.push(path);
                 } else if path.is_dir() {
+                    validate_tool_path(&path.to_string_lossy(), safety)?;
                     // Recursively collect with depth limit
-                    files.extend(self.collect_files_recursive(&path, 3).await?);
+                    files.extend(self.collect_files_recursive(&path, 3, safety).await?);
                 }
             }
         }
@@ -251,6 +266,7 @@ impl CodeIntrospect {
         &'a self,
         dir: &'a Path,
         depth: usize,
+        safety: &'a SafetyConfig,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<PathBuf>>> + Send + 'a>>
     {
         Box::pin(async move {
@@ -275,10 +291,17 @@ impl CodeIntrospect {
                     }
                 }
 
+                // Validate each candidate the walk will read, exactly as in
+                // `collect_files` (see the comment there).
                 if path.is_file() && Self::is_source_file(&path) {
+                    validate_tool_path(&path.to_string_lossy(), safety)?;
                     files.push(path);
                 } else if path.is_dir() {
-                    files.extend(self.collect_files_recursive(&path, depth - 1).await?);
+                    validate_tool_path(&path.to_string_lossy(), safety)?;
+                    files.extend(
+                        self.collect_files_recursive(&path, depth - 1, safety)
+                            .await?,
+                    );
                 }
             }
 
@@ -486,9 +509,10 @@ impl Tool for CodeQuery {
         let safety = resolve_safety_config(self.safety_config.as_ref());
         validate_tool_path(&scope, &safety)?;
 
-        // Collect files in scope
+        // Collect files in scope (every discovered candidate is validated
+        // against the same path policy before it is read).
         let mut files = Vec::new();
-        Self::collect_files(&scope_path, &mut files).await?;
+        Self::collect_files(&scope_path, &mut files, &safety).await?;
 
         // Build query engine and search
         let mut engine = CodeQueryEngine::new();
@@ -521,9 +545,14 @@ impl Tool for CodeQuery {
 }
 
 impl CodeQuery {
-    async fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    async fn collect_files(
+        dir: &Path,
+        files: &mut Vec<PathBuf>,
+        safety: &SafetyConfig,
+    ) -> Result<()> {
         if !dir.is_dir() {
             if dir.is_file() && CodeIntrospect::is_source_file(dir) {
+                validate_tool_path(&dir.to_string_lossy(), safety)?;
                 files.push(dir.to_path_buf());
             }
             return Ok(());
@@ -543,10 +572,14 @@ impl CodeQuery {
                 }
             }
 
+            // Validate each candidate the walk will read (see the
+            // `CodeIntrospect::collect_files` comment for the rationale).
             if path.is_file() && CodeIntrospect::is_source_file(&path) {
+                validate_tool_path(&path.to_string_lossy(), safety)?;
                 files.push(path);
             } else if path.is_dir() {
-                Box::pin(Self::collect_files(&path, files)).await?;
+                validate_tool_path(&path.to_string_lossy(), safety)?;
+                Box::pin(Self::collect_files(&path, files, safety)).await?;
             }
         }
 

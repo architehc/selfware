@@ -365,6 +365,32 @@ impl StreamingResponse {
             .into());
         }
 
+        // A stream that produced events but never reached an accepted
+        // terminal indication — the [DONE] sentinel or a provider
+        // `finish_reason` on the final choice — is TRUNCATED, not complete.
+        // Accepting it as `Ok` hands the caller half-written prose or a
+        // partial tool call with `finish_reason=None` (2026-09-21 review,
+        // P2: a mock that sent one content event and closed returned
+        // `Ok(content="The incomplete answer is", finish_reason=None)` and
+        // the runtime synthesized "stream_end"). Fail with the same typed
+        // protocol-violation family as the zero-events case: the accumulated
+        // usage survives in the attempt ledger (`UsageLedger` charges each
+        // usage chunk as it arrives) and is echoed in the message below, so
+        // truncated billable work is not silently dropped.
+        if !saw_done && finish_reason.is_none() {
+            return Err(ApiError::Parse(format!(
+                "stream ended before an accepted terminal indication (no [DONE], no finish_reason): \
+                 truncated after {} content chars / {} reasoning chars / {} tool call(s); \
+                 usage retained (prompt={}, completion={})",
+                content.len(),
+                reasoning.len(),
+                tool_calls.len(),
+                usage.prompt_tokens,
+                usage.completion_tokens,
+            ))
+            .into());
+        }
+
         let component_total = usage.prompt_tokens.saturating_add(usage.completion_tokens);
         usage.total_tokens = if cumulative_coverage.total {
             raw_reported_total.max(component_total)
@@ -719,6 +745,15 @@ pub(crate) fn parse_sse_event(
         }
 
         if let Some(usage_val) = json.get("usage") {
+            // SGLang emits `"usage": null` on chunks that carry no usage
+            // report (observed on every content chunk of a streamed
+            // qwen38-flash-next response). A null is "no usage here", not a
+            // malformed report — skip it silently instead of logging a
+            // warn-per-token that drowns the log (2026-09-21 review, P2.
+            // Genuinely malformed usage values still warn below).
+            if usage_val.is_null() {
+                continue;
+            }
             let coverage = super::usage::UsageCoverage::from_json(usage_val);
             match serde_json::from_value::<Usage>(usage_val.clone()) {
                 Ok(u) => chunks.push(StreamChunk::Usage(u, coverage)),

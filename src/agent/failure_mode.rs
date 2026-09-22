@@ -52,6 +52,12 @@ pub enum FailureKind {
     /// wall-clock or iterations cannot fix a (correct) safety refusal — the
     /// task or the safety configuration must change.
     BlockedBySafety,
+    /// A tool call required interactive confirmation/approval that a
+    /// non-interactive run could not provide (e.g. `shell_exec` in a
+    /// headless AutoEdit run). The run stopped on purpose, NOT because
+    /// iterations ran out — the remedy is operator action (approve the tool,
+    /// switch mode, grant permission), never "raise max_iterations".
+    PermissionRequired,
     /// `max_iterations` hit without any other distinguishing signal.
     MaxIterations,
     /// Model emitted "Final answer:" without ever mutating a tool.
@@ -74,6 +80,7 @@ impl FailureKind {
             FailureKind::NoChange => "NO_CHANGES",
             FailureKind::BudgetExhausted => "BUDGET_EXHAUSTED",
             FailureKind::BlockedBySafety => "BLOCKED_BY_SAFETY",
+            FailureKind::PermissionRequired => "PERMISSION_REQUIRED",
             FailureKind::MaxIterations => "MAX_ITERATIONS",
             FailureKind::FakeComplete => "FAKE_COMPLETE",
             FailureKind::Unknown => "UNKNOWN",
@@ -233,6 +240,26 @@ impl FailureMode {
                         kind: FailureKind::ReadLoop,
                         evidence: "aborted early: read-only tool loop on a mutation task with 0 edits".to_string(),
                         advice: "the model kept reading without editing — point it at the file to change; do NOT raise max_iterations".to_string(),
+                    };
+                }
+                // Permission / operator-approval stop (2026-09-21 review,
+                // P2): a tool that requires interactive confirmation in a
+                // non-interactive run ends the loop with the TYPED
+                // `ConfirmationRequired` error, whose message names the
+                // non-interactive mode. Unrecognized, the generic fallback
+                // filed it as MAX_ITERATIONS after 3 iterations ("raise
+                // max_iterations") although the cap was never approached:
+                // the stop was deliberate and the remedy is operator action.
+                // Matched before the counter fallbacks exactly like the
+                // other explicit loop-abort markers above.
+                if reason.contains("requires confirmation but running in non-interactive mode") {
+                    return FailureMode {
+                        kind: FailureKind::PermissionRequired,
+                        evidence: format!(
+                            "run stopped: a tool call required interactive approval unavailable in this mode ({} total tool calls, {} mutating)",
+                            total_calls, mutating
+                        ),
+                        advice: "re-run interactively, use --yolo / auto-approve the tool, or pre-grant the permission — do NOT raise max_iterations".to_string(),
                     };
                 }
                 // Safety-blocked runs burn their whole budget and then get

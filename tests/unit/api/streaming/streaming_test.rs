@@ -1,4 +1,5 @@
 use super::{append_utf8_chunk, parse_sse_event, StreamChunk, ToolCallAccumulator};
+use std::sync::{Arc, Mutex};
 
 #[test]
 fn append_utf8_chunk_preserves_split_multibyte_codepoint() {
@@ -287,4 +288,214 @@ async fn test_stream_collection_retains_reported_components_on_inconsistent_tota
     assert_eq!(chat_resp.usage.reasoning_tokens(), Some(10));
     // Derived total should reconcile to prompt + completion (120)
     assert_eq!(chat_resp.usage.total_tokens, 120);
+}
+
+// ── Truncated streams must fail typed, never read as success ─────────────
+//
+// Regression (2026-09-21 review, P2): a mock sent one valid content event
+// and closed — no [DONE], no finish_reason. collect() returned Ok with the
+// half-written prose and finish_reason=None, and the runtime synthesized
+// "stream_end", accepting truncated tool calls and partial prose as
+// completed work. Every stream must reach an accepted terminal indication
+// ([DONE] or a provider finish_reason) or fail typed.
+
+#[tokio::test]
+async fn test_stream_collection_truncated_after_one_content_event_is_error() {
+    use super::StreamingResponse;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    // The review's exact probe shape: one content event, then the mock
+    // closes the connection. No [DONE], no finish_reason.
+    let sse_data = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"The incomplete answer is\"}}]}\n\n";
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 1024];
+        let _ = socket.read(&mut buf).await.unwrap();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{}",
+            sse_data
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{}/stream", addr))
+        .send()
+        .await
+        .unwrap();
+
+    let streaming_resp = StreamingResponse::new(resp, std::time::Duration::from_secs(5), None);
+    let err = streaming_resp
+        .collect()
+        .await
+        .expect_err("a stream with no terminal indication must not succeed");
+    server.await.unwrap();
+
+    assert!(
+        err.chain().any(|c| matches!(
+            c.downcast_ref::<crate::errors::ApiError>(),
+            Some(crate::errors::ApiError::Parse(_))
+        )),
+        "expected a typed ApiError::Parse incomplete-stream outcome, got: {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("accepted terminal indication"),
+        "the error must name the missing terminal indication, got: {msg}"
+    );
+    assert!(
+        msg.contains("usage retained"),
+        "the typed outcome must retain the accumulated usage, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn test_stream_collection_truncated_partial_tool_call_is_error() {
+    use super::StreamingResponse;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    // A tool-call delta whose arguments are cut off mid-JSON, then the
+    // connection drops before [DONE]/finish_reason: the half-formed call
+    // must not be returned as a successful completion.
+    let sse_data = "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"file_read\",\"arguments\":\"{\\\"path\\\": \\\"partial\"}}]}}]}\n\n";
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 1024];
+        let _ = socket.read(&mut buf).await.unwrap();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{}",
+            sse_data
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{}/stream", addr))
+        .send()
+        .await
+        .unwrap();
+
+    let streaming_resp = StreamingResponse::new(resp, std::time::Duration::from_secs(5), None);
+    let err = streaming_resp
+        .collect()
+        .await
+        .expect_err("a stream cut off mid-tool-call must not succeed");
+    server.await.unwrap();
+    assert!(
+        err.chain().any(|c| matches!(
+            c.downcast_ref::<crate::errors::ApiError>(),
+            Some(crate::errors::ApiError::Parse(_))
+        )),
+        "expected a typed incomplete-stream outcome, got: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_stream_collection_finish_reason_without_done_is_accepted() {
+    use super::StreamingResponse;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    // Some providers end the stream with a finish_reason choice and NO
+    // [DONE] sentinel. The finish_reason IS the accepted terminal
+    // indication — this must stay Ok (collect()'s contract, kept from the
+    // pre-fix behavior: "clean EOF after valid SSE events is accepted,
+    // including providers that finish with finish_reason but no [DONE]").
+    let sse_data = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Complete answer\"}}]}\n\n\
+                    data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2,\"total_tokens\":6}}\n\n";
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 1024];
+        let _ = socket.read(&mut buf).await.unwrap();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{}",
+            sse_data
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{}/stream", addr))
+        .send()
+        .await
+        .unwrap();
+
+    let streaming_resp = StreamingResponse::new(resp, std::time::Duration::from_secs(5), None);
+    let chat_resp = streaming_resp.collect().await.unwrap();
+    server.await.unwrap();
+
+    assert_eq!(chat_resp.choices[0].message.content, "Complete answer");
+    assert_eq!(chat_resp.choices[0].finish_reason.as_deref(), Some("stop"));
+    assert_eq!(chat_resp.usage.total_tokens, 6);
+}
+
+/// SGLang emits `"usage": null` on streaming chunks that carry no usage
+/// report. This must not warn per token/chunk (2026-09-21 review, P2) and
+/// must not fabricate a zeroed Usage chunk — content keeps flowing and no
+/// "Failed to parse streamed usage" warning is emitted.
+#[test]
+fn null_usage_chunks_are_skipped_silently_without_warning() {
+    use super::parse_sse_event;
+
+    let captured: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    // Capture everything the subscriber would emit at warn level or below.
+    let writer = Arc::clone(&captured);
+    let filter = tracing_subscriber::EnvFilter::new("warn");
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(move || {
+            let w = Arc::clone(&writer);
+            std::io::BufWriter::new(CaptureWriter(w))
+        })
+        .finish();
+
+    tracing::subscriber::with_default(subscriber, || {
+        let mut acc = ToolCallAccumulator::new();
+        // One content chunk with `"usage": null` (the SGLang shape), then
+        // a normal finish. Under the old code the null chunk warned.
+        let event =
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}],\"usage\":null}\n\n";
+        let chunks = parse_sse_event(event, &mut acc);
+        assert_eq!(chunks.len(), 1, "null usage must not emit extra chunks");
+        assert!(
+            matches!(&chunks[0], StreamChunk::Content(t) if t == "hi"),
+            "content must survive a null-usage chunk, got: {chunks:?}"
+        );
+        assert!(
+            !chunks.iter().any(|c| matches!(c, StreamChunk::Usage(_, _))),
+            "a null usage report is 'not reported', not a zeroed Usage chunk"
+        );
+    });
+
+    let out = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    assert!(
+        !out.contains("Failed to parse streamed usage"),
+        "null usage must be skipped silently, captured output was: {out}"
+    );
+}
+
+struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for CaptureWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }

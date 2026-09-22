@@ -19,6 +19,68 @@ use tracing::{debug, warn};
 /// Maximum number of cached token counts before the cache is cleared.
 const MAX_CACHE_ENTRIES: usize = 1_000;
 
+/// Measured multiplier applied to tokenizer counts on CODE-SHAPED content.
+///
+/// The generic tokenizers (cl100k, and the HF fallbacks) systematically
+/// UNDER-COUNT code. Measured 2026-09-21 on the production context path:
+/// the 350k context cap admitted ~385k actual server tokens (prefill
+/// measured at 7.6k tok/s → ~51s against the 60s cliff) — i.e. the
+/// estimator ran ~9-10% low and the prefill nearly blew the cap. AGENTS.md
+/// rule 4 says measured, not estimated: the factor below is the measured
+/// ratio (385/350 ≈ 1.10) applied only where the content demonstrably
+/// carries code shape, never to prose. Rounding is upward, so the estimate
+/// lands at or above the measured actuals.
+const CODE_CALIBRATION_FACTOR: f32 = 1.10;
+
+/// Only meaningful-sized blocks are calibrated: a tiny snippet's relative
+/// padding would be noise, and short strings elsewhere in the harness
+/// (log lines, tool arguments) should not carry the code inflator.
+const CODE_SHAPE_MIN_TOKENS: usize = 64;
+
+/// True when `content` carries code shape rather than prose: a mix of
+/// braces/semicolons or a language keyword. The classifier is deliberately
+/// permissive in the safe direction — over-inflating prose costs budget
+/// headroom, under-inflating code re-opens the measured prefill cliff.
+fn is_code_shaped(content: &str) -> bool {
+    let punctuation = content
+        .chars()
+        .filter(|c| matches!(c, '{' | '}' | ';'))
+        .count();
+    if punctuation >= 16 {
+        return true;
+    }
+    const LANGUAGE_KEYWORDS: &[&str] = &[
+        "fn ",
+        "def ",
+        "impl ",
+        "struct ",
+        "enum ",
+        "class ",
+        "interface ",
+        "func ",
+        "function ",
+        "const ",
+        "let ",
+        "return ",
+        "import ",
+        "use ",
+        "pub ",
+        "elif ",
+        "=>",
+    ];
+    LANGUAGE_KEYWORDS.iter().any(|kw| content.contains(kw))
+}
+
+/// Apply the measured code-calibration margin to a raw tokenizer count.
+/// Prose (and tiny snippets) pass through untouched.
+fn apply_code_calibration(count: usize, content: &str) -> usize {
+    if count < CODE_SHAPE_MIN_TOKENS || !is_code_shaped(content) {
+        return count;
+    }
+    let calibrated = (count as f32 * CODE_CALIBRATION_FACTOR).ceil() as usize;
+    calibrated.max(count)
+}
+
 /// Model name registered by the CLI entry point once it has loaded the
 /// effective [`Config`](crate::config::Config) (see `set_configured_model`).
 /// The tokenizer must never reload the config file itself: a mid-session
@@ -220,6 +282,9 @@ pub fn estimate_tool_definitions_tokens(tools: &[crate::api::types::ToolDefiniti
 /// Estimate tokens for raw content.
 ///
 /// Results are cached by content hash to avoid redundant tokenization.
+/// Code-shaped content is calibrated up by [`CODE_CALIBRATION_FACTOR`]
+/// (measured 2026-09-21: the generic tokenizers ran ~9% low on code, so a
+/// 350k context cap admitted ~385k actual server tokens).
 #[inline]
 pub fn estimate_content_tokens(content: &str) -> usize {
     let key = hash_content(content);
@@ -231,8 +296,9 @@ pub fn estimate_content_tokens(content: &str) -> usize {
         }
     }
 
-    // Cache miss — compute the token count.
-    let count = TOKENIZER.count(content);
+    // Cache miss — compute the token count (calibrated before caching, so
+    // the calibrated value — the only one callers ever see — is cached).
+    let count = apply_code_calibration(TOKENIZER.count(content), content);
 
     // Store in cache (acquire write lock).
     if let Ok(mut cache) = TOKEN_CACHE.write() {

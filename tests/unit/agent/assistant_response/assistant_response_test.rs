@@ -466,3 +466,78 @@ async fn context_boundary_keeps_tool_pairs_adjacent_on_the_wire() {
 
     server.stop().await;
 }
+
+// ── finish_reason=length with reasoning-only output (2026-09-21 review, P2) ──
+//
+// A streamed response cut off by the completion budget whose ONLY output is
+// a reasoning trace (empty answer text) is TRUNCATED, not a deliverable.
+// Previously the truncated reasoning was promoted to content (the tag-free
+// model fallback) and stored as the final answer, bypassing execution's
+// length rejection. It must now fail typed — `ReasoningBudgetExhausted`,
+// the same semantic the non-streaming client applies — so the turn is never
+// accepted as completed work.
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "raw TCP SSE server unreliable under heavy parallelism on Windows CI"
+)]
+async fn streamed_reasoning_only_length_never_becomes_the_final_answer() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // A raw SSE server that answers any request with one reasoning delta and
+    // a final `finish_reason: "length"` — no answer text, no [DONE].
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        // Drain the request head (any method/path).
+        let mut buf = [0u8; 4096];
+        let mut head = Vec::new();
+        loop {
+            let n = socket.read(&mut buf).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            head.extend_from_slice(&buf[..n]);
+            if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let sse = "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"Let me think about this carefully before the answer gets cut off...\"},\"finish_reason\":null}]}\n\n\
+                   data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":320,\"total_tokens\":332}}\n\n";
+        // Chunked framing exactly like the passing mock streams: the API
+        // client's body decoder requires it.
+        let chunk = format!("{:X}\r\n{}\r\n", sse.len(), sse);
+        let end_chunk = "0\r\n\r\n";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{}{}",
+            chunk, end_chunk
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+
+    let config = mock_agent_config(format!("http://{addr}/v1"), true);
+    let mut agent = crate::agent::Agent::new(config).await.unwrap();
+    agent
+        .messages
+        .push(crate::api::types::Message::user("Write the refactor plan."));
+
+    let result = agent.get_assistant_step_response(false).await;
+    let err = match result {
+        Ok(resp) => panic!(
+            "reasoning-only + finish_reason=length must fail typed, not become a final \
+             answer; got Ok with {} content chars",
+            resp.content.chars().count()
+        ),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(
+            err.downcast_ref::<crate::errors::ApiError>(),
+            Some(crate::errors::ApiError::ReasoningBudgetExhausted { .. })
+        ),
+        "expected ApiError::ReasoningBudgetExhausted, got: {err:?}"
+    );
+    server.await.unwrap();
+}
