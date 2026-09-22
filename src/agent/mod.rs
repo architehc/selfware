@@ -520,6 +520,82 @@ fn render_restore_outcomes(
     line
 }
 
+/// Conservative extension of the dispatcher's read-only classifier for
+/// PLAIN INTERPRETER SCRIPT RUNS (`python3 stats.py`), used by
+/// [`Agent::headless_auto_edit_auto_approve`].
+///
+/// The shell verbs in the W1b read-verb allowlist are classified
+/// observationally by `shell_command_is_observational`, but an interpreter
+/// run is not — so a headless auto-edit task that observes via a repo script
+/// (the container-e2e `python3 stats.py` shape) hit the unconfirmable gate.
+/// This widens ONLY that exact shape, fail-closed on everything else:
+///
+/// - the verb is a plain, well-known interpreter — notably NOT `sh`/`bash`/
+///   `zsh`/`dash`/`ksh`/`fish`, which can load profile/alias state and are
+///   classic bypass vectors;
+/// - the whole command is ONE invocation: any connector (`&&`/`;`/`|`),
+///   redirect (`>`/`<`), substitution (`$`/`` ` ``/`$(…)`), or newline
+///   disqualifies the run;
+/// - no inline-code flag (`-c`/`-e`/`--eval`/`-i`) and no stdin-script
+///   marker (`-`);
+/// - the first non-flag operand is a script file (contains `/` or has a
+///   known script extension).
+///
+/// The script's own contents remain unverifiable — a residual risk the
+/// allowlist posture accepts (defense-in-depth: the safety checker's path
+/// policy still validates every explicit path operand, and the yolo guard
+/// heuristics still veto destructive/credential-shaped commands).
+fn interpreter_script_run_is_observational(command: &str) -> bool {
+    let normalized = command.trim();
+    if normalized.is_empty() || command.contains([';', '|', '&', '>', '<', '`', '$', '\n']) {
+        return false;
+    }
+    let tokens: Vec<&str> = normalized.split_whitespace().collect();
+    if tokens.is_empty() {
+        return false;
+    }
+    let verb = tokens[0].rsplit('/').next().unwrap_or(tokens[0]);
+    if !matches!(
+        verb,
+        "python"
+            | "python3"
+            | "pypy"
+            | "node"
+            | "nodejs"
+            | "deno"
+            | "bun"
+            | "ruby"
+            | "perl"
+            | "php"
+    ) {
+        return false;
+    }
+    for arg in &tokens[1..] {
+        if matches!(*arg, "-c" | "-e" | "--eval" | "-i") || *arg == "-" {
+            // Inline code / stdin script — arbitrary program text, NOT a
+            // verifiable read (the dispatcher deliberately excludes
+            // `python3 -c` for the same reason).
+            return false;
+        }
+        if arg.starts_with('-') {
+            // Flags like `-u`/`-B` don't decide script-ness; keep scanning.
+            continue;
+        }
+        // First non-flag operand must be a script file, not a bare expression.
+        let script_extension = arg
+            .rsplit_once('.')
+            .map(|(_, ext)| {
+                matches!(
+                    ext,
+                    "py" | "pyw" | "js" | "mjs" | "cjs" | "ts" | "rb" | "pl" | "pm" | "php" | "sh"
+                )
+            })
+            .unwrap_or(false);
+        return arg.contains('/') || script_extension;
+    }
+    false
+}
+
 /// Consolidated file-context tracking.
 ///
 /// Groups the three previously-scattered file tracking structures into one
@@ -2285,8 +2361,10 @@ To call a tool, use this EXACT XML structure:
                 // ask for destructive operations. The sets below reuse the
                 // checker's own classification (src/safety/checker/validation.rs:
                 // cargo_* "run predefined cargo subcommands, not arbitrary
-                // shell"; lsp_* are read-only introspection) so the approval
-                // policy and the safety checker cannot drift apart.
+                // shell"; lsp_* are read-only introspection; context_bulk_read
+                // resolves every path through the same `PathValidator` as the
+                // file tools before any I/O) so the approval policy and the
+                // safety checker cannot drift apart.
                 //
                 // Headless `-m auto-edit` runs have no TTY to answer a
                 // confirmation prompt, so before this set existed a mutating
@@ -2295,12 +2373,27 @@ To call a tool, use this EXACT XML structure:
                 // for the whole turn budget (measured: 74 steps / 1.47M
                 // tokens). Auto-approving these makes the edit → verify loop
                 // finish headless.
+                //
+                // 2026-09-22 (Rule 2, review-authorized policy flip — critical
+                // review item 11): `context_bulk_read` joins the set. It is
+                // read-only by construction and path-gated like every other
+                // read here, and a headless auto-edit run whose FIRST real task
+                // starts with a bulk context read died on it with "Use --yolo"
+                // (container e2e, iteration 2). OBSERVATIONAL `shell_exec` /
+                // `pty_shell` (which can only be classified with the call's
+                // arguments) are NOT in this args-blind list: they are widened
+                // in `headless_auto_edit_auto_approve`, which only fires
+                // headless and shares this module's yield to
+                // `safety.require_confirmation`.
                 let auto_approved = [
                     // File operations (unchanged)
                     "file_write",
                     "file_edit",
                     "directory_tree",
                     "glob_find",
+                    // Context reads (read-only, paths resolved through the
+                    // same path policy as the file tools).
+                    "context_bulk_read",
                     // Checker-safe predefined cargo subcommands
                     "cargo_test",
                     "cargo_check",
@@ -2321,6 +2414,88 @@ To call a tool, use this EXACT XML structure:
                 // Ask for all tools except safe ones
                 !safe_tools.contains(&tool_name)
             }
+        }
+    }
+
+    /// Headless AutoEdit widening (2026-09-22, container-e2e-validated).
+    ///
+    /// The documented default headless deployment (`-m auto-edit`, no TTY)
+    /// died on its FIRST real task before this existed: read-only observation
+    /// — `context_bulk_read`, an observational `shell_exec` such as
+    /// `python3 stats.py`, `pty_shell` — hit the confirm gate, which has no
+    /// operator to answer headless, and aborted with the typed
+    /// `ConfirmationRequired` stop ("Use --yolo"). The defect was named in
+    /// two reviews; the 2026-09-21 critical review item 11 (read-only
+    /// observation failing headlessly) was never dispatched. This is that
+    /// dispatch (Rule 2 sign-off: review-authorized policy flip).
+    ///
+    /// Auto-approves ONLY tools whose execution is READ-ONLY AND PATH-SAFE:
+    ///
+    /// - `context_bulk_read` — read-only by construction; every resolved
+    ///   path passes the same `PathValidator` as the file tools before any
+    ///   I/O (argument-independent, so it also lives in `needs_confirmation`).
+    /// - `shell_exec` / `pty_shell` — approved ONLY when ALL of:
+    ///   1. the command is observational by the dispatcher's own read-only
+    ///      classifier (mirrors the W1b read-verb classification from
+    ///      72a750f1) or is a PLAIN interpreter script run whose operand is
+    ///      a script file, not inline code (see
+    ///      [`interpreter_script_run_is_observational`]);
+    ///   2. the safety checker's full path policy passes for the command
+    ///      (`allowed_paths` W1b enforcement, denied globs, redirect/tee
+    ///      guards) — re-checked here so a future reordering of the gate
+    ///      cannot leak a path violation into a silent grant;
+    ///   3. every YOLO guard heuristic passes — not destructive, no
+    ///      sensitive-path reads, no denied-path reads, no protected-path
+    ///      mutation targets. The guard oracle is
+    ///      `crate::safety::yolo::headless_auto_edit_shell_guard_pass`
+    ///      (the same heuristics the YOLO floor applies).
+    ///
+    /// EVERYTHING else returns `None` (or `Some(false)` for an examined
+    /// shell call that failed the classifier) and falls through to the
+    /// normal confirmation policy, which headless turns into the typed stop
+    /// — never a silent grant, and never a mislabeled one (W2b).
+    ///
+    /// Scope: this fires ONLY when `execution_mode == AutoEdit` AND the run
+    /// is headless (no TTY, no TUI). Normal and Yolo/Daemon modes are
+    /// untouched; interactive AutoEdit keeps prompting exactly as before.
+    pub(crate) fn headless_auto_edit_auto_approve(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> Option<bool> {
+        use crate::config::ExecutionMode;
+        if !matches!(self.config.execution_mode, ExecutionMode::AutoEdit) {
+            return None;
+        }
+        if self.is_interactive() || self.has_tui_renderer() {
+            return None;
+        }
+        match tool_name {
+            "context_bulk_read" => Some(true),
+            "shell_exec" | "pty_shell" => {
+                let Some(cmd) = args.get("command").and_then(|c| c.as_str()) else {
+                    // Unparseable arguments — fail closed, never a silent grant.
+                    return None;
+                };
+                if cmd.trim().is_empty() {
+                    return None;
+                }
+                let observational =
+                    crate::agent::tool_dispatch::helpers::shell_command_is_observational(cmd)
+                        || interpreter_script_run_is_observational(cmd);
+                let checker_ok = self.safety.check_shell_command(cmd).is_ok();
+                let guard_ok = crate::safety::yolo::headless_auto_edit_shell_guard_pass(
+                    cmd,
+                    &self.config.safety.denied_paths,
+                    self.yolo_manager.protected_paths(),
+                );
+                if observational && checker_ok && guard_ok {
+                    Some(true)
+                } else {
+                    Some(false)
+                }
+            }
+            _ => None,
         }
     }
 

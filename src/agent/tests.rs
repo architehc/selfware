@@ -613,6 +613,11 @@ fn test_execution_mode_auto_edit_approval_policy() {
     assert!(!needs_confirmation_for_tool(&config, "directory_tree"));
     assert!(!needs_confirmation_for_tool(&config, "glob_find"));
 
+    // …and read-only context reads (2026-09-22: `context_bulk_read` joined
+    // the set — a headless auto-edit run died on it at e2e iteration 2;
+    // every path it resolves passes the same path policy as file_read).
+    assert!(!needs_confirmation_for_tool(&config, "context_bulk_read"));
+
     // …and the tools the safety checker classes as safe predefined
     // subcommands: cargo_* (fixed subcommands, not arbitrary shell) and lsp_*
     // (read-only introspection). A headless `-m auto-edit` run editing a file
@@ -711,14 +716,15 @@ fn needs_confirmation_for_tool(config: &Config, tool_name: &str) -> bool {
         ExecutionMode::Yolo | ExecutionMode::Daemon => false,
         ExecutionMode::AutoEdit => {
             // Mirror of `Agent::needs_confirmation`'s AutoEdit branch: the
-            // four file tools plus the checker-safe predefined-subcommand
-            // tools (cargo_* / lsp_*). Keep in sync with
-            // src/agent/mod.rs `needs_confirmation`.
+            // four file tools, context_bulk_read, plus the checker-safe
+            // predefined-subcommand tools (cargo_* / lsp_*). Keep in sync
+            // with src/agent/mod.rs `needs_confirmation`.
             let auto_approved = [
                 "file_write",
                 "file_edit",
                 "directory_tree",
                 "glob_find",
+                "context_bulk_read",
                 "cargo_test",
                 "cargo_check",
                 "cargo_clippy",
@@ -1395,6 +1401,8 @@ async fn test_auto_edit_headless_approves_checker_safe_tools_in_real_predicate()
         "file_edit",
         "directory_tree",
         "glob_find",
+        // Read-only context reads (2026-09-22 widening).
+        "context_bulk_read",
         // Checker-safe predefined subcommands (the fix).
         "cargo_test",
         "cargo_check",
@@ -1578,6 +1586,350 @@ async fn test_headless_auto_edit_confirm_gated_tool_stops_with_typed_outcome() {
     assert!(
         !msg.contains("Max iterations"),
         "the run must fail fast instead of looping to the iteration ceiling: {:?}",
+        err
+    );
+
+    server.stop().await;
+}
+
+// =========================================================================
+// Test: Headless AutoEdit read-only observation widening (2026-09-22)
+//
+// The documented default headless deployment (`-m auto-edit`, no TTY) died
+// on its FIRST real task before this widening: read-only observation —
+// `context_bulk_read`, an observational `shell_exec` such as
+// `python3 stats.py`, `pty_shell` — hit the confirm gate, which has no
+// operator to answer headless, and aborted with "requires confirmation ...
+// Use --yolo" (container e2e). Normal and Yolo/Daemon modes are untouched;
+// interactive AutoEdit keeps prompting exactly as before.
+// =========================================================================
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn test_headless_auto_edit_readonly_observation_completes_without_confirmation_stop() {
+    // Regression (d): a headless AutoEdit run whose plan observes via
+    // context_bulk_read + a path-safe observational `shell_exec` (in-
+    // workspace, non-sensitive args) must complete WITHOUT a confirmation
+    // stop. Before the fix, both tools hit the unconfirmable headless gate
+    // and the run aborted with the typed ConfirmationRequired error.
+    let _g = crate::test_support::ExecGuard::hold();
+
+    // Scratch deliverable inside docs/ (auto-removed on drop), read by the
+    // real `cat` the agent runs.
+    let scratch_dir = std::env::current_dir()
+        .expect("current dir")
+        .join("docs")
+        .join(format!(".sw_e2e_obs_read_{}", std::process::id()));
+    std::fs::create_dir_all(&scratch_dir).expect("create scratch dir");
+    std::fs::write(scratch_dir.join("notes.md"), "observational scratch\n")
+        .expect("write scratch notes");
+    struct ScratchCleanup(std::path::PathBuf);
+    impl Drop for ScratchCleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = ScratchCleanup(scratch_dir);
+    let scratch_rel = format!("docs/.sw_e2e_obs_read_{}/notes.md", std::process::id());
+
+    let task = format!(
+        "Observation task: load src/agent/mod.rs into context with context_bulk_read, then read \
+         the notes file {} with shell_exec, and report what the notes say.",
+        scratch_rel
+    );
+
+    let server = MockLlmServer::builder()
+        .with_response(
+            "<tool>\n<name>context_bulk_read</name>\n<arguments>{\"pattern\":\"src/agent/mod.rs\"}</arguments>\n</tool>",
+        )
+        .with_response(format!(
+            "<tool>\n<name>shell_exec</name>\n<arguments>{{\"command\":\"cat {}\"}}</arguments>\n</tool>",
+            scratch_rel
+        ))
+        .with_response("Final answer: notes say 'observational scratch'.")
+        .build()
+        .await;
+
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.execution_mode = ExecutionMode::AutoEdit;
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let result = agent.run_task(&task).await;
+    assert!(
+        result.is_ok(),
+        "headless AutoEdit observation must complete without a confirmation stop (was a read-only tool denied?): {:?}",
+        result.err()
+    );
+    let joined: String = agent
+        .messages
+        .iter()
+        .map(|m| m.content.text().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !joined.contains("requires confirmation"),
+        "no confirmation denial may appear in headless AutoEdit for read-only observation:\n{}",
+        joined
+    );
+    assert_eq!(
+        agent.total_tool_call_count(),
+        2,
+        "both context_bulk_read and the observational shell_exec must have executed (2 total calls); rendered chain:\n{}",
+        joined
+    );
+
+    server.stop().await;
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn test_headless_auto_edit_readonly_approval_classifier() {
+    // Pins the widening's exact boundary on the REAL predicate (not the
+    // run-level test above, and not the config mirror): what headless
+    // AutoEdit auto-approves, what stays confirm-gated, and what falls
+    // through to the normal policy untouched.
+    let _g = crate::test_support::ExecGuard::hold();
+    let server = MockLlmServer::builder().with_response("ok").build().await;
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.execution_mode = ExecutionMode::AutoEdit;
+    let agent = Agent::new(config).await.unwrap();
+
+    let approve = |name: &str, args: &str| {
+        let args: serde_json::Value = serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
+        agent.headless_auto_edit_auto_approve(name, &args)
+    };
+
+    // READ-ONLY AND PATH-SAFE → auto-approved in headless AutoEdit.
+    assert_eq!(
+        approve("context_bulk_read", r#"{"pattern":"src/**/*.rs"}"#),
+        Some(true),
+        "context_bulk_read is a path-gated read-only tool"
+    );
+    assert_eq!(
+        approve("shell_exec", r#"{"command":"git status --short"}"#),
+        Some(true),
+        "observational git_status must be auto-approved"
+    );
+    assert_eq!(
+        approve("shell_exec", r#"{"command":"cat src/lib.rs"}"#),
+        Some(true),
+        "an in-workspace read must be auto-approved"
+    );
+    // The container-e2e shape: a plain interpreter run of a script FILE is
+    // observational; inline code is not.
+    assert_eq!(
+        approve("shell_exec", r#"{"command":"python3 stats.py"}"#),
+        Some(true),
+        "a script-file run (python3 stats.py) is the e2e observational shape"
+    );
+    assert_eq!(
+        approve("shell_exec", r#"{"command":"node scripts/check.js"}"#),
+        Some(true),
+        "a node script-file run is observational"
+    );
+    assert_eq!(
+        approve("shell_exec", r#"{"command":"python3 -c 'print(1)'"}"#),
+        Some(false),
+        "inline interpreter code is arbitrary program text — fail closed"
+    );
+
+    // Destructive / credential-shaped / denied/protected reads → NOT
+    // auto-approved, whatever the verb: they fall through to the normal
+    // policy, which in headless mode stops with the typed error.
+    assert_eq!(
+        approve("shell_exec", r#"{"command":"rm -rf docs/out"}"#),
+        Some(false),
+        "destructive shell must stay confirm-gated"
+    );
+    assert_eq!(
+        approve("shell_exec", r#"{"command":"grep -r private_key src"}"#),
+        Some(false),
+        "a credential-shaped read (private_key) must stay confirm-gated"
+    );
+    assert_eq!(
+        approve("shell_exec", r#"{"command":"cat ~/.ssh/id_rsa"}"#),
+        Some(false),
+        "a sensitive-path read must stay confirm-gated"
+    );
+    assert_eq!(
+        approve("shell_exec", r#"{"command":"cat docs/.env.production"}"#),
+        Some(false),
+        "a deny-glob read must stay confirm-gated"
+    );
+    // Read-only-ness can't be established → fail closed (mutating but
+    // non-destructive commands like builds are NOT observational).
+    assert_eq!(
+        approve("shell_exec", r#"{"command":"cargo build"}"#),
+        Some(false),
+        "cargo build writes target/ — not established read-only"
+    );
+    // Everything else falls through to the normal policy untouched.
+    assert_eq!(
+        approve("git_push", r#"{"remote":"origin","branch":"main"}"#),
+        None,
+        "git_push is not part of the widening"
+    );
+    assert_eq!(
+        approve("file_write", r#"{"path":"x.txt","content":"x"}"#),
+        None,
+        "file_write is not part of the widening"
+    );
+    assert_eq!(
+        approve("shell_exec", r#"{"command":""}"#),
+        None,
+        "an unparseable shell call fails closed to the normal policy"
+    );
+
+    server.stop().await;
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn test_headless_auto_edit_destructive_shell_stops_with_typed_outcome() {
+    // Regression (e): the widening is ONLY for read-only path-safe shell. A
+    // destructive command that PASSES the path checker (in-workspace rm -rf)
+    // must still stop headless AutoEdit with the typed ConfirmationRequired
+    // outcome — the honest stop, not a silent grant and not a mislabel.
+    let _g = crate::test_support::ExecGuard::hold();
+    let server = MockLlmServer::builder()
+        .with_response(
+            "<tool>\n<name>shell_exec</name>\n<arguments>{\"command\":\"rm -rf docs/.sw_e2e_w4_nonexistent\"}</arguments>\n</tool>",
+        )
+        .with_default_response(crate::testing::mock_api::MockResponse::Text(
+            "done".to_string(),
+        ))
+        .build()
+        .await;
+
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.execution_mode = ExecutionMode::AutoEdit;
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let result = agent
+        .run_task("Delete the scratch directory docs/.sw_e2e_w4_nonexistent with rm -rf.")
+        .await;
+    let err = result.expect_err(
+        "a destructive shell command in headless AutoEdit must stop the run with the typed error",
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("requires confirmation"),
+        "expected the typed confirmation stop, got: {:?}",
+        err
+    );
+    assert!(
+        msg.contains("shell_exec"),
+        "the denial must name the denied tool, got: {:?}",
+        err
+    );
+    assert!(
+        !msg.contains("Max iterations"),
+        "the run must fail fast instead of looping to the iteration ceiling: {:?}",
+        err
+    );
+
+    server.stop().await;
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn test_headless_auto_edit_sensitive_path_read_shell_stops_with_typed_outcome() {
+    // Regression (f): same guarantee for a command that is observationally
+    // a READ but reads a credential-shaped path (private_key): the checker
+    // passes it (the operand is in-workspace), the observed-verb classifier
+    // says "read", and the sensitive-path guard heuristic must override —
+    // still a typed ConfirmationRequired stop, never approval.
+    let _g = crate::test_support::ExecGuard::hold();
+    let server = MockLlmServer::builder()
+        .with_response(
+            "<tool>\n<name>shell_exec</name>\n<arguments>{\"command\":\"grep -r private_key src\"}</arguments>\n</tool>",
+        )
+        .with_default_response(crate::testing::mock_api::MockResponse::Text(
+            "done".to_string(),
+        ))
+        .build()
+        .await;
+
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.execution_mode = ExecutionMode::AutoEdit;
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let result = agent
+        .run_task("Scan src for the string private_key with grep.")
+        .await;
+    let err = result.expect_err(
+        "a credential-shaped read in headless AutoEdit must stop the run with the typed error",
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("requires confirmation"),
+        "expected the typed confirmation stop, got: {:?}",
+        err
+    );
+    assert!(
+        msg.contains("shell_exec"),
+        "the denial must name the denied tool, got: {:?}",
+        err
+    );
+    assert!(
+        !msg.contains("Max iterations"),
+        "the run must fail fast instead of looping to the iteration ceiling: {:?}",
+        err
+    );
+
+    server.stop().await;
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn test_normal_mode_headless_observational_shell_still_stops_with_typed_outcome() {
+    // The widening applies ONLY to headless AutoEdit: in Normal mode the
+    // SAME observational command (`git status --short`) is still
+    // confirm-gated and headless still stops with the typed outcome —
+    // Normal mode is provably unchanged.
+    let _g = crate::test_support::ExecGuard::hold();
+    let server = MockLlmServer::builder()
+        .with_response(
+            "<tool>\n<name>shell_exec</name>\n<arguments>{\"command\":\"git status --short\"}</arguments>\n</tool>",
+        )
+        .with_default_response(crate::testing::mock_api::MockResponse::Text(
+            "done".to_string(),
+        ))
+        .build()
+        .await;
+
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.execution_mode = ExecutionMode::Normal;
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let result = agent.run_task("Show the working tree status.").await;
+    let err = result.expect_err(
+        "Normal mode must still confirm-gate observational shell_exec and stop headless with the typed error",
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("requires confirmation"),
+        "expected the typed confirmation stop, got: {:?}",
+        err
+    );
+    assert!(
+        msg.contains("shell_exec"),
+        "the denial must name the denied tool, got: {:?}",
         err
     );
 

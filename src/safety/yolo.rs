@@ -379,6 +379,15 @@ impl YoloManager {
         self.enabled.store(false, Ordering::SeqCst);
     }
 
+    /// The protected-path list this manager enforces (the default YOLO
+    /// protected set — /etc, ~/.ssh, .selfware, … — unless a config overrode
+    /// it). Consumed by the headless AutoEdit read-only widening so the
+    /// approvals reuse the SAME protected-path oracle as the YOLO floor
+    /// instead of a copy.
+    pub fn protected_paths(&self) -> &[String] {
+        &self.config.protected_paths
+    }
+
     /// Check if an operation should be auto-approved
     pub fn should_auto_approve(&self, tool_name: &str, args: &serde_json::Value) -> YoloDecision {
         if !self.is_active() {
@@ -1087,6 +1096,35 @@ fn targets_protected_path(cmd: &str, protected_paths: &[String]) -> Option<Strin
     }
 
     None
+}
+
+/// Guard heuristics that a shell command must pass before the headless
+/// AutoEdit widening may auto-approve it as READ-ONLY.
+///
+/// Defense-in-depth layered on the safety checker's path policy
+/// (`allowed_paths` / `denied_paths` / redirect / tee guards), which the
+/// tool-dispatch gate runs first: the checker does not classify a command
+/// as destructive or as *reading a sensitive path*, so this adds exactly
+/// those checks — the same ones [`YoloManager::should_auto_approve`] applies
+/// to shell_exec under the YOLO floor — plus the denied-path and
+/// protected-path-target checks.
+///
+/// Fail-closed: any command that trips ANY check is not a candidate for
+/// auto-approval, no matter how observational it looks. Paths like
+/// `/etc/passwd` under a read verb are deliberately NOT flagged here — the
+/// workspace allow-list (`allowed_paths`, W1b read-verb enforcement from
+/// 72a750f1) owns those in the checker, which rejects them before the
+/// approval gate; this function owns destructive verbs, credential-shaped
+/// reads, deny-glob reads and protected-path *mutation* targets.
+pub(crate) fn headless_auto_edit_shell_guard_pass(
+    cmd: &str,
+    denied_paths: &[String],
+    protected_paths: &[String],
+) -> bool {
+    !is_destructive_command(cmd)
+        && reads_sensitive_path(cmd).is_none()
+        && reads_denied_path(cmd, denied_paths).is_none()
+        && targets_protected_path(cmd, protected_paths).is_none()
 }
 
 fn path_matches_protected(path_str: &str, protected_paths: &[String]) -> Option<String> {

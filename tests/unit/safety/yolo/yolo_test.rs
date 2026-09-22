@@ -764,3 +764,83 @@ fn test_yolo_mcp_arguments_blocked() {
         "Benign image/valid.png must be auto-approved by YOLO"
     );
 }
+
+// =========================================================================
+// Headless AutoEdit read-only widening: the yolo guard-heuristic oracle
+// (`headless_auto_edit_shell_guard_pass`). These pin the fail-closed vetoes
+// the agent's widening consults; the allow-list itself owns workspace paths
+// (the checker), this owns destructive verbs / credential-shaped reads.
+// =========================================================================
+
+#[test]
+fn test_headless_auto_edit_guard_pass_approves_observational_reads() {
+    let denied: Vec<String> = vec![];
+    let protected = YoloConfig::default().protected_paths;
+
+    for cmd in [
+        "git status --short",
+        "cat src/main.rs",
+        "python3 stats.py",
+        "grep -rn TODO src",
+        "cargo check",
+    ] {
+        assert!(
+            super::headless_auto_edit_shell_guard_pass(cmd, &denied, &protected),
+            "'{cmd}' must pass the guard heuristics (not destructive, no \
+             sensitive/denied/protected-path reads)"
+        );
+    }
+}
+
+#[test]
+fn test_headless_auto_edit_guard_pass_vetoes_destructive_and_sensitive_commands() {
+    let denied: Vec<String> = vec![];
+    let protected = YoloConfig::default().protected_paths;
+
+    // Destructive verbs — never candidates regardless of how the rest looks.
+    for cmd in [
+        "rm -rf docs/out",
+        "git push --force origin main",
+        "git reset --hard HEAD",
+        "rmdir empty_dir",
+    ] {
+        assert!(
+            !super::headless_auto_edit_shell_guard_pass(cmd, &denied, &protected),
+            "'{cmd}' is destructive and must FAIL the guard heuristics"
+        );
+    }
+
+    // Credential-shaped reads — vetoed even as reads.
+    for cmd in ["cat ~/.ssh/id_rsa", "grep -r private_key src", "cat .env"] {
+        assert!(
+            !super::headless_auto_edit_shell_guard_pass(cmd, &denied, &protected),
+            "'{cmd}' reads a sensitive path and must FAIL the guard heuristics"
+        );
+    }
+
+    // Protected-path MUTATIONS — vetoed; protected-path plain reads are the
+    // allow-list's job (checker), so `/etc/passwd` under `cat` stays a pass.
+    let rm_etc = "rm /etc/passwd";
+    assert!(
+        !super::headless_auto_edit_shell_guard_pass(rm_etc, &denied, &protected),
+        "'{rm_etc}' mutates a protected path and must FAIL the guard heuristics"
+    );
+    assert!(
+        super::headless_auto_edit_shell_guard_pass("cat /etc/passwd", &denied, &protected),
+        "'cat /etc/passwd' is a READ — the workspace allow-list (checker) \
+         owns it; the guard heuristics must not double-flag it"
+    );
+}
+
+#[test]
+fn test_headless_auto_edit_guard_pass_vetoes_deny_glob_reads() {
+    let denied = vec!["**/.env".to_string(), "**/secrets/**".to_string()];
+    let protected = YoloConfig::default().protected_paths;
+
+    for cmd in ["cat docs/.env", "cat .env", "tail secrets/prod.txt"] {
+        assert!(
+            !super::headless_auto_edit_shell_guard_pass(cmd, &denied, &protected),
+            "'{cmd}' reads a deny-glob path and must FAIL the guard heuristics"
+        );
+    }
+}

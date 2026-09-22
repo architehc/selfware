@@ -2697,6 +2697,30 @@ impl Agent {
             }
         }
 
+        // Headless AutoEdit (the documented `-m auto-edit` deployment): tools
+        // whose execution is READ-ONLY AND PATH-SAFE are auto-approved —
+        // context_bulk_read plus observational shell_exec/pty_shell commands
+        // that pass the checker path policy and every yolo guard heuristic.
+        // 2026-09-22 e2e fix (reviewed twice; 2026-09-21 critical review
+        // item 11, previously undispatched): before this, read-only
+        // observation hit the gate below, which has no TTY to answer
+        // headless, and the FIRST real task aborted with "requires
+        // confirmation ... Use --yolo". EVERYTHING else falls through to the
+        // normal policy, which in headless mode still stops with the typed
+        // `ConfirmationRequired` error — never a silent grant.
+        if matches!(
+            self.config.execution_mode,
+            crate::config::ExecutionMode::AutoEdit
+        ) && !self.is_interactive()
+            && !self.has_tui_renderer()
+        {
+            let args_value: serde_json::Value =
+                serde_json::from_str(args_str).unwrap_or(serde_json::Value::Null);
+            if self.headless_auto_edit_auto_approve(name, &args_value) == Some(true) {
+                return Ok(true);
+            }
+        }
+
         // Normal mode decides via the tool-metadata classification (P1-5):
         // read-only/Low-risk tools (`lsp_diagnostics`, `process_list`,
         // `ask_user`, ...) no longer prompt — only Medium/High-risk tools do.
