@@ -763,10 +763,20 @@ pub(crate) fn shell_command_is_observational(command: &str) -> bool {
             .all(|segment| shell_command_is_observational(segment));
     }
 
+    // Classification keys off the program actually run: leading `VAR=value`
+    // assignments, `sudo`/`env` wrappers, and any path prefix on the runner
+    // are noise. Without this, `CARGO_TERM_COLOR=never cargo test 2>&1 |
+    // grep …` and `cd crate && cargo test | tail` read as unknown commands
+    // and counted as MUTATIONS — the 2026-09-22 long-task e2e burned
+    // iterations re-verifying state its own test runs had "dirtied".
+    // Mutating-marker scanning below still sees the raw text, so a wrapper
+    // cannot launder a write.
+    let run_command = strip_leading_wrappers(&normalized);
+
     // A plain formatter check does not write. Limit this special case to
     // known flags so shell operators, substitutions, and comments cannot hide
     // a mutating suffix or turn a commented-out --check into approval.
-    let words: Vec<_> = normalized.split_whitespace().collect();
+    let words: Vec<_> = run_command.split_whitespace().collect();
     if words.starts_with(&["cargo", "fmt"])
         && words[2..].contains(&"--check")
         && words[2..].iter().all(|word| {
@@ -936,6 +946,10 @@ pub(crate) fn shell_command_is_observational(command: &str) -> bool {
         "echo",
         "env",
         "printenv",
+        // `cd dir && cargo test 2>&1 | tail` is the standard monorepo
+        // verification shape; `cd` itself writes nothing. Any mutating
+        // segment after it still disqualifies the whole chain.
+        "cd",
         "xdotool getactivewindow",
         "xdotool search",
         "xdotool getwindow",
@@ -945,10 +959,10 @@ pub(crate) fn shell_command_is_observational(command: &str) -> bool {
     ];
 
     read_only_prefixes.iter().any(|prefix| {
-        normalized == *prefix
-            || (normalized.starts_with(prefix)
-                && (normalized[prefix.len()..].starts_with(' ')
-                    || normalized[prefix.len()..].starts_with("--")))
+        run_command == *prefix
+            || (run_command.starts_with(prefix)
+                && (run_command[prefix.len()..].starts_with(' ')
+                    || run_command[prefix.len()..].starts_with("--")))
     }) || shell_command_runs_test_script(&normalized)
 }
 
@@ -1338,6 +1352,116 @@ pub(crate) fn shell_command_is_verification(command: &str) -> bool {
     }) || script_runner_status_is_authoritative(&segments)
         || deliverable_check_status_is_authoritative(&segments)
         || deliverable_smoke_status_is_authoritative(&segments)
+}
+
+/// A recognized verification runner IS invoked in command position, but the
+/// command's final exit status is not the runner's: a pipeline or a `;`/`||`
+/// chain masks it (`cargo test 2>&1 | grep 'test result'`, `cargo test |
+/// true`, `cargo test; true`). Such a run earns no exit-status credit — but
+/// its captured output may still carry unambiguous evidence, which
+/// [`runner_output_proves_success`] / [`runner_output_proves_failure`] read.
+///
+/// Returns false for commands whose runner status IS authoritative (those
+/// take the ordinary credit path), for info-only invocations (`cargo test
+/// --help`), and for no-op runs (`--no-run`, `--collect-only`, …).
+pub(crate) fn shell_command_is_masked_verification(command: &str) -> bool {
+    let normalized = command.trim().to_lowercase();
+    if normalized.is_empty() || command_is_noop_verification(&normalized) {
+        return false;
+    }
+    if shell_command_is_verification(&normalized) {
+        return false;
+    }
+    let segments = shell_segments_with_operators(&normalized);
+    segments.iter().any(|(_op, segment)| {
+        match segment_verification_prefix(segment, VERIFICATION_PREFIXES) {
+            Some(prefix) => !segment_is_info_only_invocation(segment, prefix),
+            None => false,
+        }
+    })
+}
+
+/// The `N failed` count directly preceding a "failed" summary word, when the
+/// word is part of a `<digits> failed` tally. `"10 failed"` parses as 10
+/// (the digit walk is unbounded), so the `"0 failed"` substring trap cannot
+/// read a real failure as a zero-failure summary.
+fn failed_count_before(lower: &str, abs: usize) -> Option<u64> {
+    let bytes = lower.as_bytes();
+    if abs == 0 || bytes[abs - 1] != b' ' {
+        return None;
+    }
+    let mut start = abs - 1;
+    while start > 0 && bytes[start - 1].is_ascii_digit() {
+        start -= 1;
+    }
+    if start == abs - 1 {
+        return None;
+    }
+    lower[start..abs - 1].parse().ok()
+}
+
+/// Unambiguous runner-FAILURE evidence in captured output: a failing libtest
+/// summary, a rustc diagnostic, a cargo compile failure, a panic, or a
+/// nonzero `N failed` tally. Each marker is specific enough that a passing
+/// run never prints it, so recording the failure is safe.
+pub(crate) fn runner_output_proves_failure(output: &str) -> bool {
+    let lower = output.to_lowercase();
+    if lower.contains("test result: failed")
+        || lower.contains("failures:")
+        || lower.contains("error[e")
+        || lower.contains("error: aborting")
+        || lower.contains("error: could not compile")
+        || lower.contains("panicked at")
+    {
+        return true;
+    }
+    let mut from = 0;
+    while let Some(rel) = lower[from..].find("failed") {
+        let abs = from + rel;
+        if failed_count_before(&lower, abs).is_some_and(|n| n > 0) {
+            return true;
+        }
+        from = abs + 1;
+    }
+    false
+}
+
+/// Unambiguous runner-SUCCESS evidence in captured output, for runs whose
+/// exit status was masked by a pipeline or connector (see
+/// [`shell_command_is_masked_verification`]). Fail-closed (AGENTS.md rule 3):
+/// only these success markers count —
+///
+/// - `test result: ok`  (libtest / cargo test summary line),
+/// - `0 failed`         (zero-failure tallies in libtest/pytest summaries),
+/// - `N passed`         (pytest-style summaries),
+///
+/// and ANY failure-shaped content vetoes the credit — grep matching
+/// `test result` prints the FAILED line too, so output bearing both a
+/// success marker and a failure marker earns nothing.
+pub(crate) fn runner_output_proves_success(output: &str) -> bool {
+    let lower = output.to_lowercase();
+    let mut saw_zero_failed = false;
+    let mut from = 0;
+    while let Some(rel) = lower[from..].find("failed") {
+        let abs = from + rel;
+        match failed_count_before(&lower, abs) {
+            Some(0) => saw_zero_failed = true,
+            // A nonzero count or a bare "failed" vetoes the credit.
+            _ => return false,
+        }
+        from = abs + 1;
+    }
+    let success_marker =
+        lower.contains("test result: ok") || saw_zero_failed || lower.contains(" passed");
+    if !success_marker {
+        return false;
+    }
+    !lower.contains("test result: failed")
+        && !lower.contains("failures:")
+        && !lower.contains("error[e")
+        && !lower.contains("error: aborting")
+        && !lower.contains("error: could not compile")
+        && !lower.contains("panicked at")
 }
 
 /// A verification segment that does NOT execute a deliverable script — the

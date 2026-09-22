@@ -1,5 +1,7 @@
 use super::*;
+use crate::checkpoint::{TaskCheckpoint, ToolCallLog};
 use crate::config::Config;
+use chrono::Utc;
 
 fn test_config() -> Config {
     crate::test_support::mock_agent_config_with_limits(
@@ -15,18 +17,86 @@ async fn make_agent() -> Agent {
     Agent::new(test_config()).await.expect("agent::new")
 }
 
+/// Give the agent a checkpoint carrying one successful tool call.
+fn seed_tool_call(agent: &mut Agent, tool: &str, args: &str) {
+    let mut cp = agent
+        .current_checkpoint
+        .take()
+        .unwrap_or_else(|| TaskCheckpoint::new("t-classify".to_string(), "task".to_string()));
+    cp.log_tool_call(ToolCallLog {
+        timestamp: Utc::now(),
+        tool_name: tool.to_string(),
+        arguments: args.to_string(),
+        result: Some("ok".to_string()),
+        success: true,
+        duration_ms: Some(5),
+    });
+    agent.current_checkpoint = Some(cp);
+}
+
 #[tokio::test]
 async fn classify_success_when_mutating_calls_exist() {
     let mut agent = make_agent().await;
     agent.test_set_mutating_count(3);
     agent.test_set_total_tool_calls(12);
     agent.test_set_last_assistant_response("Done.".to_string());
+    // REAL_EDIT requires file evidence: seed a file_write landing on disk.
+    seed_tool_call(&mut agent, "file_write", r#"{"path":"src/lib.rs"}"#);
 
     let mode = FailureMode::classify(&agent, RunOutcome::NaturalCompletion);
     assert_eq!(mode.kind, FailureKind::Success);
     assert!(
         mode.evidence.contains("3 mutating tool calls"),
         "evidence: {}",
+        mode.evidence
+    );
+}
+
+/// 2026-09-22 e2e: runs whose only "mutations" were read-shaped shell probes
+/// rendered REAL_EDIT with "files changed: none". Probe-only mutation counts
+/// must label NoChange, never REAL_EDIT.
+#[tokio::test]
+async fn classify_probe_only_mutations_label_no_change_not_real_edit() {
+    let mut agent = make_agent().await;
+    agent.test_set_mutating_count(3);
+    agent.test_set_total_tool_calls(12);
+    agent.test_set_last_assistant_response("Done.".to_string());
+    // Shell probes: mutating by classification, but nothing reaches disk.
+    seed_tool_call(
+        &mut agent,
+        "shell_exec",
+        r#"{"command":"python3 stats.py"}"#,
+    );
+
+    let mode = FailureMode::classify(&agent, RunOutcome::NaturalCompletion);
+    assert_eq!(
+        mode.kind,
+        FailureKind::NoChange,
+        "probe-only mutations must not earn REAL_EDIT: {}",
+        mode.evidence
+    );
+    assert!(mode.evidence.contains("no file reached disk"));
+}
+
+/// The honesty fix must not over-rotate: a run whose file change came via a
+/// shell redirect IS a real edit (the file-tool ledger cannot see it).
+#[tokio::test]
+async fn classify_shell_redirect_write_counts_as_real_edit() {
+    let mut agent = make_agent().await;
+    agent.test_set_mutating_count(2);
+    agent.test_set_total_tool_calls(5);
+    agent.test_set_last_assistant_response("Done.".to_string());
+    seed_tool_call(
+        &mut agent,
+        "shell_exec",
+        r#"{"command":"printf 'x' > out.txt"}"#,
+    );
+
+    let mode = FailureMode::classify(&agent, RunOutcome::NaturalCompletion);
+    assert_eq!(
+        mode.kind,
+        FailureKind::Success,
+        "a write-shaped shell command is real edit evidence: {}",
         mode.evidence
     );
 }

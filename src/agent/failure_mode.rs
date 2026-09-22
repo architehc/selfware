@@ -189,6 +189,21 @@ impl FailureMode {
                         advice: "if this task needed edits, the model made none; if it was read-only/Q&A, this is expected".to_string(),
                     };
                 }
+                // REAL_EDIT must mean files actually changed (2026-09-22 e2e:
+                // runs whose only "mutations" were read-shaped shell probes
+                // rendered REAL_EDIT with "files changed: none"). With
+                // mutating > 0 but no file evidence — no file-tool write and
+                // no write-shaped shell command — label the run honestly as
+                // NoChange instead of crediting an edit that never landed.
+                if agent.written_paths().is_empty() && !agent.shell_write_evidence() {
+                    return FailureMode {
+                        kind: FailureKind::NoChange,
+                        evidence: format!(
+                            "completed naturally; {mutating} mutating tool call(s) but no file reached disk ({total_calls} total)"
+                        ),
+                        advice: "shell probes and reads do not change files — if the task needed edits, none landed; check the run summary's files-changed line".to_string(),
+                    };
+                }
                 let progress_note = if progress_guard > 0 {
                     format!(", {} progress guards", progress_guard)
                 } else {

@@ -480,6 +480,13 @@ enum RustfmtFailureKind {
     /// with no error-shaped lines: the code is syntactically valid. The
     /// result is an advisory format note, not a blocking syntax failure.
     FormattingDiff,
+    /// The rustfmt tool never ran: a rustup shim answered that the toolchain
+    /// has no rustfmt component ("error: toolchain 'X' does not have
+    /// component 'rustfmt'", "error: rustfmt is not installed for the
+    /// toolchain 'X'"). A missing tool is check-NOT-run — it asserts nothing
+    /// about the code and must never block as a syntax failure (W7b finding
+    /// 4: the error-line arm used to catch the shim's `error:` prefix).
+    ToolUnavailable,
     /// Genuine parse error, operational error (missing/unreadable file), or
     /// any failure that does not match the pure-diff shape. Fail-closed:
     /// never turn a real syntax error green.
@@ -488,13 +495,19 @@ enum RustfmtFailureKind {
 
 /// Classify a failed `rustfmt --check` run from its combined output.
 ///
-/// Only a run whose output consists PURELY of `Diff in ...` formatting hunks
-/// (no `error:`/`Error:` lines — rustfmt prints parse errors to its stderr,
-/// and an unreadable/missing file prints `Error: ...`) classifies as
+/// A rustup-shim "component not installed" output is
+/// [`RustfmtFailureKind::ToolUnavailable`] (checked FIRST — the tool never
+/// ran, so neither diff nor parse analysis applies). Only a run whose output
+/// consists PURELY of `Diff in ...` formatting hunks (no `error:`/`Error:`
+/// lines — rustfmt prints parse errors to its stderr, and an
+/// unreadable/missing file prints `Error: ...`) classifies as
 /// [`RustfmtFailureKind::FormattingDiff`]. Any error-shaped line (a mixed run
 /// with a parse error in one file and diffs in another counts as an error) or
 /// any unclassifiable failure stays a blocking `SyntaxFailure`.
 fn classify_rustfmt_failure(combined: &str) -> RustfmtFailureKind {
+    if rustfmt_output_is_tool_unavailable(combined) {
+        return RustfmtFailureKind::ToolUnavailable;
+    }
     let saw_diff = combined
         .lines()
         .any(|l| l.trim_start().starts_with("Diff in "));
@@ -512,6 +525,42 @@ fn classify_rustfmt_failure(combined: &str) -> RustfmtFailureKind {
         RustfmtFailureKind::FormattingDiff
     } else {
         RustfmtFailureKind::SyntaxFailure
+    }
+}
+
+/// The rustup-shim "tool not installed" output shapes. All mean the
+/// formatter never executed: no file was parsed, no diff produced.
+fn rustfmt_output_is_tool_unavailable(combined: &str) -> bool {
+    let lower = combined.to_lowercase();
+    if !lower.contains("rustfmt") {
+        return false;
+    }
+    lower.contains("does not have component")
+        || (lower.contains("not installed") && lower.contains("toolchain"))
+        || lower.contains("rustup component add rustfmt")
+}
+
+/// The "check not run" result for a rustfmt shim without the component:
+/// advisory, non-blocking, and honest that nothing was checked. Follows the
+/// sqlfluff-not-installed precedent in `run_cheap_syntax_check`.
+fn rustfmt_unavailable_result(lang: RepoLanguage, duration_ms: u64, output: &str) -> CheckResult {
+    CheckResult {
+        check_type: CheckType::TypeCheck,
+        passed: true,
+        duration_ms,
+        output: format!(
+            "{lang} syntax check could not run: rustfmt is not installed for the active toolchain"
+        ),
+        errors: vec![],
+        warnings: vec![format!(
+            "{lang} syntax check skipped: rustfmt unavailable (rustup shim reports the \
+             component is not installed); no files were checked"
+        )],
+        suggestions: vec![format!(
+            "Install the component with `rustup component add rustfmt` (the check did not \
+             run at all: {})",
+            output.chars().take(120).collect::<String>()
+        )],
     }
 }
 
@@ -1025,6 +1074,28 @@ impl VerificationGate {
 
         let duration = start.elapsed().as_millis() as u64;
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // A rustup shim without the rustfmt component exits non-zero with the
+        // explanation on stderr — that is check-not-run (tool unavailable),
+        // never a formatting failure, and the run summary must not print
+        // "verification: failed" over it. Mirrors the classify_rustfmt_failure
+        // ToolUnavailable arm (same blind spot, sibling site).
+        if !output.success && rustfmt_output_is_tool_unavailable(&format!("{stdout}\n{stderr}")) {
+            return Ok(CheckResult {
+                check_type: CheckType::Format,
+                passed: true,
+                duration_ms: duration,
+                output: "format check could not run: rustfmt is not installed for the active toolchain".to_string(),
+                errors: vec![],
+                warnings: vec![
+                    "format check skipped: rustfmt unavailable (rustup shim reports the component is not installed); no files were checked".to_string(),
+                ],
+                suggestions: vec![
+                    "Install the component with `rustup component add rustfmt` (the check did not run)".to_string(),
+                ],
+            });
+        }
 
         Ok(CheckResult {
             check_type: CheckType::Format,
@@ -1033,7 +1104,9 @@ impl VerificationGate {
             output: if output.success {
                 "Formatting check passed".to_string()
             } else {
-                stdout.to_string()
+                // stderr carries the diff summary on some rustfmt versions;
+                // include it so a failure never renders as an empty box.
+                format!("{}{}", stdout, stderr)
             },
             errors: vec![],
             warnings: vec![],
@@ -1611,35 +1684,47 @@ impl VerificationGate {
         // Rust, "syntax" means parseable, "format" means rustfmt-clean — and
         // formatting remains enforced by the separate cargo-fmt check when
         // `format_on_edit` is enabled. A real parse error NEVER goes green.
-        if !output.status.success()
-            && program == "rustfmt"
-            && classify_rustfmt_failure(&combined) == RustfmtFailureKind::FormattingDiff
-        {
-            return Ok(CheckResult {
-                check_type: CheckType::TypeCheck,
-                passed: true,
-                duration_ms: duration,
-                output: combined,
-                errors: vec![VerificationError {
-                    file: files.first().cloned().unwrap_or_default(),
-                    line: None,
-                    column: None,
-                    message: format!(
-                        "{} formatting differs (rustfmt --check reported diffs, not a syntax error); run cargo fmt to apply",
-                        lang
-                    ),
-                    code: Some("FORMATTING_DIFF".to_string()),
-                    severity: ErrorSeverity::Note,
-                    suggestion: Some(
-                        "Run `cargo fmt` (or `rustfmt`) to apply the formatting".to_string(),
-                    ),
-                }],
-                warnings: vec![format!(
-                    "{} syntax is valid; rustfmt --check only reports formatting differences",
-                    lang
-                )],
-                suggestions: vec!["Run `cargo fmt` to fix formatting before committing".to_string()],
-            });
+        //
+        // A rustup shim without the rustfmt component is neither: the tool
+        // never ran, so the result is check-not-run (advisory), never a
+        // syntax failure (W7b finding 4).
+        if !output.status.success() && program == "rustfmt" {
+            match classify_rustfmt_failure(&combined) {
+                RustfmtFailureKind::ToolUnavailable => {
+                    return Ok(rustfmt_unavailable_result(lang, duration, &combined));
+                }
+                RustfmtFailureKind::FormattingDiff => {
+                    return Ok(CheckResult {
+                        check_type: CheckType::TypeCheck,
+                        passed: true,
+                        duration_ms: duration,
+                        output: combined,
+                        errors: vec![VerificationError {
+                            file: files.first().cloned().unwrap_or_default(),
+                            line: None,
+                            column: None,
+                            message: format!(
+                                "{} formatting differs (rustfmt --check reported diffs, not a syntax error); run cargo fmt to apply",
+                                lang
+                            ),
+                            code: Some("FORMATTING_DIFF".to_string()),
+                            severity: ErrorSeverity::Note,
+                            suggestion: Some(
+                                "Run `cargo fmt` (or `rustfmt`) to apply the formatting"
+                                    .to_string(),
+                            ),
+                        }],
+                        warnings: vec![format!(
+                            "{} syntax is valid; rustfmt --check only reports formatting differences",
+                            lang
+                        )],
+                        suggestions: vec![
+                            "Run `cargo fmt` to fix formatting before committing".to_string()
+                        ],
+                    });
+                }
+                RustfmtFailureKind::SyntaxFailure => {}
+            }
         }
 
         Ok(CheckResult {

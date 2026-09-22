@@ -5232,3 +5232,216 @@ async fn xml_mode_push_tool_result_neutralizes_breakout_payload() {
         "the fabricated call must be inert, never raw tool markup: {text}"
     );
 }
+
+// =========================================================================
+// W7b finding 1a: piped / wrapper-prefixed verification runs are
+// observational, not mutations (2026-09-22 kvstore e2e: these runs fed the
+// churn breaker as "edits" while earning no verification credit).
+// =========================================================================
+
+#[test]
+fn piped_verification_runs_are_observational_not_mutating() {
+    for command in [
+        "cargo test 2>&1 | grep 'test result'",
+        "cargo test 2>&1 | grep 'test result' | head -5",
+        "cargo test 2>&1 | tail -40",
+        "cargo test --workspace 2>&1 | grep -c 'test result'",
+        "cargo check 2>&1 | tail -20",
+        "pytest -q 2>&1 | tail -20",
+        "go test ./... 2>&1 | grep ok",
+        "cargo test 2>&1 | jq -r '.summary'",
+        // Wrapper-prefixed runners: classification must key off the program
+        // actually run, not the leading assignment/path/`cd`.
+        "CARGO_TERM_COLOR=never cargo test 2>&1 | grep 'test result'",
+        "RUST_BACKTRACE=1 cargo test | tail -30",
+        "/usr/bin/cargo test 2>&1 | grep 'test result'",
+        "cd subcrate && cargo test 2>&1 | grep 'test result'",
+    ] {
+        assert!(
+            shell_command_is_observational(command),
+            "`{command}` writes nothing and must be observational"
+        );
+        assert!(
+            !tool_call_is_mutating("shell_exec", &serde_json::json!({"command": command})),
+            "`{command}` must not advance the mutation sequence"
+        );
+    }
+}
+
+#[test]
+fn piped_chains_with_a_mutating_or_unknown_stage_stay_mutating() {
+    for command in [
+        "cargo test 2>&1 | tee out.log", // tee writes
+        "cargo test > out.log",          // file redirect
+        "cargo test 2>&1 | grep ok && rm -rf target",
+        // arbitrary code in a stage: unknown → mutating (fail-closed)
+        "cargo test 2>&1 | python3 -c 'import sys; sys.stdin.read()'",
+        // a wrapper must not launder a mutating verb
+        "CARGO_TERM_COLOR=never rm -rf target",
+        "cd /tmp && rm -rf build",
+    ] {
+        assert!(
+            !shell_command_is_observational(command),
+            "`{command}` has a mutating/unknown stage and must not be observational"
+        );
+        assert!(
+            tool_call_is_mutating("shell_exec", &serde_json::json!({"command": command})),
+            "`{command}` must count as a mutation"
+        );
+    }
+}
+
+// =========================================================================
+// W7b finding 1b: masked-status verification runs — detection plus the
+// fail-closed output patterns that may substitute for the exit status.
+// =========================================================================
+
+#[test]
+fn masked_verification_runner_detection() {
+    for command in [
+        "cargo test 2>&1 | grep 'test result'",
+        "cargo test | true",
+        "cargo test; true",
+        "cargo test || echo done",
+        "pytest -q | tail -5",
+    ] {
+        assert!(
+            shell_command_is_masked_verification(command),
+            "`{command}` runs a runner whose exit status is masked"
+        );
+    }
+    for command in [
+        "cargo test",      // authoritative — ordinary credit path
+        "cargo test 2>&1", // descriptor dup keeps status authoritative
+        "cargo check && cargo test",
+        "cargo test --help", // info-only invocation runs no tests
+        "ls -la",
+        "echo cargo test", // prints the words, runs nothing
+        "grep result test.log",
+        "",
+    ] {
+        assert!(
+            !shell_command_is_masked_verification(command),
+            "`{command}` is not a masked verification run"
+        );
+    }
+}
+
+#[test]
+fn runner_output_success_credit_is_fail_closed() {
+    // Unambiguous runner success lines.
+    assert!(runner_output_proves_success(
+        "running 3 tests\n...\ntest result: ok. 3 passed; 0 failed; 0 ignored; finished in 0.01s"
+    ));
+    assert!(runner_output_proves_success(
+        "test result: ok. 1 passed; 0 failed"
+    ));
+    assert!(runner_output_proves_success(".....\n3 passed in 0.04s"));
+    // Anything ambiguous or failure-shaped earns nothing.
+    assert!(!runner_output_proves_success("ok")); // not a runner summary
+    assert!(!runner_output_proves_success(""));
+    assert!(!runner_output_proves_success(
+        "test result: FAILED. 2 failed"
+    ));
+    assert!(!runner_output_proves_success("1 failed, 2 passed in 0.5s"));
+    // "10 failed" contains the substring "0 failed" — the digit boundary
+    // must keep it from reading as a zero-failure summary.
+    assert!(!runner_output_proves_success("10 failed, 2 passed in 0.5s"));
+    assert!(!runner_output_proves_success(
+        "error[E0432]: unresolved import `x`"
+    ));
+    assert!(!runner_output_proves_success(
+        "test result: ok. 1 passed; 0 failed\nthread 'main' panicked at src/main.rs:10"
+    ));
+}
+
+#[test]
+fn runner_output_failure_markers_are_unambiguous() {
+    assert!(runner_output_proves_failure(
+        "test result: FAILED. 2 failed"
+    ));
+    assert!(runner_output_proves_failure(
+        "error[E0432]: unresolved import `x`"
+    ));
+    assert!(runner_output_proves_failure(
+        "error: could not compile `crate` due to 3 previous errors"
+    ));
+    assert!(runner_output_proves_failure("3 failed, 2 passed in 0.5s"));
+    assert!(runner_output_proves_failure(
+        "thread 'main' panicked at src/main.rs:10"
+    ));
+    assert!(!runner_output_proves_failure(
+        "test result: ok. 3 passed; 0 failed"
+    ));
+    assert!(!runner_output_proves_failure("0 failed"));
+    assert!(!runner_output_proves_failure("ok"));
+}
+
+// =========================================================================
+// W7b finding 5a: every file-writing tool feeds the files-changed summary
+// (a 37-edit file_multi_edit printed "files changed: none").
+// =========================================================================
+
+#[tokio::test]
+async fn every_writing_tool_marks_its_paths_for_the_run_summary() {
+    let mut agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
+        .await
+        .expect("agent should build");
+
+    // file_multi_edit carries its targets in an `edits` array, not a `path`.
+    agent
+        .track_task_state_after_tool(
+            "file_multi_edit",
+            &serde_json::json!({"edits": [
+                {"path": "src/a.rs", "old_str": "x", "new_str": "y"},
+                {"path": "src/b.rs", "old_str": "x", "new_str": "y"}
+            ]}),
+            "ok",
+            true,
+        )
+        .await;
+    // patch_apply embeds targets in the diff.
+    agent
+        .track_task_state_after_tool(
+            "patch_apply",
+            &serde_json::json!({"diff": "--- a/src/c.rs\n+++ b/src/c.rs\n@@ -1 +1 @@\n-x\n+y\n"}),
+            "ok",
+            true,
+        )
+        .await;
+    // file_fim_edit has a plain `path` but was never in the match arms.
+    agent
+        .track_task_state_after_tool(
+            "file_fim_edit",
+            &serde_json::json!({"path": "src/d.rs"}),
+            "ok",
+            true,
+        )
+        .await;
+
+    let summary = agent.run_summary();
+    for expected in ["src/a.rs", "src/b.rs", "src/c.rs", "src/d.rs"] {
+        assert!(
+            summary.files_changed.iter().any(|p| p.ends_with(expected)),
+            "{expected} must appear in the files-changed summary: {:?}",
+            summary.files_changed
+        );
+    }
+
+    // A failed write marks nothing.
+    let mut agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
+        .await
+        .expect("agent should build");
+    agent
+        .track_task_state_after_tool(
+            "file_multi_edit",
+            &serde_json::json!({"edits": [{"path": "src/z.rs", "old_str": "x", "new_str": "y"}]}),
+            "error: no match",
+            false,
+        )
+        .await;
+    assert!(
+        agent.run_summary().files_changed.is_empty(),
+        "a failed write must not count as a change"
+    );
+}

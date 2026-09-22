@@ -935,6 +935,185 @@ impl Agent {
         )
     }
 
+    /// A path whose content cannot change build or test outcomes:
+    /// documentation and prose (`.md`, `.txt`, `.rst`, …) plus the classic
+    /// doc basenames. Deliberately TIGHTER than `path_is_non_code_artifact`:
+    /// config/data formats (toml/json/yaml/lock) stay code-affecting —
+    /// editing Cargo.toml can absolutely break the build.
+    pub(crate) fn gate_path_is_doc_only(path: &str) -> bool {
+        let lower = path.trim_matches('"').to_ascii_lowercase();
+        let basename = lower.rsplit('/').next().unwrap_or(lower.as_str());
+        if matches!(
+            basename,
+            "readme" | "license" | "notice" | "changelog" | "contributing"
+        ) {
+            return true;
+        }
+        matches!(
+            lower.rsplit_once('.').map(|(_, ext)| ext),
+            Some("md" | "markdown" | "rst" | "txt" | "adoc" | "org")
+        )
+    }
+
+    /// Whether this run has at least one CODE-AFFECTING mutation on record —
+    /// the only kind a build/test verification can speak to. A write whose
+    /// targets are all doc-only (a REVIEW.md deliverable, notes) is not one:
+    /// it cannot change what `cargo check` prints, so arming the test gate
+    /// for it — or blaming it for a pre-existing failure — misattributes the
+    /// check (2026-09-22 read-only review run: the model edited src/ to
+    /// appease a gate its REVIEW.md had armed).
+    ///
+    /// Fail-closed: shell/git mutations, deletes, and anything the ledger
+    /// cannot attribute (no checkpoint, an unparseable record, a sequence
+    /// bump with no matching call) count as code-affecting. Only a PROVEN
+    /// doc-only mutation set disarms the gate.
+    fn has_code_affecting_mutation(&self) -> bool {
+        let Some(cp) = self.current_checkpoint.as_ref() else {
+            return self.mutation_sequence > 0 || self.has_written_any_file;
+        };
+        let mut saw_doc_only_write = false;
+        for call in &cp.tool_calls {
+            if !call.success {
+                continue;
+            }
+            let args: Value = serde_json::from_str(&call.arguments).unwrap_or(Value::Null);
+            if !super::tool_dispatch::tool_call_is_mutating(&call.tool_name, &args) {
+                continue;
+            }
+            let paths = super::tool_dispatch::written_paths_for_tool_call(&call.tool_name, &args);
+            if paths.is_empty() {
+                // shell/git mutations carry no path list; a file mutation
+                // whose path did not parse is equally unattributable.
+                return true;
+            }
+            if paths
+                .iter()
+                .any(|p| !Self::gate_path_is_doc_only(&p.to_string_lossy()))
+            {
+                return true;
+            }
+            saw_doc_only_write = true;
+        }
+        if saw_doc_only_write {
+            // Every mutation on record was a doc-only write.
+            return false;
+        }
+        // Nothing attributable on record, yet state says something changed —
+        // unknown edits get verified; only proven doc-only ones do not.
+        self.mutation_sequence > 0 || self.has_written_any_file
+    }
+
+    /// The code-affecting file edits on record (writes, multi-edits, patches,
+    /// deletes), for gate messages that must say WHICH edits a stale or
+    /// failing verification refers to.
+    fn code_affecting_edit_paths(&self) -> Vec<String> {
+        let mut paths: Vec<String> = Vec::new();
+        if let Some(cp) = self.current_checkpoint.as_ref() {
+            for call in &cp.tool_calls {
+                if !call.success {
+                    continue;
+                }
+                if !matches!(
+                    call.tool_name.as_str(),
+                    "file_edit"
+                        | "file_write"
+                        | "file_delete"
+                        | "file_fim_edit"
+                        | "file_multi_edit"
+                        | "patch_apply"
+                ) {
+                    continue;
+                }
+                let Ok(args) = serde_json::from_str::<Value>(&call.arguments) else {
+                    continue;
+                };
+                for path in
+                    super::tool_dispatch::written_paths_for_tool_call(&call.tool_name, &args)
+                {
+                    let text = path.to_string_lossy().to_string();
+                    if !Self::gate_path_is_doc_only(&text) && !paths.contains(&text) {
+                        paths.push(text);
+                    }
+                }
+            }
+        }
+        paths
+    }
+
+    /// One-phrase rendering of the code-affecting edits, for gate messages.
+    fn describe_code_affecting_edits(&self) -> String {
+        let paths = self.code_affecting_edit_paths();
+        match paths.len() {
+            0 => "your latest edit(s)".to_string(),
+            1 => format!("your edit to {}", paths[0]),
+            _ => {
+                let shown: Vec<&str> = paths.iter().take(4).map(String::as_str).collect();
+                let more = paths.len() - shown.len();
+                if more > 0 {
+                    format!("your edits to {} (+{more} more)", shown.join(", "))
+                } else {
+                    format!("your edits to {}", shown.join(", "))
+                }
+            }
+        }
+    }
+
+    /// The most recent verification-looking shell run that earned no credit
+    /// because a pipeline or `;`/`||` chain masked the runner's exit status
+    /// AND its captured output carried no unambiguous success marker — named
+    /// in gate rejections so the model fixes the actual gap (rerun unpiped)
+    /// instead of guessing (the StaleVerification ping-pong class). A masked
+    /// run whose logged output proves success was credited at dispatch and
+    /// is not "the gap", so it is not named.
+    fn recent_uncredited_masked_run(&self) -> Option<String> {
+        self.current_checkpoint
+            .as_ref()?
+            .tool_calls
+            .iter()
+            .rev()
+            .find_map(|call| {
+                if !matches!(call.tool_name.as_str(), "shell_exec" | "pty_shell") {
+                    return None;
+                }
+                let args: Value = serde_json::from_str(&call.arguments).ok()?;
+                let command = args.get("command")?.as_str()?;
+                if !super::tool_dispatch::shell_command_is_masked_verification(command) {
+                    return None;
+                }
+                let output_proven = call
+                    .result
+                    .as_deref()
+                    .map(super::tool_dispatch::runner_output_proves_success)
+                    .unwrap_or(false);
+                (!output_proven).then(|| command.to_string())
+            })
+    }
+
+    /// A checkpointed shell call whose masked-pipeline verification run was
+    /// credited from the runner's own success output. The log's result text
+    /// is the evidence; pipelined output is short (the filter kept the
+    /// summary lines), so the marker survives the log's head-truncation.
+    fn checkpoint_call_is_output_proven_masked_verification(
+        tc: &crate::checkpoint::ToolCallLog,
+    ) -> bool {
+        if !matches!(tc.tool_name.as_str(), "shell_exec" | "pty_shell") {
+            return false;
+        }
+        let Ok(args) = serde_json::from_str::<Value>(&tc.arguments) else {
+            return false;
+        };
+        let Some(command) = args.get("command").and_then(Value::as_str) else {
+            return false;
+        };
+        if !super::tool_dispatch::shell_command_is_masked_verification(command) {
+            return false;
+        }
+        tc.result
+            .as_deref()
+            .map(super::tool_dispatch::runner_output_proves_success)
+            .unwrap_or(false)
+    }
+
     /// Derive task-owned non-code artifacts and verify each one was read back
     /// after its latest successful write. Checkpoint order is authoritative:
     /// it naturally handles untracked files and rejects write/read/write as
@@ -1139,9 +1318,15 @@ impl Agent {
         // ABOVE the task_requires_mutation early-return: a failing verification
         // blocks completion on any task that mutated state, however the task
         // classifier reads it.
+        //
+        // ...but only when a CODE-AFFECTING mutation exists (W7b finding 3):
+        // a failure that follows only doc-only writes cannot be attributed
+        // to them, and blaming it there drove a read-only review run to edit
+        // src/ to appease the gate.
         if self.mutation_sequence > 0
             && self.last_failed_verification_mutation_sequence
                 >= self.last_successful_verification_mutation_sequence
+            && self.has_code_affecting_mutation()
         {
             // Only a failure this task's work could have caused blocks it.
             // A broken crate that merely ENCLOSES the task is reported, not
@@ -1155,16 +1340,21 @@ impl Agent {
             {
                 let summary = &record.summary;
                 let check = &record.check_id;
+                let edits = self.describe_code_affecting_edits();
                 return Some(format!(
-                    "FailingTestsAccepted: `{check}` failed after your edit: {summary}. \
-                     Fix the issue and run verification again before completing."
+                    "FailingTestsAccepted: `{check}` failed at the current revision (after {edits}): {summary}. \
+                     No passing `{check}` covers this revision, so the failure is unresolved. \
+                     Fix it and rerun the verification to green before completing."
                 ));
             }
             if self.verification_failures.is_empty() {
                 if let Some(summary) = &self.last_failed_verification_summary {
+                    let edits = self.describe_code_affecting_edits();
                     return Some(format!(
-                        "FailingTestsAccepted: the latest verification after your edit failed: {summary}. \
-                         Fix the issue and run verification again before completing."
+                        "FailingTestsAccepted: the latest verification after {edits} failed: {summary}. \
+                         It post-dates the last credited pass (mutation #{} → #{}), so it is unresolved. \
+                         Fix the issue and rerun the verification to green before completing.",
+                        self.last_successful_verification_mutation_sequence, self.mutation_sequence
                     ));
                 }
             }
@@ -1286,18 +1476,38 @@ impl Agent {
 
         if self.mutation_sequence > 0
             && self.last_successful_verification_mutation_sequence < self.mutation_sequence
+            && self.has_code_affecting_mutation()
         {
             if let Some(summary) = &self.last_failed_verification_summary {
+                let edits = self.describe_code_affecting_edits();
                 return Some(format!(
-                    "FailingTestsAccepted: the latest verification after your edit failed: {summary}. \
-                     Fix the issue and run verification again before completing."
+                    "FailingTestsAccepted: the latest verification after {edits} failed: {summary}. \
+                     It post-dates the last credited pass (mutation #{} → #{}), so it is unresolved. \
+                     Fix the issue and rerun the verification to green before completing.",
+                    self.last_successful_verification_mutation_sequence, self.mutation_sequence
                 ));
             }
-            return Some(
-                "StaleVerification: verification has not passed after the most recent source edit. \
-                 Run the project's relevant verification command after your last change before completing."
-                    .to_string(),
-            );
+            // Name the unmet condition: which revision lacks a pass, which
+            // edits it covers, and — when a piped run earned no credit — why
+            // (W7b finding 2; the StaleVerification ping-pong class).
+            let edits = self.describe_code_affecting_edits();
+            let masked_note = match self.recent_uncredited_masked_run() {
+                Some(command) => format!(
+                    " Note: `{command}` earned no verification credit — a pipeline/connector \
+                     masked the runner's exit status, and no unambiguous success line (e.g. \
+                     `test result: ok`) was captured. Rerun the verification WITHOUT the pipe \
+                     so its exit status is authoritative."
+                ),
+                None => String::new(),
+            };
+            return Some(format!(
+                "StaleVerification: no passing verification covers the current revision — \
+                 the last credited pass was at mutation #{}, and {edits} moved the tree to #{}.{masked_note} \
+                 Run this project's verification ({}) after your last change and let it pass before completing.",
+                self.last_successful_verification_mutation_sequence,
+                self.mutation_sequence,
+                self.suggested_verification_commands()
+            ));
         }
 
         None
@@ -1309,10 +1519,10 @@ impl Agent {
             .map(|cp| {
                 cp.tool_calls.iter().any(|tc| {
                     tc.success
-                        && super::tool_dispatch::tool_call_is_verification(
+                        && (super::tool_dispatch::tool_call_is_verification(
                             &tc.tool_name,
                             &tc.arguments,
-                        )
+                        ) || Self::checkpoint_call_is_output_proven_masked_verification(tc))
                 })
             })
             .unwrap_or(false)
@@ -1597,7 +1807,13 @@ impl Agent {
         // mutations delivers prose, not code — demanding a passing verification
         // livelocks it (the 4-model read-only study). `mutation_sequence == 0`
         // means nothing was mutated this run, so there is nothing to verify.
+        //
+        // Doc-only writes do not arm this gate at all (W7b finding 3): prose
+        // cannot change what a build/test run prints, and arming it for a
+        // REVIEW.md write pushed a read-only review run into editing src/.
+        // Anything unattributable keeps the gate armed.
         if self.has_written_any_file
+            && self.has_code_affecting_mutation()
             && !(self.current_task_is_read_only() && self.mutation_sequence == 0)
         {
             let has_verification = self.has_successful_verification_tool_call()
@@ -1608,8 +1824,10 @@ impl Agent {
                     true,
                     "file written without a passing verification",
                     &format!(
-                        "You have written code, but you have not verified it. Run a verification \
+                        "You have written code, but you have not verified it. Code-affecting \
+                         edits awaiting verification: {}. Run a verification \
                          command that fits this project ({}) successfully before completing.",
+                        self.describe_code_affecting_edits(),
                         self.suggested_verification_commands()
                     ),
                 ));
@@ -2151,7 +2369,11 @@ impl Agent {
         tool_name: &str,
         args: &Value,
     ) -> Option<String> {
-        if !matches!(tool_name, "file_edit" | "file_write") {
+        // Rule-5 sweep (2026-09-22): every file-writing tool arms the
+        // post-edit verification, not just file_edit/file_write —
+        // file_multi_edit / patch_apply / file_fim_edit edits previously got
+        // no automatic post-edit verification at all.
+        if !super::tool_dispatch::tool_call_writes_file(tool_name) {
             return None;
         }
 

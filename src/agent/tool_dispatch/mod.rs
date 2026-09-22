@@ -78,6 +78,7 @@ impl Agent {
         result_str: &str,
     ) {
         if !tool_call_is_verification(name, args_str) {
+            self.note_masked_verification_outcome(name, args_str, result_str);
             return;
         }
         // A command the shell could not execute ran no check.
@@ -126,6 +127,64 @@ impl Agent {
             // Loop 12: a passing verification breaks any repeated-probe
             // streak — probes interleaved with green checks are iteration,
             // not a stall.
+            self.probe_command_counts.clear();
+            if self.mutation_sequence > 0 {
+                self.last_successful_verification_mutation_sequence = self.mutation_sequence;
+            }
+        }
+        self.note_verification_record(record);
+    }
+
+    /// Credit path for verification runs whose exit status was masked by a
+    /// pipeline or connector (`cargo test 2>&1 | grep 'test result'`): the
+    /// shell reports the LAST stage's status — grep prints the
+    /// `test result: FAILED` line too — so the tool's own success flag says
+    /// nothing about the runner. Evidence comes from the runner's own
+    /// captured output instead (2026-09-22 long-task e2e: these runs earned
+    /// no credit and the run spent 18 of 51 iterations in StaleVerification
+    /// ping-pong).
+    ///
+    /// Fail-closed (AGENTS.md rule 3): an unambiguous success marker credits
+    /// the run, an unambiguous failure marker records the failure, and
+    /// anything else records NOTHING — ambiguous output is not evidence in
+    /// either direction.
+    fn note_masked_verification_outcome(&mut self, name: &str, args_str: &str, result_str: &str) {
+        if !matches!(name, "shell_exec" | "pty_shell") {
+            return;
+        }
+        let command = serde_json::from_str::<serde_json::Value>(args_str)
+            .ok()
+            .and_then(|v| {
+                v.get("command")
+                    .and_then(|c| c.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_default();
+        if command.is_empty() || !shell_command_is_masked_verification(&command) {
+            return;
+        }
+        let (passed, evidence) = if runner_output_proves_success(result_str) {
+            (true, "passed")
+        } else if runner_output_proves_failure(result_str) {
+            (false, "failed")
+        } else {
+            debug!("masked verification run with ambiguous output earns no credit: {command}");
+            return;
+        };
+        let working_dir = self.verification_task_root();
+        let record = super::verification_scope::VerificationRecord {
+            check_id: super::verification_scope::check_id_for(name, &command),
+            command: name.to_string(),
+            scope: super::verification_scope::scope_for_command(name, &command, &working_dir),
+            passed,
+            mutation_sequence: self.mutation_sequence,
+            summary: format!(
+                "{name} {evidence} (read from runner output; the pipeline/connector masked the \
+                 exit status): {}",
+                result_str.chars().take(300).collect::<String>()
+            ),
+        };
+        if passed {
             self.probe_command_counts.clear();
             if self.mutation_sequence > 0 {
                 self.last_successful_verification_mutation_sequence = self.mutation_sequence;
@@ -639,6 +698,34 @@ impl Agent {
         paths
     }
 
+    /// True when any recorded shell_exec/pty_shell call ran a write-shaped
+    /// command (a redirect or tee): disk-changing evidence the file-tool
+    /// ledger (`written_paths`) cannot see. The outcome classifier needs
+    /// this so a run whose edits came via the shell is not mislabeled
+    /// NO_CHANGES, while a run of probe-only "mutations" (python3 stats.py)
+    /// is no longer mislabeled REAL_EDIT (2026-09-22 e2e).
+    pub(super) fn shell_write_evidence(&self) -> bool {
+        self.current_checkpoint
+            .as_ref()
+            .map(|cp| {
+                cp.tool_calls.iter().any(|tc| {
+                    if !tc.success || !matches!(tc.tool_name.as_str(), "shell_exec" | "pty_shell") {
+                        return false;
+                    }
+                    let args: serde_json::Value =
+                        serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null);
+                    let cmd = args
+                        .get("command")
+                        .or_else(|| args.get("cmd"))
+                        .or_else(|| args.get("shell"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    !cmd.is_empty() && (helpers::has_file_redirect(cmd) || cmd.contains("tee "))
+                })
+            })
+            .unwrap_or(false)
+    }
+
     /// Stagnation accounting (loop 13d): count consecutive tool calls that
     /// leave the workspace fingerprint unchanged and aren't a green
     /// verification. Warn once at 10, abort at 20 — a run whose workspace
@@ -969,6 +1056,22 @@ impl Agent {
             return;
         }
 
+        // EVERY file-writing tool marks every path it touched. Gating this on
+        // a top-level `path` arg wired only file_edit/file_write — a
+        // file_multi_edit (edits array), a patch_apply (paths inside the
+        // diff) or a file_fim_edit left no record, so the run summary printed
+        // "files changed: none" after a 37-edit multi-edit (W7b finding 5a).
+        if tool_call_writes_file(name) {
+            for path in written_paths_for_tool_call(name, args) {
+                let path_str = path.to_string_lossy().into_owned();
+                self.file_tracker.mark_written(&path_str);
+                self.push_task_state_note(format!(
+                    "Marked `{path_str}` as changed; future rereads should expect new content"
+                ));
+            }
+            return;
+        }
+
         let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
             return;
         };
@@ -1033,13 +1136,6 @@ impl Agent {
                         path_str, unchanged_count
                     ));
                 }
-            }
-            "file_write" | "file_edit" => {
-                self.file_tracker.mark_written(&path_str);
-                self.push_task_state_note(format!(
-                    "Marked `{}` as changed; future rereads should expect new content",
-                    path_str
-                ));
             }
             "file_delete" => {
                 self.file_tracker.remove_deleted(&path_str);

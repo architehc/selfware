@@ -1623,6 +1623,255 @@ mod completion_gate_tests {
             "an unchanged snapshot must not be rescanned"
         );
     }
+
+    /// A checkpoint call whose recorded result text is caller-controlled —
+    /// the gate's evidence scan reads that output for masked-pipeline credit.
+    fn shell_exec_with_output(command: &str, success: bool, output: &str) -> ToolCallLog {
+        ToolCallLog {
+            timestamp: chrono::Utc::now(),
+            tool_name: "shell_exec".to_string(),
+            arguments: serde_json::json!({"command": command}).to_string(),
+            result: Some(output.to_string()),
+            success,
+            duration_ms: Some(100),
+        }
+    }
+
+    // W7b finding 1b: a pipeline masks the runner's exit status (the shell
+    // reports the LAST stage), so credit must come from the runner's own
+    // unambiguous success output — and only from that.
+    #[tokio::test]
+    async fn piped_verification_with_runner_success_output_earns_credit() {
+        let command = "cargo test 2>&1 | grep 'test result'";
+        let output = "test result: ok. 3 passed; 0 failed; 0 ignored; finished in 0.01s";
+        // The checkpoint log records the call first, then the lifecycle
+        // accounting runs — the same order the dispatcher uses.
+        let mut agent =
+            agent_with_checkpoint(vec![shell_exec_with_output(command, true, output)]).await;
+        agent.note_mutating_tool_call(); // the edit being verified (seq 1)
+        let args = serde_json::json!({ "command": command });
+        agent.note_tool_call_lifecycle("shell_exec", &args, &args.to_string(), true, output);
+
+        assert_eq!(
+            agent.mutation_sequence, 1,
+            "a piped test run is not an edit and must not advance the sequence"
+        );
+        assert_eq!(
+            agent.last_successful_verification_mutation_sequence, 1,
+            "unambiguous runner success output must credit the current revision"
+        );
+        assert!(
+            agent.has_successful_verification_tool_call(),
+            "the gate's evidence scan must recognize the output-credited run"
+        );
+        assert!(agent.has_fresh_successful_verification());
+    }
+
+    // The grep in `… | grep 'test result'` matches the FAILED summary line
+    // too, so the pipeline exits 0 either way — tool success says nothing.
+    // The failure must be read from the runner's output and recorded.
+    #[tokio::test]
+    async fn piped_verification_with_runner_failure_output_records_failure() {
+        let command = "cargo test 2>&1 | grep 'test result'";
+        let output = "test result: FAILED. 1 passed; 2 failed; 0 ignored";
+        let mut agent = agent_with_checkpoint(vec![
+            checkpoint_call(
+                "file_write",
+                json!({"path": "src/main.rs", "content": "fn main() {}"}),
+                true,
+            ),
+            shell_exec_with_output(command, true, output),
+        ])
+        .await;
+        agent.note_mutating_tool_call();
+        let args = serde_json::json!({ "command": command });
+        agent.note_tool_call_lifecycle("shell_exec", &args, &args.to_string(), true, output);
+
+        assert_eq!(
+            agent.last_successful_verification_mutation_sequence, 0,
+            "a failing suite masked by a pipeline must not earn credit"
+        );
+        let msg = agent
+            .mutation_completion_gate()
+            .await
+            .expect("a proven failing run must block completion");
+        assert!(msg.contains("FailingTestsAccepted"), "{msg}");
+        assert!(msg.contains("cargo test"), "names the failing check: {msg}");
+        assert!(
+            msg.contains("src/main.rs"),
+            "names the code-affecting edit under test: {msg}"
+        );
+    }
+
+    // Fail-closed: a masked run whose output carries no unambiguous runner
+    // verdict earns no credit and records no failure.
+    #[tokio::test]
+    async fn piped_verification_with_ambiguous_output_earns_no_credit() {
+        let command = "cargo test 2>&1 | tail -40";
+        let mut agent = agent_with_checkpoint(vec![]).await;
+        agent.note_mutating_tool_call();
+        let args = serde_json::json!({ "command": command });
+        agent.note_tool_call_lifecycle("shell_exec", &args, &args.to_string(), true, "ok");
+
+        assert_eq!(agent.last_successful_verification_mutation_sequence, 0);
+        assert!(
+            agent.verification_failures.is_empty(),
+            "ambiguous masked output is not evidence in either direction"
+        );
+        assert!(
+            !agent.has_successful_verification_tool_call(),
+            "ambiguous output must not satisfy the gate's evidence scan"
+        );
+    }
+
+    // W7b finding 2: a StaleVerification rejection must name the unmet
+    // condition — which revision lacks a pass and why a piped run earned no
+    // credit — instead of sending the model guessing.
+    #[tokio::test]
+    async fn stale_verification_rejection_names_the_unmet_condition() {
+        let (_dir, _cwd) = git_repo(&[("calc.py", "def div(a, b):\n    return a // b\n")]);
+        let mut agent = mutation_task_agent("Fix the divide-by-zero bug in calc.py").await;
+        std::fs::write("calc.py", "def div(a, b):\n    return a / b\n").unwrap();
+        agent.note_mutating_tool_call();
+        // A masked run earned no credit — the message must name it and why.
+        agent
+            .current_checkpoint
+            .as_mut()
+            .unwrap()
+            .log_tool_call(shell_exec_with_output(
+                "cargo test 2>&1 | grep 'test result'",
+                true,
+                "compiling…",
+            ));
+
+        let msg = agent
+            .mutation_completion_gate()
+            .await
+            .expect("a stale verification must reject");
+        assert!(msg.contains("StaleVerification"), "{msg}");
+        assert!(
+            msg.contains("#1") && msg.contains("#0"),
+            "names the current revision and the last credited one: {msg}"
+        );
+        assert!(
+            msg.contains("cargo test 2>&1 | grep 'test result'"),
+            "names the run that earned no credit: {msg}"
+        );
+        assert!(
+            msg.contains("masked"),
+            "says WHY it earned no credit: {msg}"
+        );
+    }
+
+    // W7b finding 2: FailingTestsAccepted must name the check, the revision
+    // relationship, and the edits it post-dates.
+    #[tokio::test]
+    async fn failing_tests_rejection_names_check_revision_and_edits() {
+        let mut agent = agent_with_checkpoint(vec![checkpoint_call(
+            "file_write",
+            json!({"path": "src/lib.rs", "content": "pub fn f() {}"}),
+            true,
+        )])
+        .await;
+        agent.note_mutating_tool_call();
+        agent.note_verification_outcome(
+            "shell_exec",
+            r#"{"command":"cargo test"}"#,
+            false,
+            "test result: FAILED. 2 failed",
+        );
+        let msg = agent
+            .mutation_completion_gate()
+            .await
+            .expect("a failing verification must reject");
+        assert!(msg.contains("FailingTestsAccepted"), "{msg}");
+        assert!(msg.contains("cargo test"), "names the failed check: {msg}");
+        assert!(
+            msg.contains("src/lib.rs"),
+            "names the code-affecting edit: {msg}"
+        );
+        assert!(
+            msg.contains("revision") || msg.contains("mutation #"),
+            "names the revision relationship: {msg}"
+        );
+    }
+
+    // W7b finding 3: a doc-only write must not arm the test-verification
+    // gate. Observed live: writing REVIEW.md in a read-only review run armed
+    // cargo gates until the model edited src/ to appease them.
+    #[tokio::test]
+    async fn doc_only_write_does_not_arm_the_test_gate() {
+        let mut agent = artifact_agent(
+            "Review the auth module and report findings.",
+            vec![
+                checkpoint_call(
+                    "file_write",
+                    json!({"path": "REVIEW.md", "content": "# Findings\n"}),
+                    true,
+                ),
+                checkpoint_call("file_read", json!({"path": "REVIEW.md"}), true),
+            ],
+        )
+        .await;
+        // The dispatched write advanced the mutation sequence…
+        agent.note_mutating_tool_call();
+        let gate = agent.check_completion_gate().await;
+        assert!(
+            gate.is_none(),
+            "a doc-only write must not arm the test gate: {gate:?}"
+        );
+    }
+
+    // W7b finding 3: a failing check after a doc-only write is NOT
+    // attributable to that write — the gate must not call it
+    // FailingTestsAccepted.
+    #[tokio::test]
+    async fn failing_check_is_not_attributed_to_a_doc_only_write() {
+        let mut agent = agent_with_checkpoint(vec![checkpoint_call(
+            "file_write",
+            json!({"path": "REVIEW.md", "content": "# Findings\n"}),
+            true,
+        )])
+        .await;
+        agent.note_mutating_tool_call(); // the REVIEW.md write
+                                         // A repo-wide check then failed for pre-existing reasons.
+        agent.note_verification_outcome(
+            "shell_exec",
+            r#"{"command":"cargo check"}"#,
+            false,
+            "error[E0432]: unresolved import `missing`",
+        );
+        let msg = agent.mutation_completion_gate().await;
+        assert!(
+            msg.as_deref()
+                .map(|m| !m.contains("FailingTestsAccepted"))
+                .unwrap_or(true),
+            "a doc-only write must not be blamed for a failing check: {msg:?}"
+        );
+    }
+
+    // Control for finding 3: a real code write still arms the gate.
+    #[tokio::test]
+    async fn code_write_still_arms_the_test_gate() {
+        let mut agent = artifact_agent(
+            "Review the auth module and report findings.",
+            vec![checkpoint_call(
+                "file_write",
+                json!({"path": "src/auth.py", "content": "def f():\n    pass\n"}),
+                true,
+            )],
+        )
+        .await;
+        agent.note_mutating_tool_call();
+        let gate = agent
+            .check_completion_gate()
+            .await
+            .expect("a code write without verification must reject");
+        assert!(
+            gate.contains("verif"),
+            "the rejection demands verification: {gate}"
+        );
+    }
 }
 
 // --- Requirements audit completion gate (TB 3.0 failure class, 2026-08-24) ---

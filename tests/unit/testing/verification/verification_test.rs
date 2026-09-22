@@ -2201,6 +2201,75 @@ fn classify_rustfmt_failure_operational_or_empty_is_syntax_failure() {
     );
 }
 
+#[test]
+fn classify_rustfmt_failure_missing_component_is_tool_unavailable() {
+    // W7b finding 4: a rustup shim without the rustfmt component never ran
+    // the tool — that is check-not-run, NEVER a syntax failure. The
+    // error-line arm used to catch it and block verification of valid code.
+    assert_eq!(
+        classify_rustfmt_failure(
+            "error: toolchain 'nightly-2026-09-01-aarch64-apple-darwin' does not have component 'rustfmt'"
+        ),
+        RustfmtFailureKind::ToolUnavailable
+    );
+    assert_eq!(
+        classify_rustfmt_failure(
+            "error: rustfmt is not installed for the toolchain 'stable-aarch64-apple-darwin'\nTo install, run `rustup component add rustfmt`"
+        ),
+        RustfmtFailureKind::ToolUnavailable
+    );
+    assert_eq!(
+        classify_rustfmt_failure(
+            "error: 'rustfmt' is not installed for the toolchain 'stable'\nTo install, run `rustup component add rustfmt`"
+        ),
+        RustfmtFailureKind::ToolUnavailable
+    );
+}
+
+#[test]
+fn rustfmt_tool_unavailable_result_reports_check_not_run() {
+    // The result must say the check did not run (advisory), not that the
+    // code failed — and it must not drag the report red.
+    let result = rustfmt_unavailable_result(
+        RepoLanguage::Rust,
+        7,
+        "error: toolchain 'x' does not have component 'rustfmt'",
+    );
+    assert!(
+        result.passed,
+        "a tool that never ran asserts no failure: {:?}",
+        result.errors
+    );
+    assert!(
+        result.errors.is_empty(),
+        "no syntax errors were found because none were checked: {:?}",
+        result.errors
+    );
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| w.contains("not installed") || w.contains("unavailable")),
+        "the warning must name the missing tool: {:?}",
+        result.warnings
+    );
+    assert!(
+        result.output.contains("could not run"),
+        "the output must state the check did not run: {}",
+        result.output
+    );
+}
+
+#[test]
+fn classify_rustfmt_failure_shim_error_does_not_mask_real_errors() {
+    // A shim line plus a genuine parse error stays a syntax failure.
+    let out = "error: expected expression, found `;`\n --> /tmp/broken.rs:2:13\n";
+    assert_eq!(
+        classify_rustfmt_failure(out),
+        RustfmtFailureKind::SyntaxFailure
+    );
+}
+
 #[tokio::test]
 async fn cheap_syntax_check_rust_formatting_diff_is_advisory() {
     // Finding C: `rustfmt --check` exits 1 for formatting diffs too, so a run
