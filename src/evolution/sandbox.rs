@@ -73,6 +73,21 @@ pub struct Sandbox {
     /// The leading underscore silences dead-code warnings since this field
     /// exists solely to control the TempDir's lifetime.
     _workspace_tmp: Option<tempfile::TempDir>,
+    /// Set once the container has been removed (explicitly or via Drop), so
+    /// cleanup is idempotent: a dropped-after-destroy sandbox never double-runs.
+    destroyed: bool,
+}
+
+impl Drop for Sandbox {
+    /// Container leak guard: sandboxes were only removed by an explicit
+    /// `destroy(self)`, so an evaluation that returns an error (or any caller
+    /// that early-returns) left its container running — `docker run -d`'
+    /// sleep-infinity process keeps the container alive indefinitely. Dropping
+    /// the sandbox now always runs `docker rm -f`, and the explicit `destroy`
+    /// path shares this code, so both are idempotent (2026-09-21 review, P2).
+    fn drop(&mut self) {
+        self.destroy_container();
+    }
 }
 
 #[derive(Debug)]
@@ -168,6 +183,7 @@ impl Sandbox {
             config,
             created_at: Instant::now(),
             _workspace_tmp: Some(workspace_tmp),
+            destroyed: false,
         })
     }
 
@@ -270,12 +286,35 @@ impl Sandbox {
         })
     }
 
-    /// Destroy the sandbox container
-    pub fn destroy(self) -> Result<(), SandboxError> {
-        let _ = Command::new("docker")
-            .args(["rm", "-f", &self.container_name])
-            .output();
+    /// Destroy the sandbox container.
+    ///
+    /// Idempotent with the `Drop` guard: both route through
+    /// [`Sandbox::destroy_container`], so an explicit destroy followed by a
+    /// drop (or a double destroy) runs `docker rm -f` exactly once.
+    pub fn destroy(mut self) -> Result<(), SandboxError> {
+        self.destroy_container();
         Ok(())
+    }
+
+    /// Run `docker rm -f` once. Shared by the explicit `destroy` and the
+    /// `Drop` guard; the `destroyed` flag makes the second invocation a
+    /// no-op. Failures are swallowed on purpose — the container may already
+    /// have been removed externally, and a failed cleanup must not turn a
+    /// successful evaluation into an error; the message is logged instead.
+    fn destroy_container(&mut self) {
+        if std::mem::replace(&mut self.destroyed, true) {
+            return;
+        }
+        if let Err(e) = Command::new("docker")
+            .args(["rm", "-f", &self.container_name])
+            .output()
+        {
+            tracing::warn!(
+                container = %self.container_name,
+                "sandbox: docker rm -f failed: {}",
+                e
+            );
+        }
     }
 
     /// Check if the sandbox has exceeded its timeout

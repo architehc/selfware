@@ -48,6 +48,58 @@ fn stamped_system_message(current: &Message, focus_block: &str) -> Message {
     })
 }
 
+/// Verification steps for the injected operational plan, derived from the
+/// project type's VERIFY/TEST instructions (numbering prefixes stripped). The
+/// plan used to hard-code "Run cargo_check"/"Run cargo_test" for every task;
+/// on a Python task that steers the model into a cargo invocation that can
+/// never pass (finding 1a). Pure so the steering is unit-testable.
+fn operational_plan_verification_steps(project_type: super::ProjectType) -> Vec<String> {
+    let (verify_step, test_step, _) = super::verification_instructions(project_type);
+    // Strip the "3. VERIFY: " / "5. TEST: " numbering prefixes.
+    let labelled = |step: &str| -> String {
+        step.split_once(": ")
+            .map(|(_, rest)| rest)
+            .unwrap_or(step)
+            .to_string()
+    };
+    vec![labelled(verify_step), labelled(test_step)]
+}
+
+/// Cargo-aware guidance text for the periodic progress injection. Pure: the
+/// caller decides `cargo_applies` (a manifest reachable from the task root),
+/// this function only renders text.
+fn progress_guidance(pct: f64, cargo_applies: bool) -> &'static str {
+    if pct < 30.0 {
+        "You have plenty of budget remaining. Be thorough — read relevant code, \
+         implement carefully, and verify each change."
+    } else if pct < 70.0 {
+        if cargo_applies {
+            "Good progress. Continue implementing and make sure to verify with cargo_check/cargo_test."
+        } else {
+            "Good progress. Continue implementing and make sure to verify with your project's \
+             own test runner (pytest, unittest, npm test, or the project's test command)."
+        }
+    } else if cargo_applies {
+        "You are using most of your budget. Wrap up: ensure all changes compile and tests pass, \
+         then provide your final summary."
+    } else {
+        "You are using most of your budget. Wrap up: ensure your changes work and pass your \
+         project's own tests, then provide your final summary."
+    }
+}
+
+/// The verification directive appended after a synthesized answer's code is
+/// auto-written to a file. Project-aware: a Python task must not be told to
+/// run `cargo check` (finding 1a).
+fn auto_write_verification_directive(cargo_applies: bool) -> &'static str {
+    if cargo_applies {
+        "Now run cargo check or cargo test to verify."
+    } else {
+        "Now verify the written file works (the project's compile/syntax check and its \
+         test runner, as applicable)."
+    }
+}
+
 /// Extensions that mark a bare task token as a mentioned file even without a
 /// '/'. Root-file blindness: "Create a python script hello.py …" ignored
 /// hello.py entirely under the old '/' filter, so no context preloading or
@@ -371,16 +423,24 @@ impl Agent {
             format!("Execute task: {}", task_description),
             vec![learning_session_id.clone()],
         );
-        self.cognitive_state.set_operational_plan(
-            learning_session_id.clone(),
-            vec![
-                "Plan approach and identify files to modify".to_string(),
-                "Implement changes".to_string(),
-                "Run cargo_check to verify compilation".to_string(),
-                "Run cargo_test to verify correctness".to_string(),
-                "Review and finalize result".to_string(),
-            ],
-        );
+        // Project language is detected ONCE per task and reused: the
+        // operational plan below and the MANDATORY WORKFLOW block (task_focus)
+        // both tailor their verification steps to it. The plan used to
+        // hard-code "Run cargo_check"/"Run cargo_test" for EVERY task — on a
+        // Python task that steers the model into a cargo invocation which can
+        // never pass, observed as two live runs burning ~105k tokens and
+        // exiting 1 after a correct, tested fix (finding 1a).
+        let project_type = super::detect_project_type().await;
+        self.cognitive_state
+            .set_operational_plan(learning_session_id.clone(), {
+                let mut steps = vec![
+                    "Plan approach and identify files to modify".to_string(),
+                    "Implement changes".to_string(),
+                ];
+                steps.extend(operational_plan_verification_steps(project_type));
+                steps.push("Review and finalize result".to_string());
+                steps
+            });
 
         // Initialize hierarchical context map: set modality + build L1 tree.
         self.context_map.set_modality_from_task(&task_description);
@@ -467,7 +527,6 @@ impl Agent {
                 // The MANDATORY WORKFLOW block moved here from the static
                 // system prompt so read-only tasks can be spared it (it is
                 // identical text for mutation tasks, now per-task).
-                let project_type = super::detect_project_type().await;
                 let (verify_step, test_step, _) = super::verification_instructions(project_type);
                 let workflow = format!(
                     "## MANDATORY WORKFLOW\n\
@@ -679,15 +738,13 @@ impl Agent {
             "Verification: NOT YET RUN (required before completion)"
         };
 
-        let guidance = if pct < 30.0 {
-            "You have plenty of budget remaining. Be thorough — read relevant code, \
-             implement carefully, and verify each change."
-        } else if pct < 70.0 {
-            "Good progress. Continue implementing and make sure to verify with cargo_check/cargo_test."
-        } else {
-            "You are using most of your budget. Wrap up: ensure all changes compile \
-             and tests pass, then provide your final summary."
-        };
+        // Cargo-specific guidance only when cargo applies to THIS task; a
+        // Python task kept being told to "verify with cargo_check/cargo_test"
+        // in every injection — even after Green Verdict PASSED — and dutifully
+        // probed cargo, which cannot pass without a manifest (finding 1).
+        let cargo_applies =
+            super::verification_scope::cargo_applies_to_task(&self.verification_task_root());
+        let guidance = progress_guidance(pct, cargo_applies);
 
         Some(format!(
             "[Progress: step {}/{} ({:.0}% budget used) | {}]\n{}",
@@ -821,16 +878,19 @@ impl Agent {
             );
         }
         if self.cognitive_state.active_operational_plan.is_none() {
-            self.cognitive_state.set_operational_plan(
-                learning_session_id.clone(),
-                vec![
-                    "Resume planning and identify remaining work".to_string(),
-                    "Resume implementation".to_string(),
-                    "Run cargo_check to verify compilation".to_string(),
-                    "Run cargo_test to verify correctness".to_string(),
-                    "Review and finalize result".to_string(),
-                ],
-            );
+            // Project-aware verification steps, like run_task (finding 1a): a
+            // resumed Python task must not be told to run cargo checks.
+            let project_type = super::detect_project_type().await;
+            self.cognitive_state
+                .set_operational_plan(learning_session_id.clone(), {
+                    let mut steps = vec![
+                        "Resume planning and identify remaining work".to_string(),
+                        "Resume implementation".to_string(),
+                    ];
+                    steps.extend(operational_plan_verification_steps(project_type));
+                    steps.push("Review and finalize result".to_string());
+                    steps
+                });
         }
 
         self.run_execution_loop(&task_description, LoopMode::Resume)
@@ -1538,12 +1598,19 @@ impl Agent {
                                         match self.execute_tool_batch(calls).await {
                                             Ok(()) => {
                                                 self.has_written_any_file = true;
+                                                let verify_directive = auto_write_verification_directive(
+                                                    super::verification_scope::cargo_applies_to_task(
+                                                        &self.verification_task_root(),
+                                                    ),
+                                                );
                                                 self.messages.push(Message::user(
-                                                    "<selfware_system_directive>\n\
-                                                     Code from your response was auto-written to file. \
-                                                     Now run cargo check or cargo test to verify.\n\
-                                                     </selfware_system_directive>"
-                                                        .to_string(),
+                                                    format!(
+                                                        "<selfware_system_directive>\n\
+                                                         Code from your response was auto-written to file. \
+                                                         {verify_directive}\n\
+                                                         </selfware_system_directive>"
+                                                    )
+                                                    .to_string(),
                                                 ));
                                             }
                                             Err(e) => {
@@ -1551,11 +1618,16 @@ impl Agent {
                                                 // did not happen, so say so — do NOT claim the
                                                 // code is on disk or credit a file write.
                                                 warn!("Auto-write from synthesis failed: {}", e);
+                                                let verify_directive = auto_write_verification_directive(
+                                                    super::verification_scope::cargo_applies_to_task(
+                                                        &self.verification_task_root(),
+                                                    ),
+                                                );
                                                 self.messages.push(Message::user(format!(
                                                     "<selfware_system_directive>\n\
                                                      Auto-writing the code from your response FAILED: {e}. \
                                                      Nothing was written to disk. Write the code yourself \
-                                                     with file_write, then run cargo check or cargo test to verify.\n\
+                                                     with file_write, then {verify_directive}\n\
                                                      </selfware_system_directive>"
                                                 )));
                                             }
@@ -2369,14 +2441,26 @@ where
         );
 
         // Build a role-specific prompt that includes specialist guidance
+        // Project-aware verification ask, same as the progress injections:
+        // a swarm working on a non-Rust tree must not be told to run
+        // cargo_check (finding 1a). The swarm executor is generic over the
+        // agent type, so the probe uses the process cwd like the rest of the
+        // project-type detection does.
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let verify_ask = if super::verification_scope::cargo_applies_to_task(&cwd) {
+            "After completing your work, verify with cargo_check if you made code changes."
+        } else {
+            "After completing your work, verify with your project's own test runner \
+             (pytest/unittest/npm test or the project's test command) if you made code changes."
+        };
         let role_prompt = format!(
             "{}\n\n\
              You are acting as the {} in a development swarm.\n\
              Previous phases have already contributed to the conversation context.\n\
              Focus specifically on your role's responsibilities.\n\
-             After completing your work, verify with cargo_check if you made code changes.\n\n\
+             {}\n\n\
              Task: {}",
-            lead_agent_prompt, role_name, sub_task.description
+            lead_agent_prompt, role_name, verify_ask, sub_task.description
         );
 
         let result = run_phase(agent, role_prompt).await;

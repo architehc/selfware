@@ -1852,3 +1852,263 @@ fn diff_name_status_paths_feeds_protected_path_sweep() {
         "committed edits to protected paths must be caught by the diff sweep"
     );
 }
+
+// =========================================================================
+// Follow-up review findings (W1a + P2): untracked-directory expansion,
+// quoted-path decoding, and the improve rollback (snapshot/restore).
+// =========================================================================
+
+#[cfg(feature = "self-improvement")]
+#[test]
+fn porcelain_paths_catches_protected_file_inside_new_untracked_directory() {
+    // The default `git status --porcelain` collapses an untracked directory
+    // to a single `?? newdir/` line, hiding `newdir/AGENTS.md` from the
+    // sweep. The gate now runs with `--untracked-files=all`, which emits one
+    // line PER FILE — this is the shape the sweep sees, and AGENTS.md under
+    // a new directory must trip is_protected.
+    let out = b"?? newdir/\n?? docs/\n";
+    // What `--untracked-files=all` changes the first line into:
+    let expanded = b"?? newdir/AGENTS.md\n?? newdir/notes.txt\n?? docs/review.md\n";
+    assert_eq!(
+        porcelain_paths(expanded),
+        vec![
+            std::path::PathBuf::from("newdir/AGENTS.md"),
+            std::path::PathBuf::from("newdir/notes.txt"),
+            std::path::PathBuf::from("docs/review.md"),
+        ]
+    );
+    let touched: Vec<_> = porcelain_paths(expanded)
+        .into_iter()
+        .filter(|p| crate::evolution::is_protected(p))
+        .collect();
+    assert_eq!(
+        touched,
+        vec![std::path::PathBuf::from("newdir/AGENTS.md")],
+        "a protected file inside a new untracked directory must be swept once \
+         the directory is expanded"
+    );
+    // And the collapsed form genuinely HIDES it — the reason for the flag.
+    let collapsed_touched: Vec<_> = porcelain_paths(out)
+        .into_iter()
+        .filter(|p| crate::evolution::is_protected(p))
+        .collect();
+    assert!(
+        collapsed_touched.is_empty(),
+        "collapsed `?? newdir/` hides AGENTS.md — the sweep must use --untracked-files=all"
+    );
+}
+
+#[cfg(feature = "self-improvement")]
+#[test]
+fn porcelain_paths_decodes_quoted_paths() {
+    // git C-style quotes paths with spaces / quotes / non-ASCII: `"a b.rs"`,
+    // `"a\"b.rs"`, `"notes\303\251.md"` (octal). The sweep must decode them
+    // or those paths dodge the protected-path check.
+    let out =
+        b" M \"src/my file.rs\"\n?? \"notes \\\"quoted\\\".md\"\n M \"src/caf\\303\\251.rs\"\n";
+    assert_eq!(
+        porcelain_paths(out),
+        vec![
+            std::path::PathBuf::from("src/my file.rs"),
+            std::path::PathBuf::from("notes \"quoted\".md"),
+            std::path::PathBuf::from("src/caf\u{e9}.rs"),
+        ]
+    );
+}
+
+#[cfg(feature = "self-improvement")]
+#[test]
+fn porcelain_paths_decodes_quoted_rename_both_sides() {
+    let out =
+        b"R  AGENTS.md -> \"notes backup.md\"\nR  \"src/old name.rs\" -> \"src/new name.rs\"\n";
+    let paths = porcelain_paths(out);
+    assert_eq!(
+        paths,
+        vec![
+            std::path::PathBuf::from("AGENTS.md"),
+            std::path::PathBuf::from("notes backup.md"),
+            std::path::PathBuf::from("src/old name.rs"),
+            std::path::PathBuf::from("src/new name.rs"),
+        ]
+    );
+    let touched: Vec<_> = porcelain_paths(b"R  AGENTS.md -> \"notes backup.md\"\n")
+        .into_iter()
+        .filter(|p| crate::evolution::is_protected(p))
+        .collect();
+    assert_eq!(
+        touched,
+        vec![std::path::PathBuf::from("AGENTS.md")],
+        "a quoted rename destination must not hide the protected source"
+    );
+}
+
+#[cfg(feature = "self-improvement")]
+#[test]
+fn decode_git_path_passthrough_and_escapes() {
+    assert_eq!(decode_git_path("src/plain.rs"), "src/plain.rs");
+    assert_eq!(decode_git_path("\"a b.txt\""), "a b.txt");
+    assert_eq!(decode_git_path("\"a\\\\b\""), "a\\b");
+    assert_eq!(decode_git_path("\"a\\\"b\""), "a\"b");
+    assert_eq!(decode_git_path("\"tab\\there\""), "tab\there");
+    assert_eq!(decode_git_path("\"line\\nfeed\""), "line\nfeed");
+    // Octal escapes: git renders non-ASCII bytes as \ooo.
+    assert_eq!(decode_git_path("\"caf\\303\\251\""), "caf\u{e9}");
+    assert_eq!(decode_git_path("\"\\001\""), "\u{1}");
+}
+
+#[cfg(feature = "self-improvement")]
+#[test]
+fn diff_name_status_paths_decodes_quoted_paths() {
+    let out = b"M\t\"notes backup.md\"\nA\t\"src/my new.rs\"\nD\tsrc/old.rs\n";
+    assert_eq!(
+        diff_name_status_paths(out),
+        vec![
+            std::path::PathBuf::from("notes backup.md"),
+            std::path::PathBuf::from("src/my new.rs"),
+            std::path::PathBuf::from("src/old.rs"),
+        ]
+    );
+}
+
+#[cfg(feature = "self-improvement")]
+#[test]
+fn parse_untracked_nul_list_splits_nul_separated_paths() {
+    assert!(parse_untracked_nul_list(b"").is_empty());
+    let out = b"src/new.rs\0docs/notes.md\0";
+    assert_eq!(
+        parse_untracked_nul_list(out),
+        vec![
+            std::path::PathBuf::from("src/new.rs"),
+            std::path::PathBuf::from("docs/notes.md"),
+        ]
+    );
+    // Internal NULs are data (git -z guarantees path atoms have none).
+    assert_eq!(parse_untracked_nul_list(b"a\0b\0c\0"), {
+        let mut v = vec![
+            std::path::PathBuf::from("a"),
+            std::path::PathBuf::from("b"),
+            std::path::PathBuf::from("c"),
+        ];
+        v.sort();
+        v
+    });
+}
+
+#[cfg(feature = "self-improvement")]
+#[test]
+fn untracked_created_during_run_is_exactly_the_difference() {
+    let before = vec![
+        std::path::PathBuf::from("src/user_edit.rs"),
+        std::path::PathBuf::from("notes.md"),
+    ];
+    let after = vec![
+        std::path::PathBuf::from("src/user_edit.rs"),
+        std::path::PathBuf::from("src/agent_new.rs"),
+        std::path::PathBuf::from("docs/agent_new.md"),
+    ];
+    assert_eq!(
+        untracked_created_during_run(&before, &after),
+        vec![
+            std::path::PathBuf::from("docs/agent_new.md"),
+            std::path::PathBuf::from("src/agent_new.rs"),
+        ]
+    );
+    // A pre-existing untracked file the agent deleted is reported separately,
+    // never deleted-by-difference.
+    assert_eq!(
+        untracked_removed_during_run(&before, &after),
+        vec![std::path::PathBuf::from("notes.md")]
+    );
+}
+
+#[cfg(feature = "self-improvement")]
+#[test]
+fn improve_rollback_restores_pre_run_tree_in_a_real_repo() {
+    // Integration through REAL git in a temp repo (no cargo gates): the
+    // rollback must restore the tracked tree exactly (including the
+    // operator's own pre-run dirty edit) and remove only what the agent
+    // created, leaving the operator's pre-existing untracked files be.
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(async {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+
+        async fn git(root: &std::path::Path, args: &[&str]) {
+            let out = run_gate_command("git", args, root, std::time::Duration::from_secs(30))
+                .await
+                .expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        git(&root, &["init", "-q"]).await;
+        git(&root, &["config", "user.email", "test@test"]).await;
+        git(&root, &["config", "user.name", "test"]).await;
+        std::fs::write(root.join("a.txt"), "base\n").unwrap();
+        std::fs::write(root.join("b.txt"), "base\n").unwrap();
+        git(&root, &["add", "."]).await;
+        git(&root, &["commit", "-qm", "init"]).await;
+
+        // Operator's own pre-run state: one dirty tracked file + one
+        // pre-existing untracked file.
+        std::fs::write(root.join("a.txt"), "base\noperator edit\n").unwrap();
+        std::fs::write(root.join("user_untracked.md"), "mine\n").unwrap();
+        let pre_run_head = current_head_sha(&root).await;
+        let snapshot = snapshot_improve_tree(&root, pre_run_head.as_deref()).await;
+
+        // The agent's damage: modifies the tracked file, deletes another,
+        // creates two new untracked files, and stages something.
+        std::fs::write(root.join("a.txt"), "base\noperator edit\nagent edit\n").unwrap();
+        std::fs::remove_file(root.join("b.txt")).unwrap();
+        std::fs::write(root.join("new_untracked.rs"), "fn new() {}\n").unwrap();
+        std::fs::create_dir_all(root.join("deep/dir")).unwrap();
+        std::fs::write(root.join("deep/dir/file.py"), "x = 1\n").unwrap();
+        git(&root, &["add", "a.txt"]).await;
+
+        let rollback = rollback_improve_tree(&root, &snapshot).await;
+        assert!(
+            rollback.restored_tracked,
+            "tracked tree must be restored: {:?}",
+            rollback.notes
+        );
+        // Tracked content is exactly the pre-run state.
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "base\noperator edit\n",
+            "the operator's own pre-run dirty edit is restored; the agent's edit is gone"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("b.txt")).unwrap(),
+            "base\n",
+            "a deleted tracked file is restored"
+        );
+        // Agent-created untracked files are removed...
+        assert!(!root.join("new_untracked.rs").exists());
+        assert!(!root.join("deep").exists());
+        // ...the operator's pre-existing untracked file is untouched.
+        assert_eq!(
+            std::fs::read_to_string(root.join("user_untracked.md")).unwrap(),
+            "mine\n"
+        );
+        // The final state: only the operator's pre-run dirty modification and
+        // pre-existing untracked file remain (restore flattens the worktree /
+        // index split, so the modification shows as staged — first column).
+        let status = run_gate_command(
+            "git",
+            &["status", "--porcelain"],
+            &root,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("status runs");
+        let porcelain = String::from_utf8_lossy(&status.stdout).to_string();
+        assert_eq!(
+            porcelain, "M  a.txt\n?? user_untracked.md\n",
+            "got: {porcelain}"
+        );
+    });
+}

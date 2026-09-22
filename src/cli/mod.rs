@@ -214,13 +214,72 @@ fn build_workflow_llm_handler(
 }
 
 #[cfg(feature = "self-improvement")]
+/// Decode a path as git renders it in porcelain / `--name-status` output:
+/// paths containing special characters are C-style quoted with backslash
+/// escapes (`"a b.txt"`, octal `\ooo` for control bytes and non-ASCII).
+/// Unquoted paths pass through unchanged. The improve sweep must decode,
+/// or a protected path containing a space (e.g. an instruction file with a
+/// space) silently dodges it (2026-09-21 follow-up review finding).
+fn decode_git_path(text: &str) -> String {
+    let Some(inner) = text.strip_prefix('"').and_then(|s| s.strip_suffix('"')) else {
+        return text.to_string();
+    };
+    let bytes = inner.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b != b'\\' {
+            out.push(b);
+            i += 1;
+            continue;
+        }
+        i += 1; // consume the backslash
+        if i >= bytes.len() {
+            break;
+        }
+        match bytes[i] {
+            b'\\' => out.push(b'\\'),
+            b'"' => out.push(b'"'),
+            b'n' => out.push(b'\n'),
+            b't' => out.push(b'\t'),
+            b'r' => out.push(b'\r'),
+            b'a' => out.push(0x07),
+            b'b' => out.push(0x08),
+            b'f' => out.push(0x0c),
+            b'v' => out.push(0x0b),
+            b'?' => out.push(b'?'),
+            oct @ b'0'..=b'7' => {
+                // Up to three octal digits, the way git renders non-ASCII
+                // and control bytes.
+                let mut val = u32::from(oct - b'0');
+                let mut consumed = 1;
+                while consumed < 3 && i + 1 < bytes.len() && (b'0'..=b'7').contains(&bytes[i + 1]) {
+                    i += 1;
+                    val = val * 8 + u32::from(bytes[i] - b'0');
+                    consumed += 1;
+                }
+                out.push(val as u8);
+            }
+            other => {
+                out.push(b'\\');
+                out.push(other);
+            }
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(feature = "self-improvement")]
 /// Parse `git status --porcelain` stdout into the working-tree paths it
 /// reports (tracked modifications AND untracked files). Rename entries
 /// (`R  orig -> new`) yield BOTH the source and the destination: renaming a
 /// protected path to an unprotected name is still a modification of the
 /// protected path, so the source must be swept too (2026-09-21 follow-up
-/// review finding). Kept pure so the improve gate's protected-path sweep is
-/// unit-testable without a real repository.
+/// review finding). Paths are decoded from git's C-style quoting. Kept pure
+/// so the improve gate's protected-path sweep is unit-testable without a
+/// real repository.
 fn porcelain_paths(stdout: &[u8]) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     for line in String::from_utf8_lossy(stdout).lines() {
@@ -231,10 +290,10 @@ fn porcelain_paths(stdout: &[u8]) -> Vec<std::path::PathBuf> {
         }
         match p.split_once(" -> ") {
             Some((src, dest)) => {
-                out.push(std::path::PathBuf::from(src));
-                out.push(std::path::PathBuf::from(dest));
+                out.push(std::path::PathBuf::from(decode_git_path(src)));
+                out.push(std::path::PathBuf::from(decode_git_path(dest)));
             }
-            None => out.push(std::path::PathBuf::from(p)),
+            None => out.push(std::path::PathBuf::from(decode_git_path(p))),
         }
     }
     out
@@ -244,7 +303,8 @@ fn porcelain_paths(stdout: &[u8]) -> Vec<std::path::PathBuf> {
 /// Parse `git diff --name-status --no-renames` stdout into the paths it
 /// touches. Every status line is `<status>\t<path>` and deletions are listed
 /// like any other change; `--no-renames` renders a rename as a delete + add
-/// pair so BOTH the original and the new path appear in the sweep.
+/// pair so BOTH the original and the new path appear in the sweep. Paths are
+/// decoded from git's C-style quoting.
 fn diff_name_status_paths(stdout: &[u8]) -> Vec<std::path::PathBuf> {
     String::from_utf8_lossy(stdout)
         .lines()
@@ -254,7 +314,7 @@ fn diff_name_status_paths(stdout: &[u8]) -> Vec<std::path::PathBuf> {
             if path.is_empty() {
                 None
             } else {
-                Some(std::path::PathBuf::from(path))
+                Some(std::path::PathBuf::from(decode_git_path(path)))
             }
         })
         .collect()
@@ -409,9 +469,12 @@ async fn run_improvement_gates(
     run_cargo_gate(project_root, &["test", "--lib"], Duration::from_secs(600)).await?;
 
     // Protected-path sweep #1: uncommitted / untracked working-tree changes.
+    // `--untracked-files=all` enumerates untracked FILES; the default would
+    // collapse an untracked directory to a single `?? newdir/` line, hiding
+    // e.g. `newdir/AGENTS.md` from the sweep (2026-09-21 follow-up finding).
     let status = run_gate_command(
         "git",
-        &["status", "--porcelain"],
+        &["status", "--porcelain", "--untracked-files=all"],
         project_root,
         Duration::from_secs(30),
     )
@@ -445,12 +508,375 @@ async fn run_improvement_gates(
         .collect();
     if let Some(p) = touched.first() {
         anyhow::bail!(
-            "the agent modified protected path '{}' — the change is refused and left \
-             unverified in the working tree",
+            "the agent modified protected path '{}' — the change is refused",
             p.display()
         );
     }
     Ok(())
+}
+
+#[cfg(feature = "self-improvement")]
+/// Parse `git ls-files --others --exclude-standard -z` stdout: the NUL-
+/// separated list of non-ignored untracked files, relative to the repo root.
+/// Pure so the rollback's untracked bookkeeping is unit-testable.
+fn parse_untracked_nul_list(stdout: &[u8]) -> Vec<std::path::PathBuf> {
+    String::from_utf8_lossy(stdout)
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .collect()
+}
+
+#[cfg(feature = "self-improvement")]
+/// Untracked files present AFTER a run but not BEFORE it — what the agent
+/// created. The rollback removes exactly these (and only these).
+fn untracked_created_during_run(
+    before: &[std::path::PathBuf],
+    after: &[std::path::PathBuf],
+) -> Vec<std::path::PathBuf> {
+    let before: std::collections::BTreeSet<&std::path::Path> =
+        before.iter().map(|p| p.as_path()).collect();
+    let mut created: Vec<std::path::PathBuf> = after
+        .iter()
+        .filter(|p| !before.contains(p.as_path()))
+        .cloned()
+        .collect();
+    created.sort();
+    created.dedup();
+    created
+}
+
+#[cfg(feature = "self-improvement")]
+/// Pre-existing untracked files the agent deleted during the run. Their
+/// content was never captured, so the rollback can only report them.
+fn untracked_removed_during_run(
+    before: &[std::path::PathBuf],
+    after: &[std::path::PathBuf],
+) -> Vec<std::path::PathBuf> {
+    let after: std::collections::BTreeSet<&std::path::Path> =
+        after.iter().map(|p| p.as_path()).collect();
+    let mut removed: Vec<std::path::PathBuf> = before
+        .iter()
+        .filter(|p| !after.contains(p.as_path()))
+        .cloned()
+        .collect();
+    removed.sort();
+    removed.dedup();
+    removed
+}
+
+#[cfg(feature = "self-improvement")]
+/// Pre-run capture of the live checkout, so a failed `improve` cycle can
+/// restore exactly the state the agent started from. `improve` runs on the
+/// live checkout (no daemon-style worktree isolation — see the follow-up
+/// note), so without this a gate failure or agent error left broken /
+/// policy-violating edits dirty in the working tree with no rollback
+/// (2026-09-21 follow-up review, W1a).
+struct ImproveTreeSnapshot {
+    /// Result of `git stash create`: a DANGLING commit (never written to a
+    /// ref, so history is not polluted) whose tree IS the pre-run
+    /// index+worktree state. `None` when nothing tracked was dirty.
+    tracked_stash: Option<String>,
+    /// HEAD at snapshot time: the fallback restore source when no stash was
+    /// created (a clean pre-run tree), and the baseline for counting commits
+    /// the agent left behind.
+    pre_run_head: Option<String>,
+    /// Non-ignored untracked files present before the run.
+    untracked_before: Vec<std::path::PathBuf>,
+    /// Every working-tree path porcelain reported at snapshot time, so the
+    /// post-rollback protected-path sweep can ignore the operator's own
+    /// pre-existing dirty files (restored faithfully, not agent damage).
+    pre_run_dirty: Vec<std::path::PathBuf>,
+}
+
+#[cfg(feature = "self-improvement")]
+async fn snapshot_improve_tree(
+    project_root: &std::path::Path,
+    pre_run_head: Option<&str>,
+) -> ImproveTreeSnapshot {
+    use std::time::Duration;
+    let pre_run_head = pre_run_head.map(str::to_string);
+    // `git stash create` outputs the stash commit sha, or nothing on a clean
+    // tree; on an unborn repo it exits non-zero. Either way: None, safe.
+    let tracked_stash = run_gate_command(
+        "git",
+        &["stash", "create", "selfware-improve-pre-run"],
+        project_root,
+        Duration::from_secs(30),
+    )
+    .await
+    .ok()
+    .filter(|o| o.status.success())
+    .and_then(|o| {
+        let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    });
+    let untracked_before = run_gate_command(
+        "git",
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+        project_root,
+        Duration::from_secs(30),
+    )
+    .await
+    .ok()
+    .filter(|o| o.status.success())
+    .map(|o| parse_untracked_nul_list(&o.stdout))
+    .unwrap_or_default();
+    let pre_run_dirty = run_gate_command(
+        "git",
+        &["status", "--porcelain", "--untracked-files=all"],
+        project_root,
+        Duration::from_secs(30),
+    )
+    .await
+    .ok()
+    .filter(|o| o.status.success())
+    .map(|o| porcelain_paths(&o.stdout))
+    .unwrap_or_default();
+    ImproveTreeSnapshot {
+        tracked_stash,
+        pre_run_head,
+        untracked_before,
+        pre_run_dirty,
+    }
+}
+
+#[cfg(feature = "self-improvement")]
+/// What a rollback did, for the CLI failure report.
+#[derive(Debug, Default)]
+struct ImproveRollback {
+    restored_tracked: bool,
+    removed_untracked: Vec<std::path::PathBuf>,
+    deleted_pre_existing_untracked: Vec<std::path::PathBuf>,
+    committed_since_head: usize,
+    notes: Vec<String>,
+}
+
+#[cfg(feature = "self-improvement")]
+impl ImproveRollback {
+    fn render(&self) -> String {
+        let mut bits: Vec<String> = Vec::new();
+        bits.push(if self.restored_tracked {
+            "the tracked tree was restored to its pre-run state".to_string()
+        } else {
+            "the tracked tree was NOT restored".to_string()
+        });
+        if !self.removed_untracked.is_empty() {
+            let listed: Vec<String> = self
+                .removed_untracked
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect();
+            bits.push(format!(
+                "{} new untracked file(s) the agent created were removed: {}",
+                self.removed_untracked.len(),
+                listed.join(", ")
+            ));
+        }
+        if !self.deleted_pre_existing_untracked.is_empty() {
+            let listed: Vec<String> = self
+                .deleted_pre_existing_untracked
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect();
+            bits.push(format!(
+                "{} pre-existing untracked file(s) the agent deleted could not be restored \
+                 (their content was not captured): {}",
+                self.deleted_pre_existing_untracked.len(),
+                listed.join(", ")
+            ));
+        }
+        if self.committed_since_head > 0 {
+            bits.push(format!(
+                "the agent left {} commit(s) since the pre-run HEAD — they are still in \
+                 history (dropping them would rewrite it); review with `git log <pre-run-head>..HEAD`",
+                self.committed_since_head
+            ));
+        }
+        bits.extend(self.notes.iter().cloned());
+        bits.join("; ")
+    }
+}
+
+#[cfg(feature = "self-improvement")]
+/// Restore the live checkout to the pre-run snapshot captured by
+/// [`snapshot_improve_tree`]:
+///
+/// 1. Tracked tree (index + worktree) is restored from the stash commit when
+///    one exists, else from the pre-run HEAD tree — `git restore` never moves
+///    a branch, so history is untouched. The operator's OWN pre-run dirty
+///    files are part of the snapshot and come back exactly as they were.
+/// 2. Untracked files the agent created (present after, absent before) are
+///    deleted; pre-existing untracked files the agent deleted are reported
+///    (their content was not captured).
+/// 3. A post-rollback protected-path re-sweep runs; any protected path still
+///    touched that was NOT already dirty pre-run is reported.
+///
+/// This is an in-place rollback for the LIVE checkout. Deeper daemon-style
+/// worktree isolation (run the agent in a shadow worktree so the live tree
+/// is never touched at all) is the documented follow-up.
+async fn rollback_improve_tree(
+    project_root: &std::path::Path,
+    snapshot: &ImproveTreeSnapshot,
+) -> ImproveRollback {
+    use std::time::Duration;
+
+    let mut rollback = ImproveRollback::default();
+
+    // 1. Tracked restore.
+    let restore_source = snapshot
+        .tracked_stash
+        .clone()
+        .or_else(|| snapshot.pre_run_head.clone());
+    match restore_source {
+        Some(source) => {
+            let ok = run_gate_command(
+                "git",
+                &[
+                    "restore",
+                    "--source",
+                    &source,
+                    "--staged",
+                    "--worktree",
+                    "--",
+                    ".",
+                ],
+                project_root,
+                Duration::from_secs(60),
+            )
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+            rollback.restored_tracked = ok;
+            if !ok {
+                rollback.notes.push(
+                    "`git restore` of the tracked tree failed — the tree may still contain \
+                     the agent's edits"
+                        .to_string(),
+                );
+            }
+        }
+        None => {
+            rollback.notes.push(
+                "no git snapshot and no pre-run HEAD — the tracked tree was left as-is".to_string(),
+            );
+        }
+    }
+
+    // 2. Untracked bookkeeping.
+    let untracked_after = run_gate_command(
+        "git",
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+        project_root,
+        Duration::from_secs(30),
+    )
+    .await
+    .ok()
+    .filter(|o| o.status.success())
+    .map(|o| parse_untracked_nul_list(&o.stdout))
+    .unwrap_or_default();
+    rollback.removed_untracked =
+        untracked_created_during_run(&snapshot.untracked_before, &untracked_after);
+    for created in &rollback.removed_untracked {
+        let full = project_root.join(created);
+        if full.is_dir() {
+            let _ = std::fs::remove_dir_all(&full);
+        } else {
+            let _ = std::fs::remove_file(&full);
+        }
+        // Prune directories the removed file populated: an agent that wrote
+        // `deep/dir/file.py` leaves an empty `deep/dir/` skeleton behind.
+        // Walking up, only directories that are genuinely empty are removed,
+        // so a pre-existing directory that happens to contain a new file keeps
+        // its other contents (it will not be empty) and is left alone.
+        let mut parent = full.parent();
+        while let Some(dir) = parent {
+            if dir == project_root {
+                break;
+            }
+            let empty = std::fs::read_dir(dir)
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(false);
+            if !empty {
+                break;
+            }
+            let _ = std::fs::remove_dir(dir);
+            parent = dir.parent();
+        }
+    }
+    rollback.deleted_pre_existing_untracked =
+        untracked_removed_during_run(&snapshot.untracked_before, &untracked_after);
+
+    // 3. Commits the agent left on the branch (reported, not dropped: doing
+    //    so would rewrite history the operator may have touched).
+    if let Some(head) = &snapshot.pre_run_head {
+        if let Ok(o) = run_gate_command(
+            "git",
+            &["rev-list", "--count", head, "HEAD"],
+            project_root,
+            Duration::from_secs(30),
+        )
+        .await
+        {
+            if o.status.success() {
+                if let Ok(n) = String::from_utf8_lossy(&o.stdout).trim().parse::<usize>() {
+                    rollback.committed_since_head = n;
+                }
+            }
+        }
+    }
+
+    // 4. Post-rollback protected-path re-sweep: report anything still
+    //    touched that was not already dirty pre-run (the operator's own
+    //    pre-run dirty files were restored faithfully and are not damage).
+    let mut still_dirty = run_gate_command(
+        "git",
+        &["status", "--porcelain", "--untracked-files=all"],
+        project_root,
+        Duration::from_secs(30),
+    )
+    .await
+    .ok()
+    .filter(|o| o.status.success())
+    .map(|o| porcelain_paths(&o.stdout))
+    .unwrap_or_default();
+    if let Some(head) = &snapshot.pre_run_head {
+        if let Ok(o) = run_gate_command(
+            "git",
+            &["diff", "--name-status", "--no-renames", head],
+            project_root,
+            Duration::from_secs(30),
+        )
+        .await
+        {
+            if o.status.success() {
+                still_dirty.extend(diff_name_status_paths(&o.stdout));
+            }
+        }
+    }
+    let pre_run_dirty: std::collections::BTreeSet<&std::path::Path> =
+        snapshot.pre_run_dirty.iter().map(|p| p.as_path()).collect();
+    let remaining_protected: Vec<&std::path::Path> = still_dirty
+        .iter()
+        .map(|p| p.as_path())
+        .filter(|p| !pre_run_dirty.contains(p) && crate::evolution::is_protected(p))
+        .collect();
+    if !remaining_protected.is_empty() {
+        let listed: Vec<String> = remaining_protected
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        rollback.notes.push(format!(
+            "protected path(s) still modified after rollback: {}",
+            listed.join(", ")
+        ));
+    }
+
+    rollback
 }
 
 /// Build a [`ToolHandler`](crate::workflows::ToolHandler) that dispatches Tool
@@ -2824,8 +3250,12 @@ async fn handle_command(
 
                 // Capture the pre-run HEAD so the post-run gate can also see
                 // changes the agent COMMITTED during the run (those vanish
-                // from `git status --porcelain`; follow-up review finding).
+                // from `git status --porcelain`; follow-up review finding),
+                // and snapshot the whole pre-run tree so a failed cycle can
+                // roll the live checkout back (follow-up review W1a: broken /
+                // policy-violating edits used to stay dirty with no rollback).
                 let pre_run_head = current_head_sha(&project_root).await;
+                let snapshot = snapshot_improve_tree(&project_root, pre_run_head.as_deref()).await;
 
                 let prompt = orchestrator.build_improvement_prompt(target);
                 match agent.run_task(&prompt).await {
@@ -2847,17 +3277,34 @@ async fn handle_command(
                                 // A failed gate must NOT end in overall
                                 // success: propagate as a CLI failure
                                 // (non-zero exit) so automation cannot see
-                                // exit 0 despite failed checks (follow-up
-                                // review finding P2).
+                                // exit 0 despite failed checks (Wave-1
+                                // review finding P2). The attempt is rolled
+                                // back rather than left dirty in the working
+                                // tree (follow-up review W1a; behavior flip —
+                                // failed improves now roll back).
+                                let rollback =
+                                    rollback_improve_tree(&project_root, &snapshot).await;
                                 return Err(anyhow::anyhow!(
-                                    "improvement gate failed — changes are left unverified in \
-                                     the working tree: {gate_err:#}"
+                                    "improvement gate failed — the attempt was rolled back. \
+                                     {}; Gate error: {gate_err:#}",
+                                    rollback.render()
                                 ));
                             }
                         }
                     }
                     Err(e) => {
+                        // An agent run that errors must ALSO fail the command
+                        // (non-zero exit), not merely print and exit 0 like
+                        // the Wave-1 gate fix's mirror image (follow-up
+                        // review finding): a failed run is a failure, and its
+                        // partial edits are rolled back.
                         println!("   {} Improvement failed: {}", Glyphs::frost(), e);
+                        let rollback = rollback_improve_tree(&project_root, &snapshot).await;
+                        return Err(anyhow::anyhow!(
+                            "improvement agent failed — the run did not complete and its \
+                             changes were rolled back. {}; Agent error: {e:#}",
+                            rollback.render()
+                        ));
                     }
                 }
             }

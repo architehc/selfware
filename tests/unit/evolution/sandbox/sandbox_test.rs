@@ -124,3 +124,173 @@ fn test_sandbox_error_display() {
     assert!(format!("{}", SandboxError::IoError("disk full".into())).contains("disk full"));
     assert!(format!("{}", SandboxError::Timeout).contains("timed out"));
 }
+
+// ===========================================================================
+// Container leak guard (2026-09-21 review, P2): sandboxes were only removed
+// by an explicit `destroy(self)`, so an evaluation that errored — or any
+// caller that early-returned — left its `docker run -d` sleep-infinity
+// container running forever. `Sandbox` now cleans up on drop, idempotently
+// with the explicit destroy. These tests prove `docker rm -f` is invoked
+// with a PATH-scoped fake `docker` wrapper (records every invocation);
+// nothing real is ever spawned, no window/docker interactions happen.
+// ===========================================================================
+
+use std::sync::OnceLock;
+
+/// Serializes the PATH manipulation against any other test that spawns
+/// processes: the fake `docker` sits FIRST on PATH, so it must not leak into
+/// a concurrent test that happens to run git/cargo/the shell.
+static DOCKER_PATH_LOCK: OnceLock<parking_lot::Mutex<()>> = OnceLock::new();
+
+/// Create a temp dir with an executable `docker` stub that records each
+/// invocation's argv as one line in `log_path`, and behaves like docker:
+/// `run -d` prints a container id; everything else exits 0. Returns the bin
+/// dir and a guard that scopes the PATH change to this test.
+fn fake_docker_on_path(
+    log_path: &std::path::Path,
+    on_exec: &str,
+) -> (
+    tempfile::TempDir,
+    crate::test_support::EnvGuard,
+    parking_lot::MutexGuard<'static, ()>,
+) {
+    let lock = DOCKER_PATH_LOCK
+        .get_or_init(|| parking_lot::Mutex::new(()))
+        .lock();
+    let bin = tempfile::tempdir().expect("bin tempdir");
+    let script = bin.path().join("docker");
+    // `exec` behavior is injected per test: "ok" (exit 0), "fail" (exit 125,
+    // simulating a failed container step) or "missing" (the script deletes
+    // itself, simulating the docker binary/daemon disappearing mid-run).
+    let exec_body = match on_exec {
+        "ok" => "",
+        "fail" => "echo 'docker exec failed' >&2; exit 125",
+        "missing" => "rm -f \"$0\"",
+        other => panic!("unknown on_exec: {other}"),
+    };
+    let script_body = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\ncase \"$1\" in\n  run)\n    echo \"fake-container-id\"\n    exit 0\n    ;;\n  exec)\n    {}\n    exit 125\n    ;;\n  *)\n    exit 0\n    ;;\nesac\n",
+        log_path.display(),
+        exec_body
+    );
+    std::fs::write(&script, script_body).expect("write fake docker");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut new_path = std::ffi::OsString::from(bin.path());
+    new_path.push(":");
+    new_path.push(old_path);
+    std::env::set_var("PATH", new_path);
+    let guard = crate::test_support::EnvGuard::capture(&["PATH"]);
+    (bin, guard, lock)
+}
+
+fn recorded_invocations(log_path: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(log_path)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+fn sandbox_without_creating(name: &str) -> Sandbox {
+    Sandbox {
+        container_id: "fake-container-id".to_string(),
+        container_name: format!("selfware-arena-{name}"),
+        config: SandboxConfig::default(),
+        created_at: Instant::now(),
+        _workspace_tmp: None,
+        destroyed: false,
+    }
+}
+
+#[test]
+fn drop_without_destroy_removes_the_container() {
+    // The leak: a sandbox dropped without an explicit destroy() — which is
+    // exactly what an error early-return does — must run `docker rm -f`.
+    let log_dir = tempfile::tempdir().unwrap();
+    let log_path = log_dir.path().join("docker.log");
+    let (_bin, _guard, _lock) = fake_docker_on_path(&log_path, "ok");
+    {
+        let _sb = sandbox_without_creating("leak-check");
+        // Dropped here without destroy.
+    }
+    let invocations = recorded_invocations(&log_path);
+    assert!(
+        invocations
+            .iter()
+            .any(|i| i == "rm -f selfware-arena-leak-check"),
+        "Drop must run docker rm -f; recorded: {invocations:?}"
+    );
+}
+
+#[test]
+fn error_path_drop_invokes_docker_rm_f() {
+    // The scenario the finding names: an evaluation returns an error before
+    // destroy(self) is ever called. Here the sandbox is created through the
+    // REAL `Sandbox::create` path (the fake wrapper's `run -d` succeeds),
+    // the evaluation then fails, and the caller propagates the error without
+    // destroying — drop runs `docker rm -f`.
+    let log_dir = tempfile::tempdir().unwrap();
+    let log_path = log_dir.path().join("docker.log");
+    let (_bin, _guard, _lock) = fake_docker_on_path(&log_path, "fail");
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::write(repo.path().join("Cargo.toml"), "[package]\nname=\"p\"\n").unwrap();
+
+    let result = Sandbox::create("error-path", repo.path(), SandboxConfig::default());
+    let sb = result.expect("create must succeed against the fake docker");
+
+    // The evaluation path fails (compile step exits 125) — the caller treats
+    // that as a failed/failed-over evaluation and propagates WITHOUT calling
+    // destroy(); `sb` is dropped at the end of this scope.
+    let eval = sb
+        .evaluate()
+        .expect("evaluate runs against the fake docker");
+    assert!(!eval.compiled, "fake docker exec fails the compile step");
+    drop(sb);
+
+    let invocations = recorded_invocations(&log_path);
+    assert!(
+        invocations
+            .iter()
+            .any(|i| i == "rm -f selfware-arena-error-path"),
+        "the guard must remove the container even though destroy() was never \
+         called (evaluation errored/failed first); recorded: {invocations:?}"
+    );
+    // The container was created exactly once and removed exactly once.
+    assert_eq!(
+        invocations
+            .iter()
+            .filter(|i| i.starts_with("run -d"))
+            .count(),
+        1,
+        "exactly one container creation: {invocations:?}"
+    );
+}
+
+#[test]
+fn explicit_destroy_then_drop_is_idempotent() {
+    // destroy() and Drop share the same cleanup; a dropped-after-destroy
+    // sandbox must not run `docker rm -f` twice.
+    let log_dir = tempfile::tempdir().unwrap();
+    let log_path = log_dir.path().join("docker.log");
+    let (_bin, _guard, _lock) = fake_docker_on_path(&log_path, "ok");
+    {
+        let sb = sandbox_without_creating("idempotence");
+        sb.destroy().expect("destroy succeeds");
+        // Dropped here, AFTER the explicit destroy.
+    }
+    let invocations = recorded_invocations(&log_path);
+    let rm_calls: Vec<_> = invocations
+        .iter()
+        .filter(|i| i == &"rm -f selfware-arena-idempotence")
+        .collect();
+    assert_eq!(
+        rm_calls.len(),
+        1,
+        "docker rm -f must run exactly once; recorded: {invocations:?}"
+    );
+}

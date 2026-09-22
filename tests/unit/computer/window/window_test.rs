@@ -6,6 +6,92 @@ fn test_window_id() {
     assert_eq!(id.0, 42);
 }
 
+// AGENTS.md Rule 6 pure helpers: halving transform, visible-region bounds,
+// clamping, ownership, and the wmctrl -lG geometry parser. All platform-free
+// so they are exercised without touching a real desktop.
+#[test]
+fn wmctrl_request_position_halves_for_mutter() {
+    // mutter doubles wmctrl -e position requests: request = target / 2.
+    assert_eq!(wmctrl_request_position(1920, 800), (960, 400));
+    assert_eq!(wmctrl_request_position(0, 768), (0, 384));
+    assert_eq!(wmctrl_request_position(7680, 2928), (3840, 1464));
+    // Odd targets floor — at most one device pixel short, never past target.
+    assert_eq!(wmctrl_request_position(1921, 799), (960, 399));
+}
+
+#[test]
+fn placement_bounds_use_the_rule6_visible_region() {
+    // Visible area: x 0-7680, y 768-2928 device coords. The small VGA monitor
+    // sits ABOVE at y < 768 (x 3840-4864) and must never receive a placement.
+    assert!(placement_inside_visible_region(0, 768, 1920, 1080));
+    assert!(
+        !placement_inside_visible_region(0, 767, 1920, 1080),
+        "above the visible top edge"
+    );
+    assert!(
+        !placement_inside_visible_region(3844, 100, 800, 600),
+        "on the small VGA monitor"
+    );
+    assert!(
+        !placement_inside_visible_region(6000, 768, 1800, 400),
+        "x + width beyond 7680"
+    );
+    assert!(
+        !placement_inside_visible_region(0, 768, 100, 3000),
+        "y + height beyond 2928"
+    );
+    assert!(
+        !placement_inside_visible_region(-10, 768, 100, 100),
+        "negative x"
+    );
+}
+
+#[test]
+fn clamp_to_visible_region_pulls_wayward_placements_back() {
+    // A target above the visible top edge is exactly the failure the halving
+    // fix (and its missing sanity check) used to produce: y=0 device requests
+    // landed above the visible region.
+    let (cx, cy) = clamp_to_visible_region(1920, 200, 1200, 800);
+    assert_eq!(cy, 768, "clamped onto the visible top edge");
+    assert_eq!(cx, 1920, "in-bounds x is untouched");
+    let (cx, cy) = clamp_to_visible_region(9000, 4000, 1200, 800);
+    assert!(cx + 1200 <= 7680 && cy >= 768 && cy + 800 <= 2928);
+    // A window wider than the display still clamps x without panicking.
+    let (cx, _) = clamp_to_visible_region(100, 768, 9000, 400);
+    assert_eq!(cx, 0);
+}
+
+#[test]
+fn session_owns_window_matches_sw_prefix_only() {
+    assert!(session_owns_window("sw-1: study terminal"));
+    assert!(session_owns_window(" sw-arena-7 "));
+    assert!(!session_owns_window("Firefox"));
+    assert!(!session_owns_window("Terminal — sw-2")); // prefix, not contains
+    assert!(!session_owns_window(""));
+}
+
+#[test]
+fn wmctrl_lg_geometry_is_extracted_for_the_target_id() {
+    let listing = b"0x04600003  0 12345 1920 800 1200 800 hostname sw-1: study\n0x03200001  1 54321 3844 100 800 600 hostname Firefox\n";
+    assert_eq!(
+        window_geometry_from_wmctrl_lg(listing, 0x04600003),
+        Some((1920, 800, 1200, 800))
+    );
+    assert_eq!(
+        window_geometry_from_wmctrl_lg(listing, 0x03200001),
+        Some((3844, 100, 800, 600))
+    );
+    assert_eq!(window_geometry_from_wmctrl_lg(listing, 0xdeadbeef), None);
+    // Malformed lines must not poison the scan for the target.
+    let garbled =
+        b"garbage\n0x1  1 2 3 4 5 6 host title\n0x04600003  0 1 100 800 900 600 host sw-1\n";
+    assert_eq!(
+        window_geometry_from_wmctrl_lg(garbled, 0x04600003),
+        Some((100, 800, 900, 600))
+    );
+    assert_eq!(window_geometry_from_wmctrl_lg(b"", 1), None);
+}
+
 #[test]
 fn test_window_id_equality() {
     assert_eq!(WindowId(1), WindowId(1));

@@ -265,9 +265,22 @@ mod agent_lifecycle {
     }
 
     /// An agent rooted in a scratch directory, so scope resolution does not
-    /// depend on the repository the test happens to run in.
+    /// depend on the repository the test happens to run in. A minimal
+    /// Cargo.toml is created so the cargo flows these tests simulate are
+    /// legitimate Rust-project runs: after the no-runner classification
+    /// (`scope_for_command` on a cargo command with NO manifest anywhere is
+    /// "the suite never ran", not a failure — the Python-task finding), a
+    /// cargo failure in a manifest-less directory is dropped from the ledger
+    /// entirely. These tests are about ledger mechanics (check identity, one
+    /// failure slot per check), not about missing manifests, so the fixture
+    /// must present a real cargo project.
     async fn agent() -> (Agent, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"lifecycle-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("write fixture manifest");
         let mut agent = Agent::new(gate_config()).await.expect("agent should build");
         agent.current_checkpoint = Some(TaskCheckpoint::new(
             "lifecycle".to_string(),

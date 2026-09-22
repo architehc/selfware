@@ -1404,6 +1404,22 @@ impl Agent {
                 .any(|tc| hits(&tc.function.name, &tc.function.arguments))
     }
 
+    /// The fall-back verifier list for a task that has not written anything
+    /// yet. Cargo verifiers appear only when a manifest applies to the task
+    /// root; a Python-only workspace must never be pointed at `cargo_check`
+    /// (finding 1a). Pure so the steering is unit-testable without an agent.
+    fn default_verification_suggestion(cargo_applies: bool) -> String {
+        if cargo_applies {
+            "cargo_check, cargo_test, pytest, npm test, go test, mvn test, \
+             dotnet test (whichever this project uses)"
+                .to_string()
+        } else {
+            "pytest, unittest, npm test, go test, mvn test, dotnet test \
+             (whichever this project uses)"
+                .to_string()
+        }
+    }
+
     /// Verification commands worth suggesting to THIS run, so the gate names the
     /// toolchains the deliverable implies instead of reciting a fixed list.
     ///
@@ -1432,10 +1448,13 @@ impl Agent {
         }
         if cmds.is_empty() {
             // Nothing written yet, so nothing to tailor to: name the common
-            // verifiers rather than leaving the model to guess.
-            return "cargo_check, cargo_test, pytest, npm test, go test, mvn test, \
-                    dotnet test (whichever this project uses)"
-                .to_string();
+            // verifiers rather than leaving the model to guess. Cargo verifiers
+            // are only named when a manifest actually applies to this task —
+            // a Python-only workspace was sent probing cargo this way, which
+            // failed on the missing manifest (finding 1a).
+            return Self::default_verification_suggestion(
+                super::verification_scope::cargo_applies_to_task(&self.verification_task_root()),
+            );
         }
         cmds.join(", ")
     }
@@ -2206,6 +2225,7 @@ impl Agent {
                     scope: super::verification_scope::VerificationScope {
                         working_dir: cwd.clone(),
                         project_root: Some(cwd),
+                        runner_exists: None,
                     },
                 });
                 None
@@ -2242,11 +2262,21 @@ impl Agent {
         } else {
             Some(working_dir.clone())
         };
+        // A `.rs` edit in a directory whose ancestry has no Cargo.toml is a
+        // missing-runner case, not a failing suite (finding 1b): the gate's
+        // cargo invocation could never have executed there, so recording the
+        // failure would block a task that has no cargo project at all.
+        let runner_exists = if is_rust {
+            Some(project_root.is_some())
+        } else {
+            None
+        };
         for check in &report.checks {
             let kind = check.check_type.as_str();
             let scope = super::verification_scope::VerificationScope {
                 working_dir: working_dir.clone(),
                 project_root: project_root.clone(),
+                runner_exists,
             };
             let summary = if check.passed {
                 format!("{kind} passed")

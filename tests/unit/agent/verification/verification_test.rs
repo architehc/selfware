@@ -98,6 +98,96 @@ async fn excluded_only_file_change_is_not_credited_as_verified() {
     );
 }
 
+#[tokio::test]
+async fn cargo_failure_in_python_only_workspace_is_no_runner_and_unittest_flow_completes() {
+    // Finding 1 reproduction, driven through the REAL recording path
+    // (`Agent::note_verification_outcome` → `scope_for_command` → ledger).
+    // Two live automatic-approval runs on a Python task fixed the function and
+    // passed all three Python tests yet exited 1: a `cargo_test` call in a
+    // directory with no Cargo.toml was retained as an unknown-scope failure,
+    // and the later passing unittest could not discharge it.
+    //
+    // 1. The meaningless cargo failure is classed no-runner, not a failure:
+    //    nothing is retained, nothing blocks.
+    // 2. A GENUINE unittest failure still blocks (in-scope failures survive).
+    // 3. The unittest's own passing run discharges it — the flow the live
+    //    runs needed to complete.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let py = tmp.path().join("pyproj");
+    std::fs::create_dir_all(&py).unwrap();
+    std::fs::write(py.join("solution.py"), "def f():\n    return 1\n").unwrap();
+
+    let mut agent = Agent::new(crate::config::Config::default())
+        .await
+        .expect("agent should build");
+    agent.task_verification_root = Some(py.clone());
+    agent.mutation_sequence = 2;
+
+    agent.note_verification_outcome(
+        "cargo_test",
+        "{}",
+        false,
+        "cargo_test failed: could not find Cargo.toml",
+    );
+    assert!(
+        agent.verification_failures.is_empty(),
+        "a missing manifest is no-runner, not a failure — nothing may be retained"
+    );
+    assert!(agent.verification_failures.blocking(&py, 2).is_none());
+    assert!(
+        agent.last_failed_verification_summary.is_none(),
+        "a no-runner outcome must not surface as this task's verification failure"
+    );
+
+    agent.note_verification_outcome(
+        "shell_exec",
+        r#"{"command":"python3 -m unittest"}"#,
+        false,
+        "FAILED (failures=1)",
+    );
+    assert_eq!(
+        agent
+            .verification_failures
+            .blocking(&py, 2)
+            .unwrap()
+            .check_id,
+        "python3 unittest",
+        "a genuine in-scope unittest failure must still block"
+    );
+
+    agent.note_verification_outcome(
+        "shell_exec",
+        r#"{"command":"python3 -m unittest"}"#,
+        true,
+        "OK (3 tests)",
+    );
+    assert!(
+        agent.verification_failures.blocking(&py, 2).is_none(),
+        "the passing unittest discharges the failure it owns"
+    );
+}
+
+#[test]
+fn default_verification_suggestion_drops_cargo_for_non_rust_tasks() {
+    // Finding 1(a): the "nothing written yet" fall-back must not name cargo
+    // verifiers for a task whose root has no Cargo.toml — that steering sent
+    // a Python task probing cargo before its own test runner.
+    let with_cargo = Agent::default_verification_suggestion(true);
+    assert!(
+        with_cargo.contains("cargo_check") && with_cargo.contains("cargo_test"),
+        "a cargo-applicable task keeps the cargo verifiers: {with_cargo}"
+    );
+    let without_cargo = Agent::default_verification_suggestion(false);
+    assert!(
+        !without_cargo.contains("cargo"),
+        "a non-Rust task must not be pointed at cargo: {without_cargo}"
+    );
+    assert!(
+        without_cargo.contains("pytest") && without_cargo.contains("unittest"),
+        "the project's own runners are still named: {without_cargo}"
+    );
+}
+
 #[cfg(test)]
 mod completion_gate_tests {
     use super::*;

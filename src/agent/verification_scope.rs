@@ -24,6 +24,15 @@ pub enum Relevance {
     /// The result concerns a project that encloses or sits beside the task.
     /// Reported, never silently blocking.
     OutOfScope,
+    /// The command could not run at all here: the project has no such runner
+    /// (a cargo command in a directory whose ancestry contains no
+    /// `Cargo.toml`). NOT a failure — the suite never executed, so the record
+    /// asserts nothing about the tree's correctness. Never blocks, and
+    /// [`VerificationLedger::record`] drops it outright (the missing-manifest
+    /// case reproduced on Python tasks: `cargo_test` in a directory with no
+    /// Cargo.toml failed, was held as an unknown-scope failure, and a later
+    /// passing unittest could not discharge it under its own check identity).
+    NoRunner,
     /// The scope could not be established. Treated as in-scope: an unknown
     /// failure must not be waved through.
     Unknown,
@@ -37,6 +46,14 @@ pub struct VerificationScope {
     /// The project the runner resolved to — for cargo, the directory holding
     /// the `Cargo.toml` it walked up to. `None` when it cannot be determined.
     pub project_root: Option<PathBuf>,
+    /// Whether a runner for this command exists in (or above) the working
+    /// directory. `Some(false)` means the command could not have executed at
+    /// all (cargo with no manifest anywhere in the ancestry) — the "no test
+    /// runner / no project exists" case, distinct from "the suite ran and
+    /// failed". `None` (old checkpoints, non-cargo commands) means unknown and
+    /// is treated exactly as before.
+    #[serde(default)]
+    pub runner_exists: Option<bool>,
 }
 
 impl VerificationScope {
@@ -45,8 +62,13 @@ impl VerificationScope {
     /// In scope when the project root is the task root or lies beneath it.
     /// Out of scope when it strictly encloses the task root — that is the
     /// nested case, and it is the only one that can be established as foreign
-    /// with confidence. Everything else stays Unknown, which blocks.
+    /// with confidence. A command whose runner does not exist anywhere is
+    /// `NoRunner` before any task comparison. Everything else stays Unknown,
+    /// which blocks.
     pub fn relevance_to(&self, task_root: &Path) -> Relevance {
+        if self.runner_exists == Some(false) {
+            return Relevance::NoRunner;
+        }
         let Some(project_root) = &self.project_root else {
             return Relevance::Unknown;
         };
@@ -131,13 +153,24 @@ impl VerificationRecord {
     /// Whether this result should block completion for a task rooted here.
     ///
     /// Only a relevant, current failure blocks. An out-of-scope failure is
-    /// reported and does not block; an unknown one does, because it cannot be
-    /// established as harmless.
+    /// reported and does not block; a `NoRunner` result is not a failure at
+    /// all; an unknown one does, because it cannot be established as harmless.
     pub fn blocks_completion(&self, task_root: &Path, current_mutation_sequence: usize) -> bool {
         if self.passed || self.is_stale(current_mutation_sequence) {
             return false;
         }
-        !matches!(self.relevance_to(task_root), Relevance::OutOfScope)
+        !matches!(
+            self.relevance_to(task_root),
+            Relevance::OutOfScope | Relevance::NoRunner
+        )
+    }
+
+    /// Whether this record describes a runner that does not exist in (or
+    /// above) the working directory — e.g. a cargo command with no manifest
+    /// anywhere. Such a command never executed, so its failure asserts
+    /// nothing about the tree.
+    pub fn runner_is_missing(&self) -> bool {
+        self.scope.runner_exists == Some(false)
     }
 
     /// Whether a passing result may clear `other`.
@@ -190,6 +223,16 @@ pub fn scope_for_command(tool: &str, command: &str, working_dir: &Path) -> Verif
     };
     VerificationScope {
         working_dir: working_dir.to_path_buf(),
+        // `runner_exists`: a cargo command in a directory whose ancestry
+        // contains no Cargo.toml could never have executed — the missing
+        // runner case, which is not a failed test. Distinguishing the two is
+        // what lets a Python-only workspace discharge a meaningless cargo
+        // failure. Non-cargo commands leave it `None` (unknown, as before).
+        runner_exists: if is_cargo {
+            Some(project_root.is_some())
+        } else {
+            None
+        },
         project_root,
     }
 }
@@ -222,6 +265,7 @@ mod tests {
             scope: VerificationScope {
                 working_dir: cwd.to_path_buf(),
                 project_root: root.map(Path::to_path_buf),
+                runner_exists: None,
             },
             passed,
             mutation_sequence: seq,
@@ -346,6 +390,79 @@ mod tests {
         assert_eq!(record.relevance_to(&py), Relevance::Unknown);
         assert!(record.blocks_completion(&py, 1));
     }
+
+    /// A Python-only workspace: NO Cargo.toml anywhere in the ancestry.
+    fn python_only() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let py = tmp.path().join("pyproj");
+        fs::create_dir_all(&py).unwrap();
+        fs::write(py.join("solution.py"), "def f():\n    return 1\n").unwrap();
+        (tmp, py)
+    }
+
+    #[test]
+    fn missing_cargo_manifest_is_no_runner_not_a_failure() {
+        // Finding 1(b): a `cargo_test` call in a directory with no Cargo.toml
+        // is "no test runner / no project exists", NOT "the suite ran and
+        // failed". Two live Python-task runs exited 1 after a correct, tested
+        // fix because this failure was held as Unknown-scope and blocked.
+        let (_tmp, py) = python_only();
+        let scope = scope_for_command("cargo_test", "", &py);
+        assert_eq!(scope.runner_exists, Some(false), "cargo cannot run here");
+        let record = VerificationRecord {
+            check_id: "cargo test".to_string(),
+            command: "cargo_test".to_string(),
+            scope,
+            passed: false,
+            mutation_sequence: 2,
+            summary: "cargo_test failed: could not find Cargo.toml".to_string(),
+        };
+        assert_eq!(record.relevance_to(&py), Relevance::NoRunner);
+        assert!(
+            !record.blocks_completion(&py, 2),
+            "a missing manifest must not block a correct completion"
+        );
+        // Classified as no-runner, NOT as a failure: the ledger must not
+        // retain it -- a later passing unittest (a different check identity,
+        // per the reproduction) cannot discharge it.
+        let mut ledger = VerificationLedger::default();
+        ledger.record(record);
+        assert!(ledger.is_empty(), "a no-runner record asserts nothing");
+        assert!(ledger.blocking(&py, 2).is_none());
+    }
+
+    #[test]
+    fn python_unittest_failure_still_blocks_and_a_pass_discharges_it() {
+        // Finding 1(c) preserved: a GENUINE in-scope failure blocks and a
+        // genuine pass discharges it, in a Python-only workspace through the
+        // real `scope_for_command` path.
+        let (_tmp, py) = python_only();
+        let mut ledger = VerificationLedger::default();
+        ledger.record(VerificationRecord {
+            check_id: "python3 unittest".to_string(),
+            command: "python3 -m unittest".to_string(),
+            scope: scope_for_command("shell_exec", "python3 -m unittest", &py),
+            passed: false,
+            mutation_sequence: 2,
+            summary: "1 test failed".to_string(),
+        });
+        assert!(
+            ledger.blocking(&py, 2).is_some(),
+            "a real unittest failure in the task's own project still blocks"
+        );
+        ledger.record(VerificationRecord {
+            check_id: "python3 unittest".to_string(),
+            command: "python3 -m unittest".to_string(),
+            scope: scope_for_command("shell_exec", "python3 -m unittest", &py),
+            passed: true,
+            mutation_sequence: 2,
+            summary: "OK".to_string(),
+        });
+        assert!(
+            ledger.blocking(&py, 2).is_none(),
+            "the passing unittest discharges the failure it owns"
+        );
+    }
 }
 
 /// Normalise a command to the CHECK it performs.
@@ -396,8 +513,20 @@ pub struct VerificationLedger {
 
 impl VerificationLedger {
     /// Record an outcome. A failure replaces the prior result for that same
-    /// check; a pass clears only what it actually covers.
+    /// check; a pass clears only what it actually covers. A failure whose
+    /// runner does not exist (a cargo command with no manifest anywhere) is
+    /// classified as no-runner, NOT as a failure: the suite never executed,
+    /// so nothing is recorded. Retaining it reproduced the Python-task wall —
+    /// the meaningless cargo failure blocked completion and a later passing
+    /// unittest could not discharge it under its different check identity.
     pub fn record(&mut self, record: VerificationRecord) {
+        if !record.passed && record.runner_is_missing() {
+            tracing::debug!(
+                "verification ledger: {:?} could not run (no runner/project exists) — not recorded as a failure",
+                record.check_id
+            );
+            return;
+        }
         if record.passed {
             self.outstanding.retain(|failed| !record.clears(failed));
         } else {

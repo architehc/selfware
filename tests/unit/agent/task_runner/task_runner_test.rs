@@ -36,6 +36,65 @@ fn shell_command_is_verification_recognizes_non_cargo_runners() {
     }
 }
 
+#[test]
+fn progress_guidance_is_cargo_aware() {
+    // Finding 1(a): progress injections kept telling a Python task to "verify
+    // with cargo_check/cargo_test" every 5 steps (even after "Verification:
+    // PASSED"). The guidance must name cargo only for cargo-applicable tasks.
+    let mid_cargo = progress_guidance(40.0, true);
+    assert!(
+        mid_cargo.contains("cargo_check/cargo_test"),
+        "cargo-applicable task keeps cargo guidance: {mid_cargo}"
+    );
+    let mid_python = progress_guidance(40.0, false);
+    assert!(
+        !mid_python.contains("cargo"),
+        "non-Rust task must not receive cargo guidance: {mid_python}"
+    );
+    assert!(
+        mid_python.contains("pytest") && mid_python.contains("unittest"),
+        "the project's own runner is named instead: {mid_python}"
+    );
+    // Early band: project-agnostic in both cases.
+    assert_eq!(
+        progress_guidance(10.0, true),
+        progress_guidance(10.0, false)
+    );
+    // Late band is project-aware too.
+    assert!(!progress_guidance(90.0, false).contains("cargo"));
+    assert!(progress_guidance(90.0, true).contains("tests pass"));
+}
+
+#[test]
+fn operational_verification_steps_are_project_aware() {
+    // Finding 1(a): the injected operational plan used to hard-code "Run
+    // cargo_check"/"Run cargo_test" for every task, steering Python tasks at
+    // cargo. Steps must follow the detected project type.
+    let rust = operational_plan_verification_steps(super::super::ProjectType::Rust);
+    assert!(rust.iter().any(|s| s.contains("cargo")), "{rust:?}");
+    let python = operational_plan_verification_steps(super::super::ProjectType::Python);
+    assert!(
+        !python.iter().any(|s| s.contains("cargo")),
+        "python plan must not mention cargo: {python:?}"
+    );
+    assert!(
+        python.iter().any(|s| s.contains("pytest")),
+        "python plan names its own runner: {python:?}"
+    );
+}
+
+#[test]
+fn auto_write_verification_directive_is_project_aware() {
+    // Finding 1(a): the synthesis auto-write directive must not tell a Python
+    // task to "run cargo check or cargo test".
+    assert!(auto_write_verification_directive(true).contains("cargo check"));
+    let python_directive = auto_write_verification_directive(false);
+    assert!(
+        !python_directive.contains("cargo"),
+        "python auto-write directive must not mention cargo: {python_directive}"
+    );
+}
+
 #[derive(Default)]
 struct RecordingEventEmitter {
     events: std::sync::Mutex<Vec<AgentEvent>>,
