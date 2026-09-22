@@ -203,6 +203,16 @@ mod completion_gate_tests {
 
     async fn agent_with_checkpoint(tool_calls: Vec<ToolCallLog>) -> Agent {
         let mut agent = Agent::new(test_config()).await.expect("agent should build");
+        // Deterministic task root. `Agent::new` pins `task_verification_root`
+        // from the PROCESS cwd, which races sibling tests that chdir into
+        // temp dirs (CwdGuard): the pinned root can then be a manifest-less
+        // temp dir, and a cargo verification there is truthfully classified
+        // no-runner and dropped from the ledger — right for a real Python
+        // repro, wrong for these gate-semantics tests, which model a REAL
+        // cargo project. Pin the crate root: its Cargo.toml always exists
+        // and nothing can drop it mid-test, so scope resolution never
+        // depends on what another test's chdir left behind.
+        agent.task_verification_root = Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
         let mut checkpoint = TaskCheckpoint::new("task_1".to_string(), "test task".to_string());
         for tc in tool_calls {
             checkpoint.log_tool_call(tc);

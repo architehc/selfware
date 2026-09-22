@@ -23,6 +23,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use crate::api::types::Message;
+use crate::session::checkpoint::{replace_atomically, FileLock};
 use crate::session::encryption::EncryptionManager;
 
 /// A saved chat session
@@ -106,11 +107,16 @@ impl ChatStore {
         // Ensure directory exists (especially for fallback mode)
         std::fs::create_dir_all(&self.chats_dir).context("Failed to create chats directory")?;
 
+        // Advisory lock held across the read (identity check) → modify → atomic
+        // write cycle so concurrent CLI/daemon instances saving the same chat
+        // serialize instead of clobbering each other.
+        let path = self.chat_path(name);
+        let _lock = FileLock::acquire(&path)?;
+
         // Refuse to overwrite a file that holds a DIFFERENT session (legacy
         // sanitizer collision: e.g. a pre-fix `my session` landed in
         // `my_session.json`). `load` below verifies file identity, so only a
         // file that genuinely belongs to `name` (or does not exist) passes.
-        let path = self.chat_path(name);
         if path.exists() {
             self.load(name).with_context(|| {
                 format!(
@@ -156,10 +162,10 @@ impl ChatStore {
                 .context("Failed to write chat temp file")?;
             f.sync_all().context("Failed to sync chat temp file")?;
         }
-        if let Err(err) = std::fs::rename(&tmp_path, &path) {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(err).context("Failed to atomically replace chat file");
-        }
+        // Shared atomic replace with the remove-destination-then-retry
+        // fallback (Windows rename cannot overwrite an existing destination;
+        // the same convention checkpoint.rs uses for full checkpoint writes).
+        replace_atomically(&tmp_path, &path).context("Failed to atomically replace chat file")?;
 
         Ok(())
     }
@@ -257,6 +263,9 @@ impl ChatStore {
         if !path.exists() {
             return Err(anyhow::anyhow!("Chat '{}' not found", name));
         }
+        // Same advisory lock as save: a delete must not interleave with a
+        // concurrent read→modify→write cycle on this chat.
+        let _lock = FileLock::acquire(&path)?;
         // Mirror load's identity check BEFORE touching the file: only a file
         // that verifies as `name` may be removed.
         self.load(name).with_context(|| {

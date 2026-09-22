@@ -796,6 +796,241 @@ fn sanitize_task_id(task_id: &str) -> Result<String> {
     Ok(trimmed)
 }
 
+/// A process-wide advisory lock guarding the read→modify→write cycle of one
+/// session file (a checkpoint, its delta log, a chat, …) against concurrent
+/// CLI/daemon instances working on the same task.
+///
+/// The lock lives on a SIBLING `<target>.lock` file, never the target
+/// itself: full-checkpoint writes RENAME the target (tmp → target and
+/// target → `.bak`), so a lock held on the renamed inode would stop
+/// protecting the file the moment its name moved. The sibling is created
+/// once, is never renamed, and is intentionally never deleted — an unlinking
+/// writer would strand blocked waiters on an orphaned inode while new
+/// writers lock a fresh one, silently breaking mutual exclusion. Lock files
+/// are tiny (usually empty) and are exempt from retention pruning.
+///
+/// Contract: the caller holds the guard for the WHOLE read→modify→atomic
+/// write cycle; two concurrent writers for the same task serialize even when
+/// one is mid-cycle.
+///
+/// Implementation notes:
+/// * Unix: `flock(LOCK_EX)` on the sibling, opened O_CLOEXEC so a spawned
+///   subprocess never inherits (and never pins) a task lock. `flock` locks
+///   are released by the kernel when the descriptor closes, so a crashed
+///   process cannot leave a stale lock behind. Release is explicit
+///   (`LOCK_UN` on Drop) as in `crate::phi::activity`.
+/// * Other platforms: advisory file locking is unavailable without an extra
+///   dependency, so the guard is a documented no-op. Atomic replace
+///   ([`replace_atomically`]) still prevents torn writes there.
+///
+/// Reentrancy: `flock` locks are per open-file-description, so a second
+/// flock from the SAME thread on a fresh descriptor would block forever
+/// against its own lock. A thread-local registry downgrades nested acquires
+/// in the same thread to no-ops — required because e.g.
+/// `recover_from_corruption` re-saves while `load_with_status` already holds
+/// the lock, and `apply_deltas` locks when called from inside `save`'s lock.
+pub(crate) struct FileLock {
+    /// Path of the `<target>.lock` sibling file.
+    lock_path: PathBuf,
+    /// Whether this guard actually holds the OS lock (vs. a reentrant no-op
+    /// or a non-Unix stub).
+    held: bool,
+    /// The open descriptor pinning the lock; closed on release.
+    #[cfg(unix)]
+    _file: Option<std::fs::File>,
+}
+
+thread_local! {
+    /// Lock files this THREAD currently holds (see reentrancy note above).
+    /// `flock` would deadlock on a same-thread second acquisition, so it is
+    /// only ever exercised across threads/processes.
+    static HELD_LOCKS: std::cell::RefCell<std::collections::HashSet<PathBuf>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// Sibling lock path for `target` (e.g. `task.json` → `task.json.lock`).
+#[cfg(unix)]
+fn lock_sibling_path(target: &std::path::Path) -> PathBuf {
+    let mut os = target.as_os_str().to_os_string();
+    os.push(".lock");
+    PathBuf::from(os)
+}
+
+impl FileLock {
+    /// Acquire the exclusive advisory lock for `target`, blocking until any
+    /// other writer releases it. Must be held across the whole
+    /// read→modify→atomic-write cycle.
+    #[cfg(unix)]
+    pub(crate) fn acquire(target: &std::path::Path) -> Result<Self> {
+        Self::acquire_with(target, libc::LOCK_EX)
+    }
+
+    /// Acquire the exclusive advisory lock without blocking; errors
+    /// immediately (EWOULDBLOCK) when another writer holds it. Test-only
+    /// seam for proving mutual exclusion (no non-test caller yet).
+    #[cfg(unix)]
+    #[allow(dead_code)] // test seam — used by checkpoint/chat_store tests only
+    pub(crate) fn try_acquire(target: &std::path::Path) -> Result<Self> {
+        Self::acquire_with(target, libc::LOCK_EX | libc::LOCK_NB)
+    }
+
+    #[cfg(unix)]
+    fn acquire_with(target: &std::path::Path, flags: i32) -> Result<Self> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+        let lock_path = lock_sibling_path(target);
+
+        // Reentrancy: this thread already holds the lock (nested no-op).
+        if HELD_LOCKS.with(|held| held.borrow().contains(&lock_path)) {
+            return Ok(Self {
+                lock_path,
+                held: false,
+                _file: None,
+            });
+        }
+
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .custom_flags(libc::O_CLOEXEC)
+            .open(&lock_path)
+            .with_context(|| format!("Failed to open advisory lock file {:?}", lock_path))?;
+
+        if unsafe { libc::flock(file.as_raw_fd(), flags) } != 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("Failed to acquire advisory lock {:?}", lock_path));
+        }
+
+        HELD_LOCKS.with(|held| held.borrow_mut().insert(lock_path.clone()));
+        Ok(Self {
+            lock_path,
+            held: true,
+            _file: Some(file),
+        })
+    }
+
+    /// Non-Unix stub: no advisory locking without an extra dependency. The
+    /// atomic-replace fallback ([`replace_atomically`]) still keeps writes
+    /// consistent.
+    #[cfg(not(unix))]
+    pub(crate) fn acquire(_target: &std::path::Path) -> Result<Self> {
+        Ok(Self {
+            lock_path: PathBuf::new(),
+            held: false,
+        })
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        if !self.held {
+            return;
+        }
+        HELD_LOCKS.with(|held| held.borrow_mut().remove(&self.lock_path));
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            if let Some(file) = &self._file {
+                unsafe {
+                    libc::flock(file.as_raw_fd(), libc::LOCK_UN);
+                }
+            }
+        }
+    }
+}
+
+/// Replace `dst` with `src` (both on the same filesystem) with the
+/// remove-destination-then-retry fallback for platforms where `rename`
+/// refuses to overwrite an existing destination (Windows semantics).
+/// On Unix this is a straight atomic rename. On any platform, a double
+/// failure cleans up `src` before returning the error.
+///
+/// This is the shared form of the fallback convention established in
+/// [`CheckpointManager::save_full_checkpoint`]; chat saves and undo
+/// restores use it so they survive the same Windows rename restriction.
+pub(crate) fn replace_atomically(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+) -> std::io::Result<()> {
+    replace_atomically_with(src, dst, |s, d| std::fs::rename(s, d))
+}
+
+/// [`replace_atomically`] with an injectable rename operation (test seam:
+/// a fake Windows-style rename can exercise the remove-then-retry sequence
+/// on any platform).
+fn replace_atomically_with<F>(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    rename: F,
+) -> std::io::Result<()>
+where
+    F: Fn(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+{
+    match rename(src, dst) {
+        Ok(()) => Ok(()),
+        Err(first_err) => {
+            // On Windows, rename fails when the destination already exists:
+            // remove the destination and retry before giving up.
+            if dst.exists() {
+                if let Err(remove_err) = fs::remove_file(dst) {
+                    let _ = fs::remove_file(src);
+                    return Err(std::io::Error::new(
+                        remove_err.kind(),
+                        format!(
+                            "failed to remove existing destination {:?} for atomic replace (original rename error: {first_err})",
+                            dst
+                        ),
+                    ));
+                }
+                match rename(src, dst) {
+                    Ok(()) => Ok(()),
+                    Err(retry_err) => {
+                        let _ = fs::remove_file(src);
+                        Err(std::io::Error::new(
+                            retry_err.kind(),
+                            format!(
+                                "failed to rename {:?} from {:?} after removing the destination",
+                                dst, src
+                            ),
+                        ))
+                    }
+                }
+            } else {
+                let _ = fs::remove_file(src);
+                Err(first_err)
+            }
+        }
+    }
+}
+
+/// Parse one line of a delta log (new envelope format, falling back to a
+/// legacy bare delta), verifying envelope integrity.
+fn parse_delta_line(line: &str, path: &std::path::Path, line_no: usize) -> Result<CheckpointDelta> {
+    if let Ok(envelope) = serde_json::from_str::<CheckpointEnvelope>(line) {
+        envelope.verify().with_context(|| {
+            format!(
+                "Checkpoint delta integrity check failed for {:?} line {}",
+                path, line_no
+            )
+        })?;
+        serde_json::from_value::<CheckpointDelta>(envelope.payload).with_context(|| {
+            format!(
+                "Failed to deserialize checkpoint delta from {:?} line {}",
+                path, line_no
+            )
+        })
+    } else {
+        serde_json::from_str::<CheckpointDelta>(line).with_context(|| {
+            format!(
+                "Failed to deserialize legacy checkpoint delta from {:?} line {}",
+                path, line_no
+            )
+        })
+    }
+}
+
 impl CheckpointManager {
     /// Create a new checkpoint manager
     pub fn new(checkpoints_dir: PathBuf) -> Result<Self> {
@@ -907,6 +1142,12 @@ impl CheckpointManager {
     pub fn save(&self, checkpoint: &TaskCheckpoint) -> Result<()> {
         let full_path = self.checkpoint_path(&checkpoint.task_id)?;
 
+        // Advisory lock held across the WHOLE read → modify → atomic-write
+        // cycle, so concurrent CLI/daemon instances on the same task
+        // serialize instead of interleaving (delta appends, full-write
+        // renames and delta-log truncation must never overlap).
+        let _lock = FileLock::acquire(&full_path)?;
+
         // Prefer a compact delta write when possible to reduce SSD wear.
         if full_path.exists() {
             if let Ok(mut base) = self.try_load_from_path(&full_path) {
@@ -956,6 +1197,7 @@ impl CheckpointManager {
     /// status/step. Used at task finalization — a delta save would leave the
     /// base frozen at in_progress/step 1 for anything that reads the base file.
     pub fn save_final(&self, checkpoint: &TaskCheckpoint) -> Result<()> {
+        let _lock = FileLock::acquire(&self.checkpoint_path(&checkpoint.task_id)?)?;
         self.save_full_checkpoint(checkpoint)?;
         self.clear_delta_log(&checkpoint.task_id)?;
         self.prune_old_checkpoints();
@@ -1214,38 +1456,16 @@ impl CheckpointManager {
             }
         }
 
-        if let Err(first_err) = fs::rename(&tmp_path, &path) {
-            // On Windows, `fs::rename` fails when the target already exists.
-            // Fallback: remove the destination and retry the rename.
-            if path.exists() {
-                if let Err(remove_err) = fs::remove_file(&path) {
-                    let _ = fs::remove_file(&tmp_path);
-                    return Err(remove_err).with_context(|| {
-                        format!(
-                            "Failed to remove existing checkpoint {:?} for atomic replace (original rename error: {})",
-                            path, first_err
-                        )
-                    });
-                }
-                if let Err(retry_err) = fs::rename(&tmp_path, &path) {
-                    let _ = fs::remove_file(&tmp_path);
-                    return Err(retry_err).with_context(|| {
-                        format!(
-                            "Failed to rename checkpoint {:?} from {:?} after removing target",
-                            path, tmp_path
-                        )
-                    });
-                }
-            } else {
-                let _ = fs::remove_file(&tmp_path);
-                return Err(first_err).with_context(|| {
-                    format!(
-                        "Failed to atomically replace checkpoint {:?} from {:?}",
-                        path, tmp_path
-                    )
-                });
-            }
-        }
+        // Atomic replace (tmp → path), with the remove-destination-then-retry
+        // fallback for Windows, where rename fails when the destination
+        // exists. The caller holds the task's advisory lock across this
+        // whole cycle.
+        replace_atomically(&tmp_path, &path).with_context(|| {
+            format!(
+                "Failed to atomically replace checkpoint {:?} from {:?}",
+                path, tmp_path
+            )
+        })?;
         #[cfg(unix)]
         {
             if let Some(parent) = path.parent() {
@@ -1294,31 +1514,61 @@ impl CheckpointManager {
     /// the distinction between continuation and a new task).
     pub fn load_with_status(&self, task_id: &str) -> Result<CheckpointLoad> {
         let path = self.checkpoint_path(task_id)?;
+        // Reading may HEAL the delta log (truncating a torn tail), and
+        // recovery re-saves the primary, so hold the task lock across the
+        // whole load. Nested acquires (recovery → save) are no-ops via the
+        // reentrancy registry.
+        let _lock = FileLock::acquire(&path)?;
 
-        match self.try_load_from_path(&path).and_then(|mut checkpoint| {
-            self.apply_deltas(task_id, &mut checkpoint)?;
-            Ok(checkpoint)
-        }) {
-            Ok(checkpoint) => Ok(CheckpointLoad::Clean(checkpoint)),
+        // Load the PRIMARY file on its own. Only a genuine failure to read
+        // or verify the primary itself may trigger backup recovery. A broken
+        // DELTA log is NOT primary corruption: treating it as such used to
+        // overwrite a healthy, newer primary with an older `.bak` copy and
+        // discard every valid delta (crash-cascade bug — a power loss tearing
+        // the final delta line cascaded into the PRIMARY being rolled back).
+        let mut checkpoint = match self.try_load_from_path(&path) {
+            Ok(checkpoint) => checkpoint,
             Err(primary_err) => {
-                // The primary file is missing or corrupt -- attempt recovery.
                 tracing::warn!(
                     "Primary checkpoint load failed for {:?}: {}. Attempting recovery.",
                     path,
                     primary_err
                 );
-                match self.recover_from_corruption(task_id)? {
+                return match self.recover_from_corruption(task_id)? {
                     Some(checkpoint) => Ok(CheckpointLoad::RecoveredFromBackup(checkpoint)),
                     None => Ok(CheckpointLoad::RecoveryRequired {
                         task_id: task_id.to_string(),
                         reason: format!("{primary_err}"),
                     }),
-                }
+                };
             }
-        }
+        };
+
+        // Delta replay: a torn trailing line is tolerated (and healed) inside
+        // apply_deltas; any other failure is delta-log corruption. Either way
+        // the healthy primary is preserved exactly as it is — a backup is
+        // never preferred over it.
+        self.apply_deltas(task_id, &mut checkpoint)?;
+
+        Ok(CheckpointLoad::Clean(checkpoint))
     }
 
+    /// Replay the task's delta log onto `checkpoint`.
+    ///
+    /// Torn-write tolerance: the log is append-only, so a crash/power loss
+    /// mid-`append_delta` leaves a truncated FINAL line (no trailing
+    /// newline) holding no committed delta. That line is skipped with a
+    /// warning and its partial bytes are truncated from the log (self-
+    /// healing: otherwise the next append would sandwich the torn record
+    /// between valid ones and turn a recoverable tail into a hard error).
+    /// Genuine failures on a COMPLETE or non-final line still fail the
+    /// replay — and `load_with_status` never lets a delta failure masquerade
+    /// as primary corruption.
     fn apply_deltas(&self, task_id: &str, checkpoint: &mut TaskCheckpoint) -> Result<()> {
+        // Reading may HEAL the log (truncate a torn tail), so hold the task
+        // lock across the whole replay. Nested acquires from save() etc. are
+        // no-ops via the reentrancy registry.
+        let _lock = FileLock::acquire(&self.checkpoint_path(task_id)?)?;
         let path = self.checkpoint_delta_path(task_id)?;
         if !path.exists() {
             return Ok(());
@@ -1326,41 +1576,61 @@ impl CheckpointManager {
 
         let content = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read checkpoint delta log {:?}", path))?;
-        for (line_no, line) in content.lines().enumerate() {
+
+        // Torn-write signature: an interrupted append never emitted the
+        // terminating newline, so the file body ends mid-record.
+        let ends_with_newline = content.ends_with('\n');
+        let lines: Vec<&str> = content.lines().collect();
+        let total = lines.len();
+
+        let mut torn_tail_len: Option<usize> = None;
+        for (idx, line) in lines.iter().enumerate() {
             if line.trim().is_empty() {
                 continue;
             }
-
-            let delta = if let Ok(envelope) = serde_json::from_str::<CheckpointEnvelope>(line) {
-                envelope.verify().with_context(|| {
-                    format!(
-                        "Checkpoint delta integrity check failed for {:?} line {}",
+            let is_final = idx + 1 == total;
+            match parse_delta_line(line, &path, idx + 1) {
+                Ok(delta) => {
+                    checkpoint.apply_delta(&delta).with_context(|| {
+                        format!(
+                            "Failed to apply checkpoint delta from {:?} line {}",
+                            path,
+                            idx + 1
+                        )
+                    })?;
+                }
+                Err(e) if is_final && !ends_with_newline => {
+                    // The final record never completed on disk; nothing
+                    // committed, nothing to lose. Skip it and heal the log.
+                    tracing::warn!(
+                        "Checkpoint delta log {:?} ends with a truncated record at line {} ({}); the write was interrupted mid-line — dropping the partial tail so all valid deltas still apply",
                         path,
-                        line_no + 1
+                        idx + 1,
+                        e
+                    );
+                    // The torn line ends the file without a newline, so its
+                    // start offset (in bytes) is the heal point.
+                    torn_tail_len = Some(content.len() - line.len());
+                    break;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        if let Some(truncate_to) = torn_tail_len {
+            let file = fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .with_context(|| {
+                    format!(
+                        "Failed to open checkpoint delta log {:?} to repair its torn tail",
+                        path
                     )
                 })?;
-                serde_json::from_value::<CheckpointDelta>(envelope.payload).with_context(|| {
-                    format!(
-                        "Failed to deserialize checkpoint delta from {:?} line {}",
-                        path,
-                        line_no + 1
-                    )
-                })?
-            } else {
-                serde_json::from_str::<CheckpointDelta>(line).with_context(|| {
-                    format!(
-                        "Failed to deserialize legacy checkpoint delta from {:?} line {}",
-                        path,
-                        line_no + 1
-                    )
-                })?
-            };
-
-            checkpoint.apply_delta(&delta).with_context(|| {
+            file.set_len(truncate_to as u64).with_context(|| {
                 format!(
-                    "Failed to apply checkpoint delta from {:?} line {}",
-                    path,
-                    line_no + 1
+                    "Failed to truncate torn tail of checkpoint delta log {:?}",
+                    path
                 )
             })?;
         }
@@ -1394,13 +1664,35 @@ impl CheckpointManager {
     /// Attempt to recover a corrupted checkpoint.
     ///
     /// Strategy:
-    /// 1. Try loading from the `.json.bak` backup (created by [`Self::save`]).
+    /// 0. FIRST re-check the primary: recovery must never prefer an older
+    ///    backup over a healthy primary. The caller only reaches this after
+    ///    a primary load failure, but that failure may have been transient
+    ///    (or the file repaired meanwhile) — if the primary parses NOW, it
+    ///    wins and no backup is consulted or written.
+    /// 1. Then try the `.json.bak` backup (created by [`Self::save`]).
     /// 2. If the backup is also unusable, return `None` — the caller decides
     ///    how to surface recovery-required state. No fresh checkpoint is
     ///    created here: a blank checkpoint must never masquerade as a resume
     ///    (review finding), and creating one would overwrite the evidence.
+    ///
+    /// Only genuine PRIMARY parse/integrity failures reach this function:
+    /// `load_with_status` never routes a delta-log failure here, so a broken
+    /// delta log can no longer roll a healthy primary back to an older
+    /// backup (crash-cascade fix).
     pub fn recover_from_corruption(&self, task_id: &str) -> Result<Option<TaskCheckpoint>> {
-        let backup_path = self.checkpoint_path(task_id)?.with_extension("json.bak");
+        let _lock = FileLock::acquire(&self.checkpoint_path(task_id)?)?;
+        let primary_path = self.checkpoint_path(task_id)?;
+
+        // Step 0: never prefer an older backup over a healthier primary.
+        if let Ok(checkpoint) = self.try_load_from_path(&primary_path) {
+            tracing::warn!(
+                "Primary checkpoint {:?} is readable despite the earlier failure; keeping it over any backup.",
+                primary_path
+            );
+            return Ok(Some(checkpoint));
+        }
+
+        let backup_path = primary_path.with_extension("json.bak");
 
         // Attempt 1: try the backup file
         if backup_path.exists() {
@@ -1558,6 +1850,10 @@ impl CheckpointManager {
     /// Delete a checkpoint
     pub fn delete(&self, task_id: &str) -> Result<()> {
         let path = self.checkpoint_path(task_id)?;
+        // Primary + backup + delta log are removed as one unit under the
+        // task's advisory lock so a concurrent writer observes either all
+        // or nothing.
+        let _lock = FileLock::acquire(&path)?;
         if path.exists() {
             fs::remove_file(&path)
                 .with_context(|| format!("Failed to delete checkpoint: {:?}", path))?;

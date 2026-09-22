@@ -684,3 +684,73 @@ fn test_first_edit_with_files_is_undoable_and_restores_tip() {
         "nothing left to undo after reverting the only edit"
     );
 }
+
+// ── restore_checkpoint_guarded (undo restore path; uses the shared
+//    atomic-replace with the Windows remove-then-retry fallback) ─────
+
+#[tokio::test]
+async fn restore_guarded_writes_snapshot_back_and_reports_restored() {
+    use std::collections::HashMap;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.txt");
+    std::fs::write(&path, "current content").unwrap();
+
+    let snapshot = FileSnapshot::new(path.clone(), "pre-edit content".to_string());
+    let mut files = HashMap::new();
+    files.insert(path.clone(), snapshot);
+
+    let outcomes = restore_checkpoint_guarded(&files).await;
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].0, path);
+    assert_eq!(outcomes[0].1, RestoreOutcome::Restored);
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "pre-edit content",
+        "restore must write the snapshot content back"
+    );
+    // No undo-tmp residue: the atomic replace consumed the temp file.
+    let residue = std::fs::read_dir(dir.path()).unwrap().count();
+    assert_eq!(residue, 1, "only the restored file may remain in the dir");
+}
+
+#[tokio::test]
+async fn restore_guarded_reports_already_current_without_rewriting() {
+    use std::collections::HashMap;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("b.txt");
+    std::fs::write(&path, "same content").unwrap();
+
+    let snapshot = FileSnapshot::new(path.clone(), "same content".to_string());
+    let mut files = HashMap::new();
+    files.insert(path.clone(), snapshot);
+
+    let outcomes = restore_checkpoint_guarded(&files).await;
+    assert_eq!(outcomes[0].1, RestoreOutcome::AlreadyCurrent);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "same content");
+}
+
+#[tokio::test]
+async fn restore_guarded_skips_corrupt_snapshot() {
+    use std::collections::HashMap;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("c.txt");
+    std::fs::write(&path, "live content").unwrap();
+
+    // Recorded hash ≠ own content: the checkpoint is corrupt and must not
+    // be trusted, even though the restore would be trivial.
+    let mut snapshot = FileSnapshot::new(path.clone(), "claimed content".to_string());
+    snapshot.hash = "deadbeef".to_string();
+    let mut files = HashMap::new();
+    files.insert(path.clone(), snapshot);
+
+    let outcomes = restore_checkpoint_guarded(&files).await;
+    assert_eq!(outcomes[0].1, RestoreOutcome::SkippedCorrupt);
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "live content",
+        "a corrupt checkpoint must not be written back over live content"
+    );
+}

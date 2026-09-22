@@ -1784,3 +1784,297 @@ fn autocontinue_sees_completed_status_carried_by_delta() {
         "delta-completed task must not be auto-resumed"
     );
 }
+
+// ── Crash-resilience: torn delta-log tails and the primary/backup policy ──
+
+/// Helpers to build a checkpoint whose delta writes are efficient (the save
+/// path only writes deltas when `delta_size + 128 < full_size`).
+fn big_message_set(n: usize) -> Vec<Message> {
+    (0..n)
+        .map(|i| Message::user(format!("message-{i} {}", "x".repeat(120))))
+        .collect()
+}
+
+#[test]
+fn delta_log_with_truncated_final_line_still_applies_valid_deltas() {
+    // Power loss mid-append_delta leaves a truncated FINAL line in the delta
+    // log. All COMPLETE deltas must still apply; the torn tail is skipped
+    // with a warning and healed (truncated away) so the log keeps replaying.
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+    let mut cp = TaskCheckpoint::new("torn-task".to_string(), "d".to_string());
+    cp.set_messages(big_message_set(30));
+    manager.save(&cp).unwrap(); // full write: no delta log yet
+
+    cp.set_iteration(5);
+    manager.save(&cp).unwrap(); // VALID delta (line 1)
+    cp.set_step(2);
+    manager.save(&cp).unwrap(); // delta (line 2) — will be torn
+
+    let delta_path = manager.checkpoint_delta_path("torn-task").unwrap();
+    let content = std::fs::read_to_string(&delta_path).unwrap();
+    assert!(content.ends_with('\n'), "sanity: log is newline-terminated");
+    // Simulate the crash: drop the trailing newline and chop the final
+    // record mid-write, leaving a partial line with NO trailing newline.
+    let no_final_nl = content.len() - 1;
+    let truncated = content[..no_final_nl.saturating_sub(12)].to_string();
+    std::fs::write(&delta_path, &truncated).unwrap();
+
+    // All VALID deltas still apply (iteration came from line 1); the torn
+    // line held the step change and is not committed.
+    let loaded = manager.load("torn-task").unwrap();
+    assert_eq!(loaded.messages.len(), 30, "base state must survive");
+    assert_eq!(
+        loaded.current_iteration, 5,
+        "the valid delta that was committed BEFORE the torn write must still apply"
+    );
+    assert_eq!(
+        loaded.current_step, 0,
+        "the torn write's state is not committed"
+    );
+
+    // The log healed itself: a further save appends and replays cleanly —
+    // had the torn record been left in the middle, the load would FAIL.
+    cp.set_step(3);
+    manager.save(&cp).unwrap();
+    let loaded2 = manager.load("torn-task").unwrap();
+    assert_eq!(loaded2.current_step, 3);
+    assert_eq!(loaded2.current_iteration, 5);
+}
+
+#[test]
+fn broken_delta_log_never_triggers_backup_overwrite() {
+    // Genuine delta-log corruption (a COMPLETE line that fails to parse — not
+    // a torn tail) must fail the load WITHOUT touching the healthy primary:
+    // no recovery, no .bak restore, no older-backup-over-newer-primary.
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+    let mut cp = TaskCheckpoint::new("delta-broken".to_string(), "d".to_string());
+    cp.set_messages(big_message_set(30));
+    manager.save(&cp).unwrap();
+    cp.set_status(TaskStatus::Paused);
+    manager.save(&cp).unwrap(); // delta logged
+
+    let delta_path = manager.checkpoint_delta_path("delta-broken").unwrap();
+    let raw = std::fs::read_to_string(&delta_path).unwrap();
+    let mut lines: Vec<&str> = raw.lines().collect();
+    lines[0] = "{{{ not a delta";
+    std::fs::write(&delta_path, format!("{}\n", lines.join("\n"))).unwrap();
+
+    // The delta failure surfaces honestly…
+    let err = manager.load("delta-broken").unwrap_err().to_string();
+    assert!(
+        err.contains("delta"),
+        "the failure must be reported as a delta-log failure, got: {err}"
+    );
+
+    // …but the healthy primary is preserved byte-for-byte and no backup was
+    // written over it (the old cascade would have recovered from .bak and
+    // rolled the primary back to an older state, discarding valid deltas).
+    let primary_raw = std::fs::read_to_string(dir.path().join("delta-broken.json")).unwrap();
+    assert!(
+        primary_raw.contains("in_progress"),
+        "primary must keep its own (pre-delta) state, got: {primary_raw}"
+    );
+    assert!(
+        !dir.path().join("delta-broken.json.bak").exists(),
+        "a broken delta log must not cause a backup to be consulted or written"
+    );
+}
+
+#[test]
+fn recover_from_corruption_never_prefers_backup_over_healthy_primary() {
+    // The explicit preference (Rule 2): recovery consults the .bak backup
+    // ONLY when the primary itself is unreadable. A parseable primary wins
+    // over any backup, however old or new the backup is.
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+    let mut cp = TaskCheckpoint::new("fresh-primary".to_string(), "state-one".to_string());
+    manager.save_final(&cp).unwrap(); // full write → creates .bak next round
+    cp.task_description = "state-two newest".to_string();
+    manager.save_final(&cp).unwrap(); // primary = newest, .bak = older
+
+    assert!(dir.path().join("fresh-primary.json.bak").exists());
+    let recovered = manager
+        .recover_from_corruption("fresh-primary")
+        .unwrap()
+        .expect("a healthy primary must be returned, not None");
+    assert_eq!(
+        recovered.task_description, "state-two newest",
+        "the healthy NEWER primary must win over the older backup"
+    );
+    // The primary on disk was not replaced by backup content.
+    let primary_raw = std::fs::read_to_string(dir.path().join("fresh-primary.json")).unwrap();
+    assert!(primary_raw.contains("state-two newest"));
+}
+
+// ── Atomic replace fallback (Windows rename semantics) ──────────────
+
+#[test]
+fn atomic_replace_overwrites_existing_destination_directly() {
+    // Unix path: rename over an existing destination succeeds first try —
+    // the fallback must not be (and is not) triggered.
+    let dir = tempdir().unwrap();
+    let tmp = dir.path().join("src.tmp");
+    let dest = dir.path().join("dest.json");
+    std::fs::write(&tmp, "new bytes").unwrap();
+    std::fs::write(&dest, "old bytes").unwrap();
+
+    replace_atomically(&tmp, &dest).unwrap();
+    assert_eq!(std::fs::read_to_string(&dest).unwrap(), "new bytes");
+    assert!(!tmp.exists(), "tmp must be consumed by the rename");
+}
+
+#[test]
+fn atomic_replace_retries_after_removing_existing_destination() {
+    // Windows rename semantics: rename fails while the destination exists.
+    // replace_atomically must remove the destination and retry — asserted
+    // via the injectable rename seam (no Windows machine needed).
+    let dir = tempdir().unwrap();
+    let tmp = dir.path().join("src.tmp");
+    let dest = dir.path().join("dest.json");
+    std::fs::write(&tmp, "new bytes").unwrap();
+    std::fs::write(&dest, "old bytes").unwrap();
+
+    let calls = std::cell::Cell::new(0u32);
+    let result = replace_atomically_with(&tmp, &dest, |src, dst| {
+        calls.set(calls.get() + 1);
+        if calls.get() == 1 {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "destination exists (Windows rename semantics)",
+            ))
+        } else {
+            std::fs::rename(src, dst)
+        }
+    });
+    result.unwrap_or_else(|e| panic!("the retry after removing the destination must succeed: {e}"));
+    assert_eq!(calls.get(), 2, "first attempt fails, second succeeds");
+    assert_eq!(std::fs::read_to_string(&dest).unwrap(), "new bytes");
+    assert!(
+        !tmp.exists(),
+        "tmp must be consumed by the successful retry"
+    );
+}
+
+#[test]
+fn atomic_replace_gives_up_when_retry_also_fails_and_cleans_tmp() {
+    let dir = tempdir().unwrap();
+    let tmp = dir.path().join("src.tmp");
+    let dest = dir.path().join("dest.json");
+    std::fs::write(&tmp, "new bytes").unwrap();
+    std::fs::write(&dest, "old bytes").unwrap();
+
+    let calls = std::cell::Cell::new(0u32);
+    let result = replace_atomically_with(&tmp, &dest, |_, _| {
+        calls.set(calls.get() + 1);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "denied",
+        ))
+    });
+    assert!(result.is_err());
+    assert_eq!(calls.get(), 2, "exactly one remove-then-retry attempt");
+    assert!(
+        !tmp.exists(),
+        "tmp must be cleaned up after a double failure"
+    );
+    assert!(
+        !dest.exists(),
+        "the remove-then-retry convention removes the destination for the retry; \
+         after a failed retry NO partial file may be left behind"
+    );
+}
+
+// ── Advisory file locking (finding: concurrent writers clobber state) ──
+
+#[cfg(unix)]
+#[test]
+fn file_lock_serializes_writers() {
+    let dir = tempdir().unwrap();
+    let target = dir.path().join("serial.json");
+
+    // Writer A holds the lock.
+    let a = FileLock::acquire(&target).unwrap();
+
+    // Writer B — a separate thread, so a real flock (the reentrancy
+    // registry is thread-local) — must be EXCLUDED while A holds it.
+    let t2 = target.clone();
+    let b = std::thread::spawn(move || FileLock::try_acquire(&t2).is_err());
+    assert!(
+        b.join().unwrap(),
+        "a second writer must be excluded while the lock is held"
+    );
+
+    drop(a);
+
+    // After release, the same writer acquires fine.
+    let t3 = target;
+    let c = std::thread::spawn(move || FileLock::try_acquire(&t3).is_ok());
+    assert!(c.join().unwrap(), "a writer must acquire after release");
+}
+
+#[cfg(unix)]
+#[test]
+fn file_lock_is_reentrant_within_a_thread() {
+    // Nested acquires from the same thread (load → recovery → save) must be
+    // no-ops, not deadlocks.
+    let dir = tempdir().unwrap();
+    let target = dir.path().join("reentrant.json");
+    let outer = FileLock::acquire(&target).unwrap();
+    let inner = FileLock::acquire(&target).unwrap();
+    drop(inner);
+    drop(outer);
+
+    // And the lock is genuinely free again for other threads afterwards.
+    let t = std::thread::spawn(move || FileLock::try_acquire(&target).is_ok());
+    assert!(t.join().unwrap());
+}
+
+#[cfg(unix)]
+#[test]
+fn checkpoint_save_holds_advisory_lock_during_writes() {
+    use std::time::Duration;
+
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+    manager
+        .save(&TaskCheckpoint::new(
+            "locked-task".to_string(),
+            "d".to_string(),
+        ))
+        .unwrap();
+
+    // A foreign writer pins the task's advisory lock file.
+    let lock_target = manager.checkpoint_path("locked-task").unwrap();
+    let _foreign = FileLock::acquire(&lock_target).unwrap();
+
+    // A save from another thread must BLOCK until the lock is released.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let dir2 = dir.path().to_path_buf();
+    let handle = std::thread::spawn(move || {
+        let m = CheckpointManager::new(dir2).unwrap();
+        let mut cp2 = TaskCheckpoint::new("locked-task".to_string(), "d".to_string());
+        cp2.set_step(9);
+        m.save(&cp2).unwrap();
+        tx.send(()).unwrap();
+    });
+
+    assert!(
+        rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "save must block while the advisory lock is held by another writer"
+    );
+    drop(_foreign);
+    rx.recv_timeout(Duration::from_secs(5))
+        .expect("save must complete once the lock is released");
+    handle.join().unwrap();
+
+    let loaded = manager.load("locked-task").unwrap();
+    assert_eq!(
+        loaded.current_step, 9,
+        "the blocked writer's state must land"
+    );
+}

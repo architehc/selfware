@@ -238,3 +238,46 @@ fn test_delete_legacy_file_under_its_recorded_name_still_works() {
     store.delete("my session").unwrap();
     assert!(!store.chat_path("my session").exists());
 }
+
+// ── Advisory locking + atomic replace (finding: concurrent writers and the
+//    Windows rename restriction) ─────────────────────────────────────
+
+#[cfg(unix)]
+#[test]
+fn chat_save_holds_advisory_lock_against_foreign_writer() {
+    use crate::session::checkpoint::FileLock;
+    use std::time::Duration;
+
+    let (store, dir) = test_store();
+    store
+        .save("locked-chat", &[Message::user("hello".to_string())], "m1")
+        .unwrap();
+
+    // A foreign writer pins the chat's advisory lock file.
+    let lock_target = store.chat_path("locked-chat");
+    let _foreign = FileLock::acquire(&lock_target).unwrap();
+
+    // A save from another thread must BLOCK until the lock is released.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let dir2 = dir.path().to_path_buf();
+    let handle = std::thread::spawn(move || {
+        let s = ChatStore { chats_dir: dir2 };
+        s.save("locked-chat", &[Message::user("updated".to_string())], "m2")
+            .unwrap();
+        tx.send(()).unwrap();
+    });
+
+    assert!(
+        rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "chat save must block while the advisory lock is held by another writer"
+    );
+    drop(_foreign);
+    rx.recv_timeout(Duration::from_secs(5))
+        .expect("chat save must complete once the lock is released");
+    handle.join().unwrap();
+
+    let updated = store.load("locked-chat").unwrap();
+    assert_eq!(updated.model, "m2");
+    assert_eq!(updated.messages.len(), 1);
+    assert_eq!(updated.messages[0].content.text(), "updated");
+}
