@@ -70,6 +70,36 @@ pub(crate) fn set_json_mode(json: bool) {
     JSON_MODE.store(json, Ordering::SeqCst);
 }
 
+/// Where a diagnostic block goes in the current output mode.
+///
+/// Structured output (`--output-format json`/`stream-json`) keeps stdout
+/// strictly machine-readable, so diagnostics are rerouted to stderr there
+/// (2026-09-22 container e2e finding: with `-v` on, non-JSON debug blocks
+/// interleaved with the stream-json events).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DiagnosticSink {
+    /// Normal interactive stdout (text mode).
+    Stdout,
+    /// stderr — used in structured output modes.
+    Stderr,
+}
+
+/// Pure routing decision: where a diagnostic goes for a given output mode.
+/// Split out as a pure function so the structured-output guarantee can be
+/// tested deterministically, without touching the global JSON flag.
+pub(crate) fn diagnostic_sink_for(json_mode: bool) -> DiagnosticSink {
+    if json_mode {
+        DiagnosticSink::Stderr
+    } else {
+        DiagnosticSink::Stdout
+    }
+}
+
+/// The diagnostic sink for the CURRENT output mode.
+pub(crate) fn diagnostic_sink() -> DiagnosticSink {
+    diagnostic_sink_for(is_json_mode())
+}
+
 pub(crate) fn set_streaming_mode(streaming: bool) {
     STREAMING_MODE.store(streaming, Ordering::SeqCst);
 }
@@ -1065,15 +1095,33 @@ pub(crate) fn verification_report(report: &str, passed: bool) {
 /// `--debug=turns` CLI flag (and the legacy `SELFWARE_DEBUG` /
 /// `SELFWARE_DEBUG_TURNS` env vars) actually disable this output when not set.
 /// Verbose mode (`-v`) is preserved as a friendly opt-in for interactive use.
+///
+/// In `--output-format json`/`stream-json` mode the block is routed to
+/// STDERR: stdout must carry ONLY valid machine-readable JSON, so a
+/// diagnostic that would interleave with the JSON events goes to the
+/// diagnostic sink instead (2026-09-22 container e2e finding — with `-v` on,
+/// 8/23 stream-json lines were non-JSON `=== DEBUG ===` blocks).
 pub(crate) fn debug_output(debug: &crate::config::DebugConfig, label: &str, content: &str) {
     if is_quiet() {
         return;
     }
     if is_verbose() || debug.should_log_turns() {
         let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        println!("{}", format!("=== DEBUG: {} ===", label).bright_magenta());
-        println!("{}", content);
-        println!("{}", "=== END DEBUG ===".bright_magenta());
+        let header = format!("=== DEBUG: {} ===", label);
+        // Structured output routes diagnostics to stderr; text mode keeps
+        // them on stdout.
+        match diagnostic_sink() {
+            DiagnosticSink::Stderr => {
+                eprintln!("{}", header.bright_magenta());
+                eprintln!("{}", content);
+                eprintln!("{}", "=== END DEBUG ===".bright_magenta());
+            }
+            DiagnosticSink::Stdout => {
+                println!("{}", header.bright_magenta());
+                println!("{}", content);
+                println!("{}", "=== END DEBUG ===".bright_magenta());
+            }
+        }
     }
 }
 

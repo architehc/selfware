@@ -184,7 +184,10 @@ impl HeadlessEvent {
 /// Emit a single headless event as JSON to stdout.
 #[allow(dead_code)]
 pub fn emit_event(event: &HeadlessEvent) {
-    if let Ok(json) = serde_json::to_string(event) {
+    if let Some(json) = serde_json::to_string(event)
+        .ok()
+        .and_then(validated_jsonl_line)
+    {
         use std::io::Write;
         let stdout = std::io::stdout();
         let mut lock = stdout.lock();
@@ -194,7 +197,10 @@ pub fn emit_event(event: &HeadlessEvent) {
 
 /// Emit the final session result as JSON to stdout.
 pub fn emit_result(result: &SessionResult) {
-    if let Ok(json) = serde_json::to_string(result) {
+    if let Some(json) = serde_json::to_string(result)
+        .ok()
+        .and_then(validated_jsonl_line)
+    {
         use std::io::Write;
         let stdout = std::io::stdout();
         let mut lock = stdout.lock();
@@ -441,9 +447,34 @@ impl JsonlProgressEmitter {
     }
 }
 
+/// Guard the JSONL stream: refuse to write a line that is not self-contained
+/// valid JSON. stdout under `--output-format stream-json` is a
+/// machine-readable stream — a single partial or malformed line would
+/// silently break every downstream JSONL consumer (2026-09-22 container e2e
+/// finding). Failing LOUDLY on stderr instead of emitting the corrupt line
+/// keeps the rest of the stream parseable.
+///
+/// Every line this module produces is valid by construction (`event_json_line`
+/// / `emit_result` serialize with serde), so the guard is a tripwire for a
+/// future bug, not a recovery path: when it fires the line is dropped and the
+/// defect is called out rather than corrupting the stream.
+fn validated_jsonl_line(line: String) -> Option<String> {
+    match serde_json::from_str::<serde_json::Value>(&line) {
+        Ok(_) => Some(line),
+        Err(e) => {
+            eprintln!(
+                "stream-json internal error: refusing to emit non-JSON line ({}); \
+                 the event is dropped to protect the stream",
+                e
+            );
+            None
+        }
+    }
+}
+
 impl ProgressEmitter for JsonlProgressEmitter {
     fn emit(&self, event: ProgressEvent) {
-        if let Some(line) = Self::event_json_line(event) {
+        if let Some(line) = Self::event_json_line(event).and_then(validated_jsonl_line) {
             let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
             let mut stdout = std::io::stdout().lock();
             let _ = writeln!(stdout, "{}", line);

@@ -14,7 +14,13 @@ pub struct TokenUsage {
     pub output: usize,
     /// Total tokens
     pub total: usize,
-    /// Estimated cost
+    /// Provider-reported USD cost (e.g. OpenRouter `usage.cost`), or `None`
+    /// when the provider reports no pricing. Omitted from serialized output
+    /// when `None` — `cost` is present in the JSON only when the provider
+    /// actually reported it, so a reader never has to distinguish
+    /// `"cost": null` (no pricing) from a missing key. A missing key is NOT
+    /// an error; it means the endpoint does not price usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<f64>,
     /// Reasoning tokens (if reported)
     #[serde(default, skip_serializing_if = "Option::is_none")]

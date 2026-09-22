@@ -906,3 +906,276 @@ fn test_capture_patch_does_not_stage_user_files() {
         "capture_patch must not mutate the user's real git index (staged state changed)"
     );
 }
+
+// ── stream-json purity (2026-09-22 container e2e finding) ─────────────
+
+#[test]
+fn validated_jsonl_line_accepts_self_contained_json() {
+    let line = r#"{"event":"step_started","step":1,"model":"m"}"#.to_string();
+    assert_eq!(
+        validated_jsonl_line(line.clone()).as_deref(),
+        Some(line.as_str())
+    );
+}
+
+#[test]
+fn validated_jsonl_line_rejects_non_json_lines() {
+    // A stray non-JSON line must never reach a stream-json stdout: the guard
+    // drops it and fails loudly on stderr instead of corrupting the stream.
+    assert!(validated_jsonl_line("=== DEBUG: Planning Response ===".to_string()).is_none());
+    assert!(validated_jsonl_line("partial json {".to_string()).is_none());
+    assert!(validated_jsonl_line(String::new()).is_none());
+}
+
+#[test]
+fn every_mapped_progress_event_serializes_to_valid_json() {
+    // The writer's own output must be valid JSON by construction: every event
+    // surfaced in stream-json, serialized through the guard, parses.
+    let events = [
+        ProgressEvent::StepStarted {
+            step: 1,
+            model: "m".into(),
+            tools_available: 3,
+        },
+        ProgressEvent::ToolCallStarted {
+            tool: "file_read".into(),
+            args_short: "path=a".into(),
+        },
+        ProgressEvent::ToolCallCompleted {
+            tool: "file_read".into(),
+            ok: true,
+            elapsed_ms: 3,
+        },
+        ProgressEvent::StepCompleted {
+            step: 1,
+            mutating_tools_so_far: 0,
+        },
+        ProgressEvent::TaskCompleted {
+            outcome: "done".into(),
+        },
+        ProgressEvent::LlmRequestSent { tokens: 10 },
+        ProgressEvent::LlmResponseReceived {
+            finish_reason: "stop".into(),
+            completion_tokens: 5,
+        },
+    ];
+    for event in events {
+        let line = JsonlProgressEmitter::event_json_line(event)
+            .expect("event must be surfaced in stream-json");
+        assert!(
+            validated_jsonl_line(line.clone()).is_some(),
+            "mapped event produced a non-JSON line: {line}"
+        );
+    }
+}
+
+// ── SessionResult cost contract (2026-09-22 finding: cost: null) ──────
+
+#[test]
+fn cost_field_is_omitted_when_provider_reported_no_pricing() {
+    // `usage.cost: None` (keyless endpoints — qwen38-flash against
+    // llm.selfware.design reports token counts but no pricing) must NOT
+    // serialize as `"cost": null`: a reader should never have to distinguish
+    // a null from a missing key. cost is present only when the provider
+    // actually reported it.
+    let result = SessionResult {
+        session_id: "cost-none".to_string(),
+        exit_status: 0,
+        stop_reason: "completed".to_string(),
+        num_turns: 1,
+        patch_bytes: 0,
+        patch_lines: 0,
+        usage: TokenUsage::new(100, 50), // cost defaults to None
+        model: "m".to_string(),
+        duration_ms: 1,
+        failure_mode: None,
+        artifact_dir: None,
+        answer: None,
+    };
+    let json = serde_json::to_string(&result).unwrap();
+    assert!(
+        !json.contains("\"cost\""),
+        "cost: None must be omitted from the JSON, got: {json}"
+    );
+    // And the omitted key still deserializes to None for consumers.
+    let de: SessionResult = serde_json::from_str(&json).unwrap();
+    assert!(de.usage.cost.is_none());
+}
+
+#[test]
+fn cost_field_is_present_when_provider_priced_usage() {
+    let mut usage = TokenUsage::new(100, 50);
+    usage.cost = Some(0.0123);
+    let result = SessionResult {
+        session_id: "cost-some".to_string(),
+        exit_status: 0,
+        stop_reason: "completed".to_string(),
+        num_turns: 1,
+        patch_bytes: 0,
+        patch_lines: 0,
+        usage,
+        model: "m".to_string(),
+        duration_ms: 1,
+        failure_mode: None,
+        artifact_dir: None,
+        answer: None,
+    };
+    let json = serde_json::to_string(&result).unwrap();
+    let v: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["usage"]["cost"], 0.0123);
+}
+
+// ── stdout stays pure JSONL with diagnostics enabled (regression) ─────
+
+/// Remove ANSI escape sequences (belt-and-braces: this test must hold even
+/// if a future color path runs with color forced on).
+#[cfg(unix)]
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for n in chars.by_ref() {
+                if n.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Redirect fd 1 (stdout) to an anonymous temp file for the duration of the
+/// guard, restoring the ORIGINAL fd 1 on drop — even when a test panics. The
+/// original descriptor is duplicated so the restore target stays valid.
+#[cfg(unix)]
+struct Fd1Redirect {
+    saved: i32,
+    file: std::fs::File,
+}
+
+#[cfg(unix)]
+impl Fd1Redirect {
+    fn new() -> Self {
+        use std::os::unix::io::AsRawFd;
+        let saved = unsafe { libc::dup(1) };
+        assert!(saved >= 0, "dup(1) failed");
+        let file = tempfile::tempfile().expect("temp file for stdout capture");
+        if unsafe { libc::dup2(file.as_raw_fd(), 1) } < 0 {
+            unsafe { libc::close(saved) };
+            panic!("dup2(stdout -> temp file) failed");
+        }
+        Self { saved, file }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Fd1Redirect {
+    fn drop(&mut self) {
+        // Flush buffered stdout so every line reaches the redirected file
+        // BEFORE the original fd 1 is restored.
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        unsafe {
+            libc::dup2(self.saved, 1);
+            libc::close(self.saved);
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn stream_json_stdout_carries_only_json_lines() {
+    // Container e2e regression (2026-09-22): with -v / the debug channel on
+    // AND --output-format stream-json, non-JSON === DEBUG === blocks were
+    // interleaved with the JSON events (observed: 8 of 23 lines). The
+    // diagnostic-routing half of the fix is pinned deterministically in the
+    // output-module tests (`diagnostic_sink_for`); this test pins the writer
+    // half from the same angle the container validated it: while stdout is
+    // the JSONL stream, every line that lands there must parse as JSON.
+    use std::io::{Read, Seek, SeekFrom};
+
+    let prior_json = crate::output::is_json_mode();
+    crate::output::set_json_mode(true);
+    struct RestoreJson(bool);
+    impl Drop for RestoreJson {
+        fn drop(&mut self) {
+            crate::output::set_json_mode(self.0);
+        }
+    }
+    let _json_guard = RestoreJson(prior_json);
+
+    let capture = Fd1Redirect::new();
+
+    // A realistic stream-json event sequence.
+    let emitter = JsonlProgressEmitter::new();
+    emitter.emit(ProgressEvent::StepStarted {
+        step: 1,
+        model: "m".into(),
+        tools_available: 2,
+    });
+    emitter.emit(ProgressEvent::ToolCallStarted {
+        tool: "file_read".into(),
+        args_short: "path=a".into(),
+    });
+    emitter.emit(ProgressEvent::ToolCallCompleted {
+        tool: "file_read".into(),
+        ok: true,
+        elapsed_ms: 5,
+    });
+    emitter.emit(ProgressEvent::TaskCompleted {
+        outcome: "done".into(),
+    });
+    emitter.emit(ProgressEvent::LlmResponseReceived {
+        finish_reason: "stop".into(),
+        completion_tokens: 5,
+    });
+
+    // Read what actually reached stdout while the redirect was active. The
+    // capture file is an anonymous temp file; duplicate its descriptor so we
+    // can seek+read the same inode without disturbing the guard's fd.
+    let mut captured = String::new();
+    {
+        use std::os::unix::io::{AsRawFd, FromRawFd};
+        let dup = unsafe { libc::dup(capture.file.as_raw_fd()) };
+        assert!(dup >= 0, "dup of capture file failed");
+        let mut read_handle = unsafe { std::fs::File::from_raw_fd(dup) };
+        read_handle.seek(SeekFrom::Start(0)).unwrap();
+        read_handle.read_to_string(&mut captured).unwrap();
+    }
+    drop(capture); // restore fd 1
+    drop(_json_guard); // restore json mode
+
+    let mut non_json_lines = 0usize;
+    let mut json_lines = 0usize;
+    for raw in captured.lines() {
+        let line = strip_ansi(raw).trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with("test ") {
+            // libtest's own `test <path> ... ok` status lines land on the
+            // test process's shared fd 1 while the redirect is active (a
+            // parallel test completed mid-window). They are harness
+            // infrastructure, not application output — the contract being
+            // pinned is that everything the APPLICATION emits to stdout in
+            // stream-json mode is valid JSON.
+            continue;
+        }
+        json_lines += 1;
+        if serde_json::from_str::<Value>(&line).is_err() {
+            non_json_lines += 1;
+        }
+    }
+    assert!(
+        json_lines >= 5,
+        "expected at least the emitted JSON events on stdout, got: {captured}"
+    );
+    assert_eq!(
+        non_json_lines, 0,
+        "stdout under stream-json must be pure JSON lines, got:\n{captured}"
+    );
+}

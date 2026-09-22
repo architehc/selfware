@@ -171,8 +171,13 @@ async fn reasoning_attempt_usage_survives_success_failure_and_pinned_exhaustion(
         let (endpoint, _, task) = server(replies).await;
         let mut config = config(endpoint);
         if pinned {
+            // "low", not "high": the default model is qwen38-flash-next and
+            // merge_extra_body rejects top-level reasoning_effort="high" for
+            // Qwen models on every endpoint (the Qwen chat template refuses
+            // it) — the request would fail before any attempt is metered.
+            // Any pinned reasoning key exercises the no-override path alike.
             config.extra_body = Some(
-                json!({"reasoning_effort":"high"})
+                json!({"reasoning_effort":"low"})
                     .as_object()
                     .unwrap()
                     .clone(),

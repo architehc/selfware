@@ -379,9 +379,12 @@ fn test_load_empty_file_uses_defaults() {
     let _guard = clear_env();
     let (_dir, path) = write_temp_config("", "empty.toml");
     let config = Config::load(Some(path.to_str().unwrap())).unwrap();
-    assert_eq!(config.endpoint, "https://openrouter.ai/api/v1");
-    assert_eq!(config.model, "nvidia/nemotron-3-ultra-550b-a55b:free");
-    assert_eq!(config.max_tokens, 65536);
+    assert_eq!(config.endpoint, "https://llm.selfware.design/v1");
+    assert_eq!(config.model, "qwen38-flash-next");
+    // The default model matches the built-in qwen38 profile, whose 32,768
+    // completion cap fills the omitted field (not the 65,536 profile-less
+    // default).
+    assert_eq!(config.max_tokens, 32768);
 }
 
 #[test]
@@ -2041,6 +2044,99 @@ fn env_selected_config_file_is_operator_choice_for_endpoint_gate() {
     std::env::set_var("SELFWARE_CONFIG", path.to_str().unwrap());
     let config = Config::load(None).expect("SELFWARE_CONFIG-selected file must load");
     assert_eq!(config.endpoint, "https://example.com/v1");
+}
+
+#[test]
+fn explicit_cli_config_path_is_operator_choice_for_endpoint_gate() {
+    // 2026-09-22 container e2e finding: `selfware -c selfware.toml` on a
+    // keyless/self-hosted endpoint died with "this repository is not trusted"
+    // because the loader only exempted SELFWARE_CONFIG-selected paths, not an
+    // explicit `--config`/`-c` path — even though the operator chose the file
+    // BY NAME. An explicitly-chosen path carries the same operator provenance
+    // as SELFWARE_CONFIG, so the untrusted-endpoint gate must not fire.
+    let _guard = clear_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(home.path());
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "https://attacker.example.com/v1"
+        model = "anything"
+        "#,
+        "selfware.toml",
+    );
+    let config = Config::load_explicit_cli_path(path.to_str().unwrap())
+        .expect("an operator-chosen --config path must load on an untrusted-looking filename");
+    assert_eq!(config.endpoint, "https://attacker.example.com/v1");
+    assert_eq!(
+        config.sources.get("__config_path_source"),
+        Some(&ConfigSource::CliArg("--config".to_string())),
+        "the CLI-explicit provenance must be recorded"
+    );
+}
+
+#[test]
+fn explicit_cli_config_path_with_remote_profile_endpoint_loads() {
+    // Profile-endpoint gate (untrusted-checkout PROFILE refusal): an
+    // explicitly-chosen `--config` path must not trip it — the operator chose
+    // the file by name, and the load must SUCCEED. Exactly the container
+    // failure: the untrusted-endpoint refusal killed `-c selfware.toml`
+    // before the run could start.
+    let _guard = clear_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(home.path());
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "http://localhost:9999/v1"
+        model = "anything"
+
+        [models.default]
+        endpoint = "https://attacker.example.com/v1"
+        model = "anything"
+        "#,
+        "selfware.toml",
+    );
+    let config = Config::load_explicit_cli_path(path.to_str().unwrap())
+        .expect("an operator-chosen --config path must load, profile endpoints included");
+    assert_eq!(config.endpoint, "http://localhost:9999/v1");
+    // PARITY with SELFWARE_CONFIG: the operator-explicit provenance exempts
+    // the endpoint TRUST GATE (no refusal), but the separate restricted-mode
+    // neutralization (`restrict_untrusted_project_config`) is keyed on the
+    // VALUE's origin, not the config's provenance, so privileged settings
+    // that originated from a checkout-local-named file are still reset to
+    // their safe defaults — SELFWARE_CONFIG-selected files behave exactly the
+    // same today. Only the gate refusal is lifted here.
+    assert_eq!(
+        config.models.get("default").unwrap().endpoint,
+        "http://localhost:9999/v1",
+        "profile endpoint reset to the top-level endpoint by restricted mode"
+    );
+}
+
+#[test]
+fn explicit_cli_path_is_trusted_but_plain_load_of_the_same_file_is_not() {
+    // The discrimination, pinned: the SAME checkout-local filename is refused
+    // when selected without operator provenance (`Config::load`, i.e.
+    // default-name auto-discovery / the -C original-cwd probe) and accepted
+    // when the operator explicitly chose it via --config. The protection for
+    // the DEFAULT file-name case must survive the exemption.
+    let _guard = clear_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(home.path());
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "https://attacker.example.com/v1"
+        model = "anything"
+        "#,
+        "selfware.toml",
+    );
+    let err = Config::load(Some(path.to_str().unwrap())).unwrap_err();
+    assert!(
+        err.to_string().contains("not trusted"),
+        "implicitly-discovered checkout-local selfware.toml must stay refused, got: {err}"
+    );
+    let config = Config::load_explicit_cli_path(path.to_str().unwrap())
+        .expect("the same file must load when --config names it explicitly");
+    assert_eq!(config.endpoint, "https://attacker.example.com/v1");
 }
 
 // =========================================================================

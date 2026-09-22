@@ -147,6 +147,31 @@ pub(crate) fn is_unexplained_empty_stream(
     no_content && no_reasoning && no_tool_calls && !provider_explained_itself && !cancelled
 }
 
+/// Whether the consumer's loop ended on a stream that PRODUCED output but
+/// never reached an accepted terminal indication — the [DONE] sentinel or a
+/// provider `finish_reason` — and did not exit for a deliberate reason
+/// (caller cancel, runaway-monologue cutoff).
+///
+/// This is the consumer-side mirror of the producer's `collect()` terminal
+/// contract (see `crate::api::streaming::StreamingResponse::collect`), so the
+/// two sides agree on what "complete" means: the same shapes the producer
+/// fails with a typed protocol error must also fail here instead of being
+/// promoted to a stored success with a synthesized `finish_reason: stream_end`.
+/// Deliberate truncations — cancel and the runaway-monologue cutoff — are not
+/// incomplete-provider streams and stay `Ok` with their own recovery
+/// semantics. All-empty streams are excluded: they fall through to
+/// [`is_unexplained_empty_stream`] so the `EmptyStream` discrimination is
+/// preserved exactly.
+pub(crate) fn stream_ended_truncated_without_terminal(
+    ended_with_done: bool,
+    has_finish_reason: bool,
+    produced_output: bool,
+    cancelled: bool,
+    runaway_cut: bool,
+) -> bool {
+    !ended_with_done && !has_finish_reason && produced_output && !cancelled && !runaway_cut
+}
+
 impl Agent {
     /// Extract function name from a tool_call XML block for clean display
     pub(super) fn extract_tool_name(xml: &str) -> Option<String> {
@@ -404,6 +429,13 @@ impl Agent {
         // Which suppressed tag we're currently inside, if any
         let mut suppressed_tag_idx: Option<usize> = None;
         let mut captured_logprobs: Option<serde_json::Value> = None;
+        // How the loop below ended. `stream_ended_with_done` tracks the
+        // [DONE] sentinel; `runaway_cut` tracks the deliberate monologue
+        // cutoff. Both matter for the terminal-indication guard after the
+        // loop: a stream that produced content but never reached an accepted
+        // terminal is truncated, not complete.
+        let mut stream_ended_with_done = false;
+        let mut runaway_cut = false;
 
         let cancel = self.cancel_token();
 
@@ -446,6 +478,7 @@ impl Agent {
                 let streamed = content.len() + reasoning.len();
                 warn!("runaway monologue truncated at {streamed} chars (no tool call in flight)");
                 content.push_str(&monologue_cut_notice(streamed));
+                runaway_cut = true;
                 break;
             }
 
@@ -669,7 +702,10 @@ impl Agent {
                         msg
                     ));
                 }
-                StreamChunk::Done => break,
+                StreamChunk::Done => {
+                    stream_ended_with_done = true;
+                    break;
+                }
             }
         }
 
@@ -690,6 +726,37 @@ impl Agent {
         if !tui_active && !suppress_stream_stdout && (!content.is_empty() || !reasoning.is_empty())
         {
             println!();
+        }
+
+        // Terminal-indication guard, mirror of the producer (W2b). The
+        // producer's `collect()` (`crate::api::streaming`) fails a stream that
+        // produced events but never reached an accepted terminal — the [DONE]
+        // sentinel or a provider `finish_reason`. This consumer reads the raw
+        // channel, so it must reach the same verdict itself instead of
+        // promoting truncation to success by synthesizing "stream_end"
+        // (2026-09-21 review, P2; consumer side) — half-written prose or a
+        // partial tool call must not be handed to execution as a clean turn.
+        // Deliberate truncations stay benign: caller cancel and the
+        // runaway-monologue cutoff carry their own recovery semantics.
+        // All-empty streams fall through to the narrow EmptyStream guard
+        // below, preserving the exact error discrimination of that shape.
+        let produced_output =
+            !content.is_empty() || !reasoning.is_empty() || !tool_calls.is_empty();
+        if stream_ended_truncated_without_terminal(
+            stream_ended_with_done,
+            captured_finish_reason.is_some(),
+            produced_output,
+            cancel.load(std::sync::atomic::Ordering::Relaxed),
+            runaway_cut,
+        ) {
+            return Err(crate::errors::ApiError::Parse(format!(
+                "stream ended before an accepted terminal indication (no [DONE], no finish_reason): \
+                 truncated after {} content chars / {} reasoning chars / {} tool call(s)",
+                content.len(),
+                reasoning.len(),
+                tool_calls.len(),
+            ))
+            .into());
         }
 
         // Response caching is NOT display — it must run regardless of output
@@ -722,6 +789,13 @@ impl Agent {
         // SSE stream has produced its final usage / finish-reason chunks.  The
         // request-side event was already emitted inside
         // `chat_stream_with_meta`.
+        //
+        // By this point the stream reached an accepted terminal ([DONE] or a
+        // provider finish_reason) or ended deliberately (cancel /
+        // runaway-monologue cutoff) — the truncated-without-terminal case was
+        // rejected above. The synthesize "stream_end" fallback therefore only
+        // fires for a stream that ended on [DONE] without a finish_reason
+        // chunk, which is a complete stream, not a truncation.
         self.emit_progress(super::progress::ProgressEvent::LlmResponseReceived {
             finish_reason: captured_finish_reason
                 .clone()
@@ -849,5 +923,62 @@ mod empty_stream_guard_tests {
             }
         }
         assert_eq!(errors, 1, "the guard must stay narrow");
+    }
+}
+
+#[cfg(test)]
+mod truncated_stream_guard_tests {
+    use super::stream_ended_truncated_without_terminal as trunc;
+
+    /// The consumer-side equivalent of the producer's P2 hole: a stream that
+    /// sent CONTENT and then closed without [DONE] and without a provider
+    /// finish_reason is TRUNCATED, not a stored success.
+    #[test]
+    fn content_then_close_without_terminal_is_truncated() {
+        // ended_with_done=false, has_finish_reason=false,
+        // produced_output=true, cancelled=false, runaway_cut=false
+        assert!(trunc(false, false, true, false, false));
+    }
+
+    /// Every accepted terminal / deliberate exit must stay Ok.
+    #[test]
+    fn accepted_terminals_and_deliberate_exits_are_not_truncated() {
+        // [DONE] sentinel arrived: complete, whatever else happened.
+        assert!(!trunc(true, false, true, false, false));
+        // Provider finish_reason arrived (clean-EOF providers with no [DONE]).
+        assert!(!trunc(false, true, true, false, false));
+        assert!(!trunc(true, true, true, false, false));
+        // Caller cancelled: deliberate, the content shown is the partial view.
+        assert!(!trunc(false, false, true, true, false));
+        // Runaway-monologue cutoff: deliberate truncation with its own notice.
+        assert!(!trunc(false, false, true, false, true));
+        // Nothing produced: that shape belongs to the EmptyStream guard.
+        assert!(!trunc(false, false, false, false, false));
+    }
+
+    /// Exhaustive: exactly ONE of the 32 combinations may be an error — the
+    /// stream produced output but reached no accepted terminal and ended
+    /// without a deliberate exit. Every other combination is a complete
+    /// stream ([DONE] or finish_reason), a deliberate truncation (cancel /
+    /// runaway cut), or an all-empty shape that belongs to the EmptyStream
+    /// guard.
+    #[test]
+    fn exactly_one_of_thirty_two_combinations_is_truncated() {
+        let mut errors = 0;
+        for bits in 0..32u8 {
+            if trunc(
+                bits & 1 != 0,  // ended_with_done
+                bits & 2 != 0,  // has_finish_reason
+                bits & 4 != 0,  // produced_output
+                bits & 8 != 0,  // cancelled
+                bits & 16 != 0, // runaway_cut
+            ) {
+                errors += 1;
+            }
+        }
+        assert_eq!(
+            errors, 1,
+            "the consumer guard must match the producer contract exactly"
+        );
     }
 }

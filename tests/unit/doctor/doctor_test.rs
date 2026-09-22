@@ -142,9 +142,8 @@ fn test_glob_root_no_glob() {
 #[test]
 fn test_config_checks_default_endpoint_local() {
     // A localhost endpoint with no api_key should NOT fail (treated as
-    // local). Constructed explicitly because the default endpoint is now
-    // the remote OpenRouter GLM-5.2 stack, which DOES require a key (that
-    // path is covered by test_config_checks_remote_no_api_key_fails).
+    // local). Constructed explicitly; the remote no-key failure path is
+    // covered by test_config_checks_remote_no_api_key_fails.
     let cfg = crate::config::Config {
         endpoint: "http://127.0.0.1:1234/v1".to_string(),
         api_key: None,

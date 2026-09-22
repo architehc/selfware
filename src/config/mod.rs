@@ -89,10 +89,10 @@ pub(crate) const UNKNOWN_MODEL_CONTEXT_LENGTH: usize = 32_768;
 pub(crate) const MIN_CONVERSATION_TOKENS: usize = 2048;
 
 pub fn default_endpoint() -> String {
-    "https://openrouter.ai/api/v1".to_string()
+    "https://llm.selfware.design/v1".to_string()
 }
 pub fn default_model() -> String {
-    "nvidia/nemotron-3-ultra-550b-a55b:free".to_string()
+    "qwen38-flash-next".to_string()
 }
 pub fn default_max_tokens() -> usize {
     65536

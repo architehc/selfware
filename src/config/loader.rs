@@ -451,6 +451,35 @@ impl Config {
     }
 
     pub fn load_without_validation(path: Option<&str>) -> Result<Self> {
+        Self::load_without_validation_impl(path, false)
+    }
+
+    /// Load and validate a config file the operator selected EXPLICITLY on the
+    /// command line via `--config`/`-c`.
+    ///
+    /// The path is recorded with `ConfigSource::CliArg` provenance, which the
+    /// credential/endpoint trust gates treat as an operator choice — the same
+    /// trust level as `SELFWARE_CONFIG` / `SELFWARE_ENDPOINT`. A checkout-local
+    /// `selfware.toml` that was merely DISCOVERED (default-name search, or the
+    /// `-C` original-cwd probe) gets no such provenance and stays untrusted.
+    pub fn load_explicit_cli_path(path: &str) -> Result<Self> {
+        let config = Self::load_without_validation_impl(Some(path), true)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Async twin of [`Config::load_explicit_cli_path`], used by the CLI's
+    /// `run()` path. See its docs for the provenance/trust semantics.
+    pub async fn load_async_explicit_cli_path(path: &str) -> Result<Self> {
+        let config = Self::load_without_validation_impl(Some(path), true)?;
+        config.validate_async().await?;
+        Ok(config)
+    }
+
+    fn load_without_validation_impl(
+        path: Option<&str>,
+        path_was_cli_explicit: bool,
+    ) -> Result<Self> {
         // SELFWARE_CONFIG env var overrides the config file path when no explicit
         // path is provided via CLI.
         let env_config_path = std::env::var("SELFWARE_CONFIG").ok();
@@ -481,6 +510,12 @@ impl Config {
                     sources.set(
                         "__config_path_source".to_string(),
                         ConfigSource::EnvVar("SELFWARE_CONFIG".to_string()),
+                    );
+                }
+                if path_was_cli_explicit {
+                    sources.set(
+                        "__config_path_source".to_string(),
+                        ConfigSource::CliArg("--config".to_string()),
                     );
                 }
                 raw_toml_content = Some(content);
@@ -794,15 +829,17 @@ impl Config {
         // agent's whole conversation (code, prompts, tool output) to an
         // attacker-controlled REMOTE endpoint. Localhost endpoints stay
         // allowed (dev servers); endpoints from env / CLI / home config are
-        // operator choices and unaffected — as is a config FILE the operator
-        // explicitly selected via SELFWARE_CONFIG (same trust level as
-        // SELFWARE_ENDPOINT). Trusting the repo (`selfware trust`) lifts the
-        // refusal.
-        let config_path_from_env = matches!(
+        // operator choices and unaffected — as are config FILEs the operator
+        // explicitly selected, either via SELFWARE_CONFIG or an explicit
+        // `--config`/`-c` path (same trust level as SELFWARE_ENDPOINT). The
+        // default-name case (a checkout-local `selfware.toml` selected
+        // IMPLICITLY by discovery) carries no operator provenance and stays
+        // untrusted. Trusting the repo (`selfware trust`) lifts the refusal.
+        let config_path_from_operator = matches!(
             sources.get("__config_path_source"),
-            Some(ConfigSource::EnvVar(_))
+            Some(ConfigSource::EnvVar(_) | ConfigSource::CliArg(_))
         );
-        if !config_path_from_env && !is_local_endpoint(&config.endpoint) {
+        if !config_path_from_operator && !is_local_endpoint(&config.endpoint) {
             if let Some(ConfigSource::ConfigFile(p)) = sources.get("endpoint") {
                 if config_is_checkout_local(p) && !super::trust::is_config_trusted(p) {
                     let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
@@ -822,7 +859,7 @@ impl Config {
         // they need the same gate — otherwise an untrusted checkout ships a
         // remote `[models.default] endpoint` and the top-level check above
         // never sees it. Localhost profile endpoints stay allowed.
-        if !config_path_from_env {
+        if !config_path_from_operator {
             for (name, profile) in &config.models {
                 if is_local_endpoint(&profile.endpoint) {
                     continue;

@@ -1060,6 +1060,30 @@ fn resolve_config_path(
     None
 }
 
+/// Load the config for `run()`, recording operator-explicit provenance when
+/// the path came from an explicit `--config`/`-c` flag.
+///
+/// The untrusted-repo endpoint gate (`config::loader`) exempts config FILEs
+/// the operator chose explicitly — `SELFWARE_CONFIG` and an explicit
+/// `--config` path — from the checkout-local refusal: the operator pointed at
+/// that file by name, so it is not repository content smuggled past them. The
+/// default-name `selfware.toml` (auto-discovery, or the `-C` original-cwd
+/// probe) carries NO explicit provenance and stays untrusted. See
+/// `Config::load_async_explicit_cli_path` / `Config::load_async`.
+async fn load_async_config_with_provenance(
+    cli: &Cli,
+    config_path: &Option<String>,
+) -> anyhow::Result<Config> {
+    if cli.config.is_some() {
+        let path = config_path
+            .as_deref()
+            .expect("an explicit --config path is always resolved to a concrete path");
+        crate::config::Config::load_async_explicit_cli_path(path).await
+    } else {
+        crate::config::Config::load_async(config_path.as_deref()).await
+    }
+}
+
 /// Decide whether auto-calibration should be skipped for the current CLI
 /// invocation.
 ///
@@ -1406,7 +1430,7 @@ pub async fn run() -> Result<()> {
     // cannot be parsed or trusted. Load it only for the diagnostic branch.
     if let Some(Commands::Boot { chat, check }) = &cli.command {
         if *check {
-            let loaded = match Config::load_async(config_path.as_deref()).await {
+            let loaded = match load_async_config_with_provenance(&cli, &config_path).await {
                 Ok(mut config) => apply_session_model_overrides(&cli, &mut config).map(|_| config),
                 Err(e) => Err(e),
             };
@@ -1433,7 +1457,7 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
 
-    let mut config = Config::load_async(config_path.as_deref()).await?;
+    let mut config = load_async_config_with_provenance(&cli, &config_path).await?;
 
     apply_session_model_overrides(&cli, &mut config)?;
     config.discover_sglang_capabilities().await;

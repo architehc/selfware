@@ -875,14 +875,14 @@ fn test_save_unpack_config_full_content_verification() {
 // =========================================================================
 
 #[test]
-fn test_default_endpoint_is_openrouter() {
+fn test_default_endpoint_is_llm_selfware_design() {
     // Verify the default endpoint that auto_calibrate checks against
-    assert_eq!(default_endpoint(), "https://openrouter.ai/api/v1");
+    assert_eq!(default_endpoint(), "https://llm.selfware.design/v1");
 }
 
 #[test]
-fn test_default_model_is_nemotron_ultra_free() {
-    assert_eq!(default_model(), "nvidia/nemotron-3-ultra-550b-a55b:free");
+fn test_default_model_is_qwen38_flash_next() {
+    assert_eq!(default_model(), "qwen38-flash-next");
 }
 
 #[test]
@@ -895,7 +895,7 @@ fn test_config_default_uses_defaults() {
 #[tokio::test]
 async fn test_auto_calibrate_with_known_default_endpoints() {
     // The code treats several endpoints as "default":
-    // - default_endpoint() (openrouter)
+    // - default_endpoint() (llm.selfware.design)
     // - http://localhost:8000/v1
     // - http://127.0.0.1:1234/v1
     // If we set model to non-default but keep a known default endpoint,

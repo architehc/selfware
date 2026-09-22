@@ -18,6 +18,20 @@ fn test_init_and_check_modes() {
 }
 
 #[test]
+fn diagnostics_route_to_stderr_in_structured_output_mode() {
+    // Container e2e regression (2026-09-22): with -v / the debug channel on
+    // AND --output-format stream-json, non-JSON === DEBUG === blocks leaked
+    // into stdout on top of the JSON events (8 of 23 lines). The routing
+    // decision is pure: in json/stream-json mode diagnostics must go to
+    // stderr so stdout carries only machine-readable JSON; text mode keeps
+    // them on stdout. (`diagnostic_sink()` — the wrapper that reads the
+    // global JSON flag — delegates to this same function, so the pure
+    // decision pins the routing without touching global state.)
+    assert_eq!(diagnostic_sink_for(true), DiagnosticSink::Stderr);
+    assert_eq!(diagnostic_sink_for(false), DiagnosticSink::Stdout);
+}
+
+#[test]
 fn test_token_tracking() {
     let _lock = TOKEN_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     reset_tokens();

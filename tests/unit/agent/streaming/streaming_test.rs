@@ -461,6 +461,80 @@ async fn streaming_omitted_completion_tokens_triggers_measured_output_fallback()
 }
 
 #[tokio::test]
+async fn stream_that_closes_without_terminal_is_incomplete_not_success() {
+    // Consumer-side mirror of the W2b producer contract (2026-09-21 review,
+    // P2): a mock that sends CONTENT then closes without [DONE] and without a
+    // provider finish_reason is a TRUNCATED stream. The consumer must fail it
+    // with a typed incomplete outcome — never store it as a success by
+    // promoting it with a synthesized `finish_reason: "stream_end"`.
+    const SSE: &str = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"The incomplete answer is\"},\"finish_reason\":null}]}\n\n";
+    let (endpoint, _, server) =
+        crate::api::client::review_regressions::server(vec![(200, SSE)]).await;
+    let config = crate::config::Config {
+        endpoint,
+        cache: crate::session::cache::LlmCacheConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let agent = Agent::new(config).await.unwrap();
+
+    let err = agent
+        .chat_streaming(
+            vec![Message::user("finish the answer")],
+            None,
+            ThinkingMode::Enabled,
+            None,
+        )
+        .await
+        .expect_err("a stream that closes without a terminal must not succeed");
+
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("accepted terminal indication"),
+        "the failure must name the missing terminal, got: {text}"
+    );
+    assert!(
+        err.downcast_ref::<crate::errors::ApiError>().is_some(),
+        "the failure must be a typed ApiError (incomplete outcome), got: {text}"
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn stream_ending_with_finish_reason_but_no_done_is_complete() {
+    // Clean-EOF providers that finish with a finish_reason chunk but send no
+    // [DONE] sentinel are complete streams — the producer's collect() accepts
+    // them, and the consumer must too (the terminal-indication guard accepts
+    // either [DONE] or a provider finish_reason).
+    const SSE: &str = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"The complete answer\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n";
+    let (endpoint, _, server) =
+        crate::api::client::review_regressions::server(vec![(200, SSE)]).await;
+    let config = crate::config::Config {
+        endpoint,
+        cache: crate::session::cache::LlmCacheConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let agent = Agent::new(config).await.unwrap();
+
+    let (content, _reasoning, _tools) = agent
+        .chat_streaming(
+            vec![Message::user("finish the answer")],
+            None,
+            ThinkingMode::Enabled,
+            None,
+        )
+        .await
+        .expect("a finish_reason-without-[DONE] stream is complete");
+    assert_eq!(content, "The complete answer");
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn streaming_prompt_and_total_without_completion_does_not_double_count() {
     // If usage reports prompt=100, total=150 but omits completion, the ledger charges 150.
     // The agent falls back to measured output estimation for the completion tokens, but must
