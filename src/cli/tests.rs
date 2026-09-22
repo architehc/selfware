@@ -1161,6 +1161,7 @@ fn sample_summary() -> crate::agent::RunSummary {
         cost_usd: Some(0.0123),
         cost_complete: true,
         unmetered_attempts: 0,
+        call_latency: None,
     }
 }
 
@@ -1182,6 +1183,34 @@ fn render_run_summary_completed_run() {
         "{rendered}"
     );
     assert!(!rendered.contains("budget extended"), "{rendered}");
+}
+
+#[test]
+fn render_run_summary_shows_measured_model_latency_when_present() {
+    let mut summary = sample_summary();
+    // Absent stats (no timed calls) render no latency line at all.
+    let rendered = render_run_summary(&summary, None);
+    assert!(!rendered.contains("model latency:"), "{rendered}");
+
+    summary.call_latency = Some(crate::api::usage::CallLatencyStats {
+        call_count: 7,
+        total_ms: 213_400,
+        max_ms: 61_200,
+        slowest: Some(crate::api::usage::SlowestCall {
+            elapsed_ms: 61_200,
+            model: "qwen38-flash-next".to_string(),
+            path: "chat_stream".to_string(),
+        }),
+    });
+    let rendered = render_run_summary(&summary, None);
+    assert!(
+        rendered.contains("model latency: 7 calls, 213.4s total"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("slowest 61.2s (qwen38-flash-next, chat_stream)"),
+        "{rendered}"
+    );
 }
 
 #[test]
@@ -1282,6 +1311,7 @@ fn render_cost_line_honest_about_missing_billing() {
         cost_usd: None,
         cost_complete: false,
         unmetered_attempts: 1,
+        call_latency: None,
     };
     let rendered = render_cost_line(&summary);
     assert!(rendered.contains("tokens: 12345 total"), "{rendered}");

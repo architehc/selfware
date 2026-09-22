@@ -270,6 +270,11 @@ pub struct RunSummary {
     pub cost_complete: bool,
     /// Requests in this segment that did not report a provider cost.
     pub unmetered_attempts: usize,
+    /// Measured per-call LLM wall-time stats for the run; `None` when no
+    /// call was timed. Makes "the model, not the harness, ate the clock"
+    /// visible instead of implied (2026-09-22 e2e: ~99% of long-task wall
+    /// time was model latency, with multi-minute zero-content calls).
+    pub call_latency: Option<crate::api::usage::CallLatencyStats>,
 }
 
 impl Agent {
@@ -301,6 +306,10 @@ impl Agent {
             },
             cost_complete: self.client.cost_accounting_status().0,
             unmetered_attempts: self.client.cost_accounting_status().1,
+            call_latency: {
+                let stats = self.client.call_latency_stats();
+                (stats.call_count > 0).then_some(stats)
+            },
         }
     }
 

@@ -32,10 +32,14 @@ pub enum ProgressEvent {
     },
     /// A request has been sent to the LLM.
     LlmRequestSent { tokens: usize },
-    /// A response was received from the LLM.
+    /// A response was received from the LLM. `elapsed_ms` is the call's full
+    /// wall-clock time (request send → complete response; for the non-streaming
+    /// path this includes any internal retries), so a latency-dominated run is
+    /// visible per call instead of only in aggregate.
     LlmResponseReceived {
         finish_reason: String,
         completion_tokens: u32,
+        elapsed_ms: u64,
     },
     /// A tool call has started.
     ToolCallStarted {
@@ -244,9 +248,10 @@ pub fn render_event_kv(event: &ProgressEvent) -> String {
         ProgressEvent::LlmResponseReceived {
             finish_reason,
             completion_tokens,
+            elapsed_ms,
         } => format!(
-            "kind=llm_response_received finish_reason={} completion_tokens={}",
-            finish_reason, completion_tokens
+            "kind=llm_response_received finish_reason={} completion_tokens={} {}ms",
+            finish_reason, completion_tokens, elapsed_ms
         ),
         ProgressEvent::ToolCallStarted { tool, args_short } => {
             if args_short.is_empty() {

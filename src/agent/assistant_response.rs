@@ -738,7 +738,11 @@ impl Agent {
 /// The run-level wall budget is already exhausted, so a planning-level retry
 /// would only burn backoff sleeps (the client blocks the actual billable
 /// request) and — worse — risk the stop being misfiled as a transient
-/// network failure instead of a budget stop.
+/// network failure instead of a budget stop. The per-call cap
+/// (`CallTimeBudgetExceeded`) is terminal for the same reason: the client
+/// deliberately does not retry a cap breach (a retry would burn another full
+/// cap window), so the planner must file it as a budget stop, not a
+/// transient failure.
 pub(super) fn is_terminal_api_client_error(e: &anyhow::Error) -> bool {
     e.chain().any(|cause| {
         if cause
@@ -746,6 +750,9 @@ pub(super) fn is_terminal_api_client_error(e: &anyhow::Error) -> bool {
             .is_some()
             || cause
                 .downcast_ref::<crate::api::client::UsageBudgetExceeded>()
+                .is_some()
+            || cause
+                .downcast_ref::<crate::api::client::CallTimeBudgetExceeded>()
                 .is_some()
         {
             return true;

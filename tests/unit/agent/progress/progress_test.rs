@@ -85,6 +85,7 @@ fn simulated_loop_event_order() {
     em.emit(ProgressEvent::LlmResponseReceived {
         finish_reason: "tool_calls".into(),
         completion_tokens: 42,
+        elapsed_ms: 87,
     });
     em.emit(ProgressEvent::ToolCallStarted {
         tool: "file_read".into(),

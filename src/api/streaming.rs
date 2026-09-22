@@ -24,6 +24,23 @@ fn observe_attempt(attempt: &Option<super::usage::AttemptGuard>, chunk: &StreamC
     }
 }
 
+/// Records a streamed call's full wall time into the usage ledger when the
+/// stream task ends, however it ends (terminal chunk, deadline, provider
+/// error, receiver drop). A completed-looking stream and an aborted one both
+/// burned the latency; the run summary must see both.
+struct StreamCallTiming<'a> {
+    attempt: &'a Option<super::usage::AttemptGuard>,
+    started: Instant,
+}
+
+impl Drop for StreamCallTiming<'_> {
+    fn drop(&mut self) {
+        if let Some(attempt) = self.attempt {
+            attempt.record_call_elapsed("chat_stream", self.started.elapsed());
+        }
+    }
+}
+
 /// A streaming response that yields chunks as they arrive
 pub struct StreamingResponse {
     response: reqwest::Response,
@@ -35,6 +52,10 @@ pub struct StreamingResponse {
     deadline: Option<Instant>,
     attempt: Option<super::usage::AttemptGuard>,
     prior_attempts: Vec<super::usage::UsageReceipt>,
+    /// When the originating request was sent (headers already waited). Lets
+    /// the stream task record the FULL call wall time — send → stream end —
+    /// into the run's per-call latency stats when it exits.
+    call_started: Option<Instant>,
 }
 
 impl std::fmt::Debug for StreamingResponse {
@@ -59,6 +80,7 @@ impl StreamingResponse {
             deadline,
             attempt: None,
             prior_attempts: Vec::new(),
+            call_started: None,
         }
     }
 
@@ -69,6 +91,11 @@ impl StreamingResponse {
     ) -> Self {
         self.attempt = Some(attempt);
         self.prior_attempts = prior_attempts;
+        self
+    }
+
+    pub(crate) fn with_call_started(mut self, started: Instant) -> Self {
+        self.call_started = Some(started);
         self
     }
 
@@ -99,6 +126,14 @@ impl StreamingResponse {
         tokio::spawn(async move {
             let _permit = permit;
             let attempt = self.attempt;
+            // Records the full call wall time (request send → stream end) into
+            // the usage ledger when this task exits for ANY reason: terminal
+            // chunk, deadline, provider error, or receiver drop. Measurement
+            // only — no effect on what the stream yields.
+            let _call_timing = self.call_started.map(|started| StreamCallTiming {
+                attempt: &attempt,
+                started,
+            });
             let prior_usage = super::usage::aggregate_receipts(&self.prior_attempts);
             let mut stream = self.response.bytes_stream();
             let mut buffer = String::new();

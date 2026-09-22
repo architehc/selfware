@@ -91,6 +91,56 @@ impl std::fmt::Display for UsageBudgetExceeded {
 
 impl std::error::Error for UsageBudgetExceeded {}
 
+/// The per-call wall-time cap (`agent.max_call_secs`) was exceeded by ONE
+/// LLM call, which was aborted mid-flight.
+///
+/// Raised in place of the generic retryable network/timeout error when the
+/// binding deadline was the user-configured per-call cap. Deliberately NOT
+/// [`ApiError::Network`] (transient, retried) and NOT [`ApiError::Timeout`]
+/// (no detail): the 2026-09-22 long-task e2e saw single calls exceed 5
+/// minutes with nothing capping or reporting them. Same shape as
+/// [`WallClockBudgetExceeded`]: a typed, downcastable budget stop whose
+/// message names both the elapsed time and the configured limit.
+#[derive(Debug, Clone)]
+pub struct CallTimeBudgetExceeded {
+    /// Wall seconds the aborted call had consumed.
+    pub elapsed_secs: u64,
+    /// Configured `agent.max_call_secs` limit.
+    pub limit_secs: u64,
+}
+
+impl std::fmt::Display for CallTimeBudgetExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Per-call time cap exceeded: {}s >= {}s (agent.max_call_secs)",
+            self.elapsed_secs, self.limit_secs
+        )
+    }
+}
+
+impl std::error::Error for CallTimeBudgetExceeded {}
+
+/// Typed cap error when a per-call timeout was actually the configured
+/// `agent.max_call_secs` firing. Call sites fold the cap into their deadline
+/// alongside the adaptive/wall bounds; the elapsed check discriminates which
+/// bound fired, since they share one clock. `None` when uncapped or when less
+/// than the cap has elapsed (i.e. the adaptive or wall bound fired instead).
+fn call_cap_exceeded(call_cap_secs: Option<u64>, started: Instant) -> Option<anyhow::Error> {
+    let cap = call_cap_secs?;
+    let elapsed = started.elapsed();
+    if elapsed < Duration::from_secs(cap) {
+        return None;
+    }
+    Some(
+        CallTimeBudgetExceeded {
+            elapsed_secs: elapsed.as_secs(),
+            limit_secs: cap,
+        }
+        .into(),
+    )
+}
+
 struct ChatCallResult {
     response: ChatResponse,
     body: serde_json::Value,
@@ -290,6 +340,11 @@ pub struct ApiClient {
     /// adaptive non-streaming response timeout so slow local CPU servers get
     /// proportionally longer budgets than fast remote ones.
     pub(crate) speed_tracker: Arc<std::sync::Mutex<ServerSpeedTracker>>,
+    /// Test-only override for the zero-content long-call threshold, so unit
+    /// tests can exercise the typed outcome without waiting out the real
+    /// (60 s) constant.
+    #[cfg(test)]
+    pub(crate) zero_content_threshold_override_ms: Option<u64>,
 }
 
 /// EMA of observed effective generation speed (tokens/second) for an
@@ -326,6 +381,32 @@ impl ServerSpeedTracker {
     pub(crate) fn estimate(&self) -> Option<f64> {
         self.ema_tps
     }
+}
+
+/// Default wall-time threshold for the zero-content long-call outcome.
+/// See [`ApiClient::zero_content_long_call_threshold_ms`].
+const ZERO_CONTENT_LONG_CALL_THRESHOLD_MS: u64 = 60_000;
+
+/// A response carrying no usable payload on ANY choice: empty text content,
+/// no tool calls, no reasoning trace. The non-streaming mirror of the
+/// streaming side's `is_unexplained_empty_stream` discrimination
+/// (`src/agent/streaming.rs`), minus the terminal-signal terms that only
+/// exist on a stream.
+fn zero_content_response(resp: &ChatResponse) -> bool {
+    resp.choices.iter().all(|c| {
+        c.message.content.text_all().trim().is_empty()
+            && c.message
+                .tool_calls
+                .as_ref()
+                .is_none_or(|calls| calls.is_empty())
+            && [
+                c.reasoning_content.as_deref(),
+                c.message.reasoning_content.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .all(|r| r.trim().is_empty())
+    })
 }
 
 /// Whether an `extra_body` already pins reasoning behavior, in EITHER placement.
@@ -408,6 +489,8 @@ impl ApiClient {
             native_fc_disabled: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             usage_ledger: super::usage::UsageLedger::default(),
             speed_tracker: Arc::new(std::sync::Mutex::new(ServerSpeedTracker::new())),
+            #[cfg(test)]
+            zero_content_threshold_override_ms: None,
         })
     }
 
@@ -464,8 +547,13 @@ impl ApiClient {
     /// per-call bound reuses the non-streaming path's adaptive budget
     /// (max_tokens / measured tps × safety, floored, capped at 2h) and is
     /// merged with the run-level wall deadline — whichever comes first wins.
+    /// A configured `agent.max_call_secs` tightens (never loosens) the bound.
     pub(crate) fn per_call_stream_deadline(&self, run_deadline: Option<Instant>) -> Instant {
-        let per_call = Instant::now() + Duration::from_secs(self.adaptive_response_timeout_secs());
+        let mut per_call_secs = self.adaptive_response_timeout_secs();
+        if let Some(cap) = self.config.agent.max_call_secs.filter(|s| *s > 0) {
+            per_call_secs = per_call_secs.min(cap);
+        }
+        let per_call = Instant::now() + Duration::from_secs(per_call_secs);
         match run_deadline {
             Some(d) => d.min(per_call),
             None => per_call,
@@ -612,6 +700,24 @@ impl ApiClient {
         extra_body_pins_reasoning(self.config.extra_body.as_ref())
     }
 
+    /// Wall-time threshold above which a completed-but-empty response fails
+    /// typed as [`ApiError::ZeroContentLongCall`] instead of passing through
+    /// as an empty turn.
+    ///
+    /// A standalone constant rather than `max_call_secs`: when the cap is
+    /// configured, a response slower than the cap is aborted in-flight and
+    /// never reaches this check, so reusing the cap would make the outcome
+    /// unreachable exactly when configured. 60 s matches the observed failure
+    /// regime (5–7 minute zero-content calls) while staying far above any
+    /// healthy fast response.
+    fn zero_content_long_call_threshold_ms(&self) -> u64 {
+        #[cfg(test)]
+        if let Some(ms) = self.zero_content_threshold_override_ms {
+            return ms;
+        }
+        ZERO_CONTENT_LONG_CALL_THRESHOLD_MS
+    }
+
     pub async fn completion(
         &self,
         prompt: &str,
@@ -639,6 +745,9 @@ impl ApiClient {
         max_tokens: Option<usize>,
         stop: Option<Vec<String>>,
     ) -> Result<CompletionResponse> {
+        let _call_timing =
+            self.usage_ledger
+                .timing_guard(&self.config.model, "completion", Instant::now());
         let url = format!("{}/completions", self.base_url);
 
         let req = CompletionRequest {
@@ -656,6 +765,10 @@ impl ApiClient {
         let mut receipts = Vec::new();
         let max_attempts = self.retry_config.max_retries + 1;
         let mut delay_ms = self.retry_config.initial_delay_ms;
+        // Per-call wall-time cap (agent.max_call_secs): when set, the deadline
+        // from `per_call_stream_deadline` already includes it; the timeout
+        // branches below name it with a typed error instead of a bare Timeout.
+        let call_cap_secs = self.config.agent.max_call_secs.filter(|s| *s > 0);
         for attempt in 1..=max_attempts {
             // Run-level wall budget: never issue a new billable request after
             // expiry — report a budget stop, not a network error.
@@ -672,6 +785,7 @@ impl ApiClient {
 
             let attempt_usage = self.usage_ledger.begin(&self.config.model);
             receipts.push(attempt_usage.receipt());
+            let attempt_started = Instant::now();
             let deadline = self.per_call_stream_deadline(self.run_wall_deadline());
             let result = tokio::select! {
                 biased;
@@ -684,6 +798,9 @@ impl ApiClient {
                     if let Some(stop) = self.budget_stop() {
                         return Err(stop);
                     }
+                    if let Some(err) = call_cap_exceeded(call_cap_secs, attempt_started) {
+                        return Err(err);
+                    }
                     return Err(ApiError::Timeout.into());
                 }
             };
@@ -695,10 +812,18 @@ impl ApiClient {
                         _ = crate::shutdown_requested() => return Err(ApiError::Network("Shutdown requested during completion body".into()).into()),
                         result = tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), response.text()) => result,
                     };
-                    let body = body.map_err(|_| {
-                        self.budget_stop()
-                            .unwrap_or_else(|| ApiError::Timeout.into())
-                    })??;
+                    let body = match body {
+                        Ok(body) => body?,
+                        Err(_) => {
+                            if let Some(stop) = self.budget_stop() {
+                                return Err(stop);
+                            }
+                            if let Some(err) = call_cap_exceeded(call_cap_secs, attempt_started) {
+                                return Err(err);
+                            }
+                            return Err(ApiError::Timeout.into());
+                        }
+                    };
                     let _ = attempt_usage.record_json(&body);
                     let mut resp: CompletionResponse = serde_json::from_str(&body)?;
                     let output = resp
@@ -789,7 +914,9 @@ impl ApiClient {
                 tokens: estimated_tokens,
             });
 
-        let started = std::time::Instant::now();
+        let call_timing =
+            self.usage_ledger
+                .timing_guard(&self.config.model, "chat", std::time::Instant::now());
         let ChatCallResult {
             response: mut resp,
             mut body,
@@ -829,7 +956,7 @@ impl ApiClient {
                 return Err(ApiError::ReasoningBudgetExhausted { reasoning_chars }.into());
             }
         }
-        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let elapsed_ms = call_timing.elapsed_ms();
 
         let finish_reason = resp.choices.first().and_then(|c| c.finish_reason.clone());
 
@@ -837,7 +964,19 @@ impl ApiClient {
             .emit(crate::agent::progress::ProgressEvent::LlmResponseReceived {
                 finish_reason: finish_reason.clone().unwrap_or_else(|| "unknown".into()),
                 completion_tokens: resp.usage.completion_tokens as u32,
+                elapsed_ms,
             });
+
+        // Zero-content long call (2026-09-22 long-task e2e: a 7-minute xhigh
+        // call returned zero content tokens): the call COMPLETED, so it is
+        // already billed and reported above, but returning Ok hands the agent
+        // an empty turn to silently retry. Fail typed with the elapsed time
+        // named. This check deliberately ignores `finish_reason`: the observed
+        // failure returns "stop" with nothing in it.
+        if elapsed_ms >= self.zero_content_long_call_threshold_ms() && zero_content_response(&resp)
+        {
+            return Err(ApiError::ZeroContentLongCall { elapsed_ms }.into());
+        }
 
         if let Some(discarded) = discarded_usage {
             super::usage::add_response_usage(&mut resp.usage, &discarded);
@@ -1077,6 +1216,12 @@ impl ApiClient {
             // unaffected.  The body is then streamed as before (per-chunk
             // timeout only — NO total timeout on the body).
             let mut hdr_timeout_secs = self.stream_header_timeout_secs();
+            // agent.max_call_secs tightens the header wait too; the timeout
+            // branch below names it with a typed CallTimeBudgetExceeded.
+            let call_cap_secs = self.config.agent.max_call_secs.filter(|s| *s > 0);
+            if let Some(cap) = call_cap_secs {
+                hdr_timeout_secs = hdr_timeout_secs.min(cap);
+            }
             if let Some(d) = deadline {
                 // Cap by the REMAINING wall budget (<= the full limit), so the
                 // sum across retries stays within max_wall_secs.
@@ -1091,6 +1236,7 @@ impl ApiClient {
                 .begin(body["model"].as_str().unwrap_or_default());
             let prior_receipts = receipts.clone();
             receipts.push(attempt_usage.receipt());
+            let attempt_started = Instant::now();
             let send_result = tokio::select! {
                 biased;
                 _ = crate::shutdown_requested() => {
@@ -1109,6 +1255,11 @@ impl ApiClient {
                 Err(_elapsed) => {
                     if let Some(stop) = self.budget_stop() {
                         return Err(stop);
+                    }
+                    // A configured per-call cap fails typed and terminal:
+                    // retrying would burn another full cap window per attempt.
+                    if let Some(err) = call_cap_exceeded(call_cap_secs, attempt_started) {
+                        return Err(err);
                     }
                     if attempt < max_attempts {
                         let sleep_ms = self.retry_sleep_ms(delay_ms, None);
@@ -1146,7 +1297,8 @@ impl ApiClient {
                                     Duration::from_secs(stream_chunk_timeout_secs),
                                     Some(self.per_call_stream_deadline(deadline)),
                                 )
-                                .with_attempt(attempt_usage, prior_receipts),
+                                .with_attempt(attempt_usage, prior_receipts)
+                                .with_call_started(attempt_started),
                                 body,
                             ));
                         }
@@ -1257,6 +1409,10 @@ impl ApiClient {
         client.usage_ledger = self.usage_ledger.clone();
         client.native_fc_disabled = Arc::clone(&self.native_fc_disabled);
         client.progress_emitter = Arc::clone(&self.progress_emitter);
+        #[cfg(test)]
+        {
+            client.zero_content_threshold_override_ms = self.zero_content_threshold_override_ms;
+        }
         if config.endpoint == self.config.endpoint && config.model == self.config.model {
             client.speed_tracker = Arc::clone(&self.speed_tracker);
         }
@@ -1278,6 +1434,15 @@ impl ApiClient {
 
     pub fn usage_attempts(&self) -> Vec<super::usage::UsageAttempt> {
         self.usage_ledger.attempts()
+    }
+
+    /// Cumulative per-call wall-time stats for the run (count / total / max /
+    /// slowest-call detail), measured across every top-level LLM call:
+    /// `chat`, `chat_stream` (recorded when the stream ends), profile calls,
+    /// and FIM completions. The end-of-run summary reads this to show whether
+    /// model latency dominated the run.
+    pub fn call_latency_stats(&self) -> super::usage::CallLatencyStats {
+        self.usage_ledger.call_latency_stats()
     }
 
     /// Known run usage, including checkpoint totals and measured fallbacks.
@@ -1609,6 +1774,13 @@ impl ApiClient {
             receipts.push(attempt_usage.receipt());
             let call_started = Instant::now();
             let mut response_timeout_secs = self.response_timeout_secs_for(timeout_overrides);
+            // agent.max_call_secs tightens the adaptive budget; tracked
+            // separately so a timeout it caused fails typed (terminal), not
+            // as a retryable network error.
+            let call_cap_secs = self.config.agent.max_call_secs.filter(|s| *s > 0);
+            if let Some(cap) = call_cap_secs {
+                response_timeout_secs = response_timeout_secs.min(cap);
+            }
             if let Some(d) = deadline {
                 // Cap by the REMAINING wall budget (<= the full limit).
                 let remaining = d.saturating_duration_since(Instant::now()).as_secs().max(1);
@@ -1636,6 +1808,9 @@ impl ApiClient {
                 Err(_elapsed) => {
                     if let Some(stop) = self.budget_stop() {
                         return Err(stop);
+                    }
+                    if let Some(err) = call_cap_exceeded(call_cap_secs, call_started) {
+                        return Err(err);
                     }
                     warn!(
                         "Non-streaming request timed out after {}s (attempt {}/{})",
@@ -1687,6 +1862,9 @@ impl ApiClient {
                             Err(_elapsed) => {
                                 if let Some(stop) = self.budget_stop() {
                                     return Err(stop);
+                                }
+                                if let Some(err) = call_cap_exceeded(call_cap_secs, call_started) {
+                                    return Err(err);
                                 }
                                 warn!(
                                     "Non-streaming response body read timed out after {}s (attempt {}/{})",
@@ -1915,6 +2093,11 @@ impl ApiClient {
         thinking: ThinkingMode,
         profile: &crate::config::ModelProfile,
     ) -> Result<ChatResponse> {
+        // Profile calls (audits, swarm members) are billable LLM calls too —
+        // their wall time folds into the same run latency stats.
+        let _call_timing =
+            self.usage_ledger
+                .timing_guard(&profile.model, "chat_with_profile", Instant::now());
         let mut messages: Vec<Message> = if !profile.supports_vision() {
             messages.iter().map(|m| m.strip_images()).collect()
         } else {
@@ -2088,11 +2271,12 @@ fn counts_toward_circuit_breaker(err: &anyhow::Error) -> bool {
         Some(ApiError::HttpStatus { status, .. }) => *status == 429 || (500..600).contains(status),
         Some(_) => false,
         // Untyped errors (e.g. reqwest body-read failures) keep the previous
-        // behavior and count — except the run-level wall-clock budget stop,
-        // which is a deliberate halt, not a sick backend.
+        // behavior and count — except the budget stops (run wall-clock, usage,
+        // per-call time cap), which are deliberate halts, not a sick backend.
         None => {
             err.downcast_ref::<WallClockBudgetExceeded>().is_none()
                 && err.downcast_ref::<UsageBudgetExceeded>().is_none()
+                && err.downcast_ref::<CallTimeBudgetExceeded>().is_none()
         }
     }
 }
@@ -2161,3 +2345,7 @@ mod tests;
 #[cfg(test)]
 #[path = "../../tests/unit/api/client/review_regressions.rs"]
 pub(crate) mod review_regressions;
+
+#[cfg(test)]
+#[path = "../../tests/unit/api/client/call_governor.rs"]
+pub(crate) mod call_governor;

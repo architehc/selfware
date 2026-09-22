@@ -154,6 +154,9 @@ fn test_agent_config_default_specific_values() {
     assert_eq!(cfg.max_budget_tokens, None);
     assert_eq!(cfg.max_wall_secs, None);
     assert_eq!(cfg.max_cost_usd, None);
+    // The per-call time cap ships uncapped: slow local endpoints and
+    // xhigh-reasoning calls stay legal until the user opts in.
+    assert_eq!(cfg.max_call_secs, None);
 }
 
 #[test]
@@ -194,6 +197,7 @@ fn test_agent_config_serde_roundtrip() {
         max_budget_tokens: Some(99999),
         max_wall_secs: Some(600),
         max_cost_usd: Some(1.5),
+        max_call_secs: Some(90),
     };
 
     let json = serde_json::to_string(&cfg).unwrap();
@@ -222,6 +226,7 @@ fn test_agent_config_serde_roundtrip() {
     assert_eq!(back.max_budget_tokens, Some(99999));
     assert_eq!(back.max_wall_secs, Some(600));
     assert_eq!(back.max_cost_usd, Some(1.5));
+    assert_eq!(back.max_call_secs, Some(90));
 }
 
 #[test]
@@ -265,6 +270,19 @@ fn test_agent_config_serde_empty_json_uses_defaults() {
     assert_eq!(back.max_budget_tokens, None);
     assert_eq!(back.max_wall_secs, None);
     assert_eq!(back.max_cost_usd, None);
+    assert_eq!(back.max_call_secs, None);
+}
+
+#[test]
+fn test_agent_config_max_call_secs_parses_and_zero_means_unset() {
+    // Explicit value persists.
+    let back: AgentConfig = serde_json::from_str(r#"{"max_call_secs": 120}"#).unwrap();
+    assert_eq!(back.max_call_secs, Some(120));
+    // 0 follows the zero-means-unset convention of the sibling budgets: the
+    // client filters it with `.filter(|s| *s > 0)`, so 0 must parse cleanly
+    // and behave as uncapped.
+    let back: AgentConfig = serde_json::from_str(r#"{"max_call_secs": 0}"#).unwrap();
+    assert_eq!(back.max_call_secs, Some(0));
 }
 
 #[test]

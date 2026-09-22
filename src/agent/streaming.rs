@@ -801,6 +801,7 @@ impl Agent {
                 .clone()
                 .unwrap_or_else(|| "stream_end".into()),
             completion_tokens: captured_completion_tokens.unwrap_or(0),
+            elapsed_ms: stream_started.elapsed().as_millis() as u64,
         });
 
         // Feed the endpoint's measured effective speed into the client's

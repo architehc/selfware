@@ -434,11 +434,13 @@ impl JsonlProgressEmitter {
             ProgressEvent::LlmResponseReceived {
                 finish_reason,
                 completion_tokens,
+                elapsed_ms,
             } => Some(
                 serde_json::json!({
                     "event": "llm_response_received",
                     "finish_reason": finish_reason,
                     "completion_tokens": completion_tokens,
+                    "elapsed_ms": elapsed_ms,
                 })
                 .to_string(),
             ),

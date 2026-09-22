@@ -120,6 +120,15 @@ pub struct AgentConfig {
     /// Hard limit: stop when accumulated provider-reported USD cost exceeds this.
     #[serde(default)]
     pub max_cost_usd: Option<f64>,
+
+    /// Hard limit: fail any single LLM call that exceeds this many wall-clock
+    /// seconds with a typed `CallTimeBudgetExceeded` error (never a silent
+    /// hang). `None`/0 = uncapped (the default): slow local endpoints and
+    /// xhigh-reasoning calls stay legal. Unlike the adaptive response timeout
+    /// (whose expiry is retryable), a breach here is terminal for the call —
+    /// retrying would burn another full cap window.
+    #[serde(default)]
+    pub max_call_secs: Option<u64>,
 }
 
 impl Default for AgentConfig {
@@ -147,6 +156,7 @@ impl Default for AgentConfig {
             max_budget_tokens: None,
             max_wall_secs: None,
             max_cost_usd: None,
+            max_call_secs: None,
         }
     }
 }

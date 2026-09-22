@@ -163,6 +163,19 @@ pub enum ApiError {
     )]
     EmptyStream,
 
+    /// A call COMPLETED but burned a long wall-clock time and returned
+    /// nothing usable: empty content on every choice, no tool calls, no
+    /// reasoning trace. Measured in the 2026-09-22 long-task e2e: a 7-minute
+    /// xhigh-reasoning call returned zero content tokens. Distinct from
+    /// `ReasoningBudgetExhausted` (a reasoning trace + `finish_reason=length`
+    /// is present there) and from `EmptyStream` (the streaming shape). The
+    /// elapsed time is named so a latency-dominated run is reported honestly
+    /// instead of silently retrying an empty turn.
+    #[error(
+        "LLM call returned zero content after {elapsed_ms}ms (empty content, no tool calls, no reasoning) — the provider burned the wait without producing output"
+    )]
+    ZeroContentLongCall { elapsed_ms: u64 },
+
     #[error("Invalid token usage from API: {0}")]
     InvalidUsage(String),
 }

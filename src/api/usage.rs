@@ -1,10 +1,40 @@
 //! Per-request accounting survives retries, cancellation and failed responses.
 
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
 use super::types::{CompletionTokensDetails, PromptTokensDetails, Usage};
+
+/// The slowest timed LLM call of a run, with enough detail for a run summary
+/// to name it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SlowestCall {
+    pub elapsed_ms: u64,
+    pub model: String,
+    /// Which client path served the call: `chat`, `chat_stream`,
+    /// `chat_with_profile`, or `completion`.
+    pub path: String,
+}
+
+/// Cumulative per-call wall-time stats for a run, measured (not estimated).
+///
+/// The 2026-09-22 long-task e2e finding: ~99% of wall time was model latency
+/// (one call burned 7 minutes and returned zero content tokens) and nothing
+/// recorded per-call time. Every top-level LLM call folds its wall time in
+/// here — success, typed error, or abort — so a run summary can show that
+/// latency dominated instead of only reporting token totals.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CallLatencyStats {
+    /// Number of LLM calls that reached a terminal state and were timed.
+    pub call_count: u64,
+    /// Total wall time across timed calls.
+    pub total_ms: u64,
+    /// Slowest single timed call (`slowest.elapsed_ms` carries the detail).
+    pub max_ms: u64,
+    pub slowest: Option<SlowestCall>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AttemptOutcome {
@@ -83,6 +113,29 @@ struct State {
     attempts: Vec<UsageAttempt>,
     total: Usage,
     pending: Usage,
+    call_stats: CallLatencyStats,
+}
+
+impl State {
+    fn fold_call_elapsed(&mut self, model: &str, path: &str, elapsed_ms: u64) {
+        let stats = &mut self.call_stats;
+        stats.call_count = stats.call_count.saturating_add(1);
+        stats.total_ms = stats.total_ms.saturating_add(elapsed_ms);
+        if elapsed_ms > stats.max_ms {
+            stats.max_ms = elapsed_ms;
+        }
+        if stats
+            .slowest
+            .as_ref()
+            .is_none_or(|s| elapsed_ms > s.elapsed_ms)
+        {
+            stats.slowest = Some(SlowestCall {
+                elapsed_ms,
+                model: model.to_string(),
+                path: path.to_string(),
+            });
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -180,6 +233,63 @@ impl UsageLedger {
             generation,
             ..State::default()
         };
+    }
+
+    /// Fold one top-level LLM call's wall time into the run's latency stats.
+    pub(crate) fn record_call_elapsed(&self, model: &str, path: &str, elapsed: Duration) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .fold_call_elapsed(model, path, elapsed.as_millis() as u64);
+    }
+
+    /// Snapshot of the run's per-call wall-time stats (count / total / max /
+    /// slowest-call detail), for the end-of-run summary.
+    pub fn call_latency_stats(&self) -> CallLatencyStats {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .call_stats
+            .clone()
+    }
+
+    /// A guard that records one top-level call's wall time on drop — success,
+    /// typed error, and cancellation all burned the time and must all count.
+    pub(crate) fn timing_guard(
+        &self,
+        model: &str,
+        path: &'static str,
+        started: Instant,
+    ) -> CallTimingGuard {
+        CallTimingGuard {
+            ledger: self.clone(),
+            model: model.to_string(),
+            path,
+            started,
+        }
+    }
+}
+
+/// RAII timer for one top-level LLM call; records into the ledger on drop so
+/// no exit path (Ok, typed error, early return) skips the measurement.
+#[derive(Debug)]
+pub(crate) struct CallTimingGuard {
+    ledger: UsageLedger,
+    model: String,
+    path: &'static str,
+    started: Instant,
+}
+
+impl CallTimingGuard {
+    pub(crate) fn elapsed_ms(&self) -> u64 {
+        self.started.elapsed().as_millis() as u64
+    }
+}
+
+impl Drop for CallTimingGuard {
+    fn drop(&mut self) {
+        self.ledger
+            .record_call_elapsed(&self.model, self.path, self.started.elapsed());
     }
 }
 
@@ -566,6 +676,21 @@ impl AttemptGuard {
         if let Some(attempt) = state.attempts.get_mut(self.index) {
             attempt.outcome = AttemptOutcome::Failed;
         }
+    }
+
+    /// Fold the whole call's wall time into the run's latency stats, with the
+    /// model attribution taken from this attempt. Used by the streaming path,
+    /// where total time is known only when the stream task ends.
+    pub(crate) fn record_call_elapsed(&self, path: &str, elapsed: Duration) {
+        let mut state = self.ledger.0.lock().unwrap_or_else(|e| e.into_inner());
+        if state.generation != self.generation {
+            return;
+        }
+        let Some(attempt) = state.attempts.get(self.index) else {
+            return;
+        };
+        let model = attempt.model.clone();
+        state.fold_call_elapsed(&model, path, elapsed.as_millis() as u64);
     }
 }
 

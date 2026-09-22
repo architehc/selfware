@@ -186,12 +186,14 @@ fn jsonl_emits_llm_events_with_tokens_and_finish_reason() {
     let resp = JsonlProgressEmitter::event_json_line(ProgressEvent::LlmResponseReceived {
         finish_reason: "stop".to_string(),
         completion_tokens: 56,
+        elapsed_ms: 1200,
     })
     .expect("llm_response_received must be emitted");
     let resp: Value = serde_json::from_str(&resp).unwrap();
     assert_eq!(resp["event"], "llm_response_received");
     assert_eq!(resp["finish_reason"], "stop");
     assert_eq!(resp["completion_tokens"], 56);
+    assert_eq!(resp["elapsed_ms"], 1200);
 }
 
 #[test]
@@ -514,6 +516,7 @@ fn test_jsonl_emitter_ignores_unmapped_events() {
     emitter.emit(ProgressEvent::LlmResponseReceived {
         finish_reason: "stop".to_string(),
         completion_tokens: 50,
+        elapsed_ms: 10,
     });
     emitter.emit(ProgressEvent::GuardFired {
         kind: "progress".to_string(),
@@ -957,6 +960,7 @@ fn every_mapped_progress_event_serializes_to_valid_json() {
         ProgressEvent::LlmResponseReceived {
             finish_reason: "stop".into(),
             completion_tokens: 5,
+            elapsed_ms: 10,
         },
     ];
     for event in events {
@@ -1153,6 +1157,7 @@ fn stream_json_stdout_carries_only_json_lines() {
         emitter.emit(ProgressEvent::LlmResponseReceived {
             finish_reason: "stop".into(),
             completion_tokens: 5,
+            elapsed_ms: 10,
         });
 
         // Flush BEFORE restoring fd 1 so no buffered line leaks past the

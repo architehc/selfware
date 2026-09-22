@@ -95,6 +95,7 @@ fn build_custom_config() -> Config {
             max_budget_tokens: None,
             max_wall_secs: None,
             max_cost_usd: None,
+            max_call_secs: None,
             post_edit_test_command: None,
         },
 

@@ -6459,6 +6459,26 @@ fn render_run_summary(summary: &crate::agent::RunSummary, failure: Option<&str>)
     if !summary.cost_complete {
         lines.push(format!("billing incomplete: {} attempts without reported cost; restored or estimated usage may also lack billing provenance", summary.unmetered_attempts));
     }
+    if let Some(latency) = &summary.call_latency {
+        let slowest = latency
+            .slowest
+            .as_ref()
+            .map(|s| {
+                format!(
+                    ", slowest {:.1}s ({}, {})",
+                    s.elapsed_ms as f64 / 1000.0,
+                    s.model,
+                    s.path
+                )
+            })
+            .unwrap_or_default();
+        lines.push(format!(
+            "model latency: {} calls, {:.1}s total{}",
+            latency.call_count,
+            latency.total_ms as f64 / 1000.0,
+            slowest
+        ));
+    }
     lines.join("\n")
 }
 
