@@ -134,3 +134,118 @@ fn looks_like_malformed_tool_xml_detects_unparsed_delimiters() {
     let valid_xml = "<tool>\n<name>git_diff</name>\n<arguments>{}</arguments>\n</tool>";
     assert!(!looks_like_malformed_tool_xml(valid_xml));
 }
+
+// ── W7d: no-action nudge after a FILES:-guard discard ────────────────
+//
+// The discard directive tells the model a write is pending; the follow-up
+// no-action nudge must name that accepted path, never a read-only-only tool
+// list (the contradiction burned a greenfield run: the write was thrown away
+// and the model was then told to call directory_tree/grep).
+
+/// Push a user message carrying the same marker the guard's discard branch
+/// embeds, simulating "a write was just discarded and not yet re-issued".
+fn push_discard_marker(agent: &mut crate::agent::Agent) {
+    agent
+        .messages
+        .push(crate::api::types::Message::user(format!(
+            "Your edit was NOT applied and has been discarded — no FILES: checklist ... {}",
+            crate::agent::execution::FILES_GUARD_DISCARD_MARKER
+        )));
+}
+
+#[tokio::test]
+async fn reissue_pending_detected_from_marker_and_cleared_by_write() {
+    let mut agent = crate::agent::Agent::new(crate::config::Config::default())
+        .await
+        .unwrap();
+
+    assert!(
+        !agent.files_guard_reissue_pending(),
+        "no marker → nothing pending"
+    );
+    push_discard_marker(&mut agent);
+    assert!(
+        agent.files_guard_reissue_pending(),
+        "marker in the message tail → re-issue pending"
+    );
+
+    // A successful write resolves the re-issue, even with the marker present.
+    agent.has_written_any_file = true;
+    assert!(
+        !agent.files_guard_reissue_pending(),
+        "a landed write clears the pending re-issue"
+    );
+}
+
+#[tokio::test]
+async fn reissue_pending_scrolls_out_of_the_bounded_window() {
+    let mut agent = crate::agent::Agent::new(crate::config::Config::default())
+        .await
+        .unwrap();
+    push_discard_marker(&mut agent);
+    // Push enough turns that the marker leaves the bounded scan window (6).
+    for i in 0..6 {
+        agent
+            .messages
+            .push(crate::api::types::Message::user(format!("turn {i}")));
+    }
+    assert!(
+        !agent.files_guard_reissue_pending(),
+        "an old, unresolved discard eventually stops driving the nudge"
+    );
+}
+
+#[tokio::test]
+async fn nudge_after_discard_with_checklist_names_the_write_not_readonly_tools() {
+    let mut agent = crate::agent::Agent::new(crate::config::Config::default())
+        .await
+        .unwrap();
+    push_discard_marker(&mut agent);
+    // Model complied with step 1: declared FILES: (checklist now recorded).
+    agent.files_checklist_seen = true;
+
+    let nudge = agent.build_no_action_prompt_message();
+    assert!(
+        nudge.contains("RE-ISSUE") && (nudge.contains("file_edit") || nudge.contains("file_write")),
+        "checklist-recorded nudge must name the write as the accepted action: {nudge}"
+    );
+    assert!(
+        !nudge.contains("directory_tree"),
+        "must never answer a discarded write with a read-only-only tool list: {nudge}"
+    );
+}
+
+#[tokio::test]
+async fn nudge_after_discard_without_checklist_demands_both_in_one_response() {
+    let mut agent = crate::agent::Agent::new(crate::config::Config::default())
+        .await
+        .unwrap();
+    push_discard_marker(&mut agent);
+
+    let nudge = agent.build_no_action_prompt_message();
+    assert!(
+        nudge.contains("FILES: <path>"),
+        "must ask for the FILES: line: {nudge}"
+    );
+    assert!(
+        nudge.contains("ONE response")
+            && (nudge.contains("file_edit") || nudge.contains("file_write")),
+        "must demand FILES: + write together in one response: {nudge}"
+    );
+    assert!(
+        !nudge.contains("directory_tree"),
+        "must never answer a discarded write with a read-only-only tool list: {nudge}"
+    );
+}
+
+#[tokio::test]
+async fn nudge_without_discard_keeps_generic_discovery_list() {
+    let agent = crate::agent::Agent::new(crate::config::Config::default())
+        .await
+        .unwrap();
+    let nudge = agent.build_no_action_prompt_message();
+    assert!(
+        nudge.contains("directory_tree"),
+        "the ordinary no-action nudge is unchanged: {nudge}"
+    );
+}

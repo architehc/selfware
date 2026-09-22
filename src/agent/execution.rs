@@ -17,10 +17,35 @@ pub(super) use super::tool_collect::CollectedToolCall;
 /// so callers or config layers can reference/override it if needed.
 pub(super) const ESC_PAUSE_DEADLINE_MS: u64 = 250;
 
+/// Marker embedded in the FILES:-guard discard directive so the recovery
+/// layer (`recovery::build_no_action_prompt_message`) can recognize a pending
+/// edit re-issue from the message tail alone — the Agent struct carries no
+/// extra field for it. Single source of truth for both the push site (the
+/// guard's discard branch) and the recovery check.
+pub(super) const FILES_GUARD_DISCARD_MARKER: &str = "<files_guard_discarded_write/>";
+
 /// Read a line from stdin, temporarily pausing the ESC listener so it yields
 /// raw mode and stops competing for stdin events.  This prevents the deadlock
 /// where `io::stdin().read_line()` blocks forever because crossterm raw mode
 /// is active on another thread.
+///
+/// Input-ownership contract: once the listener acknowledges the pause
+/// (`esc_pause_ack`), it has drained every event it already captured and does
+/// not touch stdin again until unpaused, so for the rest of this call the
+/// confirmation prompt is the SOLE reader of the input stream — no keystroke
+/// can be split between the listener's queue buffer and this prompt. Events
+/// that raced the handoff are discarded by the listener (with a logged note)
+/// instead of being replayed later as a fake queued user message.
+///
+/// Timeout policy: there is deliberately NO timeout on the user's answer.
+/// This prompt is the human-in-the-loop gate for destructive tool calls;
+/// while it is open no tokens burn and no tool runs, so an idle prompt costs
+/// nothing. A silent timeout would have to default to approve (unsafe) or to
+/// deny (fabricating a decision the user never made) — both worse than
+/// waiting. Ctrl+C remains available: the REPL's ctrlc handler still sets the
+/// cancel token while this prompt is open. The only deadline here is
+/// [`ESC_PAUSE_DEADLINE_MS`], which bounds the listener-handshake wait, never
+/// the human's thinking time.
 pub(super) async fn read_line_pausing_esc(
     esc_paused: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     esc_pause_ack: &std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -303,7 +328,10 @@ impl Agent {
                  You have made NO edits yet on a task that requires changing files. \
                  Stop planning and make your FIRST concrete edit NOW: pick the most \
                  promising file and write the change, even if imperfect — a wrong \
-                 attempt you can fix after verification beats more analysis. Do NOT \
+                 attempt you can fix after verification beats more analysis. \
+                 If you have not declared one yet, put a `FILES: <path>` line in the SAME \
+                 response as your `file_edit`/`file_write` call — that combination is \
+                 accepted; a bare write without it is discarded. Do NOT \
                  answer in prose without a tool call.\n\
                  </selfware_system_directive>"
                     .to_string(),
@@ -364,6 +392,34 @@ impl Agent {
                 .map(|p| self.file_tracker.read_state.contains_key(&p))
                 .unwrap_or(false);
             if !target_read {
+                return false;
+            }
+        }
+        saw_write
+    }
+
+    /// True when the batch contains at least one file-write-intent call and
+    /// EVERY such call creates a NEW file — its `path` does not exist on disk.
+    /// A creation cannot contradict or overwrite an existing file, which is
+    /// the only thing the FILES: checklist guard protects against (blind edits
+    /// of / overwrites of files the model never identified). On greenfield
+    /// work there is nothing on disk to contradict, so the guard must not
+    /// discard the write — doing so burned the model's (possibly minutes-long)
+    /// reasoning call for zero progress. Shell writes have no reliably
+    /// parseable target path, so they never qualify and stay gated.
+    fn writes_target_only_new_files(&self, tool_calls: &[CollectedToolCall]) -> bool {
+        let mut saw_write = false;
+        for (name, args_str, _) in tool_calls {
+            if !tool_call_is_file_write_intent(name, args_str) {
+                continue;
+            }
+            saw_write = true;
+            let target_is_new = serde_json::from_str::<serde_json::Value>(args_str)
+                .ok()
+                .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from))
+                .map(|p| !std::path::Path::new(&p).exists())
+                .unwrap_or(false);
+            if !target_is_new {
                 return false;
             }
         }
@@ -1074,12 +1130,21 @@ impl Agent {
                 // still tracks lifetime attempts for the hard ceiling.
                 self.consecutive_no_action_prompts = 0;
 
+                // If a FILES:-guard edit re-issue is pending, the accepted next
+                // action is the write itself — never leave the model with only
+                // the (read-only) fallback as guidance.
+                let reissue_hint = if self.files_guard_reissue_pending() {
+                    "\nYour edit re-issue is still pending: call `file_edit`/`file_write` now \
+                     — the write IS the next accepted action."
+                } else {
+                    ""
+                };
                 self.messages.push(crate::api::types::Message::user(format!(
                     "<selfware_system_directive>\n\
                      A `{}` was executed automatically because you did not call any tool.\n\
-                     Use the result above to choose your next action. Call a tool now.\n\
+                     Use the result above to choose your next action. Call a tool now.{}\n\
                      </selfware_system_directive>",
-                    tool_name
+                    tool_name, reissue_hint
                 )));
                 return Ok(false);
             }
@@ -1476,6 +1541,22 @@ impl Agent {
             self.files_checklist_seen = true;
         }
 
+        // Greenfield creation bypass: a batch whose writes are ALL new files
+        // (nothing on disk at those paths) cannot contradict or overwrite an
+        // existing file — the only thing the FILES: checklist guard protects
+        // against. Discarding a greenfield first write throws away the model's
+        // (possibly minutes-long) reasoning for zero progress, and the
+        // follow-up no-action nudge then pointed at read-only tools.
+        if has_file_write_intent
+            && !self.files_checklist_seen
+            && self.writes_target_only_new_files(&tool_calls)
+        {
+            info!(
+                "Allowing first write to new file(s) — nothing on disk to contradict; FILES: checklist satisfied by creation"
+            );
+            self.files_checklist_seen = true;
+        }
+
         // P2.1: require a FILES: checklist before the first mutating edit.
         // Force-mutation recovery bypasses this once: after the progress guard
         // has explicitly demanded an immediate edit, do not block the edit for
@@ -1495,14 +1576,23 @@ impl Agent {
                 response.reasoning_content.as_deref(),
             )
             .await;
-            self.messages.push(crate::api::types::Message::user(
+            // The directive MUST name exactly what will be accepted next: a
+            // FILES: line and the re-issued write TOGETHER in the same
+            // response. Telling the model to declare FILES: without saying the
+            // write rides along sends it into a prose-only turn, where the
+            // no-action nudge then contradicted this message with a
+            // read-only-only tool list. The marker lets the recovery layer
+            // recognize the pending re-issue without new Agent state.
+            self.messages.push(crate::api::types::Message::user(format!(
                 "Your edit was NOT applied and has been discarded — no FILES: checklist was \
-                 provided yet. First output a line `FILES: <path>` naming the file(s) you will \
-                 change, then RE-ISSUE your edit using the `file_edit` or `file_write` tool \
-                 (send it again — the previous one did not run). Do not claim the edit is \
-                 done until a tool result confirms it."
-                    .to_string(),
-            ));
+                 provided yet. In your NEXT response do BOTH of these TOGETHER, in the SAME \
+                 response: (1) output a line `FILES: <path>` naming the file(s) you will \
+                 change, and (2) RE-ISSUE the exact same `file_edit`/`file_write` tool call \
+                 (the previous one did not run). A write accompanied by its FILES: line IS \
+                 accepted and executed — no read-only tool call is needed first. Do not \
+                 claim the edit is done until a tool result confirms it.\n\
+                 {FILES_GUARD_DISCARD_MARKER}"
+            )));
             return Ok(false);
         }
 
@@ -1626,6 +1716,9 @@ impl Agent {
                          1. Use file_edit to change only the buggy lines\n\
                          2. Keep all existing function signatures and module structure intact\n\
                          3. After editing, run cargo test to verify\n\
+                         If you have not read src/lib.rs yet in this session, include a \
+                         `FILES: src/lib.rs` line in the SAME response as your first edit — \
+                         a bare write to an unread existing file is discarded.\n\
                          </selfware_system_directive>"
                             .to_string(),
                     ));

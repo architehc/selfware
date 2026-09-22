@@ -315,6 +315,24 @@ impl Agent {
         })
     }
 
+    /// True when the FILES:-checklist guard recently discarded a model write
+    /// and the re-issue is still pending (no file written since). Recognized
+    /// via the marker the discard directive embeds in the message tail, so the
+    /// Agent struct carries no extra field for it. The scan is bounded: a
+    /// discard older than a few turns was either resolved or the conversation
+    /// moved on.
+    pub(super) fn files_guard_reissue_pending(&self) -> bool {
+        if self.has_written_any_file {
+            return false;
+        }
+        self.messages.iter().rev().take(6).any(|m| {
+            m.role == "user"
+                && m.content
+                    .text()
+                    .contains(super::execution::FILES_GUARD_DISCARD_MARKER)
+        })
+    }
+
     fn build_no_action_prompt_message(&self) -> String {
         let missing_required_tools = self.missing_required_task_tools();
         if !missing_required_tools.is_empty() {
@@ -326,6 +344,28 @@ impl Agent {
             return format!(
                 "<selfware_system_directive>\nThis task explicitly requires {} before you answer.\nCall the required tool now.\nDo NOT answer from memory, filenames, or prior knowledge.\n</selfware_system_directive>",
                 required_tool_list
+            );
+        }
+
+        // After the FILES:-checklist guard discarded a write, the follow-up
+        // guidance must name exactly what WILL be accepted — never a
+        // read-only-only tool list (that contradiction burned a greenfield
+        // run: the write was thrown away and the nudge pointed at reads).
+        if self.files_guard_reissue_pending() {
+            let guidance = if self.files_checklist_seen {
+                "Your `FILES:` checklist is already recorded — the only thing missing is the \
+                 edit itself. RE-ISSUE the `file_edit`/`file_write` tool call NOW; it will be \
+                 accepted. Do NOT call read-only tools and do NOT answer in prose."
+            } else {
+                "Your previous edit was discarded because no `FILES:` line accompanied it. \
+                 Do BOTH in ONE response now: (1) output a line `FILES: <path>` naming the \
+                 file(s) to change, and (2) the `file_edit`/`file_write` tool call itself. \
+                 That combination IS accepted and executed — no read-only tool call is \
+                 needed first."
+            };
+            return format!(
+                "<selfware_system_directive>\n{}\n</selfware_system_directive>",
+                guidance
             );
         }
 

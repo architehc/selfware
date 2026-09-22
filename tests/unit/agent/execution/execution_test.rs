@@ -868,6 +868,194 @@ async fn test_writes_target_only_read_files_ignores_non_file_shell() {
 }
 
 // =========================================================================
+// FILES: guard — greenfield creation bypass (W7d review finding)
+//
+// The guard exists to stop blind edits/overwrites of files the model never
+// identified. A write whose target does NOT exist on disk is a creation: it
+// cannot contradict or overwrite anything, so discarding it just burned the
+// model's reasoning call for zero progress.
+// =========================================================================
+
+#[tokio::test]
+async fn test_writes_target_only_new_files_classification() {
+    let cwd = crate::test_support::CwdGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    cwd.switch_to(dir.path());
+    std::fs::write(dir.path().join("existing.rs"), "fn old() {}\n").unwrap();
+
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let agent = Agent::new(config).await.unwrap();
+
+    // Write to a path that does not exist → creation, not a blind edit.
+    let new_write = vec![(
+        "file_write".to_string(),
+        r#"{"path":"brand_new.rs","content":"x"}"#.to_string(),
+        None,
+    )];
+    assert!(
+        agent.writes_target_only_new_files(&new_write),
+        "write to a nonexistent path is a creation"
+    );
+
+    // Overwrite of an existing file → stays gated.
+    let existing_write = vec![(
+        "file_write".to_string(),
+        r#"{"path":"existing.rs","content":"x"}"#.to_string(),
+        None,
+    )];
+    assert!(
+        !agent.writes_target_only_new_files(&existing_write),
+        "overwrite of an existing file must stay gated"
+    );
+
+    // Mixed batch: one write to an existing file disqualifies the bypass.
+    let mixed = vec![
+        (
+            "file_write".to_string(),
+            r#"{"path":"new1.rs","content":"x"}"#.to_string(),
+            None,
+        ),
+        (
+            "file_edit".to_string(),
+            r#"{"path":"existing.rs","old":"a","new":"b"}"#.to_string(),
+            None,
+        ),
+    ];
+    assert!(!agent.writes_target_only_new_files(&mixed));
+
+    // Shell writes carry no parseable `path` → never qualify, stay gated.
+    let shell_write = vec![(
+        "shell_exec".to_string(),
+        r#"{"command":"echo x > brand_new.rs"}"#.to_string(),
+        None,
+    )];
+    assert!(!agent.writes_target_only_new_files(&shell_write));
+
+    // Missing path arg → not provably a creation → gated.
+    let no_path = vec![(
+        "file_write".to_string(),
+        r#"{"content":"x"}"#.to_string(),
+        None,
+    )];
+    assert!(!agent.writes_target_only_new_files(&no_path));
+
+    // Read-only batch → nothing to exempt.
+    let read_only = vec![(
+        "file_read".to_string(),
+        r#"{"path":"existing.rs"}"#.to_string(),
+        None,
+    )];
+    assert!(!agent.writes_target_only_new_files(&read_only));
+
+    server.stop().await;
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn greenfield_first_write_executes_instead_of_being_discarded() {
+    // W7d regression: the FILES: checklist guard used to discard the model's
+    // first write on a greenfield task even though no existing file could be
+    // contradicted — burning the (possibly minutes-long) model call that
+    // produced it. The write must now execute.
+    let cwd = crate::test_support::CwdGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    cwd.switch_to(dir.path());
+
+    let server = MockLlmServer::builder()
+        .with_response(
+            "<tool>\n<name>file_write</name>\n<arguments>{\"path\":\"src/main.rs\",\"content\":\"fn main() {}\"}</arguments>\n</tool>",
+        )
+        .build()
+        .await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let result = agent.execute_step_internal(false).await;
+    assert!(result.is_ok(), "step must not error: {:?}", result.err());
+
+    assert!(
+        dir.path().join("src/main.rs").exists(),
+        "greenfield first write must be executed, not discarded"
+    );
+    assert!(
+        agent.files_checklist_seen,
+        "the creation bypass satisfies the checklist"
+    );
+    assert!(
+        !agent
+            .messages
+            .iter()
+            .any(|m| m.content.text().contains(FILES_GUARD_DISCARD_MARKER)),
+        "no discard directive may be pushed for a greenfield creation"
+    );
+
+    server.stop().await;
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn existing_unread_file_first_write_still_discarded_and_names_accepted_path() {
+    // The guard's protective intent survives: overwriting an EXISTING file the
+    // agent never read is still blocked — and the directive must name exactly
+    // what WILL be accepted (FILES: line + re-issued write in one response).
+    let cwd = crate::test_support::CwdGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    cwd.switch_to(dir.path());
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+
+    let server = MockLlmServer::builder()
+        .with_response(
+            "<tool>\n<name>file_write</name>\n<arguments>{\"path\":\"src/main.rs\",\"content\":\"fn main() { println!(\"hi\"); }\"}</arguments>\n</tool>",
+        )
+        .build()
+        .await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let result = agent.execute_step_internal(false).await;
+    assert_eq!(
+        result.ok(),
+        Some(false),
+        "discarded write continues the loop"
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+        "fn main() {}\n",
+        "the blind overwrite must NOT land on disk"
+    );
+    let last_user = agent
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .expect("discard directive pushed");
+    let text = last_user.content.text();
+    assert!(
+        text.contains("has been discarded"),
+        "directive must say the edit was discarded: {text}"
+    );
+    assert!(
+        text.contains("SAME response") && text.contains("FILES: <path>"),
+        "directive must name the accepted path (FILES: + re-issue in one response): {text}"
+    );
+    assert!(
+        text.contains(FILES_GUARD_DISCARD_MARKER),
+        "directive must carry the re-issue marker for the recovery layer"
+    );
+
+    server.stop().await;
+}
+
+// =========================================================================
 // detect_and_correct_malformed_tools tests
 // =========================================================================
 

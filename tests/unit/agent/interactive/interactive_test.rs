@@ -765,3 +765,281 @@ async fn resume_restore_replaces_task_state_but_keeps_live_handles() {
 
     server.stop().await;
 }
+
+// ── W7d: confirmation-prompt input ownership (listener seam) ──────────────
+//
+// Reproduced failure (4/4): an answer typed or pasted while the ESC listener
+// had not yet acknowledged the confirmation prompt's pause request was split
+// — one char landed in the listener's queue buffer, the rest stayed trapped
+// in crossterm — and was later replayed as a fake queued user message. The
+// listener now owns a pure event->action seam so the handoff is testable
+// without a TTY.
+
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+fn key_event(code: KeyCode) -> Event {
+    Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+}
+
+fn type_str(state: &mut ListenerInputState, s: &str, paused: bool) -> Vec<ListenerAction> {
+    s.chars()
+        .map(|c| state.on_event(&key_event(KeyCode::Char(c)), paused))
+        .collect()
+}
+
+#[test]
+fn listener_buffers_and_queues_normal_typing() {
+    let mut st = ListenerInputState::default();
+    let acts = type_str(&mut st, "hello", false);
+    assert!(acts.iter().all(|a| *a == ListenerAction::RenderPrompt));
+    assert_eq!(st.buffer(), "hello");
+    let act = st.on_event(&key_event(KeyCode::Enter), false);
+    assert_eq!(act, ListenerAction::QueueMessage("hello".to_string()));
+}
+
+#[test]
+fn listener_discards_input_trapped_during_prompt_handoff_and_never_replays() {
+    let mut st = ListenerInputState::default();
+    // Fast "y\n" racing the pause request: both events must be discarded and
+    // counted, leaving no buffer behind.
+    let a1 = st.on_event(&key_event(KeyCode::Char('y')), true);
+    let a2 = st.on_event(&key_event(KeyCode::Enter), true);
+    assert_eq!(a1, ListenerAction::Trapped);
+    assert_eq!(a2, ListenerAction::Trapped);
+    assert_eq!(st.buffer(), "");
+    assert_eq!(st.take_trapped_count(), 2);
+    // After the prompt closes, a fresh Enter must NOT replay the trapped 'y'.
+    let a3 = st.on_event(&key_event(KeyCode::Enter), false);
+    assert_eq!(a3, ListenerAction::None);
+}
+
+#[test]
+fn listener_discards_paste_trapped_during_prompt_handoff() {
+    let mut st = ListenerInputState::default();
+    let act = st.on_event(&Event::Paste("yes".to_string()), true);
+    assert_eq!(act, ListenerAction::Trapped);
+    assert_eq!(st.buffer(), "");
+    assert_eq!(st.take_trapped_count(), 1);
+}
+
+#[test]
+fn listener_pre_pause_buffer_survives_the_handoff() {
+    let mut st = ListenerInputState::default();
+    type_str(&mut st, "hel", false);
+    // A straggler racing the pause is discarded...
+    let act = st.on_event(&key_event(KeyCode::Char('y')), true);
+    assert_eq!(act, ListenerAction::Trapped);
+    // ...but the legitimately pre-pause-typed buffer is intact afterwards.
+    assert_eq!(st.buffer(), "hel");
+    let act = st.on_event(&key_event(KeyCode::Char('l')), false);
+    assert_eq!(act, ListenerAction::RenderPrompt);
+    assert_eq!(st.buffer(), "hell");
+}
+
+#[test]
+fn listener_quit_command_cancels_and_is_never_queued() {
+    for cmd in ["/quit", "/q", "quit", "exit", "/exit"] {
+        let mut st = ListenerInputState::default();
+        type_str(&mut st, cmd, false);
+        let act = st.on_event(&key_event(KeyCode::Enter), false);
+        assert_eq!(
+            act,
+            ListenerAction::Cancel(CancelNotice::ExitCommand),
+            "{cmd} typed mid-task must act (cancel), never become task prose"
+        );
+    }
+}
+
+#[test]
+fn listener_slash_command_mid_task_is_rejected_not_queued() {
+    let mut st = ListenerInputState::default();
+    type_str(&mut st, "/mode yolo", false);
+    let act = st.on_event(&key_event(KeyCode::Enter), false);
+    assert_eq!(
+        act,
+        ListenerAction::RejectSlashCommand("/mode yolo".to_string())
+    );
+    // Buffer cleared; a following Enter queues nothing.
+    assert_eq!(
+        st.on_event(&key_event(KeyCode::Enter), false),
+        ListenerAction::None
+    );
+}
+
+#[test]
+fn listener_esc_and_ctrlc_cancel_even_during_handoff() {
+    // An explicit abort is never swallowed, even mid-handoff.
+    let mut st = ListenerInputState::default();
+    assert_eq!(
+        st.on_event(&key_event(KeyCode::Esc), true),
+        ListenerAction::Cancel(CancelNotice::Esc)
+    );
+    let ctrl_c = Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert_eq!(
+        st.on_event(&ctrl_c, true),
+        ListenerAction::Cancel(CancelNotice::CtrlC)
+    );
+}
+
+// ── Scripted event source: drives the real listener loop with no TTY ──
+
+struct ScriptedEventSource {
+    events: std::collections::VecDeque<Event>,
+}
+
+impl ScriptedEventSource {
+    fn from_events(events: Vec<Event>) -> Self {
+        Self {
+            events: events.into(),
+        }
+    }
+
+    fn exhausted() -> std::io::Error {
+        // The production loop treats a poll error as terminal, so an
+        // exhausted script deterministically ends the listener.
+        std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "script exhausted")
+    }
+}
+
+impl InputEventSource for ScriptedEventSource {
+    fn poll_ready(&mut self, _timeout: Duration) -> std::io::Result<bool> {
+        if self.events.is_empty() {
+            return Err(Self::exhausted());
+        }
+        Ok(true)
+    }
+
+    fn read_event(&mut self) -> std::io::Result<Event> {
+        self.events.pop_front().ok_or_else(Self::exhausted)
+    }
+
+    fn set_raw_mode(&mut self, _enable: bool) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn loop_flags() -> (
+    Arc<AtomicBool>,
+    Arc<AtomicBool>,
+    Arc<AtomicBool>,
+    Arc<AtomicBool>,
+    InputQueue,
+) {
+    (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(std::sync::Mutex::new(Vec::new())),
+    )
+}
+
+#[test]
+fn listener_loop_queues_typed_message_and_quit_cancels_without_queueing() {
+    let (cancel, paused, ack, stop, queued) = loop_flags();
+    let mut events = Vec::new();
+    for c in "hello".chars() {
+        events.push(key_event(KeyCode::Char(c)));
+    }
+    events.push(key_event(KeyCode::Enter));
+    // /quit mid-task must act (cancel), not be queued as prose.
+    for c in "/quit".chars() {
+        events.push(key_event(KeyCode::Char(c)));
+    }
+    events.push(key_event(KeyCode::Enter));
+
+    let mut listener = EscListenerLoop::new(
+        ScriptedEventSource::from_events(events),
+        Arc::clone(&cancel),
+        paused,
+        ack,
+        stop,
+        Arc::clone(&queued),
+    );
+    let trapped = listener.run();
+
+    assert_eq!(trapped, 0);
+    assert!(
+        cancel.load(std::sync::atomic::Ordering::Relaxed),
+        "/quit must cancel the running task"
+    );
+    let q = queued.lock().unwrap();
+    assert_eq!(q.len(), 1, "only the prose message may be queued");
+    assert_eq!(q[0].content, "hello");
+}
+
+#[test]
+fn listener_loop_rejects_slash_command_and_keeps_running() {
+    let (cancel, paused, ack, stop, queued) = loop_flags();
+    let mut events = Vec::new();
+    for c in "/help".chars() {
+        events.push(key_event(KeyCode::Char(c)));
+    }
+    events.push(key_event(KeyCode::Enter));
+    for c in "real follow-up".chars() {
+        events.push(key_event(KeyCode::Char(c)));
+    }
+    events.push(key_event(KeyCode::Enter));
+
+    let mut listener = EscListenerLoop::new(
+        ScriptedEventSource::from_events(events),
+        Arc::clone(&cancel),
+        paused,
+        ack,
+        stop,
+        Arc::clone(&queued),
+    );
+    let trapped = listener.run();
+
+    assert_eq!(trapped, 0);
+    assert!(!cancel.load(std::sync::atomic::Ordering::Relaxed));
+    let q = queued.lock().unwrap();
+    assert_eq!(
+        q.len(),
+        1,
+        "the slash command must not be queued; the prose must be"
+    );
+    assert_eq!(q[0].content, "real follow-up");
+}
+
+#[test]
+fn listener_loop_drains_trapped_events_before_acknowledging_pause() {
+    use std::sync::atomic::Ordering;
+    let (cancel, paused, ack, stop, queued) = loop_flags();
+    // The confirmation prompt's pause request is already active before the
+    // listener observes it, and a fast "y\n" is already in the event stream:
+    // the exact 4/4 repro from the finding.
+    paused.store(true, Ordering::Release);
+    let events = vec![key_event(KeyCode::Char('y')), key_event(KeyCode::Enter)];
+
+    let mut listener = EscListenerLoop::new(
+        ScriptedEventSource::from_events(events),
+        cancel,
+        Arc::clone(&paused),
+        Arc::clone(&ack),
+        Arc::clone(&stop),
+        Arc::clone(&queued),
+    );
+    let handle = std::thread::spawn(move || listener.run());
+
+    // The ack must arrive only after the trapped events were drained.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !ack.load(Ordering::Acquire) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "listener never acknowledged the pause"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    stop.store(true, Ordering::Relaxed);
+    let trapped = handle.join().expect("listener thread panicked");
+
+    assert_eq!(
+        trapped, 2,
+        "both handoff-window events must be drained and discarded"
+    );
+    assert!(
+        queued.lock().unwrap().is_empty(),
+        "nothing from the handoff window may be queued for later replay"
+    );
+}

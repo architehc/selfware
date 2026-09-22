@@ -206,6 +206,454 @@ impl EscListenerGuard {
     }
 }
 
+/// Cap on events drained per pause episode, so a pathological event source
+/// (a held-down key, a runaway paste) cannot stop the listener from acking
+/// the confirmation prompt's pause request.
+pub(crate) const MAX_PAUSE_DRAIN_EVENTS: usize = 256;
+
+/// What produced a task-cancel from the listener — used for the notice text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CancelNotice {
+    Esc,
+    CtrlC,
+    /// An exit command (`/quit`, `quit`, ...) typed mid-task. Acts as a task
+    /// cancel; exiting the session still happens at the REPL prompt.
+    ExitCommand,
+}
+
+/// What the listener loop must do after processing one terminal event. Pure
+/// decision — the loop performs the actual I/O, which keeps the state machine
+/// deterministic and testable without a TTY.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ListenerAction {
+    /// Unhandled event / nothing to do.
+    None,
+    /// Re-render the inline "▸" queue prompt for the current buffer.
+    RenderPrompt,
+    /// Erase the inline prompt line.
+    ClearPrompt,
+    /// A completed non-command line: enqueue it as a follow-up message.
+    QueueMessage(String),
+    /// Cancel the running task (ESC / Ctrl+C / exit command).
+    Cancel(CancelNotice),
+    /// A slash command typed mid-task: never enqueued as task prose; the user
+    /// is told to re-enter it at the next prompt.
+    RejectSlashCommand(String),
+    /// Input captured while a confirmation prompt owns the input stream:
+    /// counted and discarded so it can never be replayed as a queued message.
+    Trapped,
+}
+
+/// Line-buffer state for the inline queue prompt, plus the prompt-handoff
+/// discard counter. Pure: no I/O, no threads — tests drive it with scripted
+/// events and assert on the returned actions.
+#[derive(Default)]
+pub(crate) struct ListenerInputState {
+    input_buf: String,
+    showing_prompt: bool,
+    trapped_during_pause: u64,
+}
+
+impl ListenerInputState {
+    /// Process one terminal event.
+    ///
+    /// `prompt_owns_input` MUST be the pause flag re-checked AFTER the event
+    /// was read, not before the poll — that recheck is what stops an event
+    /// that raced the confirmation prompt's pause request from being buffered
+    /// here and replayed later as a fake queued user message. Events caught
+    /// mid-handoff are discarded (counted) instead.
+    pub(crate) fn on_event(
+        &mut self,
+        event: &crossterm::event::Event,
+        prompt_owns_input: bool,
+    ) -> ListenerAction {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+        match event {
+            Event::Key(KeyEvent {
+                code, modifiers, ..
+            }) => {
+                // Explicit cancels are honoured even mid-handoff — never
+                // swallow the user's abort.
+                if *code == KeyCode::Esc {
+                    return ListenerAction::Cancel(CancelNotice::Esc);
+                }
+                if *code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
+                    return ListenerAction::Cancel(CancelNotice::CtrlC);
+                }
+                if prompt_owns_input {
+                    self.trapped_during_pause += 1;
+                    return ListenerAction::Trapped;
+                }
+                match code {
+                    KeyCode::Enter => self.on_enter(),
+                    KeyCode::Backspace => {
+                        if self.input_buf.pop().is_some() {
+                            if self.input_buf.is_empty() {
+                                self.showing_prompt = false;
+                                ListenerAction::ClearPrompt
+                            } else {
+                                ListenerAction::RenderPrompt
+                            }
+                        } else {
+                            ListenerAction::None
+                        }
+                    }
+                    KeyCode::Char(c) => {
+                        self.showing_prompt = true;
+                        self.input_buf.push(*c);
+                        ListenerAction::RenderPrompt
+                    }
+                    _ => ListenerAction::None,
+                }
+            }
+            Event::Paste(text) => {
+                if prompt_owns_input {
+                    self.trapped_during_pause += 1;
+                    return ListenerAction::Trapped;
+                }
+                self.showing_prompt = true;
+                self.input_buf.push_str(text);
+                ListenerAction::RenderPrompt
+            }
+            _ => ListenerAction::None,
+        }
+    }
+
+    /// Handle the submission (Enter) of the current buffer. Exit commands
+    /// cancel the running task instead of being enqueued; other slash
+    /// commands are rejected outright — the queue carries follow-up TASK
+    /// input only, and a `/quit`-style string reaching the model as prose is
+    /// the failure this guards.
+    fn on_enter(&mut self) -> ListenerAction {
+        if self.input_buf.is_empty() {
+            return ListenerAction::None;
+        }
+        let msg = strip_trailing_submission_newlines(&self.input_buf).to_string();
+        if is_effectively_empty_message(&msg) {
+            self.input_buf.clear();
+            self.showing_prompt = false;
+            return ListenerAction::ClearPrompt;
+        }
+        if is_exit_command(msg.trim()) {
+            // Buffer dismissal happens in `apply`, which owns the visible line.
+            return ListenerAction::Cancel(CancelNotice::ExitCommand);
+        }
+        self.input_buf.clear();
+        self.showing_prompt = false;
+        if looks_like_slash_command(msg.trim_start()) {
+            ListenerAction::RejectSlashCommand(msg)
+        } else {
+            ListenerAction::QueueMessage(msg)
+        }
+    }
+
+    pub(crate) fn buffer(&self) -> &str {
+        &self.input_buf
+    }
+
+    pub(crate) fn is_showing_prompt(&self) -> bool {
+        self.showing_prompt
+    }
+
+    /// Load a queued message back into the edit buffer (Up-arrow recall).
+    pub(crate) fn load_buffer(&mut self, content: String) {
+        self.input_buf = content;
+        self.showing_prompt = true;
+    }
+
+    /// Clear the buffer and the prompt-display flag (after cancel).
+    fn dismiss(&mut self) {
+        self.input_buf.clear();
+        self.showing_prompt = false;
+    }
+
+    /// Events discarded during prompt handoffs since the last report.
+    /// Resets the counter.
+    pub(crate) fn take_trapped_count(&mut self) -> u64 {
+        std::mem::take(&mut self.trapped_during_pause)
+    }
+}
+
+/// Terminal event source abstraction. Production reads crossterm; tests drive
+/// the listener loop with a scripted source, so no TTY is involved.
+pub(crate) trait InputEventSource {
+    /// Wait up to `timeout` for an event; `Ok(true)` means one is ready.
+    fn poll_ready(&mut self, timeout: Duration) -> std::io::Result<bool>;
+    fn read_event(&mut self) -> std::io::Result<crossterm::event::Event>;
+    /// Enter/leave raw mode around event reads (no-op for scripted sources).
+    fn set_raw_mode(&mut self, enable: bool) -> std::io::Result<()>;
+}
+
+pub(crate) struct CrosstermEventSource;
+
+impl InputEventSource for CrosstermEventSource {
+    fn poll_ready(&mut self, timeout: Duration) -> std::io::Result<bool> {
+        crossterm::event::poll(timeout)
+    }
+
+    fn read_event(&mut self) -> std::io::Result<crossterm::event::Event> {
+        crossterm::event::read()
+    }
+
+    fn set_raw_mode(&mut self, enable: bool) -> std::io::Result<()> {
+        if enable {
+            crossterm::terminal::enable_raw_mode()
+        } else {
+            crossterm::terminal::disable_raw_mode()
+        }
+    }
+}
+
+/// The listener loop, generic over the event source. Owns the input stream
+/// while the agent runs, EXCEPT during confirmation prompts: while `paused`
+/// is set it drains what it already captured, acknowledges, and then stops
+/// reading until unpaused — the prompt is the sole reader for that window
+/// (see `execution::read_line_pausing_esc`).
+pub(crate) struct EscListenerLoop<S: InputEventSource> {
+    source: S,
+    state: ListenerInputState,
+    cancel_token: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+    pause_ack: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+    queued: InputQueue,
+    /// Lifetime count of events discarded during prompt handoffs — returned
+    /// from [`run`](Self::run) for tests and diagnostics.
+    total_trapped: u64,
+}
+
+impl<S: InputEventSource> EscListenerLoop<S> {
+    pub(crate) fn new(
+        source: S,
+        cancel_token: Arc<AtomicBool>,
+        paused: Arc<AtomicBool>,
+        pause_ack: Arc<AtomicBool>,
+        stop: Arc<AtomicBool>,
+        queued: InputQueue,
+    ) -> Self {
+        Self {
+            source,
+            state: ListenerInputState::default(),
+            cancel_token,
+            paused,
+            pause_ack,
+            stop,
+            queued,
+            total_trapped: 0,
+        }
+    }
+
+    /// Run until stopped/cancelled or the event source fails. Returns the
+    /// total number of input events discarded during prompt handoffs.
+    pub(crate) fn run(&mut self) -> u64 {
+        use std::sync::atomic::Ordering;
+
+        loop {
+            if self.stop.load(Ordering::Relaxed) || self.cancel_token.load(Ordering::Relaxed) {
+                break;
+            }
+
+            if self.paused.load(Ordering::Relaxed) {
+                // Acknowledge only AFTER draining everything already captured:
+                // the prompt waits for the ack before reading, so this drain
+                // is the last time the listener touches the input stream until
+                // the prompt closes — the prompt then owns it atomically.
+                if !self.pause_ack.load(Ordering::Acquire) {
+                    let cancel = self.drain_trapped_events();
+                    let trapped = self.state.take_trapped_count();
+                    if trapped > 0 {
+                        self.total_trapped += trapped;
+                        tracing::warn!(
+                            "discarded {trapped} input event(s) that raced the confirmation-prompt handoff"
+                        );
+                        let note = format!(
+                            "\r\n\x1b[90m  [input] {trapped} keystroke(s) raced the prompt handoff and were discarded — please retype at the prompt.\x1b[0m\r\n"
+                        );
+                        let _ = std::io::stderr().write_all(note.as_bytes());
+                        let _ = std::io::stderr().flush();
+                    }
+                    self.pause_ack.store(true, Ordering::Release);
+                    if cancel {
+                        break;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            self.pause_ack.store(false, Ordering::Release);
+
+            if self.source.set_raw_mode(true).is_err() {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+
+            let poll_result = self.source.poll_ready(Duration::from_millis(50));
+            let event_result = match poll_result {
+                Ok(true) => Some(self.source.read_event()),
+                Ok(false) => None,
+                Err(_) => {
+                    let _ = self.source.set_raw_mode(false);
+                    break;
+                }
+            };
+
+            let _ = self.source.set_raw_mode(false);
+
+            if let Some(read_result) = event_result {
+                match read_result {
+                    Ok(event) => {
+                        // RE-CHECK the pause flag after the read: an event that
+                        // raced the pause request belongs to the confirmation
+                        // prompt, never to the queue buffer.
+                        let prompt_owns_input = self.paused.load(Ordering::Relaxed);
+                        let action = if is_up_arrow(&event) && !prompt_owns_input {
+                            self.recall_queued_message()
+                        } else {
+                            self.state.on_event(&event, prompt_owns_input)
+                        };
+                        if self.apply(action) {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+
+        if self.state.is_showing_prompt() {
+            let _ = std::io::stderr().write_all(b"\r\x1b[2K");
+            let _ = std::io::stderr().flush();
+        }
+
+        // Flush any handoff discards that never reached a pause-episode report
+        // (e.g. stop raced the pause), so the count is never silently lost.
+        let leftover = self.state.take_trapped_count();
+        if leftover > 0 {
+            self.total_trapped += leftover;
+            tracing::warn!(
+                "discarded {leftover} input event(s) that raced the confirmation-prompt handoff"
+            );
+        }
+
+        self.pause_ack.store(false, Ordering::Release);
+        let _ = self.source.set_raw_mode(false);
+        self.total_trapped
+    }
+
+    /// Drain every event the source already has buffered, routing each through
+    /// the paused handler (discard + count). Returns true if a cancel was
+    /// requested while draining.
+    fn drain_trapped_events(&mut self) -> bool {
+        for _ in 0..MAX_PAUSE_DRAIN_EVENTS {
+            match self.source.poll_ready(Duration::ZERO) {
+                Ok(true) => match self.source.read_event() {
+                    Ok(event) => {
+                        let action = self.state.on_event(&event, true);
+                        if self.apply(action) {
+                            return true;
+                        }
+                    }
+                    Err(_) => return false,
+                },
+                _ => return false,
+            }
+        }
+        false
+    }
+
+    /// Up-arrow recall: pop the most recent queued message back into the
+    /// edit buffer.
+    fn recall_queued_message(&mut self) -> ListenerAction {
+        let popped = match self.queued.lock() {
+            Ok(mut q) => q.pop(),
+            Err(_) => None,
+        };
+        match popped {
+            Some(msg) => {
+                self.state.load_buffer(msg.content);
+                ListenerAction::RenderPrompt
+            }
+            None => ListenerAction::None,
+        }
+    }
+
+    /// Perform the side effects of a decided action. Returns true when the
+    /// loop should exit (any cancel).
+    fn apply(&mut self, action: ListenerAction) -> bool {
+        use std::sync::atomic::Ordering;
+        match action {
+            ListenerAction::None | ListenerAction::Trapped => false,
+            ListenerAction::RenderPrompt => {
+                render_inline_queue_prompt(self.state.buffer());
+                false
+            }
+            ListenerAction::ClearPrompt => {
+                let _ = std::io::stderr().write_all(b"\r\x1b[2K");
+                let _ = std::io::stderr().flush();
+                false
+            }
+            ListenerAction::QueueMessage(msg) => {
+                let count = match self.queued.lock() {
+                    Ok(mut q) => {
+                        q.push(PendingMessage::new(
+                            msg.clone(),
+                            PendingMessageOrigin::InteractiveQueue,
+                            Instant::now(),
+                        ));
+                        q.len()
+                    }
+                    Err(_) => 0,
+                };
+                let notice = format!(
+                    "\r\x1b[2K\x1b[36m  ▸ Queued: \x1b[0m{}\x1b[90m ({})\x1b[0m\r\n",
+                    preview_with_ellipsis(&msg, QUEUE_NOTICE_PREVIEW_BYTES),
+                    count,
+                );
+                let _ = std::io::stderr().write_all(notice.as_bytes());
+                let _ = std::io::stderr().flush();
+                false
+            }
+            ListenerAction::RejectSlashCommand(cmd) => {
+                let note = format!(
+                    "\r\x1b[2K\x1b[33m  Slash commands aren't queued while a task is running — re-enter at the next prompt: {}\x1b[0m\r\n",
+                    preview_with_ellipsis(&cmd, QUEUE_NOTICE_PREVIEW_BYTES),
+                );
+                let _ = std::io::stderr().write_all(note.as_bytes());
+                let _ = std::io::stderr().flush();
+                false
+            }
+            ListenerAction::Cancel(notice) => {
+                if self.state.is_showing_prompt() {
+                    let _ = std::io::stderr().write_all(b"\r\x1b[2K");
+                }
+                self.state.dismiss();
+                self.cancel_token.store(true, Ordering::Relaxed);
+                let text: &[u8] = match notice {
+                    CancelNotice::Esc => b"\r\n\x1b[33m[ESC] Cancelling...\x1b[0m\r\n",
+                    CancelNotice::CtrlC => b"\r\n\x1b[33m[Ctrl+C] Cancelling...\x1b[0m\r\n",
+                    CancelNotice::ExitCommand => {
+                        b"\r\n\x1b[33m[exit command] Cancelling the current task - type /quit at the prompt to exit selfware.\x1b[0m\r\n"
+                    }
+                };
+                let _ = std::io::stderr().write_all(text);
+                let _ = std::io::stderr().flush();
+                true
+            }
+        }
+    }
+}
+
+fn is_up_arrow(event: &crossterm::event::Event) -> bool {
+    matches!(
+        event,
+        crossterm::event::Event::Key(crossterm::event::KeyEvent {
+            code: crossterm::event::KeyCode::Up,
+            ..
+        })
+    )
+}
+
 /// Spawn a background input listener that runs during model execution.
 pub(crate) fn spawn_esc_listener(
     cancel_token: Arc<AtomicBool>,
@@ -218,11 +666,6 @@ pub(crate) fn spawn_esc_listener(
     let queued_clone = Arc::clone(&queued);
 
     let handle = tokio::task::spawn_blocking(move || {
-        use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-        use crossterm::terminal;
-        use std::sync::atomic::Ordering;
-        use std::time::Duration;
-
         #[cfg(unix)]
         {
             // Ignore SIGTTOU so tcsetattr (called by terminal::enable_raw_mode /
@@ -233,143 +676,15 @@ pub(crate) fn spawn_esc_listener(
             let _ = unsafe { sigaction(Signal::SIGTTOU, &action) };
         }
 
-        let mut input_buf = String::new();
-        let mut showing_prompt = false;
-
-        loop {
-            if stop_clone.load(Ordering::Relaxed) || cancel_token.load(Ordering::Relaxed) {
-                break;
-            }
-
-            if paused.load(Ordering::Relaxed) {
-                pause_ack.store(true, Ordering::Release);
-                std::thread::sleep(Duration::from_millis(10));
-                continue;
-            }
-            pause_ack.store(false, Ordering::Release);
-
-            if terminal::enable_raw_mode().is_err() {
-                std::thread::sleep(Duration::from_millis(100));
-                continue;
-            }
-
-            let poll_result = event::poll(Duration::from_millis(50));
-            let event_result = match poll_result {
-                Ok(true) => Some(event::read()),
-                Ok(false) => None,
-                Err(_) => {
-                    let _ = terminal::disable_raw_mode();
-                    break;
-                }
-            };
-
-            let _ = terminal::disable_raw_mode();
-
-            if let Some(read_result) = event_result {
-                match read_result {
-                    Ok(Event::Key(KeyEvent {
-                        code, modifiers, ..
-                    })) => match code {
-                        KeyCode::Esc => {
-                            if showing_prompt {
-                                let _ = std::io::stderr().write_all(b"\r\x1b[2K");
-                                let _ = std::io::stderr().flush();
-                            }
-                            input_buf.clear();
-                            showing_prompt = false;
-                            cancel_token.store(true, Ordering::Relaxed);
-                            let _ = std::io::stderr()
-                                .write_all(b"\r\n\x1b[33m[ESC] Cancelling...\x1b[0m\r\n");
-                            break;
-                        }
-                        KeyCode::Enter if !input_buf.is_empty() => {
-                            let msg = strip_trailing_submission_newlines(&input_buf).to_string();
-                            input_buf.clear();
-                            showing_prompt = false;
-                            if !is_effectively_empty_message(&msg) {
-                                let count = {
-                                    match queued_clone.lock() {
-                                        Ok(mut q) => {
-                                            q.push(PendingMessage::new(
-                                                msg.clone(),
-                                                PendingMessageOrigin::InteractiveQueue,
-                                                Instant::now(),
-                                            ));
-                                            q.len()
-                                        }
-                                        Err(_) => 0,
-                                    }
-                                };
-                                let notice = format!(
-                                            "\r\x1b[2K\x1b[36m  ▸ Queued: \x1b[0m{}\x1b[90m ({})\x1b[0m\r\n",
-                                            preview_with_ellipsis(&msg, QUEUE_NOTICE_PREVIEW_BYTES),
-                                            count,
-                                        );
-                                let _ = std::io::stderr().write_all(notice.as_bytes());
-                                let _ = std::io::stderr().flush();
-                            } else {
-                                let _ = std::io::stderr().write_all(b"\r\x1b[2K");
-                                let _ = std::io::stderr().flush();
-                            }
-                        }
-                        KeyCode::Backspace if input_buf.pop().is_some() => {
-                            render_inline_queue_prompt(&input_buf);
-                            if input_buf.is_empty() {
-                                let _ = std::io::stderr().write_all(b"\r\x1b[2K");
-                                let _ = std::io::stderr().flush();
-                                showing_prompt = false;
-                            }
-                        }
-                        KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-                            cancel_token.store(true, Ordering::Relaxed);
-                            let _ = std::io::stderr()
-                                .write_all(b"\r\n\x1b[33m[Ctrl+C] Cancelling...\x1b[0m\r\n");
-                            break;
-                        }
-                        KeyCode::Up => {
-                            let popped = match queued_clone.lock() {
-                                Ok(mut q) => q.pop(),
-                                Err(_) => None,
-                            };
-                            if let Some(msg) = popped {
-                                input_buf = msg.content;
-                                showing_prompt = true;
-                                render_inline_queue_prompt(&input_buf);
-                            }
-                        }
-                        KeyCode::Char(c) => {
-                            if !showing_prompt {
-                                let _ = std::io::stderr()
-                                    .write_all(b"\r\x1b[2K\x1b[90m  \xe2\x96\xb8 \x1b[0m");
-                                showing_prompt = true;
-                            }
-                            input_buf.push(c);
-                            render_inline_queue_prompt(&input_buf);
-                        }
-                        _ => {}
-                    },
-                    Ok(Event::Paste(text)) => {
-                        if !showing_prompt {
-                            let _ = std::io::stderr()
-                                .write_all(b"\r\x1b[2K\x1b[90m  \xe2\x96\xb8 \x1b[0m");
-                            showing_prompt = true;
-                        }
-                        input_buf.push_str(&text);
-                        render_inline_queue_prompt(&input_buf);
-                    }
-                    Ok(_) => {}
-                    Err(_) => break,
-                }
-            }
-        }
-
-        if showing_prompt {
-            let _ = std::io::stderr().write_all(b"\r\x1b[2K");
-            let _ = std::io::stderr().flush();
-        }
-
-        pause_ack.store(false, Ordering::Release);
-        let _ = terminal::disable_raw_mode();
+        let mut listener = EscListenerLoop::new(
+            CrosstermEventSource,
+            cancel_token,
+            paused,
+            pause_ack,
+            stop_clone,
+            queued_clone,
+        );
+        listener.run();
     });
 
     EscListenerGuard {
