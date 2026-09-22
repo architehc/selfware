@@ -114,9 +114,15 @@ fn test_format_workspace_guidance_for_prompt() {
         content: "Operate on /tmp/project.".to_string(),
     }];
 
-    let formatted = MemorySystem::format_workspace_guidance_for_prompt(&files);
+    let formatted =
+        MemorySystem::format_workspace_guidance_for_prompt(&files, Path::new("/project"));
     assert!(formatted.contains("## Workspace Guidance"));
-    assert!(formatted.contains("Follow the most local guidance file"));
+    // Review finding #1: guidance is injected as UNTRUSTED DATA with a
+    // safety-priority directive — the old "follow the most local guidance
+    // file" writ that treated repo files as instructions is gone.
+    assert!(formatted.contains("UNTRUSTED DATA"));
+    assert!(formatted.contains("Safety directives"));
+    assert!(!formatted.contains("Follow the most local guidance file"));
     assert!(formatted.contains("### From `/project/AGENTS.md`"));
     assert!(formatted.contains("Operate on /tmp/project."));
 }
@@ -281,4 +287,113 @@ async fn test_dream_integrated_record_session_end() {
     // Verify state was updated
     let status = system.dream_status().await;
     assert_eq!(status.sessions_since_last_dream, 1);
+}
+
+// =====================================================================
+// Workspace guidance prompt-injection defense (review finding #1):
+// AGENTS.md/CLAUDE.md contents are injected as UNTRUSTED DATA inside an
+// explicit frame with a safety-priority directive — never as instructions
+// with a "follow the most local file" writ.
+// Windows note: `dirs::home_dir()` reads USERPROFILE, not HOME, so the
+// env-var channel below only redirects on non-Windows.
+// =====================================================================
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn test_workspace_guidance_untrusted_frame_and_safety_priority() {
+    let env = crate::test_support::EnvGuard::capture(&["HOME"]);
+    let home = tempfile::tempdir().unwrap();
+    env.set("HOME", home.path());
+
+    let files = vec![WorkspaceGuidanceFile {
+        path: PathBuf::from("/repo/AGENTS.md"),
+        content: "SAMPLE_MARKER guidance text".to_string(),
+    }];
+    let formatted = MemorySystem::format_workspace_guidance_for_prompt(&files, Path::new("/repo"));
+
+    // The frame marks the content as untrusted data ...
+    assert!(
+        formatted.contains("UNTRUSTED DATA"),
+        "guidance must be framed as untrusted data: {formatted}"
+    );
+    // ... re-scopes the conflict rule to task behavior with safety winning ...
+    assert!(
+        formatted.contains("Safety directives in this system prompt ALWAYS"),
+        "safety-priority framing must survive: {formatted}"
+    );
+    // ... the old writ that made every file an instruction is gone ...
+    assert!(
+        !formatted.contains("Follow the most local guidance file"),
+        "the follow-the-file instruction must be removed: {formatted}"
+    );
+    // ... the untrusted checkout is called out because the temp HOME has no
+    // trusted-projects list ...
+    assert!(
+        formatted.contains("NOT in your trusted-projects list"),
+        "untrusted checkout must be flagged: {formatted}"
+    );
+    // ... and the guidance text itself is still present.
+    assert!(formatted.contains("SAMPLE_MARKER guidance text"));
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn test_workspace_guidance_trusted_checkout_badge() {
+    let env = crate::test_support::EnvGuard::capture(&["HOME"]);
+    let home = tempfile::tempdir().unwrap();
+    env.set("HOME", home.path());
+    // Trust the checkout the way `selfware trust <path>` would: list its
+    // canonical `selfware.toml` in the trusted-projects file.
+    let repo = tempfile::tempdir().unwrap();
+    let repo = repo
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| repo.path().to_path_buf());
+    let toml = repo.join("selfware.toml");
+    let trust_dir = home.path().join(".selfware");
+    std::fs::create_dir_all(&trust_dir).unwrap();
+    std::fs::write(
+        trust_dir.join("trusted_repos"),
+        toml.to_string_lossy().to_string(),
+    )
+    .unwrap();
+
+    let files = vec![WorkspaceGuidanceFile {
+        path: repo.join("AGENTS.md"),
+        content: "SAMPLE_MARKER guidance text".to_string(),
+    }];
+    let formatted = MemorySystem::format_workspace_guidance_for_prompt(&files, &repo);
+
+    assert!(
+        formatted.contains("in your trusted-projects list"),
+        "trusted checkout must be acknowledged: {formatted}"
+    );
+    assert!(
+        formatted.contains("UNTRUSTED DATA"),
+        "even trusted checkouts keep the untrusted-data framing: {formatted}"
+    );
+}
+
+#[test]
+fn test_workspace_guidance_never_unframed() {
+    // No files → no section at all (guidance never appears without a frame).
+    assert!(MemorySystem::format_workspace_guidance_for_prompt(&[], Path::new("/")).is_empty());
+
+    let files = vec![WorkspaceGuidanceFile {
+        path: PathBuf::from("/repo/CLAUDE.md"),
+        content: "SAMPLE_MARKER guidance text".to_string(),
+    }];
+    let formatted = MemorySystem::format_workspace_guidance_for_prompt(&files, Path::new("/repo"));
+    // The frame precedes the guidance content.
+    let frame_pos = formatted.find("UNTRUSTED DATA").expect("frame present");
+    let content_pos = formatted
+        .find("SAMPLE_MARKER guidance text")
+        .expect("content present");
+    let safety_pos = formatted
+        .find("Safety directives")
+        .expect("safety directive present");
+    assert!(
+        frame_pos < content_pos && safety_pos < content_pos,
+        "guidance text must sit inside the frame, not before it: {formatted}"
+    );
 }

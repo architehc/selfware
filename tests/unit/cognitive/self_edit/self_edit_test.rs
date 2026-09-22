@@ -304,6 +304,53 @@ fn test_rewrite_todo_fixme_marker_rewrites_preferred_line() {
     assert!(!updated.contains("TODO"));
 }
 
+// ── Inline comment stripper (shared with the trivial-mutation gate) ──
+
+#[test]
+fn test_strip_inline_comment_basic() {
+    assert_eq!(
+        strip_inline_comment("    let x = 5; // TODO: fix"),
+        "    let x = 5;"
+    );
+    // A whole-line comment strips to nothing (the gate then filters it out).
+    assert_eq!(strip_inline_comment("// whole line comment"), "");
+    // No comment anywhere: the line comes back unchanged.
+    assert_eq!(strip_inline_comment("let x = 5;"), "let x = 5;");
+    assert_eq!(strip_inline_comment(""), "");
+}
+
+#[test]
+fn test_strip_inline_comment_ignores_slashes_inside_strings() {
+    // `//` inside a string literal is code, not a comment — a URL must
+    // survive intact so a change inside it never compares equal.
+    assert_eq!(
+        strip_inline_comment(r#"let u = "http://example.com/a/b"; // note"#),
+        r#"let u = "http://example.com/a/b";"#
+    );
+    // Char literals are shielded the same way.
+    assert_eq!(
+        strip_inline_comment("let c = '/'; // separator"),
+        "let c = '/';"
+    );
+}
+
+#[test]
+fn test_strip_inline_comment_escaped_quotes_stay_inside_string() {
+    assert_eq!(
+        strip_inline_comment(r#"let s = "a \"quoted\" bit"; // note"#),
+        r#"let s = "a \"quoted\" bit";"#
+    );
+}
+
+#[test]
+fn test_strip_inline_comment_lifetime_erreds_to_not_stripping() {
+    // A Rust lifetime leaves the char-literal state open until the next `'`,
+    // so the trailing comment is (conservatively) NOT stripped: this can only
+    // cost one cycle's evaluation, never silently skip a real change.
+    let line = "fn f<'a>(x: &'a str) -> &'a str { x } // TODO";
+    assert_eq!(strip_inline_comment(line), line);
+}
+
 #[test]
 fn test_apply_target_in_sandbox_updates_file() {
     // Serialize against tests that mutate process-global state (cwd, HOME):

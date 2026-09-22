@@ -153,6 +153,66 @@ fn test_mutation_is_trivial_empty_edit_list() {
     assert!(mutation_is_trivial(dir.path(), dir.path(), &[]));
 }
 
+// ── Trivial-mutation gate: inline comment-text-only changes (pass-3) ──
+
+#[test]
+fn test_mutation_is_trivial_inline_comment_text_only_change() {
+    // A TODO marker rewrite on a code-bearing line changes ONLY comment text:
+    // once the inline comment is stripped, old and new are the same code, so
+    // the mutation is trivial and must never reach the paid suites.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    let sandbox = dir.path().join("sandbox");
+    write_pair(
+        &root,
+        &sandbox,
+        "src/lib.rs",
+        "pub fn f() -> usize {\n    let answer = 42; // TODO: remove this marker\n    answer\n}\n",
+        "pub fn f() -> usize {\n    let answer = 42; // Resolved: remove this marker\n    answer\n}\n",
+    );
+    let edited = vec!["src/lib.rs".to_string()];
+    assert!(mutation_is_trivial(&root, &sandbox, &edited));
+}
+
+#[test]
+fn test_mutation_is_trivial_inline_comment_with_code_change_not_trivial() {
+    // Comment text AND code changed together: the inline stripping must never
+    // mask a real code change — the mutation still goes to evaluation.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    let sandbox = dir.path().join("sandbox");
+    write_pair(
+        &root,
+        &sandbox,
+        "src/lib.rs",
+        "pub fn f() -> usize {\n    let answer = 42; // TODO: remove\n    answer\n}\n",
+        "pub fn f() -> usize {\n    let answer = 43; // Resolved: remove\n    answer\n}\n",
+    );
+    let edited = vec!["src/lib.rs".to_string()];
+    assert!(!mutation_is_trivial(&root, &sandbox, &edited));
+}
+
+#[test]
+fn test_mutation_is_trivial_string_literal_with_slashes_not_stripped() {
+    // `//` inside a string literal is code, not a comment: a change inside
+    // such a string must still be evaluated even though a trailing comment
+    // marker is present. This is the false-trivial guard for the stripper —
+    // if the scanner stripped `//` blindly, the two URL literals would
+    // compare equal and a real code change would be silently skipped.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    let sandbox = dir.path().join("sandbox");
+    write_pair(
+        &root,
+        &sandbox,
+        "src/lib.rs",
+        "pub fn url() -> &'static str {\n    \"http://example.com/a\" // TODO\n}\n",
+        "pub fn url() -> &'static str {\n    \"http://example.com/b\" // TODO\n}\n",
+    );
+    let edited = vec!["src/lib.rs".to_string()];
+    assert!(!mutation_is_trivial(&root, &sandbox, &edited));
+}
+
 #[test]
 fn test_rsi_orchestrator_stop() {
     let mut orch = RSIOrchestrator::new(PathBuf::from("/tmp/test_project"));
@@ -438,10 +498,47 @@ fn test_rsi_state_save_and_load() {
     orch.consecutive_failures = 3;
     orch.save_state().unwrap();
 
-    // Load into a fresh orchestrator
+    // Load into a fresh orchestrator.
+    // total_iterations survives verbatim (that is the resume counter); the
+    // consecutive-failure STREAK is deliberately decayed on load (3 -> 1) so a
+    // stored breaker state cannot wedge a fresh process (see the lockout
+    // regression test below).
     let orch2 = RSIOrchestrator::new(dir.path().to_path_buf());
     assert_eq!(orch2.total_iterations, 42);
-    assert_eq!(orch2.consecutive_failures, 3);
+    assert_eq!(orch2.consecutive_failures, 1);
+}
+
+/// Regression: a state file saved on a tripped breaker (5 consecutive
+/// failures) must NOT re-abort iteration 1 of the next process. The loaded
+/// streak is decayed (5 -> 2), so the first cycle failure only brings the
+/// counter to 3/5 — the loop keeps running instead of locking across
+/// restarts until the state file is deleted by hand.
+#[test]
+fn test_tripped_breaker_state_does_not_wedge_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_root = dir.path().to_path_buf();
+    let mut orch = RSIOrchestrator::new(project_root.clone());
+    // Simulate a run that ended with the breaker tripped: 5 failures == the
+    // default max_consecutive_failures threshold.
+    orch.consecutive_failures = orch.max_consecutive_failures;
+    orch.save_state().unwrap();
+
+    let mut restart = RSIOrchestrator::new(project_root);
+    assert_eq!(
+        restart.consecutive_failures,
+        orch.max_consecutive_failures / 2,
+        "the stored streak must be decayed on load"
+    );
+
+    // The first cycle failure of the restarted process must not abort the loop:
+    // under the old carry-over the counter went 5 -> 6 and tripped
+    // immediately, wedging RSI forever.
+    restart.record_cycle_failure(1).unwrap();
+    assert_eq!(
+        restart.consecutive_failures,
+        orch.max_consecutive_failures / 2 + 1,
+        "iteration 1 must only advance the decayed streak, not trip the breaker"
+    );
 }
 
 #[test]
@@ -564,7 +661,14 @@ fn test_save_state_is_atomic_and_leaves_no_temp_files() {
 // process-global cwd and HOME stable for the sandbox git-clone and for
 // the rustup-shimmed `cargo` invocations in `sandbox.verify()`.
 #[allow(clippy::await_holding_lock)]
-async fn test_execute_improvement_cycle_applies_mutation_and_records_result() {
+async fn test_execute_improvement_cycle_skips_inline_comment_mutation_before_paid_suites() {
+    // The fixture marker is `42 // TODO: remove this marker` — an INLINE
+    // marker: it is proposed (the line carries code), applied, and then the
+    // trivial-mutation gate must classify the marker rewrite as comment-text-
+    // only BEFORE any paid suite runs. This is the pass-3 regression for the
+    // circular trap: a comment-only edit used to burn two paid benchmark
+    // suites, fail to improve fitness, and increment the failure counter until
+    // the circuit breaker tripped.
     let _state = crate::test_support::CwdGuard::hold();
     let dir = create_rsi_fixture_project();
     let project_root = dir.path().to_path_buf();
@@ -575,18 +679,36 @@ async fn test_execute_improvement_cycle_applies_mutation_and_records_result() {
     let outcome = orch.execute_improvement_cycle().await.unwrap();
     assert_eq!(
         outcome,
-        CycleOutcome::Improved,
-        "RSI cycle should merge an improving mutation"
+        CycleOutcome::NoEligibleMutation,
+        "a comment-text-only mutation must be skipped as trivial, not evaluated"
     );
 
-    let content = fs::read_to_string(project_root.join("src/lib.rs")).unwrap();
-    assert!(content.contains("Resolved: remove this marker"));
+    // The failure counter is untouched: the trap's third link (failure
+    // counter -> circuit breaker) never fires for this cycle.
+    assert_eq!(orch.consecutive_failures, 0);
 
+    // No paid e2e suite ran: no benchmark directory was created under reports.
+    let reports_dir = project_root.join("system_tests/projecte2e/reports");
+    if reports_dir.exists() {
+        let has_rsi_reports = fs::read_dir(&reports_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().starts_with("rsi-"));
+        assert!(
+            !has_rsi_reports,
+            "trivial mutation must not burn a paid e2e suite"
+        );
+    }
+
+    // The attempt IS recorded, honestly, as SkippedTrivial — neutral for the
+    // category cooldown (see `recently_failed_categories`) and for the
+    // circuit breaker, so it can never wedge or starve a category.
     let history = orch.edit_orchestrator.history();
     assert_eq!(history.len(), 1);
-    assert!(history[0].verified);
-    assert!(!history[0].rolled_back);
-    assert!(history[0].effectiveness_score > 0.0);
+    assert_eq!(
+        history[0].status,
+        crate::cognitive::self_edit::ProposalStatus::SkippedTrivial
+    );
 }
 
 /// A whole-line TODO comment rewrite cannot change code, so it must never be

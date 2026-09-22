@@ -5,6 +5,29 @@ use serde_json::Value;
 use std::io::Write;
 use tempfile::NamedTempFile;
 
+/// True when the diff creates, converts, or retargets a symbolic link (git
+/// file mode 120000).
+///
+/// Unified diffs encode symlinks as file entries with mode `120000`; without
+/// this check `git apply` happily materialises an in-repo symlink whose
+/// target can be any host path (`link:/etc/shadow`). Path validation of the
+/// leaf filename never sees the target, so the entry itself must be refused.
+///
+/// The default is to deny symlink-touching diffs ENTIRELY (fail-closed): a
+/// newly created symlink and a retargeted existing symlink are equally able
+/// to point at sensitive host files, and every later tool that reads through
+/// the project root would then follow it. There is deliberately no opt-out —
+/// if a legitimate symlink workflow ever appears, an explicit allowlist for
+/// *known* in-repo targets should be designed, not added as a blanket flag.
+fn diff_touches_symlink_mode(diff: &str) -> bool {
+    diff.lines().any(|line| {
+        (line.starts_with("new file mode ")
+            || line.starts_with("old mode ")
+            || line.starts_with("new mode "))
+            && line.ends_with("120000")
+    })
+}
+
 /// Parse a unified diff and return approximate stats and target paths.
 ///
 /// File deletions (`+++ /dev/null`) target the OLD file path (`--- a/<path>`):
@@ -114,6 +137,17 @@ impl Tool for PatchApply {
 
         if diff.trim().is_empty() {
             return Err(anyhow!("diff is empty"));
+        }
+
+        // Fail-closed symlink guard: refuse ANY hunk that creates, converts,
+        // or retargets a symlink (mode 120000) before `git apply` can
+        // materialise it — an in-repo symlink can point at /etc/shadow or any
+        // other host file, and leaf-filename validation cannot see the target.
+        if diff_touches_symlink_mode(diff) {
+            anyhow::bail!(
+                "patch_apply refuses diffs that create or retarget symlinks (mode 120000): \
+                 an in-repo symlink can point at sensitive host files"
+            );
         }
 
         let (files, insertions, deletions, targets) = parse_diff_stats(diff);

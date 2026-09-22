@@ -3,17 +3,39 @@
 //! Explicit loading tiers (smallest → largest), all over production code nodes:
 //! - `Map`: a component index — doc line + public symbol names per component,
 //!   with detail pulled on demand via `evolve::map::expand` (retrieval, not resident).
-//! - `Lite`: interface signatures only (~18% of full) — the smallest whole-code tier.
-//! - `Compact`: full code with comments stripped (~82%) — for smaller models.
+//! - `Lite`: interface signatures only — the smallest whole-code tier.
+//! - `Compact`: full code with comments stripped — for smaller models.
 //! - `Full`: full production code.
 //! - `FullExtended`: production code plus test/example nodes.
 //! - `Custom`: a hand-picked component selection, loaded at Lite/skeleton detail.
 //! - `Preset(name)`: a single named preset loaded.
+//!
+//! Cost estimates for Lite/Compact are MEASURED projections (skeleton /
+//! comment-stripped source, the same machinery `envelope` ships and
+//! `TierMeasurer` measures); the fractional heuristics survive only as
+//! per-node fallbacks for nodes whose source cannot be read.
 
+use super::context_reduce::reduce_source;
+use super::skeleton::extract_rust_skeleton;
 use super::{Graph, Node, NodeLayer};
+use crate::token_count::estimate_content_tokens;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::MutexGuard;
 
-/// Rough tokens-per-line factor used when a node has no measured token count.
+/// Rough tokens-per-line factor used when a node has NO measured token count
+/// at all (scan produced `tokens == 0`). Per-node fallback only — every node
+/// with a measured count consults it never.
 const TOKENS_PER_LINE: usize = 10;
+
+/// Which tier projection a node's measured cost comes from. Lite and Custom
+/// share the skeleton projection; Compact uses comment-stripped source.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum ProjectionClass {
+    Lite,
+    Compact,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -86,6 +108,15 @@ pub struct ContextComposer {
     graph: Graph,
     mode: ContextMode,
     included: Vec<String>,
+    /// Project root the measured tier projections read sources from (skeleton /
+    /// comment-strip). Defaults to the process current directory — the evolve
+    /// server runs from the project root (same convention as
+    /// `envelope::build_envelope`).
+    root: PathBuf,
+    /// Measured per-node projections, cached per (projection class, node id)
+    /// for the composer's lifetime (one graph revision) so repeated estimates
+    /// do not re-read sources — mirrors `TierMeasurer`.
+    projection_cache: Mutex<HashMap<(ProjectionClass, String), usize>>,
 }
 
 impl ContextComposer {
@@ -94,6 +125,21 @@ impl ContextComposer {
             graph,
             mode: ContextMode::Lite,
             included: Vec::new(),
+            root: std::env::current_dir().unwrap_or_default(),
+            projection_cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Construct with an explicit project root, so measured projections read
+    /// sources from a known location. The server runs from the project root
+    /// (and `new` picks up the cwd); tests point this at a fixture dir.
+    pub fn with_root(graph: Graph, root: impl Into<PathBuf>) -> Self {
+        Self {
+            graph,
+            mode: ContextMode::Lite,
+            included: Vec::new(),
+            root: root.into(),
+            projection_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -158,7 +204,7 @@ impl ContextComposer {
                 .nodes
                 .iter()
                 .filter(|node| included.contains(&node.id))
-                .map(|node| estimate_context_node_tokens(node, &mode))
+                .map(|node| self.projected_tokens(node, &mode))
                 .sum();
             ContextModeSize {
                 mode: mode.name().to_string(),
@@ -179,15 +225,16 @@ impl ContextComposer {
 
     /// Estimated token cost of the currently included nodes.
     ///
-    /// Uses the measured `tokens` count when available; otherwise falls back
-    /// to a `lines`-based heuristic (with a minimum of 1 per included node),
-    /// so included content never estimates to zero.
+    /// Measured per-node projections when sources are readable (skeleton for
+    /// Lite/Custom `.rs`, comment-stripped for Compact — the same projections
+    /// the envelope renders); per-node fallbacks only when a source cannot be
+    /// read (included content never estimates to zero).
     pub fn estimate_tokens(&self) -> usize {
         self.graph
             .nodes
             .iter()
             .filter(|n| self.included.contains(&n.id))
-            .map(|node| estimate_context_node_tokens(node, &self.mode))
+            .map(|node| self.projected_tokens(node, &self.mode))
             .sum()
     }
 
@@ -216,7 +263,7 @@ impl ContextComposer {
                 nodes: nodes.len(),
                 tokens: nodes
                     .iter()
-                    .map(|node| estimate_context_node_tokens(node, &self.mode))
+                    .map(|node| self.projected_tokens(node, &self.mode))
                     .sum(),
                 files: nodes.iter().map(|node| node.files).sum(),
             })
@@ -248,7 +295,7 @@ impl ContextComposer {
                 continue;
             };
             bucket.nodes += 1;
-            bucket.tokens += estimate_context_node_tokens(node, &self.mode);
+            bucket.tokens += self.projected_tokens(node, &self.mode);
             bucket.files += node.files;
             if node.layer == NodeLayer::Code && node.inline_test_ranges > 0 {
                 production_files_with_inline_tests += 1;
@@ -271,52 +318,118 @@ impl ContextComposer {
             layers: self.layer_summaries(),
         }
     }
+
+    /// Per-node projected token count for `mode`, matching what the envelope
+    /// ships (`envelope.rs`) so the composer's cost view converges with the
+    /// shipped bytes instead of a blind fraction:
+    ///
+    /// - Lite/Custom `.rs` nodes: the measured skeleton (`extract_rust_skeleton`),
+    ///   the exact projection the envelope renders.
+    /// - Compact: the measured comment-stripped source
+    ///   (`estimate_content_tokens(reduce_source(...))`).
+    /// - non-`.rs` Lite/Custom nodes ship verbatim, so their measured
+    ///   scan-time count is used directly.
+    ///
+    /// The fractional constants (`SIGNATURE_FRACTION`,
+    /// `COMMENT_STRIPPED_FRACTION`) are now per-node fallbacks only,
+    /// consulted when a node's source file cannot be read — the same
+    /// fallback-only role they play in `context_fit::TierMeasurer`.
+    fn projected_tokens(&self, node: &Node, mode: &ContextMode) -> usize {
+        let total = estimate_node_tokens(node.tokens, node.lines);
+        let code_tokens = total.saturating_sub(node.inline_test_tokens);
+        match mode {
+            // Map: a compiled component-index artifact, not a per-node projection.
+            // Its real resident cost is measured by `evolve::map` and reported by
+            // the server; per node it contributes nothing to the composer estimate.
+            ContextMode::Map => 0,
+            // Lite: interface signatures only — the smallest useful tier.
+            // Custom selections also load at skeleton detail, so they cost the
+            // same. Exception: non-.rs sources have no skeleton and ship verbatim
+            // in both modes (see envelope.rs), so they cost their full content
+            // here too — the estimate must match what the envelope ships.
+            ContextMode::Lite | ContextMode::Custom => {
+                if node
+                    .path
+                    .as_deref()
+                    .is_some_and(|path| path.ends_with(".rs"))
+                {
+                    self.measured_or_fallback(
+                        node,
+                        ProjectionClass::Lite,
+                        |path, src| extract_rust_skeleton(path, src).token_count,
+                        (code_tokens as f64 * SIGNATURE_FRACTION).round() as usize,
+                    )
+                } else {
+                    code_tokens
+                }
+            }
+            // Compact: full code with comments stripped, for smaller models.
+            ContextMode::Compact => self.measured_or_fallback(
+                node,
+                ProjectionClass::Compact,
+                |_, src| estimate_content_tokens(&reduce_source(src)),
+                (code_tokens as f64 * COMMENT_STRIPPED_FRACTION).round() as usize,
+            ),
+            ContextMode::Full => code_tokens,
+            _ => total,
+        }
+    }
+
+    /// The measured projection for `node`, read from disk under `self.root`
+    /// and cached per (projection class, node id) so repeat estimates do not
+    /// re-read sources (mirrors `TierMeasurer`'s per-mode cache). The
+    /// per-node `fallback` is consulted only when the source cannot be read.
+    fn measured_or_fallback(
+        &self,
+        node: &Node,
+        class: ProjectionClass,
+        project: impl FnOnce(&Path, &str) -> usize,
+        fallback: usize,
+    ) -> usize {
+        let key = (class, node.id.clone());
+        if let Some(cached) = self.cache_lock().get(&key).copied() {
+            return cached;
+        }
+        let value = match node.path.as_deref() {
+            Some(rel) => match std::fs::read_to_string(self.root.join(rel)) {
+                Ok(src) => project(Path::new(rel), &src),
+                Err(_) => fallback,
+            },
+            None => fallback,
+        };
+        self.cache_lock().insert(key, value);
+        value
+    }
+
+    /// Lock the measurement cache, tolerating a panicked prior holder: the
+    /// cache is disposable, so a poisoned lock must never wedge estimates.
+    fn cache_lock(&self) -> MutexGuard<'_, HashMap<(ProjectionClass, String), usize>> {
+        self.projection_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 }
 
 fn estimate_node_tokens(tokens: usize, lines: usize) -> usize {
     if tokens > 0 {
         tokens
     } else {
+        // Per-node fallback for nodes the scan could not measure: a
+        // lines-times-factor estimate, floor 1 so included content never
+        // estimates to zero.
         (lines * TOKENS_PER_LINE).max(1)
     }
 }
 
-/// Fraction of a file's implementation tokens that its public-signature skeleton
-/// occupies — measured at ~18% across the tree (pub fn/struct/trait lines + doc).
+/// Per-node fallback: fraction of a file's implementation tokens that its
+/// public-signature skeleton occupies (measured tree-wide at ~18%). Used ONLY
+/// when a `.rs` node's source cannot be read for the measured skeleton —
+/// never as a live projection (see [`ContextComposer::projected_tokens`]).
 const SIGNATURE_FRACTION: f64 = 0.18;
-/// Fraction remaining after stripping comments — measured at ~82%.
+/// Per-node fallback: fraction remaining after stripping comments (measured
+/// at ~82%). Used ONLY when a node's source cannot be read for the measured
+/// comment-stripped projection — never as a live projection.
 const COMMENT_STRIPPED_FRACTION: f64 = 0.82;
-
-fn estimate_context_node_tokens(node: &Node, mode: &ContextMode) -> usize {
-    let total = estimate_node_tokens(node.tokens, node.lines);
-    let code_tokens = total.saturating_sub(node.inline_test_tokens);
-    match mode {
-        // Map: a compiled component-index artifact, not a per-node projection.
-        // Its real resident cost is measured by `evolve::map` and reported by the
-        // server; per node it contributes nothing to the composer estimate.
-        ContextMode::Map => 0,
-        // Lite: interface signatures only — the smallest useful tier.
-        // Custom selections also load at skeleton detail, so they cost the same.
-        // Exception: non-.rs sources have no skeleton and ship verbatim in both
-        // modes (see envelope.rs), so they cost their full content here too —
-        // the estimate must match what the envelope ships.
-        ContextMode::Lite | ContextMode::Custom => {
-            if node
-                .path
-                .as_deref()
-                .is_some_and(|path| path.ends_with(".rs"))
-            {
-                ((code_tokens as f64) * SIGNATURE_FRACTION).round() as usize
-            } else {
-                code_tokens
-            }
-        }
-        // Compact: full code with comments stripped, for smaller models.
-        ContextMode::Compact => ((code_tokens as f64) * COMMENT_STRIPPED_FRACTION).round() as usize,
-        ContextMode::Full => code_tokens,
-        _ => total,
-    }
-}
 
 #[cfg(test)]
 #[path = "../../tests/unit/evolve/context_custom_test.rs"]

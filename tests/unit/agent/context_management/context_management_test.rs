@@ -233,6 +233,99 @@ async fn test_structured_compression_preserves_task_anchor_and_tool_pairing() {
     server.stop().await;
 }
 
+/// Assert strict user/assistant role alternation: no two consecutive
+/// messages may share the user role (strict-alternation providers 400 on
+/// that shape), while XML tool-result-as-user messages still count as their
+/// own user-role turn.
+fn assert_strict_role_alternation(messages: &[Message]) {
+    for pair in messages.windows(2) {
+        assert!(
+            !(pair[0].role == "user" && pair[1].role == "user"),
+            "consecutive user-role messages at [{:#?}] -> [{:#?}]",
+            pair[0],
+            pair[1]
+        );
+    }
+}
+
+/// Review finding #3 (structured compaction boundary): the three boundary
+/// markers ([ORIGINAL TASK] / [STRUCTURED SUMMARY] / [RECENT CONTEXT]) were
+/// consecutive user-role messages. They must coalesce into one real user
+/// turn — while an XML tool-result user message in the recent window keeps
+/// its own `<tool_result>` envelope message (never merged into a real
+/// user turn).
+#[tokio::test]
+async fn test_structured_compression_boundary_alternates_strict_roles() {
+    let server = MockLlmServer::builder().build().await;
+    let mut agent = make_test_agent(&server).await;
+    agent.messages.clear();
+    agent.messages.push(Message::user("stale bootstrap line"));
+    agent
+        .messages
+        .push(Message::system("SYSTEM_MARKER: obey the rules"));
+    agent
+        .messages
+        .push(Message::user("STRUCT ALT TASK: refactor the parser"));
+    for i in 0..8 {
+        agent
+            .messages
+            .push(Message::user(format!("filler user {i}")));
+        agent
+            .messages
+            .push(Message::assistant(format!("filler assistant {i}")));
+    }
+    // Recent window (last 4): assistant, XML tool-result user, assistant,
+    // plain user turn. Payload fragments are inert markers.
+    let lt = "<";
+    let gt = ">";
+    let envelope_open = format!("{lt}tool_result{gt}");
+    let envelope_close = format!("{lt}/tool_result{gt}");
+    agent.messages.push(Message::assistant("recent a0"));
+    agent.messages.push(Message::user(format!(
+        "{envelope_open}keep me{envelope_close}"
+    )));
+    agent.messages.push(Message::assistant("recent a1"));
+    agent.messages.push(Message::user("final user turn"));
+
+    agent.compress_to_structured_summary(1);
+
+    assert_strict_role_alternation(&agent.messages);
+    let joined: String = agent
+        .messages
+        .iter()
+        .map(|m| m.content.text_all())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        joined.contains("STRUCT ALT TASK"),
+        "original task must survive: {joined}"
+    );
+    assert!(
+        joined.contains("STRUCTURED SUMMARY"),
+        "summary marker must survive (coalesced, not dropped): {joined}"
+    );
+    assert!(
+        joined.contains("SYSTEM_MARKER"),
+        "real system prompt must survive: {joined}"
+    );
+    assert!(
+        !joined.contains("stale bootstrap line"),
+        "bootstrap line before the system prompt must be compacted away: {joined}"
+    );
+    // The XML tool-result user message survives as its own envelope message.
+    let tool_result = agent
+        .messages
+        .iter()
+        .find(|m| m.content.text_all().contains("keep me"))
+        .unwrap_or_else(|| panic!("tool-result content must survive: {joined}"));
+    assert_eq!(tool_result.role, "user");
+    assert!(
+        tool_result.content.text().starts_with(&envelope_open),
+        "tool-result must keep its own unmerged envelope message: {joined}"
+    );
+    server.stop().await;
+}
+
 // =====================================================================
 // format_file_size  (pure static method -- no Agent needed)
 // =====================================================================

@@ -1217,10 +1217,15 @@ To call a tool, use this EXACT XML structure:
         };
         prompt_builder.add_dynamic(move || memory_section.clone());
 
+        // Workspace guidance files (AGENTS.md / CLAUDE.md / .claude.md) are
+        // injected as UNTRUSTED DATA: the formatter below always wraps them
+        // in an explicit demarcation frame plus a safety-priority directive,
+        // so cloned-repo content can configure task behavior but can never
+        // masquerade as authoritative prompt instructions.
         let workspace_guidance_files = MemorySystem::discover_workspace_guidance(&cwd);
         let workspace_guidance_section = if !workspace_guidance_files.is_empty() {
             let section =
-                MemorySystem::format_workspace_guidance_for_prompt(&workspace_guidance_files);
+                MemorySystem::format_workspace_guidance_for_prompt(&workspace_guidance_files, &cwd);
             info!(
                 "Injected {} workspace guidance file(s) into system prompt",
                 workspace_guidance_files.len()
@@ -2131,8 +2136,14 @@ To call a tool, use this EXACT XML structure:
 
         let messages = vec![
             crate::api::types::Message::system(synthesis_prompt),
-            crate::api::types::Message::user(format!("Reference project data:\n{}", context_data)),
-            crate::api::types::Message::user(task.to_string()),
+            // One user message, not two: the reference data and the task used
+            // to arrive as consecutive user-role messages, which strict
+            // role-alternation providers reject with a 400. The task stays
+            // last so the model answers it after reading the data.
+            crate::api::types::Message::user(format!(
+                "Reference project data:\n{}\n\n{}",
+                context_data, task
+            )),
         ];
 
         // No tools, no streaming — just a direct completion
@@ -2675,7 +2686,25 @@ To call a tool, use this EXACT XML structure:
 
     /// Push a user-role message into the conversation (chat `!cmd` shell
     /// passthrough output, operator notes) so the next turn sees it.
+    ///
+    /// Strict role-alternation providers reject consecutive same-role
+    /// messages, so a new plain user turn coalesces into the previous one
+    /// when the conversation already ends on a plain user message. XML
+    /// tool-result user messages (the deliberate role=user convention of
+    /// text tool-calling mode) are never merged into — the
+    /// `tool_use`/`tool_result` pairing must keep its own message.
     pub fn push_user_message(&mut self, content: String) {
+        if let Some(last) = self.messages.last_mut() {
+            if last.role == "user"
+                && last.content.image_count() == 0
+                && !last.content.text().contains("<tool_result>")
+            {
+                let prev = last.content.text().to_string();
+                last.content =
+                    crate::api::types::MessageContent::Text(format!("{prev}\n\n{content}"));
+                return;
+            }
+        }
         self.messages
             .push(crate::api::types::Message::user(content));
     }

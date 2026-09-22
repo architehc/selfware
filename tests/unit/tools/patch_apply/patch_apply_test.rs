@@ -124,6 +124,81 @@ async fn test_deletion_with_parent_escape_rejected() {
     );
 }
 
+// ── Symlink (mode 120000) rejection (pass-3) ──
+
+#[test]
+fn test_diff_touches_symlink_mode_detection() {
+    // Creation of a symlink whose target is a sensitive host path.
+    assert!(diff_touches_symlink_mode(
+        "--- /dev/null\n+++ b/evil\nnew file mode 120000\n@@ -0,0 +1 @@\n+link:/etc/shadow\n",
+    ));
+    // Mode conversion of an existing file into a symlink.
+    assert!(diff_touches_symlink_mode(
+        "old mode 100644\nnew mode 120000\n"
+    ));
+    // Retargeting an existing symlink (deliberately denied too).
+    assert!(diff_touches_symlink_mode(
+        "old mode 120000\nnew mode 120000\n"
+    ));
+    // Regular file modes never match.
+    assert!(!diff_touches_symlink_mode("new file mode 100644\n"));
+    assert!(!diff_touches_symlink_mode(
+        "old mode 100644\nnew mode 100755\n"
+    ));
+    assert!(!diff_touches_symlink_mode(
+        "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
+    ));
+}
+
+#[tokio::test]
+async fn test_symlink_creation_diff_rejected() {
+    let diff =
+        "--- /dev/null\n+++ b/evil\nnew file mode 120000\n@@ -0,0 +1 @@\n+link:/etc/shadow\n";
+    let result = PatchApply.execute(serde_json::json!({"diff": diff})).await;
+    let err = result.expect_err("symlink-creating diff must be refused");
+    assert!(
+        err.to_string().contains("symlink"),
+        "error must name symlinks: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_existing_file_converted_to_symlink_rejected() {
+    let diff = "diff --git a/conf b/conf\nold mode 100644\nnew mode 120000\nindex 111..222 100644\n--- a/conf\n+++ b/conf\n@@ -1 +1 @@\n-x\n+link:/etc/shadow\n";
+    let result = PatchApply.execute(serde_json::json!({"diff": diff})).await;
+    let err = result.expect_err("mode-converting diff must be refused");
+    assert!(
+        err.to_string().contains("symlink"),
+        "error must name symlinks: {err}"
+    );
+}
+
+/// The symlink guard must not break the tool's normal job: a regular
+/// file-creation diff still applies end-to-end (real `git apply` in an
+/// isolated temp repo). Run under `CwdGuard` because the tool applies
+/// relative to the process cwd.
+#[tokio::test]
+async fn test_regular_file_creation_diff_still_applies() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+
+    let diff = "diff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+hello world\n";
+    let _state = crate::test_support::CwdGuard::enter(&repo);
+    let result = PatchApply.execute(serde_json::json!({"diff": diff})).await;
+    let value = result.expect("regular file-creation diff must apply");
+    assert_eq!(value["files_changed"], 1);
+    assert_eq!(
+        std::fs::read_to_string(repo.join("new.txt")).unwrap(),
+        "hello world\n"
+    );
+}
+
 /// Regression (review finding P1): `git apply` runs against project-controlled
 /// diffs, so the constructed command must not inherit host credentials. A
 /// pass-through `git` stub (intercepted only when a sentinel arg is present,

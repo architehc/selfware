@@ -8,14 +8,21 @@ use tracing::{debug, info, warn};
 /// Per-message overhead tokens (role header, formatting, separators).
 const MESSAGE_OVERHEAD_TOKENS: usize = 4;
 
-/// Advance a tail start index past any leading `role == "tool"` messages so
-/// the kept tail never begins on an orphan tool result (whose matching
-/// assistant tool_call was compacted away). Those leading tool results move
-/// into the summarized/dropped region instead, keeping tool-call pairs
-/// intact and avoiding unpaired-tool_calls 400s.
+/// Advance a tail start index past any leading `role == "tool"` messages and
+/// any leading XML tool-result user messages (`<tool_result>` markup) so the
+/// kept tail never begins on an orphan tool result (whose matching assistant
+/// tool_call was compacted away). Those leading tool results move into the
+/// summarized/dropped region instead, keeping tool-call pairs intact and
+/// avoiding unpaired-tool_calls 400s. Skipping the XML tool-result USER
+/// variant is also required by the strict role-alternation guarantee: the
+/// boundary marker must never sit directly before a tool-result user message,
+/// because coalescing would break the tool_use/tool_result pairing.
 fn safe_tail_start(messages: &[Message], desired: usize) -> usize {
     let mut start = desired.min(messages.len());
-    while start < messages.len() && messages[start].role == "tool" {
+    while start < messages.len()
+        && (messages[start].role == "tool"
+            || super::Agent::is_tool_result_user_message(&messages[start]))
+    {
         start += 1;
     }
     start
@@ -194,6 +201,13 @@ impl ContextCompressor {
         // Keep messages in chronological order (recent_msgs is already chronological)
         compressed.extend(recent_msgs);
 
+        // The boundary markers above are up to FOUR consecutive user-role
+        // messages; strict role-alternation providers reject that shape with
+        // a 400. Coalesce adjacent PLAIN user turns (never XML tool-result
+        // user messages — `safe_tail_start` keeps those out of the window
+        // opening) so the rebuilt boundary alternates.
+        let compressed = super::Agent::coalesce_adjacent_user_turns(compressed);
+
         // Tool-call pairing invariants: `safe_tail_start` already stops the
         // recent window from OPENING on an orphan tool result, but a dangling
         // assistant `tool_calls` at the TAIL (e.g. an interrupted final turn)
@@ -242,27 +256,47 @@ impl ContextCompressor {
         // Preserve the original task objective (the first user message) so an
         // emergency compaction doesn't make the model forget the task on a long run.
         let tail_start = messages.len().saturating_sub(3);
-        if let Some((idx, task_msg)) = messages.iter().enumerate().find(|(_, m)| m.role == "user") {
-            if idx < tail_start {
-                result.push(Message::user(format!(
-                    "[Original task, preserved across compression]:\n{}",
-                    task_msg.content.text()
-                )));
-            }
-        }
+        let task_text = messages
+            .iter()
+            .enumerate()
+            .find(|(idx, m)| *idx < tail_start && m.role == "user")
+            .map(|(_, m)| m.content.text().to_string());
 
-        // Add a note about compression
-        result.push(Message::user(
-            "[Earlier context was compressed due to length limits]",
-        ));
+        // ONE boundary message combining the task anchor and the compression
+        // note. The previous shape emitted two consecutive user-role markers
+        // (plus the trailing continue prompt); strict role-alternation
+        // providers reject consecutive same-role messages, so the markers are
+        // folded together at source instead.
+        result.push(Message::user(match task_text {
+            Some(task) => format!(
+                "[Original task, preserved across compression]:\n{task}\n\n\
+                 [Earlier context was compressed due to length limits]"
+            ),
+            None => "[Earlier context was compressed due to length limits]".to_string(),
+        }));
 
         // Keep only last few messages (must end with user for next assistant response)
         let start = safe_tail_start(messages, messages.len().saturating_sub(3));
-        for msg in &messages[start..] {
+        for (i, msg) in messages[start..].iter().enumerate() {
             // Skip if this would create consecutive assistants
             if let Some(last) = result.last() {
                 if last.role == "assistant" && msg.role == "assistant" {
                     continue; // Skip duplicate assistant
+                }
+            }
+            // Fold a leading real user turn into the boundary message so the
+            // tail cannot open on two consecutive user-role messages. XML
+            // tool-result user messages and image-bearing turns are never
+            // folded (the tool_use/tool_result pairing must keep its own
+            // user message).
+            if i == 0 && super::Agent::is_mergeable_user_turn(msg) {
+                if let Some(last) = result.last_mut() {
+                    let prev = last.content.text().to_string();
+                    last.content = crate::api::types::MessageContent::Text(format!(
+                        "{prev}\n\n{}",
+                        msg.content.text()
+                    ));
+                    continue;
                 }
             }
             result.push(msg.clone());

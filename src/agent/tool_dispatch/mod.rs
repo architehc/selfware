@@ -3389,6 +3389,34 @@ impl Agent {
         }
     }
 
+    /// Escape untrusted tool-result content before it is placed inside the
+    /// `<tool_result>` envelope used by text tool-calling mode. A result may
+    /// carry tag-shaped text of its own; without escaping it could close the
+    /// envelope early and present its own markup as a tool call (a
+    /// prompt-injection breakout). The native/JSON tool path needs no such
+    /// escape — serde_json quoting already keeps the value opaque.
+    fn escape_xml_result_content(content: &str) -> String {
+        content
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    }
+
+    /// Wrap a tool result in the XML envelope for text tool-calling mode,
+    /// escaping the (untrusted) content first so it cannot break out of the
+    /// tag. The envelope itself stays literal: downstream consumers (the
+    /// synthesis tool-history strip, checkpoint restore, critical-message
+    /// detection) parse the literal tags and never see raw `<` inside the
+    /// content.
+    fn format_xml_tool_result(content: &str, success: bool) -> String {
+        let escaped = Self::escape_xml_result_content(content);
+        if success {
+            format!("<tool_result>{escaped}</tool_result>")
+        } else {
+            format!("<tool_result><error>{escaped}</error></tool_result>")
+        }
+    }
+
     pub(super) async fn push_tool_result_message(
         &mut self,
         use_native_fc: bool,
@@ -3491,14 +3519,9 @@ impl Agent {
             };
             self.messages.push(Message::tool(result_json, call_id));
         } else {
-            let formatted = if success {
-                format!("<tool_result>{}</tool_result>", result_to_store)
-            } else {
-                format!(
-                    "<tool_result><error>{}</error></tool_result>",
-                    result_to_store
-                )
-            };
+            // XML path: escape the (untrusted) result content so it cannot
+            // break out of the envelope or synthesize tool markup of its own.
+            let formatted = Self::format_xml_tool_result(&result_to_store, success);
             self.messages.push(Message::user(formatted));
         }
     }

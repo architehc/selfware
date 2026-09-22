@@ -109,12 +109,25 @@ impl RSIOrchestrator {
         };
         // Restore previous state if available.
         if let Ok(state) = orch.load_state() {
+            // Decay the stored failure streak on load instead of carrying it
+            // across verbatim. A state file saved on a tripped breaker
+            // (5 consecutive failures) would otherwise re-abort iteration 1 of
+            // every future run: the first non-improving cycle would trip the
+            // breaker again instantly, locking the loop across restarts until
+            // the state file is deleted by hand. Halving preserves the
+            // breaker's hysteresis — a transient bad run ages out
+            // geometrically, while a persistently broken environment still
+            // re-engages the breaker within two or three failures, keeping
+            // the paid-suite budget protection.
+            let loaded = state.consecutive_failures;
+            let decayed = loaded / 2;
             info!(
-                "Restored RSI state: {} iterations completed, {} consecutive failures",
-                state.total_iterations, state.consecutive_failures
+                "Restored RSI state: {} iterations completed; failure streak {} decayed to {} \
+                 on restart so a tripped breaker cannot instantly re-abort the loop",
+                state.total_iterations, loaded, decayed
             );
             orch.total_iterations = state.total_iterations;
-            orch.consecutive_failures = state.consecutive_failures;
+            orch.consecutive_failures = decayed;
         }
         orch
     }
@@ -965,13 +978,21 @@ pub fn parse_benchmark_report(tsv_content: &str) -> std::result::Result<Benchmar
 /// the paid e2e evaluation is skipped for it.
 ///
 /// Heuristic (deliberately conservative): compare each edited file's content
-/// in the project root vs the sandbox after dropping blank lines and lines
-/// that consist ENTIRELY of a comment/doc marker (`//…`, `///…`, `//!…`,
-/// `/*…`, `*…`, `--…`, plus `#…` only in file types where `#` is a comment —
-/// in Rust, `#` starts an attribute and counts as code). Inline trailing
-/// comments are NOT stripped, so a line mixing code and comment still counts
-/// as code — when in doubt we evaluate (false "non-trivial" only costs one
-/// cycle's evaluation; a false "trivial" would silently skip a real change).
+/// in the project root vs the sandbox after dropping blank lines, lines that
+/// consist ENTIRELY of a comment/doc marker (`//…`, `///…`, `//!…`, `/*…`,
+/// `*…`, `--…`, plus `#…` only in file types where `#` is a comment — in Rust,
+/// `#` starts an attribute and counts as code), AND inline trailing `//`
+/// comments (string-literal aware, so `let u = "http://a/b";` keeps its code
+/// content). Stripping the inline comment is what makes a TODO/FIXME marker
+/// rewrite on a code-bearing line classify as trivial: the marker text lives
+/// inside the trailing comment, so old and new compare equal once comment text
+/// is removed.
+///
+/// A line mixing code and a changed comment still counts as code whenever the
+/// CODE changed — only comment-text-only diffs compare equal. When in doubt we
+/// evaluate: a false "trivial" would silently skip a real change, and the
+/// stripper's corners (lifetimes, raw strings) are arranged to err towards
+/// NOT stripping.
 fn mutation_is_trivial(project_root: &Path, sandbox_dir: &Path, edited_files: &[String]) -> bool {
     if edited_files.is_empty() {
         return true;
@@ -995,12 +1016,15 @@ fn mutation_is_trivial(project_root: &Path, sandbox_dir: &Path, edited_files: &[
 }
 
 /// The content lines of `content` with blank lines and whole-line comments
-/// removed — see [`mutation_is_trivial`] for the exact stripping rules.
+/// removed, then an inline `//` comment stripped from every remaining line —
+/// see [`mutation_is_trivial`] for the exact stripping rules.
 fn code_lines(content: &str, strip_hash: bool, strip_asterisk: bool) -> Vec<&str> {
-    // Delegates to the shared predicate so this gate and the target scanner in
-    // `self_edit::scan_code_quality` cannot drift apart on what counts as code.
+    // Delegates to the shared predicate (plus the shared inline stripper) so
+    // this gate and the target scanner in `self_edit::scan_code_quality`
+    // cannot drift apart on what counts as code.
     content
         .lines()
+        .map(crate::cognitive::self_edit::strip_inline_comment)
         .map(str::trim)
         .filter(|line| {
             !crate::cognitive::self_edit::line_is_non_code(line, strip_hash, strip_asterisk)

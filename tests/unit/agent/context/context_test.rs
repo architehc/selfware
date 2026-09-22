@@ -601,3 +601,194 @@ async fn test_compress_summarize_preserves_task_anchor_and_pairing() {
     );
     server.stop().await;
 }
+
+/// Assert a message list alternates user/assistant roles strictly: no two
+/// consecutive messages may share the user role (providers enforce this
+/// with a 400), while tool-result-as-user messages still count as their own
+/// user-role turn.
+fn assert_strict_role_alternation(messages: &[Message]) {
+    for pair in messages.windows(2) {
+        assert!(
+            !(pair[0].role == "user" && pair[1].role == "user"),
+            "consecutive user-role messages at [{:#?}] -> [{:#?}]",
+            pair[0],
+            pair[1]
+        );
+    }
+}
+
+/// Review finding #3 (summarize path): the boundary markers
+/// ([ORIGINAL TASK] / [CONTEXT SUMMARY] / [RECENT CONTEXT] / continue) were
+/// up to four consecutive user-role messages. They must now coalesce into
+/// one real user turn so strict role-alternation providers accept the
+/// rebuilt history.
+#[tokio::test]
+async fn test_compress_boundary_alternates_strict_roles() {
+    let server = crate::testing::mock_api::MockLlmServer::builder()
+        .with_response("Summary of earlier work")
+        .build()
+        .await;
+    let config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
+    let client = ApiClient::new(&config).unwrap();
+    let compressor = ContextCompressor::new(1_000_000);
+
+    let mut messages = vec![
+        Message::system("sys"),
+        Message::user(format!(
+            "ALTERNATION TASK SENTINEL: audit the codebase {}",
+            "x".repeat(300)
+        )),
+    ];
+    for i in 0..10 {
+        messages.push(Message::user(format!("filler user {i}")));
+        messages.push(Message::assistant(format!("filler assistant {i}")));
+    }
+    // Recent window (last 6): [.., assistant, plain user turn].
+    messages.push(Message::assistant("recent a0"));
+    messages.push(Message::user("recent u0"));
+
+    let (compressed, _usage) = compressor.compress(&client, &messages).await.unwrap();
+    let joined = compressed
+        .iter()
+        .map(|m| m.content.text_all())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert_strict_role_alternation(&compressed);
+    assert!(
+        joined.contains("ALTERNATION TASK SENTINEL"),
+        "original task must survive: {joined}"
+    );
+    assert!(
+        joined.contains("[RECENT CONTEXT]") && joined.contains("Based on the above summary"),
+        "boundary markers must remain present (coalesced, not dropped): {joined}"
+    );
+    server.stop().await;
+}
+
+/// Review finding #3 (summarize path, XML tool-calling mode): a tool-result
+/// user message must never be merged into the boundary markers — the
+/// `<tool_result>` envelope keeps its own role=user message — and the recent
+/// window may not OPEN on one (its assistant tool_use partner sat outside
+/// the window). `safe_tail_start` skips it into the summarized region, so
+/// the boundary always alternates.
+#[tokio::test]
+async fn test_compress_boundary_xml_tool_result_never_merged() {
+    let server = crate::testing::mock_api::MockLlmServer::builder()
+        .with_response("Summary of earlier work")
+        .build()
+        .await;
+    let config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
+    let client = ApiClient::new(&config).unwrap();
+    let compressor = ContextCompressor::new(1_000_000);
+
+    let mut messages = vec![
+        Message::system("sys"),
+        Message::user(format!(
+            "XML TOOL TASK SENTINEL: audit the codebase {}",
+            "x".repeat(300)
+        )),
+    ];
+    for i in 0..8 {
+        messages.push(Message::user(format!("filler user {i}")));
+        messages.push(Message::assistant(format!("filler assistant {i}")));
+    }
+    // The final six messages: the window's opening message is a tool-result
+    // user message whose assistant tool_use partner lies OUTSIDE the window.
+    // Payload fragments are inert markers, not hostile text.
+    let lt = "<";
+    let gt = ">";
+    let envelope_open = format!("{lt}tool_result{gt}");
+    let envelope_close = format!("{lt}/tool_result{gt}");
+    messages.push(Message::user(format!(
+        "{envelope_open}alpha{envelope_close}"
+    )));
+    messages.push(Message::assistant("recent a0"));
+    messages.push(Message::user(format!(
+        "{envelope_open}beta{envelope_close}"
+    )));
+    messages.push(Message::assistant("recent a1"));
+    messages.push(Message::user("final user 1"));
+    messages.push(Message::user("final user 2"));
+
+    let (compressed, _usage) = compressor.compress(&client, &messages).await.unwrap();
+    let joined = compressed
+        .iter()
+        .map(|m| m.content.text_all())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert_strict_role_alternation(&compressed);
+    // The window-opening orphan tool-result is summarized away (its partner
+    // was compacted out), while the tool-result INSIDE the window survives
+    // as its own unmerged user-role message.
+    assert!(
+        !joined.contains("alpha"),
+        "window-opening orphan tool-result must be skipped into the summary region: {joined}"
+    );
+    let beta = compressed
+        .iter()
+        .find(|m| m.content.text_all().contains("beta"))
+        .unwrap_or_else(|| panic!("tool-result content must survive: {joined}"));
+    assert_eq!(beta.role, "user");
+    assert!(
+        beta.content.text().starts_with(&envelope_open),
+        "tool-result must keep its own envelope message, unmerged: {joined}"
+    );
+    // The two plain final turns coalesce into one (they were consecutive
+    // user messages in the fixture).
+    assert!(
+        joined.contains("final user 1\n\nfinal user 2"),
+        "adjacent plain user turns must coalesce: {joined}"
+    );
+    server.stop().await;
+}
+
+/// The coalescer itself must never touch XML tool-result user messages or
+/// image-bearing user messages, only plain text user turns.
+#[test]
+fn test_coalesce_adjacent_user_turns_preserves_tool_results() {
+    let lt = "<";
+    let gt = ">";
+    let envelope_open = format!("{lt}tool_result{gt}");
+    let envelope_close = format!("{lt}/tool_result{gt}");
+    let messages = vec![
+        Message::user("plain a"),
+        Message::user("plain b"),
+        Message::user(format!("{envelope_open}result{envelope_close}")),
+        Message::assistant("assistant reply"),
+        Message::user("plain c"),
+        Message::user("plain d"),
+    ];
+
+    let coalesced = crate::agent::Agent::coalesce_adjacent_user_turns(messages);
+
+    assert_eq!(coalesced.len(), 4);
+    assert_eq!(coalesced[0].role, "user");
+    assert_eq!(coalesced[0].content.text(), "plain a\n\nplain b");
+    assert_eq!(
+        coalesced[1].content.text(),
+        format!("{envelope_open}result{envelope_close}")
+    );
+    assert_eq!(coalesced[2].role, "assistant");
+    assert_eq!(coalesced[3].content.text(), "plain c\n\nplain d");
+}
+
+/// `safe_tail_start` must skip both native (`role = "tool"`) orphan results
+/// AND XML tool-result user messages when picking the recent-window opening.
+#[test]
+fn test_safe_tail_start_skips_xml_tool_result_user_messages() {
+    let lt = "<";
+    let gt = ">";
+    let envelope_open = format!("{lt}tool_result{gt}");
+    let envelope_close = format!("{lt}/tool_result{gt}");
+    let messages = vec![
+        Message::user("plain u"),
+        Message::tool("native result", "call_1"),
+        Message::user(format!("{envelope_open}xml result{envelope_close}")),
+        Message::assistant("recent a"),
+        Message::user("recent u"),
+    ];
+
+    assert_eq!(super::safe_tail_start(&messages, 1), 3);
+}

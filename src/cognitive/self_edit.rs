@@ -667,9 +667,12 @@ impl SelfEditOrchestrator {
                         // as comment text, and `mutation_is_trivial` discards a
                         // comment-only diff before evaluation — proposing it
                         // spends a cycle to learn nothing, and the target stays
-                        // eligible for the next cycle. Only a marker sharing its
-                        // line with code is a mutation that can reach
-                        // evaluation. (`.rs` files only: `glob_rs_files`.)
+                        // eligible for the next cycle. Markers that share their
+                        // line with code stay proposable, but their rewrite is
+                        // comment-text-only too, so the same gate (now with
+                        // inline-comment stripping) skips them as trivial before
+                        // any paid suite runs. (`.rs` files only:
+                        // `glob_rs_files`.)
                         if line_is_non_code(line, false, false) {
                             continue;
                         }
@@ -751,9 +754,10 @@ fn glob_rs_files(dir: &Path) -> Result<Vec<PathBuf>> {
 /// Rust, where `#` opens an attribute and `*` dereferences).
 ///
 /// The single source of truth behind both `rsi_orchestrator::code_lines` (the
-/// trivial-diff gate) and `scan_code_quality`, which must not propose a marker
-/// rewrite that gate would then discard as comment-only. An inline trailing
-/// comment does NOT make a line non-code, so `42 // TODO: x` is a real mutation.
+/// trivial-diff gate) and `scan_code_quality`. An inline trailing comment does
+/// NOT make a line non-code, so `42 // TODO: x` is proposable — but its marker
+/// rewrite is comment-text-only, which the gate's inline stripping classifies
+/// as trivial before any paid suite runs.
 pub(crate) fn line_is_non_code(line: &str, strip_hash: bool, strip_asterisk: bool) -> bool {
     let line = line.trim();
     line.is_empty()
@@ -762,6 +766,67 @@ pub(crate) fn line_is_non_code(line: &str, strip_hash: bool, strip_asterisk: boo
         || line.starts_with("/*")
         || (strip_asterisk && line.starts_with('*'))
         || line.starts_with("--")
+}
+
+/// Drop a trailing `//` line comment from `line`, returning the code prefix
+/// (right-trimmed). `//` sequences inside string or char literals are left
+/// intact, so `let url = "http://a/b";` is untouched — that keeps code that
+/// differs only inside a string literal from comparing equal after stripping.
+///
+/// This is what lets the trivial-mutation gate see the *code* content of a
+/// line that also carries an inline comment: a mutation that only rewrites
+/// comment text (e.g. a TODO marker rewrite) then compares equal and is
+/// skipped before any paid suite runs.
+///
+/// Corners err towards NOT stripping (the evaluate direction), never towards
+/// stripping real code: a Rust lifetime (`&'a str`) leaves the char-literal
+/// state open until the next `'`, so a `//` on such a line is not stripped;
+/// raw strings are not escaped like normal strings, so a `\` inside one leaves
+/// the string state open and shields any following `//`. Both misreadings can
+/// only cost one cycle's evaluation, never silently skip a real change.
+pub(crate) fn strip_inline_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut escaped = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        if b == b'\\' {
+            escaped = true;
+            i += 1;
+            continue;
+        }
+        if in_string {
+            if b == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_char {
+            if b == b'\'' {
+                in_char = false;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'\'' => in_char = true,
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                return line[..i].trim_end();
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    line
 }
 
 fn parse_line_hint(description: &str) -> Option<usize> {

@@ -188,6 +188,51 @@ impl Agent {
             .collect()
     }
 
+    /// A user-role message in text tool-calling mode that carries a tool
+    /// result. XML tool results are DELIBERATELY role=user (see
+    /// `tool_dispatch::push_tool_result_message`): merging one into a real
+    /// user turn would break the `tool_use`/`tool_result` pairing those
+    /// endpoints validate, so alternation fixes must never touch them.
+    pub(super) fn is_tool_result_user_message(message: &Message) -> bool {
+        message.role == "user" && message.content.text().contains("<tool_result>")
+    }
+
+    /// Whether a user message is a plain real user turn that is safe to
+    /// coalesce with an adjacent one: text-only, and NOT an XML tool result.
+    pub(super) fn is_mergeable_user_turn(message: &Message) -> bool {
+        message.role == "user"
+            && message.content.image_count() == 0
+            && !Self::is_tool_result_user_message(message)
+    }
+
+    /// Coalesce adjacent real user turns so strict role-alternation
+    /// providers (which reject consecutive same-role messages with a 400)
+    /// accept the rebuilt boundary. Only PLAIN text-only user messages are
+    /// merged (later message's text appended after a separator, order
+    /// preserved); XML tool-result user messages and image-bearing
+    /// multimodal user messages always keep their own message. Callers
+    /// guarantee via `safe_tail_start`-style windowing that a tool-result
+    /// user message is never the FIRST kept tail message, so the boundary
+    /// can always alternate.
+    pub(super) fn coalesce_adjacent_user_turns(messages: Vec<Message>) -> Vec<Message> {
+        let mut out: Vec<Message> = Vec::with_capacity(messages.len());
+        for message in messages {
+            let prev_is_mergeable = out
+                .last()
+                .map(Self::is_mergeable_user_turn)
+                .unwrap_or(false);
+            if prev_is_mergeable && Self::is_mergeable_user_turn(&message) {
+                let prev_text = out.last().unwrap().content.text().to_string();
+                let next_text = message.content.text();
+                out.last_mut().unwrap().content =
+                    crate::api::types::MessageContent::Text(format!("{prev_text}\n\n{next_text}"));
+                continue;
+            }
+            out.push(message);
+        }
+        out
+    }
+
     /// Per-message truncation cap for the over-budget fallback: 3/4 of the
     /// conversation budget, floored at 50K. A flat 50K silently destroyed
     /// deliberately injected large context — a 780K evolve-graph pack on a
@@ -786,7 +831,15 @@ impl Agent {
                 .cloned()
                 .or_else(|| self.messages.first().cloned());
             let messages_before = self.messages.len();
-            let recent: Vec<_> = self
+            // Keep the window from OPENING on a message whose role/partner
+            // was compacted away. `apply_tool_call_pair_invariants` below
+            // handles `role = "tool"` results, but the XML tool-calling
+            // convention carries results as role=user (`<tool_result>`
+            // markup); a tool-result USER message at the window start would
+            // sit directly after the boundary marker and cannot be coalesced
+            // (merging breaks the tool_use/tool_result pairing). Skip past
+            // it so the boundary always opens on a plain role.
+            let mut recent: Vec<Message> = self
                 .messages
                 .iter()
                 .rev()
@@ -796,6 +849,12 @@ impl Agent {
                 .into_iter()
                 .rev()
                 .collect();
+            while recent
+                .first()
+                .is_some_and(Self::is_tool_result_user_message)
+            {
+                recent.remove(0);
+            }
             let compressed_count = messages_before
                 .saturating_sub(recent.len())
                 .saturating_sub(usize::from(system_msg.is_some()));
@@ -830,13 +889,16 @@ impl Agent {
                 .push(crate::api::types::Message::user("[RECENT CONTEXT]:"));
             self.messages.extend(recent);
 
-            // The recent window can split a tool-call pair (assistant with
-            // tool_calls whose results were dropped, or tool results whose
-            // assistant message fell outside the window). Providers 400 on
-            // orphaned sequences — enforce the invariants like trim does
+            // The boundary markers above are three consecutive user-role
+            // messages; strict role-alternation providers reject that shape
+            // with a 400. Coalesce adjacent PLAIN user turns (never XML
+            // tool-result user messages) so the rebuilt boundary alternates,
+            // then enforce the tool-call pairing invariants like trim does
             // (review round 7).
-            self.messages =
-                Self::apply_tool_call_pair_invariants(std::mem::take(&mut self.messages));
+            let mut rebuilt =
+                Self::coalesce_adjacent_user_turns(std::mem::take(&mut self.messages));
+            rebuilt = Self::apply_tool_call_pair_invariants(rebuilt);
+            self.messages = rebuilt;
         }
     }
 
