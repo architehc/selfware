@@ -1976,3 +1976,136 @@ async fn test_start_returns_error_when_process_exits_zero_immediately() {
         err_msg
     );
 }
+
+/// Whether a unix pid is still alive (kill -0 probe).
+#[cfg(unix)]
+fn pid_is_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Poll until the pid dies, returning false if it is still alive after `deadline`.
+#[cfg(unix)]
+async fn wait_until_pid_dead(pid: u32, wait: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + wait;
+    while std::time::Instant::now() < deadline {
+        if !pid_is_alive(pid) {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    !pid_is_alive(pid)
+}
+
+/// Regression (2026-09-21 review): after an auto-restart, the managed process
+/// must still hold a live handle to the RESTARTED child, so `stop()` can kill
+/// it. The pre-fix code pointed `proc.child_handle` at the spawn handle that
+/// the restart path then emptied with `take()`, so every later kill path
+/// found `None`, skipped the kill, and the restarted process kept running
+/// behind a `Stopped` record.
+///
+/// The script is generation-aware: the first generation exits immediately
+/// (triggering the auto-restart); every later generation — the config is
+/// cloned verbatim for restarts — reads the marker file and execs a long
+/// sleep, so `stop()` has a live restarted pid to prove is really gone.
+#[tokio::test]
+#[cfg(unix)]
+async fn test_auto_restart_then_stop_kills_the_restarted_process() {
+    let manager = ProcessManager::new();
+    let marker = std::env::temp_dir().join(format!("sw_w2_pm_gen_{}", std::process::id()));
+    let _ = std::fs::remove_file(&marker);
+
+    let script = format!(
+        "g='{}'; if [ -f \"$g\" ] && [ \"$(cat \"$g\")\" = 1 ]; then exec sleep 300; fi; printf 1 > \"$g\"; exit 0",
+        marker.display()
+    );
+
+    let config = ProcessConfig {
+        id: "auto-restart-kill-test".to_string(),
+        command: "sh".to_string(),
+        args: vec!["-c".to_string(), script],
+        cwd: None,
+        env: HashMap::new(),
+        health_check_pattern: None,
+        health_check_timeout_secs: None,
+        expected_port: None,
+        auto_restart: true,
+        max_restart_attempts: 1,
+    };
+
+    // Generation 1 exits immediately, so start() reports it as Crashed — but
+    // the monitor task is already running and must auto-restart it. Ignore
+    // the Err; the entry stays in the map.
+    let _ = manager.start(config).await;
+    let _ = std::fs::remove_file(&marker);
+
+    // Wait for the auto-restart to complete (restart_count >= 1 and a new
+    // pid in Running state).
+    let mut restarted_pid = None;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
+        if let Ok(summary) = manager.get("auto-restart-kill-test").await {
+            if summary.restart_count >= 1
+                && matches!(
+                    summary.status,
+                    ProcessStatus::Running | ProcessStatus::Starting
+                )
+                && summary.pid.is_some()
+            {
+                restarted_pid = summary.pid;
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let restarted_pid = restarted_pid.expect("auto-restart must complete within 20s");
+    assert!(
+        pid_is_alive(restarted_pid),
+        "restarted pid {} should be alive before stop",
+        restarted_pid
+    );
+
+    // The managed process must hold a LIVE handle to the restarted child —
+    // this is the exact pre-fix failure: the handle wrapped None.
+    {
+        let processes = manager.processes.read().await;
+        let proc = processes
+            .get("auto-restart-kill-test")
+            .expect("process entry must survive the restart");
+        let handle = proc
+            .child_handle
+            .as_ref()
+            .expect("child_handle must be set after auto-restart");
+        assert!(
+            handle.read().await.is_some(),
+            "restarted child must still be killable through the managed process handle"
+        );
+    }
+
+    // Stop must now actually kill the restarted process.
+    let stopped = manager.stop("auto-restart-kill-test", true).await;
+    assert!(stopped.is_ok(), "stop after restart must succeed");
+    let stopped = stopped.unwrap();
+    assert_eq!(stopped.status, ProcessStatus::Stopped);
+
+    assert!(
+        wait_until_pid_dead(restarted_pid, std::time::Duration::from_secs(5)).await,
+        "restarted pid {} must be dead after stop",
+        restarted_pid
+    );
+
+    // Remove the entry and keep watching: the monitor must terminate (it has
+    // nothing left to poll) instead of looping forever with the killed
+    // process's child still referenced — the pre-fix orphan shape.
+    let removed = manager.remove("auto-restart-kill-test").await;
+    assert!(removed.is_ok(), "remove after stop must succeed");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        !pid_is_alive(restarted_pid),
+        "restarted pid {} must stay dead after the entry is removed",
+        restarted_pid
+    );
+}

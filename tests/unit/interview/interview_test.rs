@@ -265,3 +265,112 @@ fn test_session_to_context() {
     assert_eq!(ctx.project_type, Some(ProjectType::CliTool));
     assert_eq!(ctx.extra_notes, vec!["keep it simple"]);
 }
+
+// ---------------------------------------------------------------------------
+// Raw-mode key handling (2026-09-21 review finding)
+// ---------------------------------------------------------------------------
+//
+// Raw mode disables the kernel ISIG line discipline, so ctrl-c/ctrl-d arrive
+// as ordinary key events (Char with the CONTROL modifier) instead of signals.
+// The pre-fix match appended them as literal characters, trapping the user
+// with no way to abort. These tests drive `handle_raw_key` with synthesized
+// `KeyEvent`s (crossterm's `KeyEvent::new`) and assert the chords cancel the
+// prompt (LineInput::Esc) while all normal input handling is unchanged.
+
+fn raw_line(keys: &[KeyEvent]) -> (LineInput, String) {
+    let mut buf = String::new();
+    let mut sink = Vec::new();
+    let mut last = LineInput::Line(String::new());
+    for key in keys {
+        if let Some(input) =
+            handle_raw_key(*key, &mut buf, &mut sink).expect("key handling must not fail")
+        {
+            last = input;
+        }
+    }
+    (last, buf)
+}
+
+#[test]
+fn test_ctrl_c_aborts_prompt_not_appended() {
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    // The pre-fix code appended 'c' and returned None forever — the trap.
+    let (input, buf) = raw_line(&[ctrl_c]);
+    assert_eq!(input, LineInput::Esc, "ctrl+c must cancel the prompt");
+    assert_eq!(
+        buf, "",
+        "ctrl+c must not be appended as a literal character"
+    );
+}
+
+#[test]
+fn test_ctrl_d_aborts_prompt_not_appended() {
+    let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+    let (input, buf) = raw_line(&[ctrl_d]);
+    assert_eq!(input, LineInput::Esc, "ctrl+d must cancel the prompt");
+    assert_eq!(
+        buf, "",
+        "ctrl+d must not be appended as a literal character"
+    );
+}
+
+#[test]
+fn test_ctrl_chords_abort_even_after_typed_text() {
+    let keys = [
+        KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+    ];
+    let (input, buf) = raw_line(&keys);
+    assert_eq!(
+        input,
+        LineInput::Esc,
+        "ctrl+c must abort a partially typed prompt"
+    );
+    assert_eq!(
+        buf, "hi",
+        "typed text stays in the buffer even when aborted"
+    );
+}
+
+#[test]
+fn test_esc_still_cancels() {
+    let (input, _) = raw_line(&[KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)]);
+    assert_eq!(input, LineInput::Esc);
+}
+
+#[test]
+fn test_enter_still_returns_line() {
+    let keys = [
+        KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    ];
+    let (input, buf) = raw_line(&keys);
+    assert_eq!(input, LineInput::Line("y".to_string()));
+    assert_eq!(buf, "", "the completed line is taken out of the buffer");
+}
+
+#[test]
+fn test_plain_typing_still_accumulates() {
+    let keys = [
+        KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+    ];
+    let (input, buf) = raw_line(&keys);
+    assert_eq!(
+        input,
+        LineInput::Line(String::new()),
+        "typing alone completes nothing"
+    );
+    assert_eq!(buf, "ab");
+}
+
+#[test]
+fn test_backspace_still_edits() {
+    let keys = [
+        KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+    ];
+    let (_, buf) = raw_line(&keys);
+    assert_eq!(buf, "", "backspace pops the typed char");
+}

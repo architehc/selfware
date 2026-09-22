@@ -190,6 +190,58 @@ async fn test_start_and_close_session() {
 
 #[cfg(not(target_os = "windows"))]
 #[tokio::test]
+async fn test_send_stderr_flood_does_not_deadlock() {
+    let _guard = TEST_LOCK.lock().await;
+    clear_all_sessions().await;
+
+    let tool = PtyShellTool::new();
+
+    let result = tool
+        .execute(serde_json::json!({ "action": "start" }))
+        .await
+        .unwrap();
+    let session_id = result["session_id"].as_str().unwrap().to_string();
+
+    // Emit well over one pipe buffer (>64KB) of stderr, THEN echo the
+    // completion marker. Pre-fix, the parent read only stdout until the
+    // marker, so the child blocked on its full stderr pipe while the parent
+    // blocked reading stdout — a deadlock that only the timeout force-kill
+    // broke. Post-fix, stderr is drained concurrently with stdout, the marker
+    // arrives, and the command completes normally within the timeout.
+    let flood = "i=0; while [ $i -lt 5000 ]; do printf 'stderr-flood %s pad pad pad pad pad pad pad pad\n' \"$i\" >&2; i=$((i+1)); done; echo flood_done";
+    let result = tool
+        .execute(serde_json::json!({
+            "action": "send",
+            "session_id": &session_id,
+            "command": flood,
+            "timeout_secs": 20
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result["timed_out"], false,
+        "a >64KB stderr flood must complete without deadlocking"
+    );
+    assert_eq!(result["exit_code"], 0);
+    assert!(result["stdout"].as_str().unwrap().contains("flood_done"));
+    let stderr = result["stderr"].as_str().unwrap();
+    assert!(
+        stderr.contains("stderr-flood"),
+        "the bounded stderr capture must retain flood lines"
+    );
+
+    // Cleanup.
+    let _ = tool
+        .execute(serde_json::json!({
+            "action": "close",
+            "session_id": &session_id
+        }))
+        .await;
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tokio::test]
 async fn test_send_echo_command() {
     let _guard = TEST_LOCK.lock().await;
     clear_all_sessions().await;

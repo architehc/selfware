@@ -1158,7 +1158,17 @@ async fn monitor_process(
                                 proc.started_at = Some(Utc::now());
                                 proc.status = ProcessStatus::Starting;
                                 proc.health_matched = false;
-                                proc.child_handle = Some(new_child_handle.clone());
+                                // Point the managed process at the MONITOR's
+                                // `child_handle`, not `new_child_handle`: the
+                                // move just below empties `new_child_handle`,
+                                // so a reference to it would become `None`
+                                // while the live restarted child is owned by
+                                // the monitor here. With the handle emptied,
+                                // every kill path (stop/stop_all/remove) found
+                                // `None`, skipped the kill, and the restarted
+                                // process kept running orphaned behind a
+                                // Stopped record (2026-09-21 review finding).
+                                proc.child_handle = Some(child_handle.clone());
                             }
                         }
 
@@ -1198,8 +1208,13 @@ async fn monitor_process(
                             }
                         }
 
-                        // Update child_handle for continued monitoring
-                        // Move the child from new_child_handle to the original child_handle
+                        // Move the child into the monitor's original
+                        // `child_handle` (the one `proc.child_handle` now
+                        // points at) so the monitor keeps polling the
+                        // restarted process. `new_child_handle` is emptied by
+                        // the take and dropped — it must not be referenced by
+                        // `proc.child_handle` anymore (see the assignment
+                        // above).
                         let new_child = new_child_handle.write().await.take();
                         *child_handle.write().await = new_child;
 

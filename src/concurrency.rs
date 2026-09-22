@@ -29,14 +29,22 @@ static SHARED_GOVERNORS: LazyLock<Mutex<HashMap<(usize, usize, usize), Arc<Concu
 /// tool executions cannot starve streaming slots and vice-versa.  The global
 /// semaphore acts as an upper ceiling across both categories.
 ///
-/// **The acquisition order is category-then-global, and that order is what
-/// makes the isolation above real.** A caller that takes the global permit
-/// first holds it while parked on its category semaphore, so a burst of stream
-/// requesters consumes the whole global budget with *waiters* and leaves a
-/// completely idle tool pool unreachable until a stream happens to finish.
-/// Taking the category permit first means only admitted operations ever hold a
-/// global permit, so the global limit behaves as a ceiling on inflight work
-/// rather than a reservation parked on by whoever queued first.
+/// **The acquisition order is global-then-category, and that single total
+/// order is what keeps the governor deadlock-free under nested acquisition.**
+/// A stream task that dispatches a tool or a nested stream acquires its second
+/// permit through the SAME order, so no task can ever hold a category permit
+/// while waiting on the global semaphore that another task holds — the
+/// category↔global cyclic wait that the 2026-09-21 review found (global
+/// permits saturated by streams whose tool/nested-stream dispatch then parks
+/// against a category held by a task parked on global) cannot form.
+///
+/// The tradeoff, inherited from the category-first design, is inverted: a
+/// caller that waits on its category semaphore now holds a global permit while
+/// parked, so a sustained stream backlog can head-of-line block the tool pool
+/// on the global ceiling. That is a scheduling cost, not a correctness one —
+/// every parked waiter still releases its global permit the moment it proceeds,
+/// and the alternative (category-first) is exactly the ordering that deadlocks
+/// under nested dispatch.
 pub struct ConcurrencyGovernor {
     /// Limits concurrent LLM streaming responses.
     stream_semaphore: Arc<Semaphore>,
@@ -116,22 +124,24 @@ impl ConcurrencyGovernor {
     /// Returns a [`ConcurrencyPermit`] that holds both a stream-level and a
     /// global-level permit.  Both are released when the permit is dropped.
     ///
-    /// The stream permit is acquired first: a caller parked here holds no
-    /// global permit, so it cannot starve the tool category (see the ordering
-    /// note on [`ConcurrencyGovernor`]).
+    /// The global permit is acquired FIRST, then the category permit — the
+    /// single total order that keeps nested acquisitions deadlock-free (see
+    /// the ordering note on [`ConcurrencyGovernor`]). If the category
+    /// semaphore is closed while the caller holds the global permit, the
+    /// global permit is returned before the error surfaces.
     pub async fn acquire_stream(&self) -> Result<ConcurrencyPermit, ConcurrencyError> {
-        let stream = Arc::clone(&self.stream_semaphore)
-            .acquire_owned()
-            .await
-            .map_err(|_| ConcurrencyError::SemaphoreClosed)?;
         let global = Arc::clone(&self.global_semaphore)
             .acquire_owned()
             .await
             .map_err(|_| ConcurrencyError::SemaphoreClosed)?;
-        Ok(ConcurrencyPermit {
-            _category: stream,
-            _global: global,
-        })
+        match Arc::clone(&self.stream_semaphore).acquire_owned().await {
+            Ok(stream) => Ok(ConcurrencyPermit {
+                _category: stream,
+                _global: global,
+            }),
+            // `global` drops here, returning the permit to the pool.
+            Err(_) => Err(ConcurrencyError::SemaphoreClosed),
+        }
     }
 
     /// Acquire a tool execution permit, waiting if none are currently available.
@@ -139,39 +149,43 @@ impl ConcurrencyGovernor {
     /// Returns a [`ConcurrencyPermit`] that holds both a tool-level and a
     /// global-level permit.  Both are released when the permit is dropped.
     ///
-    /// The tool permit is acquired first, for the same reason as
-    /// [`Self::acquire_stream`].
+    /// Global first, then category — the same total order as
+    /// [`Self::acquire_stream`] (see the ordering note on
+    /// [`ConcurrencyGovernor`]).
     pub async fn acquire_tool(&self) -> Result<ConcurrencyPermit, ConcurrencyError> {
-        let tool = Arc::clone(&self.tool_semaphore)
-            .acquire_owned()
-            .await
-            .map_err(|_| ConcurrencyError::SemaphoreClosed)?;
         let global = Arc::clone(&self.global_semaphore)
             .acquire_owned()
             .await
             .map_err(|_| ConcurrencyError::SemaphoreClosed)?;
-        Ok(ConcurrencyPermit {
-            _category: tool,
-            _global: global,
-        })
+        match Arc::clone(&self.tool_semaphore).acquire_owned().await {
+            Ok(tool) => Ok(ConcurrencyPermit {
+                _category: tool,
+                _global: global,
+            }),
+            // `global` drops here, returning the permit to the pool.
+            Err(_) => Err(ConcurrencyError::SemaphoreClosed),
+        }
     }
 
     /// Try to acquire a tool execution permit without blocking.
     ///
     /// Returns `None` if all tool or global permits are currently held.
     ///
-    /// Category first, then global — and the category permit is dropped again
-    /// when the global ceiling rejects the request, so a failed try never
-    /// leaks a tool slot (the global limit still bounds this path, which
-    /// `test_global_limit_caps_total_operations` pins).
+    /// Global first, then the category permit — and when the category ceiling
+    /// refuses the request, the global permit is dropped again, so a failed
+    /// try never leaks a global slot (the global limit still bounds this path
+    /// and the refuse path stays leak-free, which
+    /// `test_try_acquire_stream_is_non_blocking_and_leak_free` pins).
     pub fn try_acquire_tool(&self) -> Option<ConcurrencyPermit> {
-        let tool = Arc::clone(&self.tool_semaphore).try_acquire_owned().ok()?;
-        match Arc::clone(&self.global_semaphore).try_acquire_owned() {
-            Ok(global) => Some(ConcurrencyPermit {
+        let global = Arc::clone(&self.global_semaphore)
+            .try_acquire_owned()
+            .ok()?;
+        match Arc::clone(&self.tool_semaphore).try_acquire_owned() {
+            Ok(tool) => Some(ConcurrencyPermit {
                 _category: tool,
                 _global: global,
             }),
-            // `tool` drops here, releasing the category permit.
+            // `global` drops here, returning the permit to the pool.
             Err(_) => None,
         }
     }
@@ -180,18 +194,18 @@ impl ConcurrencyGovernor {
     ///
     /// Symmetric counterpart to [`Self::try_acquire_tool`]: a caller that must
     /// stay non-blocking (a status refresh, a best-effort call) can probe the
-    /// stream pool instead of parking on it. Category first, then global, with
-    /// the category permit released when the global ceiling refuses.
+    /// stream pool instead of parking on it. Global first, then category, with
+    /// the global permit released when the category ceiling refuses.
     pub fn try_acquire_stream(&self) -> Option<ConcurrencyPermit> {
-        let stream = Arc::clone(&self.stream_semaphore)
+        let global = Arc::clone(&self.global_semaphore)
             .try_acquire_owned()
             .ok()?;
-        match Arc::clone(&self.global_semaphore).try_acquire_owned() {
-            Ok(global) => Some(ConcurrencyPermit {
+        match Arc::clone(&self.stream_semaphore).try_acquire_owned() {
+            Ok(stream) => Some(ConcurrencyPermit {
                 _category: stream,
                 _global: global,
             }),
-            // `stream` drops here, releasing the category permit.
+            // `global` drops here, returning the permit to the pool.
             Err(_) => None,
         }
     }

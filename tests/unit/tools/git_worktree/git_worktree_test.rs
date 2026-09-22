@@ -135,6 +135,66 @@ fn test_validate_path_allows_explicit_allowlist() {
     assert!(validate_path("/sandbox/worktrees/wt-1", Some(&config)).is_ok());
 }
 
+// ── enter_worktree_dir path policy (2026-09-21 review finding) ───────────
+//
+// The TUI `/worktree enter` handler goes through enter_worktree_dir; it used
+// to bypass the validation the tool path got in the W1b sweep. enter_worktree_dir
+// now runs the same validate_tool_path/resolve_safety_config check with the
+// process-global config, so an out-of-workspace target is refused and the cwd
+// is left untouched.
+
+#[test]
+fn test_enter_worktree_dir_refuses_out_of_workspace_target() {
+    // Hold the shared cwd lock so the validate (resolved against the process
+    // cwd and the global safety config) sees a stable working directory.
+    let _g = crate::test_support::CwdGuard::hold();
+    // enter_worktree_dir validates against the process-global config — pin it
+    // to the default so an earlier agent-init test cannot leave a permissive
+    // one behind (which would let /var/folders paths through).
+    crate::tools::file::reset_safety_config_for_tests();
+    reset_worktree_state();
+    let before = std::env::current_dir().unwrap();
+
+    // A tempdir outside the workspace (default config allows only ./**).
+    let outside = tempfile::tempdir().unwrap();
+    let err = crate::tools::git_worktree::enter_worktree_dir(outside.path().to_path_buf())
+        .expect_err("an out-of-workspace /worktree-enter target must be refused");
+    assert!(
+        err.to_string().contains("outside the workspace"),
+        "unexpected error: {err}"
+    );
+    // No cwd change, no state change: the refusal is a pure gate.
+    assert_eq!(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        before.canonicalize().unwrap()
+    );
+    assert!(!crate::tools::git_worktree::is_in_worktree());
+    assert!(crate::tools::git_worktree::get_current_worktree().is_none());
+}
+
+#[test]
+fn test_enter_worktree_dir_allows_in_workspace_target() {
+    let _g = crate::test_support::CwdGuard::hold();
+    crate::tools::file::reset_safety_config_for_tests();
+    reset_worktree_state();
+    let before = std::env::current_dir().unwrap();
+
+    let tmp = tempfile::Builder::new()
+        .tempdir_in(std::env::current_dir().unwrap())
+        .unwrap();
+    let entered = crate::tools::git_worktree::enter_worktree_dir(tmp.path().to_path_buf())
+        .expect("an in-workspace /worktree-enter target must be allowed");
+    assert_eq!(entered, tmp.path().to_path_buf());
+    assert!(crate::tools::git_worktree::is_in_worktree());
+
+    crate::tools::git_worktree::exit_worktree_dir().unwrap();
+    assert_eq!(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        before.canonicalize().unwrap()
+    );
+    assert!(!crate::tools::git_worktree::is_in_worktree());
+}
+
 #[test]
 fn test_parse_worktree_list_empty() {
     let result = parse_worktree_list("");
@@ -389,9 +449,15 @@ fn test_push_failure_restores_cwd_and_leaves_state_consistent() {
 #[tokio::test]
 async fn test_enter_exit_dir_roundtrip_restores_cwd() {
     let _g = crate::test_support::CwdGuard::hold();
+    crate::tools::file::reset_safety_config_for_tests();
     reset_worktree_state();
     let original = std::env::current_dir().unwrap();
-    let tmp = tempfile::tempdir().unwrap();
+    // In-workspace tempdir: `enter_worktree_dir` validates the target against
+    // the workspace path policy (2026-09-21), so the tempdir must live under
+    // the workspace root — an out-of-workspace target is refused.
+    let tmp = tempfile::Builder::new()
+        .tempdir_in(std::env::current_dir().unwrap())
+        .unwrap();
     let canonical_tmp = tmp.path().canonicalize().unwrap();
 
     let entered = crate::tools::git_worktree::enter_worktree_dir(tmp.path().to_path_buf()).unwrap();
@@ -436,9 +502,15 @@ async fn test_exit_dir_without_enter_errors_and_preserves_cwd() {
 #[tokio::test]
 async fn test_concurrent_observer_never_observes_stranded_cwd() {
     let _g = crate::test_support::CwdGuard::hold();
+    crate::tools::file::reset_safety_config_for_tests();
     reset_worktree_state();
     let original = std::env::current_dir().unwrap().canonicalize().unwrap();
-    let tmp = tempfile::tempdir().unwrap();
+    // In-workspace tempdir — `enter_worktree_dir` enforces the workspace path
+    // policy (2026-09-21), so the enter/exit probe paths must live under the
+    // workspace root.
+    let tmp = tempfile::Builder::new()
+        .tempdir_in(std::env::current_dir().unwrap())
+        .unwrap();
     let canonical_tmp = tmp.path().canonicalize().unwrap();
     let missing = tmp.path().join("does-not-exist");
 
@@ -486,6 +558,92 @@ async fn test_concurrent_observer_never_observes_stranded_cwd() {
         seen
     );
     assert!(seen.contains(&original));
+}
+
+/// Regression (2026-09-21 Pass-3 review): the worktree feature switches the
+/// PROCESS current directory (`std::env::set_current_dir`), a single global
+/// across every Tokio worker thread. A relative-path operation running
+/// concurrently on another thread — a file tool resolving a relative path, a
+/// path validation, a cargo/git invocation — must stay coherent through a full
+/// enter/exit cycle: it may only ever resolve against a directory the worktree
+/// state accounts for (the original workspace root or the entered worktree,
+/// never a torn or unknown intermediate), it must not error, and when the
+/// cycle is over the process cwd must be EXACTLY the original again — no
+/// worktree residue that would silently retarget the next relative path.
+///
+/// Transitions are serialized by the process-wide transition lock
+/// (WORKTREE_TRANSITION_LOCK in src/tools/git_worktree.rs) taken around the
+/// cwd switch + bookkeeping, so the enter and exit never interleave with each
+/// other and the restore always lands on the recorded previous directory.
+#[tokio::test]
+async fn test_concurrent_relative_path_operation_through_enter_exit_cycle() {
+    let _g = crate::test_support::CwdGuard::hold();
+    crate::tools::file::reset_safety_config_for_tests();
+    reset_worktree_state();
+    let original = std::env::current_dir().unwrap().canonicalize().unwrap();
+
+    // A task that — like a concurrent file tool / cargo / git invocation on
+    // another thread — resolves a RELATIVE path against the process cwd in a
+    // loop, recording the directory each resolution ran against.
+    let observer = tokio::spawn(async move {
+        let mut seen: Vec<std::path::PathBuf> = Vec::new();
+        for _ in 0..200 {
+            let cwd = std::env::current_dir().unwrap();
+            // The relative-path operation: a read-side join + existence
+            // probe. A torn cwd would resolve this against a directory the
+            // worktree state does not know about (and an already-restored
+            // exit would resolve it against the original — both accounted
+            // for by the assertion below).
+            let relative = cwd.join("sw-w2-relative-probe");
+            let _ = std::fs::metadata(&relative);
+            seen.push(cwd);
+            tokio::task::yield_now().await;
+        }
+        seen
+    });
+    tokio::task::yield_now().await;
+
+    let tmp = tempfile::Builder::new()
+        .tempdir_in(std::env::current_dir().unwrap())
+        .unwrap();
+    let canonical_tmp = tmp.path().canonicalize().unwrap();
+
+    // Full enter/exit cycle on the main task.
+    crate::tools::git_worktree::enter_worktree_dir(tmp.path().to_path_buf())
+        .expect("enter must succeed");
+    assert!(crate::tools::git_worktree::is_in_worktree());
+    tokio::task::yield_now().await;
+    let (restored, _prev) =
+        crate::tools::git_worktree::exit_worktree_dir().expect("exit must succeed");
+    assert_eq!(
+        restored.canonicalize().unwrap(),
+        original,
+        "the cycle restores the original directory"
+    );
+
+    // After the cycle the process cwd is EXACTLY the original — no residue.
+    assert_eq!(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        original,
+        "no worktree residue may survive the cycle"
+    );
+
+    // Every concurrent relative-path operation ran against a coherent,
+    // state-accounted directory (original or entered worktree) — and the
+    // operation never failed or observed anything in between.
+    let seen = observer.await.unwrap();
+    assert_eq!(
+        seen.len(),
+        200,
+        "the relative-path operation ran unaffected"
+    );
+    assert!(
+        seen.iter()
+            .all(|c| c.canonicalize().unwrap() == original
+                || c.canonicalize().unwrap() == canonical_tmp),
+        "relative-path op observed an unexpected cwd: {:?}",
+        seen
+    );
 }
 
 #[tokio::test]

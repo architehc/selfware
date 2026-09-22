@@ -29,6 +29,11 @@ const CMD_DONE_MARKER: &str = "__SELFWARE_CMD_DONE_";
 /// Maximum output size returned per command (bytes).
 const MAX_OUTPUT_BYTES: usize = 10_240;
 
+/// Maximum number of stderr lines retained per command. Output beyond this
+/// is still drained (so the child never blocks on a full stderr pipe) but
+/// discarded, so a verbose child can't grow memory without limit.
+const MAX_STDERR_LINES: usize = 200;
+
 /// Maximum number of concurrent sessions.
 const MAX_SESSIONS: usize = 5;
 
@@ -248,45 +253,97 @@ impl PtySession {
         let mut total_bytes = 0usize;
         let mut line = String::new();
 
-        // Read until we see the completion marker.
+        // Read stdout and stderr CONCURRENTLY until the completion marker
+        // appears (or the deadline hits). The stderr drain is what keeps a
+        // chatty child (compiler warnings, verbose test suites) from blocking
+        // on a full stderr pipe while the parent reads only stdout — the
+        // pipe-stall deadlock from the 2026-09-21 review: a child emitting
+        // more than one pipe buffer (~64KB) of stderr stalled its write(2)
+        // on the full pipe while the parent blocked on read(2) for the
+        // completion marker, and only the timeout force-kill broke it. The
+        // bounded stderr capture (first [`MAX_STDERR_LINES`] lines) is kept
+        // intact; everything beyond the cap is still drained, never buffered.
+        let mut err_lines: Vec<String> = Vec::new();
+        let mut err_line = String::new();
+        // Disabled once the child's stderr hits EOF so the select never
+        // busy-polls an immediately-ready stream.
+        let mut stderr_open = true;
+
         loop {
             if Instant::now() > deadline {
                 return Ok(self.report_timeout(&output_lines).await);
             }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(self.report_timeout(&output_lines).await);
+            }
 
             line.clear();
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            let read_future = self.stdout.read_line(&mut line);
-            match tokio::time::timeout(remaining, read_future).await {
-                Ok(Ok(0)) => {
-                    // EOF — process terminated.
-                    break;
-                }
-                Ok(Ok(_)) => {
-                    let trimmed = line.trim_end();
-                    // Check for our completion marker.
-                    if let Some(ec) = Self::parse_marker(trimmed) {
-                        exit_code = Some(ec);
-                        break;
-                    }
-                    total_bytes += line.len();
-                    if total_bytes <= MAX_OUTPUT_BYTES {
-                        output_lines.push(trimmed.to_string());
-                    }
-                }
-                Ok(Err(e)) => {
-                    bail!("Error reading shell output: {}", e);
-                }
-                Err(_) => {
-                    // Timeout: terminate the stuck child before reporting, so
+            err_line.clear();
+            // Unbiased select: when BOTH stdout and stderr are continuously
+            // ready, each ready arm is serviced fairly, so a sustained stdout
+            // flood can never starve the stderr drain (the pipe-stall would
+            // just move to stderr). The deadline is enforced by the
+            // top-of-loop checks above plus this sleep arm, which is ready as
+            // soon as `remaining` elapses and is then picked within a couple
+            // of iterations.
+            tokio::select! {
+                _ = tokio::time::sleep(remaining) => {
+                    // Deadline: terminate the stuck child before reporting, so
                     // the hung process cannot keep running behind the session.
                     return Ok(self.report_timeout(&output_lines).await);
+                }
+                res = self.stdout.read_line(&mut line) => {
+                    match res {
+                        Ok(0) => {
+                            // EOF — process terminated.
+                            break;
+                        }
+                        Ok(_) => {
+                            let trimmed = line.trim_end();
+                            // Check for our completion marker.
+                            if let Some(ec) = Self::parse_marker(trimmed) {
+                                exit_code = Some(ec);
+                                break;
+                            }
+                            total_bytes += line.len();
+                            if total_bytes <= MAX_OUTPUT_BYTES {
+                                output_lines.push(trimmed.to_string());
+                            }
+                        }
+                        Err(e) => {
+                            bail!("Error reading shell output: {}", e);
+                        }
+                    }
+                }
+                res = self.stderr.read_line(&mut err_line), if stderr_open => {
+                    match res {
+                        Ok(0) | Err(_) => {
+                            // stderr EOF / error: stop polling this stream,
+                            // keep reading stdout.
+                            stderr_open = false;
+                        }
+                        Ok(_) => {
+                            if err_lines.len() < MAX_STDERR_LINES {
+                                err_lines.push(err_line.trim_end().to_string());
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        // Drain any stderr that's accumulated.
-        let stderr = self.drain_stderr().await;
+        // Drain any stderr that's accumulated since the marker (e.g. a
+        // background writer still holding the pipe).
+        let mut stderr = self.drain_stderr().await;
+        if !err_lines.is_empty() {
+            if !stderr.is_empty() {
+                stderr = format!("{}\n{}", err_lines.join("\n"), stderr);
+            } else {
+                stderr = err_lines.join("\n");
+            }
+        }
+        stderr = strip_ansi(&stderr);
 
         Ok(CommandOutput {
             stdout: Self::collect_output(&output_lines),
@@ -407,7 +464,7 @@ impl PtySession {
                 Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
                 Ok(Ok(_)) => {
                     buf.push(line.trim_end().to_string());
-                    if buf.len() > 200 {
+                    if buf.len() > MAX_STDERR_LINES {
                         break;
                     }
                 }

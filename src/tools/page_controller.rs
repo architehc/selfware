@@ -92,6 +92,12 @@ struct BridgeResponse {
     error: Option<String>,
 }
 
+/// Maximum number of stderr lines from the bridge retained before the drainer
+/// discards the rest. Chromium's logging can be extremely verbose; the pipe is
+/// still drained (so the bridge never blocks on a full stderr pipe), only the
+/// captured copy is bounded.
+const MAX_BRIDGE_STDERR_LINES: usize = 400;
+
 /// Manages the lifecycle of the playwright-bridge.js child process.
 struct PlaywrightBridge {
     stdin: Arc<Mutex<tokio::process::ChildStdin>>,
@@ -99,6 +105,20 @@ struct PlaywrightBridge {
     next_id: AtomicU64,
     child: Arc<Mutex<Child>>,
     reader_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Task that drains the bridge's stderr concurrently, so a >64KB burst of
+    /// Chromium logging cannot fill the pipe and stall Node (2026-09-21
+    /// review: the pipe was never read — the parent stalled, the child
+    /// stalled, the agent deadlocked until the command timed out).
+    stderr_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Process-group id of the bridge, captured at spawn. On unix the bridge
+    /// is spawned with `process_group(0)`, making it the leader of its own
+    /// process group, so the pgid equals the bridge pid and the group covers
+    /// the Chromium children the bridge spawns. Kept separately from the
+    /// [`Child`] handle because `start_kill()` / `kill()` only signal the
+    /// direct Node process (2026-09-21 review: killing Node reparented the
+    /// still-running Chromium to PID 1); the group kill reaches the whole tree.
+    #[cfg(unix)]
+    pgid: Option<u32>,
 }
 
 impl PlaywrightBridge {
@@ -118,12 +138,25 @@ impl PlaywrightBridge {
     async fn spawn() -> Result<Self> {
         let bridge_script = Self::find_bridge_script()?;
         Self::ensure_bridge_dependencies(&bridge_script)?;
+        Self::spawn_with_script(&bridge_script, &[]).await
+    }
 
+    /// Testable core: spawn the bridge with an explicit script and optional
+    /// extra argv. Skips script discovery and the `npm install` dependency
+    /// bootstrap — tests point this at a stub script so no real browser or
+    /// package install is ever touched.
+    async fn spawn_with_script(
+        bridge_script: &std::path::Path,
+        extra_args: &[&str],
+    ) -> Result<Self> {
         info!("Spawning playwright-bridge: {}", bridge_script.display());
 
         let mut cmd = Command::new("node");
-        cmd.arg(&bridge_script)
-            .stdin(Stdio::piped())
+        cmd.arg(bridge_script);
+        for arg in extra_args {
+            cmd.arg(arg);
+        }
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -131,6 +164,15 @@ impl PlaywrightBridge {
         // page content, so it must not carry the agent's secrets. The specific
         // SELFWARE_* vars the bridge needs are re-added explicitly below.
         crate::safety::process_env::sanitize_command_env(&mut cmd);
+
+        // Run the bridge in its own process group so teardown can kill the
+        // ENTIRE tree (Node + the Chromium children it spawns), not just the
+        // direct Node process — `child.start_kill()`/`kill()` only signal
+        // Node, and an orphaned Chromium keeps running after the bridge is
+        // gone (2026-09-21 review: killing Node left Chromium reparented to
+        // PID 1, running forever).
+        #[cfg(unix)]
+        cmd.process_group(0);
 
         // Forward the private-network env var
         if let Ok(val) = std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK") {
@@ -159,6 +201,15 @@ impl PlaywrightBridge {
             .spawn()
             .with_context(|| format!("Failed to spawn playwright-bridge: {:?}", bridge_script))?;
 
+        // Capture the process-group id at spawn. The bridge child runs in its
+        // own process group (see `process_group(0)` above), so the pgid equals
+        // the child's pid. It must be captured here rather than re-derived
+        // later from the Child handle: `start_kill`/`kill` only signal the
+        // direct Node process, and once Node is reaped `Child::id()` returns
+        // None — the surviving Chromium group members would be unreachable.
+        #[cfg(unix)]
+        let pgid = child.id();
+
         let stdin = child
             .stdin
             .take()
@@ -167,6 +218,10 @@ impl PlaywrightBridge {
             .stdout
             .take()
             .context("Failed to capture playwright-bridge stdout")?;
+        let stderr = child
+            .stderr
+            .take()
+            .context("Failed to capture playwright-bridge stderr")?;
 
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<BridgeResponse>>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -208,12 +263,36 @@ impl PlaywrightBridge {
             debug!("Playwright-bridge stdout reader exited");
         });
 
+        // Background stderr drain task. The bridge's stderr pipe was never
+        // read, so a >64KB burst of Chromium logging filled the pipe and
+        // blocked Node's write(2) — the parent stalled waiting for NDJSON
+        // that never arrived (2026-09-21 review). The pipe is drained
+        // concurrently now; only the first [`MAX_BRIDGE_STDERR_LINES`] lines
+        // are retained (for diagnostics), everything beyond the cap is still
+        // consumed, never buffered.
+        let stderr_handle = tokio::spawn(async move {
+            let reader = BufReader::new(stderr);
+            let mut lines = reader.lines();
+            let mut retained = 0usize;
+            while let Ok(Some(line)) = lines.next_line().await {
+                if retained < MAX_BRIDGE_STDERR_LINES {
+                    retained += 1;
+                    warn!("playwright-bridge stderr: {}", line);
+                }
+                // Beyond the cap: keep draining so the pipe never fills up.
+            }
+            debug!("Playwright-bridge stderr reader exited");
+        });
+
         Ok(Self {
             stdin: Arc::new(Mutex::new(stdin)),
             pending,
             next_id: AtomicU64::new(1),
             child: Arc::new(Mutex::new(child)),
             reader_handle: Mutex::new(Some(reader_handle)),
+            stderr_handle: Mutex::new(Some(stderr_handle)),
+            #[cfg(unix)]
+            pgid,
         })
     }
 
@@ -277,6 +356,22 @@ impl PlaywrightBridge {
         Ok(response.result.unwrap_or(json!(null)))
     }
 
+    /// SIGKILL every member of the bridge's process group.
+    ///
+    /// Uses the pgid captured at spawn rather than the live child pid: it
+    /// reaches the Node process AND the Chromium children it spawned, and it
+    /// still works after the direct Node child has been reaped (`Child::id()`
+    /// returns `None` then, but surviving group members — orphaned Chromium —
+    /// would otherwise be unreachable).
+    fn kill_bridge_group(&self) {
+        #[cfg(unix)]
+        if let Some(pgid) = self.pgid {
+            use nix::sys::signal::{killpg, Signal};
+            use nix::unistd::Pid;
+            let _ = killpg(Pid::from_raw(pgid as i32), Signal::SIGKILL);
+        }
+    }
+
     /// Shut down the bridge process gracefully.
     async fn shutdown(&self) -> Result<()> {
         info!("Shutting down playwright-bridge");
@@ -284,14 +379,21 @@ impl PlaywrightBridge {
         // Send shutdown command
         let _ = self.send(json!({"action": "shutdown"}), 5000).await;
 
-        // Give it a moment, then force kill
+        // Give it a moment, then force kill the whole process group (Node +
+        // Chromium children — `child.kill()` alone would orphan the latter).
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
+        self.kill_bridge_group();
         let mut child = self.child.lock().await;
         let _ = child.kill().await;
+        let _ = child.wait().await;
 
-        // Cancel reader task
+        // Cancel reader tasks
         let mut handle = self.reader_handle.lock().await;
+        if let Some(h) = handle.take() {
+            h.abort();
+        }
+        let mut handle = self.stderr_handle.lock().await;
         if let Some(h) = handle.take() {
             h.abort();
         }
@@ -409,13 +511,21 @@ impl Drop for PlaywrightBridge {
     fn drop(&mut self) {
         // Owned teardown: if the bridge is dropped without an explicit async
         // shutdown() (e.g. an error path), still reap the browser child process
-        // and its reader task so they cannot leak. Best-effort, synchronous —
-        // no await, so use try_lock + Child::start_kill (SIGKILL). Mirrors the
-        // MCP StdioTransport Drop guard.
+        // and its reader tasks so they cannot leak. Best-effort, synchronous —
+        // no await, so use try_lock + start_kill (SIGKILL). The process GROUP
+        // is killed first so the Chromium children spawn-killed alongside the
+        // Node process instead of being orphaned to PID 1 (the 2026-09-21
+        // finding that `start_kill()` alone only signals Node).
+        self.kill_bridge_group();
         if let Ok(mut child) = self.child.try_lock() {
             let _ = child.start_kill();
         }
         if let Ok(mut handle) = self.reader_handle.try_lock() {
+            if let Some(h) = handle.take() {
+                h.abort();
+            }
+        }
+        if let Ok(mut handle) = self.stderr_handle.try_lock() {
             if let Some(h) = handle.take() {
                 h.abort();
             }

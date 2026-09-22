@@ -336,3 +336,122 @@ fn bridge_installer_command_sanitizes_env() {
         "the shared allowlist (PATH) must still reach the child; saw: {envs:?}"
     );
 }
+
+// ── Bridge stderr saturation + Chromium orphan (2026-09-21 review) ──────
+//
+// Synthetic-probe tests only — never a real browser. The stub bridge dumps
+// >64KB to stderr (the pipe buffer) BEFORE writing its pidfile, spawns a
+// long-lived sleeper child that inherits the bridge's process group, then
+// hangs on stdin without ever answering on stdout.
+
+const STUB_BRIDGE_JS: &str = r#"
+const fs = require('fs');
+const pidfile = process.argv[2];
+
+// ~147KB of stderr, written before anything else. Pre-fix the parent never
+// drained stderr, so node blocked on write(2) at the ~64KB pipe limit and
+// never reached the pidfile write below.
+const line = 'x'.repeat(48) + '\n';
+for (let i = 0; i < 3000; i++) { fs.writeSync(2, line); }
+
+// A long-lived child that inherits the bridge's process group.
+const { spawn } = require('child_process');
+const sleeper = spawn('sleep', ['60']);
+fs.writeFileSync(pidfile, JSON.stringify({ node: process.pid, sleeper: sleeper.pid }));
+
+// Hang on stdin without ever responding on stdout.
+process.stdin.resume();
+setInterval(() => {}, 1000);
+"#;
+
+#[cfg(unix)]
+fn pid_is_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[cfg(unix)]
+async fn wait_for_pidfile(
+    pidfile: &std::path::Path,
+    wait: std::time::Duration,
+) -> Option<(u32, u32)> {
+    let deadline = std::time::Instant::now() + wait;
+    while std::time::Instant::now() < deadline {
+        if let Ok(contents) = std::fs::read_to_string(pidfile) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&contents) {
+                if let (Some(n), Some(s)) = (v["node"].as_u64(), v["sleeper"].as_u64()) {
+                    return Some((n as u32, s as u32));
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    None
+}
+
+#[cfg(unix)]
+async fn wait_until_pid_dead(pid: u32, wait: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + wait;
+    while std::time::Instant::now() < deadline {
+        if !pid_is_alive(pid) {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    !pid_is_alive(pid)
+}
+
+/// The bridge's stderr must be drained concurrently (the pipe never stalls
+/// Node even with a >64KB burst) and teardown must kill the whole process
+/// group (Node AND its children, not an orphaned descendant).
+#[cfg(unix)]
+#[tokio::test]
+async fn test_bridge_stderr_saturation_and_group_termination() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("stub-bridge.js");
+    std::fs::write(&script, STUB_BRIDGE_JS).unwrap();
+    let pidfile = dir.path().join("bridge-pids.json");
+
+    let bridge = PlaywrightBridge::spawn_with_script(&script, &[pidfile.to_str().unwrap()])
+        .await
+        .expect("stub bridge must spawn");
+
+    // The stub floods stderr BEFORE writing the pidfile: with a dead stderr
+    // pipe the parent stalls right here (the pidfile never appears and this
+    // 10s wait times out). With the concurrent drain it appears promptly.
+    let (node_pid, sleeper_pid) = wait_for_pidfile(&pidfile, std::time::Duration::from_secs(10))
+        .await
+        .expect("stub bridge must drain its stderr flood and reach the pidfile write");
+    assert!(
+        pid_is_alive(node_pid),
+        "bridge node process should be alive"
+    );
+
+    // The stub hangs on stdin and never answers: a command must report a
+    // clean timeout (the parent loop stays functional — no deadlock), and
+    // the pending entry must not leak.
+    let err = bridge
+        .send(json!({"action": "goto", "url": "https://example.com"}), 500)
+        .await
+        .expect_err("a bridge that never answers must time out");
+    assert!(
+        err.to_string().contains("timed out"),
+        "expected a bridge timeout, got: {err}"
+    );
+
+    // Dropping the bridge must terminate the whole process group: Node and
+    // the sleeper it spawned. Pre-fix, start_kill signaled only Node, and
+    // the sleeper (the "Chromium") kept running reparented.
+    drop(bridge);
+    assert!(
+        wait_until_pid_dead(node_pid, std::time::Duration::from_secs(5)).await,
+        "bridge node process must be dead after drop"
+    );
+    assert!(
+        wait_until_pid_dead(sleeper_pid, std::time::Duration::from_secs(5)).await,
+        "the bridge's child must be killed together with Node (group kill), not orphaned"
+    );
+}

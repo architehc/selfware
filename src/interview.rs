@@ -19,7 +19,7 @@
 
 use anyhow::Result;
 use colored::*;
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::Path;
@@ -426,6 +426,8 @@ fn ask_freeform(prompt: &str) -> Result<Option<String>> {
     }
 }
 
+/// Cancellation (Esc or a Ctrl+C/Ctrl+D abort chord) or a completed line.
+#[derive(Debug, PartialEq)]
 enum LineInput {
     Esc,
     Line(String),
@@ -465,7 +467,8 @@ fn read_line_or_esc() -> Result<LineInput> {
     read_line_raw()
 }
 
-/// Raw-mode line reader that recognises Esc as a cancellation signal.
+/// Raw-mode line reader that recognises Esc and Ctrl+C/Ctrl+D as
+/// cancellation signals.
 fn read_line_raw() -> Result<LineInput> {
     let mut buf = String::new();
     let mut stdout = io::stdout();
@@ -473,33 +476,69 @@ fn read_line_raw() -> Result<LineInput> {
     loop {
         if event::poll(std::time::Duration::from_millis(5000))? {
             if let Event::Key(key) = event::read()? {
-                match key.code {
-                    KeyCode::Esc => {
-                        // Print a newline so subsequent output is clean.
-                        write!(stdout, "\r\n")?;
-                        stdout.flush()?;
-                        return Ok(LineInput::Esc);
-                    }
-                    KeyCode::Enter => {
-                        write!(stdout, "\r\n")?;
-                        stdout.flush()?;
-                        return Ok(LineInput::Line(buf));
-                    }
-                    KeyCode::Char(c) => {
-                        buf.push(c);
-                        write!(stdout, "{c}")?;
-                        stdout.flush()?;
-                    }
-                    KeyCode::Backspace if buf.pop().is_some() => {
-                        // Move cursor back, overwrite, move back again.
-                        write!(stdout, "\x08 \x08")?;
-                        stdout.flush()?;
-                    }
-                    _ => {}
+                if let Some(input) = handle_raw_key(key, &mut buf, &mut stdout)? {
+                    return Ok(input);
                 }
             }
         }
     }
+}
+
+/// Process one raw-mode key event, mutating the line buffer.
+///
+/// Returns `Some(LineInput)` when the key completes input (Enter, Esc, or a
+/// terminal abort chord), `None` while input continues.
+///
+/// Raw mode disables the kernel's ISIG line discipline, so a typed Ctrl+C or
+/// Ctrl+D never arrives as a signal — it comes through as an ordinary key
+/// event (`Char('c')`/`Char('d')` with the CONTROL modifier). Without this
+/// branch those would be appended as literal characters, trapping the user
+/// with no way to abort (2026-09-21 review finding). Both chords now cancel
+/// like Esc; termios restoration is handled by [`RawModeGuard`] regardless of
+/// which path returns.
+fn handle_raw_key(
+    key: KeyEvent,
+    buf: &mut String,
+    out: &mut impl io::Write,
+) -> Result<Option<LineInput>> {
+    // Terminal abort chords: Ctrl+C (universal interrupt) and Ctrl+D (typed
+    // EOF) cancel the prompt. Recognised before the plain-char match so they
+    // can never be appended to the buffer as literal 'c'/'d'.
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        if let KeyCode::Char(c) = key.code {
+            if matches!(c, 'c' | 'C' | 'd' | 'D') {
+                write!(out, "\r\n")?;
+                out.flush()?;
+                return Ok(Some(LineInput::Esc));
+            }
+        }
+    }
+    Ok(match key.code {
+        KeyCode::Esc => {
+            // Print a newline so subsequent output is clean.
+            write!(out, "\r\n")?;
+            out.flush()?;
+            Some(LineInput::Esc)
+        }
+        KeyCode::Enter => {
+            write!(out, "\r\n")?;
+            out.flush()?;
+            Some(LineInput::Line(std::mem::take(buf)))
+        }
+        KeyCode::Char(c) => {
+            buf.push(c);
+            write!(out, "{c}")?;
+            out.flush()?;
+            None
+        }
+        KeyCode::Backspace if buf.pop().is_some() => {
+            // Move cursor back, overwrite, move back again.
+            write!(out, "\x08 \x08")?;
+            out.flush()?;
+            None
+        }
+        _ => None,
+    })
 }
 
 // ---------------------------------------------------------------------------

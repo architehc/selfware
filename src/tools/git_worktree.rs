@@ -32,6 +32,27 @@ use std::sync::Mutex;
 
 static WORKTREE_STATE: Mutex<WorktreeState> = Mutex::new(WorktreeState::new());
 
+/// Serializes worktree enter/exit transitions process-wide.
+///
+/// The worktree feature switches the PROCESS current directory
+/// (`std::env::set_current_dir`) — a single process-global across every Tokio
+/// worker thread. A concurrent relative-path resolution, cargo/git command, or
+/// path validation on ANY other thread observes the shifted cwd (the test
+/// suite serializes cwd-sensitive tests for exactly this reason, see the
+/// `CwdGuard` in src/test_support.rs). Fully eliminating the global-cwd
+/// mutation — carrying absolute paths and passing an explicit cwd to every
+/// spawned command instead — is a cross-module contract change to the tool
+/// surface (its documented behavior is "changes working directory to the new
+/// worktree"); the minimal exclusive-guard option is implemented here instead:
+/// every enter/exit transition (the `set_current_dir` switch AND the state
+/// bookkeeping) runs under this one process-wide lock, so transitions are
+/// mutually exclusive, linearizable, and independent of the state mutex.
+///
+/// Lock ordering: this lock FIRST, then [`WORKTREE_STATE`]. The lock is a
+/// std (blocking) mutex and is only ever held across synchronous cwd
+/// bookkeeping — never across an `.await`.
+static WORKTREE_TRANSITION_LOCK: Mutex<()> = Mutex::new(());
+
 /// RAII guard that restores the process current directory to the directory
 /// that was current before [`CwdRestoreGuard::enter`] changed it.
 ///
@@ -83,15 +104,25 @@ impl std::fmt::Debug for CwdRestoreGuard {
 
 impl Drop for CwdRestoreGuard {
     fn drop(&mut self) {
-        // Restoring the process cwd can fail at the OS level; surface it
-        // loudly instead of silently leaving every later relative path
-        // resolved against the wrong directory.
-        if let Err(e) = env::set_current_dir(&self.previous) {
-            warn!(
-                "Failed to restore working directory to {}: {}",
-                self.previous.display(),
-                e
-            );
+        // Re-apply the restore under the process-wide transition lock when it
+        // is free to take. The explicit restore in [`WorktreeState::pop_worktree`]
+        // already ran while this thread held the transition lock, so on the
+        // normal path `try_lock` fails and the (idempotent) restore is skipped
+        // — a std Mutex is not reentrant, and re-running it would self-deadlock.
+        // `try_lock` succeeds on the fallback paths — panics between enter and
+        // the explicit restore, state resets, static teardown — and keeps those
+        // restores serialized with any concurrent transition too.
+        if let Ok(_transition) = WORKTREE_TRANSITION_LOCK.try_lock() {
+            // Restoring the process cwd can fail at the OS level; surface it
+            // loudly instead of silently leaving every later relative path
+            // resolved against the wrong directory.
+            if let Err(e) = env::set_current_dir(&self.previous) {
+                warn!(
+                    "Failed to restore working directory to {}: {}",
+                    self.previous.display(),
+                    e
+                );
+            }
         }
     }
 }
@@ -418,7 +449,12 @@ impl Tool for EnterWorktreeTool {
         let worktree_path_str = worktree_path.to_string_lossy().to_string();
         let branch_used = branch_arg.unwrap_or("(detached)").to_string();
 
-        // Update the global state and change directory
+        // Update the global state and change directory. Both the state lock
+        // and the process-wide transition lock are held for the whole cwd
+        // switch (see [`WORKTREE_TRANSITION_LOCK`]).
+        let _transition = WORKTREE_TRANSITION_LOCK
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Worktree transition lock poisoned: {}", e))?;
         let mut state = WORKTREE_STATE
             .lock()
             .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
@@ -488,8 +524,12 @@ impl Tool for ExitWorktreeTool {
 
         // `restored_path` is the directory the process cwd was actually
         // restored to (see `pop_worktree`); for a single-level entry that is
-        // the repository root.
+        // the repository root. Both the state lock and the process-wide
+        // transition lock are held for the whole cwd restore.
         let (restored_path, removed_path) = {
+            let _transition = WORKTREE_TRANSITION_LOCK
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Worktree transition lock poisoned: {}", e))?;
             let mut state = WORKTREE_STATE
                 .lock()
                 .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
@@ -669,7 +709,28 @@ pub fn is_in_worktree() -> bool {
 /// worktree state — the cwd is restored again by [`exit_worktree_dir`] on
 /// every exit path (success, error, early return). Returns the directory now
 /// in effect.
+///
+/// The path is validated against the workspace path policy FIRST, with the
+/// process-global safety config ([`validate_path`]). The `enter_worktree`
+/// tool validates with its own per-instance config on the execute path;
+/// this entry point is what the TUI `/worktree enter` handler goes through,
+/// and without the same check its cwd change could land an out-of-workspace
+/// target (2026-09-21 review: the tool path was hardened, the TUI path was
+/// not). An in-workspace target passes unchanged.
 pub fn enter_worktree_dir(worktree_path: PathBuf) -> Result<PathBuf> {
+    let path_str = worktree_path.to_string_lossy().into_owned();
+    validate_path(&path_str, None).with_context(|| {
+        format!(
+            "Refused to change into worktree outside the workspace: {} (the \
+             worktree was created, but no cwd change was made)",
+            path_str
+        )
+    })?;
+    // Hold the process-wide transition lock for the whole cwd switch +
+    // bookkeeping critical section (see [`WORKTREE_TRANSITION_LOCK`]).
+    let _transition = WORKTREE_TRANSITION_LOCK
+        .lock()
+        .map_err(|e| anyhow::anyhow!("Worktree transition lock poisoned: {}", e))?;
     let mut state = WORKTREE_STATE
         .lock()
         .map_err(|e| anyhow::anyhow!("Worktree state lock poisoned: {}", e))?;
@@ -681,6 +742,11 @@ pub fn enter_worktree_dir(worktree_path: PathBuf) -> Result<PathBuf> {
 /// the exit path, and on early return alike. Returns the restored directory
 /// and the worktree just left (useful for a follow-up `git worktree remove`).
 pub fn exit_worktree_dir() -> Result<(PathBuf, Option<PathBuf>)> {
+    // Hold the process-wide transition lock for the whole cwd restore +
+    // bookkeeping critical section (see [`WORKTREE_TRANSITION_LOCK`]).
+    let _transition = WORKTREE_TRANSITION_LOCK
+        .lock()
+        .map_err(|e| anyhow::anyhow!("Worktree transition lock poisoned: {}", e))?;
     let mut state = WORKTREE_STATE
         .lock()
         .map_err(|e| anyhow::anyhow!("Worktree state lock poisoned: {}", e))?;
