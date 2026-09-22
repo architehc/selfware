@@ -2078,3 +2078,274 @@ fn checkpoint_save_holds_advisory_lock_during_writes() {
         "the blocked writer's state must land"
     );
 }
+
+// ── --autocontinue: iteration-cap-failed checkpoints may chain ─────────────
+//
+// 2026-09-22 long-horizon finding: a productive run that died at the
+// iteration cap was persisted as Failed with the "Max iterations exceeded"
+// stop reason, and --autocontinue refused to pick it up (Failed was excluded
+// wholesale), so the chain could only be continued by a manual
+// `selfware resume <id>`. The policy now chains a Failed checkpoint ONLY
+// when its terminal stop is the iteration/step-cap family; crashes, safety
+// stops, guard aborts and the typed AUTO_CONTINUE_LIMIT stop stay
+// explicit-resume-only.
+
+/// Fabricate a Failed checkpoint in `project_root` whose terminal stop is
+/// `reason` (logged unrecovered, as `fail_checkpoint` does).
+fn failed_with_stop_reason(
+    task_id: &str,
+    project_root: &str,
+    rfc3339: &str,
+    reason: &str,
+) -> TaskCheckpoint {
+    let mut cp = cp_in(
+        task_id,
+        "task that hit a stop",
+        TaskStatus::Failed,
+        project_root,
+        rfc3339,
+    );
+    cp.log_error(12, reason.to_string(), false);
+    cp
+}
+
+#[test]
+fn autocontinue_chains_iteration_cap_failed_checkpoint() {
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+    let capped = failed_with_stop_reason(
+        "capped-task",
+        WORKSPACE_A,
+        "2024-01-03T00:00:00Z",
+        crate::agent::loop_control::MAX_ITERATIONS_STOP_REASON,
+    );
+    manager.save_final(&capped).unwrap();
+
+    let latest = manager
+        .latest_autoresumable_task(WORKSPACE_A)
+        .unwrap()
+        .expect("an iteration-cap stop is exactly what --autocontinue exists to chain");
+    assert_eq!(latest.task_id, "capped-task");
+}
+
+#[test]
+fn autocontinue_never_chains_arbitrary_failures() {
+    // Every non-cap terminal stop stays explicit-`resume`-only: a safety
+    // stop, a guard abort, a provider failure, and the typed
+    // AUTO_CONTINUE_LIMIT (its per-task chain budget is already spent —
+    // re-chaining it every startup would defeat MAX_AUTO_CONTINUES).
+    for (task_id, reason) in [
+        ("safety-stop", "killswitch engaged: writes to /etc are forbidden"),
+        (
+            "guard-abort",
+            "WORKSPACE_STAGNATION: 20 consecutive tool calls with no workspace change",
+        ),
+        ("provider-error", "HTTP 401 Unauthorized: invalid API key"),
+        (
+            "chain-exhausted",
+            "AUTO_CONTINUE_LIMIT: automatic continuation chained 3 times on this task and the iteration cap was reached again",
+        ),
+    ] {
+        let dir = tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+        let failed = failed_with_stop_reason(task_id, WORKSPACE_A, "2024-01-03T00:00:00Z", reason);
+        manager.save_final(&failed).unwrap();
+        assert!(
+            manager
+                .latest_autoresumable_task(WORKSPACE_A)
+                .unwrap()
+                .is_none(),
+            "'{reason}' must not auto-chain"
+        );
+    }
+}
+
+#[test]
+fn autocontinue_cap_failure_still_scoped_to_its_workspace() {
+    // The workspace gate is unchanged by the policy extension: a cap-failed
+    // checkpoint from repo A is never chained by a startup in repo B.
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+    let capped_a = failed_with_stop_reason(
+        "capped-a",
+        WORKSPACE_A,
+        "2024-01-03T00:00:00Z",
+        crate::agent::loop_control::MAX_ITERATIONS_STOP_REASON,
+    );
+    manager.save_final(&capped_a).unwrap();
+
+    assert!(
+        manager
+            .latest_autoresumable_task(WORKSPACE_B)
+            .unwrap()
+            .is_none(),
+        "repo A's cap-failed checkpoint must never chain into repo B"
+    );
+}
+
+#[test]
+fn autocontinue_picks_newest_eligible_across_status_classes() {
+    // A newer cap-failed checkpoint is eligible over an older InProgress
+    // one: "newest eligible by updated_at" is the standing rule.
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+    let running = cp_in(
+        "running-old",
+        "older interrupted task",
+        TaskStatus::InProgress,
+        WORKSPACE_A,
+        "2024-01-01T00:00:00Z",
+    );
+    manager.save(&running).unwrap();
+    let capped = failed_with_stop_reason(
+        "capped-new",
+        WORKSPACE_A,
+        "2024-01-02T00:00:00Z",
+        crate::agent::loop_control::MAX_ITERATIONS_STOP_REASON,
+    );
+    manager.save_final(&capped).unwrap();
+
+    let latest = manager
+        .latest_autoresumable_task(WORKSPACE_A)
+        .unwrap()
+        .expect("both candidates are eligible");
+    assert_eq!(latest.task_id, "capped-new", "newest eligible wins");
+}
+
+#[test]
+fn autocontinue_ignores_recovered_cap_errors() {
+    // A cap trip that was RECOVERED mid-run (the adaptive grant rescued it)
+    // is not the terminal stop; a later arbitrary failure is.
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+    let mut cp = cp_in(
+        "recovered-then-crashed",
+        "cap recovered, then failed for real",
+        TaskStatus::Failed,
+        WORKSPACE_A,
+        "2024-01-03T00:00:00Z",
+    );
+    // Earlier cap trip was recovered (grant fired); the later failure is terminal.
+    cp.log_error(
+        10,
+        crate::agent::loop_control::MAX_ITERATIONS_STOP_REASON.to_string(),
+        true,
+    );
+    cp.log_error(14, "HTTP 500 from provider".to_string(), false);
+    manager.save_final(&cp).unwrap();
+
+    assert!(
+        manager
+            .latest_autoresumable_task(WORKSPACE_A)
+            .unwrap()
+            .is_none(),
+        "the TERMINAL stop is the provider failure, not the recovered cap trip"
+    );
+}
+
+// ── Adaptive-budget + chain-iteration fields survive save/load ─────────────
+
+#[test]
+fn checkpoint_persists_adaptive_budget_and_chain_iterations() {
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+    let mut cp = TaskCheckpoint::new("budget-fields".to_string(), "d".to_string());
+    cp.effective_max_iterations = Some(24);
+    cp.extensions_granted = 4;
+    cp.cumulative_iterations = 42;
+    manager.save(&cp).unwrap();
+
+    let loaded = manager.load("budget-fields").unwrap();
+    assert_eq!(loaded.effective_max_iterations, Some(24));
+    assert_eq!(loaded.extensions_granted, 4);
+    assert_eq!(loaded.cumulative_iterations, 42);
+}
+
+#[test]
+fn legacy_checkpoint_without_budget_fields_defaults_cleanly() {
+    // Checkpoints written before the fields existed deserialize with no
+    // earned extension: resume then keeps the configured cap, unchanged.
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+    let cp = TaskCheckpoint::new("legacy".to_string(), "d".to_string());
+    manager.save(&cp).unwrap();
+
+    let loaded = manager.load("legacy").unwrap();
+    assert_eq!(loaded.effective_max_iterations, None);
+    assert_eq!(loaded.extensions_granted, 0);
+    assert_eq!(loaded.cumulative_iterations, 0);
+}
+
+#[test]
+fn delta_round_trip_carries_adaptive_budget_and_chain_iterations() {
+    let mut base = TaskCheckpoint::new("delta-budget".to_string(), "d".to_string());
+    base.effective_max_iterations = Some(12);
+    base.extensions_granted = 0;
+    base.cumulative_iterations = 4;
+
+    // A version bump alone must NOT carry the budget fields (unchanged).
+    let mut step_only = base.clone();
+    step_only.set_step(1);
+    let delta = step_only
+        .compute_delta(&base)
+        .expect("the step change produces a delta");
+    assert_eq!(delta.effective_max_iterations, None);
+    assert_eq!(delta.extensions_granted, None);
+    assert_eq!(delta.cumulative_iterations, None);
+
+    // A grant firing between saves MUST ride the delta, or the resumed run
+    // would rebuild at the configured cap and drop the earned extension.
+    let mut updated = base.clone();
+    updated.set_step(2);
+    updated.effective_max_iterations = Some(15);
+    updated.extensions_granted = 1;
+    updated.cumulative_iterations = 7;
+    let delta = updated
+        .compute_delta(&base)
+        .expect("budget fields changed, so a delta exists");
+    assert_eq!(delta.effective_max_iterations, Some(15));
+    assert_eq!(delta.extensions_granted, Some(1));
+    assert_eq!(delta.cumulative_iterations, Some(7));
+
+    let mut hydrated = base.clone();
+    hydrated.apply_delta(&delta).unwrap();
+    assert_eq!(hydrated.effective_max_iterations, Some(15));
+    assert_eq!(hydrated.extensions_granted, 1);
+    assert_eq!(hydrated.cumulative_iterations, 7);
+}
+
+#[test]
+fn checkpoint_manager_delta_log_carries_adaptive_budget_fields() {
+    // End-to-end through the on-disk delta log: a mid-run grant between two
+    // incremental saves must be visible after hydration (the base file keeps
+    // the stale configured cap).
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+    let mut cp = TaskCheckpoint::new("delta-mgr-budget".to_string(), "d".to_string());
+    cp.set_messages(big_message_set(30));
+    cp.effective_max_iterations = Some(12);
+    manager.save(&cp).unwrap();
+
+    cp.set_step(2);
+    cp.effective_max_iterations = Some(15);
+    cp.extensions_granted = 1;
+    cp.cumulative_iterations = 7;
+    manager.save(&cp).unwrap();
+
+    let delta_path = manager.checkpoint_delta_path("delta-mgr-budget").unwrap();
+    assert!(
+        delta_path.exists(),
+        "expected a delta log for the second save"
+    );
+
+    let loaded = manager.load("delta-mgr-budget").unwrap();
+    assert_eq!(loaded.effective_max_iterations, Some(15));
+    assert_eq!(loaded.extensions_granted, 1);
+    assert_eq!(loaded.cumulative_iterations, 7);
+}

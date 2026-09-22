@@ -1291,6 +1291,62 @@ pub(crate) fn autocontinue_should_run(
     !(has_subcommand || has_prompt || has_continue_flag || has_resume_session)
 }
 
+/// Progress emitter for a RESUMED run (`--continue`, `--autocontinue`,
+/// `selfware resume`), mirroring the fresh-headless wiring:
+/// `stream-json` gets the JSONL emitter on stdout, plain text mode gets the
+/// stderr emitter, and quiet / single-object `--output-format json` get none
+/// so machine-readable stdout stays clean. A resumed run's execution loop
+/// emits the same [`crate::agent::progress::ProgressEvent`]s as a fresh one —
+/// without an attached emitter they fired into the no-op default and the
+/// resume looked silent (2026-09-22 long-horizon finding).
+fn resume_progress_emitter(
+    quiet: bool,
+    output_format: HeadlessOutputFormat,
+) -> Option<std::sync::Arc<dyn crate::agent::progress::ProgressEmitter>> {
+    use crate::agent::progress::ProgressEmitter;
+    let emitter: std::sync::Arc<dyn ProgressEmitter> = match output_format {
+        HeadlessOutputFormat::StreamJson => {
+            std::sync::Arc::new(headless::JsonlProgressEmitter::new())
+        }
+        HeadlessOutputFormat::Text if !quiet => {
+            std::sync::Arc::new(crate::agent::progress::StderrProgressEmitter::new())
+        }
+        _ => return None,
+    };
+    Some(emitter)
+}
+
+/// Print the end-of-run summary for a resumed run — the same block a fresh
+/// headless run prints. The iteration figure is chain-wide
+/// (`chain_run_summary`): token/cost totals, the budget caps, and the
+/// files-changed list already accumulate across segments via the checkpoint
+/// restore, and the per-segment loop counter alone would under-report a
+/// resumed task's work. Suppressed in quiet mode and in machine-readable
+/// output formats, exactly like the fresh-run summary.
+fn print_resume_run_summary(
+    agent: &Agent,
+    run_result: &Result<()>,
+    quiet: bool,
+    output_format: HeadlessOutputFormat,
+) {
+    if quiet
+        || matches!(
+            output_format,
+            HeadlessOutputFormat::Json | HeadlessOutputFormat::StreamJson
+        )
+    {
+        return;
+    }
+    let failure = run_result
+        .as_ref()
+        .err()
+        .map(|e| crate::observability::telemetry::redact_secrets(&e.to_string()));
+    println!(
+        "{}",
+        render_run_summary(&agent.chain_run_summary(), failure.as_deref())
+    );
+}
+
 /// Canonical, absolute identity of the current workspace, used by
 /// `--autocontinue` to match a checkpoint's recorded `project_root`.
 ///
@@ -1698,8 +1754,12 @@ pub async fn run() -> Result<()> {
             );
         }
         let mut agent = Agent::resume(config, &latest.task_id).await?;
-        agent.continue_execution().await?;
-        return Ok(());
+        if let Some(emitter) = resume_progress_emitter(cli.quiet, cli.output_format) {
+            agent = agent.with_progress_emitter(emitter);
+        }
+        let run_result = agent.continue_execution().await;
+        print_resume_run_summary(&agent, &run_result, cli.quiet, cli.output_format);
+        return run_result;
     }
 
     // --autocontinue: resume the most recent unfinished task of THIS workspace
@@ -1709,9 +1769,11 @@ pub async fn run() -> Result<()> {
     // an explicit subcommand, -p prompt, --continue, or --resume-session
     // argument always wins and suppresses the auto-resume; only checkpoints
     // recorded for the CURRENT working directory are eligible (a task from
-    // another repository must never be pulled into this one); and only
-    // InProgress checkpoints qualify (Failed/Paused stay explicit-`resume`
-    // territory). Nothing eligible → normal startup (announced).
+    // another repository must never be pulled into this one); and eligibility
+    // is InProgress checkpoints plus Failed checkpoints whose terminal stop is
+    // the iteration-cap family (see terminal_stop_allows_autochain) — Paused
+    // and every other failure class stay explicit-`resume` territory.
+    // Nothing eligible → normal startup (announced).
     if cli.autocontinue {
         if !autocontinue_should_run(
             cli.command.is_some(),
@@ -1744,8 +1806,12 @@ pub async fn run() -> Result<()> {
                         "auto-resuming in-progress task from this workspace"
                     );
                     let mut agent = Agent::resume(config, &latest.task_id).await?;
-                    agent.continue_execution().await?;
-                    return Ok(());
+                    if let Some(emitter) = resume_progress_emitter(cli.quiet, cli.output_format) {
+                        agent = agent.with_progress_emitter(emitter);
+                    }
+                    let run_result = agent.continue_execution().await;
+                    print_resume_run_summary(&agent, &run_result, cli.quiet, cli.output_format);
+                    return run_result;
                 }
                 None => {
                     tracing::info!(
@@ -2924,7 +2990,12 @@ async fn handle_command(
                         task.craftsman_voice()
                     );
                 }
-                agent.continue_execution().await?;
+                if let Some(emitter) = resume_progress_emitter(quiet, output_format) {
+                    agent = agent.with_progress_emitter(emitter);
+                }
+                let run_result = agent.continue_execution().await;
+                print_resume_run_summary(&agent, &run_result, quiet, output_format);
+                run_result?;
             }
         }
 

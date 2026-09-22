@@ -105,10 +105,15 @@ pub(crate) struct Cli {
 
     /// Auto-resume the most recent INCOMPLETE task at startup, so a long
     /// task interrupted mid-run (crash/restart) picks up from its
-    /// checkpoint. Implicit and conservative: an explicit task or resume
-    /// argument (a subcommand, `-p` prompt, `--continue`, `--resume-session`)
-    /// always wins and suppresses auto-resume; if no incomplete checkpoint
-    /// exists, startup proceeds normally.
+    /// checkpoint. A task that FAILED by hitting its iteration cap (typed
+    /// "Max iterations exceeded" stop) also qualifies — chaining it is how a
+    /// productive long run gets its next segment — while every other
+    /// failure (crashes, safety stops, guard aborts, the exhausted-chain
+    /// AUTO_CONTINUE_LIMIT stop) stays explicit-`resume`-only. Implicit and
+    /// conservative: an explicit task or resume argument (a subcommand,
+    /// `-p` prompt, `--continue`, `--resume-session`) always wins and
+    /// suppresses auto-resume; if no eligible checkpoint exists, startup
+    /// proceeds normally.
     #[arg(long)]
     pub(crate) autocontinue: bool,
 

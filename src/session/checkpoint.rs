@@ -331,6 +331,15 @@ pub struct CheckpointDelta {
     pub cumulative_cost_usd: Option<f64>,
     #[serde(default)]
     pub guard_counters: Option<GuardCounters>,
+    // Adaptive iteration-budget state and the chain-wide iteration total —
+    // carried in the delta for the same reason as the budget totals above:
+    // a grant firing between full saves must still survive a resume.
+    #[serde(default)]
+    pub effective_max_iterations: Option<usize>,
+    #[serde(default)]
+    pub extensions_granted: Option<usize>,
+    #[serde(default)]
+    pub cumulative_iterations: Option<usize>,
     pub git_checkpoint: Option<GitCheckpointInfo>,
 
     // Visual assertion state (changes are always recorded, None means no change)
@@ -399,6 +408,28 @@ pub struct TaskCheckpoint {
     #[serde(default)]
     pub guard_counters: GuardCounters,
 
+    /// The EFFECTIVE iteration cap at checkpoint time: the configured cap
+    /// plus any adaptive +25% grants earned so far (`AgentLoop::max_iterations`).
+    /// Restored on resume so a productive run's earned budget survives a
+    /// restart instead of silently shrinking back to the configured cap
+    /// (2026-09-22 long-horizon finding). `None` on legacy checkpoints —
+    /// resume then keeps the configured cap, the pre-field behavior.
+    #[serde(default)]
+    pub effective_max_iterations: Option<usize>,
+    /// Adaptive budget grants consumed when this checkpoint was written (the
+    /// +25%×4 ceiling accounting in `AgentLoop::extend_budget_once`).
+    /// Persisted alongside `effective_max_iterations` so a resumed run
+    /// cannot re-earn grants already spent.
+    #[serde(default)]
+    pub extensions_granted: usize,
+    /// Chain-wide iteration count at checkpoint time: the initial run plus
+    /// every auto-continue/resume segment accumulated. The per-segment loop
+    /// counter resets on resume for budget fairness; THIS total powers the
+    /// end-of-run summary so a chained/resumed run reports the whole task's
+    /// work, not just the final segment.
+    #[serde(default)]
+    pub cumulative_iterations: usize,
+
     /// Hard budget caps themselves, carried across resume. `AgentConfig` marks
     /// these `#[serde(skip)]` (CLI-only), so without persisting them here a
     /// resume that doesn't re-pass `--max-budget-tokens`/`--max-wall-secs`/
@@ -448,6 +479,17 @@ impl TaskCheckpoint {
             .then_some(self.cumulative_cost_usd);
         let guard_counters =
             (self.guard_counters != base.guard_counters).then(|| self.guard_counters.clone());
+        // The effective cap only ever GROWS in-task (grants add onto it), so
+        // "changed" always means a new Some value; the flatten keeps the
+        // delta field None when nothing moved.
+        let effective_max_iterations = (self.effective_max_iterations
+            != base.effective_max_iterations)
+            .then_some(self.effective_max_iterations)
+            .flatten();
+        let extensions_granted =
+            (self.extensions_granted != base.extensions_granted).then_some(self.extensions_granted);
+        let cumulative_iterations = (self.cumulative_iterations != base.cumulative_iterations)
+            .then_some(self.cumulative_iterations);
         if self.git_checkpoint != base.git_checkpoint && self.git_checkpoint.is_none() {
             // Delta format cannot encode "explicitly clear git checkpoint".
             // Force a full checkpoint write for this transition.
@@ -503,6 +545,9 @@ impl TaskCheckpoint {
             || elapsed_wall_secs.is_some()
             || cumulative_cost_usd.is_some()
             || guard_counters.is_some()
+            || effective_max_iterations.is_some()
+            || extensions_granted.is_some()
+            || cumulative_iterations.is_some()
             || git_checkpoint.is_some()
             || pending_changed;
 
@@ -529,6 +574,9 @@ impl TaskCheckpoint {
             elapsed_wall_secs,
             cumulative_cost_usd,
             guard_counters,
+            effective_max_iterations,
+            extensions_granted,
+            cumulative_iterations,
             git_checkpoint,
             pending_visual_assertion,
         })
@@ -588,6 +636,15 @@ impl TaskCheckpoint {
         if let Some(ref gc) = delta.guard_counters {
             self.guard_counters = gc.clone();
         }
+        if let Some(cap) = delta.effective_max_iterations {
+            self.effective_max_iterations = Some(cap);
+        }
+        if let Some(grants) = delta.extensions_granted {
+            self.extensions_granted = grants;
+        }
+        if let Some(iterations) = delta.cumulative_iterations {
+            self.cumulative_iterations = iterations;
+        }
         if let Some(ref git) = delta.git_checkpoint {
             self.git_checkpoint = Some(git.clone());
         }
@@ -641,6 +698,9 @@ impl TaskCheckpoint {
             elapsed_wall_secs: 0,
             cumulative_cost_usd: 0.0,
             guard_counters: GuardCounters::default(),
+            effective_max_iterations: None,
+            extensions_granted: 0,
+            cumulative_iterations: 0,
             max_budget_tokens: None,
             max_wall_secs: None,
             max_cost_usd: None,
@@ -1819,7 +1879,7 @@ impl CheckpointManager {
 
     /// Find the most recently updated checkpoint that is SAFE to auto-resume at
     /// startup — meaning it belongs to the CURRENT workspace and was left
-    /// mid-run.
+    /// mid-run (or was stopped by the iteration cap while otherwise healthy).
     ///
     /// Two gates:
     /// - **Workspace**: `workspace` is the canonical absolute working
@@ -1830,10 +1890,12 @@ impl CheckpointManager {
     ///   edits against B's tree. Legacy checkpoints without a recorded
     ///   `project_root` cannot be validated and are skipped (they remain
     ///   reachable via explicit `resume <id>`).
-    /// - **Status**: only [`TaskStatus::InProgress`] qualifies. A crash or
-    ///   restart leaves the status InProgress; `Failed` and `Paused` tasks are
-    ///   deliberately excluded from AUTOMATIC resumption (the operator can
-    ///   still resume them explicitly).
+    /// - **Status**: [`TaskStatus::InProgress`] qualifies (a crash or restart
+    ///   leaves the status InProgress), and so does a [`TaskStatus::Failed`]
+    ///   checkpoint whose terminal stop is the iteration/step-cap family —
+    ///   see [`terminal_stop_allows_autochain`]. `Paused` tasks and every
+    ///   other failure class stay explicit-`resume` territory: a crashed or
+    ///   safety-stopped checkpoint must not auto-chain.
     ///
     /// Ordering and hydration match [`Self::list_tasks`]: delta logs are
     /// replayed (so a delta that flips a task to Completed is visible even
@@ -1841,10 +1903,33 @@ impl CheckpointManager {
     /// result is the newest eligible checkpoint by hydrated `updated_at`.
     /// Returns `Ok(None)` when no eligible checkpoint exists.
     pub fn latest_autoresumable_task(&self, workspace: &str) -> Result<Option<TaskSummary>> {
-        Ok(self.list_tasks()?.into_iter().find(|summary| {
-            summary.status == TaskStatus::InProgress
-                && summary.project_root.as_deref() == Some(workspace)
-        }))
+        // Summaries are already newest-first. A Failed candidate needs its
+        // terminal stop reason, which the summary does not carry — hydrate
+        // the full checkpoint for those (rare, and only within the current
+        // workspace). An unrecoverable checkpoint is skipped, never chained.
+        for summary in self.list_tasks()? {
+            if summary.project_root.as_deref() != Some(workspace) {
+                continue;
+            }
+            match summary.status {
+                TaskStatus::InProgress => return Ok(Some(summary)),
+                TaskStatus::Failed => match self.load(&summary.task_id) {
+                    Ok(checkpoint) if terminal_stop_allows_autochain(&checkpoint) => {
+                        return Ok(Some(summary));
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            "auto-resume: skipping unrecoverable failed checkpoint '{}': {}",
+                            summary.task_id,
+                            e
+                        );
+                    }
+                },
+                _ => {}
+            }
+        }
+        Ok(None)
     }
 
     /// Delete a checkpoint
@@ -1886,6 +1971,27 @@ impl CheckpointManager {
     pub fn checkpoints_dir(&self) -> &PathBuf {
         &self.checkpoints_dir
     }
+}
+
+/// Whether a FAILED checkpoint's terminal stop is in the iteration/step-cap
+/// family — the ONLY failure class `--autocontinue` may chain without
+/// operator review. A cap stop means the run was bounded by budget
+/// accounting while otherwise healthy, so chaining it continues productive
+/// work; a crash leaves the status `InProgress` (already eligible), and
+/// every other terminal failure — safety/killswitch stops, guard aborts
+/// (READ_LOOP_NO_EDIT, WORKSPACE_STAGNATION, …), provider errors — must not
+/// auto-chain. The typed `AUTO_CONTINUE_LIMIT` stop is also excluded: its
+/// per-task chain budget is already spent, and re-chaining it on every
+/// startup would defeat `MAX_AUTO_CONTINUES` (the bound exists to turn
+/// exactly that pattern into a typed stop).
+///
+/// The terminal failure is the checkpoint's LAST error entry, logged
+/// unrecovered by `fail_checkpoint` with the loop's reason verbatim.
+fn terminal_stop_allows_autochain(checkpoint: &TaskCheckpoint) -> bool {
+    checkpoint.errors.last().is_some_and(|entry| {
+        !entry.recovered
+            && entry.error.trim() == crate::agent::loop_control::MAX_ITERATIONS_STOP_REASON
+    })
 }
 
 /// Get home directory

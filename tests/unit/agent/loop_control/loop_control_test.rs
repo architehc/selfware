@@ -386,6 +386,237 @@ fn reset_for_task_restores_original_budget_and_extension() {
 }
 
 // ---------------------------------------------------------------------------
+// Productive-streak duplicate rule (2026-09-22 long-horizon finding):
+// re-running verification after an intervening successful mutation is the
+// edit→test rhythm of a long task, not a stall; only a repeat with NO
+// intervening mutation breaks the streak.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn verification_rerun_after_each_mutation_earns_streak() {
+    // The exact long-task pattern the old rule killed: edit, test, edit,
+    // test, edit — cargo_test repeats, but every repeat follows a fresh
+    // mutation.
+    let turns = streak_of(vec![
+        progress_turn(true, &[("file_edit", 1)]),
+        progress_turn(true, &[("cargo_test", 9)]),
+        progress_turn(true, &[("file_edit", 2)]),
+        progress_turn(true, &[("cargo_test", 9)]),
+        progress_turn(true, &[("file_edit", 3)]),
+    ]);
+    assert!(
+        productive_streak(&turns, 5),
+        "verification re-run after an intervening mutation must earn the grant"
+    );
+}
+
+#[test]
+fn batched_edit_and_verify_turns_earn_streak() {
+    // Same rhythm with the edit and the verification in ONE batched turn:
+    // the mutation shares the repeat's turn, which still counts.
+    let turns = streak_of(vec![
+        progress_turn(true, &[("file_edit", 1), ("cargo_test", 9)]),
+        progress_turn(true, &[("file_edit", 2), ("cargo_test", 9)]),
+        progress_turn(true, &[("file_edit", 3), ("cargo_test", 9)]),
+        progress_turn(true, &[("file_edit", 4), ("cargo_test", 9)]),
+        progress_turn(true, &[("file_edit", 5), ("cargo_test", 9)]),
+    ]);
+    assert!(productive_streak(&turns, 5));
+}
+
+#[test]
+fn identical_verification_loop_without_mutation_still_breaks() {
+    // The true stall: the same verification call five times with nothing
+    // changing in between must keep breaking the streak (fail-closed).
+    let turns = streak_of(
+        (0..5)
+            .map(|_| progress_turn(true, &[("cargo_test", 9)]))
+            .collect(),
+    );
+    assert!(
+        !productive_streak(&turns, 5),
+        "5x the identical call with no intervening mutation is a stall"
+    );
+}
+
+#[test]
+fn same_mutation_reapplied_is_still_a_stall() {
+    // The repeated call may not be its OWN witness: re-applying the identical
+    // edit args changes nothing, so test/edit cycles with the SAME edit are
+    // a retry loop, not progress.
+    let turns = streak_of(vec![
+        progress_turn(true, &[("file_edit", 1)]),
+        progress_turn(true, &[("cargo_test", 9)]),
+        progress_turn(true, &[("file_edit", 1)]),
+        progress_turn(true, &[("cargo_test", 9)]),
+        progress_turn(true, &[("file_edit", 1)]),
+    ]);
+    assert!(
+        !productive_streak(&turns, 5),
+        "the identical edit re-applied is not new work"
+    );
+}
+
+#[test]
+fn reread_after_mutation_is_progress() {
+    // Re-reading a file after an edit (formatter ran, own edit to review) is
+    // follow-up work on changed state, not a probe loop.
+    let turns = streak_of(vec![
+        progress_turn(true, &[("file_read", 1)]),
+        progress_turn(true, &[("file_edit", 2)]),
+        progress_turn(true, &[("file_read", 1)]),
+        progress_turn(true, &[("file_edit", 3)]),
+        progress_turn(true, &[("file_read", 1)]),
+    ]);
+    assert!(productive_streak(&turns, 5));
+}
+
+#[test]
+fn adjacent_repeat_after_mutation_turn_still_breaks() {
+    // One edit, then the same verification twice in a row: nothing changed
+    // between the two runs, so the second run is a bare retry.
+    let turns = streak_of(vec![
+        progress_turn(true, &[("file_edit", 1)]),
+        progress_turn(true, &[("cargo_test", 9)]),
+        progress_turn(true, &[("cargo_test", 9)]),
+        progress_turn(true, &[("file_edit", 2)]),
+        progress_turn(true, &[("cargo_test", 9)]),
+    ]);
+    assert!(
+        !productive_streak(&turns, 5),
+        "a back-to-back identical pair with no mutation between is a stall"
+    );
+}
+
+#[test]
+fn alternating_two_probes_without_mutation_still_breaks() {
+    // test/read alternation with no mutation anywhere in the window: the
+    // two calls are not each other's progress.
+    let turns = streak_of(vec![
+        progress_turn(true, &[("cargo_test", 9)]),
+        progress_turn(true, &[("file_read", 1)]),
+        progress_turn(true, &[("cargo_test", 9)]),
+        progress_turn(true, &[("file_read", 1)]),
+        progress_turn(true, &[("cargo_test", 9)]),
+    ]);
+    assert!(!productive_streak(&turns, 5));
+}
+
+#[test]
+fn shell_probe_repeat_is_fail_closed_without_args() {
+    // The progress window stores args HASHES, so shell commands cannot be
+    // classified as mutating or observational after the fact. A repeated
+    // shell_exec signature therefore never excuses itself — fail-closed.
+    let turns = streak_of(
+        (0..5)
+            .map(|_| progress_turn(true, &[("shell_exec", 7)]))
+            .collect(),
+    );
+    assert!(
+        !productive_streak(&turns, 5),
+        "shell_exec repeats cannot prove an intervening mutation"
+    );
+    // But a shell probe interleaved with REAL file-tool mutations still
+    // earns the streak — the mutation witness is what matters.
+    let turns = streak_of(vec![
+        progress_turn(true, &[("shell_exec", 7)]),
+        progress_turn(true, &[("file_write", 1)]),
+        progress_turn(true, &[("shell_exec", 7)]),
+        progress_turn(true, &[("file_write", 2)]),
+        progress_turn(true, &[("shell_exec", 7)]),
+    ]);
+    assert!(productive_streak(&turns, 5));
+}
+
+// ---------------------------------------------------------------------------
+// Adaptive-budget persistence across resume (2026-09-22 finding: the
+// extended cap was rebuilt at the configured value on resume, silently
+// dropping earned grants).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn restore_budget_extension_restores_cap_and_grants() {
+    let mut loop_ctrl = AgentLoop::new(12);
+    // Checkpoint persisted cap 15 with one grant consumed (12 + 12/4).
+    loop_ctrl.restore_budget_extension(15, 1);
+    assert_eq!(loop_ctrl.max_iterations(), 15);
+    assert_eq!(loop_ctrl.extensions_granted(), 1);
+    assert!(!loop_ctrl.extension_ceiling_reached());
+    // The remaining grants keep the +25%-of-original step and the ceiling.
+    assert_eq!(loop_ctrl.extend_budget_once(), Some(3));
+    assert_eq!(loop_ctrl.max_iterations(), 18);
+    assert_eq!(loop_ctrl.extend_budget_once(), Some(3));
+    assert_eq!(loop_ctrl.extend_budget_once(), Some(3));
+    assert_eq!(loop_ctrl.max_iterations(), 24);
+    assert_eq!(
+        loop_ctrl.extend_budget_once(),
+        None,
+        "ceiling includes restored grants"
+    );
+}
+
+#[test]
+fn restore_budget_extension_never_shrinks_below_configured_cap() {
+    // Operator re-passed a LARGER --max-turns on resume: the persisted cap
+    // must not shrink the configured one (extensions only ever grow a cap).
+    let mut loop_ctrl = AgentLoop::new(20);
+    loop_ctrl.restore_budget_extension(15, 2);
+    assert_eq!(loop_ctrl.max_iterations(), 20);
+    assert_eq!(
+        loop_ctrl.extensions_granted(),
+        2,
+        "spent grants still count against the ceiling"
+    );
+}
+
+#[test]
+fn restore_budget_extension_clamps_grants_to_the_ceiling() {
+    // A hand-edited/corrupt checkpoint must not mint grants beyond the
+    // +100% ceiling, nor a huge grant count panic the accounting.
+    let mut loop_ctrl = AgentLoop::new(12);
+    loop_ctrl.restore_budget_extension(24, usize::MAX);
+    assert!(loop_ctrl.extension_ceiling_reached());
+    assert_eq!(loop_ctrl.extend_budget_once(), None);
+}
+
+// ---------------------------------------------------------------------------
+// Chain-wide iteration total (resume segments accumulate; the per-segment
+// counter resets for budget fairness).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn accumulated_iterations_fold_across_segments_and_reset_per_task() {
+    let mut loop_ctrl = AgentLoop::new(10);
+    loop_ctrl.next_state(); // Planning — consumes no iteration
+    loop_ctrl
+        .transition_to(AgentState::Executing { step: 0 })
+        .unwrap();
+    for _ in 0..3 {
+        loop_ctrl.next_state();
+    }
+    assert_eq!(loop_ctrl.current_iteration(), 3);
+    assert_eq!(loop_ctrl.accumulated_iterations(), 3);
+
+    // The resume/chain boundary: per-segment counter resets, total folds.
+    loop_ctrl.set_prior_iterations(13); // what Agent::resume restores
+    loop_ctrl.reset_budget_for_resume();
+    assert_eq!(loop_ctrl.current_iteration(), 0);
+    assert_eq!(
+        loop_ctrl.accumulated_iterations(),
+        16,
+        "the closing segment folds into the chain-wide total"
+    );
+
+    loop_ctrl.next_state();
+    loop_ctrl.next_state();
+    assert_eq!(loop_ctrl.accumulated_iterations(), 18);
+
+    // A genuinely new task starts the chain total over.
+    loop_ctrl.reset_for_task();
+    assert_eq!(loop_ctrl.accumulated_iterations(), 0);
+}
+
+// ---------------------------------------------------------------------------
 // Auto-checkpoint-and-continue (long-task caps, USER-APPROVED policy)
 // ---------------------------------------------------------------------------
 

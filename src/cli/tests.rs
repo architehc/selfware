@@ -1419,6 +1419,28 @@ fn autocontinue_explicit_task_or_resume_argument_wins() {
 }
 
 #[test]
+fn resume_progress_emitter_mirrors_headless_wiring() {
+    // Resumed runs get the same live progress wiring as fresh headless runs:
+    // stderr lines in plain text mode, JSONL on stdout for stream-json, and
+    // nothing for quiet / single-object json (machine-readable stdout stays
+    // clean).
+    assert!(resume_progress_emitter(false, HeadlessOutputFormat::Text).is_some());
+    assert!(
+        resume_progress_emitter(true, HeadlessOutputFormat::Text).is_none(),
+        "quiet stays silent"
+    );
+    assert!(
+        resume_progress_emitter(false, HeadlessOutputFormat::Json).is_none(),
+        "single-object json keeps stdout clean"
+    );
+    assert!(resume_progress_emitter(false, HeadlessOutputFormat::StreamJson).is_some());
+    assert!(
+        resume_progress_emitter(true, HeadlessOutputFormat::StreamJson).is_some(),
+        "stream-json emits even when quiet — stdout is the machine channel"
+    );
+}
+
+#[test]
 fn cli_mcp_add_remove_parse() {
     use clap::Parser;
     let cli = Cli::try_parse_from([

@@ -37,6 +37,14 @@ const MAX_GRANTS: usize = 4;
 /// pathological infinite chain (USER-APPROVED long-task caps policy).
 pub const MAX_AUTO_CONTINUES: usize = 3;
 
+/// The exact terminal reason [`AgentLoop::next_state`] produces when the
+/// iteration cap trips. The `--autocontinue` resume policy
+/// (`CheckpointManager::latest_autoresumable_task`) matches on this string
+/// to distinguish a budget stop (chainable) from every other failure (never
+/// auto-chained), so it must stay byte-identical with what the Failed state
+/// carries — keep it the single source of truth for that reason.
+pub const MAX_ITERATIONS_STOP_REASON: &str = "Max iterations exceeded";
+
 impl std::fmt::Display for InvalidStateTransition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -68,6 +76,12 @@ pub struct AgentLoop {
     /// which keeps "making progress" forever into a typed stop rather than
     /// an unbounded chain.
     auto_continue_count: usize,
+    /// Iterations consumed by EARLIER segments of this task chain. The
+    /// per-segment `iteration` counter resets on resume/continuation for
+    /// budget fairness; this accumulator keeps the chain-wide total so the
+    /// checkpoint (`cumulative_iterations`) and the end-of-run summary
+    /// report the whole task's work, not just the final segment.
+    prior_iterations: usize,
     current_step: usize,
     iteration: usize,
 }
@@ -82,22 +96,72 @@ pub struct TurnProgress {
     pub signatures: Vec<(String, u64)>,
 }
 
+/// Whether a tool name witnesses a mutation for the [`productive_streak`]
+/// duplicate excusal. Name-only on purpose: the progress window stores
+/// (name, args HASH), so argument-classified tools (`shell_exec`/`pty_shell`
+/// — a `cargo test` vs a `cat > file` are indistinguishable once hashed)
+/// conservatively do NOT count as mutation witnesses. Reuses the canonical
+/// dispatcher classifier with empty args rather than duplicating its name
+/// list; the file- and git-mutation branches are name-only there.
+fn signature_is_mutating(tool_name: &str) -> bool {
+    super::tool_dispatch::tool_call_is_mutating(tool_name, &serde_json::Value::Null)
+}
+
 /// Conservative forward-progress test for the adaptive iteration budget:
 /// the last `window` turns must EACH contain at least one non-error tool
-/// result, and no identical tool call (same tool, same args) may repeat
-/// anywhere in the window. Anything less — an error-only turn, a repeated
-/// call, missing evidence — is NOT progress, and the run dies at the cap.
+/// result, and no tool call (same tool, same args) may repeat without an
+/// intervening mutation. Anything less — an error-only turn, a bare re-run
+/// of the same call, missing evidence — is NOT progress, and the run dies
+/// at the cap.
+///
+/// Duplicate rule: re-running the SAME verification after an intervening
+/// successful mutation is the normal edit→test rhythm of a long task, not
+/// a stall — the old "no identical call anywhere in the window" rule
+/// rejected every such window, so productive refactors (cargo_test after
+/// each edit) never earned an adaptive grant or an auto-continue chain and
+/// died at the cap with a typed MAX_ITERATIONS (2026-09-22 long-horizon
+/// e2e finding). A repeat is now excused iff a MUTATING call with a
+/// different signature appears in the span from the previous occurrence to
+/// this one (inclusive of both turns: a batched [edit, test] turn mutates
+/// and re-verifies in one step). A repeat with no intervening mutation —
+/// the identical probe hammered N times, two reads alternated, the same
+/// edit re-applied verbatim — still breaks the streak (fail-closed on true
+/// stall/retry loops).
 pub fn productive_streak(turns: &std::collections::VecDeque<TurnProgress>, window: usize) -> bool {
     if turns.len() < window {
         return false;
     }
-    let mut seen: std::collections::HashSet<&(String, u64)> = std::collections::HashSet::new();
-    for turn in turns.iter().rev().take(window) {
+    let window_turns: Vec<&TurnProgress> = turns.iter().skip(turns.len() - window).collect();
+    for turn in &window_turns {
         if !turn.had_success || turn.signatures.is_empty() {
             return false;
         }
-        for signature in &turn.signatures {
-            if !seen.insert(signature) {
+    }
+    for (i, turn) in window_turns.iter().enumerate() {
+        for (pos, signature) in turn.signatures.iter().enumerate() {
+            // The most recent earlier occurrence of this exact call: in a
+            // prior window turn, or earlier in this same turn (a duplicated
+            // call inside one batch).
+            let previous_turn = (0..i)
+                .rev()
+                .find(|&j| window_turns[j].signatures.contains(signature));
+            let same_turn_repeat = turn.signatures[..pos].contains(signature);
+            let Some(anchor) = previous_turn.or(same_turn_repeat.then_some(i)) else {
+                continue;
+            };
+            // Excused only when some turn from the previous occurrence up to
+            // this one carried a mutation OTHER than the repeated call
+            // itself — the edit that makes re-running the verification new
+            // work instead of a retry. The repeated call is excluded as its
+            // own witness, so a cycle re-applying the SAME edit args (an
+            // edit that changes nothing on re-run) still breaks.
+            let excused = (anchor..=i).any(|k| {
+                window_turns[k]
+                    .signatures
+                    .iter()
+                    .any(|other| other != signature && signature_is_mutating(&other.0))
+            });
+            if !excused {
                 return false;
             }
         }
@@ -113,6 +177,7 @@ impl AgentLoop {
             original_max: max_iterations,
             extensions_granted: 0,
             auto_continue_count: 0,
+            prior_iterations: 0,
             current_step: 0,
             iteration: 0,
         }
@@ -137,6 +202,41 @@ impl AgentLoop {
     /// further in-place grant is owed).
     pub fn extension_ceiling_reached(&self) -> bool {
         self.extensions_granted >= MAX_GRANTS
+    }
+
+    /// How many adaptive grants this task has consumed so far. Persisted in
+    /// the checkpoint so a resume keeps the +25%×4 ceiling accounting
+    /// instead of re-earning grants already spent.
+    pub fn extensions_granted(&self) -> usize {
+        self.extensions_granted
+    }
+
+    /// Restore the persisted adaptive-budget state on resume: the effective
+    /// cap the task had earned at checkpoint time and the grants already
+    /// consumed. Without this a resume rebuilt the loop at the CONFIGURED
+    /// cap and silently dropped the earned extension (2026-09-22
+    /// long-horizon finding). The cap restores as max(configured,
+    /// persisted): an earned extension only ever GROWS the cap, and an
+    /// operator re-passing a larger `--max-turns` still wins. The grant
+    /// count is clamped to the ceiling so a hand-edited or corrupt
+    /// checkpoint cannot mint extra grants.
+    pub fn restore_budget_extension(&mut self, persisted_cap: usize, grants: usize) {
+        self.max_iterations = self.original_max.max(persisted_cap);
+        self.extensions_granted = grants.min(MAX_GRANTS);
+    }
+
+    /// Chain-wide iteration count: iterations consumed by earlier segments
+    /// of this task (restored on resume, folded at each in-process
+    /// continuation) plus the current segment's counter.
+    pub fn accumulated_iterations(&self) -> usize {
+        self.prior_iterations + self.iteration
+    }
+
+    /// Set the iteration total earlier segments of this task chain consumed
+    /// (the `Agent::resume` restore path reads it from the checkpoint's
+    /// `cumulative_iterations`).
+    pub fn set_prior_iterations(&mut self, prior: usize) {
+        self.prior_iterations = prior;
     }
 
     /// How many auto-continuations ("chains") have fired on the current task.
@@ -165,14 +265,17 @@ impl AgentLoop {
     }
 
     /// Reset the iteration budget exactly as a manual `Agent::resume` would
-    /// re-create it (`AgentLoop::new` + `restore_progress(step, 0)`):
-    /// iteration returns to 0, the cap returns to the ORIGINAL configured
-    /// value, and the adaptive-extension budget is fresh — while the step
-    /// counter keeps counting and the state returns to `Executing`. The
-    /// in-process auto-continue chain mirrors this, so a chained segment is
-    /// indistinguishable from a resumed one. The auto-continue counter is
-    /// deliberately NOT reset: it bounds the whole task, not one segment.
+    /// re-create it (`AgentLoop::new` + `set_prior_iterations` +
+    /// `restore_progress(step, 0)`): iteration returns to 0, the cap returns
+    /// to the ORIGINAL configured value, and the adaptive-extension budget is
+    /// fresh — while the step counter keeps counting, the chain-wide
+    /// iteration total folds the closing segment in, and the state returns
+    /// to `Executing`. The in-process auto-continue chain mirrors this, so a
+    /// chained segment is indistinguishable from a resumed one. The
+    /// auto-continue counter is deliberately NOT reset: it bounds the whole
+    /// task, not one segment.
     pub fn reset_budget_for_resume(&mut self) {
+        self.prior_iterations += self.iteration;
         self.iteration = 0;
         self.max_iterations = self.original_max;
         self.extensions_granted = 0;
@@ -191,7 +294,7 @@ impl AgentLoop {
         }
         if self.iteration > self.max_iterations {
             self.state = AgentState::Failed {
-                reason: "Max iterations exceeded".to_string(),
+                reason: MAX_ITERATIONS_STOP_REASON.to_string(),
             };
             return Some(self.state.clone());
         }
@@ -327,6 +430,7 @@ impl AgentLoop {
         self.state = AgentState::Planning;
         self.current_step = 0;
         self.iteration = 0;
+        self.prior_iterations = 0;
         // A new task gets a fresh budget: extensions are per-task.
         self.max_iterations = self.original_max;
         self.extensions_granted = 0;

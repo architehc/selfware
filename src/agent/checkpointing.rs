@@ -247,6 +247,17 @@ impl Agent {
         let mut restored_messages = checkpoint.messages.clone();
         let mut restored_loop = AgentLoop::new(config.agent.max_iterations);
 
+        // Restore the adaptive budget earned before the checkpoint: the
+        // extended cap and the grants already consumed. Without this a resume
+        // silently dropped earned extensions — the run restarted at the
+        // configured cap, and with the extension ceiling unspent it re-earned
+        // grants it had already used (2026-09-22 long-horizon finding). Done
+        // BEFORE the step/iteration restore below so even the legacy replay
+        // path evaluates the cap trips against the extended budget.
+        if let Some(persisted_cap) = checkpoint.effective_max_iterations {
+            restored_loop.restore_budget_extension(persisted_cap, checkpoint.extensions_granted);
+        }
+
         // Restore exact loop progress when available.
         // Older checkpoints may not have an iteration value, so keep fallback logic.
         //
@@ -270,6 +281,11 @@ impl Agent {
                 step: checkpoint.current_step,
             });
         }
+        // The per-segment iteration counter reset above is budget fairness;
+        // the chain-wide total must still accumulate across every segment of
+        // the task so the end-of-run summary (and the next checkpoint) report
+        // the whole chain rather than the final segment alone.
+        restored_loop.set_prior_iterations(checkpoint.cumulative_iterations);
         // The auto-continue chain bound is per-TASK, not per-process: a task
         // resumed after chaining continuations keeps counting against
         // `MAX_AUTO_CONTINUES` instead of receiving a fresh budget of 3
@@ -331,6 +347,25 @@ impl Agent {
             .last_failed_verification_summary
             .clone();
         agent.verification_failures = checkpoint.guard_counters.verification_failures.clone();
+        // Restore the files-changed evidence from earlier segments: without
+        // it the end-of-run summary's file list covered only the resumed
+        // segment. This mirrors exactly what a single-process run accumulates
+        // — `mark_written` marks the path stale, which is also the correct
+        // reread-guard treatment (the file WAS written by this task chain, so
+        // a re-read is not an unchanged probe).
+        for tool_call in &checkpoint.tool_calls {
+            if !tool_call.success {
+                continue;
+            }
+            let Ok(args) = serde_json::from_str::<serde_json::Value>(&tool_call.arguments) else {
+                continue;
+            };
+            for path in
+                super::tool_dispatch::written_paths_for_tool_call(&tool_call.tool_name, &args)
+            {
+                agent.file_tracker.mark_written(&path.to_string_lossy());
+            }
+        }
         agent.last_checkpoint_tool_calls = checkpoint_tool_calls;
         agent.last_checkpoint_persisted_at = Instant::now();
         agent.checkpoint_persisted_once = true;
@@ -421,6 +456,28 @@ impl Agent {
         Ok(agent)
     }
 
+    /// Chain-wide iteration count: iterations consumed by every segment of
+    /// the current task (initial run + auto-continue chains + resumes), not
+    /// just the segment currently in flight. The per-segment counter
+    /// (`current_iteration`) resets on resume for budget fairness; this
+    /// total never resets within a task chain.
+    pub fn cumulative_iterations(&self) -> usize {
+        self.loop_control.accumulated_iterations()
+    }
+
+    /// End-of-run summary for a resumed or chained run: identical to
+    /// [`Agent::run_summary`], but `iterations` is the chain-wide total
+    /// instead of the per-segment loop counter. (Token/cost totals, the
+    /// earned iteration-cap extension, and the files-changed evidence are
+    /// already restored from the checkpoint by [`Agent::resume`].) On a
+    /// fresh run the two are identical, so callers may use this
+    /// unconditionally.
+    pub fn chain_run_summary(&self) -> crate::agent::RunSummary {
+        let mut summary = self.run_summary();
+        summary.iterations = self.loop_control.accumulated_iterations();
+        summary
+    }
+
     /// Convert current state to a checkpoint
     pub fn to_checkpoint(&self, task_id: &str, task_description: &str) -> TaskCheckpoint {
         let mut checkpoint = if let Some(ref existing) = self.current_checkpoint {
@@ -438,6 +495,14 @@ impl Agent {
         // Persist the auto-continue chain count so the per-task chain bound
         // survives a restart (`Agent::resume` restores it onto the new loop).
         checkpoint.auto_continue_count = self.loop_control.auto_continue_count();
+        // Persist the adaptive-budget state (effective cap + grants consumed)
+        // so a resume restores the EARNED extension instead of silently
+        // rebuilding at the configured cap — and the chain-wide iteration
+        // total so the resumed run's end-of-run summary reports the whole
+        // task chain, not just the final segment.
+        checkpoint.effective_max_iterations = Some(self.loop_control.max_iterations());
+        checkpoint.extensions_granted = self.loop_control.extensions_granted();
+        checkpoint.cumulative_iterations = self.loop_control.accumulated_iterations();
         checkpoint.set_messages(self.messages.clone());
         checkpoint.set_estimated_tokens(self.memory.total_tokens());
 
@@ -720,6 +785,12 @@ impl Agent {
             checkpoint.cumulative_tokens = tokens;
             checkpoint.elapsed_wall_secs = wall;
             checkpoint.cumulative_cost_usd = cost;
+            // The adaptive cap/grants and the chain-wide iteration total move
+            // between periodic saves (a grant fires exactly when the cap
+            // trips) — stamp them at the terminal write too.
+            checkpoint.effective_max_iterations = Some(self.loop_control.max_iterations());
+            checkpoint.extensions_granted = self.loop_control.extensions_granted();
+            checkpoint.cumulative_iterations = self.loop_control.accumulated_iterations();
         }
     }
 
@@ -1144,6 +1215,10 @@ mod tests;
 #[cfg(test)]
 #[path = "../../tests/unit/agent/checkpointing/checkpointing_resume_budget_test.rs"]
 mod resume_budget_tests;
+
+#[cfg(test)]
+#[path = "../../tests/unit/agent/checkpointing/checkpointing_resume_chain_test.rs"]
+mod resume_chain_tests;
 
 #[cfg(all(test, feature = "consolidation"))]
 #[path = "../../tests/unit/agent/checkpointing/checkpointing_consolidate_utf8_test.rs"]
