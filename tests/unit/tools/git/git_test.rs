@@ -312,6 +312,47 @@ async fn test_git_diff_with_specific_path() {
 }
 
 #[tokio::test]
+async fn test_git_diff_with_specific_file_path() {
+    let _iso = isolated_git_repo();
+    let tool = GitDiff::new();
+
+    // Create and commit a file
+    std::fs::write("test_file.txt", "initial content\n").unwrap();
+    let commit_tool = GitCommit::new();
+    let _ = commit_tool
+        .execute(serde_json::json!({
+            "message": "Initial",
+            "files": ["test_file.txt"]
+        }))
+        .await;
+
+    // Modify the file
+    std::fs::write("test_file.txt", "modified content\n").unwrap();
+
+    // git_diff with the exact file path must succeed and not crash with 'Not a directory'
+    let args = serde_json::json!({
+        "path": "test_file.txt",
+        "staged": false
+    });
+
+    let result = tool.execute(args).await;
+    assert!(
+        result.is_ok(),
+        "git_diff with specific file path must succeed: {:?}",
+        result.err()
+    );
+
+    let output = result.unwrap();
+    let diff = output["diff"].as_str().unwrap_or("");
+    assert!(
+        diff.contains("modified content"),
+        "diff must show modified content, got: {}",
+        diff
+    );
+    assert_eq!(output["has_changes"], true);
+}
+
+#[tokio::test]
 async fn test_git_commit_with_specific_files() {
     let _iso = isolated_git_repo();
     let tool = GitCommit::new();

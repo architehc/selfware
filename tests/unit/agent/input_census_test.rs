@@ -357,3 +357,29 @@ fn census_applies_to_small_tasks_but_not_self_contained_documents() {
     let big: String = (0..60_000).map(|i| format!("uniq{i:05} ")).collect();
     assert!(!census_applies(&big));
 }
+
+#[test]
+fn census_skips_hidden_dot_directories() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        &dir,
+        ".qwen/tmp/stale.json",
+        r#"{"stale_field": "should_be_ignored"}"#,
+    );
+    write(&dir, ".selfware/data.json", r#"{"internal_flag": true}"#);
+    write(&dir, "visible/data.json", r#"{"real_field": 123}"#);
+    let census = census_task_inputs(dir.path());
+    let joined = census.key_paths.join("\n");
+    assert!(
+        !joined.contains("stale_field"),
+        "dot-dirs must be skipped: {joined}"
+    );
+    assert!(
+        !joined.contains("internal_flag"),
+        "dot-dirs must be skipped: {joined}"
+    );
+    assert!(
+        joined.contains("real_field"),
+        "normal dirs must be included: {joined}"
+    );
+}

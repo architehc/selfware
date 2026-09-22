@@ -3749,3 +3749,79 @@ async fn auto_continue_aborts_without_manager_at_the_boundary() {
     );
     server.stop().await;
 }
+
+#[tokio::test]
+async fn test_enforce_hard_budgets_zero_caps_treated_as_uncapped() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.agent.max_budget_tokens = Some(0);
+    config.agent.max_cost_usd = Some(0.0);
+    config.agent.max_wall_secs = Some(0);
+
+    let mut agent = Agent::new(config).await.unwrap();
+    // With 0 caps filtered out, enforce_hard_budgets must succeed without bailing
+    let result = agent.enforce_hard_budgets("test task").await;
+    assert!(
+        result.is_ok(),
+        "zero caps must be treated as uncapped: {:?}",
+        result
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn test_reset_failure_mode_counters_clears_task_history_buffers() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = mock_agent_config(format!("{}/v1", server.url()), false);
+    let mut agent = Agent::new(config).await.unwrap();
+
+    // Populate buffers
+    agent
+        .recent_tool_calls
+        .push_back(("shell_exec".to_string(), 12345));
+    agent
+        .recent_tool_batches
+        .push_back(vec![("shell_exec".to_string(), 12345)]);
+    agent
+        .recent_turn_progress
+        .push_back(productive_turn("shell_exec", 1));
+    agent.readonly_no_tool_streak = 5;
+    agent.consecutive_empty_responses = 2;
+
+    // Reset counters
+    agent.reset_failure_mode_counters();
+
+    // Verify all per-task buffers and streaks are clean
+    assert!(agent.recent_tool_calls.is_empty());
+    assert!(agent.recent_tool_batches.is_empty());
+    assert!(agent.recent_turn_progress.is_empty());
+    assert_eq!(agent.readonly_no_tool_streak, 0);
+    assert_eq!(agent.consecutive_empty_responses, 0);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn test_maybe_inject_commit_mode_uses_cumulative_budget_elapsed_secs() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.agent.max_wall_secs = Some(100);
+
+    let mut agent = Agent::new(config).await.unwrap();
+    // Prior elapsed seconds across previous segments is 70s out of 100s (70%)
+    agent.prior_elapsed_secs = 70;
+
+    // Call commit mode injection
+    agent.maybe_inject_commit_mode_directive();
+
+    // 70% >= 65% should trigger COMMIT MODE
+    let last_msg = agent
+        .messages
+        .last()
+        .expect("commit mode directive expected");
+    assert!(
+        last_msg.content.text().contains("COMMIT MODE: 65%"),
+        "cumulative elapsed time must trigger commit mode: {:?}",
+        last_msg.content.text()
+    );
+    server.stop().await;
+}

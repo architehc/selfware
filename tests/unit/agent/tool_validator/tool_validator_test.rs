@@ -289,3 +289,23 @@ fn test_normalize_passthrough_on_non_object_or_unparsable() {
     );
     assert_eq!(normalize_tool_arg_aliases("file_edit", ""), "".to_string());
 }
+
+#[test]
+fn test_normalize_git_diff_and_screen_aliases() {
+    assert_eq!(
+        normalized("git_diff", r#"{"file":"src/main.rs"}"#),
+        serde_json::json!({"path": "src/main.rs"})
+    );
+    assert_eq!(
+        normalized("git_diff", r#"{"file_path":"src/main.rs"}"#),
+        serde_json::json!({"path": "src/main.rs"})
+    );
+    assert_eq!(
+        normalized("computer_screen", r#"{"target":"region"}"#),
+        serde_json::json!({"action": "region"})
+    );
+    assert_eq!(
+        normalized("screen_capture", r#"{"action":"screen"}"#),
+        serde_json::json!({"target": "screen"})
+    );
+}

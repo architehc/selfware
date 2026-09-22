@@ -74,7 +74,8 @@ pub(crate) fn census_task_inputs(root: &Path) -> InputCensus {
         .filter_entry(|e| {
             !(e.file_type().is_dir()
                 && e.depth() > 0
-                && SKIP_DIRS.contains(&e.file_name().to_string_lossy().as_ref()))
+                && (SKIP_DIRS.contains(&e.file_name().to_string_lossy().as_ref())
+                    || e.file_name().to_string_lossy().starts_with('.')))
         });
 
     let mut files_seen = 0usize;

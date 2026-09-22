@@ -205,7 +205,7 @@ impl Tool for ComputerScreenTool {
             .ok_or_else(|| anyhow::anyhow!("Missing 'action' field"))?;
 
         match action {
-            "full" => {
+            "full" | "screen" => {
                 let captured = crate::computer::ScreenCapture::capture_full().await?;
                 Ok(json!({
                     "status": "ok",

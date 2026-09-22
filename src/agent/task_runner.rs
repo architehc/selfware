@@ -770,8 +770,8 @@ impl Agent {
             return None;
         }
 
-        let max_steps = self.config.agent.max_iterations;
-        let pct = ((step + 1) as f64 / max_steps as f64 * 100.0).min(100.0);
+        let max_steps = self.loop_control.max_iterations();
+        let pct = ((step + 1) as f64 / max_steps.max(1) as f64 * 100.0).min(100.0);
 
         let has_verification = self
             .current_checkpoint
@@ -977,10 +977,10 @@ impl Agent {
     /// FINAL STRETCH once — the run must ship something before the hard stop.
     /// No-op when no wall budget is configured. Latches reset in run_task.
     pub(super) fn maybe_inject_commit_mode_directive(&mut self) {
-        let Some(max_wall) = self.config.agent.max_wall_secs else {
+        let Some(max_wall) = self.config.agent.max_wall_secs.filter(|&s| s > 0) else {
             return;
         };
-        let elapsed = self.task_start_time.elapsed().as_secs();
+        let elapsed = self.budget_elapsed_secs();
         let pct = elapsed.saturating_mul(100) / max_wall.max(1);
         if pct >= 85
             && !self
@@ -1207,7 +1207,7 @@ impl Agent {
     /// over-budget response report success.
     pub(super) async fn enforce_hard_budgets(&mut self, task_description: &str) -> Result<()> {
         self.sync_api_usage();
-        if let Some(max_budget) = self.config.agent.max_budget_tokens {
+        if let Some(max_budget) = self.config.agent.max_budget_tokens.filter(|&b| b > 0) {
             let total = self.cumulative_token_usage.total;
             if total >= max_budget {
                 let reason = format!("Token budget exhausted: {} >= {} tokens", total, max_budget);
@@ -1220,7 +1220,7 @@ impl Agent {
                 anyhow::bail!("{}", reason);
             }
         }
-        if let Some(max_cost) = self.config.agent.max_cost_usd {
+        if let Some(max_cost) = self.config.agent.max_cost_usd.filter(|&c| c > 0.0) {
             if self.cumulative_cost_usd >= max_cost {
                 let reason = format!(
                     "Cost budget exhausted: ${:.4} >= ${:.4}",
@@ -1235,7 +1235,7 @@ impl Agent {
                 anyhow::bail!("{}", reason);
             }
         }
-        if let Some(max_secs) = self.config.agent.max_wall_secs {
+        if let Some(max_secs) = self.config.agent.max_wall_secs.filter(|&s| s > 0) {
             let elapsed = self.budget_elapsed_secs();
             if elapsed >= max_secs {
                 let reason = format!("Wall-clock timeout: {}s >= {}s", elapsed, max_secs);
@@ -1340,7 +1340,7 @@ impl Agent {
                 message: format!(
                     "Step {}/{}",
                     self.loop_control.current_step(),
-                    self.config.agent.max_iterations
+                    self.loop_control.max_iterations()
                 ),
             });
             // Hard limits: token budget, USD cost, and wall-clock timeout

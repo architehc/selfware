@@ -3091,6 +3091,14 @@ To call a tool, use this EXACT XML structure:
         self.rigor_directive_injected = false;
         self.consecutive_read_only_steps = 0;
         self.seen_read_targets.clear();
+        self.recent_tool_calls.clear();
+        self.recent_tool_batches.clear();
+        self.recent_turn_progress.clear();
+        self.recent_failed_tool_attempts.clear();
+        self.escalated_edit_args_hashes.clear();
+        self.readonly_no_tool_streak = 0;
+        self.consecutive_empty_responses = 0;
+        self.pending_failure_hint = None;
     }
 
     // ============================================================

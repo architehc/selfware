@@ -115,3 +115,22 @@ async fn error_recovery_hint_truncates_multibyte_error_without_panic() {
     });
     assert!(hint.contains("Endpoint/connection issue"));
 }
+
+#[test]
+fn looks_like_malformed_tool_xml_detects_unparsed_delimiters() {
+    assert!(looks_like_malformed_tool_xml("<|open|>tools<|sep|>broken"));
+    assert!(looks_like_malformed_tool_xml(
+        "<|open|>call tool=\"shell_exec\""
+    ));
+    assert!(looks_like_malformed_tool_xml(
+        "<tool_call>{\"name\": \"git_diff\"}"
+    ));
+    assert!(looks_like_malformed_tool_xml("</tool_call>"));
+    assert!(looks_like_malformed_tool_xml("<function=run_command>"));
+    assert!(!looks_like_malformed_tool_xml(
+        "Just normal plain text summary."
+    ));
+    // Valid standard XML format
+    let valid_xml = "<tool>\n<name>git_diff</name>\n<arguments>{}</arguments>\n</tool>";
+    assert!(!looks_like_malformed_tool_xml(valid_xml));
+}

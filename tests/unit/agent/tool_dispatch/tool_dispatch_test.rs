@@ -2358,6 +2358,24 @@ fn test_not_observational_cargo_fmt() {
 }
 
 #[test]
+fn test_observational_wmctrl_and_process_inspection() {
+    assert!(shell_command_is_observational("wmctrl -l"));
+    assert!(shell_command_is_observational("wmctrl -lG"));
+    assert!(shell_command_is_observational("wmctrl -d"));
+    assert!(shell_command_is_observational("ps aux"));
+    assert!(shell_command_is_observational("top -b -n 1"));
+    assert!(shell_command_is_observational("uptime"));
+    assert!(shell_command_is_observational("xdotool getactivewindow"));
+
+    // Mutating window management commands must NOT be observational
+    assert!(!shell_command_is_observational(
+        "wmctrl -r :ACTIVE: -e 0,100,100,800,600"
+    ));
+    assert!(!shell_command_is_observational("wmctrl -c 'Firefox'"));
+    assert!(!shell_command_is_observational("wmctrl -s 1"));
+}
+
+#[test]
 fn formatter_checks_are_observational_and_formatting_is_mutating() {
     for command in ["cargo fmt --check", "cargo fmt --all -- --check"] {
         assert!(shell_command_is_observational(command));

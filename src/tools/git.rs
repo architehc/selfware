@@ -392,12 +392,33 @@ impl Tool for GitDiff {
 
         let mut cmd = tokio::process::Command::new("git");
         crate::safety::process_env::sanitize_command_env(&mut cmd);
-        cmd.arg("-C").arg(repo_path).arg("diff");
-        if staged {
-            cmd.arg("--cached");
-        }
-        if let Some(base) = base {
-            cmd.arg(base);
+
+        let path_obj = std::path::Path::new(repo_path);
+        if path_obj.is_dir() {
+            cmd.arg("-C").arg(repo_path).arg("diff");
+            if staged {
+                cmd.arg("--cached");
+            }
+            if let Some(base) = base {
+                cmd.arg(base);
+            }
+        } else {
+            let (work_dir, file_spec) = if let Some(parent) = path_obj
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty() && p.is_dir())
+            {
+                (parent, path_obj.file_name().unwrap_or(path_obj.as_os_str()))
+            } else {
+                (std::path::Path::new("."), path_obj.as_os_str())
+            };
+            cmd.arg("-C").arg(work_dir).arg("diff");
+            if staged {
+                cmd.arg("--cached");
+            }
+            if let Some(base) = base {
+                cmd.arg(base);
+            }
+            cmd.arg("--").arg(file_spec);
         }
 
         let output = cmd.output().await?;

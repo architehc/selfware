@@ -68,6 +68,10 @@ pub(super) fn looks_like_malformed_tool_xml(content: &str) -> bool {
         || trimmed.contains("<function=")
         || trimmed.contains("<name=")
         || trimmed.contains("<parameter=")
+        || trimmed.contains("<|open|>tools")
+        || trimmed.contains("<|open|>call")
+        || trimmed.contains("<tool_call>")
+        || trimmed.contains("</tool_call>")
 }
 
 pub(super) fn detect_oscillating_batch_pair(
@@ -150,13 +154,12 @@ impl Agent {
     }
 
     pub(super) fn missing_required_task_tools(&self) -> Vec<String> {
-        let successful_tools: std::collections::BTreeSet<String> = self
+        let attempted_tools: std::collections::BTreeSet<String> = self
             .current_checkpoint
             .as_ref()
             .map(|cp| {
                 cp.tool_calls
                     .iter()
-                    .filter(|tc| tc.success)
                     .map(|tc| tc.tool_name.clone())
                     .collect()
             })
@@ -164,7 +167,7 @@ impl Agent {
 
         self.required_task_tools
             .iter()
-            .filter(|tool| !successful_tools.contains(*tool))
+            .filter(|tool| !attempted_tools.contains(*tool))
             .cloned()
             .collect()
     }

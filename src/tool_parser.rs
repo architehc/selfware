@@ -61,6 +61,22 @@ static BARE_FUNCTION_REGEX: OnceLock<Regex> = OnceLock::new();
 static OPENAI_FUNCTION_REGEX: OnceLock<Regex> = OnceLock::new();
 static MALFORMED_CLOSE_TAG_REGEX: OnceLock<Regex> = OnceLock::new();
 static JSON_STRING_REGEX: OnceLock<Regex> = OnceLock::new();
+static KIMI_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static KIMI_ARG_REGEX: OnceLock<Regex> = OnceLock::new();
+
+fn kimi_call_regex() -> &'static Regex {
+    KIMI_CALL_REGEX.get_or_init(|| {
+        Regex::new(r#"(?s)(?:<\|open\|>)?call\s+tool="([^"]+)"[^>]*<\|sep\|>(.*?)<\|close\|>call(?:<\|sep\|>)?"#)
+            .expect("Invalid Kimi call regex")
+    })
+}
+
+fn kimi_arg_regex() -> &'static Regex {
+    KIMI_ARG_REGEX.get_or_init(|| {
+        Regex::new(r#"(?s)<\|open\|>argument\s+key="([^"]+)"(?:\s+type="([^"]+)")?<\|sep\|>(.*?)<\|close\|>argument(?:<\|sep\|>)?"#)
+            .expect("Invalid Kimi arg regex")
+    })
+}
 
 /// Cached regex for XML element parsing: `<tag>content</tag>`
 /// Previously this was compiled on every call to `parse_xml_arguments`.
@@ -285,6 +301,33 @@ pub fn parse_tool_calls(content: &str) -> ParseResult {
                     result.parse_errors.push(format!("XML parse error: {}", e));
                 }
             }
+        }
+    }
+
+    // Strategy 1b: Try Moonshot/Kimi delimiter format (<|open|>tools<|sep|> or <|open|>call tool=...)
+    if result.tool_calls.is_empty() {
+        if let Some(kimi_results) = try_parse_kimi_tools(content) {
+            for (tool_call, raw) in kimi_results {
+                match tool_call {
+                    Ok(tc) => {
+                        result.text_content = result.text_content.replace(&raw, "");
+                        result.tool_calls.push(tc);
+                    }
+                    Err(e) => {
+                        result
+                            .parse_errors
+                            .push(format!("Kimi tool parse error: {}", e));
+                    }
+                }
+            }
+            // Strip any residual container tokens: <|open|>tools<|sep|>, <|close|>tools<|sep|>, <|close|>message<|sep|>
+            result.text_content = result
+                .text_content
+                .replace("<|open|>tools<|sep|>", "")
+                .replace("<|close|>tools<|sep|>", "")
+                .replace("<|close|>tools", "")
+                .replace("<|close|>message<|sep|>", "")
+                .replace("<|close|>message", "");
         }
     }
 
@@ -589,6 +632,85 @@ fn try_parse_xml(content: &str) -> Option<Vec<(Result<ParsedToolCall>, String)>>
             })
             .collect();
     }
+
+    if results.is_empty() {
+        None
+    } else {
+        Some(results)
+    }
+}
+
+/// Try to parse Moonshot/Kimi delimiter-style tool calls:
+/// `<|open|>call tool="name" index="1"<|sep|><|open|>argument key="arg" type="string"<|sep|>val<|close|>argument<|close|>call`
+fn try_parse_kimi_tools(content: &str) -> Option<Vec<(Result<ParsedToolCall>, String)>> {
+    if !content.contains("call tool=") {
+        return None;
+    }
+    let regex = kimi_call_regex();
+    let arg_regex = kimi_arg_regex();
+
+    let results: Vec<_> = regex
+        .captures_iter(content)
+        .map(|cap| {
+            let raw = cap[0].to_string();
+            let tool_name = cap[1].trim().to_string();
+            let body = &cap[2];
+
+            let mut args_map = serde_json::Map::new();
+            let mut found_any = false;
+
+            for arg_cap in arg_regex.captures_iter(body) {
+                found_any = true;
+                let key = arg_cap[1].trim().to_string();
+                let type_hint = arg_cap.get(2).map(|m| m.as_str());
+                let val_str = arg_cap[3].trim();
+
+                let json_val = if let Some("number") = type_hint {
+                    if let Ok(i) = val_str.parse::<i64>() {
+                        serde_json::Value::Number(i.into())
+                    } else if let Ok(f) = val_str.parse::<f64>() {
+                        serde_json::Number::from_f64(f)
+                            .map(serde_json::Value::Number)
+                            .unwrap_or_else(|| serde_json::Value::String(val_str.to_string()))
+                    } else {
+                        serde_json::Value::String(val_str.to_string())
+                    }
+                } else if let Some("boolean") = type_hint {
+                    match val_str.to_lowercase().as_str() {
+                        "true" => serde_json::Value::Bool(true),
+                        "false" => serde_json::Value::Bool(false),
+                        _ => serde_json::Value::String(val_str.to_string()),
+                    }
+                } else if (val_str.starts_with('{') && val_str.ends_with('}'))
+                    || (val_str.starts_with('[') && val_str.ends_with(']'))
+                {
+                    serde_json::from_str::<serde_json::Value>(val_str)
+                        .unwrap_or_else(|_| serde_json::Value::String(val_str.to_string()))
+                } else {
+                    serde_json::Value::String(val_str.to_string())
+                };
+
+                args_map.insert(key, json_val);
+            }
+
+            let arguments = if found_any {
+                serde_json::Value::Object(args_map)
+            } else if let Ok(parsed_json) = serde_json::from_str::<serde_json::Value>(body.trim()) {
+                parsed_json
+            } else {
+                serde_json::json!({})
+            };
+
+            let call = ParsedToolCall {
+                tool_name,
+                arguments,
+                raw_text: raw.clone(),
+                parse_method: ParseMethod::Xml,
+            };
+
+            (Ok(call), raw)
+        })
+        .collect();
 
     if results.is_empty() {
         None

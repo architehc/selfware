@@ -958,3 +958,34 @@ fn test_parse_tool_call_with_html_content() {
         "h2 should NOT appear as a top-level argument key"
     );
 }
+
+#[test]
+fn test_parse_kimi_style_tools() {
+    let content = r#"I'll check the diff and the file.<|open|>tools<|sep|><|open|>call tool="shell_exec" index="1"<|sep|><|open|>argument key="command" type="string"<|sep|>git diff src/output/mod.rs<|close|>argument<|sep|><|open|>argument key="output_limit" type="number"<|sep|>5000<|close|>argument<|close|>call<|sep|><|open|>call tool="shell_exec" index="2"<|sep|><|open|>argument key="command" type="string"<|sep|>file selfware-screen.png<|close|>argument<|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|>"#;
+
+    let result = parse_tool_calls(content);
+    assert_eq!(result.tool_calls.len(), 2, "Should parse 2 Kimi tool calls");
+    assert_eq!(result.tool_calls[0].tool_name, "shell_exec");
+    assert_eq!(
+        result.tool_calls[0].arguments["command"],
+        "git diff src/output/mod.rs"
+    );
+    assert_eq!(result.tool_calls[0].arguments["output_limit"], 5000);
+    assert_eq!(result.tool_calls[1].tool_name, "shell_exec");
+    assert_eq!(
+        result.tool_calls[1].arguments["command"],
+        "file selfware-screen.png"
+    );
+    assert_eq!(result.text_content, "I'll check the diff and the file.");
+}
+
+#[test]
+fn test_parse_kimi_style_no_args() {
+    let content = r#"Checking git diff.<|open|>tools<|sep|><|open|>call tool="git_diff" index="1"<|sep|><|close|>call<|sep|><|close|>tools<|sep|>"#;
+
+    let result = parse_tool_calls(content);
+    assert_eq!(result.tool_calls.len(), 1);
+    assert_eq!(result.tool_calls[0].tool_name, "git_diff");
+    assert_eq!(result.tool_calls[0].arguments, serde_json::json!({}));
+    assert_eq!(result.text_content, "Checking git diff.");
+}

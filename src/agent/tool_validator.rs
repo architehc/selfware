@@ -212,6 +212,9 @@ const TOOL_ARG_ALIASES: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     ("shell_exec", &[("cmd", "command")]),
+    ("git_diff", &[("file", "path"), ("file_path", "path")]),
+    ("computer_screen", &[("target", "action")]),
+    ("screen_capture", &[("action", "target")]),
 ];
 
 /// Rewrite alias argument spellings to the canonical schema field names for a

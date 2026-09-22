@@ -814,12 +814,37 @@ pub(crate) fn shell_command_is_observational(command: &str) -> bool {
         "pnpm install",
         "yarn add ",
         "pip install",
+        "wmctrl -r",
+        "wmctrl -c",
+        "wmctrl -s",
+        "wmctrl -k",
+        "wmctrl -a",
+        "wmctrl -e",
     ];
     if mutating_markers
         .iter()
         .any(|marker| normalized.contains(marker))
     {
         return false;
+    }
+
+    if words.first().copied() == Some("wmctrl") {
+        let has_mutating = words[1..].iter().any(|word| {
+            word.starts_with("-r")
+                || word.starts_with("-c")
+                || word.starts_with("-s")
+                || word.starts_with("-k")
+                || word.starts_with("-a")
+                || word.starts_with("-e")
+                || word.starts_with("-b")
+                || word.starts_with("-o")
+                || word.starts_with("-n")
+                || word.starts_with("-R")
+        });
+        let has_query = words[1..]
+            .iter()
+            .any(|word| word.starts_with("-l") || *word == "-d" || *word == "-m");
+        return has_query && !has_mutating;
     }
 
     let read_only_prefixes = [
@@ -911,6 +936,12 @@ pub(crate) fn shell_command_is_observational(command: &str) -> bool {
         "echo",
         "env",
         "printenv",
+        "xdotool getactivewindow",
+        "xdotool search",
+        "xdotool getwindow",
+        "ps",
+        "top",
+        "uptime",
     ];
 
     read_only_prefixes.iter().any(|prefix| {
