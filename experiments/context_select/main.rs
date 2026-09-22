@@ -337,8 +337,8 @@ impl Selection {
 
 /// Rank the whole corpus for `query`: BM25 hits first (scored docs), then the
 /// remaining docs in stable path order as a deterministic tail.
-fn ranked_order<'a>(query: &str, corpus: &'a [Doc], index: &BM25Index) -> Vec<&'a Doc> {
-    let ranked = index.search_immutable(query, corpus.len());
+fn ranked_order<'a>(query: &str, corpus: &'a [Doc], index: &mut BM25Index) -> Vec<&'a Doc> {
+    let ranked = index.search(query, corpus.len());
     let mut order: Vec<&Doc> = Vec::with_capacity(corpus.len());
     let mut seen = std::collections::HashSet::new();
     for r in &ranked {
@@ -363,7 +363,7 @@ fn build_context(
     strategy: Strategy,
     breadth_frac: f64,
     corpus: &[Doc],
-    index: &BM25Index,
+    index: &mut BM25Index,
 ) -> Selection {
     let order = ranked_order(query, corpus, index);
     let mut picks = Vec::new();
@@ -797,7 +797,7 @@ async fn main() -> Result<()> {
                     strategy,
                     args.breadth_frac,
                     &corpus,
-                    &index,
+                    &mut index,
                 );
                 let m = score(p, &sel, budget, &corpus);
                 let e = agg.entry((strategy.name(), budget)).or_default();
@@ -868,7 +868,7 @@ async fn main() -> Result<()> {
     }
 
     if args.e2e > 0 {
-        run_e2e(&args, &corpus, &index, &probs).await?;
+        run_e2e(&args, &corpus, &mut index, &probs).await?;
     } else {
         println!(
             "(retrieval-only run. Add --e2e N to validate against GLM-5.2 on the first N problems.)"
@@ -882,7 +882,12 @@ async fn main() -> Result<()> {
 // End-to-end subset: does the selected context let GLM-5.2 locate the fix?
 // ---------------------------------------------------------------------------
 
-async fn run_e2e(args: &Args, corpus: &[Doc], index: &BM25Index, probs: &[Problem]) -> Result<()> {
+async fn run_e2e(
+    args: &Args,
+    corpus: &[Doc],
+    index: &mut BM25Index,
+    probs: &[Problem],
+) -> Result<()> {
     use selfware::api::{ApiClient, Message, ThinkingMode};
     use selfware::config::Config;
 
