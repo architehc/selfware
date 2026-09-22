@@ -281,9 +281,23 @@ impl ListenerInputState {
                 if *code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
                     return ListenerAction::Cancel(CancelNotice::CtrlC);
                 }
+                if (*code == KeyCode::Char('j') || *code == KeyCode::Char('m'))
+                    && modifiers.contains(KeyModifiers::CONTROL)
+                {
+                    if prompt_owns_input {
+                        self.trapped_during_pause += 1;
+                        return ListenerAction::Trapped;
+                    }
+                    return self.on_enter();
+                }
                 if prompt_owns_input {
                     self.trapped_during_pause += 1;
                     return ListenerAction::Trapped;
+                }
+                if modifiers.contains(KeyModifiers::CONTROL)
+                    || modifiers.contains(KeyModifiers::ALT)
+                {
+                    return ListenerAction::None;
                 }
                 match code {
                     KeyCode::Enter => self.on_enter(),

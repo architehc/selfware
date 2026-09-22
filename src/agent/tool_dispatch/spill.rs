@@ -135,6 +135,9 @@ pub(crate) fn tool_result_value_indicates_success(result: &Value) -> bool {
     if result.get("passed").and_then(|v| v.as_bool()) == Some(false) {
         return false;
     }
+    if result.get("timed_out").and_then(|v| v.as_bool()) == Some(true) {
+        return false;
+    }
     // A truthy top-level `error` key means the tool reported a failure even
     // if it returned a structured payload (e.g. CONTEXT_LOAD_SKELETON read
     // errors). Honest status over optimistic success.

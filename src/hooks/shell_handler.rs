@@ -137,6 +137,7 @@ async fn run_shell_command(command: &str, timeout: Duration) -> Result<Option<Sh
 
     let mut child = cmd.spawn()?;
     let child_pid = child.id();
+    let mut pg_guard = crate::tools::process_guard::ProcessGroupGuard::new(child_pid);
 
     // Drain stdout/stderr concurrently (bounded) so a chatty hook can't
     // deadlock on a full pipe or OOM the agent with unbounded output.
@@ -163,6 +164,7 @@ async fn run_shell_command(command: &str, timeout: Duration) -> Result<Option<Sh
             let stderr_bytes = stderr_task.await.unwrap_or_default();
             let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
             let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
+            pg_guard.disarm();
             Ok(Some(ShellOutput {
                 success: status.success(),
                 exit_code: status.code().unwrap_or(-1),
@@ -171,6 +173,7 @@ async fn run_shell_command(command: &str, timeout: Duration) -> Result<Option<Sh
             }))
         }
         Ok(Err(e)) => {
+            pg_guard.kill();
             // Make sure the drain tasks don't leak.
             let _ = stdout_task.await;
             let _ = stderr_task.await;
@@ -178,12 +181,7 @@ async fn run_shell_command(command: &str, timeout: Duration) -> Result<Option<Sh
         }
         Err(_) => {
             // Timed out: kill the whole process group, then reap the child.
-            #[cfg(unix)]
-            if let Some(pid) = child_pid {
-                use nix::sys::signal::{killpg, Signal};
-                use nix::unistd::Pid;
-                let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
-            }
+            pg_guard.kill();
             let _ = child.kill().await;
             let _ = child.wait().await;
             // Always await the drain tasks so they don't leak; the pipes close

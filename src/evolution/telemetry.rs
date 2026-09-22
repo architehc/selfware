@@ -14,7 +14,7 @@ pub struct TelemetrySnapshot {
     pub hotspots: Vec<CpuHotspot>,
     pub allocations: Vec<AllocationHotspot>,
     pub benchmark_deltas: Vec<BenchmarkDelta>,
-    pub test_summary: TestSummary,
+    pub test_summary: Option<TestSummary>,
 }
 
 #[derive(Debug, Clone)]
@@ -132,17 +132,87 @@ pub fn to_agent_prompt(snapshot: &TelemetrySnapshot) -> String {
         prompt.push('\n');
     }
 
-    // Test summary
-    prompt.push_str(&format!(
-        "### Test Suite: {}/{} passed ({} failed, {} ignored) in {:.1}s\n",
-        snapshot.test_summary.passed,
-        snapshot.test_summary.total,
-        snapshot.test_summary.failed,
-        snapshot.test_summary.ignored,
-        snapshot.test_summary.duration.as_secs_f64()
-    ));
+    // Test summary (only rendered when real tests were actually measured)
+    if let Some(ref summary) = snapshot.test_summary {
+        prompt.push_str(&format!(
+            "### Test Suite: {}/{} passed ({} failed, {} ignored) in {:.1}s\n",
+            summary.passed,
+            summary.total,
+            summary.failed,
+            summary.ignored,
+            summary.duration.as_secs_f64()
+        ));
+    }
 
     prompt
+}
+
+/// Run a subprocess with a timeout and drain both stdout and stderr in background
+/// threads to eliminate pipe saturation deadlocks.
+fn run_command_with_timeout(
+    mut cmd: std::process::Command,
+    timeout: Duration,
+) -> Result<std::process::Output, TelemetryError> {
+    use std::io::Read;
+    use std::process::Stdio;
+    use wait_timeout::ChildExt;
+
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| TelemetryError::ToolFailed("spawn".into(), e.to_string()))?;
+
+    let stdout_pipe = child.stdout.take().expect("stdout piped");
+    let stdout_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = Read::read_to_end(&mut std::io::BufReader::new(stdout_pipe), &mut buf);
+        buf
+    });
+
+    let stderr_pipe = child.stderr.take().expect("stderr piped");
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = Read::read_to_end(&mut std::io::BufReader::new(stderr_pipe), &mut buf);
+        buf
+    });
+
+    let started = std::time::Instant::now();
+    let poll_interval = Duration::from_millis(200);
+
+    loop {
+        match child.wait_timeout(poll_interval) {
+            Ok(Some(status)) => {
+                let stdout = stdout_handle.join().unwrap_or_default();
+                let stderr = stderr_handle.join().unwrap_or_default();
+                return Ok(std::process::Output {
+                    status,
+                    stdout,
+                    stderr,
+                });
+            }
+            Ok(None) => {
+                if started.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stdout_handle.join();
+                    let _ = stderr_handle.join();
+                    return Err(TelemetryError::ToolFailed(
+                        "timeout".into(),
+                        format!("command timed out after {}s", timeout.as_secs()),
+                    ));
+                }
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
+                return Err(TelemetryError::ToolFailed("wait".into(), e.to_string()));
+            }
+        }
+    }
 }
 
 /// Build the cargo invocation for telemetry capture with a SANITIZED
@@ -153,6 +223,9 @@ fn cargo_telemetry_command(repo_root: &Path) -> std::process::Command {
     let mut cmd = std::process::Command::new("cargo");
     crate::safety::process_env::sanitize_std_command_env_preserve(&mut cmd, &[]);
     cmd.current_dir(repo_root);
+    // Isolate target directory so telemetry builds do not conflict with or dirty user's target/
+    let target_dir = repo_root.join("target").join("evolve-telemetry");
+    cmd.env("CARGO_TARGET_DIR", target_dir);
     cmd
 }
 
@@ -160,8 +233,14 @@ fn capture_cpu_hotspots(
     repo_root: &Path,
     bench_name: &str,
 ) -> Result<Vec<CpuHotspot>, TelemetryError> {
-    // Run cargo flamegraph and parse the folded stacks
-    let flamegraph_path = repo_root.join("target").join("flamegraph.folded");
+    // Run cargo flamegraph in isolated target dir and parse folded stacks
+    let flamegraph_path = repo_root
+        .join("target")
+        .join("evolve-telemetry")
+        .join("flamegraph.folded");
+    if let Some(parent) = flamegraph_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
 
     let mut cmd = cargo_telemetry_command(repo_root);
     cmd.args([
@@ -173,16 +252,17 @@ fn capture_cpu_hotspots(
         "--",
         "--bench",
     ]);
-    let _output = cmd
-        .output()
-        .map_err(|e| TelemetryError::ToolFailed("flamegraph".into(), e.to_string()))?;
 
-    // Parse folded stacks into hotspot list
-    if flamegraph_path.exists() {
-        parse_folded_stacks(&flamegraph_path)
-    } else {
-        // Fallback: use perf stat or time-based sampling
-        Ok(vec![])
+    // Enforce 60-second timeout. If flamegraph is not installed, fails, or times out,
+    // gracefully fall back to empty hotspots rather than failing or hanging.
+    match run_command_with_timeout(cmd, Duration::from_secs(60)) {
+        Ok(output) if output.status.success() && flamegraph_path.exists() => {
+            parse_folded_stacks(&flamegraph_path)
+        }
+        _ => {
+            // Fallback: tool missing, timed out, or benchmark failed
+            Ok(vec![])
+        }
     }
 }
 
@@ -554,51 +634,73 @@ fn parse_criterion_estimate(path: &Path) -> Result<f64, TelemetryError> {
         .ok_or_else(|| TelemetryError::ParseFailed("No mean estimate found".into()))
 }
 
-fn capture_test_summary(repo_root: &Path) -> Result<TestSummary, TelemetryError> {
+fn capture_test_summary(repo_root: &Path) -> Result<Option<TestSummary>, TelemetryError> {
     let start = std::time::Instant::now();
 
     let mut cmd = cargo_telemetry_command(repo_root);
-    cmd.args([
-        "test",
-        "--all-features",
-        "--",
-        "--format=json",
-        "-Z",
-        "unstable-options",
-    ]);
-    let output = cmd
-        .output()
-        .map_err(|e| TelemetryError::ToolFailed("cargo test".into(), e.to_string()))?;
+    cmd.args(["test", "--no-fail-fast", "--lib", "--", "--nocapture"]);
+
+    let output = match run_command_with_timeout(cmd, Duration::from_secs(60)) {
+        Ok(output) => output,
+        Err(_) => return Ok(None),
+    };
 
     let duration = start.elapsed();
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}\n{stderr}");
 
-    let mut total = 0;
-    let mut passed = 0;
-    let mut failed = 0;
-    let mut ignored = 0;
+    Ok(parse_cargo_test_output(&combined, duration))
+}
 
-    for line in stdout.lines() {
-        if let Ok(event) = serde_json::from_str::<serde_json::Value>(line) {
-            if event["type"] == "test" && event["event"].is_string() {
-                total += 1;
-                match event["event"].as_str() {
-                    Some("ok") => passed += 1,
-                    Some("failed") => failed += 1,
-                    Some("ignored") => ignored += 1,
-                    _ => {}
-                }
+fn extract_test_count(s: &str, keyword: &str) -> Option<usize> {
+    if let Some(pos) = s.find(keyword) {
+        let before = s[..pos].trim_end();
+        if let Some(start) = before.rfind(|c: char| !c.is_ascii_digit()) {
+            before[start + 1..].parse().ok()
+        } else {
+            before.parse().ok()
+        }
+    } else {
+        None
+    }
+}
+
+pub(crate) fn parse_cargo_test_output(output: &str, duration: Duration) -> Option<TestSummary> {
+    let mut total_passed = 0;
+    let mut total_failed = 0;
+    let mut total_ignored = 0;
+    let mut found_summary = false;
+
+    // Standard libtest prints:
+    // "test result: ok. 42 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 1.23s"
+    // "test result: FAILED. 40 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.23s"
+    for line in output.lines() {
+        if let Some(idx) = line.find("test result:") {
+            let rest = &line[idx + "test result:".len()..];
+            if let Some(passed) = extract_test_count(rest, "passed") {
+                let failed = extract_test_count(rest, "failed").unwrap_or(0);
+                let ignored = extract_test_count(rest, "ignored").unwrap_or(0);
+
+                found_summary = true;
+                total_passed += passed;
+                total_failed += failed;
+                total_ignored += ignored;
             }
         }
     }
 
-    Ok(TestSummary {
-        total,
-        passed,
-        failed,
-        ignored,
-        duration,
-    })
+    if found_summary {
+        Some(TestSummary {
+            total: total_passed + total_failed + total_ignored,
+            passed: total_passed,
+            failed: total_failed,
+            ignored: total_ignored,
+            duration,
+        })
+    } else {
+        None
+    }
 }
 
 #[derive(Debug)]

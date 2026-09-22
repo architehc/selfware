@@ -468,6 +468,7 @@ impl Tool for ShellExec {
         let start = std::time::Instant::now();
         let mut child = cmd.spawn()?;
         let child_pid = child.id();
+        let mut pg_guard = crate::tools::process_guard::ProcessGroupGuard::new(child_pid);
 
         // Drain stdout/stderr concurrently (bounded) so a chatty process can't
         // deadlock on a full pipe or OOM the agent with unbounded output.
@@ -495,15 +496,13 @@ impl Tool for ShellExec {
 
         let (exit_code, mut timed_out) = match wait_result {
             Ok(Ok(status)) => (status.code().unwrap_or(-1), false),
-            Ok(Err(e)) => return Err(e.into()),
+            Ok(Err(e)) => {
+                pg_guard.kill();
+                return Err(e.into());
+            }
             Err(_) => {
                 // Timed out: kill the whole process group, then reap the child.
-                #[cfg(unix)]
-                if let Some(pid) = child_pid {
-                    use nix::sys::signal::{killpg, Signal};
-                    use nix::unistd::Pid;
-                    let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
-                }
+                pg_guard.kill();
                 let _ = child.kill().await;
                 let _ = child.wait().await;
                 (-1, true)
@@ -523,12 +522,7 @@ impl Tool for ShellExec {
             Err(_) => {
                 stdout_task.abort();
                 stderr_task.abort();
-                #[cfg(unix)]
-                if let Some(pid) = child_pid {
-                    use nix::sys::signal::{killpg, Signal};
-                    use nix::unistd::Pid;
-                    let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
-                }
+                pg_guard.kill();
                 timed_out = true;
                 (Vec::new(), Vec::new())
             }
@@ -552,6 +546,8 @@ impl Tool for ShellExec {
             super::truncate_with_pagination(&stdout, args.output_offset, args.output_limit);
         let (stderr_page, stderr_pagination) =
             super::truncate_with_pagination(&stderr, args.output_offset, args.output_limit);
+
+        pg_guard.disarm();
 
         Ok(serde_json::json!({
             "exit_code": exit_code,

@@ -1861,3 +1861,138 @@ async fn test_tools_call_grep_search_redacts_secrets() {
         "expected a redaction marker in the grep_search output: {text}"
     );
 }
+
+#[tokio::test]
+async fn test_resources_read_blocks_denied_paths() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    // Create allowed file
+    std::fs::write(root.join("allowed.txt"), "hello world").unwrap();
+
+    // Create denied files
+    std::fs::create_dir_all(root.join("secrets")).unwrap();
+    std::fs::write(root.join("secrets").join("notes.txt"), "secret notes").unwrap();
+    std::fs::write(root.join(".env"), "DB_PASS=12345").unwrap();
+    std::fs::create_dir_all(root.join(".ssh")).unwrap();
+    std::fs::write(root.join(".ssh").join("id_ed25519"), "private key").unwrap();
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::write(root.join(".git").join("config"), "[core]").unwrap();
+
+    let server = McpServer::with_project_root_and_safety_config(
+        root.to_path_buf(),
+        crate::config::SafetyConfig::default(),
+    );
+    initialize_server(&server).await;
+
+    // 1. allowed.txt must succeed
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(Value::from(100)),
+        method: "resources/read".to_string(),
+        params: Some(serde_json::json!({
+            "uri": "selfware://project/file/allowed.txt"
+        })),
+    };
+    let resp = server.handle_request(&req).await.unwrap();
+    assert!(resp.error.is_none());
+    let text = resp.result.unwrap()["contents"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(text, "hello world");
+
+    // 2. secrets/notes.txt must be denied
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(Value::from(101)),
+        method: "resources/read".to_string(),
+        params: Some(serde_json::json!({
+            "uri": "selfware://project/file/secrets/notes.txt"
+        })),
+    };
+    let resp = server.handle_request(&req).await.unwrap();
+    assert!(resp.error.is_some());
+    assert_eq!(resp.error.unwrap().code, INVALID_PARAMS);
+
+    // 3. .env must be denied
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(Value::from(102)),
+        method: "resources/read".to_string(),
+        params: Some(serde_json::json!({
+            "uri": "selfware://project/file/.env"
+        })),
+    };
+    let resp = server.handle_request(&req).await.unwrap();
+    assert!(resp.error.is_some());
+    assert_eq!(resp.error.unwrap().code, INVALID_PARAMS);
+
+    // 4. .ssh/id_ed25519 must be denied
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(Value::from(103)),
+        method: "resources/read".to_string(),
+        params: Some(serde_json::json!({
+            "uri": "selfware://project/file/.ssh/id_ed25519"
+        })),
+    };
+    let resp = server.handle_request(&req).await.unwrap();
+    assert!(resp.error.is_some());
+    assert_eq!(resp.error.unwrap().code, INVALID_PARAMS);
+
+    // 5. .git/config must be denied
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(Value::from(104)),
+        method: "resources/read".to_string(),
+        params: Some(serde_json::json!({
+            "uri": "selfware://project/file/.git/config"
+        })),
+    };
+    let resp = server.handle_request(&req).await.unwrap();
+    assert!(resp.error.is_some());
+    assert_eq!(resp.error.unwrap().code, INVALID_PARAMS);
+
+    // 6. selfware://project/files must omit denied files
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(Value::from(105)),
+        method: "resources/read".to_string(),
+        params: Some(serde_json::json!({
+            "uri": "selfware://project/files"
+        })),
+    };
+    let resp = server.handle_request(&req).await.unwrap();
+    assert!(resp.error.is_none());
+    let files_json = resp.result.unwrap()["contents"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(files_json.contains("allowed.txt"));
+    assert!(!files_json.contains("secrets"));
+    assert!(!files_json.contains("notes.txt"));
+    assert!(!files_json.contains(".env"));
+    assert!(!files_json.contains("id_ed25519"));
+
+    // 7. selfware://project/structure must omit denied paths
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(Value::from(106)),
+        method: "resources/read".to_string(),
+        params: Some(serde_json::json!({
+            "uri": "selfware://project/structure"
+        })),
+    };
+    let resp = server.handle_request(&req).await.unwrap();
+    assert!(resp.error.is_none());
+    let tree_str = resp.result.unwrap()["contents"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(tree_str.contains("allowed.txt"));
+    assert!(!tree_str.contains("secrets"));
+    assert!(!tree_str.contains("notes.txt"));
+    assert!(!tree_str.contains(".env"));
+    assert!(!tree_str.contains("id_ed25519"));
+}

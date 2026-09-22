@@ -50,6 +50,7 @@ pub mod package;
 pub mod page_controller;
 pub mod patch_apply;
 pub mod process;
+pub mod process_guard;
 pub mod prompt;
 pub mod pty_shell;
 pub mod screen_capture;

@@ -558,15 +558,29 @@ impl Agent {
         // empty — a loop reading only content sees a zero-turn forever
         // (server-side analysis 2026-09-04; matches the ablit-wave "zeros").
         // The tool-call extractor already falls back to reasoning
-        // (tool_collect.rs); promote the turn text the same way.
+        // (tool_collect.rs); promote the turn text ONLY when tool markup
+        // or native tool calls are present. Never promote pure reasoning
+        // monologue as the final answer text (Ranked #1: reasoning-only long
+        // stream becoming final answer when content is empty).
         let mut content = content;
         if content.trim().is_empty() {
             if let Some(r) = reasoning.as_ref().filter(|r| !r.trim().is_empty()) {
-                info!(
-                    "Content empty but reasoning_content non-empty ({} chars) — promoting reasoning to content (tag-free model output)",
-                    r.len()
-                );
-                content = r.clone();
+                let has_tool_markup = r.contains("<tool")
+                    || r.contains("<function=")
+                    || r.contains("<|open|>call")
+                    || r.contains("<tool_call>");
+                if has_tool_markup || native_tool_calls.is_some() {
+                    info!(
+                        "Content empty but reasoning_content has tool calls ({} chars) — promoting to content",
+                        r.len()
+                    );
+                    content = r.clone();
+                } else {
+                    debug!(
+                        "Content empty and reasoning_content contains no tool calls ({} chars) — not promoting to content",
+                        r.len()
+                    );
+                }
             }
         }
 

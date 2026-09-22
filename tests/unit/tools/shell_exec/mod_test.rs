@@ -86,6 +86,55 @@ async fn registered_shell_exec_timeout_reaps_process_group() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
+async fn registered_shell_exec_future_cancellation_reaps_process_group() {
+    // When the agent cancels a running shell command future (e.g. step timeout or abort),
+    // ProcessGroupGuard must ensure the entire process group is reaped immediately.
+    let dir = tempfile::tempdir().unwrap();
+    let pidfile = dir.path().join("gc_cancel.pid");
+    let tool = ShellExec;
+    let args = serde_json::json!({
+        "command": format!("sleep 60 & echo $! > {}; wait", pidfile.display()),
+        "timeout_secs": 60
+    });
+    let mut fut = Box::pin(tool.execute(args));
+
+    for _ in 0..50 {
+        if pidfile.exists() {
+            break;
+        }
+        tokio::select! {
+            _ = &mut fut => {}
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+    }
+
+    let gc_pid: i32 = std::fs::read_to_string(&pidfile)
+        .expect("grandchild wrote its pid")
+        .trim()
+        .parse()
+        .expect("valid pid");
+
+    // Cancel / drop the future mid-execution
+    drop(fut);
+
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+    let mut alive = true;
+    for _ in 0..50 {
+        if kill(Pid::from_raw(gc_pid), None).is_err() {
+            alive = false;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        !alive,
+        "grandchild pid {gc_pid} should have been reaped on future drop"
+    );
+}
+
+#[tokio::test]
 async fn registered_shell_exec_large_output_completes() {
     // ~40 MiB of output must complete without hang/OOM (bounded drain).
     let tool = ShellExec;

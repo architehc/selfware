@@ -785,7 +785,14 @@ impl Config {
         // "selfware.toml" and so are unaffected — as is SELFWARE_ENDPOINT
         // (operator naming the endpoint directly). Trust a repo by adding its
         // config's canonical path to ~/.selfware/trusted_repos.
-        if config.api_key.is_some() && matches!(api_key_source, ApiKeySource::EnvVar) {
+        let config_path_from_operator = matches!(
+            sources.get("__config_path_source"),
+            Some(ConfigSource::EnvVar(_) | ConfigSource::CliArg(_))
+        );
+        if !config_path_from_operator
+            && config.api_key.is_some()
+            && matches!(api_key_source, ApiKeySource::EnvVar)
+        {
             if let Some(ConfigSource::ConfigFile(p)) = sources.get("endpoint") {
                 if config_is_checkout_local(p) && !super::trust::is_config_trusted(p) {
                     let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
@@ -835,10 +842,6 @@ impl Config {
         // default-name case (a checkout-local `selfware.toml` selected
         // IMPLICITLY by discovery) carries no operator provenance and stays
         // untrusted. Trusting the repo (`selfware trust`) lifts the refusal.
-        let config_path_from_operator = matches!(
-            sources.get("__config_path_source"),
-            Some(ConfigSource::EnvVar(_) | ConfigSource::CliArg(_))
-        );
         if !config_path_from_operator && !is_local_endpoint(&config.endpoint) {
             if let Some(ConfigSource::ConfigFile(p)) = sources.get("endpoint") {
                 if config_is_checkout_local(p) && !super::trust::is_config_trusted(p) {

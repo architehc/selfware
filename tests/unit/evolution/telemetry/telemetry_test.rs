@@ -41,13 +41,13 @@ fn test_prompt_generation() {
                 delta_percent: -2.1,
             },
         ],
-        test_summary: TestSummary {
+        test_summary: Some(TestSummary {
             total: 5200,
             passed: 5198,
             failed: 2,
             ignored: 0,
             duration: Duration::from_secs(240),
-        },
+        }),
     };
 
     let prompt = to_agent_prompt(&snapshot);
@@ -67,17 +67,34 @@ fn test_empty_snapshot() {
         hotspots: vec![],
         allocations: vec![],
         benchmark_deltas: vec![],
-        test_summary: TestSummary {
-            total: 0,
-            passed: 0,
-            failed: 0,
-            ignored: 0,
-            duration: Duration::ZERO,
-        },
+        test_summary: None,
     };
     let prompt = to_agent_prompt(&snapshot);
     assert!(prompt.contains("Performance Telemetry"));
-    assert!(prompt.contains("0/0 passed"));
+    // Honest reporting: unmeasured test suite must NOT emit fake "0/0 passed"
+    assert!(!prompt.contains("Test Suite:"));
+    assert!(!prompt.contains("0/0 passed"));
+}
+
+#[test]
+fn test_parse_cargo_test_output_libtest() {
+    let output = r#"
+running 42 tests
+test foo ... ok
+test bar ... FAILED
+test baz ... ignored
+
+test result: FAILED. 40 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 2.34s
+"#;
+    let summary = parse_cargo_test_output(output, Duration::from_secs(2)).unwrap();
+    assert_eq!(summary.total, 42);
+    assert_eq!(summary.passed, 40);
+    assert_eq!(summary.failed, 1);
+    assert_eq!(summary.ignored, 1);
+
+    // Empty or failed compile output without test summary
+    let err_output = "error: could not compile `crate` due to 1 previous error";
+    assert!(parse_cargo_test_output(err_output, Duration::from_secs(1)).is_none());
 }
 
 #[test]
@@ -142,13 +159,13 @@ fn test_prompt_benchmark_thresholds() {
                 delta_percent: 1.0, // between -2 and 2 → STABLE
             },
         ],
-        test_summary: TestSummary {
+        test_summary: Some(TestSummary {
             total: 100,
             passed: 100,
             failed: 0,
             ignored: 0,
             duration: Duration::from_secs(10),
-        },
+        }),
     };
     let prompt = to_agent_prompt(&snapshot);
     assert!(prompt.contains("SLOWER"));
@@ -175,13 +192,7 @@ fn test_prompt_many_hotspots_truncated() {
         hotspots,
         allocations: vec![],
         benchmark_deltas: vec![],
-        test_summary: TestSummary {
-            total: 0,
-            passed: 0,
-            failed: 0,
-            ignored: 0,
-            duration: Duration::ZERO,
-        },
+        test_summary: None,
     };
     let prompt = to_agent_prompt(&snapshot);
     // Should contain func_0 through func_9 (10 items) but NOT func_10..14
@@ -204,13 +215,7 @@ fn test_prompt_many_allocations_truncated() {
         hotspots: vec![],
         allocations,
         benchmark_deltas: vec![],
-        test_summary: TestSummary {
-            total: 0,
-            passed: 0,
-            failed: 0,
-            ignored: 0,
-            duration: Duration::ZERO,
-        },
+        test_summary: None,
     };
     let prompt = to_agent_prompt(&snapshot);
     // Should contain alloc_func_0 through alloc_func_4 (5 items) but NOT alloc_func_5+

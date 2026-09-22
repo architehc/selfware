@@ -277,7 +277,7 @@ pub struct ImageUrl {
 /// let user = Message::user("What is the weather?");
 /// let assistant = Message::assistant("I can help you with that!");
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Message {
     /// The role of the message author: `"system"`, `"user"`, `"assistant"`, or `"tool"`.
     pub role: String,
@@ -427,7 +427,7 @@ impl Message {
 ///     },
 /// };
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolCall {
     /// Unique identifier for this tool call, used to match with tool responses.
     pub id: String,
@@ -442,7 +442,7 @@ pub struct ToolCall {
 ///
 /// Contains the name of the function to invoke and the JSON-serialized
 /// arguments to pass to it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolFunction {
     /// Name of the function to call.
     pub name: String,

@@ -151,13 +151,54 @@ pub mod util;
 // ============================================================================
 // Global shutdown coordination
 // ============================================================================
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownReason {
+    UserInterrupt,
+    SignalTerminate,
+    Timeout,
+}
 
 static SHUTDOWN_FLAG: AtomicBool = AtomicBool::new(false);
+static SHUTDOWN_REASON: AtomicU8 = AtomicU8::new(0);
+
+#[allow(dead_code)]
+const SHUTDOWN_NONE: u8 = 0;
+const SHUTDOWN_USER_INTERRUPT: u8 = 1;
+const SHUTDOWN_SIGNAL_TERMINATE: u8 = 2;
+const SHUTDOWN_TIMEOUT: u8 = 3;
+
+/// Signal that a graceful shutdown has been requested with a specific reason.
+pub fn request_shutdown_with_reason(reason: ShutdownReason) {
+    let val = match reason {
+        ShutdownReason::UserInterrupt => SHUTDOWN_USER_INTERRUPT,
+        ShutdownReason::SignalTerminate => SHUTDOWN_SIGNAL_TERMINATE,
+        ShutdownReason::Timeout => SHUTDOWN_TIMEOUT,
+    };
+    SHUTDOWN_REASON.store(val, Ordering::SeqCst);
+    SHUTDOWN_FLAG.store(true, Ordering::SeqCst);
+}
+
+/// Check the specific reason shutdown was requested, if any.
+pub fn shutdown_reason() -> Option<ShutdownReason> {
+    match SHUTDOWN_REASON.load(Ordering::SeqCst) {
+        SHUTDOWN_USER_INTERRUPT => Some(ShutdownReason::UserInterrupt),
+        SHUTDOWN_SIGNAL_TERMINATE => Some(ShutdownReason::SignalTerminate),
+        SHUTDOWN_TIMEOUT => Some(ShutdownReason::Timeout),
+        _ => {
+            if SHUTDOWN_FLAG.load(Ordering::SeqCst) {
+                Some(ShutdownReason::UserInterrupt)
+            } else {
+                None
+            }
+        }
+    }
+}
 
 /// Signal that a graceful shutdown has been requested.
 pub fn request_shutdown() {
-    SHUTDOWN_FLAG.store(true, Ordering::SeqCst);
+    request_shutdown_with_reason(ShutdownReason::UserInterrupt);
 }
 
 /// Check whether a graceful shutdown has been requested.
@@ -172,6 +213,7 @@ pub fn is_shutdown_requested() -> bool {
 /// (which observes this latch) spuriously fails with "Task cancelled by user".
 #[cfg(test)]
 pub(crate) fn reset_shutdown_for_test() {
+    SHUTDOWN_REASON.store(SHUTDOWN_NONE, Ordering::SeqCst);
     SHUTDOWN_FLAG.store(false, Ordering::SeqCst);
 }
 

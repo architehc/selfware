@@ -32,21 +32,32 @@ async fn async_main() -> ExitCode {
 
         // First signal: ask every component to wind down and start a bounded
         // grace timer.
-        signals.recv().await;
-        selfware::request_shutdown();
-        eprintln!(
-            "\nReceived shutdown signal, winding down... \
-             (press Ctrl-C again to force quit)"
-        );
+        let reason = signals.recv().await;
+        selfware::request_shutdown_with_reason(reason);
+        match reason {
+            selfware::ShutdownReason::SignalTerminate => {
+                eprintln!("\nReceived SIGTERM, winding down...");
+            }
+            _ => {
+                eprintln!(
+                    "\nReceived shutdown signal, winding down... \
+                     (press Ctrl-C again to force quit)"
+                );
+            }
+        }
 
         // Race the grace period against a SECOND signal. An impatient operator
         // pressing Ctrl-C again should exit immediately instead of waiting out
         // the full grace period (the previous handler ignored further signals,
         // so an active run could hang for the whole window).
         tokio::select! {
-            _ = signals.recv() => {
+            second = signals.recv() => {
                 eprintln!("\nSecond signal received, forcing immediate exit.");
-                std::process::exit(130); // 128 + SIGINT
+                let code = match second {
+                    selfware::ShutdownReason::SignalTerminate => 143, // 128 + SIGTERM
+                    _ => 130, // 128 + SIGINT
+                };
+                std::process::exit(code);
             }
             _ = tokio::time::sleep(std::time::Duration::from_secs(SHUTDOWN_GRACE_SECS)) => {
                 eprintln!("Shutdown grace period expired, forcing exit.");
@@ -95,10 +106,10 @@ impl ShutdownSignals {
         }
     }
 
-    async fn recv(&mut self) {
+    async fn recv(&mut self) -> selfware::ShutdownReason {
         tokio::select! {
-            _ = self.sigint.recv() => {},
-            _ = self.sigterm.recv() => {},
+            _ = self.sigint.recv() => selfware::ShutdownReason::UserInterrupt,
+            _ = self.sigterm.recv() => selfware::ShutdownReason::SignalTerminate,
         }
     }
 }
@@ -112,8 +123,9 @@ impl ShutdownSignals {
         Self
     }
 
-    async fn recv(&mut self) {
+    async fn recv(&mut self) -> selfware::ShutdownReason {
         // ctrl_c() yields a fresh future each call, so it is naturally re-armable.
         let _ = tokio::signal::ctrl_c().await;
+        selfware::ShutdownReason::UserInterrupt
     }
 }

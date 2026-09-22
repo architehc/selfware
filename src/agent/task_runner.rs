@@ -214,6 +214,9 @@ enum LoopMode {
 }
 
 pub(super) fn is_fatal_loop_error(error: &anyhow::Error) -> bool {
+    if super::assistant_response::is_terminal_api_client_error(error) {
+        return true;
+    }
     if error
         .downcast_ref::<crate::safety::killswitch::KillswitchError>()
         .is_some()
@@ -1362,20 +1365,36 @@ impl Agent {
             self.enforce_hard_budgets(task_description).await?;
 
             if self.is_cancelled() {
-                cli_println!("{}", "\n⚡ Interrupted".bright_yellow());
-                self.messages
-                    .push(Message::user("[Task interrupted by user]"));
-                self.record_task_outcome(
-                    task_description,
-                    Outcome::Abandoned,
-                    Some("Task interrupted by user"),
+                let reason = crate::shutdown_reason();
+                let (user_msg, outcome_msg, err) = match reason {
+                    Some(crate::ShutdownReason::SignalTerminate) => (
+                        "[Task terminated by SIGTERM]",
+                        "Task terminated by SIGTERM",
+                        crate::errors::AgentError::Terminated("SIGTERM".to_string()),
+                    ),
+                    Some(crate::ShutdownReason::Timeout) => (
+                        "[Task cancelled by timeout]",
+                        "Task cancelled by timeout",
+                        crate::errors::AgentError::CancelledWithReason("timeout".to_string()),
+                    ),
+                    _ => (
+                        "[Task interrupted by user]",
+                        "Task interrupted by user",
+                        crate::errors::AgentError::Cancelled,
+                    ),
+                };
+                cli_println!(
+                    "{}",
+                    format!("\n⚡ Interrupted ({outcome_msg})").bright_yellow()
                 );
+                self.messages.push(Message::user(user_msg));
+                self.record_task_outcome(task_description, Outcome::Abandoned, Some(outcome_msg));
                 // Return a typed cancellation. `run_execution_loop` maps errors
                 // to the single authoritative terminal Error event AND saves the
                 // resumable checkpoint (one save for every cancellation exit);
                 // returning Ok here would emit a misleading Completed event and
                 // make headless callers exit 0.
-                return Err(crate::errors::AgentError::Cancelled.into());
+                return Err(err.into());
             }
 
             match state {

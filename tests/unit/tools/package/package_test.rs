@@ -127,18 +127,26 @@ async fn test_pip_install_no_packages() {
         .contains("must be specified"));
 }
 
+static PATH_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 #[cfg(unix)]
 async fn npm_install_timeout_kills_child_process() {
+    let _lock = PATH_MUTEX.lock().await;
     // Regression: `Command::output()` timeouts used to leave the child
     // running — a "timed-out" install kept mutating the tree afterwards.
     // The child must be killed (kill_on_drop) when the timeout fires.
     let dir = tempfile::tempdir().unwrap();
     let pidfile = dir.path().join("npm.pid");
+    let sleep_pidfile = dir.path().join("sleep.pid");
     let stub = dir.path().join("npm");
     std::fs::write(
         &stub,
-        format!("#!/bin/sh\necho $$ > {}\nsleep 60\n", pidfile.display()),
+        format!(
+            "#!/bin/sh\necho $$ > {}\nsleep 60 &\necho $! > {}\nwait\n",
+            pidfile.display(),
+            sleep_pidfile.display()
+        ),
     )
     .unwrap();
     use std::os::unix::fs::PermissionsExt;
@@ -167,15 +175,12 @@ async fn npm_install_timeout_kills_child_process() {
         .trim()
         .parse()
         .expect("valid pid");
-    // Verify the child is really killed instead of still sleeping for the
-    // next minute. A SIGKILL'd child is "no longer running" the moment it
-    // dies — but under coverage instrumentation (tarpaulin ptraces every
-    // process) the runtime's reaping is delayed, so the killed child
-    // lingers as an unreaped ZOMBIE. `kill(pid, 0)` returns Ok for a
-    // zombie (it still occupies a slot in the process table), so an
-    // existence check alone is fooled. Treat "gone" OR "zombie/dead" as
-    // successfully killed; only a genuinely running (sleeping) process
-    // counts as alive.
+    let sleep_pid: i32 = std::fs::read_to_string(&sleep_pidfile)
+        .expect("stub wrote descendant pid")
+        .trim()
+        .parse()
+        .expect("valid descendant pid");
+
     fn pid_is_running(pid: i32) -> bool {
         use nix::sys::signal::kill;
         use nix::unistd::Pid;
@@ -184,8 +189,6 @@ async fn npm_install_timeout_kills_child_process() {
         }
         #[cfg(target_os = "linux")]
         {
-            // /proc/<pid>/stat: "pid (comm) STATE ...". A zombie ('Z') or
-            // dead ('X'/'x') process has been killed, just not yet reaped.
             if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
                 let state = stat
                     .rsplit(')')
@@ -198,15 +201,105 @@ async fn npm_install_timeout_kills_child_process() {
         }
         true
     }
+
     let mut alive = true;
     for _ in 0..75 {
-        if !pid_is_running(child_pid) {
+        if !pid_is_running(child_pid) && !pid_is_running(sleep_pid) {
             alive = false;
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
-    assert!(!alive, "timed-out npm child pid {child_pid} must be killed");
+    assert!(
+        !alive,
+        "timed-out npm child {child_pid} and descendant {sleep_pid} must be killed"
+    );
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn npm_install_future_cancellation_reaps_process_group() {
+    let _lock = PATH_MUTEX.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let pidfile = dir.path().join("npm.pid");
+    let sleep_pidfile = dir.path().join("sleep.pid");
+    let stub = dir.path().join("npm");
+    std::fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\necho $$ > {}\nsleep 60 &\necho $! > {}\nwait\n",
+            pidfile.display(),
+            sleep_pidfile.display()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    std::env::set_var("PATH", format!("{}:{}", dir.path().display(), old_path));
+    let tool = NpmInstall::new();
+
+    let mut fut = Box::pin(tool.execute(json!({"packages": ["express"], "timeout_secs": 60})));
+
+    for _ in 0..50 {
+        if sleep_pidfile.exists() {
+            break;
+        }
+        tokio::select! {
+            _ = &mut fut => {}
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+        }
+    }
+    std::env::set_var("PATH", &old_path);
+
+    let child_pid: i32 = std::fs::read_to_string(&pidfile)
+        .expect("stub wrote its pid")
+        .trim()
+        .parse()
+        .expect("valid pid");
+    let sleep_pid: i32 = std::fs::read_to_string(&sleep_pidfile)
+        .expect("stub wrote descendant pid")
+        .trim()
+        .parse()
+        .expect("valid descendant pid");
+
+    // Drop the pinned Box future mid-flight to simulate agent task cancellation
+    drop(fut);
+
+    fn pid_is_running(pid: i32) -> bool {
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+        if kill(Pid::from_raw(pid), None).is_err() {
+            return false;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                let state = stat
+                    .rsplit(')')
+                    .next()
+                    .and_then(|rest| rest.split_whitespace().next());
+                if matches!(state, Some("Z") | Some("X") | Some("x")) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    let mut alive = true;
+    for _ in 0..75 {
+        if !pid_is_running(child_pid) && !pid_is_running(sleep_pid) {
+            alive = false;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        !alive,
+        "both npm parent {child_pid} and descendant {sleep_pid} should be killed on future drop"
+    );
 }
 
 // ── Path-policy enforcement (2026-09-21 review sweep) ────────────────────

@@ -310,6 +310,18 @@ fn normalize_checkpoint_path(raw: &str) -> Option<PathBuf> {
     Some(crate::safety::checker::normalize_path(&lexical))
 }
 
+fn basename_is_build_or_dependency_file(basename: &str) -> bool {
+    basename == "cmakelists.txt"
+        || basename == "conanfile.txt"
+        || basename.starts_with("requirements")
+        || basename.starts_with("constraints")
+        || basename.starts_with("packages")
+        || basename.starts_with("dependencies")
+        || basename.starts_with("vcpkg")
+        || basename.starts_with("pip")
+        || basename.starts_with("cargo")
+}
+
 /// Deliberately conservative allow-list for text/document/config artifacts.
 /// Unknown extensions continue through the existing source-code gate rather
 /// than gaining a new completion bypass.
@@ -319,6 +331,9 @@ fn path_is_non_code_artifact(path: &Path) -> bool {
         .and_then(|name| name.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
+    if basename_is_build_or_dependency_file(&basename) {
+        return false;
+    }
     if matches!(
         basename.as_str(),
         "readme"
@@ -943,6 +958,9 @@ impl Agent {
     pub(crate) fn gate_path_is_doc_only(path: &str) -> bool {
         let lower = path.trim_matches('"').to_ascii_lowercase();
         let basename = lower.rsplit('/').next().unwrap_or(lower.as_str());
+        if basename_is_build_or_dependency_file(basename) {
+            return false;
+        }
         if matches!(
             basename,
             "readme" | "license" | "notice" | "changelog" | "contributing"
@@ -1080,11 +1098,13 @@ impl Agent {
                 if !super::tool_dispatch::shell_command_is_masked_verification(command) {
                     return None;
                 }
-                let output_proven = call
-                    .result
-                    .as_deref()
-                    .map(super::tool_dispatch::runner_output_proves_success)
-                    .unwrap_or(false);
+                let output_proven =
+                    !super::tool_dispatch::shell_command_pipes_runner_output(command)
+                        && call
+                            .result
+                            .as_deref()
+                            .map(super::tool_dispatch::runner_output_proves_success)
+                            .unwrap_or(false);
                 (!output_proven).then(|| command.to_string())
             })
     }
@@ -1105,7 +1125,9 @@ impl Agent {
         let Some(command) = args.get("command").and_then(Value::as_str) else {
             return false;
         };
-        if !super::tool_dispatch::shell_command_is_masked_verification(command) {
+        if !super::tool_dispatch::shell_command_is_masked_verification(command)
+            || super::tool_dispatch::shell_command_pipes_runner_output(command)
+        {
             return false;
         }
         tc.result

@@ -85,6 +85,12 @@ pub enum AgentError {
     #[error("Task cancelled by user")]
     Cancelled,
 
+    #[error("Task terminated by system signal ({0})")]
+    Terminated(String),
+
+    #[error("Task cancelled: {0}")]
+    CancelledWithReason(String),
+
     #[error("Missing system prompt")]
     MissingSystemPrompt,
 
@@ -491,8 +497,13 @@ pub fn get_exit_code(e: &anyhow::Error) -> u8 {
     if e.downcast_ref::<SafetyError>().is_some() {
         return EXIT_SAFETY_ERROR;
     }
-    if e.downcast_ref::<AgentError>().is_some() {
-        return EXIT_ERROR;
+    if let Some(agent_err) = e.downcast_ref::<AgentError>() {
+        return match agent_err {
+            AgentError::Terminated(_) => 143,
+            AgentError::Cancelled => EXIT_INTERRUPTED,
+            AgentError::CancelledWithReason(_) => EXIT_INTERRUPTED,
+            _ => EXIT_ERROR,
+        };
     }
 
     // Fallback string matching only for cases where specific types aren't available

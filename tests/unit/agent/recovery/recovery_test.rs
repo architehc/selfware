@@ -249,3 +249,23 @@ async fn nudge_without_discard_keeps_generic_discovery_list() {
         "the ordinary no-action nudge is unchanged: {nudge}"
     );
 }
+
+#[test]
+fn test_looks_like_malformed_tool_xml() {
+    // Valid tool XML is not malformed
+    let valid = "<tool>\n<name>file_read</name>\n<arguments>{\"path\": \"src/main.rs\"}</arguments>\n</tool>";
+    assert!(!looks_like_malformed_tool_xml(valid));
+
+    // Invalid JSON in arguments is malformed
+    let invalid_json =
+        "<tool>\n<name>file_read</name>\n<arguments>{invalid json}</arguments>\n</tool>";
+    assert!(looks_like_malformed_tool_xml(invalid_json));
+
+    // Missing closing tag is malformed
+    let unclosed = "<tool>\n<name>file_read</name>\n<arguments>{\"path\": \"x\"}";
+    assert!(looks_like_malformed_tool_xml(unclosed));
+
+    // Empty name is malformed
+    let empty_name = "<tool>\n<name></name>\n<arguments>{}</arguments>\n</tool>";
+    assert!(looks_like_malformed_tool_xml(empty_name));
+}

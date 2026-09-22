@@ -55,23 +55,57 @@ pub(super) fn looks_like_malformed_tool_xml(content: &str) -> bool {
         return false;
     }
 
-    let has_tool_tag = trimmed.contains("<tool");
-    let has_tool_close = trimmed.contains("</tool>");
-    let has_valid_tool_shape = has_tool_tag
-        && has_tool_close
-        && trimmed.contains("<name>")
-        && trimmed.contains("</name>")
-        && trimmed.contains("<arguments>")
-        && trimmed.contains("</arguments>");
-
-    (has_tool_tag && !has_valid_tool_shape)
-        || trimmed.contains("<function=")
+    if trimmed.contains("<function=")
         || trimmed.contains("<name=")
         || trimmed.contains("<parameter=")
         || trimmed.contains("<|open|>tools")
         || trimmed.contains("<|open|>call")
         || trimmed.contains("<tool_call>")
         || trimmed.contains("</tool_call>")
+    {
+        return true;
+    }
+
+    let has_tool_tag = trimmed.contains("<tool");
+    let has_tool_close = trimmed.contains("</tool>");
+    let has_arguments_tag = trimmed.contains("<arguments>") || trimmed.contains("</arguments>");
+
+    if !has_tool_tag && has_arguments_tag {
+        return true;
+    }
+
+    if has_tool_tag {
+        if !has_tool_close {
+            return true;
+        }
+        let Some(name_start) = trimmed.find("<name>") else {
+            return true;
+        };
+        let after_name = &trimmed[name_start + "<name>".len()..];
+        let Some(name_end) = after_name.find("</name>") else {
+            return true;
+        };
+        let tool_name = after_name[..name_end].trim();
+        if tool_name.is_empty() {
+            return true;
+        }
+
+        let Some(args_start) = trimmed.find("<arguments>") else {
+            return true;
+        };
+        let after_args = &trimmed[args_start + "<arguments>".len()..];
+        let Some(args_end) = after_args.find("</arguments>") else {
+            return true;
+        };
+        let args_str = after_args[..args_end].trim();
+        if serde_json::from_str::<serde_json::Value>(args_str).is_err() {
+            return true;
+        }
+
+        return false;
+    }
+
+    false
 }
 
 pub(super) fn detect_oscillating_batch_pair(

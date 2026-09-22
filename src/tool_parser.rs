@@ -517,7 +517,7 @@ fn try_parse_xml(content: &str) -> Option<Vec<(Result<ParsedToolCall>, String)>>
             .captures_iter(content)
             .map(|cap| {
                 let raw = cap[0].to_string();
-                let name = cap[1].trim().to_string();
+                let name = resolve_qwen_tool_name(&cap[1], &cap[2]);
                 let params_str = &cap[2];
 
                 let result = parse_qwen3_parameters(params_str).map(|arguments| ParsedToolCall {
@@ -618,7 +618,7 @@ fn try_parse_xml(content: &str) -> Option<Vec<(Result<ParsedToolCall>, String)>>
             .captures_iter(content)
             .map(|cap| {
                 let raw = cap[0].to_string();
-                let name = cap[1].trim().to_string();
+                let name = resolve_qwen_tool_name(&cap[1], &cap[2]);
                 let params_str = &cap[2];
 
                 let result = parse_qwen3_parameters(params_str).map(|arguments| ParsedToolCall {
@@ -719,8 +719,32 @@ fn try_parse_kimi_tools(content: &str) -> Option<Vec<(Result<ParsedToolCall>, St
     }
 }
 
-/// Parse Qwen3-style parameters: <parameter=key>value</parameter>
+/// Resolve the actual tool name for Qwen tool calls. If the outer function name
+/// is generic (`"tool"`), extract the real tool name from the inner `<name>` tag.
+fn resolve_qwen_tool_name(captured_name: &str, params_str: &str) -> String {
+    let trimmed = captured_name.trim();
+    if trimmed == "tool" {
+        if let Some(start) = params_str.find("<name>") {
+            let after = &params_str[start + "<name>".len()..];
+            if let Some(end) = after.find("</name>") {
+                let inner = after[..end].trim();
+                if !inner.is_empty() {
+                    return inner.to_string();
+                }
+            }
+        }
+    }
+    trimmed.to_string()
+}
+
+/// Parse Qwen3-style parameters: <parameter=key>value</parameter>, or hybrid <arguments>...</arguments>
 fn parse_qwen3_parameters(params_str: &str) -> Result<serde_json::Value> {
+    if let Some(start) = params_str.find("<arguments>") {
+        let after = &params_str[start + "<arguments>".len()..];
+        if let Some(end) = after.find("</arguments>") {
+            return parse_xml_arguments(&after[..end]);
+        }
+    }
     let param_regex = qwen3_parameter_regex();
     let mut args = serde_json::Map::new();
 

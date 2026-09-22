@@ -44,37 +44,42 @@ impl CheckpointEnvelope {
     /// # Returns
     /// A 32-byte key for HMAC-SHA-256 operations.
     fn get_hmac_key() -> Vec<u8> {
-        let path = dirs::data_local_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("selfware")
-            .join("checkpoint_hmac_key");
+        static CACHED_KEY: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+        CACHED_KEY
+            .get_or_init(|| {
+                let path = dirs::data_local_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join("selfware")
+                    .join("checkpoint_hmac_key");
 
-        // Try to load existing key
-        if let Ok(key) = std::fs::read(&path) {
-            if key.len() == 32 {
-                return key;
-            }
-            tracing::warn!(
-                "Existing HMAC key at {:?} has invalid length (expected 32, got {}). Generating new key.",
-                path,
-                key.len()
-            );
-        }
+                // Try to load existing key
+                if let Ok(key) = std::fs::read(&path) {
+                    if key.len() == 32 {
+                        return key;
+                    }
+                    tracing::warn!(
+                        "Existing HMAC key at {:?} has invalid length (expected 32, got {}). Generating new key.",
+                        path,
+                        key.len()
+                    );
+                }
 
-        // Generate new key
-        let mut key = vec![0u8; 32];
-        rand::Rng::fill_bytes(&mut rand::rng(), &mut key);
+                // Generate new key
+                let mut key = vec![0u8; 32];
+                rand::Rng::fill_bytes(&mut rand::rng(), &mut key);
 
-        // Attempt to persist the key with best-effort error handling
-        if let Err(e) = Self::persist_hmac_key(&path, &key) {
-            tracing::warn!(
-                "Failed to persist HMAC key to {:?}: {}. Key will be ephemeral for this session.",
-                path,
-                e
-            );
-        }
+                // Attempt to persist the key with best-effort error handling
+                if let Err(e) = Self::persist_hmac_key(&path, &key) {
+                    tracing::warn!(
+                        "Failed to persist HMAC key to {:?}: {}. Key will be ephemeral for this session.",
+                        path,
+                        e
+                    );
+                }
 
-        key
+                key
+            })
+            .clone()
     }
 
     /// Persist the HMAC key to disk with appropriate permissions.
@@ -183,7 +188,7 @@ pub enum TaskStatus {
 }
 
 /// A memory entry for serialization
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MemoryEntry {
     pub timestamp: String,
     pub role: String,
@@ -192,7 +197,7 @@ pub struct MemoryEntry {
 }
 
 /// Log of a tool execution
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolCallLog {
     pub timestamp: DateTime<Utc>,
     pub tool_name: String,
@@ -234,7 +239,7 @@ pub struct VisualAssertion {
 }
 
 /// Log of an error during execution
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ErrorLog {
     pub timestamp: DateTime<Utc>,
     pub step: usize,
@@ -500,27 +505,36 @@ impl TaskCheckpoint {
             .flatten();
 
         // Only capture appended elements. If vectors shrank or changed in place, prefer full save.
-        let new_messages = if self.messages.len() >= base.messages.len() {
+        let new_messages = if self.messages.len() >= base.messages.len()
+            && self.messages[..base.messages.len()] == base.messages[..]
+        {
             self.messages[base.messages.len()..].to_vec()
         } else {
             return None;
         };
-        let new_memory_entries = if self.memory_entries.len() >= base.memory_entries.len() {
+        let new_memory_entries = if self.memory_entries.len() >= base.memory_entries.len()
+            && self.memory_entries[..base.memory_entries.len()] == base.memory_entries[..]
+        {
             self.memory_entries[base.memory_entries.len()..].to_vec()
         } else {
             return None;
         };
-        let new_tool_calls = if self.tool_calls.len() >= base.tool_calls.len() {
+        let new_tool_calls = if self.tool_calls.len() >= base.tool_calls.len()
+            && self.tool_calls[..base.tool_calls.len()] == base.tool_calls[..]
+        {
             self.tool_calls[base.tool_calls.len()..].to_vec()
         } else {
             return None;
         };
-        let new_errors = if self.errors.len() >= base.errors.len() {
+        let new_errors = if self.errors.len() >= base.errors.len()
+            && self.errors[..base.errors.len()] == base.errors[..]
+        {
             self.errors[base.errors.len()..].to_vec()
         } else {
             return None;
         };
         let new_visual_assertions = if self.visual_assertions.len() >= base.visual_assertions.len()
+            && self.visual_assertions[..base.visual_assertions.len()] == base.visual_assertions[..]
         {
             self.visual_assertions[base.visual_assertions.len()..].to_vec()
         } else {
@@ -1644,6 +1658,8 @@ impl CheckpointManager {
         let total = lines.len();
 
         let mut torn_tail_len: Option<usize> = None;
+        let mut obsolete_count = 0;
+        let mut valid_records_count = 0;
         for (idx, line) in lines.iter().enumerate() {
             if line.trim().is_empty() {
                 continue;
@@ -1651,6 +1667,21 @@ impl CheckpointManager {
             let is_final = idx + 1 == total;
             match parse_delta_line(line, &path, idx + 1) {
                 Ok(delta) => {
+                    valid_records_count += 1;
+                    // If delta is already fully incorporated in the base checkpoint:
+                    // This happens when compaction wrote a new base at a higher version
+                    // but the process crashed before clear_delta_log could delete the old delta log.
+                    if delta.target_version <= checkpoint.version {
+                        tracing::info!(
+                            "Skipping obsolete checkpoint delta from {:?} line {} (delta target_version {} <= base checkpoint version {})",
+                            path,
+                            idx + 1,
+                            delta.target_version,
+                            checkpoint.version
+                        );
+                        obsolete_count += 1;
+                        continue;
+                    }
                     checkpoint.apply_delta(&delta).with_context(|| {
                         format!(
                             "Failed to apply checkpoint delta from {:?} line {}",
@@ -1693,6 +1724,14 @@ impl CheckpointManager {
                     path
                 )
             })?;
+        }
+
+        if valid_records_count > 0 && obsolete_count == valid_records_count {
+            tracing::info!(
+                "Checkpoint delta log {:?} contains only obsolete deltas from a prior compacted base; clearing obsolete delta log",
+                path
+            );
+            let _ = self.clear_delta_log(task_id);
         }
 
         Ok(())

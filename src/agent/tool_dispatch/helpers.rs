@@ -1381,6 +1381,69 @@ pub(crate) fn shell_command_is_masked_verification(command: &str) -> bool {
     })
 }
 
+/// Does the command pipe a verification runner's output into a downstream
+/// process (`cargo test 2>&1 | grep 'test result: ok'`)?
+///
+/// Output passed through a pipeline (`|`) is filtered or transformed by
+/// downstream commands, so captured tool output CANNOT prove test success: a
+/// filter like `grep 'test result: ok'` or `grep '0 failed'` drops failing
+/// summaries while retaining passing ones, hiding failing test suites.
+/// Downstream commands like `cut`, `sort`, `awk`, `sed`, `head`, `tail`, `wc`,
+/// etc. also alter or truncate the stream. Only transparent pass-throughs
+/// (`tee`, `cat`) or neutral grep/rg matching solely "test result" without
+/// inverted matching, max-count, or outcome filters (`ok`, `pass`, `fail`,
+/// `success`) are exempted.
+pub(crate) fn shell_command_pipes_runner_output(command: &str) -> bool {
+    let normalized = command.trim().to_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+    let segments = shell_segments_with_operators(&normalized);
+    for (i, (_op, segment)) in segments.iter().enumerate() {
+        let is_runner = match segment_verification_prefix(segment, VERIFICATION_PREFIXES) {
+            Some(prefix) => !segment_is_info_only_invocation(segment, prefix),
+            None => segment_runs_test_script(segment),
+        };
+        if is_runner {
+            let mut j = i + 1;
+            while let Some((next_op, downstream)) = segments.get(j) {
+                if next_op.trim() != "|" {
+                    break;
+                }
+                let trimmed = downstream.trim();
+                let words: Vec<&str> = trimmed.split_whitespace().collect();
+                let cmd = words.first().copied().unwrap_or("");
+                // tee and cat pass lines through unmodified
+                if matches!(cmd, "tee" | "cat") {
+                    j += 1;
+                    continue;
+                }
+                // Neutral grep/rg that preserves all test result lines (both passing and failing)
+                if matches!(cmd, "grep" | "rg") {
+                    let has_invert = words.iter().any(|w| *w == "-v" || *w == "--invert-match");
+                    let has_max_count = words
+                        .iter()
+                        .any(|w| *w == "-m" || w.starts_with("-m=") || *w == "--max-count");
+                    let has_outcome_filter = trimmed.contains("ok")
+                        || trimmed.contains("pass")
+                        || trimmed.contains("success")
+                        || trimmed.contains("fail");
+                    let has_neutral_marker = trimmed.contains("test result");
+
+                    if !has_invert && !has_max_count && !has_outcome_filter && has_neutral_marker {
+                        j += 1;
+                        continue;
+                    }
+                }
+                // Any other downstream command (cut, sort, awk, sed, head, tail, wc,
+                // non-neutral grep, etc.) can filter or alter runner output.
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// The `N failed` count directly preceding a "failed" summary word, when the
 /// word is part of a `<digits> failed` tally. `"10 failed"` parses as 10
 /// (the digit walk is unbounded), so the `"0 failed"` substring trap cannot

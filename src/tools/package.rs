@@ -11,12 +11,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::Stdio;
 use tokio::process::Command;
 
 use super::Tool;
 use crate::config::SafetyConfig;
 use crate::tools::file::{resolve_safety_config, validate_tool_path};
+
+/// Maximum output buffer size from a package command (10 MB).
+/// Prevents a runaway command from consuming unlimited memory while draining pipes.
+const MAX_PACKAGE_OUTPUT_SIZE: usize = 10 * 1024 * 1024;
 
 // ============================================================================
 // NPM Tools
@@ -123,21 +126,23 @@ impl Tool for NpmInstall {
         }
 
         cmd.current_dir(path);
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-        // Kill the child if the timeout drops the output future — a timed-out
-        // install must not keep mutating node_modules after we report failure.
-        cmd.kill_on_drop(true);
 
         let timeout_secs = args
             .get("timeout_secs")
             .and_then(|v| v.as_u64())
             .unwrap_or(300);
-        let output =
-            tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output())
-                .await
-                .context("npm install timed out (the npm process was killed)")?
-                .context("Failed to run npm install")?;
+        let output = crate::tools::process_guard::run_command_bounded(
+            cmd,
+            std::time::Duration::from_secs(timeout_secs),
+            MAX_PACKAGE_OUTPUT_SIZE,
+        )
+        .await
+        .map_err(|e| match e {
+            crate::tools::process_guard::CommandRunError::Timeout(_) => {
+                anyhow::anyhow!("npm install timed out (the npm process was killed)")
+            }
+            other => anyhow::anyhow!("Failed to run npm install: {}", other),
+        })?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -250,17 +255,19 @@ impl Tool for NpmRun {
         }
 
         cmd.current_dir(path);
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-        // Kill the child if the timeout drops the output future, so a timed-out
-        // script doesn't keep running detached after we report the timeout.
-        cmd.kill_on_drop(true);
 
-        let output =
-            tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output())
-                .await
-                .context("npm run timed out (the npm process was killed)")?
-                .context("Failed to run npm script")?;
+        let output = crate::tools::process_guard::run_command_bounded(
+            cmd,
+            std::time::Duration::from_secs(timeout_secs),
+            MAX_PACKAGE_OUTPUT_SIZE,
+        )
+        .await
+        .map_err(|e| match e {
+            crate::tools::process_guard::CommandRunError::Timeout(_) => {
+                anyhow::anyhow!("npm run timed out (the npm process was killed)")
+            }
+            other => anyhow::anyhow!("Failed to run npm script: {}", other),
+        })?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -477,21 +484,22 @@ impl Tool for PipInstall {
             cmd.arg("--user");
         }
 
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-        // Kill the child if the timeout drops the output future — a timed-out
-        // pip install must not keep writing into site-packages afterwards.
-        cmd.kill_on_drop(true);
-
         let timeout_secs = args
             .get("timeout_secs")
             .and_then(|v| v.as_u64())
             .unwrap_or(300);
-        let output =
-            tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output())
-                .await
-                .context("pip install timed out (the pip process was killed)")?
-                .context("Failed to run pip install")?;
+        let output = crate::tools::process_guard::run_command_bounded(
+            cmd,
+            std::time::Duration::from_secs(timeout_secs),
+            MAX_PACKAGE_OUTPUT_SIZE,
+        )
+        .await
+        .map_err(|e| match e {
+            crate::tools::process_guard::CommandRunError::Timeout(_) => {
+                anyhow::anyhow!("pip install timed out (the pip process was killed)")
+            }
+            other => anyhow::anyhow!("Failed to run pip install: {}", other),
+        })?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -560,10 +568,13 @@ impl Tool for PipList {
             cmd.arg("--outdated");
         }
 
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-
-        let output = cmd.output().await.context("Failed to run pip list")?;
+        let output = crate::tools::process_guard::run_command_bounded(
+            cmd,
+            std::time::Duration::from_secs(60),
+            MAX_PACKAGE_OUTPUT_SIZE,
+        )
+        .await
+        .context("Failed to run pip list")?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -630,10 +641,13 @@ impl Tool for PipFreeze {
         let mut cmd = Command::new(&python);
         crate::safety::process_env::sanitize_command_env(&mut cmd);
         cmd.args(["-m", "pip", "freeze"]);
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-
-        let output = cmd.output().await.context("Failed to run pip freeze")?;
+        let output = crate::tools::process_guard::run_command_bounded(
+            cmd,
+            std::time::Duration::from_secs(60),
+            MAX_PACKAGE_OUTPUT_SIZE,
+        )
+        .await
+        .context("Failed to run pip freeze")?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -712,6 +726,10 @@ impl Tool for YarnInstall {
                 "dev": {
                     "type": "boolean",
                     "description": "Install as dev dependency (--dev)"
+                },
+                "timeout_secs": {
+                    "type": "integer",
+                    "description": "Timeout in seconds (default: 300)"
                 }
             }
         })
@@ -731,6 +749,11 @@ impl Tool for YarnInstall {
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
         let dev = args.get("dev").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        let timeout_secs = args
+            .get("timeout_secs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(300);
 
         // `yarn add/install` mutates the working directory (node_modules,
         // yarn.lock) — the cwd obeys the workspace path policy like other
@@ -752,10 +775,19 @@ impl Tool for YarnInstall {
         }
 
         cmd.current_dir(path);
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
 
-        let output = cmd.output().await.context("Failed to run yarn")?;
+        let output = crate::tools::process_guard::run_command_bounded(
+            cmd,
+            std::time::Duration::from_secs(timeout_secs),
+            MAX_PACKAGE_OUTPUT_SIZE,
+        )
+        .await
+        .map_err(|e| match e {
+            crate::tools::process_guard::CommandRunError::Timeout(_) => {
+                anyhow::anyhow!("yarn install timed out (the yarn process was killed)")
+            }
+            other => anyhow::anyhow!("Failed to run yarn: {}", other),
+        })?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();

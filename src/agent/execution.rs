@@ -917,8 +917,9 @@ impl Agent {
             info!("Rejected empty response as final answer — nudging for an actual answer");
             self.messages.push(crate::api::types::Message::user(
                 "<selfware_system_directive>\n\
-                 Your last response was empty. Provide your actual final answer now \
-                 (a concise summary of the completed work).\n\
+                 Your last response produced no deliverable content or tool calls (reasoning only). \
+                 Provide your actual final answer now (a concise summary of the completed work) \
+                 or call a tool.\n\
                  </selfware_system_directive>"
                     .to_string(),
             ));

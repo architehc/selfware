@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Semaphore};
 use tracing::warn;
 
+use super::client::{CallTimeBudgetExceeded, WallClockBudgetExceeded};
 use super::types::{self, ChatResponse, Choice, Message, ToolCall, Usage};
 use crate::errors::ApiError;
 
@@ -56,6 +57,8 @@ pub struct StreamingResponse {
     /// the stream task record the FULL call wall time — send → stream end —
     /// into the run's per-call latency stats when it exits.
     call_started: Option<Instant>,
+    call_cap_secs: Option<u64>,
+    wall_limit_secs: Option<u64>,
 }
 
 impl std::fmt::Debug for StreamingResponse {
@@ -81,6 +84,8 @@ impl StreamingResponse {
             attempt: None,
             prior_attempts: Vec::new(),
             call_started: None,
+            call_cap_secs: None,
+            wall_limit_secs: None,
         }
     }
 
@@ -96,6 +101,16 @@ impl StreamingResponse {
 
     pub(crate) fn with_call_started(mut self, started: Instant) -> Self {
         self.call_started = Some(started);
+        self
+    }
+
+    pub(crate) fn with_call_cap(mut self, cap: Option<u64>) -> Self {
+        self.call_cap_secs = cap;
+        self
+    }
+
+    pub(crate) fn with_wall_limit(mut self, limit: Option<u64>) -> Self {
+        self.wall_limit_secs = limit;
         self
     }
 
@@ -143,6 +158,34 @@ impl StreamingResponse {
             let deadline = self.deadline;
             let mut saw_valid_event = false;
 
+            let call_cap_secs = self.call_cap_secs;
+            let wall_limit_secs = self.wall_limit_secs;
+            let call_started = self.call_started;
+
+            let classify_timeout = || -> anyhow::Error {
+                if let (Some(started), Some(cap)) = (call_started, call_cap_secs) {
+                    let elapsed = started.elapsed();
+                    if elapsed >= Duration::from_secs(cap) {
+                        return CallTimeBudgetExceeded {
+                            elapsed_secs: elapsed.as_secs(),
+                            limit_secs: cap,
+                        }
+                        .into();
+                    }
+                }
+                if let (Some(started), Some(limit)) = (call_started, wall_limit_secs) {
+                    let elapsed = started.elapsed();
+                    if elapsed >= Duration::from_secs(limit) {
+                        return WallClockBudgetExceeded {
+                            elapsed_secs: elapsed.as_secs(),
+                            limit_secs: limit,
+                        }
+                        .into();
+                    }
+                }
+                ApiError::Timeout.into()
+            };
+
             loop {
                 // Bound each chunk wait by BOTH the per-chunk timeout and the
                 // absolute deadline. Once the deadline passes, stop — otherwise
@@ -162,7 +205,7 @@ impl StreamingResponse {
                                     return;
                                 }
                             }
-                            if tx.send(Err(ApiError::Timeout.into())).await.is_err() {
+                            if tx.send(Err(classify_timeout())).await.is_err() {
                                 warn!(
                                     "Streaming receiver dropped while sending deadline timeout error"
                                 );
@@ -193,7 +236,7 @@ impl StreamingResponse {
                                 return;
                             }
                         }
-                        if tx.send(Err(ApiError::Timeout.into())).await.is_err() {
+                        if tx.send(Err(classify_timeout())).await.is_err() {
                             warn!("Streaming receiver dropped while sending timeout error");
                         }
                         return;

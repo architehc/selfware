@@ -2379,3 +2379,169 @@ async fn test_sync_api_usage_accumulates_nested_only_reasoning_tokens() {
         "nested reasoning tokens in completion_tokens_details must flow into agent cumulative_token_usage"
     );
 }
+
+#[test]
+fn build_and_dependency_files_are_not_doc_only() {
+    assert!(!Agent::gate_path_is_doc_only("CMakeLists.txt"));
+    assert!(!Agent::gate_path_is_doc_only("requirements.txt"));
+    assert!(!Agent::gate_path_is_doc_only("requirements-dev.txt"));
+    assert!(!Agent::gate_path_is_doc_only("constraints.txt"));
+    assert!(!Agent::gate_path_is_doc_only("vcpkg.json"));
+    assert!(!Agent::gate_path_is_doc_only("conanfile.txt"));
+
+    // Real documentation files remain doc-only
+    assert!(Agent::gate_path_is_doc_only("README.md"));
+    assert!(Agent::gate_path_is_doc_only("docs/guide.txt"));
+    assert!(Agent::gate_path_is_doc_only("notes.rst"));
+}
+
+#[tokio::test]
+async fn tests_in_another_directory_do_not_clear_task_failures() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let task_dir = tmp.path().join("task_proj");
+    let other_dir = tmp.path().join("other_proj");
+    std::fs::create_dir_all(&task_dir).unwrap();
+    std::fs::create_dir_all(&other_dir).unwrap();
+    std::fs::write(
+        task_dir.join("Cargo.toml"),
+        "[package]\nname=\"task_proj\"\nversion=\"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        other_dir.join("Cargo.toml"),
+        "[package]\nname=\"other_proj\"\nversion=\"0.1.0\"\n",
+    )
+    .unwrap();
+
+    let mut agent = Agent::new(crate::config::Config::default())
+        .await
+        .expect("agent should build");
+    agent.task_verification_root = Some(task_dir.clone());
+    agent.mutation_sequence = 2;
+
+    // Fail cargo test in the task project
+    agent.note_verification_outcome(
+        "shell_exec",
+        &serde_json::json!({
+            "command": "cargo test",
+            "cwd": task_dir.to_str().unwrap()
+        })
+        .to_string(),
+        false,
+        "test result: FAILED. 1 failed",
+    );
+    assert!(
+        agent.verification_failures.blocking(&task_dir, 2).is_some(),
+        "task project failure must block"
+    );
+    assert_eq!(agent.last_successful_verification_mutation_sequence, 0);
+
+    // Pass cargo test in the OTHER project via cwd
+    agent.note_verification_outcome(
+        "shell_exec",
+        &serde_json::json!({
+            "command": "cargo test",
+            "cwd": other_dir.to_str().unwrap()
+        })
+        .to_string(),
+        true,
+        "test result: ok. 1 passed",
+    );
+
+    // It must NOT clear task_proj's failure and must NOT credit verification sequence
+    assert!(
+        agent.verification_failures.blocking(&task_dir, 2).is_some(),
+        "external directory pass must NOT clear task project failure"
+    );
+    assert_eq!(
+        agent.last_successful_verification_mutation_sequence, 0,
+        "external directory pass must not credit task mutation sequence"
+    );
+
+    // Now pass cargo test in the TASK project
+    agent.note_verification_outcome(
+        "shell_exec",
+        &serde_json::json!({
+            "command": "cargo test",
+            "cwd": task_dir.to_str().unwrap()
+        })
+        .to_string(),
+        true,
+        "test result: ok. 1 passed",
+    );
+    assert!(
+        agent.verification_failures.blocking(&task_dir, 2).is_none(),
+        "in-scope pass discharges task project failure"
+    );
+    assert_eq!(
+        agent.last_successful_verification_mutation_sequence, 2,
+        "in-scope pass credits task mutation sequence"
+    );
+}
+
+#[tokio::test]
+async fn passing_test_subset_does_not_clear_failing_full_suite() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let task_dir = tmp.path().join("task_proj");
+    std::fs::create_dir_all(&task_dir).unwrap();
+    std::fs::write(
+        task_dir.join("Cargo.toml"),
+        "[package]\nname=\"task_proj\"\nversion=\"0.1.0\"\n",
+    )
+    .unwrap();
+
+    let mut agent = Agent::new(crate::config::Config::default())
+        .await
+        .expect("agent should build");
+    agent.task_verification_root = Some(task_dir.clone());
+    agent.mutation_sequence = 2;
+
+    // Full suite fails
+    agent.note_verification_outcome(
+        "shell_exec",
+        &serde_json::json!({
+            "command": "cargo test",
+            "cwd": task_dir.to_str().unwrap()
+        })
+        .to_string(),
+        false,
+        "test result: FAILED. 1 failed",
+    );
+    assert!(agent.verification_failures.blocking(&task_dir, 2).is_some());
+
+    // Narrower subset passes
+    agent.note_verification_outcome(
+        "shell_exec",
+        &serde_json::json!({
+            "command": "cargo test passing_test",
+            "cwd": task_dir.to_str().unwrap()
+        })
+        .to_string(),
+        true,
+        "test result: ok. 1 passed",
+    );
+
+    // Full suite failure must NOT be cleared by narrower pass
+    assert!(
+        agent.verification_failures.blocking(&task_dir, 2).is_some(),
+        "passing test subset must not clear failing full-suite result"
+    );
+
+    // Full suite passes
+    agent.note_verification_outcome(
+        "shell_exec",
+        &serde_json::json!({
+            "command": "cargo test",
+            "cwd": task_dir.to_str().unwrap()
+        })
+        .to_string(),
+        true,
+        "test result: ok. 5 passed",
+    );
+
+    // Full suite failure is cleared
+    assert!(
+        agent.verification_failures.blocking(&task_dir, 2).is_none(),
+        "passing full-suite run must clear full-suite failure"
+    );
+}

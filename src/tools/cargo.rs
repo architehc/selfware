@@ -225,17 +225,20 @@ impl Tool for CargoTest {
         }
 
         cmd.env("RUST_BACKTRACE", "1");
-        cmd.kill_on_drop(true);
 
         let timeout_duration = Duration::from_secs(CARGO_TIMEOUT_SECS);
-        let output_result = tokio::time::timeout(timeout_duration, cmd.output()).await;
-
-        let output = match output_result {
-            Ok(Ok(o)) => o,
-            Ok(Err(e)) => anyhow::bail!("Failed to execute cargo test: {}", e),
-            Err(_) => {
+        let output = match crate::tools::process_guard::run_command_bounded(
+            cmd,
+            timeout_duration,
+            MAX_CARGO_OUTPUT_SIZE,
+        )
+        .await
+        {
+            Ok(o) => o,
+            Err(crate::tools::process_guard::CommandRunError::Timeout(_)) => {
                 anyhow::bail!("cargo test timed out after {} seconds", CARGO_TIMEOUT_SECS)
             }
+            Err(e) => anyhow::bail!("Failed to execute cargo test: {}", e),
         };
 
         let stdout = safe_truncate_output(&output.stdout, MAX_CARGO_OUTPUT_SIZE);
@@ -303,7 +306,6 @@ impl Tool for CargoCheck {
         crate::safety::process_env::sanitize_command_env(&mut cmd);
         cmd.arg("check");
         cmd.arg("--message-format=json");
-        cmd.kill_on_drop(true);
 
         if args
             .get("all_targets")
@@ -330,14 +332,18 @@ impl Tool for CargoCheck {
         }
 
         let timeout_duration = Duration::from_secs(CARGO_TIMEOUT_SECS);
-        let output_result = tokio::time::timeout(timeout_duration, cmd.output()).await;
-
-        let output = match output_result {
-            Ok(Ok(o)) => o,
-            Ok(Err(e)) => anyhow::bail!("Failed to execute cargo check: {}", e),
-            Err(_) => {
+        let output = match crate::tools::process_guard::run_command_bounded(
+            cmd,
+            timeout_duration,
+            MAX_CARGO_OUTPUT_SIZE,
+        )
+        .await
+        {
+            Ok(o) => o,
+            Err(crate::tools::process_guard::CommandRunError::Timeout(_)) => {
                 anyhow::bail!("cargo check timed out after {} seconds", CARGO_TIMEOUT_SECS)
             }
+            Err(e) => anyhow::bail!("Failed to execute cargo check: {}", e),
         };
 
         let stdout = safe_truncate_output(&output.stdout, MAX_CARGO_OUTPUT_SIZE);
@@ -446,17 +452,21 @@ impl Tool for CargoClippy {
         cmd.arg("--").args(lint_args);
 
         let timeout_duration = Duration::from_secs(CARGO_TIMEOUT_SECS);
-        let output_result = tokio::time::timeout(timeout_duration, cmd.output()).await;
-
-        let output = match output_result {
-            Ok(Ok(o)) => o,
-            Ok(Err(e)) => anyhow::bail!("Failed to execute cargo clippy: {}", e),
-            Err(_) => {
+        let output = match crate::tools::process_guard::run_command_bounded(
+            cmd,
+            timeout_duration,
+            MAX_CARGO_OUTPUT_SIZE,
+        )
+        .await
+        {
+            Ok(o) => o,
+            Err(crate::tools::process_guard::CommandRunError::Timeout(_)) => {
                 anyhow::bail!(
                     "cargo clippy timed out after {} seconds",
                     CARGO_TIMEOUT_SECS
                 )
             }
+            Err(e) => anyhow::bail!("Failed to execute cargo clippy: {}", e),
         };
 
         let stdout = safe_truncate_output(&output.stdout, MAX_CARGO_OUTPUT_SIZE);
@@ -537,14 +547,18 @@ impl Tool for CargoFmt {
         }
 
         let timeout_duration = Duration::from_secs(CARGO_TIMEOUT_SECS);
-        let output_result = tokio::time::timeout(timeout_duration, cmd.output()).await;
-
-        let output = match output_result {
-            Ok(Ok(o)) => o,
-            Ok(Err(e)) => anyhow::bail!("Failed to execute cargo fmt: {}", e),
-            Err(_) => {
+        let output = match crate::tools::process_guard::run_command_bounded(
+            cmd,
+            timeout_duration,
+            MAX_CARGO_OUTPUT_SIZE,
+        )
+        .await
+        {
+            Ok(o) => o,
+            Err(crate::tools::process_guard::CommandRunError::Timeout(_)) => {
                 anyhow::bail!("cargo fmt timed out after {} seconds", CARGO_TIMEOUT_SECS)
             }
+            Err(e) => anyhow::bail!("Failed to execute cargo fmt: {}", e),
         };
 
         Ok(serde_json::json!({

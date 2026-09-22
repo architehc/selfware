@@ -189,14 +189,23 @@ impl VerificationRecord {
     /// never permanently blocked) without two unrelated directories clearing
     /// each other.
     pub fn clears(&self, other: &VerificationRecord) -> bool {
-        self.passed && !other.passed && self.same_check_as(other)
-    }
-
-    /// Whether two records answer the same question about the same tree.
-    pub fn same_check_as(&self, other: &VerificationRecord) -> bool {
-        if self.check_id != other.check_id {
+        if !self.passed || other.passed {
             return false;
         }
+        if !self.same_scope_as(other) {
+            return false;
+        }
+        if self.check_id == other.check_id {
+            return true;
+        }
+        if other.check_id.starts_with(&format!("{} ", self.check_id)) {
+            return true;
+        }
+        false
+    }
+
+    /// Whether two records operate in the same scope.
+    pub fn same_scope_as(&self, other: &VerificationRecord) -> bool {
         match (&self.scope.project_root, &other.scope.project_root) {
             (Some(a), Some(b)) => normalise(a) == normalise(b),
             // Neither root resolved. Unknown is not a match: fall back to the
@@ -206,6 +215,14 @@ impl VerificationRecord {
             }
             _ => false,
         }
+    }
+
+    /// Whether two records answer the same question about the same tree.
+    pub fn same_check_as(&self, other: &VerificationRecord) -> bool {
+        if self.check_id != other.check_id {
+            return false;
+        }
+        self.same_scope_as(other)
     }
 }
 
@@ -463,6 +480,57 @@ mod tests {
             "the passing unittest discharges the failure it owns"
         );
     }
+
+    #[test]
+    fn check_id_preserves_test_selectors_and_drops_flags() {
+        assert_eq!(check_id_for("shell_exec", "cargo test"), "cargo test");
+        assert_eq!(
+            check_id_for("shell_exec", "cargo test passing_test"),
+            "cargo test passing_test"
+        );
+        assert_eq!(
+            check_id_for("shell_exec", "cargo test --lib passing_test"),
+            "cargo test passing_test"
+        );
+        assert_eq!(
+            check_id_for("shell_exec", "cargo test --lib -- --nocapture"),
+            "cargo test"
+        );
+        assert_eq!(
+            check_id_for("shell_exec", "python3 -m unittest test_user"),
+            "python3 unittest test_user"
+        );
+        assert_eq!(
+            check_id_for("shell_exec", "python3 -m unittest"),
+            "python3 unittest"
+        );
+        assert_eq!(check_id_for("cargo_test", ""), "cargo test");
+        assert_eq!(check_id_for("cargo_check", ""), "cargo check");
+    }
+
+    #[test]
+    fn passing_test_subset_cannot_clear_failing_full_suite() {
+        let (_tmp, parent, _py) = nested();
+        let full_suite_failure = record("cargo test", Some(&parent), &parent, false, 1);
+        let subset_pass = record("cargo test passing_test", Some(&parent), &parent, true, 1);
+
+        assert!(
+            !subset_pass.clears(&full_suite_failure),
+            "a passing test subset must NOT clear a failing full-suite result"
+        );
+
+        let full_suite_pass = record("cargo test", Some(&parent), &parent, true, 1);
+        assert!(
+            full_suite_pass.clears(&full_suite_failure),
+            "a passing full-suite run clears the full-suite failure"
+        );
+
+        let subset_failure = record("cargo test failing_test", Some(&parent), &parent, false, 1);
+        assert!(
+            full_suite_pass.clears(&subset_failure),
+            "a passing full-suite run clears narrower subset failures"
+        );
+    }
 }
 
 /// Normalise a command to the CHECK it performs.
@@ -473,7 +541,13 @@ mod tests {
 pub fn check_id_for(tool: &str, command: &str) -> String {
     let text = command.trim();
     if text.is_empty() {
-        return tool.to_string();
+        return match tool {
+            "cargo_test" => "cargo test".to_string(),
+            "cargo_check" => "cargo check".to_string(),
+            "cargo_clippy" => "cargo clippy".to_string(),
+            "cargo_fmt" => "cargo fmt".to_string(),
+            other => other.to_string(),
+        };
     }
     let words: Vec<&str> = text
         .split_whitespace()
@@ -481,21 +555,49 @@ pub fn check_id_for(tool: &str, command: &str) -> String {
         .filter(|w| !w.starts_with('-'))
         .collect();
     match words.as_slice() {
-        [] => tool.to_string(),
+        [] => match tool {
+            "cargo_test" => "cargo test".to_string(),
+            "cargo_check" => "cargo check".to_string(),
+            "cargo_clippy" => "cargo clippy".to_string(),
+            "cargo_fmt" => "cargo fmt".to_string(),
+            other => other.to_string(),
+        },
         // `python3 -m pytest` / `python3 -m unittest`: the module is the check,
         // and it is behind a flag the filter above dropped.
         [interp, rest @ ..] if interp.starts_with("python") || *interp == "node" => {
-            let module = text
-                .split_whitespace()
-                .skip_while(|w| *w != "-m")
-                .nth(1)
-                .or_else(|| rest.first().copied())
-                .unwrap_or("script");
-            format!("{interp} {module}")
+            let has_m = text.split_whitespace().any(|w| w == "-m");
+            let (module, selectors) = if has_m {
+                let m = text
+                    .split_whitespace()
+                    .skip_while(|w| *w != "-m")
+                    .nth(1)
+                    .unwrap_or("script");
+                let sel = rest.iter().copied().filter(|w| *w != m).collect::<Vec<_>>();
+                (m, sel)
+            } else {
+                let m = rest.first().copied().unwrap_or("script");
+                let sel = if rest.len() > 1 {
+                    rest[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                (m, sel)
+            };
+            if selectors.is_empty() {
+                format!("{interp} {module}")
+            } else {
+                format!("{interp} {module} {}", selectors.join(" "))
+            }
         }
         [single] => (*single).to_string(),
         // `cargo test`, `npm run`, `go build`.
-        [first, second, ..] => format!("{first} {second}"),
+        [first, second, rest @ ..] => {
+            if rest.is_empty() {
+                format!("{first} {second}")
+            } else {
+                format!("{first} {second} {}", rest.join(" "))
+            }
+        }
     }
 }
 

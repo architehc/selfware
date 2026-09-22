@@ -102,19 +102,14 @@ pub(crate) async fn run_cancellable_subprocess(
 
     let child = cmd.spawn().map_err(SubprocessError::Io)?;
     let child_pid = child.id();
+    let mut pg_guard = crate::tools::process_guard::ProcessGroupGuard::new(child_pid);
 
     let wait_fut = tokio::time::timeout(timeout, child.wait_with_output());
     tokio::pin!(wait_fut);
 
     let wait_res = loop {
         if crate::is_shutdown_requested() {
-            #[cfg(unix)]
-            if let Some(pid) = child_pid {
-                let _ = nix::sys::signal::killpg(
-                    nix::unistd::Pid::from_raw(pid as i32),
-                    nix::sys::signal::Signal::SIGKILL,
-                );
-            }
+            pg_guard.kill();
             return Err(SubprocessError::ShutdownRequested);
         }
 
@@ -125,15 +120,12 @@ pub(crate) async fn run_cancellable_subprocess(
     };
 
     match wait_res {
-        Ok(output_res) => output_res.map_err(SubprocessError::Io),
+        Ok(output_res) => {
+            pg_guard.disarm();
+            output_res.map_err(SubprocessError::Io)
+        }
         Err(_) => {
-            #[cfg(unix)]
-            if let Some(pid) = child_pid {
-                let _ = nix::sys::signal::killpg(
-                    nix::unistd::Pid::from_raw(pid as i32),
-                    nix::sys::signal::Signal::SIGKILL,
-                );
-            }
+            pg_guard.kill();
             Err(SubprocessError::Timeout)
         }
     }
@@ -205,6 +197,25 @@ pub fn parse_test_summary(output: &str) -> (usize, usize) {
 
 fn features_arg(features: &[&str]) -> String {
     features.join(",")
+}
+
+/// RAII guard that removes a shadow worktree when the evaluation iteration
+/// ends — on success, on early `continue`, AND on panic unwind.
+struct WorktreeGuard<'a> {
+    repo_root: &'a Path,
+    path: PathBuf,
+}
+
+impl<'a> WorktreeGuard<'a> {
+    fn new(repo_root: &'a Path, path: PathBuf) -> Self {
+        Self { repo_root, path }
+    }
+}
+
+impl Drop for WorktreeGuard<'_> {
+    fn drop(&mut self) {
+        let _ = ast_tools::cleanup_worktree(self.repo_root, &self.path);
+    }
 }
 
 /// Measure baseline fitness from real compile / test / fmt / clippy / build
@@ -1617,7 +1628,16 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         }
     } else {
         log_phase("Using compile+test fitness (set SELFWARE_EVOLVE_SAB=1 for full SAB)");
-        match measure_compile_test_baseline(repo_root, EVOLVE_FEATURES, DEFAULT_TIMEOUT_SECS).await
+        // Measure baseline on a clean shadow worktree branched from HEAD so baseline and
+        // candidate mutations are evaluated against the exact same committed tree state.
+        let baseline_worktree = ast_tools::create_shadow_worktree(repo_root).ok();
+        let _guard = baseline_worktree
+            .as_ref()
+            .map(|w| WorktreeGuard::new(repo_root, w.clone()));
+        let baseline_path = baseline_worktree.as_deref().unwrap_or(repo_root);
+
+        match measure_compile_test_baseline(baseline_path, EVOLVE_FEATURES, DEFAULT_TIMEOUT_SECS)
+            .await
         {
             Ok(mut m) => {
                 m.max_binary_size_mb = config.safety.max_binary_size_mb;
@@ -5059,27 +5079,6 @@ fn apply_patch_to_repo(repo_root: &Path, patch: &str) -> bool {
         return false;
     }
     apply_edits(repo_root, patch)
-}
-
-/// RAII guard that removes a shadow worktree when the evaluation iteration
-/// ends — on success, on early `continue`, AND on panic unwind. The old flow
-/// called `cleanup_worktree` manually at each exit, so a panic anywhere in
-/// the iteration leaked worktrees under `.worktrees/`.
-struct WorktreeGuard<'a> {
-    repo_root: &'a Path,
-    path: PathBuf,
-}
-
-impl<'a> WorktreeGuard<'a> {
-    fn new(repo_root: &'a Path, path: PathBuf) -> Self {
-        Self { repo_root, path }
-    }
-}
-
-impl Drop for WorktreeGuard<'_> {
-    fn drop(&mut self) {
-        let _ = ast_tools::cleanup_worktree(self.repo_root, &self.path);
-    }
 }
 
 /// Capture the exact tested worktree state as a unified diff against HEAD.

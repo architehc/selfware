@@ -989,3 +989,16 @@ fn test_parse_kimi_style_no_args() {
     assert_eq!(result.tool_calls[0].arguments, serde_json::json!({}));
     assert_eq!(result.text_content, "Checking git diff.");
 }
+
+#[test]
+fn test_parse_qwen_hybrid_function_tool() {
+    let content = r#"<function=tool>
+<name>file_read</name>
+<arguments>{"path": "src/main.rs"}</arguments>
+</function>"#;
+
+    let result = parse_tool_calls(content);
+    assert_eq!(result.tool_calls.len(), 1);
+    assert_eq!(result.tool_calls[0].tool_name, "file_read");
+    assert_eq!(result.tool_calls[0].arguments["path"], "src/main.rs");
+}

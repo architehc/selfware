@@ -548,16 +548,24 @@ impl ApiClient {
     /// (max_tokens / measured tps × safety, floored, capped at 2h) and is
     /// merged with the run-level wall deadline — whichever comes first wins.
     /// A configured `agent.max_call_secs` tightens (never loosens) the bound.
-    pub(crate) fn per_call_stream_deadline(&self, run_deadline: Option<Instant>) -> Instant {
+    pub(crate) fn per_call_stream_deadline_from(
+        &self,
+        started: Instant,
+        run_deadline: Option<Instant>,
+    ) -> Instant {
         let mut per_call_secs = self.adaptive_response_timeout_secs();
         if let Some(cap) = self.config.agent.max_call_secs.filter(|s| *s > 0) {
             per_call_secs = per_call_secs.min(cap);
         }
-        let per_call = Instant::now() + Duration::from_secs(per_call_secs);
+        let per_call = started + Duration::from_secs(per_call_secs);
         match run_deadline {
             Some(d) => d.min(per_call),
             None => per_call,
         }
+    }
+
+    pub(crate) fn per_call_stream_deadline(&self, run_deadline: Option<Instant>) -> Instant {
+        self.per_call_stream_deadline_from(Instant::now(), run_deadline)
     }
 
     /// Return a reference to the underlying [`Config`](crate::config::Config).
@@ -1277,84 +1285,90 @@ impl ApiClient {
                     ))
                     .into());
                 }
-                Ok(matched) => match matched {
-                    Ok(response) => {
-                        let status = response.status();
-                        attempt_usage.status(status.as_u16());
-                        if status.is_success() {
-                            let mut stream_chunk_timeout_secs = self
-                                .config
-                                .agent
-                                .stream_stall_timeout_secs
-                                .unwrap_or_else(|| self.config.agent.step_timeout_secs.max(30));
-                            if let Some(wall) = self.config.agent.max_wall_secs {
-                                stream_chunk_timeout_secs =
-                                    stream_chunk_timeout_secs.min(wall.max(1));
+                Ok(matched) => {
+                    match matched {
+                        Ok(response) => {
+                            let status = response.status();
+                            attempt_usage.status(status.as_u16());
+                            if status.is_success() {
+                                let mut stream_chunk_timeout_secs =
+                                    self.config.agent.stream_stall_timeout_secs.unwrap_or_else(
+                                        || self.config.agent.step_timeout_secs.max(30),
+                                    );
+                                if let Some(wall) = self.config.agent.max_wall_secs {
+                                    stream_chunk_timeout_secs =
+                                        stream_chunk_timeout_secs.min(wall.max(1));
+                                }
+                                return Ok((
+                                    StreamingResponse::new(
+                                        response,
+                                        Duration::from_secs(stream_chunk_timeout_secs),
+                                        Some(self.per_call_stream_deadline_from(
+                                            attempt_started,
+                                            deadline,
+                                        )),
+                                    )
+                                    .with_attempt(attempt_usage, prior_receipts)
+                                    .with_call_started(attempt_started)
+                                    .with_call_cap(call_cap_secs)
+                                    .with_wall_limit(self.config.agent.max_wall_secs),
+                                    body,
+                                ));
                             }
-                            return Ok((
-                                StreamingResponse::new(
-                                    response,
-                                    Duration::from_secs(stream_chunk_timeout_secs),
-                                    Some(self.per_call_stream_deadline(deadline)),
-                                )
-                                .with_attempt(attempt_usage, prior_receipts)
-                                .with_call_started(attempt_started),
-                                body,
-                            ));
-                        }
 
-                        let retry_after = Self::parse_retry_after(response.headers());
-                        let text = self.read_error_body_bounded(response).await;
-                        let _ = attempt_usage.record_json(&text);
-                        // Provider rejects the native tool-call payload:
-                        // latch XML mode for the session and retry — the
-                        // alternative is a guaranteed dead run on models
-                        // without native-FC support (m3:free case).
-                        if Self::is_tool_schema_400(status, &text)
-                            && body.get("tool_choice").is_some()
-                            && body.get("tools").is_some()
-                        {
-                            self.latch_tool_mode(&self.base_url, &self.config.model);
-                            convert_body_to_xml(&mut body, &None, self.config.context_length)?;
-                            tool_mode_retry = true;
-                            continue;
-                        }
-                        if Self::is_retryable_status(status) && attempt < max_attempts {
-                            let sleep_ms = self.retry_sleep_ms(delay_ms, retry_after);
-                            warn!(
+                            let retry_after = Self::parse_retry_after(response.headers());
+                            let text = self.read_error_body_bounded(response).await;
+                            let _ = attempt_usage.record_json(&text);
+                            // Provider rejects the native tool-call payload:
+                            // latch XML mode for the session and retry — the
+                            // alternative is a guaranteed dead run on models
+                            // without native-FC support (m3:free case).
+                            if Self::is_tool_schema_400(status, &text)
+                                && body.get("tool_choice").is_some()
+                                && body.get("tools").is_some()
+                            {
+                                self.latch_tool_mode(&self.base_url, &self.config.model);
+                                convert_body_to_xml(&mut body, &None, self.config.context_length)?;
+                                tool_mode_retry = true;
+                                continue;
+                            }
+                            if Self::is_retryable_status(status) && attempt < max_attempts {
+                                let sleep_ms = self.retry_sleep_ms(delay_ms, retry_after);
+                                warn!(
                                 "Streaming request retryable error {} (attempt {}/{}); retrying after {}ms{}",
                                 status, attempt, max_attempts, sleep_ms,
                                 if retry_after.is_some() { " (server Retry-After)" } else { " (jittered)" }
                             );
-                            self.retry_pause(Duration::from_millis(sleep_ms)).await?;
-                            delay_ms = (delay_ms * 2).min(self.retry_config.max_delay_ms);
-                            continue;
+                                self.retry_pause(Duration::from_millis(sleep_ms)).await?;
+                                delay_ms = (delay_ms * 2).min(self.retry_config.max_delay_ms);
+                                continue;
+                            }
+                            return Err(Self::http_status_error(
+                                &self.base_url,
+                                status,
+                                text,
+                                self.config.api_key.as_ref(),
+                            ));
                         }
-                        return Err(Self::http_status_error(
-                            &self.base_url,
-                            status,
-                            text,
-                            self.config.api_key.as_ref(),
-                        ));
-                    }
-                    Err(e) => {
-                        if attempt < max_attempts {
-                            let sleep_ms = self.retry_sleep_ms(delay_ms, None);
-                            warn!(
+                        Err(e) => {
+                            if attempt < max_attempts {
+                                let sleep_ms = self.retry_sleep_ms(delay_ms, None);
+                                warn!(
                                 "Streaming request network error: {} (attempt {}/{}); retrying after {}ms (jittered)",
                                 e, attempt, max_attempts, sleep_ms
                             );
-                            self.retry_pause(Duration::from_millis(sleep_ms)).await?;
-                            delay_ms = (delay_ms * 2).min(self.retry_config.max_delay_ms);
-                            continue;
+                                self.retry_pause(Duration::from_millis(sleep_ms)).await?;
+                                delay_ms = (delay_ms * 2).min(self.retry_config.max_delay_ms);
+                                continue;
+                            }
+                            return Err(ApiError::Network(format!(
+                                "Failed to send streaming request after {} attempts: {}",
+                                attempt, e
+                            ))
+                            .into());
                         }
-                        return Err(ApiError::Network(format!(
-                            "Failed to send streaming request after {} attempts: {}",
-                            attempt, e
-                        ))
-                        .into());
                     }
-                },
+                }
             }
         }
 

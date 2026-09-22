@@ -284,11 +284,12 @@ impl McpServer {
     /// Create a new MCP server with a custom project root.
     pub fn with_project_root(project_root: PathBuf) -> Self {
         let project_root_env = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let safety_config = load_mcp_safety_config(None);
         Self {
             registry: Arc::new(RwLock::new(ToolRegistry::new())),
-            project_root,
+            project_root: project_root.clone(),
             initialized: Arc::new(AtomicBool::new(false)),
-            safety: SafetyChecker::new(&load_mcp_safety_config(None)),
+            safety: SafetyChecker::with_working_dir(&safety_config, project_root),
             config_path: None,
             _project_root_env: project_root_env,
         }
@@ -301,11 +302,12 @@ impl McpServer {
     /// of the application.
     pub fn with_config(config_path: Option<String>) -> Self {
         let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let safety_config = load_mcp_safety_config(config_path.as_deref());
         Self {
             registry: Arc::new(RwLock::new(ToolRegistry::new())),
-            project_root,
+            project_root: project_root.clone(),
             initialized: Arc::new(AtomicBool::new(false)),
-            safety: SafetyChecker::new(&load_mcp_safety_config(config_path.as_deref())),
+            safety: SafetyChecker::with_working_dir(&safety_config, project_root),
             config_path,
             _project_root_env: PathBuf::from("."),
         }
@@ -316,13 +318,30 @@ impl McpServer {
     /// the developer's `~/.config/selfware/config.toml`, so tests behave the
     /// same on every machine regardless of local `denied_paths`.
     pub fn with_explicit_safety_config(safety: crate::config::SafetyConfig) -> Self {
+        let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         Self {
             registry: Arc::new(RwLock::new(ToolRegistry::new())),
-            project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            project_root: project_root.clone(),
             initialized: Arc::new(AtomicBool::new(false)),
-            safety: SafetyChecker::new(&safety),
+            safety: SafetyChecker::with_working_dir(&safety, project_root),
             config_path: None,
             _project_root_env: PathBuf::from("."),
+        }
+    }
+
+    /// Create a server with a custom project root and explicit safety config.
+    pub fn with_project_root_and_safety_config(
+        project_root: PathBuf,
+        safety: crate::config::SafetyConfig,
+    ) -> Self {
+        let project_root_env = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Self {
+            registry: Arc::new(RwLock::new(ToolRegistry::new())),
+            project_root: project_root.clone(),
+            initialized: Arc::new(AtomicBool::new(false)),
+            safety: SafetyChecker::with_working_dir(&safety, project_root),
+            config_path: None,
+            _project_root_env: project_root_env,
         }
     }
 
@@ -840,13 +859,28 @@ impl McpServer {
             .max_depth(8)
             .into_iter()
             .filter_entry(|e| {
+                if e.depth() == 0 {
+                    return true;
+                }
                 let name = e.file_name().to_string_lossy();
                 // Skip hidden dirs, target, node_modules, etc.
-                !name.starts_with('.')
-                    && name != "target"
-                    && name != "node_modules"
-                    && name != "__pycache__"
-                    && name != ".git"
+                if name.starts_with('.')
+                    || name == "target"
+                    || name == "node_modules"
+                    || name == "__pycache__"
+                    || name == ".git"
+                {
+                    return false;
+                }
+                if let Ok(relative) = e.path().strip_prefix(&self.project_root) {
+                    let rel_str = relative.to_string_lossy();
+                    if self.safety.is_path_denied(relative)
+                        || self.safety.check_path(&rel_str).is_err()
+                    {
+                        return false;
+                    }
+                }
+                true
             });
 
         for entry in walker {
@@ -856,7 +890,12 @@ impl McpServer {
             if let Ok(entry) = entry {
                 if entry.file_type().is_file() {
                     if let Ok(relative) = entry.path().strip_prefix(&self.project_root) {
-                        files.push(relative.to_string_lossy().to_string());
+                        let rel_str = relative.to_string_lossy();
+                        if !self.safety.is_path_denied(relative)
+                            && self.safety.check_path(&rel_str).is_ok()
+                        {
+                            files.push(rel_str.to_string());
+                        }
                     }
                 }
             }
@@ -892,6 +931,15 @@ impl McpServer {
                     continue;
                 }
 
+                if let Ok(relative) = entry.path().strip_prefix(&self.project_root) {
+                    let rel_str = relative.to_string_lossy();
+                    if self.safety.is_path_denied(relative)
+                        || self.safety.check_path(&rel_str).is_err()
+                    {
+                        continue;
+                    }
+                }
+
                 if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                     result.push_str(&self.build_directory_tree(
                         &entry.path(),
@@ -913,7 +961,22 @@ impl McpServer {
         uri: &str,
         relative_path: &str,
     ) -> (Option<Value>, Option<JsonRpcError>) {
-        let full_path = self.project_root.join(relative_path);
+        let relative_clean = relative_path.trim().trim_start_matches("./");
+        if relative_clean.is_empty()
+            || self.safety.is_path_denied(Path::new(relative_clean))
+            || self.safety.check_path(relative_clean).is_err()
+        {
+            return (
+                None,
+                Some(JsonRpcError {
+                    code: INVALID_PARAMS,
+                    message: format!("Access denied: path '{}' is not permitted", relative_path),
+                    data: None,
+                }),
+            );
+        }
+
+        let full_path = self.project_root.join(relative_clean);
 
         // Safety: ensure the resolved path is within the project root, and
         // READ VIA the canonical path (reading the unresolved path after a
@@ -931,6 +994,23 @@ impl McpServer {
                 );
             }
         };
+
+        if self.safety.is_path_denied(&canonical)
+            || self
+                .safety
+                .check_path(&canonical.to_string_lossy())
+                .is_err()
+        {
+            return (
+                None,
+                Some(JsonRpcError {
+                    code: INVALID_PARAMS,
+                    message: format!("Access denied: path '{}' is not permitted", relative_path),
+                    data: None,
+                }),
+            );
+        }
+
         let root_canonical = match self.project_root.canonicalize() {
             Ok(root) => root,
             // No root canonicalization → no containment guarantee: deny, don't

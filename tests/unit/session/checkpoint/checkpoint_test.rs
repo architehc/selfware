@@ -2349,3 +2349,84 @@ fn checkpoint_manager_delta_log_carries_adaptive_budget_fields() {
     assert_eq!(loaded.extensions_granted, 1);
     assert_eq!(loaded.cumulative_iterations, 7);
 }
+
+#[test]
+fn test_in_place_message_change_forces_full_save() {
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+    let mut cp = TaskCheckpoint::new("inplace-test".to_string(), "desc".to_string());
+    let mut msgs = big_message_set(10);
+    cp.set_messages(msgs.clone());
+    manager.save(&cp).unwrap();
+
+    let base = manager.load("inplace-test").unwrap();
+
+    // Modify an existing message in-place AND append new messages
+    msgs[2] = Message::user("modified content in place");
+    msgs.extend(big_message_set(5));
+    cp.set_messages(msgs);
+    cp.version += 1;
+
+    // compute_delta must return None because prefix changed
+    assert!(
+        cp.compute_delta(&base).is_none(),
+        "in-place message modification must prevent delta generation and force full save"
+    );
+
+    // Save should perform full save without losing the in-place change
+    manager.save(&cp).unwrap();
+
+    let loaded = manager.load("inplace-test").unwrap();
+    assert_eq!(loaded.messages.len(), 15);
+    assert_eq!(
+        loaded.messages[2],
+        Message::user("modified content in place")
+    );
+}
+
+#[test]
+fn test_crashed_compaction_recovers_and_cleans_obsolete_deltas() {
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+    let mut cp = TaskCheckpoint::new("crash-compact".to_string(), "desc".to_string());
+    cp.set_messages(big_message_set(30));
+    manager.save(&cp).unwrap();
+
+    // Multiple incremental saves that write deltas to .delta.jsonl
+    for i in 1..=4 {
+        cp.set_step(i);
+        manager.save(&cp).unwrap();
+    }
+
+    let delta_path = manager.checkpoint_delta_path("crash-compact").unwrap();
+    assert!(
+        delta_path.exists(),
+        "delta log exists from incremental saves"
+    );
+
+    // Verify normal delta loading works
+    let loaded = manager.load("crash-compact").unwrap();
+    assert_eq!(loaded.current_step, 4);
+
+    // Now simulate a crash during compaction:
+    // Compaction wrote the full base checkpoint at the latest state (e.g. step 10),
+    // but the process crashed before clear_delta_log could delete the old delta log.
+    cp.set_step(10);
+    manager.save_full_checkpoint(&cp).unwrap();
+
+    assert!(
+        delta_path.exists(),
+        "delta log still present after crash before clear_delta_log"
+    );
+
+    // Loading must skip obsolete deltas without error and clean the obsolete delta log
+    let loaded = manager.load("crash-compact").unwrap();
+    assert_eq!(loaded.version, cp.version);
+    assert_eq!(loaded.current_step, 10);
+    assert!(
+        !delta_path.exists(),
+        "obsolete delta log should be cleaned after successful recovery"
+    );
+}

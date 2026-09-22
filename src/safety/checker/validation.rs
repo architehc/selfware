@@ -3651,7 +3651,7 @@ impl SafetyChecker {
     }
 
     /// Check file path
-    fn check_path(&self, path: &str) -> Result<()> {
+    pub fn check_path(&self, path: &str) -> Result<()> {
         use crate::safety::path_validator::PathValidator;
         let validator = PathValidator::new(&self.config, self.working_dir.clone());
         validator.validate(path).map_err(|e| match e {
@@ -3660,6 +3660,18 @@ impl SafetyChecker {
             }
             other => other,
         })
+    }
+
+    /// Check whether a path targets a configured denied path rule or fails safety validation.
+    pub fn is_path_denied(&self, path: &std::path::Path) -> bool {
+        let path_str = path.to_string_lossy();
+        if self.matches_configured_path_rule(&path_str) {
+            return true;
+        }
+        if self.check_path(&path_str).is_err() {
+            return true;
+        }
+        false
     }
 
     /// Check whether a raw argument token targets a configured denied path rule,

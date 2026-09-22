@@ -4279,10 +4279,99 @@ fn tool_result_value_indicates_success_normal_results_unchanged() {
     assert!(!tool_result_value_indicates_success(&serde_json::json!({
         "exit_code": 1
     })));
+    assert!(!tool_result_value_indicates_success(&serde_json::json!({
+        "timed_out": true
+    })));
+    assert!(tool_result_value_indicates_success(&serde_json::json!({
+        "timed_out": false
+    })));
     // An error key nested inside a result field is NOT a top-level failure.
     assert!(tool_result_value_indicates_success(&serde_json::json!({
         "results": [{"error": "ignored"}]
     })));
+}
+
+#[test]
+fn test_extract_subprocess_exit_code_truthful_accounting() {
+    // Nonzero exit code is preserved honestly
+    assert_eq!(
+        extract_subprocess_exit_code(&serde_json::json!({
+            "exit_code": 1,
+            "timed_out": false,
+            "command": "cargo test"
+        })),
+        1
+    );
+    assert_eq!(
+        extract_subprocess_exit_code(&serde_json::json!({
+            "exit_code": 101,
+            "timed_out": false
+        })),
+        101
+    );
+
+    // Timed out commands report failure (-1)
+    assert_eq!(
+        extract_subprocess_exit_code(&serde_json::json!({
+            "exit_code": -1,
+            "timed_out": true
+        })),
+        -1
+    );
+    // Timed out takes precedence even if exit_code is 0
+    assert_eq!(
+        extract_subprocess_exit_code(&serde_json::json!({
+            "exit_code": 0,
+            "timed_out": true
+        })),
+        -1
+    );
+
+    // Explicit success = false with exit_code = 0 reports failure (-1)
+    assert_eq!(
+        extract_subprocess_exit_code(&serde_json::json!({
+            "exit_code": 0,
+            "success": false
+        })),
+        -1
+    );
+
+    // Clean exit reports 0
+    assert_eq!(
+        extract_subprocess_exit_code(&serde_json::json!({
+            "exit_code": 0,
+            "success": true,
+            "timed_out": false
+        })),
+        0
+    );
+
+    // Tool indicates failure via error key reports -1
+    assert_eq!(
+        extract_subprocess_exit_code(&serde_json::json!({
+            "error": "syntax error"
+        })),
+        -1
+    );
+}
+
+#[test]
+fn test_is_subprocess_tool_coverage() {
+    assert!(is_subprocess_tool("shell_exec"));
+    assert!(is_subprocess_tool("pty_shell"));
+    assert!(is_subprocess_tool("cargo_test"));
+    assert!(is_subprocess_tool("cargo_build"));
+    assert!(is_subprocess_tool("cargo_check"));
+    assert!(is_subprocess_tool("cargo_clippy"));
+    assert!(is_subprocess_tool("cargo_fmt"));
+    assert!(is_subprocess_tool("npm_install"));
+    assert!(is_subprocess_tool("npm_run"));
+    assert!(is_subprocess_tool("pip_install"));
+    assert!(is_subprocess_tool("yarn_install"));
+
+    assert!(!is_subprocess_tool("file_read"));
+    assert!(!is_subprocess_tool("file_write"));
+    assert!(!is_subprocess_tool("tool_search"));
 }
 
 #[tokio::test]
@@ -5375,6 +5464,40 @@ fn runner_output_failure_markers_are_unambiguous() {
     ));
     assert!(!runner_output_proves_failure("0 failed"));
     assert!(!runner_output_proves_failure("ok"));
+}
+
+#[test]
+fn shell_command_pipes_runner_output_detects_piped_runner() {
+    assert!(shell_command_pipes_runner_output(
+        "cargo test 2>&1 | grep 'test result: ok'"
+    ));
+    assert!(shell_command_pipes_runner_output(
+        "cargo test | grep '0 failed'"
+    ));
+    assert!(shell_command_pipes_runner_output(
+        "cargo test 2>&1 | grep ok"
+    ));
+    assert!(shell_command_pipes_runner_output(
+        "cargo test 2>&1 | grep pass"
+    ));
+    assert!(shell_command_pipes_runner_output(
+        "cargo test 2>&1 | grep -v FAILED"
+    ));
+    assert!(shell_command_pipes_runner_output(
+        "cargo test | cut -d: -f2"
+    ));
+    assert!(shell_command_pipes_runner_output("cargo test | sort"));
+    assert!(shell_command_pipes_runner_output("pytest | head -n 5"));
+    assert!(shell_command_pipes_runner_output("cargo test | tail -20"));
+    assert!(!shell_command_pipes_runner_output(
+        "cargo test 2>&1 | grep 'test result'"
+    ));
+    assert!(!shell_command_pipes_runner_output(
+        "cargo test | tee test.log"
+    ));
+    assert!(!shell_command_pipes_runner_output("cargo test --lib"));
+    assert!(!shell_command_pipes_runner_output("pytest -v"));
+    assert!(!shell_command_pipes_runner_output("cargo test; echo done"));
 }
 
 // =========================================================================

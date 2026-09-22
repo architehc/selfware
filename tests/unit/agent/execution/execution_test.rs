@@ -3840,7 +3840,7 @@ async fn empty_streak_resets_after_tool_progress() {
     // counted as TWO consecutive empties and tripped the breaker despite the
     // intervening progress. A meaningful response (here: an executed tool
     // call) must end the streak.
-    let temp = tempfile::NamedTempFile::new_in(std::env::current_dir().unwrap()).unwrap();
+    let temp = tempfile::NamedTempFile::new_in(env!("CARGO_MANIFEST_DIR")).unwrap();
     std::fs::write(temp.path(), "hello world\n").unwrap();
     let path = temp.path().display().to_string();
 

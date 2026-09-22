@@ -99,17 +99,33 @@ impl Agent {
             debug!("{name} could not be executed; no check ran, so nothing is recorded");
             return;
         }
-        // Relative to the TASK, not to wherever the process currently is.
-        let working_dir = self.verification_task_root();
         let command = serde_json::from_str::<serde_json::Value>(args_str)
             .ok()
             .and_then(|v| {
-                v.get("command")
-                    .and_then(|c| c.as_str())
-                    .map(str::to_string)
+                if let Some(cmd) = v.get("command").and_then(|c| c.as_str()) {
+                    Some(cmd.to_string())
+                } else if name == "cargo_test" {
+                    let mut parts = vec!["cargo", "test"];
+                    if let Some(pkg) = v.get("package").and_then(|p| p.as_str()) {
+                        parts.push(pkg);
+                    }
+                    if let Some(test) = v.get("test_name").and_then(|t| t.as_str()) {
+                        parts.push(test);
+                    }
+                    Some(parts.join(" "))
+                } else if name == "cargo_check" {
+                    Some("cargo check".to_string())
+                } else if name == "cargo_clippy" {
+                    Some("cargo clippy".to_string())
+                } else {
+                    None
+                }
             })
             .unwrap_or_default();
+        let working_dir = self.resolve_verification_working_dir(args_str, &command);
         let scope = super::verification_scope::scope_for_command(name, &command, &working_dir);
+        let is_in_scope = scope.relevance_to(&self.verification_task_root())
+            == super::verification_scope::Relevance::InScope;
         let record = super::verification_scope::VerificationRecord {
             check_id: super::verification_scope::check_id_for(name, &command),
             command: name.to_string(),
@@ -128,11 +144,52 @@ impl Agent {
             // streak — probes interleaved with green checks are iteration,
             // not a stall.
             self.probe_command_counts.clear();
-            if self.mutation_sequence > 0 {
+            if is_in_scope && self.mutation_sequence > 0 {
                 self.last_successful_verification_mutation_sequence = self.mutation_sequence;
             }
         }
         self.note_verification_record(record);
+    }
+
+    fn resolve_verification_working_dir(
+        &self,
+        args_str: &str,
+        command: &str,
+    ) -> std::path::PathBuf {
+        let task_root = self.verification_task_root();
+        let mut dir = if let Ok(val) = serde_json::from_str::<serde_json::Value>(args_str) {
+            if let Some(cwd_str) = val.get("cwd").and_then(|c| c.as_str()) {
+                let p = std::path::Path::new(cwd_str);
+                if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    task_root.join(p)
+                }
+            } else {
+                task_root
+            }
+        } else {
+            task_root
+        };
+
+        let trimmed = command.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("cd ") {
+            let end = rest
+                .find("&&")
+                .or_else(|| rest.find(';'))
+                .unwrap_or(rest.len());
+            let cd_arg = rest[..end].trim().trim_matches(|c| c == '"' || c == '\'');
+            if !cd_arg.is_empty() {
+                let p = std::path::Path::new(cd_arg);
+                if p.is_absolute() {
+                    dir = p.to_path_buf();
+                } else {
+                    dir = dir.join(p);
+                }
+            }
+        }
+
+        dir
     }
 
     /// Credit path for verification runs whose exit status was masked by a
@@ -163,7 +220,9 @@ impl Agent {
         if command.is_empty() || !shell_command_is_masked_verification(&command) {
             return;
         }
-        let (passed, evidence) = if runner_output_proves_success(result_str) {
+        let (passed, evidence) = if !shell_command_pipes_runner_output(&command)
+            && runner_output_proves_success(result_str)
+        {
             (true, "passed")
         } else if runner_output_proves_failure(result_str) {
             (false, "failed")
@@ -171,11 +230,14 @@ impl Agent {
             debug!("masked verification run with ambiguous output earns no credit: {command}");
             return;
         };
-        let working_dir = self.verification_task_root();
+        let working_dir = self.resolve_verification_working_dir(args_str, &command);
+        let scope = super::verification_scope::scope_for_command(name, &command, &working_dir);
+        let is_in_scope = scope.relevance_to(&self.verification_task_root())
+            == super::verification_scope::Relevance::InScope;
         let record = super::verification_scope::VerificationRecord {
             check_id: super::verification_scope::check_id_for(name, &command),
             command: name.to_string(),
-            scope: super::verification_scope::scope_for_command(name, &command, &working_dir),
+            scope,
             passed,
             mutation_sequence: self.mutation_sequence,
             summary: format!(
@@ -186,7 +248,7 @@ impl Agent {
         };
         if passed {
             self.probe_command_counts.clear();
-            if self.mutation_sequence > 0 {
+            if is_in_scope && self.mutation_sequence > 0 {
                 self.last_successful_verification_mutation_sequence = self.mutation_sequence;
             }
         }
@@ -3282,11 +3344,10 @@ impl Agent {
 
         let timeout_secs = self.config.agent.step_timeout_secs.max(1);
 
-        // For tools that spawn an OS subprocess (shell_exec, pty_shell), emit
-        // structured progress events around the spawn so live observers
-        // (StderrProgressEmitter, future Prometheus exporter) can track
-        // subprocess lifecycles independently of the in-process tool wrapper.
-        let spawns_subprocess = is_bash;
+        // For tools that spawn an OS subprocess, emit structured progress events
+        // around the spawn so live observers (StderrProgressEmitter, trace recording)
+        // can track subprocess lifecycles accurately with honest exit codes.
+        let spawns_subprocess = is_subprocess_tool(name);
         let subprocess_start = std::time::Instant::now();
         if spawns_subprocess {
             self.emit_progress(super::progress::ProgressEvent::SubprocessStarted {
@@ -3304,11 +3365,8 @@ impl Agent {
         .await;
 
         if spawns_subprocess {
-            // Best-effort exit code: tool wrappers (e.g. shell_exec) surface it
-            // in the JSON result; the agent layer can't read it back here, so we
-            // report success/failure as 0/-1 and the elapsed wall time.
             let exit = match &execution {
-                Ok(Ok(_)) => 0,
+                Ok(Ok(result)) => extract_subprocess_exit_code(result),
                 Ok(Err(_)) => -1,
                 Err(_) => -2, // tokio timeout
             };
@@ -3786,6 +3844,51 @@ impl Agent {
                 duration_ms: Some(duration_ms),
             });
         }
+    }
+}
+
+/// Returns true if the named tool spawns an external operating system subprocess.
+pub(crate) fn is_subprocess_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "shell_exec"
+            | "pty_shell"
+            | "cargo_test"
+            | "cargo_build"
+            | "cargo_check"
+            | "cargo_clippy"
+            | "cargo_fmt"
+            | "npm_install"
+            | "npm_run"
+            | "pip_install"
+            | "pip_list"
+            | "pip_freeze"
+            | "yarn_install"
+    )
+}
+
+/// Extract an accurate subprocess exit code from a tool's JSON result payload.
+///
+/// Returns 0 only if the tool completed successfully without timeouts or non-zero exit codes.
+/// Returns the actual non-zero exit code if present, or -1 if the payload indicates failure.
+pub(crate) fn extract_subprocess_exit_code(result: &Value) -> i32 {
+    // 1. Explicit timed_out flag indicates failure
+    if result.get("timed_out").and_then(|v| v.as_bool()) == Some(true) {
+        return -1;
+    }
+    // 2. Explicit exit code in JSON payload
+    if let Some(code) = result.get("exit_code").and_then(|v| v.as_i64()) {
+        let code = code as i32;
+        if code == 0 && !tool_result_value_indicates_success(result) {
+            return -1;
+        }
+        return code;
+    }
+    // 3. Fall back to tool success flag
+    if tool_result_value_indicates_success(result) {
+        0
+    } else {
+        -1
     }
 }
 
