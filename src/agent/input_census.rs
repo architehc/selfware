@@ -8,6 +8,12 @@
 //! Unanimous across the GLM-5.3 / Claude Fable 5 / Qwen 3.8 consult: enumerate
 //! the environment deterministically and force every field to be accounted
 //! for. No model call involved — pure extraction.
+//!
+//! Since 2026-09-22 the census is OPT-IN: only data-processing/inventory task
+//! shapes get it (see [`task_requests_data_inventory`]), package-manifest
+//! metadata (name/version/edition-class fields) is never enumerated, and the
+//! injected directive names selfware as its source. Firing on every small task
+//! taxed ordinary code/review runs with manifest-accounting prose.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -43,11 +49,36 @@ const SUSPICIOUS_VALUE_MAX_CHARS: usize = 200;
 /// for" irrelevant config fields.
 pub(crate) const CENSUS_SELF_CONTAINED_TASK_TOKENS: usize = 50_000;
 
-/// True when the environment census should be enumerated and injected for
-/// this task (small, environment-driven tasks), false for self-contained
-/// document payloads.
+/// Size gate for the census: false for self-contained document payloads. The
+/// census additionally requires the task-shape opt-in
+/// ([`task_requests_data_inventory`]); both gates must pass at the call site.
 pub(crate) fn census_applies(task: &str) -> bool {
     crate::token_count::estimate_content_tokens(task) <= CENSUS_SELF_CONTAINED_TASK_TOKENS
+}
+
+/// Opt-in task-shape gate for the input census (2026-09-22 long-task e2e):
+/// the census exists for data-processing/inventory tasks — the task text asks
+/// to process, account for, or enumerate files or their fields. It used to
+/// fire on EVERY small task (token-length gating only), so any project with a
+/// Cargo.toml paid a page of manifest-accounting prose on every run. The
+/// predicate is word-boundary verb+noun co-occurrence, deliberately simple: a
+/// false negative only skips a bounded context note.
+pub(crate) fn task_requests_data_inventory(task: &str) -> bool {
+    static VERB_RE: OnceLock<regex::Regex> = OnceLock::new();
+    static NOUN_RE: OnceLock<regex::Regex> = OnceLock::new();
+    let verbs = VERB_RE.get_or_init(|| {
+        regex::Regex::new(
+            r"(?i)\b(account for|enumerate[sd]?|inventor(?:y|ies|ied)|catalog(?:ue)?[sd]?|audit(?:s|ed|ing)?|tall(?:y|ies|ied)|survey(?:s|ed|ing)?|process(?:es|ed|ing)?|extract(?:s|ed|ing)?|aggregate[sd]?|ingest(?:s|ed|ing)?|pars(?:e|es|ed|ing)|summari[sz]e[sd]?)\b",
+        )
+        .expect("inventory verb regex")
+    });
+    let nouns = NOUN_RE.get_or_init(|| {
+        regex::Regex::new(
+            r"(?i)\b(fields?|files?|records?|rows?|columns?|entry|entries|datasets?|documents?|payloads?|tables?|logs?|json|csv|yaml|yml|toml|xml)\b",
+        )
+        .expect("inventory noun regex")
+    });
+    verbs.is_match(task) && nouns.is_match(task)
 }
 
 /// The environment's data contract, extracted deterministically.
@@ -95,6 +126,9 @@ pub(crate) fn census_task_inputs(root: &Path) -> InputCensus {
             .unwrap_or(path)
             .to_string_lossy()
             .to_string();
+        // Package-manifest metadata (name/version/edition-class fields) is
+        // project scaffolding, not a task input — pruned before extraction.
+        let manifest_name = package_manifest_name(path);
 
         // Suspicious file basenames (private-normalize.ts -> private-normalize).
         if let Some(stem) = path.file_stem().map(|s| s.to_string_lossy().to_string()) {
@@ -118,7 +152,10 @@ pub(crate) fn census_task_inputs(root: &Path) -> InputCensus {
 
         match ext.as_str() {
             "json" => {
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if let Some(manifest) = manifest_name {
+                        prune_manifest_metadata(manifest, &mut value);
+                    }
                     extract_value_keys(
                         &rel,
                         &value,
@@ -142,7 +179,10 @@ pub(crate) fn census_task_inputs(root: &Path) -> InputCensus {
             }
             "toml" => {
                 if let Ok(value) = toml::from_str::<toml::Value>(&text) {
-                    let value = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
+                    let mut value = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
+                    if let Some(manifest) = manifest_name {
+                        prune_manifest_metadata(manifest, &mut value);
+                    }
                     extract_value_keys(
                         &rel,
                         &value,
@@ -167,6 +207,92 @@ pub(crate) fn census_task_inputs(root: &Path) -> InputCensus {
     }
 
     census
+}
+
+/// The manifest basename when `path` is a package manifest whose
+/// name/version/edition-class metadata is project scaffolding, never a task
+/// input (2026-09-22 long-task e2e: a run on any project with a Cargo.toml
+/// paid a page of WONTFIX prose accounting for the manifest's
+/// name/version/edition fields).
+fn package_manifest_name(path: &Path) -> Option<&'static str> {
+    match path.file_name()?.to_str()? {
+        "Cargo.toml" => Some("Cargo.toml"),
+        "pyproject.toml" => Some("pyproject.toml"),
+        "package.json" => Some("package.json"),
+        _ => None,
+    }
+}
+
+/// Keys that name, version, license, and publish the PROJECT itself. Inside a
+/// package manifest they are scaffolding metadata, not task inputs, so the
+/// census drops them before extraction (which also keeps package.json's
+/// `"private": true` off the suspicious-identifier list the leak check hunts).
+const MANIFEST_METADATA_KEYS: &[&str] = &[
+    "name",
+    "version",
+    "edition",
+    "rust-version",
+    "requires-python",
+    "description",
+    "authors",
+    "author",
+    "maintainers",
+    "license",
+    "license-file",
+    "homepage",
+    "repository",
+    "documentation",
+    "readme",
+    "keywords",
+    "categories",
+    "classifiers",
+    "publish",
+    "private",
+    "urls",
+    "badges",
+    "exclude",
+    "include",
+];
+
+/// Strip [`MANIFEST_METADATA_KEYS`] from the metadata tables of a parsed
+/// package manifest: Cargo.toml `[package]` / `[workspace.package]`,
+/// pyproject.toml `[project]` / `[tool.poetry]`, package.json top level.
+/// Dependency/feature/script tables are task-relevant environment and stay.
+fn prune_manifest_metadata(manifest: &str, value: &mut serde_json::Value) {
+    fn strip_metadata_keys(table: &mut serde_json::Value) {
+        if let Some(map) = table.as_object_mut() {
+            map.retain(|key, _| !MANIFEST_METADATA_KEYS.contains(&key.as_str()));
+        }
+    }
+    if manifest == "package.json" {
+        strip_metadata_keys(value);
+        return;
+    }
+    for section in ["package", "project"] {
+        if let Some(table) = value.get_mut(section) {
+            strip_metadata_keys(table);
+            // A table reduced to pure metadata would still leave a bare
+            // `Cargo.toml: package` entry reading as a field to account for —
+            // drop the emptied table entirely.
+            if table.as_object().is_some_and(|m| m.is_empty()) {
+                if let Some(map) = value.as_object_mut() {
+                    map.remove(section);
+                }
+            }
+        }
+    }
+    if let Some(table) = value
+        .get_mut("workspace")
+        .and_then(|ws| ws.get_mut("package"))
+    {
+        strip_metadata_keys(table);
+    }
+    if let Some(table) = value
+        .get_mut("tool")
+        .and_then(|tool| tool.get_mut("poetry"))
+    {
+        strip_metadata_keys(table);
+    }
 }
 
 fn push_unique(list: &mut Vec<String>, item: String) {
@@ -403,14 +529,17 @@ pub(crate) fn collect_gate_outputs(root: &Path, diff_paths: Option<Vec<String>>)
 }
 
 impl InputCensus {
-    /// Render the census as a compact context note.
+    /// Render the census as a compact context note. The header names selfware
+    /// explicitly: an unattributed census note was credited to "AGENTS.md
+    /// rule 3" by the model it was shown to (2026-09-22 long-task e2e).
     pub(crate) fn render(&self) -> Option<String> {
         if self.key_paths.is_empty() && self.suspicious_identifiers.is_empty() {
             return None;
         }
         let mut out = String::from(
-            "INPUT CENSUS (harness-extracted, deterministic — the hidden verifier grades the \
-             environment's full data contract, not just the instruction text):\n",
+            "SELFWARE INPUT CENSUS (extracted deterministically by the selfware harness — the \
+             hidden verifier grades the environment's full data contract, not just the \
+             instruction text):\n",
         );
         for entry in &self.key_paths {
             out.push_str("- ");
@@ -428,6 +557,23 @@ impl InputCensus {
         }
         Some(out)
     }
+}
+
+/// Compose the census directive injected at task start. It must identify
+/// itself as selfware's input census — an unattributed census note was
+/// credited to "AGENTS.md rule 3" by the model, and its "account for every
+/// field" section was copied into a code-review deliverable (2026-09-22
+/// long-task e2e). The accounting stays in the agent's working notes; the
+/// final deliverable never gains a census section.
+pub(crate) fn census_directive(note: &str) -> String {
+    format!(
+        "<selfware_system_directive>\n{note}\n\
+         This is selfware's input census, injected by the selfware harness. Account for every \
+         field above in your working notes: consume it or consciously waive it — fields the \
+         instruction never mentions still count. Keep that accounting out of the final \
+         deliverable; do not add a census section to your answer.\n\
+         </selfware_system_directive>"
+    )
 }
 
 #[cfg(test)]

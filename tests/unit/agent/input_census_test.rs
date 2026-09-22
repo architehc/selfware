@@ -383,3 +383,137 @@ fn census_skips_hidden_dot_directories() {
         "normal dirs must be included: {joined}"
     );
 }
+
+// --- 2026-09-22 long-task e2e: the census taxed every run ---
+// Token-length-only gating fired the census on any project with a Cargo.toml:
+// every run paid an audit-ledger rejection plus a page of WONTFIX prose over
+// the manifest's name/version/edition fields, and a code-review deliverable
+// gained a census "account for every field" section the model attributed to
+// "AGENTS.md rule 3". The census is now opt-in for data-processing/inventory
+// task shapes, never enumerates manifest metadata, and names selfware.
+
+#[test]
+fn census_gate_stays_off_for_code_review_explain_task_shapes() {
+    for task in [
+        "fix the parser bug in src/main.rs",
+        "Review src/auth/login.rs for security issues",
+        "Explain how the router handles requests",
+        "Refactor the config loader to use serde",
+        "Add unit tests for the tokenizer",
+        "Update the README with the new install steps",
+    ] {
+        assert!(
+            !task_requests_data_inventory(task),
+            "census must stay off for this task shape: {task}"
+        );
+    }
+}
+
+#[test]
+fn census_gate_fires_on_data_processing_task_shapes() {
+    for task in [
+        "Process all JSON files in data/ and account for every field",
+        "Enumerate the fields in each CSV file under /data and write a summary",
+        "Inventory the files in the dataset and tally record counts",
+        "Account for every field in the input data",
+        "Audit the log files and catalogue every error record",
+    ] {
+        assert!(
+            task_requests_data_inventory(task),
+            "census must fire for this task shape: {task}"
+        );
+    }
+}
+
+#[test]
+fn census_never_enumerates_manifest_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        &dir,
+        "Cargo.toml",
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nserde = \"1\"\n",
+    );
+    write(
+        &dir,
+        "pyproject.toml",
+        "[project]\nname = \"demo\"\nversion = \"0.1.0\"\nrequires-python = \">=3.11\"\ndependencies = [\"httpx\"]\n",
+    );
+    write(
+        &dir,
+        "package.json",
+        r#"{"name": "demo", "version": "1.0.0", "private": true, "scripts": {"build": "tsc"}}"#,
+    );
+    write(&dir, "data/aircraft.json", r#"{"turnaround_time_min": 25}"#);
+    let census = census_task_inputs(dir.path());
+    let lines: Vec<&str> = census.key_paths.iter().map(String::as_str).collect();
+    // name/version/edition-class fields are project scaffolding — the census
+    // must not list them as fields to account for.
+    for scaffolding in [
+        "Cargo.toml: package.name",
+        "Cargo.toml: package.version",
+        "Cargo.toml: package.edition",
+        "Cargo.toml: package",
+        "pyproject.toml: project.name",
+        "pyproject.toml: project.version",
+        "pyproject.toml: project.requires-python",
+        "package.json: name",
+        "package.json: version",
+        "package.json: private",
+    ] {
+        assert!(
+            !lines.contains(&scaffolding),
+            "manifest metadata must not be a census entry: {scaffolding} in {lines:?}"
+        );
+    }
+    // Task data and non-metadata manifest content are still enumerated.
+    assert!(
+        lines.contains(&"data/aircraft.json: turnaround_time_min"),
+        "{lines:?}"
+    );
+    assert!(
+        lines.contains(&"Cargo.toml: dependencies.serde"),
+        "{lines:?}"
+    );
+    assert!(
+        lines.contains(&"pyproject.toml: project.dependencies"),
+        "{lines:?}"
+    );
+    assert!(lines.contains(&"package.json: scripts.build"), "{lines:?}");
+    // package.json "private": true is scaffolding too — it must not become a
+    // "sensitive identifier" the leak check then hunts in every output.
+    assert!(
+        !census.suspicious_identifiers.iter().any(|i| i == "private"),
+        "manifest scaffolding must not feed the suspicious list: {:?}",
+        census.suspicious_identifiers
+    );
+}
+
+#[test]
+fn census_directive_names_selfware_and_keeps_accounting_out_of_deliverables() {
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir, "data/aircraft.json", r#"{"turnaround_time_min": 25}"#);
+    let census = census_task_inputs(dir.path());
+    let note = census
+        .render()
+        .expect("a data file must produce a census note");
+    // Attribution: an unattributed census note was credited to "AGENTS.md
+    // rule 3" in a delivered code review — the header must name selfware.
+    assert!(
+        note.starts_with("SELFWARE INPUT CENSUS"),
+        "the census note must identify itself as selfware's: {note}"
+    );
+    let directive = census_directive(&note);
+    assert!(
+        directive.contains("selfware's input census"),
+        "the directive must name selfware's input census: {directive}"
+    );
+    assert!(
+        !directive.contains("AGENTS"),
+        "the directive must never point at AGENTS.md: {directive}"
+    );
+    // The accounting is working-notes-only — no census section in the answer.
+    assert!(
+        directive.contains("working notes") && directive.contains("deliverable"),
+        "accounting must stay in working notes, out of the deliverable: {directive}"
+    );
+}

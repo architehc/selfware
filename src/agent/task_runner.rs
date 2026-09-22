@@ -636,16 +636,18 @@ impl Agent {
         // deterministically at task start. The hidden verifier grades the full
         // contract — the instruction text is a subset (measured: the cargo and
         // bun TB 3.0 misses were fields the instruction never names).
-        // Self-contained document payloads skip it (see census_applies).
-        if super::input_census::census_applies(task) {
+        // OPT-IN (2026-09-22 long-task e2e): only data-processing/inventory
+        // task shapes get the census (see task_requests_data_inventory);
+        // ordinary code/review/explain tasks are no longer taxed with it.
+        // Self-contained document payloads skip it too (see census_applies).
+        let census_requested = super::input_census::task_requests_data_inventory(task);
+        if census_requested && super::input_census::census_applies(task) {
             let census = super::input_census::census_task_inputs(&super::current_project_root());
             self.input_census_suspicious = census.suspicious_identifiers.clone();
             self.input_census_note = census.render();
             if let Some(note) = &self.input_census_note {
-                let note_msg = Message::user(format!(
-                    "<selfware_system_directive>\n{note}\nAccount for every field above: consume it or consciously waive it. Fields the instruction never mentions still count.\n</selfware_system_directive>"
-                ));
-                self.messages.push(note_msg);
+                self.messages
+                    .push(Message::user(super::input_census::census_directive(note)));
             }
             self.emit_progress(super::progress::ProgressEvent::TurnDecision {
                 decision: "input_census".to_string(),
@@ -654,7 +656,11 @@ impl Agent {
         } else {
             self.emit_progress(super::progress::ProgressEvent::TurnDecision {
                 decision: "input_census".to_string(),
-                detail: "skipped: self-contained document payload".to_string(),
+                detail: if census_requested {
+                    "skipped: self-contained document payload".to_string()
+                } else {
+                    "skipped: not a data-inventory task".to_string()
+                },
             });
         }
 
