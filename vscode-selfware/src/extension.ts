@@ -81,7 +81,9 @@ function openCodeMap(context: vscode.ExtensionContext): void {
         'selfwareCodeMap',
         'Selfware Code Map',
         vscode.ViewColumn.One,
-        { enableScripts: true, retainContextWhenHidden: true }
+        // No local resources are loaded: the page is fully inline and its
+        // scripts are gated by a nonce CSP (see webview.ts).
+        { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [] }
     );
 
     updateWebview();

@@ -31,7 +31,8 @@
   },
   "scripts": {
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "test": "tsc -p ./ && node --test out/test/*.test.js"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",

@@ -178,58 +178,100 @@ impl Tool for ComputerScreenTool {
     }
 
     fn description(&self) -> &str {
-        "Capture the screen: full screen or a specific region. Returns base64 PNG."
+        "Capture the full screen or a region (with a Windows fallback under WSL). \
+         Saves the PNG to a per-session directory outside the workspace (or `output_path`) \
+         and returns {path, width, height, bytes}; set inline=true to also get base64_png \
+         (attached as an image for vision models; capped ~3.75 MB, use a region for more). \
+         Same arguments and output as `screen_capture`, which spells the mode `target` \
+         (screen|window|region) and can also capture a single window by title."
     }
 
     fn schema(&self) -> Value {
+        let mut props = serde_json::Map::new();
+        props.insert(
+            "action".to_string(),
+            json!({
+                "type": "string",
+                "enum": ["full", "region"],
+                "description": "Capture mode ('screen' is accepted as 'full'). For a single window use `screen_capture` with target=window."
+            }),
+        );
+        props.insert(
+            "x".to_string(),
+            json!({ "type": "integer", "description": "Region X (alternative to region.x)" }),
+        );
+        props.insert(
+            "y".to_string(),
+            json!({ "type": "integer", "description": "Region Y (alternative to region.y)" }),
+        );
+        props.insert(
+            "width".to_string(),
+            json!({ "type": "integer", "description": "Region width (alternative to region.width)" }),
+        );
+        props.insert(
+            "height".to_string(),
+            json!({ "type": "integer", "description": "Region height (alternative to region.height)" }),
+        );
+        props.extend(super::screen_capture::shared_output_schema_properties());
         json!({
             "type": "object",
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["full", "region"],
-                    "description": "Capture mode"
-                },
-                "x": { "type": "integer", "description": "Region X (for 'region')" },
-                "y": { "type": "integer", "description": "Region Y (for 'region')" },
-                "width": { "type": "integer", "description": "Region width (for 'region')" },
-                "height": { "type": "integer", "description": "Region height (for 'region')" }
-            },
+            "properties": props,
             "required": ["action"]
         })
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
+        use super::screen_capture::{
+            parse_region, run_blocking, screenshot_session_dir, shape_capture_output,
+            CaptureOutputOptions,
+        };
+
+        // Relative paths resolve against the agent's workspace root.
+        let args = crate::tools::workspace_root::anchor_json(args, &["output_path"]);
         let action = args["action"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'action' field"))?;
+        let opts = CaptureOutputOptions::from_args(&args);
 
-        match action {
-            "full" | "screen" => {
-                let captured = crate::computer::ScreenCapture::capture_full().await?;
-                Ok(json!({
-                    "status": "ok",
-                    "width": captured.width,
-                    "height": captured.height,
-                    "base64_png": captured.base64_png
-                }))
-            }
+        let (target, captured) = match action {
+            "full" | "screen" => (
+                "screen",
+                crate::computer::ScreenCapture::capture_full().await?,
+            ),
             "region" => {
-                let x = args["x"].as_i64().unwrap_or(0) as i32;
-                let y = args["y"].as_i64().unwrap_or(0) as i32;
-                let width = args["width"].as_u64().unwrap_or(100) as u32;
-                let height = args["height"].as_u64().unwrap_or(100) as u32;
+                let (x, y, width, height) = parse_region(&args)?;
                 let region = crate::computer::screen::ScreenRegion::new(x, y, width, height);
-                let captured = crate::computer::ScreenCapture::capture_region(region).await?;
-                Ok(json!({
-                    "status": "ok",
-                    "width": captured.width,
-                    "height": captured.height,
-                    "base64_png": captured.base64_png
-                }))
+                (
+                    "region",
+                    crate::computer::ScreenCapture::capture_region(region).await?,
+                )
             }
+            "window" => anyhow::bail!(
+                "computer_screen cannot capture a single window; use `screen_capture` with \
+                 target=window and window_name=<title substring>"
+            ),
             other => anyhow::bail!("Unknown screen action: {}", other),
-        }
+        };
+
+        // The capture backend hands back base64; decode once so the shared
+        // shaping writes real PNG bytes and measures their true size.
+        let png = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            captured.base64_png.as_bytes(),
+        )
+        .map_err(|e| anyhow::anyhow!("Screen capture returned invalid base64 PNG: {}", e))?;
+        let dir = screenshot_session_dir();
+        run_blocking(|| {
+            shape_capture_output(
+                self.name(),
+                target,
+                &png,
+                captured.width,
+                captured.height,
+                &opts,
+                &dir,
+            )
+        })
     }
 }
 

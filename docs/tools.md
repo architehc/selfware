@@ -332,10 +332,19 @@ Control the keyboard: type text, press keys, key combinations.
 
 ### `computer_screen`
 
-Capture the screen: full screen or a specific region. Returns base64 PNG.
+Capture the full screen or a region (with a Windows fallback under WSL). Same
+arguments and output as [`screen_capture`](#screen_capture), which spells the
+mode `target` and can also capture a single window.
 
 **Parameters:**
-- `region` (object) -- optional region `{ x, y, width, height }`
+- `action` (string, required) -- `"full"` (`"screen"` also accepted) or `"region"`
+- `region` (object) -- region `{ x, y, width, height }`; top-level `x`, `y`, `width`, `height` are also accepted (`width`/`height` required for `"region"`)
+- `output_path` (string) -- optional workspace path to save the PNG (safety-validated)
+- `inline` (boolean) -- also return `base64_png`; default `false`
+
+**Output:** `{ path, width, height, bytes, target, inline }` — the PNG is saved
+to a per-session directory outside the workspace; see `screen_capture` for the
+inline size cap.
 
 ### `computer_window`
 
@@ -676,13 +685,26 @@ Make HTTP requests to APIs or web endpoints. Supports GET, POST, PUT, DELETE met
 
 ### `screen_capture`
 
-Capture a screenshot of the screen, a specific window, or a region. Returns the image path.
+Capture a screenshot of the primary screen, a specific window, or a region.
+Shares its arguments and output with [`computer_screen`](#computer_screen)
+(which spells the mode `action`, adds a WSL fallback, and cannot capture a
+single window).
 
 **Parameters:**
-- `target` (string) -- `"screen"`, `"window"`, or `"region"`
-- `window_title` (string) -- window to capture
-- `region` (object) -- region `{ x, y, width, height }`
-- `output_path` (string) -- where to save the screenshot
+- `target` (string) -- `"screen"` (`"full"` also accepted), `"window"`, or `"region"`; defaults to `"region"` when `region` is given, else `"screen"`
+- `window_name` (string) -- window title substring (required for `target: "window"`)
+- `region` (object) -- region `{ x, y, width, height }` (top-level `x`/`y`/`width`/`height` also accepted)
+- `output_path` (string) -- optional workspace path to save the PNG (safety-validated)
+- `inline` (boolean) -- also return `base64_png`; default `false`
+
+**Output:** `{ path, width, height, bytes, target, inline }`. By default the PNG
+is written to a per-session directory outside the workspace
+(`<data_local_dir>/selfware/tool_results/screenshots/session-<pid>-<start>/`,
+mode 0700/0600 on Unix) — no image data enters the conversation. With
+`inline: true` the result also carries `base64_png`, which the agent loop
+attaches as an image for vision-capable models; PNGs above 3,750,000 bytes
+(≈5 MB of base64) are refused with an error naming the saved file — capture a
+smaller region instead.
 
 ---
 

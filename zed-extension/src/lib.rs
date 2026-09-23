@@ -6,9 +6,8 @@
 use zed_extension_api::{
     self as zed, process, serde_json,
     settings::{ContextServerSettings, LspSettings},
-    ContextServerConfiguration, ContextServerId, LanguageServerId, Project, Result,
-    SlashCommand, SlashCommandArgumentCompletion, SlashCommandOutput, SlashCommandOutputSection,
-    Worktree,
+    ContextServerConfiguration, ContextServerId, LanguageServerId, Project, Result, SlashCommand,
+    SlashCommandArgumentCompletion, SlashCommandOutput, SlashCommandOutputSection, Worktree,
 };
 
 const SELFWARE_CONTEXT_SERVER_ID: &str = "selfware";
@@ -53,19 +52,15 @@ impl SelfwareExtension {
             return Ok(path.clone());
         }
 
-        let candidates = [
+        let resolved = pick_binary(
             worktree.which("selfware"),
-            Some(format!("{root}/target/debug/selfware")),
-            Some(format!("{root}/target/release/selfware")),
-            Some("selfware".to_string()),
-        ];
-
-        for candidate in candidates.into_iter().flatten() {
-            self.cached_binary_path = Some(candidate.clone());
-            return Ok(candidate);
+            &local_build_candidates(&root),
+            binary_exists,
+        );
+        if resolved.cacheable {
+            self.cached_binary_path = Some(resolved.path.clone());
         }
-
-        Err("Could not find the selfware binary. Build the repo or install `selfware` on PATH.".into())
+        Ok(resolved.path)
     }
 
     fn resolve_project_binary(
@@ -349,6 +344,80 @@ impl zed::Extension for SelfwareExtension {
     }
 }
 
+/// Bare command name used when no concrete binary was found: the host
+/// resolves it against PATH at spawn time.
+const PATH_FALLBACK: &str = "selfware";
+
+/// Outcome of binary resolution.
+#[derive(Debug, PartialEq, Eq)]
+struct ResolvedBinary {
+    path: String,
+    /// Only a path that was verified to exist may be cached. The bare PATH
+    /// fallback is never cached, so a later `cargo build` in the worktree is
+    /// picked up on the next resolution instead of being shadowed forever.
+    cacheable: bool,
+}
+
+/// Worktree-local build outputs, in preference order.
+fn local_build_candidates(root: &str) -> [String; 2] {
+    [
+        format!("{root}/target/debug/selfware"),
+        format!("{root}/target/release/selfware"),
+    ]
+}
+
+/// Pick the binary to launch.
+///
+/// Order: a PATH hit reported by the worktree shell (`which`, already an
+/// existence check), then worktree-local `target/debug` / `target/release`
+/// builds — each only if `exists` confirms it — then the bare `selfware`
+/// PATH fallback. Previously the first local candidate was returned (and
+/// cached) unconditionally, so a release-only build or a PATH install
+/// resolved to a non-existent `target/debug/selfware`.
+fn pick_binary(
+    which_hit: Option<String>,
+    local_candidates: &[String],
+    exists: impl Fn(&str) -> bool,
+) -> ResolvedBinary {
+    if let Some(path) = which_hit {
+        return ResolvedBinary {
+            path,
+            cacheable: true,
+        };
+    }
+    for candidate in local_candidates {
+        if exists(candidate) {
+            return ResolvedBinary {
+                path: candidate.clone(),
+                cacheable: true,
+            };
+        }
+    }
+    ResolvedBinary {
+        path: PATH_FALLBACK.to_string(),
+        cacheable: false,
+    }
+}
+
+/// Existence probe usable from the WASM sandbox.
+///
+/// `std::fs` cannot see the worktree from inside the wasm32-wasip1 sandbox
+/// (only the extension's own work directory is preopened), and
+/// `Worktree::read_text_file` only reads UTF-8 text relative to the root, so
+/// it cannot tell a missing binary from a present one. The extension already
+/// holds the `process:exec` capability, so spawn the candidate with
+/// `--version`: the host returns `Err` when the file cannot be spawned (not
+/// found / not executable) and `Ok` — whatever the exit status — when it
+/// exists and ran.
+fn binary_exists(path: &str) -> bool {
+    process::Command::new(path)
+        .arg("--version")
+        .env("RUST_LOG", "error")
+        .env("NO_COLOR", "1")
+        .output()
+        .is_ok()
+}
+
 fn parse_graph_args(args: Vec<String>) -> (&'static str, String) {
     let mut parts = args
         .join(" ")
@@ -419,3 +488,40 @@ fn push_env_if_missing(env: &mut Vec<(String, String)>, key: &str, value: String
 }
 
 zed::register_extension!(SelfwareExtension);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn locals() -> [String; 2] {
+        local_build_candidates("/ws")
+    }
+
+    #[test]
+    fn which_hit_wins_and_is_cached() {
+        let r = pick_binary(Some("/usr/bin/selfware".into()), &locals(), |_| true);
+        assert_eq!(r.path, "/usr/bin/selfware");
+        assert!(r.cacheable);
+    }
+
+    #[test]
+    fn missing_debug_build_falls_through_to_release() {
+        let r = pick_binary(None, &locals(), |p| p == "/ws/target/release/selfware");
+        assert_eq!(r.path, "/ws/target/release/selfware");
+        assert!(r.cacheable);
+    }
+
+    #[test]
+    fn existing_debug_build_is_preferred() {
+        let r = pick_binary(None, &locals(), |_| true);
+        assert_eq!(r.path, "/ws/target/debug/selfware");
+        assert!(r.cacheable);
+    }
+
+    #[test]
+    fn nothing_found_uses_uncached_path_fallback() {
+        let r = pick_binary(None, &locals(), |_| false);
+        assert_eq!(r.path, PATH_FALLBACK);
+        assert!(!r.cacheable, "the bare PATH fallback must never be cached");
+    }
+}

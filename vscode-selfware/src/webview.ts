@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
-import { CodeGraph, GraphNode } from './contextManager';
+import { CodeGraph } from './contextManager';
+import { buildCsp, makeNonce, serializeForHtmlScript } from './htmlSafe';
 
 export function getWebviewContent(
     webview: vscode.Webview,
@@ -7,16 +8,32 @@ export function getWebviewContent(
     contextNodeIds: string[],
     budget: { used: number; total: number; percent: number }
 ): string {
-    const graphJson = JSON.stringify(graph);
-    const contextJson = JSON.stringify(contextNodeIds);
-    const budgetJson = JSON.stringify(budget);
+    return renderWebviewHtml(webview.cspSource, makeNonce(), graph, contextNodeIds, budget);
+}
+
+/**
+ * Build the Code Map HTML. The graph comes from a workspace `codegraph.json`
+ * (untrusted), so it is never interpolated as script source: it is embedded
+ * as an escaped `application/json` data block and read with `JSON.parse`,
+ * and a nonce CSP blocks any script that is not ours.
+ */
+export function renderWebviewHtml(
+    cspSource: string,
+    nonce: string,
+    graph: CodeGraph,
+    contextNodeIds: string[],
+    budget: { used: number; total: number; percent: number }
+): string {
+    const dataJson = serializeForHtmlScript({ graph, contextNodeIds, budget });
+    const csp = buildCsp(cspSource, nonce);
 
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
+<meta http-equiv="Content-Security-Policy" content="${csp}"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<style>
+<style nonce="${nonce}">
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { background: #1e1e1e; color: #ccc; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
 #budget-bar { height: 28px; background: #252526; display: flex; align-items: center; padding: 0 12px; font-size: 12px; gap: 8px; }
@@ -53,14 +70,16 @@ canvas { display: block; width: 100%; height: 100%; }
   <div id="detail"></div>
   <div id="ctx-menu"></div>
 </div>
-<script>
+<script type="application/json" id="selfware-data" nonce="${nonce}">${dataJson}</script>
+<script nonce="${nonce}">
 (function() {
 const vscode = acquireVsCodeApi();
-const graph = ${graphJson};
+const initial = JSON.parse(document.getElementById('selfware-data').textContent || '{}');
+const graph = initial.graph || {};
 const nodes = graph.nodes || [];
 const edges = graph.edges || [];
-let contextIds = new Set(${contextJson});
-let budget = ${budgetJson};
+let contextIds = new Set(initial.contextNodeIds || []);
+let budget = initial.budget || { used: 0, total: 0, percent: 0 };
 
 const KIND_COLORS = {
   module: '#4a9eff', file: '#4ec9b0', struct: '#e5a34b',
@@ -218,7 +237,11 @@ function hitTest(mx, my) {
   return best;
 }
 
+// Always yields digits/'.'/'k': token counts come from untrusted
+// codegraph.json and flow into innerHTML, so coerce to a finite number.
 function fmtTokens(t) {
+  t = Number(t);
+  if (!Number.isFinite(t)) t = 0;
   if (t >= 1000) return (t / 1000).toFixed(1) + 'k';
   return '' + t;
 }
@@ -251,7 +274,7 @@ function showDetail(s) {
   let html = '<h3>' + esc(n.label) + '</h3>';
   html += '<div class="kind">' + esc(n.kind) + (n.path ? ' &mdash; ' + esc(n.path) : '') + '</div>';
   html += '<div class="tokens">' + fmtTokens(n.tokens) + ' tokens' +
-    (n.fusion_group ? ' &bull; ' + n.fusion_group + ' fusion' : '') + '</div>';
+    (n.fusion_group ? ' &bull; ' + esc(n.fusion_group) + ' fusion' : '') + '</div>';
   html += '<div class="actions">';
   if (!inCtx) {
     html += '<div class="action-btn" data-act="ctx_add">Add to Context<span class="action-cost">' + fmtTokens(n.tokens) + '</span></div>';
