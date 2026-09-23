@@ -27,10 +27,14 @@ jobs:
         os: [ubuntu-24.04, macos-14]
         rust: [stable]
         include:
+          # 60m: on 287a6e47 both legs passed every test step but were
+          # cancelled at 45m (Linux during "Build release", macOS during the
+          # all-features pass) — two full test passes plus the multi-minute
+          # redteam corpus gate no longer fit.
           - os: ubuntu-24.04
-            timeout: 45
+            timeout: 60
           - os: macos-14
-            timeout: 45
+            timeout: 60
         exclude:
           # Only test beta on Linux to save CI time
           - os: macos-14
@@ -158,9 +162,11 @@ jobs:
     name: MSRV (1.95.0)
     runs-on: ubuntu-24.04
     # A cold build + two full `cargo test` runs on 1.95 plus the cache-save
-    # post-step exceeded 15m (build/tests passed but the job was cancelled
-    # mid cache upload). Match the other Test jobs' 30m budget.
-    timeout-minutes: 30
+    # post-step. 30m was exceeded on 287a6e47 (default-features tests passed;
+    # the all-features run was cancelled at the limit) once the redteam corpus
+    # gate test grew to a multi-minute run per pass. Match the Test matrix's
+    # budget (60m), which runs the same two passes.
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
