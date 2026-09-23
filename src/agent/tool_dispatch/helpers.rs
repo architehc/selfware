@@ -1644,7 +1644,8 @@ pub(crate) fn masked_run_output_proves_success(command: &str, result: &str) -> b
 /// The `N failed` count directly preceding a "failed" summary word, when the
 /// word is part of a `<digits> failed` tally. `"10 failed"` parses as 10
 /// (the digit walk is unbounded), so the `"0 failed"` substring trap cannot
-/// read a real failure as a zero-failure summary.
+/// read a real failure as a zero-failure summary. Used for every
+/// `<digits> <word>` tally (`passed`, `passing`, `failing`, `error`).
 fn failed_count_before(lower: &str, abs: usize) -> Option<u64> {
     let bytes = lower.as_bytes();
     if abs == 0 || bytes[abs - 1] != b' ' {
@@ -1660,12 +1661,103 @@ fn failed_count_before(lower: &str, abs: usize) -> Option<u64> {
     lower[start..abs - 1].parse().ok()
 }
 
+/// Every `<digits> <word>` tally in `lower` (e.g. all `N passed` counts).
+fn tallies_before(lower: &str, word: &str) -> Vec<u64> {
+    let mut counts = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = lower[from..].find(word) {
+        let abs = from + rel;
+        if let Some(n) = failed_count_before(lower, abs) {
+            counts.push(n);
+        }
+        from = abs + 1;
+    }
+    counts
+}
+
+/// The runner's captured output inside a tool result: the `stdout`,
+/// `stderr` and `output` strings of a JSON-object result, joined by
+/// newlines. Line-anchored markers (unittest's lone `OK`, go's `ok  \tpkg`)
+/// need real lines — a JSON-encoded result carries them as `\n` escapes —
+/// and unittest prints its summary on STDERR, so both streams are read. A
+/// result that is not such an object is read as raw text.
+fn captured_runner_output(result: &str) -> String {
+    if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(result) {
+        let streams: Vec<&str> = ["stdout", "stderr", "output"]
+            .iter()
+            .filter_map(|key| map.get(*key).and_then(Value::as_str))
+            .collect();
+        if !streams.is_empty() {
+            return streams.join("\n");
+        }
+    }
+    result.to_string()
+}
+
+/// The `N` in a Python unittest `Ran N test(s) in …` summary line.
+fn unittest_ran_count(line: &str) -> Option<u64> {
+    let rest = line.strip_prefix("Ran ")?;
+    let (count, tail) = rest.split_once(' ')?;
+    if !(tail.starts_with("test in ") || tail.starts_with("tests in ")) {
+        return None;
+    }
+    count.parse().ok()
+}
+
+/// A `go test` package-pass line: `ok  \t<pkg>\t<duration>` (or
+/// `(cached)`). The literal `ok` must be followed by whitespace and the line
+/// must carry go's tab-separated package column, so a bare `ok` or prose
+/// (`ok fine`) never matches.
+fn is_go_test_ok_line(line: &str) -> bool {
+    line.strip_prefix("ok")
+        .is_some_and(|rest| rest.starts_with([' ', '\t']) && rest.contains('\t'))
+        && line
+            .split('\t')
+            .nth(1)
+            .is_some_and(|pkg| !pkg.trim().is_empty())
+}
+
+/// A `node --test` summary count: TAP `# pass 5` / `# fail 0`, or the spec
+/// reporter's `ℹ pass 5` / `ℹ fail 0`.
+fn tap_count(line: &str, word: &str) -> Option<u64> {
+    line.strip_prefix("# ")
+        .or_else(|| line.strip_prefix("\u{2139} "))?
+        .strip_prefix(word)?
+        .strip_prefix(' ')?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Line-anchored runner failure markers, matched on the runner's ORIGINAL
+/// casing (the runners print them in upper case; prose rarely does):
+///
+/// - unittest: `FAILED (failures=…)` / `FAILED (errors=…)` summary and the
+///   per-test `FAIL: test_x` / `ERROR: test_x` headers;
+/// - go test: `--- FAIL: TestX`, `FAIL\t<pkg>`, a lone `FAIL`;
+/// - jest/vitest: `FAIL src/x.test.js` file headers;
+/// - node TAP: a nonzero `# fail N`.
+fn line_proves_runner_failure(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with("FAILED (")
+        || trimmed.starts_with("FAIL: ")
+        || trimmed.starts_with("ERROR: test")
+        || trimmed.starts_with("--- FAIL")
+        || trimmed == "FAIL"
+        || trimmed.starts_with("FAIL\t")
+        || trimmed.starts_with("FAIL ")
+        || tap_count(trimmed, "fail").is_some_and(|n| n > 0)
+}
+
 /// Unambiguous runner-FAILURE evidence in captured output: a failing libtest
-/// summary, a rustc diagnostic, a cargo compile failure, a panic, or a
-/// nonzero `N failed` tally. Each marker is specific enough that a passing
-/// run never prints it, so recording the failure is safe.
+/// summary, a rustc diagnostic, a cargo compile failure, a panic, a nonzero
+/// `N failed` / `N failing` tally (libtest, pytest, jest, vitest, mocha), or a line-anchored unittest / go test / jest / TAP
+/// failure marker ([`line_proves_runner_failure`]). Each marker is specific
+/// enough that a passing run never prints it, so recording the failure is
+/// safe.
 pub(crate) fn runner_output_proves_failure(output: &str) -> bool {
-    let lower = output.to_lowercase();
+    let text = captured_runner_output(output);
+    let lower = text.to_lowercase();
     if lower.contains("test result: failed")
         || lower.contains("failures:")
         || lower.contains("error[e")
@@ -1675,15 +1767,13 @@ pub(crate) fn runner_output_proves_failure(output: &str) -> bool {
     {
         return true;
     }
-    let mut from = 0;
-    while let Some(rel) = lower[from..].find("failed") {
-        let abs = from + rel;
-        if failed_count_before(&lower, abs).is_some_and(|n| n > 0) {
-            return true;
-        }
-        from = abs + 1;
+    if ["failed", "failing"]
+        .iter()
+        .any(|word| tallies_before(&lower, word).iter().any(|&n| n > 0))
+    {
+        return true;
     }
-    false
+    text.lines().any(line_proves_runner_failure)
 }
 
 /// Unambiguous runner-SUCCESS evidence in captured output, for runs whose
@@ -1691,15 +1781,24 @@ pub(crate) fn runner_output_proves_failure(output: &str) -> bool {
 /// [`shell_command_is_masked_verification`]). Fail-closed (AGENTS.md rule 3):
 /// only these success markers count —
 ///
-/// - `test result: ok`  (libtest / cargo test summary line),
-/// - `0 failed`         (zero-failure tallies in libtest/pytest summaries),
-/// - `N passed`         (pytest-style summaries),
+/// - `test result: ok`       (libtest / cargo test summary line),
+/// - `0 failed`              (zero-failure tallies in libtest summaries),
+/// - `N passed`, N > 0       (pytest / jest / vitest summaries),
+/// - `N passing`, N > 0      (mocha),
+/// - `Ran N tests in …` (N > 0) PLUS a line that is exactly `OK` or starts
+///   `OK (` (`OK (skipped=1)`) — Python unittest; `Ran` alone is not a
+///   verdict and a lone `OK` is not a unittest summary,
+/// - an `ok  \t<pkg>` line   (go test),
+/// - `# pass N` (N > 0) PLUS `# fail 0` (node --test TAP summary),
 ///
-/// and ANY failure-shaped content vetoes the credit — grep matching
-/// `test result` prints the FAILED line too, so output bearing both a
-/// success marker and a failure marker earns nothing.
+/// and ANY failure-shaped content vetoes the credit — every
+/// [`runner_output_proves_failure`] marker, a bare `failed` word (grep
+/// matching `test result` prints the FAILED line too), a nonzero error
+/// tally, and a Python traceback — so output bearing both a success marker
+/// and a failure marker earns nothing.
 pub(crate) fn runner_output_proves_success(output: &str) -> bool {
-    let lower = output.to_lowercase();
+    let text = captured_runner_output(output);
+    let lower = text.to_lowercase();
     let mut saw_zero_failed = false;
     let mut from = 0;
     while let Some(rel) = lower[from..].find("failed") {
@@ -1711,28 +1810,123 @@ pub(crate) fn runner_output_proves_success(output: &str) -> bool {
         }
         from = abs + 1;
     }
-    let success_marker =
-        lower.contains("test result: ok") || saw_zero_failed || lower.contains(" passed");
-    if !success_marker {
-        return false;
-    }
+    let positive_tally = |word: &str| tallies_before(&lower, word).iter().any(|&n| n > 0);
     // pytest reports collection/fixture errors as `N error(s)` beside
     // `M passed` with no "failed" word (`2 passed, 1 error in 0.1s`): a
     // nonzero error tally vetoes the credit.
-    let mut from = 0;
-    while let Some(rel) = lower[from..].find("error") {
-        let abs = from + rel;
-        if failed_count_before(&lower, abs).is_some_and(|n| n > 0) {
-            return false;
-        }
-        from = abs + 1;
+    if positive_tally("error")
+        || runner_output_proves_failure(output)
+        || lower.contains("traceback (most recent call last)")
+    {
+        return false;
     }
-    !lower.contains("test result: failed")
-        && !lower.contains("failures:")
-        && !lower.contains("error[e")
-        && !lower.contains("error: aborting")
-        && !lower.contains("error: could not compile")
-        && !lower.contains("panicked at")
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    let unittest_ok = lines
+        .iter()
+        .any(|line| unittest_ran_count(line).is_some_and(|n| n > 0))
+        && lines
+            .iter()
+            .any(|line| *line == "OK" || line.starts_with("OK ("));
+    let go_ok = text.lines().any(is_go_test_ok_line);
+    let tap_ok = lines
+        .iter()
+        .any(|line| tap_count(line, "pass").is_some_and(|n| n > 0))
+        && lines.iter().any(|line| tap_count(line, "fail") == Some(0));
+    lower.contains("test result: ok")
+        || saw_zero_failed
+        || positive_tally("passed")
+        || positive_tally("passing")
+        || unittest_ok
+        || go_ok
+        || tap_ok
+}
+
+/// Why a masked verification run earned no success credit, phrased to
+/// follow "the pipeline/connector masked the runner's exit status, and" in a
+/// gate message. `None` when the run DID earn output credit.
+///
+/// Distinguishes the two gaps because their fixes differ: a filtered stream
+/// (`| tail -5`, `| grep …`, `> log; cat log`) can never earn credit — a
+/// filter can drop the failing lines — so the run must be repeated without
+/// the filter; an unfiltered-but-masked run whose output simply carried no
+/// recognised verdict should be rerun with an authoritative exit status.
+pub(crate) fn masked_run_uncredited_reason(command: &str, result: &str) -> Option<&'static str> {
+    if masked_run_output_proves_success(command, result) {
+        return None;
+    }
+    Some(if !runner_output_reaches_result_unfiltered(command) {
+        "its output was piped through a filter or redirected (`| tail`, `| grep`, `> file`), \
+         which can drop the failing lines — filtered output never earns credit"
+    } else if !tool_result_output_is_complete(result) {
+        "its captured output was truncated or paginated, so a failing tail may be missing"
+    } else {
+        "its complete, unfiltered output carried no unambiguous success summary \
+         (e.g. `test result: ok`, `N passed`, unittest `OK`)"
+    })
+}
+
+/// The test-runner segment of `command`, in its ORIGINAL spelling, stripped
+/// of pipes, `;`/`||` chains and output redirections — the form whose exit
+/// status is authoritative. Leading `cd DIR &&` segments are kept so the
+/// runner still runs where it did. `None` when no segment is a
+/// [`VerificationKind::TestExecution`] runner (compile-only checks such as
+/// `py_compile` / `cargo check` never qualify).
+///
+/// `python3 -m unittest discover -s tests 2>&1 | tail -5` →
+/// `python3 -m unittest discover -s tests 2>&1`.
+pub(crate) fn unmasked_test_runner_command(command: &str) -> Option<String> {
+    let segments = shell_segments_with_operators(command);
+    let runner_idx = segments.iter().rposition(|(_, segment)| {
+        let lower = segment.trim().to_lowercase();
+        match segment_verification_prefix(&lower, VERIFICATION_PREFIXES) {
+            Some(prefix) => {
+                !segment_is_info_only_invocation(&lower, prefix)
+                    && shell_command_verification_kind(&lower)
+                        == Some(VerificationKind::TestExecution)
+            }
+            None => false,
+        }
+    })?;
+    let runner = strip_output_redirections(segments[runner_idx].1.trim());
+    if runner.is_empty() {
+        return None;
+    }
+    // Keep a contiguous `cd DIR && … &&` prefix: the runner's own `&&`
+    // connector and every earlier one must be `&&` and each earlier segment
+    // a `cd`.
+    let mut start = runner_idx;
+    while start > 0
+        && segments[start].0.trim() == "&&"
+        && first_shell_word(segments[start - 1].1.trim()) == Some("cd")
+    {
+        start -= 1;
+    }
+    let mut parts: Vec<String> = segments[start..runner_idx]
+        .iter()
+        .map(|(_, segment)| segment.trim().to_string())
+        .collect();
+    parts.push(runner);
+    Some(parts.join(" && "))
+}
+
+/// Drop output-diverting redirections from a single command segment (`>
+/// o`, `>>o`, `2>/dev/null`, `&> log`), keeping descriptor duplication onto
+/// the captured stream (`2>&1`). Word-level: good enough for advice text.
+fn strip_output_redirections(segment: &str) -> String {
+    const BARE_OPERATORS: &[&str] = &[">", ">>", "1>", "1>>", "2>", "2>>", "&>", "&>>"];
+    let mut kept: Vec<&str> = Vec::new();
+    let mut words = segment.split_whitespace();
+    while let Some(word) = words.next() {
+        if BARE_OPERATORS.contains(&word) {
+            words.next(); // the redirection target
+            continue;
+        }
+        if word.contains('>') && !matches!(word, "2>&1" | "1>&2" | ">&2") {
+            continue;
+        }
+        kept.push(word);
+    }
+    kept.join(" ")
 }
 
 /// A verification segment that does NOT execute a deliverable script — the

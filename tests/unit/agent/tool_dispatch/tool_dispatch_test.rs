@@ -5692,6 +5692,224 @@ fn pytest_error_tally_vetoes_output_success() {
 }
 
 // =========================================================================
+// Non-cargo runner verdicts for masked-run credit (e2e: a Python ledger task
+// earned no credit from any unittest run; only cargo output was recognised).
+// =========================================================================
+
+/// A complete shell_exec result carrying `stderr` (unittest writes its
+/// summary there) with an empty `stdout`.
+fn complete_shell_result_stderr(stderr: &str) -> String {
+    serde_json::json!({
+        "exit_code": 0,
+        "stdout": "",
+        "stderr": stderr,
+        "stdout_pagination": {"offset": 0, "limit": 30000, "total_chars": 0, "has_more": false},
+        "stderr_pagination": {"offset": 0, "limit": 30000, "total_chars": stderr.len(), "has_more": false},
+        "duration_ms": 10,
+        "timed_out": false
+    })
+    .to_string()
+}
+
+#[test]
+fn python_unittest_output_verdicts() {
+    let ok = "....\n----------------------------------------------------------------------\nRan 4 tests in 0.002s\n\nOK\n";
+    assert!(runner_output_proves_success(ok));
+    assert!(!runner_output_proves_failure(ok));
+    assert!(runner_output_proves_success(
+        "Ran 1 test in 0.000s\n\nOK (skipped=1)"
+    ));
+    // Line-anchored markers must survive JSON encoding: the summary arrives
+    // on stderr as `\n` escapes inside the tool result.
+    let json_ok = complete_shell_result_stderr(ok);
+    assert!(runner_output_proves_success(&json_ok));
+
+    for failing in [
+        "..F.\n======================================================================\nFAIL: test_balance (tests.test_ledger.LedgerTest.test_balance)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"tests/test_ledger.py\", line 9\nAssertionError: 3 != 4\n\nRan 4 tests in 0.002s\n\nFAILED (failures=1)",
+        "E\n======================================================================\nERROR: test_ledger (unittest.loader._FailedTest.test_ledger)\nImportError: No module named 'ledger'\n\nRan 1 test in 0.000s\n\nFAILED (errors=1)",
+    ] {
+        assert!(!runner_output_proves_success(failing), "{failing}");
+        assert!(runner_output_proves_failure(failing), "{failing}");
+        assert!(runner_output_proves_failure(&complete_shell_result_stderr(
+            failing
+        )));
+    }
+    // Neither half of the unittest summary is a verdict on its own, and a
+    // zero-test run proves nothing.
+    assert!(!runner_output_proves_success("OK"));
+    assert!(!runner_output_proves_success("Ran 4 tests in 0.002s"));
+    assert!(!runner_output_proves_success("Ran 0 tests in 0.000s\n\nOK"));
+    assert!(!runner_output_proves_success(
+        "Ran 0 tests in 0.000s\n\nNO TESTS RAN"
+    ));
+    // A traceback beside a passing summary is not clean evidence.
+    assert!(!runner_output_proves_success(
+        "Traceback (most recent call last):\n  boom\nRan 2 tests in 0.1s\n\nOK"
+    ));
+}
+
+#[test]
+fn pytest_output_verdicts() {
+    assert!(runner_output_proves_success(
+        "tests/test_ledger.py ....                 [100%]\n\n============ 4 passed in 0.03s ============"
+    ));
+    assert!(runner_output_proves_success(
+        "==== 4 passed, 1 skipped, 2 warnings in 0.1s ===="
+    ));
+    let failing = "FAILED tests/test_ledger.py::test_balance - assert 3 == 4\n==== 1 failed, 3 passed in 0.05s ====";
+    assert!(!runner_output_proves_success(failing));
+    assert!(runner_output_proves_failure(failing));
+    // Error tallies veto success; a zero-count or prose "passed" is not a
+    // pytest summary.
+    assert!(!runner_output_proves_success(
+        "==== 3 passed, 1 error in 0.1s ===="
+    ));
+    assert!(!runner_output_proves_success("==== 0 passed in 0.01s ===="));
+    assert!(!runner_output_proves_success("all checks passed"));
+    assert!(!runner_output_proves_success(
+        "==== no tests ran in 0.01s ===="
+    ));
+}
+
+#[test]
+fn go_test_output_verdicts() {
+    let ok = "ok  \texample.com/ledger\t0.012s\nok  \texample.com/ledger/store\t(cached)\n?   \texample.com/ledger/cmd\t[no test files]";
+    assert!(runner_output_proves_success(ok));
+    assert!(!runner_output_proves_failure(ok));
+    let failing = "--- FAIL: TestBalance (0.00s)\n    ledger_test.go:12: got 3, want 4\nFAIL\nFAIL\texample.com/ledger\t0.010s\nok  \texample.com/ledger/store\t0.004s";
+    assert!(!runner_output_proves_success(failing));
+    assert!(runner_output_proves_failure(failing));
+    let build_failed = "# example.com/ledger\n./ledger.go:3:1: syntax error\nFAIL\texample.com/ledger [build failed]";
+    assert!(!runner_output_proves_success(build_failed));
+    assert!(runner_output_proves_failure(build_failed));
+    // A bare `ok` or prose is not a go package-pass line.
+    assert!(!runner_output_proves_success("ok"));
+    assert!(!runner_output_proves_success("ok fine"));
+    assert!(!runner_output_proves_success(
+        "?   \texample.com/ledger\t[no test files]"
+    ));
+}
+
+#[test]
+fn jest_vitest_mocha_and_node_test_output_verdicts() {
+    // jest
+    assert!(runner_output_proves_success(
+        "PASS src/ledger.test.js\nTest Suites: 1 passed, 1 total\nTests:       4 passed, 4 total"
+    ));
+    let jest_failing = "FAIL src/ledger.test.js\n  ● balance\nTest Suites: 1 failed, 1 total\nTests:       1 failed, 3 passed, 4 total";
+    assert!(!runner_output_proves_success(jest_failing));
+    assert!(runner_output_proves_failure(jest_failing));
+    // vitest
+    assert!(runner_output_proves_success(
+        " Test Files  1 passed (1)\n      Tests  4 passed (4)"
+    ));
+    let vitest_failing = " FAIL  src/ledger.test.ts > balance\n Test Files  1 failed (1)\n      Tests  1 failed | 3 passed (4)";
+    assert!(!runner_output_proves_success(vitest_failing));
+    assert!(runner_output_proves_failure(vitest_failing));
+    // mocha
+    assert!(runner_output_proves_success("  4 passing (12ms)"));
+    let mocha_failing = "  3 passing (12ms)\n  1 failing\n\n  1) balance:\n     AssertionError";
+    assert!(!runner_output_proves_success(mocha_failing));
+    assert!(runner_output_proves_failure(mocha_failing));
+    // node --test (TAP and spec reporter)
+    assert!(runner_output_proves_success(
+        "# tests 4\n# pass 4\n# fail 0"
+    ));
+    assert!(runner_output_proves_success(
+        "\u{2139} tests 4\n\u{2139} pass 4\n\u{2139} fail 0"
+    ));
+    let node_failing = "# tests 4\n# pass 3\n# fail 1";
+    assert!(!runner_output_proves_success(node_failing));
+    assert!(runner_output_proves_failure(node_failing));
+    // `# pass N` without the zero-fail line is not a complete verdict.
+    assert!(!runner_output_proves_success("# pass 4"));
+}
+
+// The f41fc2fd soundness rules still gate every new runner: a filtered
+// stream (`| tail -5`, the e2e shape) earns nothing, an unfiltered masked
+// run with a complete passing summary earns credit.
+#[test]
+fn non_cargo_masked_runs_keep_the_unfiltered_output_rule() {
+    let unittest_ok = complete_shell_result_stderr("Ran 4 tests in 0.002s\n\nOK");
+    for command in [
+        "python3 -m unittest discover -s tests 2>&1 | tail -5",
+        "python3 -m unittest discover -s tests 2>&1 | grep -E 'OK|FAIL'",
+        "python3 -m unittest discover -s tests > log 2>&1; cat log",
+    ] {
+        assert!(shell_command_is_masked_verification(command), "{command}");
+        assert!(
+            !masked_run_output_proves_success(command, &unittest_ok),
+            "`{command}` filters the runner's output and must earn no credit"
+        );
+        let reason = masked_run_uncredited_reason(command, &unittest_ok)
+            .expect("an uncredited run has a reason");
+        assert!(reason.contains("filter"), "{command}: {reason}");
+    }
+    for (command, result) in [
+        (
+            "python3 -m unittest discover -s tests; echo done",
+            unittest_ok.clone(),
+        ),
+        (
+            "python3 -m pytest -q | tee pytest.log",
+            complete_shell_result("....\n4 passed in 0.03s"),
+        ),
+        (
+            "go test ./... 2>&1 | tee go.log",
+            complete_shell_result("ok  \texample.com/ledger\t0.012s"),
+        ),
+        (
+            "npx jest || echo done",
+            complete_shell_result("Tests:       4 passed, 4 total"),
+        ),
+    ] {
+        assert!(shell_command_is_masked_verification(command), "{command}");
+        assert!(
+            masked_run_output_proves_success(command, &result),
+            "`{command}` delivers a complete passing summary unfiltered"
+        );
+        assert_eq!(masked_run_uncredited_reason(command, &result), None);
+    }
+    // Unfiltered but no verdict: named as such, not as filtering.
+    let command = "python3 -m unittest discover -s tests; echo done";
+    let reason = masked_run_uncredited_reason(command, &complete_shell_result("running…"))
+        .expect("no verdict earns nothing");
+    assert!(
+        reason.contains("no unambiguous success summary"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn unmasked_test_runner_command_recovers_the_authoritative_rerun() {
+    assert_eq!(
+        unmasked_test_runner_command("python3 -m unittest discover -s tests 2>&1 | tail -5")
+            .as_deref(),
+        Some("python3 -m unittest discover -s tests 2>&1")
+    );
+    assert_eq!(
+        unmasked_test_runner_command("cargo test --lib 2>&1 | grep 'test result'").as_deref(),
+        Some("cargo test --lib 2>&1")
+    );
+    assert_eq!(
+        unmasked_test_runner_command("cd Ledger && pytest -q > out.txt; cat out.txt").as_deref(),
+        Some("cd Ledger && pytest -q"),
+        "original casing and the cd prefix survive; the redirection does not"
+    );
+    // Compile-only checks are never offered as the task's test command.
+    assert_eq!(
+        unmasked_test_runner_command("python3 -m py_compile ledger.py | tail -1"),
+        None
+    );
+    assert_eq!(
+        unmasked_test_runner_command("cargo check 2>&1 | tail"),
+        None
+    );
+    assert_eq!(unmasked_test_runner_command("ls -la"), None);
+    assert_eq!(unmasked_test_runner_command("pytest --version"), None);
+}
+
+// =========================================================================
 // W7b finding 5a: every file-writing tool feeds the files-changed summary
 // (a 37-edit file_multi_edit printed "files changed: none").
 // =========================================================================

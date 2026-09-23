@@ -1815,6 +1815,164 @@ mod completion_gate_tests {
             msg.contains("masked"),
             "says WHY it earned no credit: {msg}"
         );
+        assert!(
+            msg.contains("Rerun `cargo test 2>&1`"),
+            "gives the unpiped rerun: {msg}"
+        );
+    }
+
+    /// An agent whose checkpoint (task text `task`) logged `tool_calls`, with
+    /// a file written — the "file written without a passing verification"
+    /// gate's arming state.
+    async fn file_written_agent(task: &str, tool_calls: Vec<ToolCallLog>) -> Agent {
+        let mut agent = Agent::new(test_config()).await.expect("agent should build");
+        let mut checkpoint = TaskCheckpoint::new("ledger".to_string(), task.to_string());
+        for tc in tool_calls {
+            checkpoint.log_tool_call(tc);
+        }
+        agent.current_checkpoint = Some(checkpoint);
+        agent.has_written_any_file = true;
+        agent.last_assistant_response = "Done.".to_string();
+        agent
+    }
+
+    const FILE_WRITTEN_GATE: &str =
+        "[POLICY kind=gate retryable=true reason=\"file written without a passing verification\"]\n";
+
+    // E2E (Python ledger greenfield task): four POLICY refusals while every
+    // unittest run was piped through `| tail -5`; the gate never said the
+    // piped runs earned nothing and suggested `py_compile`, which the model
+    // finally used. The refusal must name the uncredited piped run, say it
+    // was filtered, give the unpiped rerun, and not steer to py_compile.
+    #[tokio::test]
+    async fn file_written_gate_names_piped_test_run_and_unpiped_rerun() {
+        let piped = "python3 -m unittest discover -s tests 2>&1 | tail -5";
+        let agent = file_written_agent(
+            "Build a small ledger CLI in ledger.py with tests.",
+            vec![
+                checkpoint_call(
+                    "file_write",
+                    json!({"path": "ledger.py", "content": "def balance(): return 0\n"}),
+                    true,
+                ),
+                checkpoint_call(
+                    "file_write",
+                    json!({"path": "tests/test_ledger.py", "content": "import unittest\n"}),
+                    true,
+                ),
+                shell_exec_with_output(
+                    piped,
+                    true,
+                    &complete_shell_output("Ran 4 tests in 0.002s\n\nOK"),
+                ),
+            ],
+        )
+        .await;
+        assert!(
+            !agent.has_successful_verification_tool_call(),
+            "a `| tail -5` run must earn no credit"
+        );
+
+        let msg = agent
+            .check_completion_gate()
+            .await
+            .expect("an unverified write must be refused");
+        assert!(msg.starts_with(FILE_WRITTEN_GATE), "{msg}");
+        assert!(msg.contains(piped), "names the uncredited piped run: {msg}");
+        assert!(
+            msg.contains("earned no verification credit") && msg.contains("filter"),
+            "says it earned nothing because its output was filtered: {msg}"
+        );
+        assert!(
+            msg.contains("Rerun `python3 -m unittest discover -s tests 2>&1` WITHOUT pipes"),
+            "gives the exact unpiped rerun: {msg}"
+        );
+        assert!(
+            !msg.contains("py_compile"),
+            "must not steer a task with a test suite to a compile-only check: {msg}"
+        );
+    }
+
+    // With no run yet, the refusal leads with the task's OWN test command
+    // (named verbatim in the task text) instead of `py_compile`.
+    #[tokio::test]
+    async fn file_written_gate_prefers_task_test_command_over_compile_check() {
+        let agent = file_written_agent(
+            "Implement ledger.py and make `python3 -m pytest -q tests` pass.",
+            vec![checkpoint_call(
+                "file_write",
+                json!({"path": "ledger.py", "content": "def balance(): return 0\n"}),
+                true,
+            )],
+        )
+        .await;
+        let msg = agent
+            .check_completion_gate()
+            .await
+            .expect("an unverified write must be refused");
+        assert!(msg.starts_with(FILE_WRITTEN_GATE), "{msg}");
+        assert!(
+            msg.contains("run `python3 -m pytest -q tests` on its own (no pipe)"),
+            "names the task's test command: {msg}"
+        );
+        assert!(!msg.contains("py_compile <path>"), "{msg}");
+        assert!(
+            !msg.contains("earned no verification credit"),
+            "no piped run happened, so none is named: {msg}"
+        );
+    }
+
+    // A written Python test module implies the test runner; a script-only
+    // deliverable with no test signal keeps the py_compile advice (see
+    // `test_suggested_verification_commands_fit_the_project`).
+    #[tokio::test]
+    async fn suggested_commands_infer_unittest_from_a_written_test_module() {
+        let agent = file_written_agent(
+            "Build a small ledger CLI in ledger.py.",
+            vec![
+                checkpoint_call(
+                    "file_write",
+                    json!({"path": "ledger.py", "content": "x = 1\n"}),
+                    true,
+                ),
+                checkpoint_call(
+                    "file_write",
+                    json!({"path": "test_ledger.py", "content": "import unittest\n"}),
+                    true,
+                ),
+            ],
+        )
+        .await;
+        let hints = agent.suggested_verification_commands();
+        assert!(
+            hints.starts_with("`python3 -m unittest discover`"),
+            "the test runner leads: {hints}"
+        );
+        assert!(!hints.contains("py_compile"), "{hints}");
+    }
+
+    // An unfiltered masked unittest run (`; echo done`) with a complete
+    // passing summary on stderr is credited by the gate's evidence scan.
+    #[tokio::test]
+    async fn unfiltered_masked_unittest_run_is_credited_by_the_evidence_scan() {
+        let output = serde_json::json!({
+            "exit_code": 0,
+            "stdout": "done\n",
+            "stderr": "....\nRan 4 tests in 0.002s\n\nOK\n",
+            "stdout_pagination": {"offset": 0, "limit": 30000, "total_chars": 5, "has_more": false},
+            "stderr_pagination": {"offset": 0, "limit": 30000, "total_chars": 30, "has_more": false},
+        })
+        .to_string();
+        let agent = file_written_agent(
+            "Build a small ledger CLI in ledger.py with tests.",
+            vec![shell_exec_with_output(
+                "python3 -m unittest discover -s tests; echo done",
+                true,
+                &output,
+            )],
+        )
+        .await;
+        assert!(agent.has_successful_verification_tool_call());
     }
 
     // W7b finding 2: FailingTestsAccepted must name the check, the revision

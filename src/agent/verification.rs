@@ -710,6 +710,86 @@ fn written_paths(tool_name: &str, args: &Value) -> Vec<String> {
     }
 }
 
+/// A masked verification run that earned no credit, for gate messages.
+struct UncreditedMaskedRun {
+    /// The command exactly as the model ran it.
+    command: String,
+    /// Why it earned nothing ([`super::tool_dispatch::masked_run_uncredited_reason`]).
+    reason: &'static str,
+    /// The same test runner, unpiped — what to rerun.
+    rerun: Option<String>,
+}
+
+/// A Python test module path: `test_*.py`, `*_test.py`, or any `.py` under
+/// a `tests/` / `test/` directory.
+fn is_python_test_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/").to_lowercase();
+    if !normalized.ends_with(".py") {
+        return false;
+    }
+    let basename = normalized.rsplit('/').next().unwrap_or(&normalized);
+    basename.starts_with("test_")
+        || basename.ends_with("_test.py")
+        || normalized
+            .split('/')
+            .rev()
+            .skip(1)
+            .any(|dir| dir == "tests" || dir == "test")
+}
+
+/// The test command a task's own text names. A backticked span that is a
+/// test-runner invocation wins verbatim (`Run \`python3 -m unittest discover
+/// -s tests\``); otherwise a named runner maps to its canonical invocation.
+/// Compile-only commands (`py_compile`, `cargo check`) never qualify.
+fn task_text_test_command(task: &str) -> Option<String> {
+    let spans = task.split('`').skip(1).step_by(2);
+    for span in spans {
+        if let Some(cmd) = super::tool_dispatch::unmasked_test_runner_command(span.trim()) {
+            return Some(cmd);
+        }
+    }
+    let lower = task.to_lowercase();
+    const NAMED_RUNNERS: &[(&str, &str)] = &[
+        ("pytest", "python3 -m pytest"),
+        ("unittest", "python3 -m unittest discover"),
+        ("cargo test", "cargo test"),
+        ("go test", "go test ./..."),
+        ("npm test", "npm test"),
+    ];
+    NAMED_RUNNERS
+        .iter()
+        .find(|(needle, _)| lower.contains(needle))
+        .map(|(_, cmd)| cmd.to_string())
+}
+
+/// The toolchain a verification command belongs to, so gate advice can drop
+/// the compile-only entry of an ecosystem whose test command is known.
+fn verification_ecosystem(command: &str) -> Option<&'static str> {
+    let lower = command.to_lowercase();
+    let word = lower
+        .split("&&")
+        .last()
+        .and_then(|seg| super::tool_dispatch::first_shell_word(seg.trim()))
+        .unwrap_or("");
+    let program = word.rsplit('/').next().unwrap_or(word);
+    if program.starts_with("python") || program == "pytest" {
+        Some("python")
+    } else if program == "cargo" {
+        Some("rust")
+    } else if program == "go" {
+        Some("go")
+    } else if matches!(
+        program,
+        "npm" | "pnpm" | "yarn" | "bun" | "npx" | "node" | "deno"
+    ) {
+        Some("node")
+    } else if matches!(program, "mvn" | "gradle" | "gradlew") {
+        Some("java")
+    } else {
+        None
+    }
+}
+
 fn artifact_readback_guidance(paths: &[String]) -> String {
     let calls = paths
         .iter()
@@ -1165,7 +1245,7 @@ impl Agent {
     /// instead of guessing (the StaleVerification ping-pong class). A masked
     /// run whose logged output proves success was credited at dispatch and
     /// is not "the gap", so it is not named.
-    fn recent_uncredited_masked_run(&self) -> Option<String> {
+    fn recent_uncredited_masked_run(&self) -> Option<UncreditedMaskedRun> {
         self.current_checkpoint
             .as_ref()?
             .tool_calls
@@ -1180,11 +1260,107 @@ impl Agent {
                 if !super::tool_dispatch::shell_command_is_masked_verification(command) {
                     return None;
                 }
-                let output_proven = call.result.as_deref().is_some_and(|result| {
-                    super::tool_dispatch::masked_run_output_proves_success(command, result)
-                });
-                (!output_proven).then(|| command.to_string())
+                let reason = match call.result.as_deref() {
+                    Some(result) => {
+                        super::tool_dispatch::masked_run_uncredited_reason(command, result)?
+                    }
+                    None => "its output was not recorded",
+                };
+                Some(UncreditedMaskedRun {
+                    command: command.to_string(),
+                    reason,
+                    rerun: super::tool_dispatch::unmasked_test_runner_command(command),
+                })
             })
+    }
+
+    /// The gate-message note for [`Self::recent_uncredited_masked_run`]:
+    /// names the run, says WHY it earned nothing, and gives the exact
+    /// unpiped command to rerun. Shared by the StaleVerification and the
+    /// "file written without a passing verification" rejections so they
+    /// cannot drift apart (AGENTS.md rule 5) — the latter used to say
+    /// nothing, and an e2e run piped four consecutive `python3 -m unittest
+    /// … | tail -5` runs into it before settling for a compile-only check.
+    fn uncredited_masked_run_note(&self) -> String {
+        let Some(run) = self.recent_uncredited_masked_run() else {
+            return String::new();
+        };
+        let rerun = match &run.rerun {
+            Some(cmd) => format!("`{cmd}`"),
+            None => "the verification".to_string(),
+        };
+        format!(
+            " Note: `{}` earned no verification credit — a pipeline/connector masked the \
+             runner's exit status, and {}. Rerun {rerun} WITHOUT pipes, output filters \
+             (`| tail`, `| grep`), redirections, or `;`/`||` chains so its exit status is \
+             authoritative.",
+            run.command, run.reason
+        )
+    }
+
+    /// The task's own TEST command, when one can be identified — preferred in
+    /// gate advice over compile-only checks (`py_compile`, `cargo check`),
+    /// which prove the code builds, not that it works. In order:
+    ///
+    /// 1. the most recent test-runner invocation this run made, unpiped
+    ///    (`python3 -m unittest discover -s tests 2>&1 | tail -5` →
+    ///    `python3 -m unittest discover -s tests 2>&1`);
+    /// 2. a backticked test command in the task text;
+    /// 3. a test runner the task text names (`pytest`, `unittest`, `cargo
+    ///    test`, `go test`, `npm test`);
+    /// 4. a Python test file this run wrote → `python3 -m unittest discover`.
+    ///
+    /// Advice only: nothing about what COUNTS as verification changes here.
+    fn task_test_command(&self) -> Option<String> {
+        let from_history = self.current_checkpoint.as_ref().and_then(|cp| {
+            cp.tool_calls.iter().rev().find_map(|call| {
+                if !matches!(call.tool_name.as_str(), "shell_exec" | "pty_shell") {
+                    return None;
+                }
+                let args: Value = serde_json::from_str(&call.arguments).ok()?;
+                super::tool_dispatch::unmasked_test_runner_command(args.get("command")?.as_str()?)
+            })
+        });
+        if from_history.is_some() {
+            return from_history;
+        }
+        let task = self
+            .current_checkpoint
+            .as_ref()
+            .map(|cp| cp.task_description.as_str())
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| self.task_context_for_classification());
+        if let Some(cmd) = task_text_test_command(task) {
+            return Some(cmd);
+        }
+        self.wrote_python_test_file()
+            .then(|| "python3 -m unittest discover".to_string())
+    }
+
+    /// True when this run wrote a Python test module (`test_*.py`,
+    /// `*_test.py`, or a `.py` under `tests/`). Same two sources as
+    /// [`Self::wrote_extension`].
+    fn wrote_python_test_file(&self) -> bool {
+        let hits = |name: &str, args: &str| {
+            serde_json::from_str::<Value>(args).ok().is_some_and(|v| {
+                written_paths(name, &v)
+                    .iter()
+                    .any(|path| is_python_test_path(path))
+            })
+        };
+        let in_checkpoint = self.current_checkpoint.as_ref().is_some_and(|cp| {
+            cp.tool_calls
+                .iter()
+                .any(|log| hits(&log.tool_name, &log.arguments))
+        });
+        in_checkpoint
+            || self
+                .messages
+                .iter()
+                .filter(|m| m.role == "assistant")
+                .filter_map(|m| m.tool_calls.as_ref())
+                .flatten()
+                .any(|tc| hits(&tc.function.name, &tc.function.arguments))
     }
 
     /// A checkpointed shell call whose masked verification run was credited
@@ -1590,16 +1766,7 @@ impl Agent {
             // edits it covers, and — when a piped run earned no credit — why
             // (W7b finding 2; the StaleVerification ping-pong class).
             let edits = self.describe_code_affecting_edits();
-            let masked_note = match self.recent_uncredited_masked_run() {
-                Some(command) => format!(
-                    " Note: `{command}` earned no verification credit — a pipeline/connector \
-                     masked the runner's exit status, and its complete, unfiltered output \
-                     carried no unambiguous success line (e.g. `test result: ok`). Rerun the \
-                     verification WITHOUT pipes, output redirections, or `;`/`||` chains so \
-                     its exit status is authoritative."
-                ),
-                None => String::new(),
-            };
+            let masked_note = self.uncredited_masked_run_note();
             return Some(format!(
                 "StaleVerification: no passing verification covers the current revision — \
                  the last credited pass was at mutation #{}, and {edits} moved the tree to #{}.{masked_note} \
@@ -1739,22 +1906,28 @@ impl Agent {
     /// `python3 -m py_compile` on its own — observed as 5 wasted turns on an
     /// otherwise successful task. Nothing about what *counts* as verification is
     /// relaxed here; only the advice changes.
+    ///
+    /// When the task's own test command is known ([`Self::task_test_command`])
+    /// it leads the list and replaces that ecosystem's generic entry — an
+    /// e2e run with a `tests/` suite was offered `python3 -m py_compile` and
+    /// took it: a compile check proves the code builds, not that it works.
     fn suggested_verification_commands(&self) -> String {
-        let mut cmds: Vec<&str> = Vec::new();
-        if self.wrote_extension(&["rs"]) {
-            cmds.push("cargo_check, cargo_test");
+        let test_cmd = self.task_test_command();
+        let test_ecosystem = test_cmd.as_deref().and_then(verification_ecosystem);
+        let mut cmds: Vec<String> = Vec::new();
+        if let Some(cmd) = &test_cmd {
+            cmds.push(format!("`{cmd}` — this task's test command"));
         }
-        if self.wrote_extension(&["js", "ts", "mjs", "cjs"]) {
-            cmds.push("npm test");
-        }
-        if self.wrote_extension(&["go"]) {
-            cmds.push("go test ./...");
-        }
-        if self.wrote_extension(&["java"]) {
-            cmds.push("mvn test");
-        }
-        if self.wrote_extension(&["py"]) {
-            cmds.push("python3 -m py_compile <path>");
+        for (exts, ecosystem, suggestion) in [
+            (&["rs"][..], "rust", "cargo_check, cargo_test"),
+            (&["js", "ts", "mjs", "cjs"][..], "node", "npm test"),
+            (&["go"][..], "go", "go test ./..."),
+            (&["java"][..], "java", "mvn test"),
+            (&["py"][..], "python", "python3 -m py_compile <path>"),
+        ] {
+            if test_ecosystem != Some(ecosystem) && self.wrote_extension(exts) {
+                cmds.push(suggestion.to_string());
+            }
         }
         if cmds.is_empty() {
             // Nothing written yet, so nothing to tailor to: name the common
@@ -1912,6 +2085,16 @@ impl Agent {
         // cannot change what a build/test run prints, and arming it for a
         // REVIEW.md write pushed a read-only review run into editing src/.
         // Anything unattributable keeps the gate armed.
+        //
+        // Scope note (documented, intentionally unchanged): this gate accepts
+        // ANY credited verification kind, compile-only checks included
+        // (`VerificationKind::CompileOrLint` — `py_compile`, `cargo check`,
+        // `tsc`). A script-only deliverable with no test suite has no other
+        // route to credit, and no task-text "tests required" obligation
+        // exists in the gate to key a stricter rule off. What this gate DOES
+        // do is steer: the message names an uncredited piped run and leads
+        // with the task's own test command, so the model reruns its tests
+        // unpiped instead of settling for a compile-only check.
         if self.has_written_any_file
             && self.has_code_affecting_mutation()
             && !(self.current_task_is_read_only() && self.mutation_sequence == 0)
@@ -1919,15 +2102,28 @@ impl Agent {
             let has_verification = self.has_successful_verification_tool_call()
                 && self.has_fresh_successful_verification();
             if !has_verification {
+                let masked_note = self.uncredited_masked_run_note();
+                // The masked-run note already names the unpiped rerun; the
+                // test-command note covers the no-piped-run case.
+                let test_note = match self.task_test_command().filter(|_| masked_note.is_empty()) {
+                    Some(cmd) => format!(
+                        " This task has a test command — run `{cmd}` on its own (no pipe) and \
+                         let it pass; prefer it over a compile-only check such as `py_compile`, \
+                         which proves the code builds, not that it works."
+                    ),
+                    None => String::new(),
+                };
                 return Some(policy_envelope(
                     PolicyKind::Gate,
                     true,
                     "file written without a passing verification",
                     &format!(
                         "You have written code, but you have not verified it. Code-affecting \
-                         edits awaiting verification: {}. Run a verification \
+                         edits awaiting verification: {}.{}{} Run a verification \
                          command that fits this project ({}) successfully before completing.",
                         self.describe_code_affecting_edits(),
+                        masked_note,
+                        test_note,
                         self.suggested_verification_commands()
                     ),
                 ));
