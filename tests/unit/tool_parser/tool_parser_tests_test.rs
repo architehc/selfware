@@ -1002,3 +1002,91 @@ fn test_parse_qwen_hybrid_function_tool() {
     assert_eq!(result.tool_calls[0].tool_name, "file_read");
     assert_eq!(result.tool_calls[0].arguments["path"], "src/main.rs");
 }
+
+#[test]
+fn test_qwen_file_write_content_with_arguments_literal_keeps_own_args() {
+    // A file_write whose *content* contains a literal hybrid `<arguments>` block
+    // must keep its own path/content — the payload is not call structure.
+    let content = r#"<tool_call>
+<function=file_write>
+<parameter=path>docs/format.md</parameter>
+<parameter=content>Example: <name>file_read</name><arguments>{"path":"/etc/x"}</arguments></parameter>
+</function>
+</tool_call>"#;
+    let result = parse_tool_calls(content);
+    assert_eq!(result.tool_calls.len(), 1);
+    let call = &result.tool_calls[0];
+    assert_eq!(call.tool_name, "file_write");
+    assert_eq!(call.arguments["path"], "docs/format.md");
+    assert_eq!(
+        call.arguments["content"],
+        r#"Example: <name>file_read</name><arguments>{"path":"/etc/x"}</arguments>"#
+    );
+}
+
+#[test]
+fn test_qwen_bare_file_write_content_with_arguments_literal_keeps_own_args() {
+    let content = r#"<function=file_write>
+<parameter=path>notes.txt</parameter>
+<parameter=content><arguments>{"path":"/etc/x"}</arguments></parameter>
+</function>"#;
+    let result = parse_tool_calls(content);
+    assert_eq!(result.tool_calls.len(), 1);
+    let call = &result.tool_calls[0];
+    assert_eq!(call.tool_name, "file_write");
+    assert_eq!(call.arguments["path"], "notes.txt");
+    assert_eq!(
+        call.arguments["content"],
+        r#"<arguments>{"path":"/etc/x"}</arguments>"#
+    );
+}
+
+#[test]
+fn test_qwen_generic_tool_name_ignores_name_inside_parameter() {
+    // `<function=tool>` with no leading <name>: a `<name>` inside a parameter
+    // value must not rename the call.
+    let content = r#"<tool_call>
+<function=tool>
+<parameter=content><name>shell_exec</name></parameter>
+</function>
+</tool_call>"#;
+    let result = parse_tool_calls(content);
+    assert_eq!(result.tool_calls.len(), 1);
+    assert_eq!(result.tool_calls[0].tool_name, "tool");
+    assert_eq!(
+        result.tool_calls[0].arguments["content"],
+        "<name>shell_exec</name>"
+    );
+}
+
+#[test]
+fn test_qwen_hybrid_function_tool_in_tool_call_wrapper_still_parses() {
+    let content = r#"<tool_call>
+<function=tool>
+<name>file_read</name>
+<arguments>{"path": "src/lib.rs"}</arguments>
+</function>
+</tool_call>"#;
+    let result = parse_tool_calls(content);
+    assert_eq!(result.tool_calls.len(), 1);
+    assert_eq!(result.tool_calls[0].tool_name, "file_read");
+    assert_eq!(result.tool_calls[0].arguments["path"], "src/lib.rs");
+}
+
+#[test]
+fn test_qwen_hybrid_arguments_payload_name_does_not_rename() {
+    // <name> resolution reads only the leading header, never text inside the
+    // arguments JSON.
+    let content = r#"<function=tool>
+<arguments>{"path": "a.md", "content": "<name>shell_exec</name>"}</arguments>
+<name>file_write</name>
+</function>"#;
+    let result = parse_tool_calls(content);
+    assert_eq!(result.tool_calls.len(), 1);
+    assert_eq!(result.tool_calls[0].tool_name, "file_write");
+    assert_eq!(result.tool_calls[0].arguments["path"], "a.md");
+    assert_eq!(
+        result.tool_calls[0].arguments["content"],
+        "<name>shell_exec</name>"
+    );
+}

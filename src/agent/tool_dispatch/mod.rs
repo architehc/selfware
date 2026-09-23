@@ -105,9 +105,16 @@ impl Agent {
                 if let Some(cmd) = v.get("command").and_then(|c| c.as_str()) {
                     Some(cmd.to_string())
                 } else if name == "cargo_test" {
+                    // Rendered as the equivalent cargo command so the check
+                    // identity keeps the package SCOPE apart from a test-name
+                    // filter (`-p x`, not a bare `x` that read as a filter).
                     let mut parts = vec!["cargo", "test"];
                     if let Some(pkg) = v.get("package").and_then(|p| p.as_str()) {
+                        parts.push("-p");
                         parts.push(pkg);
+                    }
+                    if v.get("release").and_then(|r| r.as_bool()) == Some(true) {
+                        parts.push("--release");
                     }
                     if let Some(test) = v.get("test_name").and_then(|t| t.as_str()) {
                         parts.push(test);
@@ -202,9 +209,14 @@ impl Agent {
     /// ping-pong).
     ///
     /// Fail-closed (AGENTS.md rule 3): an unambiguous success marker credits
-    /// the run, an unambiguous failure marker records the failure, and
-    /// anything else records NOTHING — ambiguous output is not evidence in
-    /// either direction.
+    /// the run ONLY when the runner's output reached the result unfiltered
+    /// and complete ([`masked_run_output_proves_success`] — `cargo test;
+    /// true`, `cargo test | tee log`); a filtered stream (`| grep …`,
+    /// `> o; grep ok o`) can drop the failing lines, so it never earns
+    /// success. An unambiguous failure marker records the failure either way
+    /// (a recorded failure can only block, never falsely pass), and anything
+    /// else records NOTHING —
+    /// ambiguous output is not evidence in either direction.
     fn note_masked_verification_outcome(&mut self, name: &str, args_str: &str, result_str: &str) {
         if !matches!(name, "shell_exec" | "pty_shell") {
             return;
@@ -220,9 +232,7 @@ impl Agent {
         if command.is_empty() || !shell_command_is_masked_verification(&command) {
             return;
         }
-        let (passed, evidence) = if !shell_command_pipes_runner_output(&command)
-            && runner_output_proves_success(result_str)
-        {
+        let (passed, evidence) = if masked_run_output_proves_success(&command, result_str) {
             (true, "passed")
         } else if runner_output_proves_failure(result_str) {
             (false, "failed")

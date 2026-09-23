@@ -198,6 +198,14 @@ impl VerificationRecord {
         if self.check_id == other.check_id {
             return true;
         }
+        // Cargo identities carry their subset selection (`--lib`, `--doc`,
+        // `-p x`, filters); coverage is decided structurally so a subset pass
+        // never clears a broader failure.
+        match (cargo_shape(&self.check_id), cargo_shape(&other.check_id)) {
+            (Some(pass), Some(failed)) => return pass.covers(&failed),
+            (Some(_), None) | (None, Some(_)) => return false,
+            (None, None) => {}
+        }
         if other.check_id.starts_with(&format!("{} ", self.check_id)) {
             return true;
         }
@@ -488,12 +496,19 @@ mod tests {
             check_id_for("shell_exec", "cargo test passing_test"),
             "cargo test passing_test"
         );
+        // Subset selection is part of the identity (review finding: `--lib`
+        // was dropped and a lib-only pass cleared a full-suite failure).
         assert_eq!(
             check_id_for("shell_exec", "cargo test --lib passing_test"),
-            "cargo test passing_test"
+            "cargo test --lib passing_test"
         );
         assert_eq!(
             check_id_for("shell_exec", "cargo test --lib -- --nocapture"),
+            "cargo test --lib"
+        );
+        // Output-only libtest flags are still dropped.
+        assert_eq!(
+            check_id_for("shell_exec", "cargo test -- --nocapture --test-threads 1"),
             "cargo test"
         );
         assert_eq!(
@@ -536,13 +551,476 @@ mod tests {
             "a passing full-suite run clears narrower subset failures"
         );
     }
+
+    #[test]
+    fn check_id_keeps_every_subset_selector_and_strips_redirections() {
+        for (command, id) in [
+            ("cargo test --lib", "cargo test --lib"),
+            ("cargo test --lib 2>&1", "cargo test --lib"),
+            ("cargo test 2>&1 > out.log", "cargo test"),
+            ("cargo test --bins", "cargo test --bins"),
+            ("cargo test --doc", "cargo test --doc"),
+            (
+                "cargo test --test integration",
+                "cargo test --test=integration",
+            ),
+            (
+                "cargo test --test=integration",
+                "cargo test --test=integration",
+            ),
+            ("cargo test -p core", "cargo test --package=core"),
+            ("cargo test --package core", "cargo test --package=core"),
+            ("cargo test -pcore", "cargo test --package=core"),
+            ("cargo test -- parser", "cargo test parser"),
+            ("cargo test parser", "cargo test parser"),
+            (
+                "cargo test -- --exact parser",
+                "cargo test -- --exact parser",
+            ),
+            ("cargo test -- --ignored", "cargo test -- --ignored"),
+            ("cargo test -j 4 --no-fail-fast", "cargo test"),
+            ("RUST_BACKTRACE=1 cargo test", "cargo test"),
+            ("cd sub && cargo test --lib", "cargo test --lib"),
+            ("/usr/bin/cargo test --doc", "cargo test --doc"),
+            ("cargo clippy -- -D warnings", "cargo clippy -- -D warnings"),
+            ("pytest --lf", "pytest --lf"),
+            ("pytest -q", "pytest"),
+        ] {
+            assert_eq!(check_id_for("shell_exec", command), id, "for `{command}`");
+        }
+        // The cargo_test tool's rendered command keeps package scope apart
+        // from a test-name filter.
+        assert_eq!(
+            check_id_for("cargo_test", "cargo test -p core parser"),
+            "cargo test --package=core parser"
+        );
+    }
+
+    #[test]
+    fn subset_selecting_passes_cannot_clear_broader_failures() {
+        let (_tmp, parent, _py) = nested();
+        let fail = |cmd: &str| record(cmd, Some(&parent), &parent, false, 1);
+        let pass = |cmd: &str| record(cmd, Some(&parent), &parent, true, 1);
+
+        // A narrower pass never clears the broader failure.
+        for (narrow_pass, broad_failure) in [
+            ("cargo test --lib", "cargo test"),
+            ("cargo test --bins", "cargo test"),
+            ("cargo test --doc", "cargo test"),
+            ("cargo test --test integration", "cargo test"),
+            ("cargo test -p core", "cargo test"),
+            ("cargo test -- parser", "cargo test"),
+            ("cargo test parser", "cargo test"),
+            ("cargo test --lib", "cargo test --lib --bins"),
+            ("cargo test --lib", "cargo test --doc"),
+            ("cargo test -- --exact parser", "cargo test parser"),
+            ("cargo test", "cargo test -p other"),
+            ("cargo test", "cargo test --release"),
+            ("cargo test", "cargo test -- --ignored"),
+            ("cargo test", "cargo test --features extra"),
+            ("cargo check --lib", "cargo check"),
+            ("cargo check", "cargo check --tests"),
+            ("cargo clippy", "cargo clippy -- -D warnings"),
+            ("pytest --lf", "pytest"),
+        ] {
+            assert!(
+                !pass(narrow_pass).clears(&fail(broad_failure)),
+                "passing `{narrow_pass}` must NOT clear failing `{broad_failure}`"
+            );
+        }
+
+        // The unrestricted run (or a workspace-wide one) still clears the
+        // narrower failures it covers, and an identical run clears its own.
+        for (broad_pass, narrow_failure) in [
+            ("cargo test", "cargo test --lib"),
+            ("cargo test", "cargo test --doc"),
+            ("cargo test", "cargo test --test integration"),
+            ("cargo test", "cargo test -- parser"),
+            ("cargo test 2>&1", "cargo test --lib -- --exact parser"),
+            ("cargo test --workspace", "cargo test --lib"),
+            ("cargo test -p core", "cargo test -p core --lib"),
+            ("cargo test --lib", "cargo test --lib 2>&1"),
+            ("cargo check --all-targets", "cargo check"),
+            ("pytest", "pytest --lf"),
+        ] {
+            assert!(
+                pass(broad_pass).clears(&fail(narrow_failure)),
+                "passing `{broad_pass}` must clear failing `{narrow_failure}`"
+            );
+        }
+    }
+
+    #[test]
+    fn ledger_keeps_full_suite_failure_after_lib_only_pass() {
+        let (_tmp, parent, _py) = nested();
+        let mut ledger = VerificationLedger::default();
+        ledger.record(record("cargo test", Some(&parent), &parent, false, 1));
+        ledger.record(record("cargo test --lib", Some(&parent), &parent, true, 1));
+        assert!(
+            ledger.blocking(&parent, 1).is_some(),
+            "a lib-only pass must leave the full-suite failure outstanding"
+        );
+        ledger.record(record("cargo test", Some(&parent), &parent, true, 1));
+        assert!(ledger.is_empty(), "the full-suite pass clears it");
+    }
+}
+
+/// Boolean flags of non-cargo runners that select a SUBSET of the suite
+/// (`pytest --lf` reruns only the last failures, `go test -short` skips long
+/// tests). Kept in the check identity so a subset pass cannot clear a
+/// full-suite failure; every other dash flag is dropped as before.
+const SUBSET_BOOL_FLAGS: &[&str] = &[
+    "--lf",
+    "--last-failed",
+    "--sw",
+    "--stepwise",
+    "--stepwise-skip",
+    "-short",
+    "--onlychanged",
+    "--only-changed",
+    "--changed",
+];
+
+/// Is `word` a bare redirection operator whose TARGET is the next word
+/// (`>`, `>>`, `2>`, `&>`, `<`)? Its target is not a test selector.
+fn is_bare_redirect_operator(word: &str) -> bool {
+    (word.ends_with('>') || word.ends_with('<'))
+        && word
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '&' | '>' | '<'))
+}
+
+/// The words of the segment that actually runs the check: leading setup
+/// segments (`cd sub && …`, `export X=1; …`) are skipped, as are leading
+/// `sudo`/`env` wrappers, and a path prefix on the program is removed.
+/// Leading `NAME=value` assignments are returned separately. Redirections and
+/// their targets are removed (`2>&1`, `> out.log`).
+fn check_segment_words(text: &str) -> (Vec<&str>, Vec<&str>) {
+    let all: Vec<&str> = text.split_whitespace().collect();
+    let segments = all.split(|w| matches!(*w, "&&" | "||" | ";" | "|"));
+    let mut chosen: &[&str] = &[];
+    for segment in segments {
+        let first = segment.first().copied().unwrap_or("");
+        if segment.is_empty()
+            || matches!(
+                first,
+                "cd" | "pushd"
+                    | "popd"
+                    | "export"
+                    | "source"
+                    | "."
+                    | "set"
+                    | "unset"
+                    | "true"
+                    | ":"
+            )
+        {
+            continue;
+        }
+        chosen = segment;
+        break;
+    }
+    let mut assignments = Vec::new();
+    let mut words = Vec::new();
+    let mut skip_next = false;
+    for (i, word) in chosen.iter().copied().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if words.is_empty() {
+            if matches!(word, "sudo" | "env") {
+                continue;
+            }
+            if word.split_once('=').is_some_and(|(name, _)| {
+                !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            }) {
+                assignments.push(word);
+                continue;
+            }
+            let program = word
+                .rsplit('/')
+                .next()
+                .filter(|p| !p.is_empty())
+                .unwrap_or(word);
+            words.push(program);
+            continue;
+        }
+        if is_bare_redirect_operator(word) {
+            skip_next = i + 1 < chosen.len();
+            continue;
+        }
+        if word.contains('>') || word.contains('<') {
+            continue;
+        }
+        words.push(word);
+    }
+    (words, assignments)
+}
+
+/// The value of a flag: attached (`--flag=v`, `-pv`) or the next word.
+fn flag_value<'a>(inline: Option<&'a str>, rest: &mut impl Iterator<Item = &'a str>) -> &'a str {
+    inline.or_else(|| rest.next()).unwrap_or("")
+}
+
+/// The selection a cargo invocation makes, parsed into the parts that decide
+/// whether one run covers another.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct CargoCheckShape {
+    /// `test`, `check`, `clippy`, `build`, …
+    sub: String,
+    /// Flags that change WHAT is built or run in a way that is not a plain
+    /// narrowing of the default run: `--package=x`, `--features=f`,
+    /// `--release`, `--workspace`, `--ignored`, toolchain `+nightly`, build
+    /// env such as `RUSTFLAGS=…`, and any unrecognized flag (fail-closed).
+    scope: std::collections::BTreeSet<String>,
+    /// Target selections that narrow the default run: `--lib`, `--bins`,
+    /// `--bin=x`, `--doc`, `--tests`, `--test=x` (test only), plus libtest's
+    /// `--exact` / `--skip=x`.
+    narrowing: std::collections::BTreeSet<String>,
+    /// Test-name filters (`cargo test foo`, `cargo test -- foo bar`).
+    filters: std::collections::BTreeSet<String>,
+}
+
+impl CargoCheckShape {
+    /// Parse the words after `cargo` (wrappers/assignments already split off).
+    fn parse(args: &[&str], assignments: &[&str]) -> Option<Self> {
+        const DROP_ENV: &[&str] = &[
+            "RUST_BACKTRACE",
+            "RUST_LOG",
+            "CARGO_TERM_COLOR",
+            "NO_COLOR",
+            "TERM",
+            "CARGO_INCREMENTAL",
+        ];
+        let mut shape = CargoCheckShape::default();
+        for a in assignments {
+            let name = a.split('=').next().unwrap_or("");
+            if !DROP_ENV.contains(&name) {
+                shape.scope.insert((*a).to_string());
+            }
+        }
+        let mut iter = args.iter().copied().peekable();
+        // Toolchain selector and global flags before the subcommand.
+        while let Some(word) = iter.peek().copied() {
+            if word.starts_with('+') {
+                shape.scope.insert(word.to_string());
+                iter.next();
+            } else if matches!(word, "-q" | "--quiet" | "-v" | "-vv" | "--verbose") {
+                iter.next();
+            } else {
+                break;
+            }
+        }
+        shape.sub = iter.next()?.to_string();
+        if shape.sub.starts_with('-') {
+            return None;
+        }
+        let is_test = shape.sub == "test";
+        let mut after_dashdash = false;
+        while let Some(word) = iter.next() {
+            if word == "--" && !after_dashdash {
+                after_dashdash = true;
+                continue;
+            }
+            if after_dashdash && !is_test {
+                // `cargo clippy -- -D warnings`: lint configuration is part of
+                // what the check asserts, kept verbatim.
+                shape.scope.insert(format!("-- {word}"));
+                continue;
+            }
+            if !word.starts_with('-') || word == "-" {
+                if is_test {
+                    shape.filters.insert(word.to_string());
+                } else {
+                    shape.scope.insert(word.to_string());
+                }
+                continue;
+            }
+            let (flag, inline_value) = match word.split_once('=') {
+                Some((f, v)) => (f, Some(v)),
+                None => (word, None),
+            };
+            if after_dashdash {
+                // libtest arguments.
+                match flag {
+                    "--exact" => {
+                        shape.narrowing.insert("--exact".into());
+                    }
+                    "--skip" => {
+                        let v = flag_value(inline_value, &mut iter);
+                        shape.narrowing.insert(format!("--skip={v}"));
+                    }
+                    "--nocapture" | "--show-output" | "-q" | "--quiet" | "--report-time" => {}
+                    "--test-threads" | "--color" | "--format" | "-Z" => {
+                        let _ = flag_value(inline_value, &mut iter);
+                    }
+                    other => {
+                        // `--ignored` / `--include-ignored` / unknown: a
+                        // different selection, never a narrowing.
+                        shape.scope.insert(format!("-- {other}"));
+                    }
+                }
+                continue;
+            }
+            // Short-flag spellings with the value attached: `-pfoo`, `-j4`.
+            let (flag, inline_value) = if flag.len() > 2
+                && !flag.starts_with("--")
+                && inline_value.is_none()
+                && flag.is_char_boundary(2)
+                && matches!(&flag[..2], "-p" | "-j" | "-F" | "-Z")
+            {
+                (&flag[..2], Some(&flag[2..]))
+            } else {
+                (flag, inline_value)
+            };
+            let take_value = |iter: &mut _| flag_value(inline_value, iter);
+            match flag {
+                // Output / parallelism only.
+                "-q" | "--quiet" | "-v" | "-vv" | "--verbose" | "--no-fail-fast" | "--locked"
+                | "--offline" | "--frozen" | "--timings" | "--keep-going" => {}
+                "-j" | "--jobs" | "--color" | "--message-format" | "--target-dir" => {
+                    let _ = take_value(&mut iter);
+                }
+                "--lib" | "--bins" => {
+                    shape.narrowing.insert(flag.to_string());
+                }
+                "--doc" | "--tests" if is_test => {
+                    shape.narrowing.insert(flag.to_string());
+                }
+                "--bin" => {
+                    let v = take_value(&mut iter);
+                    shape.narrowing.insert(format!("--bin={v}"));
+                }
+                "--test" if is_test => {
+                    let v = take_value(&mut iter);
+                    shape.narrowing.insert(format!("--test={v}"));
+                }
+                "-p" | "--package" | "-F" | "--features" | "--test" | "--example" | "--bench"
+                | "--exclude" | "--manifest-path" | "--target" | "--profile" | "--config" => {
+                    let canonical = match flag {
+                        "-p" => "--package",
+                        "-F" => "--features",
+                        other => other,
+                    };
+                    let v = take_value(&mut iter);
+                    shape.scope.insert(format!("{canonical}={v}"));
+                }
+                "--all" => {
+                    shape.scope.insert("--workspace".into());
+                }
+                other => {
+                    // --release, --all-features, --no-default-features,
+                    // --workspace, --all-targets, --examples, --benches, and
+                    // anything unrecognized: a different selection.
+                    shape.scope.insert(other.to_string());
+                }
+            }
+        }
+        Some(shape)
+    }
+
+    /// Canonical, runnable rendering — the check identity.
+    fn render(&self) -> String {
+        let mut out = format!("cargo {}", self.sub);
+        let (cargo_scope, libtest_scope): (Vec<&String>, Vec<&String>) =
+            self.scope.iter().partition(|s| !s.starts_with("-- "));
+        let (cargo_narrow, libtest_narrow): (Vec<&String>, Vec<&String>) = self
+            .narrowing
+            .iter()
+            .partition(|s| !(s.as_str() == "--exact" || s.starts_with("--skip=")));
+        for token in cargo_scope.iter().chain(cargo_narrow.iter()) {
+            out.push(' ');
+            out.push_str(token);
+        }
+        let mut filters = self.filters.iter();
+        let tail_needed =
+            !libtest_scope.is_empty() || !libtest_narrow.is_empty() || self.filters.len() > 1;
+        if !tail_needed {
+            if let Some(f) = filters.next() {
+                out.push(' ');
+                out.push_str(f);
+            }
+            return out;
+        }
+        out.push_str(" --");
+        for token in &libtest_scope {
+            out.push(' ');
+            out.push_str(token.trim_start_matches("-- "));
+        }
+        for token in libtest_narrow
+            .iter()
+            .map(|s| s.as_str())
+            .chain(filters.map(String::as_str))
+        {
+            out.push(' ');
+            out.push_str(token);
+        }
+        out
+    }
+
+    /// Flags a pass may carry beyond the failure's and still cover it: the
+    /// whole workspace covers the default members, and for non-test
+    /// subcommands `--all-targets` covers the default lib+bins selection
+    /// (NOT for `cargo test`, where `--all-targets` skips doc tests).
+    fn is_broadening(&self, token: &str) -> bool {
+        match token {
+            "--workspace" => true,
+            "--all-targets" => self.sub != "test",
+            "-- --include-ignored" => self.sub == "test",
+            _ => false,
+        }
+    }
+
+    /// Does a PASSING run of `self` cover everything `failed` ran?
+    ///
+    /// Only when both run the same subcommand, the pass's selection scope
+    /// equals the failure's (or broadens it by workspace/all-targets), and
+    /// either the selections are identical or the pass is UNRESTRICTED (no
+    /// target narrowing, no filters). A narrowed pass (`--lib`, `--doc`,
+    /// `-- foo`) covers only its identical failure: target flags and filters
+    /// combine as unions, so no narrowed run provably covers another.
+    fn covers(&self, failed: &CargoCheckShape) -> bool {
+        if self.sub != failed.sub {
+            return false;
+        }
+        if !failed.scope.is_subset(&self.scope) {
+            return false;
+        }
+        if !self
+            .scope
+            .difference(&failed.scope)
+            .all(|token| self.is_broadening(token))
+        {
+            return false;
+        }
+        let unrestricted = self.narrowing.is_empty() && self.filters.is_empty();
+        unrestricted || (self.narrowing == failed.narrowing && self.filters == failed.filters)
+    }
+}
+
+/// Parse a check identity (or command) as a cargo invocation.
+fn cargo_shape(check: &str) -> Option<CargoCheckShape> {
+    let (words, assignments) = check_segment_words(check.trim());
+    match words.split_first() {
+        Some((&"cargo", rest)) => CargoCheckShape::parse(rest, &assignments),
+        _ => None,
+    }
 }
 
 /// Normalise a command to the CHECK it performs.
 ///
-/// `cargo test --lib -- --nocapture` and `cargo test` are the same check;
-/// `cargo check` is a different one. Flags and paths are dropped, the
-/// subcommand is kept — that is the distinction a single failure slot lost.
+/// `cargo test -- --nocapture` and `cargo test 2>&1` are the same check as
+/// `cargo test`; `cargo check` is a different one. Output-only flags and
+/// redirections are dropped, the subcommand is kept — that is the
+/// distinction a single failure slot lost.
+///
+/// Subset selection IS the check: `cargo test --lib`, `--doc`, `--test x`,
+/// `-p x`, `cargo test foo` and `cargo test -- foo` each keep their
+/// selectors (review finding: `cargo test --lib` normalised to `cargo test`
+/// and a passing lib-only run cleared a failing full-suite result). Whether
+/// one identity's pass covers another's failure is decided by
+/// [`VerificationRecord::clears`].
 pub fn check_id_for(tool: &str, command: &str) -> String {
     let text = command.trim();
     if text.is_empty() {
@@ -554,10 +1032,13 @@ pub fn check_id_for(tool: &str, command: &str) -> String {
             other => other.to_string(),
         };
     }
-    let words: Vec<&str> = text
-        .split_whitespace()
-        .take_while(|w| !matches!(*w, "&&" | "||" | ";" | "|"))
-        .filter(|w| !w.starts_with('-') && !w.contains('>') && !w.contains('<'))
+    if let Some(shape) = cargo_shape(text) {
+        return shape.render();
+    }
+    let (segment_words, _assignments) = check_segment_words(text);
+    let words: Vec<&str> = segment_words
+        .into_iter()
+        .filter(|w| !w.starts_with('-') || SUBSET_BOOL_FLAGS.contains(w))
         .collect();
     match words.as_slice() {
         [] => match tool {

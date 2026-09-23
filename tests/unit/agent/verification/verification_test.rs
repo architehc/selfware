@@ -1637,13 +1637,37 @@ mod completion_gate_tests {
         }
     }
 
+    /// A complete (unpaginated) shell_exec result JSON carrying `stdout`.
+    fn complete_shell_output(stdout: &str) -> String {
+        serde_json::json!({
+            "exit_code": 0,
+            "stdout": stdout,
+            "stderr": "",
+            "stdout_pagination": {"offset": 0, "limit": 30000, "total_chars": stdout.len(), "has_more": false},
+            "stderr_pagination": {"offset": 0, "limit": 30000, "total_chars": 0, "has_more": false},
+            "duration_ms": 10,
+            "timed_out": false
+        })
+        .to_string()
+    }
+
     // W7b finding 1b: a pipeline masks the runner's exit status (the shell
     // reports the LAST stage), so credit must come from the runner's own
     // unambiguous success output — and only from that.
+    //
+    // Rule-2 sign-off: this test previously used `cargo test 2>&1 | grep
+    // 'test result'` as the credited command. That grep-filtered form no
+    // longer earns output credit (a filter can drop the FAILED line — see
+    // `grep_filtered_runner_output_earns_no_credit`), so the credited case is
+    // now a masked run whose output reaches the result unfiltered
+    // (`|| echo done`).
     #[tokio::test]
     async fn piped_verification_with_runner_success_output_earns_credit() {
-        let command = "cargo test 2>&1 | grep 'test result'";
-        let output = "test result: ok. 3 passed; 0 failed; 0 ignored; finished in 0.01s";
+        let command = "cargo test 2>&1 || echo done";
+        let output = complete_shell_output(
+            "running 3 tests\ntest result: ok. 3 passed; 0 failed; 0 ignored; finished in 0.01s",
+        );
+        let output = output.as_str();
         // The checkpoint log records the call first, then the lifecycle
         // accounting runs — the same order the dispatcher uses.
         let mut agent =
@@ -1665,6 +1689,36 @@ mod completion_gate_tests {
             "the gate's evidence scan must recognize the output-credited run"
         );
         assert!(agent.has_fresh_successful_verification());
+    }
+
+    // Scope C review finding: filtered or redirected-then-read-back runner
+    // output must not earn success credit, at dispatch or in the gate's
+    // checkpoint evidence scan.
+    #[tokio::test]
+    async fn grep_filtered_runner_output_earns_no_credit() {
+        let output = complete_shell_output("test result: ok. 3 passed; 0 failed; 0 ignored");
+        for command in [
+            "cargo test 2>&1 | grep 'test result'",
+            "cargo test | grep -m1 'test result'",
+            "cargo test > o; grep 'test result: ok' o",
+            "cargo test > o 2>&1; tail -3 o",
+            "cargo test | tee o; grep ok o",
+        ] {
+            let mut agent =
+                agent_with_checkpoint(vec![shell_exec_with_output(command, true, &output)]).await;
+            agent.note_mutating_tool_call();
+            let args = serde_json::json!({ "command": command });
+            agent.note_tool_call_lifecycle("shell_exec", &args, &args.to_string(), true, &output);
+            assert_eq!(
+                agent.last_successful_verification_mutation_sequence, 0,
+                "`{command}` must not credit the revision"
+            );
+            assert!(
+                !agent.has_successful_verification_tool_call(),
+                "the gate's evidence scan must not credit `{command}`"
+            );
+            assert!(!agent.has_fresh_successful_verification(), "{command}");
+        }
     }
 
     // The grep in `… | grep 'test result'` matches the FAILED summary line
@@ -2393,6 +2447,99 @@ fn build_and_dependency_files_are_not_doc_only() {
     assert!(Agent::gate_path_is_doc_only("README.md"));
     assert!(Agent::gate_path_is_doc_only("docs/guide.txt"));
     assert!(Agent::gate_path_is_doc_only("notes.rst"));
+}
+
+// Review finding: the build-file check prefix-matched, so doc files whose
+// names merely START like a manifest (requirements.md, pipeline.md, …) were
+// classified as build files and armed the code-verification gate on a
+// doc-only write. Exact manifests / pip families only; docs stay docs.
+#[test]
+fn doc_files_named_like_manifests_stay_documentation() {
+    for doc in [
+        "requirements.md",
+        "docs/requirements.md",
+        "pipeline.md",
+        "packages.md",
+        "dependencies.md",
+        "cargo-notes.md",
+        "constraints.md",
+        "Cargo-guide.rst",
+        "package.json.md",
+        "requirements.adoc",
+        "Makefile.markdown",
+    ] {
+        assert!(
+            !basename_is_build_or_dependency_file(
+                &doc.rsplit('/').next().unwrap().to_ascii_lowercase()
+            ),
+            "`{doc}` is documentation, not a build file"
+        );
+        assert!(
+            Agent::gate_path_is_doc_only(doc),
+            "`{doc}` must stay doc-only"
+        );
+        assert!(
+            path_is_non_code_artifact(Path::new(doc)),
+            "`{doc}` must stay a non-code artifact"
+        );
+    }
+}
+
+#[test]
+fn exact_build_and_dependency_files_are_classified() {
+    for build in [
+        "requirements.txt",
+        "requirements-dev.txt",
+        "requirements_test.in",
+        "requirements.in",
+        "constraints.txt",
+        "constraints-ci.txt",
+        "Pipfile",
+        "Pipfile.lock",
+        "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
+        "Cargo.toml",
+        "Cargo.lock",
+        "package.json",
+        "package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "CMakeLists.txt",
+        "conanfile.txt",
+        "conanfile.py",
+        "vcpkg.json",
+        "go.mod",
+        "go.sum",
+        "Gemfile",
+        "Makefile",
+    ] {
+        assert!(
+            basename_is_build_or_dependency_file(&build.to_ascii_lowercase()),
+            "`{build}` is a build/dependency file"
+        );
+        assert!(
+            !Agent::gate_path_is_doc_only(build),
+            "`{build}` can change build/test outcomes and is never doc-only"
+        );
+        assert!(
+            !path_is_non_code_artifact(Path::new(build)),
+            "`{build}` must go through the code-verification gate"
+        );
+    }
+    // Names that only share a prefix with a manifest are not build files.
+    for other in [
+        "pipeline.txt",
+        "packages.txt",
+        "dependencies.txt",
+        "cargo-notes.txt",
+        "requirementsdoc.txt",
+    ] {
+        assert!(
+            !basename_is_build_or_dependency_file(other),
+            "`{other}` is not a build/dependency file"
+        );
+    }
 }
 
 #[tokio::test]

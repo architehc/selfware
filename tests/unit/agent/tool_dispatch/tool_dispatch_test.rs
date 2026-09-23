@@ -5494,37 +5494,201 @@ fn runner_output_failure_markers_are_unambiguous() {
 }
 
 #[test]
-fn shell_command_pipes_runner_output_detects_piped_runner() {
-    assert!(shell_command_pipes_runner_output(
+fn filtered_runner_output_does_not_reach_result_unfiltered() {
+    assert!(!runner_output_reaches_result_unfiltered(
         "cargo test 2>&1 | grep 'test result: ok'"
     ));
-    assert!(shell_command_pipes_runner_output(
+    assert!(!runner_output_reaches_result_unfiltered(
         "cargo test | grep '0 failed'"
     ));
-    assert!(shell_command_pipes_runner_output(
+    assert!(!runner_output_reaches_result_unfiltered(
         "cargo test 2>&1 | grep ok"
     ));
-    assert!(shell_command_pipes_runner_output(
+    assert!(!runner_output_reaches_result_unfiltered(
         "cargo test 2>&1 | grep pass"
     ));
-    assert!(shell_command_pipes_runner_output(
+    assert!(!runner_output_reaches_result_unfiltered(
         "cargo test 2>&1 | grep -v FAILED"
     ));
-    assert!(shell_command_pipes_runner_output(
+    assert!(!runner_output_reaches_result_unfiltered(
         "cargo test | cut -d: -f2"
     ));
-    assert!(shell_command_pipes_runner_output("cargo test | sort"));
-    assert!(shell_command_pipes_runner_output("pytest | head -n 5"));
-    assert!(shell_command_pipes_runner_output("cargo test | tail -20"));
-    assert!(!shell_command_pipes_runner_output(
+    assert!(!runner_output_reaches_result_unfiltered(
+        "cargo test | sort"
+    ));
+    assert!(!runner_output_reaches_result_unfiltered(
+        "pytest | head -n 5"
+    ));
+    assert!(!runner_output_reaches_result_unfiltered(
+        "cargo test | tail -20"
+    ));
+    // Rule-2 sign-off (flipped expectation, stricter): the "neutral"
+    // `grep 'test result'` exemption was unsound — a regex such as
+    // `grep -E 'test result: o.'` or `grep -m1 'test result'` drops the
+    // FAILED summary while keeping a passing one. Every filter stage now
+    // counts as filtering; only transparent tee/cat pass through.
+    assert!(!runner_output_reaches_result_unfiltered(
         "cargo test 2>&1 | grep 'test result'"
     ));
-    assert!(!shell_command_pipes_runner_output(
+    assert!(runner_output_reaches_result_unfiltered(
         "cargo test | tee test.log"
     ));
-    assert!(!shell_command_pipes_runner_output("cargo test --lib"));
-    assert!(!shell_command_pipes_runner_output("pytest -v"));
-    assert!(!shell_command_pipes_runner_output("cargo test; echo done"));
+    assert!(runner_output_reaches_result_unfiltered("cargo test --lib"));
+    assert!(runner_output_reaches_result_unfiltered("pytest -v"));
+    assert!(runner_output_reaches_result_unfiltered(
+        "cargo test; echo done"
+    ));
+}
+
+// Review finding (Scope C 2a): every max-count spelling must count as
+// filtering — `-m1`, `-m 1`, `--max-count=1`, `--max-count 1` all stop after
+// the first (possibly passing) summary line of a multi-suite run.
+#[test]
+fn every_max_count_spelling_filters_runner_output() {
+    for command in [
+        "cargo test | grep -m1 'test result'",
+        "cargo test | grep -m 1 'test result'",
+        "cargo test 2>&1 | grep --max-count=1 'test result'",
+        "cargo test 2>&1 | grep --max-count 1 'test result'",
+        "cargo test 2>&1 | grep -m=1 'test result'",
+        "cargo test 2>&1 | rg -m1 'test result'",
+        "cargo test 2>&1 | grep -E 'test result: o.'",
+        "cargo test |& grep 'test result'",
+    ] {
+        assert!(
+            shell_command_is_masked_verification(command),
+            "`{command}` masks the runner's exit status"
+        );
+        assert!(
+            !runner_output_reaches_result_unfiltered(command),
+            "`{command}` must not reach the result unfiltered"
+        );
+        assert!(
+            !masked_run_output_proves_success(
+                command,
+                &complete_shell_result("test result: ok. 3 passed; 0 failed")
+            ),
+            "`{command}` must earn no success credit from filtered output"
+        );
+    }
+}
+
+/// A complete (unpaginated) shell_exec result carrying `stdout`.
+fn complete_shell_result(stdout: &str) -> String {
+    serde_json::json!({
+        "exit_code": 0,
+        "stdout": stdout,
+        "stderr": "",
+        "stdout_pagination": {"offset": 0, "limit": 30000, "total_chars": stdout.len(), "has_more": false},
+        "stderr_pagination": {"offset": 0, "limit": 30000, "total_chars": 0, "has_more": false},
+        "duration_ms": 10,
+        "timed_out": false
+    })
+    .to_string()
+}
+
+// Review finding (Scope C 2b/2c): a runner whose output is redirected to a
+// file and then read back / filtered by a LATER command must not earn
+// success credit from that command's output. Output credit requires the
+// runner's own stdout to reach the result unfiltered.
+#[test]
+fn redirected_then_filtered_runner_output_earns_no_credit() {
+    let ok = complete_shell_result("test result: ok. 3 passed; 0 failed");
+    for command in [
+        "cargo test > o; grep 'test result: ok' o",
+        "cargo test > o 2>&1; tail -3 o",
+        "cargo test >> o; cat o",
+        "cargo test &> o; grep ok o",
+        "cargo test 2>/dev/null; true",
+        "cargo test | tee o; grep ok o",
+        "cargo test | tee o > /dev/null; grep ok o",
+        "cargo test | cat o",
+        "cargo test; echo 'test result: ok. 1 passed'",
+        "echo '3 passed'; pytest; true",
+        "cargo test; printf done",
+        "pytest -q; cargo test; true",
+        "cargo test | tee o | tail -3",
+    ] {
+        assert!(
+            shell_command_is_masked_verification(command),
+            "`{command}` is a masked run"
+        );
+        assert!(
+            !runner_output_reaches_result_unfiltered(command),
+            "`{command}` does not deliver the runner's output unfiltered"
+        );
+        assert!(
+            !masked_run_output_proves_success(command, &ok),
+            "`{command}` must earn no success credit"
+        );
+    }
+    // Transparent forms keep output credit: status masked, stream intact.
+    for command in [
+        "cargo test; true",
+        "cargo test || echo done",
+        "cargo test | tee test.log",
+        "cargo test 2>&1 | tee -a test.log | cat",
+        "cd sub && cargo test; true",
+    ] {
+        assert!(
+            runner_output_reaches_result_unfiltered(command),
+            "`{command}` delivers the runner's output unfiltered"
+        );
+        assert!(
+            masked_run_output_proves_success(command, &ok),
+            "`{command}` with complete success output earns credit"
+        );
+    }
+}
+
+// A paginated or truncated result may have cut the failing tail of a
+// multi-suite run: an early `test result: ok` in the visible head proves
+// nothing.
+#[test]
+fn incomplete_tool_output_earns_no_masked_success_credit() {
+    let head = "test result: ok. 3 passed; 0 failed";
+    let paginated = serde_json::json!({
+        "exit_code": 0,
+        "stdout": head,
+        "stderr": "",
+        "stdout_pagination": {"offset": 0, "limit": 36, "total_chars": 9000, "has_more": true},
+        "stderr_pagination": {"offset": 0, "limit": 36, "total_chars": 0, "has_more": false},
+    })
+    .to_string();
+    let pty_truncated = serde_json::json!({
+        "session_id": "s",
+        "stdout": format!("{head}\n... [output truncated at 10240 bytes]"),
+        "stderr": "",
+        "exit_code": 0,
+    })
+    .to_string();
+    let head_truncated_log: String = complete_shell_result(head).chars().take(40).collect();
+    for result in [
+        paginated,
+        pty_truncated,
+        head_truncated_log,
+        head.to_string(),
+    ] {
+        assert!(!tool_result_output_is_complete(&result), "{result}");
+        assert!(!masked_run_output_proves_success(
+            "cargo test; true",
+            &result
+        ));
+    }
+    assert!(tool_result_output_is_complete(&complete_shell_result(head)));
+}
+
+// pytest reports collection errors as `N error` beside `M passed`, with no
+// "failed" word — a nonzero error tally vetoes success credit.
+#[test]
+fn pytest_error_tally_vetoes_output_success() {
+    assert!(!runner_output_proves_success("2 passed, 1 error in 0.10s"));
+    assert!(!runner_output_proves_success(
+        "=== 5 passed, 3 errors in 1.2s ==="
+    ));
+    assert!(runner_output_proves_success(
+        "=== 5 passed, 0 errors in 1.2s ==="
+    ));
 }
 
 // =========================================================================

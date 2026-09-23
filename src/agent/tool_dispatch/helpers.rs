@@ -1453,67 +1453,192 @@ pub(crate) fn shell_command_is_masked_verification(command: &str) -> bool {
     })
 }
 
-/// Does the command pipe a verification runner's output into a downstream
-/// process (`cargo test 2>&1 | grep 'test result: ok'`)?
+/// Is this segment a (non-info-only) verification runner whose OUTPUT may be
+/// read as evidence — a runner prefix in command position, or a test script?
+fn segment_is_output_runner(segment: &str) -> bool {
+    match segment_verification_prefix(segment, VERIFICATION_PREFIXES) {
+        Some(prefix) => !segment_is_info_only_invocation(segment, prefix),
+        None => segment_runs_test_script(segment),
+    }
+}
+
+/// Does this segment divert stdout or stderr away from the tool result?
+/// Every unquoted `>` counts (`> o`, `>> o`, `1> o`, `2> o`, `&> o`, `>&-`,
+/// `2>/dev/null`) EXCEPT a pure descriptor duplication onto the other
+/// captured stream (`2>&1`, `1>&2`, `>&2`), which keeps every line in the
+/// captured output. Fail-closed: `2>/dev/null` hides compile errors and
+/// panics, so it diverts too.
+fn segment_diverts_output(segment: &str) -> bool {
+    let bytes = segment.as_bytes();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            b'\\' if !in_single => {
+                i += 2;
+                continue;
+            }
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            b'>' if !in_single && !in_double => {
+                let dup_to_captured = bytes.get(i + 1) == Some(&b'&')
+                    && matches!(bytes.get(i + 2), Some(b'1') | Some(b'2'))
+                    && !bytes.get(i + 3).is_some_and(|c| c.is_ascii_digit());
+                if !dup_to_captured {
+                    return true;
+                }
+                i += 3;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+/// A pipeline stage downstream of the runner that passes every line through
+/// to the tool result unmodified: `tee [-a|-i|-p] FILE…` (copies to files,
+/// stdout still flows) or bare `cat` / `cat -`. `cat FILE` would print the
+/// file instead of the runner's stream, so it is not transparent. Any output
+/// diversion on the stage itself (`tee o > /dev/null`) disqualifies it.
+fn segment_is_transparent_stage(segment: &str) -> bool {
+    if segment_diverts_output(segment) {
+        return false;
+    }
+    let words: Vec<&str> = segment.split_whitespace().collect();
+    match words.first().copied() {
+        Some("tee") => words[1..]
+            .iter()
+            .all(|w| !w.starts_with('-') || matches!(*w, "-a" | "--append" | "-i" | "-p")),
+        Some("cat") => words[1..].iter().all(|w| matches!(*w, "-" | "-u")),
+        _ => false,
+    }
+}
+
+/// A non-runner segment that cannot put runner-shaped text into the tool
+/// result: directory changes, environment builtins, `true`/`false`/`:`,
+/// `exit`, `sleep`, and a literal `echo` carrying no outcome vocabulary and
+/// no expansion/escape (`echo done`). Everything else — including `printf`,
+/// `echo "test result: ok"`, a second runner, `grep … o` on a log file —
+/// could add or fabricate success-shaped lines.
+fn segment_is_output_neutral(segment: &str) -> bool {
+    let trimmed = segment.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let word = first_shell_word(trimmed).unwrap_or("");
+    match word {
+        "cd" | "pushd" | "popd" | "true" | "false" | ":" | "exit" | "export" | "set" | "unset"
+        | "sleep" => true,
+        "echo" => {
+            let lower = trimmed.to_lowercase();
+            !lower.contains('$')
+                && !lower.contains('`')
+                && !lower.contains('\\')
+                && !["ok", "pass", "fail", "result", "error", "success"]
+                    .iter()
+                    .any(|w| lower.contains(w))
+        }
+        _ => false,
+    }
+}
+
+/// Does the verification runner's output reach the tool result UNFILTERED —
+/// the only condition under which captured output may substitute for a
+/// masked exit status as SUCCESS evidence?
 ///
-/// Output passed through a pipeline (`|`) is filtered or transformed by
-/// downstream commands, so captured tool output CANNOT prove test success: a
-/// filter like `grep 'test result: ok'` or `grep '0 failed'` drops failing
-/// summaries while retaining passing ones, hiding failing test suites.
-/// Downstream commands like `cut`, `sort`, `awk`, `sed`, `head`, `tail`, `wc`,
-/// etc. also alter or truncate the stream. Only transparent pass-throughs
-/// (`tee`, `cat`) or neutral grep/rg matching solely "test result" without
-/// inverted matching, max-count, or outcome filters (`ok`, `pass`, `fail`,
-/// `success`) are exempted.
-pub(crate) fn shell_command_pipes_runner_output(command: &str) -> bool {
+/// Requirements (fail-closed, AGENTS.md rule 3):
+/// - exactly one runner segment (two runners' outputs mix: one suite's
+///   `test result: ok` can sit beside another's unlabelled error);
+/// - the runner segment diverts neither stream (`cargo test > o`,
+///   `cargo test > o 2>&1`, `pytest 2>/dev/null` all fail);
+/// - every downstream pipeline stage is transparent (`tee FILE`, bare
+///   `cat`) — `grep` of any kind (`grep 'test result'`, `grep -m1`,
+///   `grep -E 'test result: o.'`), `head`, `tail`, `sort`, `awk`, … can drop
+///   the failing lines while keeping a passing one;
+/// - every other segment is output-neutral, so a later `grep 'test result:
+///   ok' o` / `cat o` / `echo '3 passed'` cannot contribute success-shaped
+///   text that the runner never printed to the result.
+pub(crate) fn runner_output_reaches_result_unfiltered(command: &str) -> bool {
     let normalized = command.trim().to_lowercase();
     if normalized.is_empty() {
         return false;
     }
     let segments = shell_segments_with_operators(&normalized);
-    for (i, (_op, segment)) in segments.iter().enumerate() {
-        let is_runner = match segment_verification_prefix(segment, VERIFICATION_PREFIXES) {
-            Some(prefix) => !segment_is_info_only_invocation(segment, prefix),
-            None => segment_runs_test_script(segment),
-        };
-        if is_runner {
-            let mut j = i + 1;
-            while let Some((next_op, downstream)) = segments.get(j) {
-                if next_op.trim() != "|" {
-                    break;
-                }
-                let trimmed = downstream.trim();
-                let words: Vec<&str> = trimmed.split_whitespace().collect();
-                let cmd = words.first().copied().unwrap_or("");
-                // tee and cat pass lines through unmodified
-                if matches!(cmd, "tee" | "cat") {
-                    j += 1;
-                    continue;
-                }
-                // Neutral grep/rg that preserves all test result lines (both passing and failing)
-                if matches!(cmd, "grep" | "rg") {
-                    let has_invert = words.iter().any(|w| *w == "-v" || *w == "--invert-match");
-                    let has_max_count = words
-                        .iter()
-                        .any(|w| *w == "-m" || w.starts_with("-m=") || *w == "--max-count");
-                    let has_outcome_filter = trimmed.contains("ok")
-                        || trimmed.contains("pass")
-                        || trimmed.contains("success")
-                        || trimmed.contains("fail");
-                    let has_neutral_marker = trimmed.contains("test result");
-
-                    if !has_invert && !has_max_count && !has_outcome_filter && has_neutral_marker {
-                        j += 1;
-                        continue;
-                    }
-                }
-                // Any other downstream command (cut, sort, awk, sed, head, tail, wc,
-                // non-neutral grep, etc.) can filter or alter runner output.
-                return true;
-            }
-        }
+    let runners: Vec<usize> = segments
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, segment))| segment_is_output_runner(segment))
+        .map(|(i, _)| i)
+        .collect();
+    let [runner_idx] = runners.as_slice() else {
+        return false;
+    };
+    let runner_idx = *runner_idx;
+    if segment_diverts_output(&segments[runner_idx].1) {
+        return false;
     }
-    false
+    let mut j = runner_idx + 1;
+    while let Some((op, stage)) = segments.get(j) {
+        if op.trim() != "|" {
+            break;
+        }
+        if !segment_is_transparent_stage(stage.trim()) {
+            return false;
+        }
+        j += 1;
+    }
+    let runner_pipeline = runner_idx..j;
+    // Every other segment — including an upstream stage piped INTO the
+    // runner, whose stderr still reaches the result — must be neutral.
+    segments
+        .iter()
+        .enumerate()
+        .all(|(i, (_, segment))| runner_pipeline.contains(&i) || segment_is_output_neutral(segment))
+}
+
+/// Did the tool deliver the command's COMPLETE output? A paginated page with
+/// more to come (`has_more`), a page starting past offset 0, a pty
+/// `[output truncated …]` marker, or a result that is not a well-formed JSON
+/// object (e.g. the checkpoint log's 1000-char head truncation) all mean the
+/// failing tail of a multi-suite run may be missing — so an early
+/// `test result: ok` in the visible head proves nothing.
+pub(crate) fn tool_result_output_is_complete(result: &str) -> bool {
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(result)
+    else {
+        return false;
+    };
+    map.iter().all(|(key, value)| {
+        if key.ends_with("pagination") {
+            let has_more = value
+                .get("has_more")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+            let offset = value
+                .get("offset")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            return !has_more && offset == 0;
+        }
+        match value.as_str() {
+            Some(text) => !text.contains("[output truncated"),
+            None => true,
+        }
+    })
+}
+
+/// The single success-credit rule for a MASKED verification run (exit status
+/// not authoritative): the runner's output reached the tool result
+/// unfiltered and complete, and it carries an unambiguous success marker with
+/// no failure marker. Used by the dispatcher's credit path and by both
+/// checkpoint-scan paths so they cannot drift apart (AGENTS.md rule 5).
+pub(crate) fn masked_run_output_proves_success(command: &str, result: &str) -> bool {
+    runner_output_reaches_result_unfiltered(command)
+        && tool_result_output_is_complete(result)
+        && runner_output_proves_success(result)
 }
 
 /// The `N failed` count directly preceding a "failed" summary word, when the
@@ -1590,6 +1715,17 @@ pub(crate) fn runner_output_proves_success(output: &str) -> bool {
         lower.contains("test result: ok") || saw_zero_failed || lower.contains(" passed");
     if !success_marker {
         return false;
+    }
+    // pytest reports collection/fixture errors as `N error(s)` beside
+    // `M passed` with no "failed" word (`2 passed, 1 error in 0.1s`): a
+    // nonzero error tally vetoes the credit.
+    let mut from = 0;
+    while let Some(rel) = lower[from..].find("error") {
+        let abs = from + rel;
+        if failed_count_before(&lower, abs).is_some_and(|n| n > 0) {
+            return false;
+        }
+        from = abs + 1;
     }
     !lower.contains("test result: failed")
         && !lower.contains("failures:")

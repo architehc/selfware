@@ -520,12 +520,13 @@ fn try_parse_xml(content: &str) -> Option<Vec<(Result<ParsedToolCall>, String)>>
                 let name = resolve_qwen_tool_name(&cap[1], &cap[2]);
                 let params_str = &cap[2];
 
-                let result = parse_qwen3_parameters(params_str).map(|arguments| ParsedToolCall {
-                    tool_name: name,
-                    arguments,
-                    raw_text: raw.clone(),
-                    parse_method: ParseMethod::Xml,
-                });
+                let result =
+                    parse_qwen3_parameters(&cap[1], params_str).map(|arguments| ParsedToolCall {
+                        tool_name: name,
+                        arguments,
+                        raw_text: raw.clone(),
+                        parse_method: ParseMethod::Xml,
+                    });
 
                 (result, raw)
             })
@@ -621,12 +622,13 @@ fn try_parse_xml(content: &str) -> Option<Vec<(Result<ParsedToolCall>, String)>>
                 let name = resolve_qwen_tool_name(&cap[1], &cap[2]);
                 let params_str = &cap[2];
 
-                let result = parse_qwen3_parameters(params_str).map(|arguments| ParsedToolCall {
-                    tool_name: name,
-                    arguments,
-                    raw_text: raw.clone(),
-                    parse_method: ParseMethod::Xml,
-                });
+                let result =
+                    parse_qwen3_parameters(&cap[1], params_str).map(|arguments| ParsedToolCall {
+                        tool_name: name,
+                        arguments,
+                        raw_text: raw.clone(),
+                        parse_method: ParseMethod::Xml,
+                    });
 
                 (result, raw)
             })
@@ -719,30 +721,75 @@ fn try_parse_kimi_tools(content: &str) -> Option<Vec<(Result<ParsedToolCall>, St
     }
 }
 
+/// Top-level `<name>` / `<arguments>` blocks of a Qwen hybrid call body.
+///
+/// Only blocks that form the *leading structure* of the body count: the body is
+/// scanned from the start, skipping whitespace, and each step must open with
+/// `<name>` or `<arguments>` (each at most once). The scan stops at the first
+/// other token, so `<name>`/`<arguments>` text that appears later — inside a
+/// `<parameter=content>` value, or in free text — is payload, never structure.
+#[derive(Default)]
+struct QwenHybridHeader<'a> {
+    name: Option<&'a str>,
+    arguments: Option<&'a str>,
+}
+
+fn qwen_hybrid_header(params_str: &str) -> QwenHybridHeader<'_> {
+    let mut header = QwenHybridHeader::default();
+    let mut rest = params_str;
+    loop {
+        rest = rest.trim_start();
+        let (slot, tag) = if rest.starts_with("<name>") && header.name.is_none() {
+            (&mut header.name, "name")
+        } else if rest.starts_with("<arguments>") && header.arguments.is_none() {
+            (&mut header.arguments, "arguments")
+        } else {
+            break;
+        };
+        let open_len = tag.len() + 2;
+        let close = format!("</{}>", tag);
+        let after = &rest[open_len..];
+        let Some(end) = after.find(&close) else {
+            break;
+        };
+        *slot = Some(&after[..end]);
+        rest = &after[end + close.len()..];
+    }
+    header
+}
+
+/// Whether the hybrid `<function=tool><name>x</name><arguments>{…}</arguments>`
+/// form may apply: only when the outer function name is the generic `tool`, or
+/// when the body carries no `<parameter=` tags at all. A real tool call such as
+/// `<function=file_write><parameter=content>…` must never have its arguments
+/// replaced by `<arguments>` text appearing inside a parameter value.
+fn qwen_hybrid_form_allowed(captured_name: &str, params_str: &str) -> bool {
+    captured_name.trim() == "tool" || !params_str.contains("<parameter=")
+}
+
 /// Resolve the actual tool name for Qwen tool calls. If the outer function name
-/// is generic (`"tool"`), extract the real tool name from the inner `<name>` tag.
+/// is generic (`"tool"`), extract the real tool name from the leading top-level
+/// `<name>` tag (never from inside a `<parameter=…>` value or argument payload).
 fn resolve_qwen_tool_name(captured_name: &str, params_str: &str) -> String {
     let trimmed = captured_name.trim();
     if trimmed == "tool" {
-        if let Some(start) = params_str.find("<name>") {
-            let after = &params_str[start + "<name>".len()..];
-            if let Some(end) = after.find("</name>") {
-                let inner = after[..end].trim();
-                if !inner.is_empty() {
-                    return inner.to_string();
-                }
+        if let Some(inner) = qwen_hybrid_header(params_str).name {
+            let inner = inner.trim();
+            if !inner.is_empty() {
+                return inner.to_string();
             }
         }
     }
     trimmed.to_string()
 }
 
-/// Parse Qwen3-style parameters: <parameter=key>value</parameter>, or hybrid <arguments>...</arguments>
-fn parse_qwen3_parameters(params_str: &str) -> Result<serde_json::Value> {
-    if let Some(start) = params_str.find("<arguments>") {
-        let after = &params_str[start + "<arguments>".len()..];
-        if let Some(end) = after.find("</arguments>") {
-            return parse_xml_arguments(&after[..end]);
+/// Parse Qwen3-style parameters: <parameter=key>value</parameter>, or the hybrid
+/// leading `<arguments>...</arguments>` form (see [`qwen_hybrid_form_allowed`]
+/// and [`qwen_hybrid_header`]).
+fn parse_qwen3_parameters(captured_name: &str, params_str: &str) -> Result<serde_json::Value> {
+    if qwen_hybrid_form_allowed(captured_name, params_str) {
+        if let Some(inner) = qwen_hybrid_header(params_str).arguments {
+            return parse_xml_arguments(inner);
         }
     }
     let param_regex = qwen3_parameter_regex();

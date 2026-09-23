@@ -310,16 +310,98 @@ fn normalize_checkpoint_path(raw: &str) -> Option<PathBuf> {
     Some(crate::safety::checker::normalize_path(&lexical))
 }
 
+/// Exact (lowercased) basenames of build manifests, dependency pins and
+/// lockfiles: a write to one can change what a build or test run does, so it
+/// is never a doc-only / non-code artifact.
+const BUILD_OR_DEPENDENCY_BASENAMES: &[&str] = &[
+    // C / C++
+    "cmakelists.txt",
+    "conanfile.txt",
+    "conanfile.py",
+    "vcpkg.json",
+    "vcpkg-configuration.json",
+    "meson.build",
+    "makefile",
+    "gnumakefile",
+    // Python
+    "pipfile",
+    "pipfile.lock",
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "poetry.lock",
+    "uv.lock",
+    "pdm.lock",
+    "tox.ini",
+    "environment.yml",
+    "environment.yaml",
+    // Rust
+    "cargo.toml",
+    "cargo.lock",
+    "rust-toolchain",
+    "rust-toolchain.toml",
+    // JavaScript / TypeScript
+    "package.json",
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+    "bun.lockb",
+    "deno.json",
+    "tsconfig.json",
+    // Go
+    "go.mod",
+    "go.sum",
+    "go.work",
+    // Ruby / PHP / Elixir
+    "gemfile",
+    "gemfile.lock",
+    "composer.json",
+    "composer.lock",
+    "mix.exs",
+    "mix.lock",
+    // JVM / .NET
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "settings.gradle",
+    "settings.gradle.kts",
+    "gradle.properties",
+    "build.sbt",
+    "packages.config",
+    "packages.lock.json",
+    "directory.packages.props",
+    // Zig
+    "build.zig",
+    "build.zig.zon",
+];
+
+/// Is this (lowercased) basename a build manifest, dependency pin, or
+/// lockfile? Exact names only (plus the `requirements*.txt`/`.in` and
+/// `constraints*.txt`/`.in` pip families): the previous prefix match read
+/// `requirements.md`, `pipeline.md`, `packages.md`, `dependencies.md`,
+/// `cargo-notes.md` and `constraints.md` as build files and armed the
+/// code-verification gate on a doc-only write. Documentation extensions
+/// (`.md`, `.markdown`, `.rst`, `.adoc`, `.org`) are never build files.
 fn basename_is_build_or_dependency_file(basename: &str) -> bool {
-    basename == "cmakelists.txt"
-        || basename == "conanfile.txt"
-        || basename.starts_with("requirements")
-        || basename.starts_with("constraints")
-        || basename.starts_with("packages")
-        || basename.starts_with("dependencies")
-        || basename.starts_with("vcpkg")
-        || basename.starts_with("pip")
-        || basename.starts_with("cargo")
+    let (stem, ext) = match basename.rsplit_once('.') {
+        Some((stem, ext)) => (stem, Some(ext)),
+        None => (basename, None),
+    };
+    if matches!(ext, Some("md" | "markdown" | "rst" | "adoc" | "org")) {
+        return false;
+    }
+    if BUILD_OR_DEPENDENCY_BASENAMES.contains(&basename) {
+        return true;
+    }
+    // pip requirement / constraint files: requirements.txt,
+    // requirements-dev.txt, requirements_test.in, constraints.txt, …
+    let pip_family = |prefix: &str| {
+        stem.strip_prefix(prefix)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['-', '_', '.']))
+    };
+    matches!(ext, Some("txt" | "in")) && (pip_family("requirements") || pip_family("constraints"))
 }
 
 /// Deliberately conservative allow-list for text/document/config artifacts.
@@ -1098,21 +1180,19 @@ impl Agent {
                 if !super::tool_dispatch::shell_command_is_masked_verification(command) {
                     return None;
                 }
-                let output_proven =
-                    !super::tool_dispatch::shell_command_pipes_runner_output(command)
-                        && call
-                            .result
-                            .as_deref()
-                            .map(super::tool_dispatch::runner_output_proves_success)
-                            .unwrap_or(false);
+                let output_proven = call.result.as_deref().is_some_and(|result| {
+                    super::tool_dispatch::masked_run_output_proves_success(command, result)
+                });
                 (!output_proven).then(|| command.to_string())
             })
     }
 
-    /// A checkpointed shell call whose masked-pipeline verification run was
-    /// credited from the runner's own success output. The log's result text
-    /// is the evidence; pipelined output is short (the filter kept the
-    /// summary lines), so the marker survives the log's head-truncation.
+    /// A checkpointed shell call whose masked verification run was credited
+    /// from the runner's own success output. Same rule as the dispatcher
+    /// ([`super::tool_dispatch::masked_run_output_proves_success`]): the
+    /// runner's output must reach the result unfiltered, and the logged
+    /// result must be complete — a head-truncated log entry (no longer valid
+    /// JSON) can hide a later suite's FAILED line, so it earns nothing.
     fn checkpoint_call_is_output_proven_masked_verification(
         tc: &crate::checkpoint::ToolCallLog,
     ) -> bool {
@@ -1125,15 +1205,12 @@ impl Agent {
         let Some(command) = args.get("command").and_then(Value::as_str) else {
             return false;
         };
-        if !super::tool_dispatch::shell_command_is_masked_verification(command)
-            || super::tool_dispatch::shell_command_pipes_runner_output(command)
-        {
+        if !super::tool_dispatch::shell_command_is_masked_verification(command) {
             return false;
         }
-        tc.result
-            .as_deref()
-            .map(super::tool_dispatch::runner_output_proves_success)
-            .unwrap_or(false)
+        tc.result.as_deref().is_some_and(|result| {
+            super::tool_dispatch::masked_run_output_proves_success(command, result)
+        })
     }
 
     /// Derive task-owned non-code artifacts and verify each one was read back
@@ -1516,9 +1593,10 @@ impl Agent {
             let masked_note = match self.recent_uncredited_masked_run() {
                 Some(command) => format!(
                     " Note: `{command}` earned no verification credit — a pipeline/connector \
-                     masked the runner's exit status, and no unambiguous success line (e.g. \
-                     `test result: ok`) was captured. Rerun the verification WITHOUT the pipe \
-                     so its exit status is authoritative."
+                     masked the runner's exit status, and its complete, unfiltered output \
+                     carried no unambiguous success line (e.g. `test result: ok`). Rerun the \
+                     verification WITHOUT pipes, output redirections, or `;`/`||` chains so \
+                     its exit status is authoritative."
                 ),
                 None => String::new(),
             };
