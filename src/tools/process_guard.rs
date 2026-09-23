@@ -126,7 +126,7 @@ pub const DRAIN_GRACE: Duration = Duration::from_secs(1);
 /// Final wait for the output drains after the process group was killed.
 pub const DRAIN_AFTER_KILL: Duration = Duration::from_millis(500);
 
-type DrainSlot<'a> = (
+pub(crate) type DrainSlot<'a> = (
     &'a mut tokio::task::JoinHandle<Vec<u8>>,
     &'a mut Option<Vec<u8>>,
 );
@@ -135,7 +135,7 @@ type DrainSlot<'a> = (
 /// task's output in its slot. A handle whose slot is already filled is never
 /// polled again; a handle that is still pending at the deadline is left
 /// unpolled-to-completion and is safe to poll again later.
-async fn collect_drains_until(
+pub(crate) async fn collect_drains_until(
     deadline: tokio::time::Instant,
     stdout: DrainSlot<'_>,
     stderr: DrainSlot<'_>,

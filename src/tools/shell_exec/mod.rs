@@ -515,30 +515,61 @@ impl Tool for ShellExec {
         // Await the drains only up to the same absolute deadline. A child that
         // backgrounded a pipe-holding descendant (`sleep 300 &`) must not hold
         // the tool past the budget — reap the group and report the timeout.
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        let (stdout_bytes, stderr_bytes) = match tokio::time::timeout(remaining, async {
-            tokio::join!(&mut stdout_task, &mut stderr_task)
-        })
-        .await
-        {
-            Ok((out, err)) => (out.unwrap_or_default(), err.unwrap_or_default()),
-            Err(_) => {
-                stdout_task.abort();
-                stderr_task.abort();
+        //
+        // Each drain has its own result slot (shared helper with
+        // `run_command_bounded`): output a drain ALREADY captured survives a
+        // timeout of the other one instead of being discarded with it.
+        let (stdout_bytes, stderr_bytes) = {
+            use crate::tools::process_guard::{collect_drains_until, DRAIN_AFTER_KILL};
+            let mut stdout_slot: Option<Vec<u8>> = None;
+            let mut stderr_slot: Option<Vec<u8>> = None;
+            collect_drains_until(
+                tokio::time::Instant::from_std(deadline),
+                (&mut stdout_task, &mut stdout_slot),
+                (&mut stderr_task, &mut stderr_slot),
+            )
+            .await;
+            if stdout_slot.is_none() || stderr_slot.is_none() {
+                // A descendant still holds a pipe past the budget: reap the
+                // group so the pipe closes, give the drain(s) a short bounded
+                // chance to reach EOF, then abort only the unfinished ones.
                 pg_guard.kill();
                 timed_out = true;
-                (Vec::new(), Vec::new())
+                collect_drains_until(
+                    tokio::time::Instant::now() + DRAIN_AFTER_KILL,
+                    (&mut stdout_task, &mut stdout_slot),
+                    (&mut stderr_task, &mut stderr_slot),
+                )
+                .await;
+                if stdout_slot.is_none() {
+                    stdout_task.abort();
+                }
+                if stderr_slot.is_none() {
+                    stderr_task.abort();
+                }
             }
+            (
+                stdout_slot.unwrap_or_default(),
+                stderr_slot.unwrap_or_default(),
+            )
         };
         let stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
         let stderr = if timed_out {
-            format!(
+            // Keep whatever stderr was captured before the kill, then the
+            // timeout notice (always present so callers can key on it).
+            let captured = String::from_utf8_lossy(&stderr_bytes);
+            let notice = format!(
                 "Command timed out after {}s and was killed (whole process group \
                  reaped). For long-running builds/tests (e.g. `cargo \
                  check`/`build`/`test`), retry the SAME command with a larger \
                  timeout, e.g. add \"timeout_secs\": 600 to the tool arguments.",
                 args.timeout_secs
-            )
+            );
+            if captured.trim().is_empty() {
+                notice
+            } else {
+                format!("{}\n{}", captured.trim_end(), notice)
+            }
         } else {
             String::from_utf8_lossy(&stderr_bytes).into_owned()
         };

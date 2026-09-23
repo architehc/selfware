@@ -11,26 +11,6 @@ const SHUTDOWN_GRACE_SECS: u64 = 10;
 /// large stack so every subcommand works there.
 const MAIN_STACK_SIZE: usize = 16 * 1024 * 1024;
 
-/// Restore the terminal before a hard `std::process::exit`.
-///
-/// `exit()` runs no destructors, so any raw-mode guard (the ESC listener, the
-/// TUI) never gets to put the terminal back and the shell is left without
-/// echo or line editing. Same idea as `read_line_pausing_esc_with_deadline`
-/// in `src/agent/execution.rs`, which forces cooked mode before reading:
-/// `disable_raw_mode` is idempotent (a no-op when raw mode was never
-/// enabled), so it is always safe to call. The TUI (ratatui) hides the
-/// cursor while drawing, so show it again too — only when stdout is a
-/// terminal, so no escape bytes leak into a pipe. Errors are ignored: this
-/// is best-effort cleanup on the way out.
-fn restore_terminal_before_exit() {
-    use std::io::IsTerminal;
-    let _ = crossterm::terminal::disable_raw_mode();
-    let mut stdout = std::io::stdout();
-    if stdout.is_terminal() {
-        let _ = crossterm::execute!(stdout, crossterm::cursor::Show);
-    }
-}
-
 fn main() -> ExitCode {
     // SIGPIPE is deliberately left at Rust's default (ignored). Resetting it
     // to SIG_DFL made ANY write to a closed pipe fatal — including pipes to
@@ -65,7 +45,7 @@ async fn async_main() -> ExitCode {
             selfware::ShutdownReason::SignalTerminate => {
                 eprintln!("\nReceived SIGTERM, winding down...");
                 if selfware::is_repl_waiting_for_input() {
-                    restore_terminal_before_exit();
+                    selfware::output::restore_terminal_before_exit();
                     std::process::exit(143);
                 }
             }
@@ -88,7 +68,7 @@ async fn async_main() -> ExitCode {
                     selfware::ShutdownReason::SignalTerminate => 143, // 128 + SIGTERM
                     _ => 130, // 128 + SIGINT
                 };
-                restore_terminal_before_exit();
+                selfware::output::restore_terminal_before_exit();
                 std::process::exit(code);
             }
             _ = tokio::time::sleep(std::time::Duration::from_secs(SHUTDOWN_GRACE_SECS)) => {
@@ -97,7 +77,7 @@ async fn async_main() -> ExitCode {
                     selfware::ShutdownReason::SignalTerminate => 143,
                     _ => 1,
                 };
-                restore_terminal_before_exit();
+                selfware::output::restore_terminal_before_exit();
                 std::process::exit(code);
             }
         }

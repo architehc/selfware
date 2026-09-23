@@ -117,25 +117,46 @@ where
     };
 
     // Bound the collection phase with the SAME absolute deadline; on
-    // collection timeout abort the drains and re-kill the group best-effort.
-    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-    let (stdout, mut stderr, drain_timed_out) = match tokio::time::timeout(remaining, async {
-        tokio::join!(&mut so_task, &mut se_task)
-    })
-    .await
-    {
-        Ok((out, err)) => (out.unwrap_or_default(), err.unwrap_or_default(), false),
-        Err(_) => {
-            so_task.abort();
-            se_task.abort();
+    // collection timeout re-kill the group and abort only the drains that
+    // never finished. Each drain has its own result slot (shared helper with
+    // `run_command_bounded`), so output one stream ALREADY captured survives
+    // a timeout of the other instead of being discarded with it.
+    let (stdout, mut stderr, drain_timed_out) = {
+        use crate::tools::process_guard::{collect_drains_until, DRAIN_AFTER_KILL};
+        let mut so_slot: Option<Vec<u8>> = None;
+        let mut se_slot: Option<Vec<u8>> = None;
+        collect_drains_until(
+            tokio::time::Instant::from_std(deadline),
+            (&mut so_task, &mut so_slot),
+            (&mut se_task, &mut se_slot),
+        )
+        .await;
+        let drain_timed_out = so_slot.is_none() || se_slot.is_none();
+        if drain_timed_out {
             #[cfg(unix)]
             if let Some(p) = pid {
                 use nix::sys::signal::{killpg, Signal};
                 use nix::unistd::Pid;
                 let _ = killpg(Pid::from_raw(p as i32), Signal::SIGKILL);
             }
-            (Vec::new(), Vec::new(), true)
+            collect_drains_until(
+                tokio::time::Instant::now() + DRAIN_AFTER_KILL,
+                (&mut so_task, &mut so_slot),
+                (&mut se_task, &mut se_slot),
+            )
+            .await;
+            if so_slot.is_none() {
+                so_task.abort();
+            }
+            if se_slot.is_none() {
+                se_task.abort();
+            }
         }
+        (
+            so_slot.unwrap_or_default(),
+            se_slot.unwrap_or_default(),
+            drain_timed_out,
+        )
     };
     let timed_out = wait_timed_out || drain_timed_out;
     // Fail-closed: a timed-out run (wait OR collection) never reports
@@ -601,7 +622,7 @@ impl VerificationGate {
         self.config.post_edit_test_command = command;
     }
 
-    /// Resolve a file path, checking `working_dir` (or `cwd`) first for relative paths
+    /// Resolve a file path, checking an explicit `working_dir` first for relative paths
     /// so that edits made in a subproject or nested directory are resolved correctly
     /// even if `project_root` points to an enclosing workspace.
     pub fn resolve_file_path(&self, file: &str) -> PathBuf {
@@ -609,22 +630,25 @@ impl VerificationGate {
         if p.is_absolute() {
             p.to_path_buf()
         } else {
-            let cwd = self
-                .working_dir
-                .clone()
-                .or_else(|| std::env::current_dir().ok());
-            if let Some(ref dir) = cwd {
-                let cwd_path = dir.join(p);
-                if cwd_path.exists() {
-                    return cwd_path;
-                }
+            // Only an EXPLICIT working dir is consulted before the project
+            // root. The implicit process-cwd fallback made every gate
+            // without one resolve `Cargo.toml`/`src/main.rs` against
+            // wherever the process happened to run (the selfware checkout
+            // in tests, whose manifests then won over a Python project's —
+            // CI-only `infer_repo_language` / side-effect failures). The
+            // agent always sets the working dir explicitly (agent/mod.rs),
+            // so the nested-subproject case keeps working.
+            let Some(dir) = self.working_dir.as_ref() else {
+                return self.project_root.join(p);
+            };
+            let wd_path = dir.join(p);
+            if wd_path.exists() {
+                return wd_path;
             }
             if self.project_root.join(p).exists() {
                 self.project_root.join(p)
-            } else if let Some(dir) = cwd {
-                dir.join(p)
             } else {
-                self.project_root.join(p)
+                wd_path
             }
         }
     }
@@ -1650,7 +1674,9 @@ impl VerificationGate {
             .and_then(|p| p.parent())
             .filter(|p| p.is_dir())
             .map(|p| p.to_path_buf())
-            .or_else(|| std::env::current_dir().ok())
+            // Explicit working dir, then the project root -- never the
+            // ambient process cwd (see `resolve_file_path`).
+            .or_else(|| self.working_dir.clone())
             .unwrap_or_else(|| self.project_root.clone());
 
         let mut check_cmd = Command::new(program);

@@ -158,7 +158,13 @@ impl Agent {
                     if tap_count >= FORCE_QUIT_TAPS {
                         // Force quit immediately
                         println!("\n\x1b[1m\x1b[91m⚠️  FORCE QUIT - Exiting immediately\x1b[0m");
-                        std::process::exit(1);
+                        // `exit()` runs no destructors: put the terminal back
+                        // (cooked mode, visible cursor) so the user's shell is
+                        // not left without echo after a force quit.
+                        crate::output::restore_terminal_before_exit();
+                        // 130 = 128 + SIGINT, matching the signal handler's
+                        // forced exit on a repeated Ctrl-C (src/main.rs).
+                        std::process::exit(130);
                     } else if tap_count == 2 {
                         // Graceful exit on double-tap
                         println!("\n\x1b[1m\x1b[33m👋 Gracefully exiting... (saving checkpoint if needed)\x1b[0m");

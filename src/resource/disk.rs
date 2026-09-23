@@ -32,7 +32,9 @@ pub struct DiskManager {
     logs_path: PathBuf,
     models_path: PathBuf,
     /// Cache for models directory size: (calculated_at, size_in_bytes)
-    models_size_cache: std::sync::Mutex<Option<(std::time::SystemTime, u64)>>,
+    // Monotonic `Instant`, not `SystemTime`: a wall-clock step backwards
+    // made `elapsed()` fail and silently invalidated a fresh cache entry.
+    models_size_cache: std::sync::Mutex<Option<(std::time::Instant, u64)>>,
 }
 
 /// Disk usage statistics
@@ -331,7 +333,7 @@ impl DiskManager {
         // Return cached value if still fresh
         if let Ok(cache) = self.models_size_cache.lock() {
             if let Some((cached_at, cached_size)) = *cache {
-                if cached_at.elapsed().unwrap_or(CACHE_TTL * 2) < CACHE_TTL {
+                if cached_at.elapsed() < CACHE_TTL {
                     debug!(size = cached_size, "Returning cached models directory size");
                     return cached_size;
                 }
@@ -358,7 +360,7 @@ impl DiskManager {
 
         // Update cache
         if let Ok(mut cache) = self.models_size_cache.lock() {
-            *cache = Some((std::time::SystemTime::now(), size));
+            *cache = Some((std::time::Instant::now(), size));
         }
 
         size

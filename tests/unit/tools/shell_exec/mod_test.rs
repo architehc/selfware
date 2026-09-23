@@ -223,6 +223,35 @@ async fn test_shell_exec_timeout() {
     assert!(stderr.contains("timeout_secs"), "stderr was: {stderr}");
 }
 
+/// Regression: a drain timeout must not discard output the OTHER stream
+/// already captured. The shell prints to stdout and exits (stdout EOFs) while
+/// a backgrounded sleeper keeps only STDERR open past the budget: the call is
+/// reported as timed out, but the stdout text survives.
+#[tokio::test]
+#[cfg(unix)]
+async fn test_shell_exec_drain_timeout_keeps_captured_stdout() {
+    let tool = ShellExec;
+    let args = serde_json::json!({
+        "command": "echo early-stdout-marker; sleep 30 >/dev/null & exit 0",
+        "timeout_secs": 2
+    });
+
+    let start = std::time::Instant::now();
+    let result = tool.execute(args).await.unwrap();
+    assert!(
+        start.elapsed().as_secs() < 10,
+        "must return in bounded time"
+    );
+    assert_eq!(result["timed_out"], true);
+    let stdout = result["stdout"].as_str().unwrap();
+    assert!(
+        stdout.contains("early-stdout-marker"),
+        "stdout captured before the stderr drain timed out must be kept: {stdout}"
+    );
+    let stderr = result["stderr"].as_str().unwrap();
+    assert!(stderr.contains("timed out"), "stderr was: {stderr}");
+}
+
 #[test]
 fn test_command_is_long_running_build() {
     // Build/test commands get a generous timeout floor so they aren't killed

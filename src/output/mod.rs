@@ -1563,6 +1563,29 @@ pub fn exit_on_closed_output() -> ! {
     std::process::exit(BROKEN_PIPE_EXIT_CODE)
 }
 
+/// Restore the terminal before a hard `std::process::exit`.
+///
+/// `exit()` runs no destructors, so any raw-mode guard (the ESC listener, the
+/// TUI) never gets to put the terminal back and the shell is left without
+/// echo or line editing. Same idea as `read_line_pausing_esc_with_deadline`
+/// in `src/agent/execution.rs`, which forces cooked mode before reading:
+/// `disable_raw_mode` is idempotent (a no-op when raw mode was never
+/// enabled), so it is always safe to call. The TUI (ratatui) hides the
+/// cursor while drawing, so show it again too — only when stdout is a
+/// terminal, so no escape bytes leak into a pipe. Errors are ignored: this
+/// is best-effort cleanup on the way out.
+///
+/// Lives in the library (not `main.rs`) so every hard-exit path — the signal
+/// handler in the binary and the REPL's triple-Ctrl-C force quit — shares it.
+pub fn restore_terminal_before_exit() {
+    use std::io::IsTerminal;
+    let _ = crossterm::terminal::disable_raw_mode();
+    let mut stdout = std::io::stdout();
+    if stdout.is_terminal() {
+        let _ = crossterm::execute!(stdout, crossterm::cursor::Show);
+    }
+}
+
 #[cfg(test)]
 #[path = "../../tests/unit/output/mod_test.rs"]
 mod tests;

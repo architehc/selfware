@@ -138,3 +138,41 @@ async fn run_stage_collection_bounded_when_grandchild_holds_pipe() {
     );
     assert!(!result.passed, "a timed-out stage must not report success");
 }
+
+/// Regression: a drain timeout must not discard output the OTHER stream
+/// already captured. The parent writes to stdout and exits (stdout EOFs),
+/// while a backgrounded sleeper keeps only STDERR open past the deadline.
+/// The stage times out, but the stdout text must survive in the output.
+#[tokio::test]
+#[cfg(unix)]
+async fn run_stage_drain_timeout_keeps_captured_stdout() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let start = std::time::Instant::now();
+    let result = run_stage(
+        QaStage::Test,
+        "sh",
+        &[
+            "-c",
+            "echo early-stdout-marker; sleep 30 >/dev/null & exit 0",
+        ],
+        dir.path(),
+        1, // floored to 5s by run_stage
+    )
+    .await;
+    assert!(
+        start.elapsed().as_secs() < 12,
+        "stage must return in bounded time"
+    );
+    assert!(!result.passed, "a timed-out stage must not report success");
+    assert!(
+        result.output.contains("timed out"),
+        "drain timeout must still be reported: {}",
+        result.output
+    );
+    assert!(
+        result.output.contains("early-stdout-marker"),
+        "stdout captured before the stderr drain timed out must be kept: {}",
+        result.output
+    );
+}

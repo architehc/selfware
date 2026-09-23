@@ -184,27 +184,46 @@ async fn run_stage(
     // backgrounded descendant that escaped the process-group kill still holds
     // a write end, and an unbounded await here would stall the stage forever
     // (review finding: QA can hang beyond its timeout). On collection
-    // timeout, abort the drains and re-kill the group best-effort.
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    let (stdout_bytes, stderr_bytes, drain_timed_out) =
-        match tokio::time::timeout(remaining, async {
-            tokio::join!(&mut stdout_task, &mut stderr_task)
-        })
-        .await
-        {
-            Ok((out, err)) => (out.unwrap_or_default(), err.unwrap_or_default(), false),
-            Err(_) => {
-                stdout_task.abort();
-                stderr_task.abort();
-                #[cfg(unix)]
-                if let Some(pid) = child_pid {
-                    use nix::sys::signal::{killpg, Signal};
-                    use nix::unistd::Pid;
-                    let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
-                }
-                (Vec::new(), Vec::new(), true)
+    // timeout, re-kill the group best-effort and abort only the drains that
+    // never finished: each drain has its own result slot (shared helper with
+    // `run_command_bounded`), so output one stream ALREADY captured is kept.
+    let (stdout_bytes, stderr_bytes, drain_timed_out) = {
+        use crate::tools::process_guard::{collect_drains_until, DRAIN_AFTER_KILL};
+        let mut stdout_slot: Option<Vec<u8>> = None;
+        let mut stderr_slot: Option<Vec<u8>> = None;
+        collect_drains_until(
+            tokio::time::Instant::from_std(deadline),
+            (&mut stdout_task, &mut stdout_slot),
+            (&mut stderr_task, &mut stderr_slot),
+        )
+        .await;
+        let drain_timed_out = stdout_slot.is_none() || stderr_slot.is_none();
+        if drain_timed_out {
+            #[cfg(unix)]
+            if let Some(pid) = child_pid {
+                use nix::sys::signal::{killpg, Signal};
+                use nix::unistd::Pid;
+                let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
             }
-        };
+            collect_drains_until(
+                tokio::time::Instant::now() + DRAIN_AFTER_KILL,
+                (&mut stdout_task, &mut stdout_slot),
+                (&mut stderr_task, &mut stderr_slot),
+            )
+            .await;
+            if stdout_slot.is_none() {
+                stdout_task.abort();
+            }
+            if stderr_slot.is_none() {
+                stderr_task.abort();
+            }
+        }
+        (
+            stdout_slot.unwrap_or_default(),
+            stderr_slot.unwrap_or_default(),
+            drain_timed_out,
+        )
+    };
     let timed_out = wait_timed_out || drain_timed_out;
     let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -221,7 +240,15 @@ async fn run_stage(
             stage,
             passed: false,
             duration_ms,
-            output: format!("{} {:?} timed out after {}s", program, args, timeout_secs),
+            // Keep whatever was captured before the kill after the notice.
+            output: if combined.trim().is_empty() {
+                format!("{} {:?} timed out after {}s", program, args, timeout_secs)
+            } else {
+                format!(
+                    "{} {:?} timed out after {}s\n{}",
+                    program, args, timeout_secs, combined
+                )
+            },
             error_count: 1,
             warning_count: 0,
         };

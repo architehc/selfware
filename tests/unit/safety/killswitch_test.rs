@@ -514,3 +514,78 @@ fn test_killswitch_cwd_ambient_worker() {
         check_res.err()
     );
 }
+
+/// Regression (ordering-dependent `safety::checker` failures in full lib
+/// runs): a killswitch test tripping the process-global state (in-process
+/// flag, env var, `TEST_ROOT_OVERRIDE` pointing at a tripped root) must not
+/// leak that trip into tests running concurrently on OTHER threads — their
+/// `check_tool_call` used to fail with an unrelated `KillswitchActive`. The
+/// owning thread still sees every trip.
+#[test]
+fn test_global_trip_is_scoped_to_the_lock_owner_thread() {
+    let _lock = KILLSWITCH_TEST_LOCK.lock();
+    let tmp = tempdir().unwrap();
+    let tripped_root = tmp.path().join("tripped");
+    std::fs::create_dir_all(&tripped_root).unwrap();
+    trip_file_killswitch(&tripped_root, "override root trip").unwrap();
+    set_test_root_override(Some(tripped_root.clone()));
+    trip_in_process("owner-only trip");
+    std::env::set_var(KILLSWITCH_ENV_VAR, "1");
+
+    // The owner sees the trip (first the in-process one).
+    assert!(matches!(
+        check_killswitch(None),
+        Err(KillswitchError::InProcess { .. })
+    ));
+
+    // Another thread (a concurrently running, unrelated test) does not.
+    let clean_root = tmp.path().join("clean");
+    std::fs::create_dir_all(&clean_root).unwrap();
+    let other = std::thread::spawn(move || {
+        let explicit = check_killswitch_with_home(Some(&clean_root), Some(&clean_root));
+        let checker = crate::safety::SafetyChecker::with_working_dir(
+            &crate::config::SafetyConfig::default(),
+            clean_root.clone(),
+        );
+        let call = crate::api::types::ToolCall {
+            id: "call-1".to_string(),
+            call_type: "function".to_string(),
+            function: crate::api::types::ToolFunction {
+                name: "file_read".to_string(),
+                arguments: serde_json::json!({ "path": "src/lib.rs" }).to_string(),
+            },
+        };
+        let checked = checker.check_tool_call(&call).map_err(|e| e.to_string());
+        (explicit, checked)
+    })
+    .join()
+    .unwrap();
+    assert!(
+        other.0.is_ok(),
+        "another thread must not observe the owner's global trip: {:?}",
+        other.0
+    );
+    let checked = other.1;
+    assert!(
+        !checked
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.to_lowercase().contains("killswitch")),
+        "another thread's tool call must not be refused by the owner's trip: {checked:?}"
+    );
+
+    // Each global input still trips the owner on its own.
+    reset_in_process();
+    assert!(matches!(
+        check_killswitch(None),
+        Err(KillswitchError::Environment { .. })
+    ));
+    std::env::remove_var(KILLSWITCH_ENV_VAR);
+    match check_killswitch(None) {
+        Err(KillswitchError::File { reason, .. }) => {
+            assert!(reason.contains("override root trip"), "reason: {reason}");
+        }
+        other => panic!("owner must see the override-root file trip, got: {other:?}"),
+    }
+    remove_file_killswitch(&tripped_root).unwrap();
+}

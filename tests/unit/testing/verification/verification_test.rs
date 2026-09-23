@@ -2270,6 +2270,56 @@ fn classify_rustfmt_failure_shim_error_does_not_mask_real_errors() {
     );
 }
 
+/// When rustfmt cannot run on this machine — no binary at all
+/// (`VERIFIER_NOT_FOUND`), or a rustup shim whose toolchain lacks the
+/// component (e.g. CI's MSRV toolchain) — assert the honest "check did not
+/// run" shape instead of the formatter verdicts, and return true so the
+/// caller stops. With rustfmt present this returns false and the caller's
+/// full assertions run unchanged.
+fn rustfmt_absent_path_asserted(result: &CheckResult) -> bool {
+    if result
+        .errors
+        .iter()
+        .any(|e| e.code.as_deref() == Some("VERIFIER_NOT_FOUND"))
+    {
+        eprintln!("rustfmt not installed — asserting the verifier-not-found path");
+        assert_eq!(result.check_type, CheckType::TypeCheck);
+        return true;
+    }
+    if result
+        .warnings
+        .iter()
+        .any(|w| w.contains("rustfmt unavailable"))
+    {
+        eprintln!("rustfmt component missing — asserting the tool-unavailable path");
+        assert!(
+            result.passed,
+            "an unavailable formatter is advisory, not a failure: {}",
+            result.output
+        );
+        assert!(
+            result.errors.is_empty(),
+            "no verdict may be claimed when rustfmt never ran: {:?}",
+            result.errors
+        );
+        assert!(
+            result.output.contains("could not run"),
+            "the output must say the check did not run: {}",
+            result.output
+        );
+        assert!(
+            result
+                .suggestions
+                .iter()
+                .any(|s| s.contains("rustup component add rustfmt")),
+            "the fix must be suggested: {:?}",
+            result.suggestions
+        );
+        return true;
+    }
+    false
+}
+
 #[tokio::test]
 async fn cheap_syntax_check_rust_formatting_diff_is_advisory() {
     // Finding C: `rustfmt --check` exits 1 for formatting diffs too, so a run
@@ -2288,12 +2338,7 @@ async fn cheap_syntax_check_rust_formatting_diff_is_advisory() {
         .run_cheap_syntax_check(RepoLanguage::Rust, &["unformatted.rs".to_string()])
         .await
         .unwrap();
-    if result
-        .errors
-        .iter()
-        .any(|e| e.code.as_deref() == Some("VERIFIER_NOT_FOUND"))
-    {
-        eprintln!("rustfmt not installed — skipping Rust syntax-check tests");
+    if rustfmt_absent_path_asserted(&result) {
         let _ = std::fs::remove_dir_all(&tmp);
         return;
     }
@@ -2345,12 +2390,7 @@ async fn cheap_syntax_check_rust_parse_error_still_fails() {
         .run_cheap_syntax_check(RepoLanguage::Rust, &["bad.rs".to_string()])
         .await
         .unwrap();
-    if result
-        .errors
-        .iter()
-        .any(|e| e.code.as_deref() == Some("VERIFIER_NOT_FOUND"))
-    {
-        eprintln!("rustfmt not installed — skipping Rust syntax-check tests");
+    if rustfmt_absent_path_asserted(&result) {
         let _ = std::fs::remove_dir_all(&tmp);
         return;
     }
@@ -2603,4 +2643,41 @@ async fn test_nested_project_syntax_check_runs_in_child_dir() {
         .find(|c| c.check_type == CheckType::TypeCheck);
     assert!(type_check.is_some());
     assert!(type_check.unwrap().passed);
+}
+
+/// Regression: a drain timeout must not discard output the OTHER stream
+/// already captured. The parent prints to stdout and exits (stdout EOFs)
+/// while a backgrounded sleeper keeps only STDERR open past the deadline:
+/// the run is fail-closed (timed out, not success) but keeps the stdout text.
+#[tokio::test]
+#[cfg(unix)]
+async fn run_reaped_drain_timeout_keeps_captured_stdout() {
+    let dir = tempfile::tempdir().unwrap();
+    let start = std::time::Instant::now();
+    let out = run_reaped(
+        "sh",
+        &[
+            "-c",
+            "echo early-stdout-marker; sleep 30 >/dev/null & exit 0",
+        ],
+        dir.path(),
+        1,
+    )
+    .await
+    .unwrap();
+    assert!(
+        start.elapsed().as_secs() < 10,
+        "must return in bounded time"
+    );
+    assert!(out.timed_out, "the stderr drain exceeded the deadline");
+    assert!(!out.success, "a timed-out run must not report success");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("early-stdout-marker"),
+        "stdout captured before the stderr drain timed out must be kept: {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("timed out"),
+        "stderr should note the timeout"
+    );
 }

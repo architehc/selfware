@@ -77,12 +77,29 @@ fn test_disk_usage_clone() {
 // ---- DiskManager estimation tests ----
 
 /// Helper to create a DiskManager without async, for unit testing estimation logic.
-fn make_test_disk_manager(config: &DiskConfig) -> DiskManager {
+///
+/// Hermetic: every path lives under a FRESH per-test tempdir (returned so it
+/// outlives the manager). The old fixed `/tmp/test_models` path made the
+/// "models dir missing -> 10GB fallback" tests depend on whatever else on the
+/// machine had created that path. `models_path` is deliberately never created.
+fn make_test_disk_manager(config: &DiskConfig) -> (tempfile::TempDir, DiskManager) {
+    let root = tempfile::tempdir().unwrap();
+    let dm = make_disk_manager_with_models(config, root.path(), root.path().join("missing_models"));
+    (root, dm)
+}
+
+/// DiskManager whose checkpoints/logs live under `root` and whose models dir
+/// is `models_path`.
+fn make_disk_manager_with_models(
+    config: &DiskConfig,
+    root: &std::path::Path,
+    models_path: PathBuf,
+) -> DiskManager {
     DiskManager {
         config: config.clone(),
-        checkpoints_path: PathBuf::from("/tmp/test_checkpoints"),
-        logs_path: PathBuf::from("/tmp/test_logs"),
-        models_path: PathBuf::from("/tmp/test_models"),
+        checkpoints_path: root.join("checkpoints"),
+        logs_path: root.join("logs"),
+        models_path,
         models_size_cache: std::sync::Mutex::new(None),
     }
 }
@@ -90,13 +107,13 @@ fn make_test_disk_manager(config: &DiskConfig) -> DiskManager {
 #[test]
 fn test_estimate_storage_needs_one_day() {
     let config = DiskConfig::default();
-    let dm = make_test_disk_manager(&config);
+    let (_root, dm) = make_test_disk_manager(&config);
     let estimate = dm.estimate_storage_needs(1);
 
     // 1 day: 500MB checkpoints + 100MB logs + 10GB models (fallback) + 1GB buffer
     assert_eq!(estimate.checkpoints, 500 * 1024 * 1024);
     assert_eq!(estimate.logs, 100 * 1024 * 1024);
-    // models: fallback 10GB because /tmp/test_models does not exist
+    // models: fallback 10GB because the models dir does not exist
     assert_eq!(estimate.models, 10_000_000_000);
     assert_eq!(estimate.buffer, 500 * 1024 * 1024 * 2); // 2-day buffer
 }
@@ -104,7 +121,7 @@ fn test_estimate_storage_needs_one_day() {
 #[test]
 fn test_estimate_storage_needs_thirty_days() {
     let config = DiskConfig::default();
-    let dm = make_test_disk_manager(&config);
+    let (_root, dm) = make_test_disk_manager(&config);
     let estimate = dm.estimate_storage_needs(30);
 
     assert_eq!(estimate.checkpoints, 500 * 1024 * 1024 * 30);
@@ -116,7 +133,7 @@ fn test_estimate_storage_needs_thirty_days() {
 #[test]
 fn test_estimate_storage_needs_zero_days() {
     let config = DiskConfig::default();
-    let dm = make_test_disk_manager(&config);
+    let (_root, dm) = make_test_disk_manager(&config);
     let estimate = dm.estimate_storage_needs(0);
 
     assert_eq!(estimate.checkpoints, 0);
@@ -129,7 +146,7 @@ fn test_estimate_storage_needs_zero_days() {
 #[test]
 fn test_estimate_storage_total_scales_with_days() {
     let config = DiskConfig::default();
-    let dm = make_test_disk_manager(&config);
+    let (_root, dm) = make_test_disk_manager(&config);
     let est1 = dm.estimate_storage_needs(1);
     let est10 = dm.estimate_storage_needs(10);
 
@@ -143,10 +160,10 @@ fn test_estimate_storage_total_scales_with_days() {
 #[test]
 fn test_get_models_size_returns_placeholder() {
     let config = DiskConfig::default();
-    let dm = make_test_disk_manager(&config);
+    let (_root, dm) = make_test_disk_manager(&config);
     // estimate_storage_needs calls get_models_size internally
     let estimate = dm.estimate_storage_needs(1);
-    // Fallback 10GB because /tmp/test_models does not exist
+    // Fallback 10GB because the models dir does not exist
     assert_eq!(estimate.models, 10_000_000_000);
 }
 
@@ -162,9 +179,12 @@ fn test_disk_config_defaults_reasonable() {
 
 #[test]
 fn test_get_models_size_calculates_real_directory() {
-    // Create a temporary directory with known file sizes
-    let temp_dir = std::env::temp_dir().join("selfware_test_models_calc");
-    let _ = std::fs::remove_dir_all(&temp_dir);
+    // Create a UNIQUE temporary directory with known file sizes. (A fixed
+    // `$TMPDIR/selfware_test_models_calc` was shared by every concurrent test
+    // process — parallel worktrees/CI jobs — and one run's cleanup or files
+    // corrupted another's byte count.)
+    let root = tempfile::tempdir().unwrap();
+    let temp_dir = root.path().join("models");
     std::fs::create_dir_all(&temp_dir).unwrap();
 
     // Write files with known sizes
@@ -179,37 +199,23 @@ fn test_get_models_size_calculates_real_directory() {
     std::fs::write(subdir.join("model_c.bin"), vec![0u8; 4096]).unwrap();
 
     let config = DiskConfig::default();
-    let dm = DiskManager {
-        config: config.clone(),
-        checkpoints_path: PathBuf::from("/tmp/test_checkpoints"),
-        logs_path: PathBuf::from("/tmp/test_logs"),
-        models_path: temp_dir.clone(),
-        models_size_cache: std::sync::Mutex::new(None),
-    };
+    let dm = make_disk_manager_with_models(&config, root.path(), temp_dir.clone());
 
     let estimate = dm.estimate_storage_needs(1);
     // 1024 + 2048 + 4096 = 7168 bytes
     assert_eq!(estimate.models, 7168);
-
-    // Cleanup
-    let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
 #[test]
 fn test_get_models_size_caches_result() {
-    let temp_dir = std::env::temp_dir().join("selfware_test_models_cache");
-    let _ = std::fs::remove_dir_all(&temp_dir);
+    // Unique per-test dir (see test_get_models_size_calculates_real_directory).
+    let root = tempfile::tempdir().unwrap();
+    let temp_dir = root.path().join("models");
     std::fs::create_dir_all(&temp_dir).unwrap();
     std::fs::write(temp_dir.join("model.bin"), vec![0u8; 512]).unwrap();
 
     let config = DiskConfig::default();
-    let dm = DiskManager {
-        config: config.clone(),
-        checkpoints_path: PathBuf::from("/tmp/test_checkpoints"),
-        logs_path: PathBuf::from("/tmp/test_logs"),
-        models_path: temp_dir.clone(),
-        models_size_cache: std::sync::Mutex::new(None),
-    };
+    let dm = make_disk_manager_with_models(&config, root.path(), temp_dir.clone());
 
     // First call calculates
     let estimate1 = dm.estimate_storage_needs(1);
@@ -221,9 +227,6 @@ fn test_get_models_size_caches_result() {
     // Second call should return cached value (512), not 768
     let estimate2 = dm.estimate_storage_needs(1);
     assert_eq!(estimate2.models, 512);
-
-    // Cleanup
-    let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
 // ---- Lazy state-dir creation tests (cwd-pollution fix) ----

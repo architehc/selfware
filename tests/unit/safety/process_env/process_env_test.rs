@@ -69,6 +69,10 @@ async fn sanitized_env_keeps_toolchain_and_identity_vars() {
     // keep-list names are used on purpose (the keep-list resolves values from
     // the parent env); each key is restored to its prior value before the
     // child is awaited so concurrently-running tests never observe them.
+    // Serialize with every other env/cwd-mutating test (shared state lock);
+    // the per-key restore below still runs before the child is awaited.
+    let env_lock = crate::test_support::state_lock();
+    let tmp_dir = std::env::temp_dir().to_string_lossy().into_owned();
     let keep_vars = [
         ("GIT_AUTHOR_NAME", "Ada Lovelace"),
         ("GIT_AUTHOR_EMAIL", "ada@example.test"),
@@ -79,9 +83,14 @@ async fn sanitized_env_keeps_toolchain_and_identity_vars() {
         ("NO_PROXY", "internal.example.test,localhost"),
         ("SSL_CERT_FILE", "/etc/ssl/certs/ca-bundle.crt"),
         ("SSL_CERT_DIR", "/etc/ssl/certs"),
-        ("TMPDIR", "/scratch/tmp"),
-        ("TEMP", "/scratch/tmp"),
-        ("TMP", "/scratch/tmp"),
+        // Temp locations point at the REAL temp dir: the keep-list is
+        // resolved from the process env, so these values are briefly visible
+        // to every concurrently running test, and a nonexistent path (the
+        // old `/scratch/tmp`) made their `tempfile::tempdir()` fail
+        // ("No such file or directory" under /scratch/tmp).
+        ("TMPDIR", tmp_dir.as_str()),
+        ("TEMP", tmp_dir.as_str()),
+        ("TMP", tmp_dir.as_str()),
         ("TERM", "xterm-256color"),
         ("CARGO_HOME", "/opt/cargo"),
         ("RUSTUP_HOME", "/opt/rustup"),
@@ -107,6 +116,7 @@ async fn sanitized_env_keeps_toolchain_and_identity_vars() {
         }
     }
     std::env::remove_var("SELFWARE_TEST_SECRET_ENVCLEAR");
+    drop(env_lock);
 
     #[cfg(not(windows))]
     {

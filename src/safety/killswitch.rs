@@ -66,28 +66,65 @@ pub(crate) struct KillswitchTestLock;
 
 #[cfg(test)]
 pub(crate) struct KillswitchTestGuard {
+    /// Owner recorded before this guard took ownership (nested guards on the
+    /// same thread restore it on drop).
+    prev_owner: Option<std::thread::ThreadId>,
     _lock: parking_lot::ReentrantMutexGuard<'static, ()>,
+}
+
+/// Thread currently holding [`KILLSWITCH_TEST_LOCK`] (test builds only).
+///
+/// The process-global killswitch inputs — the in-process flag, the
+/// `SELFWARE_KILLSWITCH` env var and [`TEST_ROOT_OVERRIDE`] — are tripped by
+/// killswitch tests while they hold the lock. Every OTHER concurrently
+/// running test that reaches `check_killswitch` (every
+/// `SafetyChecker::check_tool_call`, the API client, skills, …) used to see
+/// that trip and fail with an unrelated `KillswitchActive` error — the
+/// ordering-dependent `safety::checker` failures in full lib runs. While a
+/// thread owns the lock, those globals are therefore scoped to that thread:
+/// other threads evaluate the killswitch as if they were untouched (which is
+/// exactly what they are once the owner's guard resets them on drop).
+/// File-based checks against an explicit project root and the home check are
+/// unaffected. Production builds have no owner and no scoping.
+#[cfg(test)]
+static KILLSWITCH_TEST_OWNER: parking_lot::Mutex<Option<std::thread::ThreadId>> =
+    parking_lot::Mutex::new(None);
+
+/// True when another thread holds [`KILLSWITCH_TEST_LOCK`], so the
+/// process-global killswitch state belongs to that test, not this caller.
+#[cfg(test)]
+fn global_state_owned_by_other_thread() -> bool {
+    matches!(*KILLSWITCH_TEST_OWNER.lock(), Some(owner) if owner != std::thread::current().id())
 }
 
 #[cfg(test)]
 impl KillswitchTestLock {
     pub(crate) fn lock(&self) -> KillswitchTestGuard {
         let lock = crate::test_support::state_lock();
+        let prev_owner = KILLSWITCH_TEST_OWNER
+            .lock()
+            .replace(std::thread::current().id());
         std::env::remove_var(KILLSWITCH_ENV_VAR);
         std::env::remove_var("SELFWARE_KILLSWITCH_IGNORE_HOME");
         *TEST_ROOT_OVERRIDE.write() = None;
         reset_in_process();
-        KillswitchTestGuard { _lock: lock }
+        KillswitchTestGuard {
+            prev_owner,
+            _lock: lock,
+        }
     }
 }
 
 #[cfg(test)]
 impl Drop for KillswitchTestGuard {
     fn drop(&mut self) {
+        // Reset the globals BEFORE releasing ownership (and, after this body,
+        // the lock), so no other thread can ever observe a leftover trip.
         std::env::remove_var(KILLSWITCH_ENV_VAR);
         std::env::remove_var("SELFWARE_KILLSWITCH_IGNORE_HOME");
         *TEST_ROOT_OVERRIDE.write() = None;
         reset_in_process();
+        *KILLSWITCH_TEST_OWNER.lock() = self.prev_owner.take();
     }
 }
 
@@ -142,8 +179,15 @@ pub fn check_killswitch_with_home(
     project_root: Option<&Path>,
     home_override: Option<&Path>,
 ) -> Result<(), KillswitchError> {
+    // Test builds: while another thread's killswitch test owns the global
+    // state, that state is not ours (see `KILLSWITCH_TEST_OWNER`).
+    #[cfg(test)]
+    let consult_globals = !global_state_owned_by_other_thread();
+    #[cfg(not(test))]
+    let consult_globals = true;
+
     // 1. In-process atomic check (fastest, zero allocation)
-    if IN_PROCESS_KILLSWITCH.load(Ordering::SeqCst) {
+    if consult_globals && IN_PROCESS_KILLSWITCH.load(Ordering::SeqCst) {
         let reason = IN_PROCESS_REASON
             .read()
             .clone()
@@ -152,10 +196,13 @@ pub fn check_killswitch_with_home(
     }
 
     // 2. Environment variable check
-    if let Ok(val) = std::env::var(KILLSWITCH_ENV_VAR) {
-        if let Some(reason) = parse_env_killswitch_value(&val) {
-            return Err(KillswitchError::Environment { reason });
-        }
+    let env_val = if consult_globals {
+        std::env::var(KILLSWITCH_ENV_VAR).ok()
+    } else {
+        None
+    };
+    if let Some(reason) = env_val.as_deref().and_then(parse_env_killswitch_value) {
+        return Err(KillswitchError::Environment { reason });
     }
 
     // 3. File existence checks (fail-closed for project root / cwd)
@@ -164,7 +211,11 @@ pub fn check_killswitch_with_home(
     // Specific project root if provided (or test root override), otherwise check current working directory
     #[cfg(test)]
     let effective_root_buf = {
-        let override_root = TEST_ROOT_OVERRIDE.read().clone();
+        let override_root = if consult_globals {
+            TEST_ROOT_OVERRIDE.read().clone()
+        } else {
+            None
+        };
         if override_root.is_some() {
             override_root
         } else if let Some(root) = project_root {
