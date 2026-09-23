@@ -4420,3 +4420,125 @@ fn test_looks_like_mcp_path_token_predicates() {
     assert!(!looks_like_mcp_path_token("application/json"));
     assert!(!looks_like_mcp_path_token("text/plain"));
 }
+
+/// Checker rooted in a fresh temp workspace (hermetic: no dependence on the
+/// process cwd), with the default policy (`allowed_paths = ["./**"]`).
+fn workspace_shell_checker() -> (tempfile::TempDir, SafetyChecker) {
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(workspace.path().join("cmd/server")).unwrap();
+    let checker =
+        SafetyChecker::with_working_dir(&SafetyConfig::default(), workspace.path().to_path_buf());
+    (workspace, checker)
+}
+
+fn shell_verdict(checker: &SafetyChecker, command: &str) -> crate::errors::Result<()> {
+    let args = serde_json::json!({ "command": command }).to_string();
+    checker.check_tool_call(&create_test_call("shell_exec", &args))
+}
+
+#[test]
+fn test_go_package_pattern_is_not_dot_overflow() {
+    let (_ws, checker) = workspace_shell_checker();
+    for command in [
+        "go build ./...",
+        "go test ./...",
+        "go vet ./...",
+        "go test -race ./cmd/...",
+        "GOFLAGS=-mod=mod go build ./...",
+        "go mod tidy && go test ./...",
+        "go test github.com/example/project/...",
+        "golangci-lint run ./...",
+    ] {
+        let verdict = shell_verdict(&checker, command);
+        assert!(verdict.is_ok(), "{command}: {verdict:?}");
+    }
+}
+
+#[test]
+fn test_go_package_pattern_keeps_traversal_refused() {
+    let (_ws, checker) = workspace_shell_checker();
+    for command in [
+        "go build ../...",
+        "go test ../../...",
+        "go vet ../../etc/...",
+        "go build /...",
+        "go build ./.../...",
+        "cat ./...",
+        "rm -rf ../outside",
+    ] {
+        assert!(
+            shell_verdict(&checker, command).is_err(),
+            "{command} must stay refused"
+        );
+    }
+}
+
+#[test]
+fn test_here_string_operand_is_data_not_path() {
+    let (_ws, checker) = workspace_shell_checker();
+    for command in [
+        "base64 -d <<< 'aGVsbG8='",
+        "base64 -d <<< '...'",
+        "base64 -d <<<aGVsbG8=",
+        "cat <<< '/etc/passwd'",
+        "wc -c <<< /etc/shadow",
+    ] {
+        let verdict = shell_verdict(&checker, command);
+        assert!(verdict.is_ok(), "{command}: {verdict:?}");
+    }
+    // A real input redirect is still a read target, and heredoc parsing is
+    // unchanged.
+    assert!(shell_verdict(&checker, "base64 -d < /etc/shadow").is_err());
+    assert!(shell_verdict(&checker, "base64 -d </etc/shadow").is_err());
+    assert!(shell_verdict(&checker, "cat << EOF").is_ok());
+}
+
+#[test]
+fn test_read_into_denied_env_var_is_env_injection() {
+    // With here-string operands treated as data, the assignment made by
+    // `read`/`printf -v` is what must refuse a denied variable.
+    let (_ws, checker) = workspace_shell_checker();
+    for command in [
+        "read LD_PRELOAD <<< '/lib/u.so'; ls",
+        "read -r PATH <<< /tmp/bin",
+        "read -p prompt -r a LD_LIBRARY_PATH < in.txt",
+        "printf -v LD_PRELOAD %s /tmp/x.so",
+    ] {
+        assert!(
+            shell_verdict(&checker, command).is_err(),
+            "{command} must be refused"
+        );
+    }
+    for command in [
+        "read -r name <<< 'alice'",
+        "read -a parts <<< 'a b c'",
+        "printf -v out %s hello",
+    ] {
+        let verdict = shell_verdict(&checker, command);
+        assert!(verdict.is_ok(), "{command}: {verdict:?}");
+    }
+}
+
+#[test]
+fn test_exec_redirection_only_builtin() {
+    let (_ws, checker) = workspace_shell_checker();
+    for command in [
+        "exec > /dev/null",
+        "exec 3> out.log",
+        "exec > /tmp/log 2>&1",
+        "exec 2>/dev/null",
+        "exec >build.log 2>&1",
+    ] {
+        let verdict = shell_verdict(&checker, command);
+        assert!(verdict.is_ok(), "{command}: {verdict:?}");
+    }
+    // The redirect-target policy that applies to every redirect still holds.
+    assert!(shell_verdict(&checker, "exec > .env").is_err());
+    assert!(shell_verdict(&checker, "exec 3> /etc/passwd").is_err());
+    // Input redirects are reads and keep the full path policy.
+    assert!(shell_verdict(&checker, "exec 3< /etc/shadow").is_err());
+    assert!(shell_verdict(&checker, "exec < /etc/passwd").is_err());
+    // `exec` with a real command after the redirections still inspects it.
+    assert!(shell_verdict(&checker, "exec 2>/dev/null cat /etc/shadow").is_err());
+    assert!(shell_verdict(&checker, "exec cat /etc/hosts").is_err());
+}

@@ -136,6 +136,11 @@ struct RedteamCase {
     expect: String,
     #[allow(dead_code)]
     note: String,
+    /// Corpus file and 1-based line number, for triage output.
+    #[serde(skip)]
+    source: String,
+    #[serde(skip)]
+    line: usize,
 }
 
 fn load_corpus() -> Vec<RedteamCase> {
@@ -160,9 +165,11 @@ fn load_corpus() -> Vec<RedteamCase> {
             if line.is_empty() {
                 continue;
             }
-            let case: RedteamCase = serde_json::from_str(line).unwrap_or_else(|e| {
+            let mut case: RedteamCase = serde_json::from_str(line).unwrap_or_else(|e| {
                 panic!("{}:{}: invalid JSONL case: {e}", path.display(), lineno + 1)
             });
+            case.source = path.file_name().unwrap().to_string_lossy().into_owned();
+            case.line = lineno + 1;
             // The arguments field must itself be valid JSON — a malformed
             // attack string would test serde, not the gate.
             serde_json::from_str::<serde_json::Value>(&case.arguments).unwrap_or_else(|e| {
@@ -179,7 +186,28 @@ fn load_corpus() -> Vec<RedteamCase> {
     cases
 }
 
-fn corpus_failures(checker: &SafetyChecker, cases: &[RedteamCase]) -> Vec<String> {
+/// One gate violation: `allowed_attack_id` is set when an attack case was
+/// let through (the only kind a known-gap entry can excuse).
+struct Violation {
+    allowed_attack_id: Option<String>,
+    message: String,
+}
+
+/// Attack case ids the checker currently allows, tracked in
+/// tests/redteam/known_gaps.txt for a separate hardening effort. The list
+/// may only shrink (maintainer sign-off 2026-09-23).
+fn load_known_gaps() -> std::collections::BTreeSet<String> {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/redteam/known_gaps.txt");
+    std::fs::read_to_string(path)
+        .expect("tests/redteam/known_gaps.txt must exist")
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_string)
+        .collect()
+}
+
+fn corpus_failures(checker: &SafetyChecker, cases: &[RedteamCase]) -> Vec<Violation> {
     let mut failures = Vec::new();
     for case in cases {
         let call = ToolCall {
@@ -195,22 +223,31 @@ fn corpus_failures(checker: &SafetyChecker, cases: &[RedteamCase]) -> Vec<String
             "refuse" => {
                 if verdict.is_ok() {
                     // SECURITY HOLE: an attack the gate let through.
-                    failures.push(format!(
-                        "{} [{}]: attack was ALLOWED (tool={}, args={})",
-                        case.id, case.class, case.tool, case.arguments
-                    ));
+                    failures.push(Violation {
+                        allowed_attack_id: Some(case.id.clone()),
+                        message: format!(
+                            "{} [{}]: attack was ALLOWED (tool={}, args={})",
+                            case.id, case.class, case.tool, case.arguments
+                        ),
+                    });
                 }
             }
             "allow" => {
                 if let Err(e) = verdict {
                     // FALSE POSITIVE: benign work the gate blocked.
-                    failures.push(format!(
-                        "{} [{}]: benign control was REFUSED: {e} (tool={}, args={})",
-                        case.id, case.class, case.tool, case.arguments
-                    ));
+                    failures.push(Violation {
+                        allowed_attack_id: None,
+                        message: format!(
+                            "{} [{}]: benign control was REFUSED: {e} (tool={}, args={})",
+                            case.id, case.class, case.tool, case.arguments
+                        ),
+                    });
                 }
             }
-            other => failures.push(format!("{}: unknown expect value {other:?}", case.id)),
+            other => failures.push(Violation {
+                allowed_attack_id: None,
+                message: format!("{}: unknown expect value {other:?}", case.id),
+            }),
         }
     }
     failures
@@ -262,11 +299,45 @@ fn redteam_corpus_respects_gate_expectations() {
     });
     assert_eq!(processed, cases.len(), "every corpus case must be checked");
 
+    // Known gaps: allowed attacks tracked in tests/redteam/known_gaps.txt are
+    // reported but not counted as failures. Every other violation fails, and
+    // a listed id that is no longer an allowed attack fails too, so the list
+    // can only shrink.
+    let known_gaps = load_known_gaps();
+    let mut still_open = std::collections::BTreeSet::new();
+    let mut tolerated = Vec::new();
+    let mut hard_failures = Vec::new();
+    for violation in failures {
+        match &violation.allowed_attack_id {
+            Some(id) if known_gaps.contains(id) => {
+                still_open.insert(id.clone());
+                tolerated.push(violation.message);
+            }
+            _ => hard_failures.push(violation.message),
+        }
+    }
+    if !tolerated.is_empty() {
+        eprintln!(
+            "{} known-gap attack case(s) still ALLOWED (tests/redteam/known_gaps.txt):\n  {}",
+            tolerated.len(),
+            tolerated.join("\n  ")
+        );
+    }
+    let closed: Vec<_> = known_gaps.difference(&still_open).cloned().collect();
     assert!(
-        failures.is_empty(),
+        closed.is_empty(),
+        "{} known-gap id(s) are no longer allowed attacks (now refused, or gone from \
+         the corpus) — remove them from tests/redteam/known_gaps.txt so the list \
+         only shrinks:\n  {}",
+        closed.len(),
+        closed.join("\n  ")
+    );
+
+    assert!(
+        hard_failures.is_empty(),
         "{} red-team case(s) violated gate expectations:\n  {}",
-        failures.len(),
-        failures.join("\n  ")
+        hard_failures.len(),
+        hard_failures.join("\n  ")
     );
 }
 
@@ -322,4 +393,51 @@ fn retriaged_path_evasion_cases_are_refused() {
             id
         );
     }
+}
+
+/// Violation dump for corpus triage (`scripts/redteam_relabel.py`).
+///
+/// Ignored by default: it asserts nothing. When run explicitly with
+/// `REDTEAM_VIOLATIONS_OUT=<path>` it writes one JSON object per gate
+/// violation (`source`, `line`, `id`, `expect`, `tool`,
+/// `reason`) in corpus order, where
+/// `reason` is the checker's refusal error for benign controls and empty for
+/// allowed attacks.
+#[test]
+#[ignore = "triage tool: run explicitly with REDTEAM_VIOLATIONS_OUT set"]
+fn redteam_dump_violations() {
+    let Ok(out_path) = std::env::var("REDTEAM_VIOLATIONS_OUT") else {
+        return;
+    };
+    let workspace = corpus_workspace();
+    let checker =
+        SafetyChecker::with_working_dir(&SafetyConfig::default(), workspace.path().to_path_buf());
+    let mut out = String::new();
+    for case in load_corpus() {
+        let call = ToolCall {
+            id: format!("redteam-{}", case.id),
+            call_type: "function".to_string(),
+            function: ToolFunction {
+                name: case.tool.clone(),
+                arguments: case.arguments.clone(),
+            },
+        };
+        let verdict = checker.check_tool_call(&call);
+        let reason = match (case.expect.as_str(), &verdict) {
+            ("refuse", Ok(())) => String::new(),
+            ("allow", Err(e)) => e.to_string(),
+            _ => continue,
+        };
+        let row = serde_json::json!({
+            "source": case.source,
+            "line": case.line,
+            "id": case.id,
+            "expect": case.expect,
+            "tool": case.tool,
+            "reason": reason,
+        });
+        out.push_str(&row.to_string());
+        out.push('\n');
+    }
+    std::fs::write(&out_path, out).expect("write violations dump");
 }

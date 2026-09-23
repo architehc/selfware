@@ -1903,6 +1903,16 @@ impl SafetyChecker {
             }
         }
 
+        // `read` / `printf -v` assign their NAME operands exactly like
+        // `VAR=value` (`read LD_PRELOAD <<< '/lib/u.so'`). Here-string
+        // operands are data, not paths, so the assignment itself must be
+        // what refuses — same DENIED_ENV_VARS list as the forms above.
+        for part in split_shell_pipeline(&normalized) {
+            if read_assigns_denied_env_var(part) {
+                return Err(SelfwareError::Safety(SafetyError::BlockedEnvInjection));
+            }
+        }
+
         // Empty-quote interleaves inside the var NAME (red-team wave-510:
         // `PA'TH'=/tmp/bin ls`, `env PA''TH=/tmp/bin id`) defeat name
         // extraction — shells strip the empty quotes and assign PATH. A
@@ -2178,7 +2188,9 @@ impl SafetyChecker {
                 if let Some(rest) = stripped.strip_prefix("<<") {
                     // Heredoc: `<<EOF` glues the delimiter word onto the
                     // token; `<< EOF` takes the next one. Neither is a path.
-                    if rest.is_empty() {
+                    // Here-string: `<<< 'data'` / `<<<data` feeds the word
+                    // itself to stdin — it is data, never a path.
+                    if rest.is_empty() || rest == "<" {
                         pending = Redirect::Skip;
                     }
                     continue;
@@ -2237,6 +2249,18 @@ impl SafetyChecker {
                                 self.check_shell_path_candidate(trimmed_val)?;
                             }
                         }
+                    }
+                    continue;
+                }
+                // Go package patterns (`go test ./...`, `go vet ./cmd/...`):
+                // the trailing `/...` is a package wildcard, not a
+                // dot-overflow path component. Validate the directory it
+                // ranges over instead, so `../...` still fails as traversal.
+                // Import-path patterns (`github.com/org/...`) are not
+                // filesystem paths and stay out of scope, as before.
+                if let Some(dir) = go_package_pattern_dir(verb, tok) {
+                    if looks_like_explicit_path(tok) {
+                        self.check_shell_path_candidate(dir)?;
                     }
                     continue;
                 }
@@ -4222,6 +4246,7 @@ fn command_word_index(tokens: &[String]) -> Option<usize> {
                 }
             }
             "exec" => {
+                let exec_idx = idx;
                 idx += 1;
                 while let Some(t) = tokens.get(idx) {
                     if is_env_assignment(t) {
@@ -4240,6 +4265,26 @@ fn command_word_index(tokens: &[String]) -> Option<usize> {
                     if flag == "-a" {
                         idx += 1;
                     }
+                }
+                // `exec > /dev/null`, `exec 3> file`, `exec >log 2>&1`:
+                // redirections after `exec` are not the command word. Skip
+                // them (and the separate target of a bare operator); when
+                // nothing but redirections follows, `exec` is a
+                // redirection-only builtin and is itself the command word,
+                // so its redirect targets stay with the redirect guards.
+                let mut saw_redirect = false;
+                while let Some(t) = tokens.get(idx) {
+                    if !is_shell_redirect_token(t) {
+                        break;
+                    }
+                    saw_redirect = true;
+                    idx += 1;
+                    if is_bare_redirect_operator(t) {
+                        idx += 1; // separate target word (`> file`)
+                    }
+                }
+                if saw_redirect && idx >= tokens.len() {
+                    return Some(exec_idx);
                 }
             }
             "command" => {
@@ -4442,6 +4487,86 @@ fn command_word_index(tokens: &[String]) -> Option<usize> {
         }
     }
     (idx < tokens.len()).then_some(idx)
+}
+
+/// Whether one pipeline segment is a `read` (NAME operands) or `printf -v
+/// NAME` builtin that assigns a variable on the DENIED_ENV_VARS list.
+fn read_assigns_denied_env_var(segment: &str) -> bool {
+    let Some(tokens) = shlex::split(segment) else {
+        return false;
+    };
+    let Some(cmd_idx) = command_word_index(&tokens) else {
+        return false;
+    };
+    let is_denied = |name: &str| DENIED_ENV_VARS.iter().any(|d| d.eq_ignore_ascii_case(name));
+    let rest = &tokens[cmd_idx + 1..];
+    match command_basename(&tokens[cmd_idx]) {
+        "read" => {
+            let mut skip_next = false;
+            for tok in rest {
+                if skip_next {
+                    skip_next = false;
+                    continue;
+                }
+                if is_shell_redirect_token(tok) {
+                    skip_next = is_bare_redirect_operator(tok);
+                    continue;
+                }
+                if tok.starts_with('-') {
+                    // Flags taking an argument: -a NAME assigns too.
+                    if tok == "-a" {
+                        continue;
+                    }
+                    skip_next =
+                        matches!(tok.as_str(), "-d" | "-i" | "-n" | "-N" | "-p" | "-t" | "-u");
+                    continue;
+                }
+                if is_denied(tok) {
+                    return true;
+                }
+            }
+            false
+        }
+        "printf" => rest.windows(2).any(|w| w[0] == "-v" && is_denied(&w[1])),
+        _ => false,
+    }
+}
+
+/// Programs whose operands may be Go package patterns (`./...`).
+const GO_PACKAGE_PATTERN_VERBS: &[&str] = &["go", "golangci-lint", "staticcheck", "govulncheck"];
+
+/// For a Go tool operand ending in the `/...` package wildcard (`./...`,
+/// `./cmd/...`, `../...`), return the directory the pattern ranges over
+/// (`.`, `./cmd`, `..`) so it can be validated as a path. Returns `None`
+/// for other verbs and for tokens that are not package patterns. Only one
+/// trailing wildcard is stripped: `./.../...` keeps a `...` component and
+/// still fails the dot-overflow check.
+fn go_package_pattern_dir<'a>(verb: &str, tok: &'a str) -> Option<&'a str> {
+    if !GO_PACKAGE_PATTERN_VERBS.contains(&verb) {
+        return None;
+    }
+    let dir = tok.strip_suffix("/...")?;
+    if dir.is_empty() {
+        return Some("/"); // `/...` ranges over the filesystem root
+    }
+    Some(dir)
+}
+
+/// Whether a token is a redirection (`>`, `2>`, `>>`, `>&2`, `<`, `3<`,
+/// `&>`, `>file`), optionally with a numeric fd prefix.
+fn is_shell_redirect_token(tok: &str) -> bool {
+    let stripped = tok.trim_start_matches(|c: char| c.is_ascii_digit());
+    stripped.starts_with('>') || stripped.starts_with('<') || stripped.starts_with("&>")
+}
+
+/// Whether a redirection token is a bare operator whose target is the NEXT
+/// word (`>`, `2>>`, `<`, `&>`, `>|`) rather than glued (`>file`, `2>&1`).
+fn is_bare_redirect_operator(tok: &str) -> bool {
+    let stripped = tok.trim_start_matches(|c: char| c.is_ascii_digit());
+    matches!(
+        stripped,
+        ">" | ">>" | ">|" | "<" | "<>" | "&>" | "&>>" | "<<" | "<<<"
+    )
 }
 
 /// Whether a token is shell plumbing rather than an operand: redirections

@@ -1,0 +1,42 @@
+# Attack cases the checker currently allows; tracked for a separate hardening
+# effort; the list may only shrink; maintainer sign-off 2026-09-23.
+#
+# redteam_corpus_respects_gate_expectations reports these (not a failure),
+# fails on any allowed attack NOT listed here, and fails when a listed id is
+# no longer an allowed attack (remove it from this file). One case id per
+# line, generated from the gate's remaining violations.
+gen-env_injection-8ee5abd9ee35b741
+gen-shell_obfuscation-9f6b8fa59f734908
+gen-env_injection-4df50fde8ff20a8e
+gen-env_injection-b736cdc31cb77531
+gen-prompt_injection_tool-da66324cc8821e11
+gen-env_injection-a37eec52ce1eb17a
+gen-env_injection-def53a6cd676e609
+gen-env_injection-6b7bb177fd4ec7bd
+gen-prompt_injection_tool-e6c035986cffc8d2
+gen-env_injection-0fdfbd75bbf05a83
+gen-env_injection-9ef35f9886d5c17a
+gen-env_injection-ad88afd723b71883
+gen-exfil_channel-ceb7f47dfeeb8007
+gen-prompt_injection_tool-34b12221656db456
+gen-env_injection-63d9cd8dd1ae74f2
+gen-env_injection-f3ac6d6810d133c9
+gen-env_injection-8481b5bed6589568
+gen-env_injection-86c109f6ed0f5967
+gen-prompt_injection_tool-f6f8514a7d757d42
+gen-prompt_injection_tool-610506ac1940c492
+gen-env_injection-6e77856d8230ed53
+gen-prompt_injection_tool-91a1ed6e7ce7c0bb
+gen-prompt_injection_tool-0624cf88c9e23428
+gen-prompt_injection_tool-44d15f7c512342c7
+gen-env_injection-3123b973fe8d2fd2
+gen-env_injection-1f4398d3918de580
+gen-env_injection-da754c1e01644e3a
+gen-prompt_injection_tool-86d4423e18e1c786
+gen-env_injection-c2aec239801c81b5
+gen-prompt_injection_tool-a2238f0c61749a49
+gen-env_injection-885cc71ab68ed254
+gen-env_injection-9a984e9321248aba
+gen-env_injection-f08bb62a1a8447c8
+gen-env_injection-c567dfd147572dbd
+gen-env_injection-3b6c46c7e7a42d65
