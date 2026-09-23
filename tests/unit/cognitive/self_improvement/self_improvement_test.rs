@@ -889,3 +889,104 @@ fn first_observation_shrinks_toward_prior() {
         "one-shot success ({lucky}) must not outrank a proven record ({proven})"
     );
 }
+
+// --- System prompt erasure: pattern variants must extend the baseline ---
+
+fn optimizer_with_proven_pattern(template: &str) -> PromptOptimizer {
+    let mut optimizer = PromptOptimizer::new();
+    let mut pattern = PromptPattern::new("proven", template);
+    pattern.effective_for.push("system_prompt".to_string());
+    for _ in 0..6 {
+        pattern.update(Outcome::Success, 1.0);
+    }
+    optimizer.register_pattern(pattern);
+    optimizer
+}
+
+#[test]
+fn pattern_variant_extends_baseline_instead_of_replacing_it() {
+    let baseline = "SYSTEM: tool schemas; safety rules; workspace /repo";
+    let optimizer = optimizer_with_proven_pattern("Please {action} in the {target}.");
+    let variants = optimizer.generate_prompt_variants("system_prompt", baseline);
+    let pattern_variants: Vec<_> = variants
+        .iter()
+        .filter(|(id, _, _)| id.starts_with("pattern_"))
+        .collect();
+    assert_eq!(pattern_variants.len(), 1, "proven pattern yields a variant");
+    let prompt = &pattern_variants[0].2;
+    assert_eq!(
+        prompt,
+        &format!("{baseline}\n\nPlease complete the requested task in the codebase.")
+    );
+    for (id, _, prompt) in &variants {
+        assert!(
+            prompt.starts_with(baseline),
+            "variant {id} dropped the baseline prompt: {prompt:?}"
+        );
+    }
+}
+
+#[test]
+fn pattern_variant_already_containing_baseline_is_not_doubled() {
+    let baseline = "SYSTEM baseline";
+    let optimizer = optimizer_with_proven_pattern("SYSTEM baseline\n\nExtra rule.");
+    let variants = optimizer.generate_prompt_variants("system_prompt", baseline);
+    let (_, _, prompt) = variants
+        .iter()
+        .find(|(id, _, _)| id.starts_with("pattern_"))
+        .expect("pattern variant");
+    assert_eq!(prompt, "SYSTEM baseline\n\nExtra rule.");
+}
+
+#[test]
+fn winning_pattern_variant_keeps_full_system_prompt() {
+    let baseline = "SYSTEM: tool schemas; safety rules; workspace /repo";
+    let mut optimizer = optimizer_with_proven_pattern("Short replacement.");
+    let result = optimizer.evolve_prompt("system_prompt", baseline);
+    assert!(
+        result.extends_baseline(baseline),
+        "winner {:?} must extend the baseline",
+        result.winner_prompt
+    );
+    for v in &result.variants {
+        assert!(v.prompt.starts_with(baseline), "variant {}", v.variant_id);
+    }
+}
+
+#[test]
+fn evolved_candidate_template_stores_only_the_extension() {
+    let baseline = "SYSTEM baseline prompt";
+    let mut optimizer = PromptOptimizer::new();
+    let result = optimizer.evolve_prompt("system_prompt", baseline);
+    let candidate = optimizer
+        .patterns
+        .values()
+        .find(|p| p.id.starts_with("evo-system_prompt-"))
+        .expect("candidate registered");
+    assert!(
+        !candidate.template.contains(baseline),
+        "the baseline must not be baked into the stored template: {:?}",
+        candidate.template
+    );
+    assert_eq!(
+        format!("{baseline}\n\n{}", candidate.template).trim_end(),
+        result.winner_prompt.trim_end()
+    );
+}
+
+#[test]
+fn extends_baseline_rejects_replacement_and_truncation() {
+    let mk = |winner: &str| PromptTournamentResult {
+        task_type: "system_prompt".to_string(),
+        winner_prompt: winner.to_string(),
+        winner_strategy: "pattern_x".to_string(),
+        winner_score: 1.0,
+        variants: Vec::new(),
+    };
+    let baseline = "FULL SYSTEM PROMPT";
+    assert!(mk(baseline).extends_baseline(baseline));
+    assert!(mk("FULL SYSTEM PROMPT\n\nextra").extends_baseline(baseline));
+    assert!(!mk("Short replacement.").extends_baseline(baseline));
+    assert!(!mk("FULL SYSTEM").extends_baseline(baseline));
+    assert!(!mk("extra\n\nFULL SYSTEM PROMPT").extends_baseline(baseline));
+}

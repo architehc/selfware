@@ -16,6 +16,7 @@ use tokio::process::Command;
 
 use super::Tool;
 use crate::config::is_local_endpoint;
+use crate::safety::process_env::SanitizedEnvExt;
 
 // ============================================================================
 // Browser Detection
@@ -48,6 +49,7 @@ async fn detect_browser() -> Result<BrowserType> {
     // Try Chrome/Chromium first
     for browser in chrome_candidates() {
         if Command::new(browser)
+            .sanitized_env()
             .arg("--version")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -62,6 +64,7 @@ async fn detect_browser() -> Result<BrowserType> {
 
     // Fallback to curl
     if Command::new("curl")
+        .sanitized_env()
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())

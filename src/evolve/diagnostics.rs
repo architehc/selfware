@@ -3,6 +3,7 @@
 //! The runner deliberately exposes a fixed command set. Browser requests can
 //! never supply executable names or arbitrary arguments.
 
+use crate::safety::process_env::SanitizedEnvExt;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -110,6 +111,7 @@ impl DiagnosticsEngine {
             kind.args()
         };
         let output = Command::new("cargo")
+            .sanitized_env()
             .args(args)
             .current_dir(&self.project_root)
             .env("CARGO_TERM_COLOR", "never")

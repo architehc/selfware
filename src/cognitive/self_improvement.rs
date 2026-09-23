@@ -198,6 +198,19 @@ pub struct PromptTournamentResult {
     pub variants: Vec<PromptVariantScore>,
 }
 
+impl PromptTournamentResult {
+    /// Whether the winning prompt is a pure EXTENSION of `baseline`: it must
+    /// start with the full baseline text (and so be at least as long).
+    ///
+    /// The system prompt carries tool schemas, safety rules and workspace
+    /// info; a winner that drops or rewrites any of it would silently erase
+    /// those from the agent's context. Callers applying a tournament winner
+    /// to a live prompt must reject anything for which this returns false.
+    pub fn extends_baseline(&self, baseline: &str) -> bool {
+        self.winner_prompt.len() >= baseline.len() && self.winner_prompt.starts_with(baseline)
+    }
+}
+
 impl PromptOptimizer {
     pub fn new() -> Self {
         Self {
@@ -349,8 +362,18 @@ impl PromptOptimizer {
         // be fabricated: the candidate only becomes recommendable after real
         // outcomes accumulate via PromptPattern::update (best_patterns_for
         // requires usage_count >= 5).
+        //
+        // Only the EXTENSION beyond the baseline is stored as the template:
+        // the baseline (a full system prompt with per-session dynamic
+        // sections) is re-supplied at variant-generation time, so storing it
+        // would re-append a stale copy of the whole prompt to future ones.
         let pattern_id = format!("evo-{}-{}", task_type, winner.variant_id);
-        let mut pattern = PromptPattern::new(&pattern_id, &winner.prompt);
+        let template = winner
+            .prompt
+            .strip_prefix(baseline_prompt)
+            .map(str::trim)
+            .unwrap_or(&winner.prompt);
+        let mut pattern = PromptPattern::new(&pattern_id, template);
         pattern.effective_for.push(task_type.to_string());
         self.register_pattern(pattern);
 
@@ -402,10 +425,23 @@ impl PromptOptimizer {
 
         for (idx, pattern) in self.best_patterns_for(task_type).iter().take(2).enumerate() {
             let rendered = Self::render_pattern_template(&pattern.template);
+            let rendered = rendered.trim();
+            if rendered.is_empty() {
+                continue;
+            }
+            // Pattern variants EXTEND the baseline like every heuristic
+            // variant does. A bare template as a variant would, if it won,
+            // replace the entire system prompt (tool schemas, safety rules,
+            // workspace info) with a one-line instruction.
+            let prompt = if rendered.starts_with(baseline_prompt) {
+                rendered.to_string()
+            } else {
+                format!("{}\n\n{}", baseline_prompt, rendered)
+            };
             variants.push((
                 format!("pattern_{}", idx + 1),
                 format!("pattern_{}", pattern.id),
-                rendered,
+                prompt,
             ));
         }
 

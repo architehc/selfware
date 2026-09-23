@@ -2,6 +2,7 @@
 //!
 //! Gates must pass before the engine recommends or applies an action.
 
+use crate::safety::process_env::SanitizedEnvExt;
 use anyhow::Result;
 
 #[derive(Debug)]
@@ -32,6 +33,7 @@ impl Gatekeeper {
     pub fn check_code_gates(&self) -> Result<GateResult> {
         // MVP: run cargo check and parse result
         let output = std::process::Command::new("cargo")
+            .sanitized_env()
             .args(["check", "--lib"])
             .output()?;
         Ok(GateResult {

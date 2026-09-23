@@ -13,6 +13,7 @@ use super::runtime::{get_runtime, ContainerRuntime};
 use super::validation::{
     is_valid_memory, is_valid_user, validate_port_mapping, validate_volume_spec,
 };
+use crate::safety::process_env::SanitizedEnvExt;
 use crate::tools::Tool;
 
 /// Build the container-runtime isolation flags for a run request's `profile`
@@ -192,6 +193,7 @@ impl Tool for ContainerRun {
 
         let runtime = get_runtime(args.get("runtime").and_then(|v| v.as_str())).await?;
         let mut cmd = Command::new(runtime.command());
+        cmd.sanitized_env_preserve(crate::safety::process_env::CONTAINER_RUNTIME_ENV);
         crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         cmd.arg("run");
 
@@ -368,6 +370,7 @@ impl Tool for ContainerStop {
         let timeout = args.get("timeout").and_then(|v| v.as_u64()).unwrap_or(10);
 
         let mut cmd = Command::new(runtime.command());
+        cmd.sanitized_env_preserve(crate::safety::process_env::CONTAINER_RUNTIME_ENV);
         crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         cmd.args(["stop", "-t", &timeout.to_string(), container]);
         cmd.stdout(Stdio::piped());
@@ -443,6 +446,7 @@ impl Tool for ContainerList {
         let all = args.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
 
         let mut cmd = Command::new(runtime.command());
+        cmd.sanitized_env_preserve(crate::safety::process_env::CONTAINER_RUNTIME_ENV);
         crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         cmd.args(["ps", "--format", "{{.ID}}\t{{.Image}}\t{{.Command}}\t{{.CreatedAt}}\t{{.Status}}\t{{.Ports}}\t{{.Names}}"]);
 
@@ -564,6 +568,7 @@ impl Tool for ContainerLogs {
         let tail = args.get("tail").and_then(|v| v.as_u64()).unwrap_or(100);
 
         let mut cmd = Command::new(runtime.command());
+        cmd.sanitized_env_preserve(crate::safety::process_env::CONTAINER_RUNTIME_ENV);
         crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         cmd.args(["logs", "--tail", &tail.to_string()]);
 
@@ -688,6 +693,7 @@ impl Tool for ContainerExec {
         let runtime = get_runtime(args.get("runtime").and_then(|v| v.as_str())).await?;
 
         let mut cmd = Command::new(runtime.command());
+        cmd.sanitized_env_preserve(crate::safety::process_env::CONTAINER_RUNTIME_ENV);
         crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         cmd.arg("exec");
 
@@ -798,6 +804,7 @@ impl Tool for ContainerBuild {
         let runtime = get_runtime(args.get("runtime").and_then(|v| v.as_str())).await?;
 
         let mut cmd = Command::new(runtime.command());
+        cmd.sanitized_env_preserve(crate::safety::process_env::CONTAINER_RUNTIME_ENV);
         crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         cmd.args(["build", "-t", tag]);
 
@@ -911,6 +918,7 @@ impl Tool for ContainerImages {
         let all = args.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
 
         let mut cmd = Command::new(runtime.command());
+        cmd.sanitized_env_preserve(crate::safety::process_env::CONTAINER_RUNTIME_ENV);
         crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         cmd.args([
             "images",
@@ -1007,6 +1015,7 @@ impl Tool for ContainerPull {
         let runtime = get_runtime(args.get("runtime").and_then(|v| v.as_str())).await?;
 
         let mut cmd = Command::new(runtime.command());
+        cmd.sanitized_env_preserve(crate::safety::process_env::CONTAINER_RUNTIME_ENV);
         crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         cmd.args(["pull", image]);
         cmd.stdout(Stdio::piped());
@@ -1086,6 +1095,7 @@ impl Tool for ContainerRemove {
         let runtime = get_runtime(args.get("runtime").and_then(|v| v.as_str())).await?;
 
         let mut cmd = Command::new(runtime.command());
+        cmd.sanitized_env_preserve(crate::safety::process_env::CONTAINER_RUNTIME_ENV);
         crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         cmd.args(["rm"]);
 
@@ -1185,6 +1195,7 @@ impl Tool for ComposeUp {
         };
 
         let mut cmd = Command::new(cmd_name);
+        cmd.sanitized_env_preserve(crate::safety::process_env::CONTAINER_RUNTIME_ENV);
         crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         cmd.args(&compose_args);
 
@@ -1291,6 +1302,7 @@ impl Tool for ComposeDown {
         };
 
         let mut cmd = Command::new(cmd_name);
+        cmd.sanitized_env_preserve(crate::safety::process_env::CONTAINER_RUNTIME_ENV);
         crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         cmd.args(&compose_args);
 

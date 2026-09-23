@@ -9,6 +9,7 @@ use super::task_policy::{policy_envelope, PolicyKind};
 use super::*;
 use crate::checkpoint::VisualAssertion;
 use crate::cognitive::CyclePhase;
+use crate::safety::process_env::SanitizedEnvExt;
 
 /// Result of visual verification including whether it should hard-gate execution.
 pub(super) struct VisualVerificationResult {
@@ -1036,6 +1037,7 @@ impl Agent {
         // Async process spawn — this runs inside the async check_completion_gate,
         // so a blocking std::process::Command would stall a tokio worker thread.
         let output = tokio::process::Command::new("git")
+            .sanitized_env()
             .args(["diff", "-z", "--name-only", "HEAD", "--"])
             .current_dir(&root)
             .output()
@@ -1059,6 +1061,7 @@ impl Agent {
         // files created during the run count as changes. Use -z so filenames with
         // spaces or unusual characters are safely parsed.
         if let Ok(untracked) = tokio::process::Command::new("git")
+            .sanitized_env()
             .args(["ls-files", "-z", "--others", "--exclude-standard"])
             .current_dir(&root)
             .output()
@@ -1170,6 +1173,7 @@ impl Agent {
             }
             // Async process spawn — see diff_paths_for_completion_gate.
             let output = tokio::process::Command::new("git")
+                .sanitized_env()
                 .args(["diff", "HEAD", "--", path])
                 .current_dir(&root)
                 .output()
@@ -1670,6 +1674,7 @@ impl Agent {
         let root = super::current_project_root();
         // Async process spawn — see diff_paths_for_completion_gate.
         let output = tokio::process::Command::new("git")
+            .sanitized_env()
             .args([
                 "log",
                 "-z",

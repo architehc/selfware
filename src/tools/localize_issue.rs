@@ -3,6 +3,7 @@
 //! and recent git change history.
 
 use crate::config::SafetyConfig;
+use crate::safety::process_env::SanitizedEnvExt;
 use crate::tools::file::{resolve_safety_config, validate_tool_path};
 use crate::tools::Tool;
 use anyhow::{Context, Result};
@@ -90,6 +91,7 @@ fn is_source_file(path: &Path) -> bool {
 /// Collect files recently modified in git (last 30 days).
 fn recent_git_files(repo_path: &str) -> HashSet<String> {
     let output = std::process::Command::new("git")
+        .sanitized_env()
         .args([
             "log",
             "-z",

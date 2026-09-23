@@ -5,6 +5,7 @@ use super::file::{
 use super::Tool;
 use crate::api::ApiClient;
 use crate::config::SafetyConfig;
+use crate::safety::process_env::SanitizedEnvExt;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use regex::Regex;
@@ -264,7 +265,7 @@ impl Tool for FileFimEdit {
         // For Rust files, run a quick syntax check before writing
         if path.ends_with(".rs") {
             use tokio::process::Command;
-            let check = Command::new("rustfmt")
+            let check = Command::new("rustfmt").sanitized_env()
                 // rustfmt discovers rustfmt.toml from its cwd: the workspace root.
                 .current_dir(crate::tools::workspace_root::current_path())
                 .args(["--edition", "2021", "--check"])

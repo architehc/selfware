@@ -13,6 +13,7 @@ use crate::agent::progress::{ProgressEmitter, ProgressEvent};
 use crate::agent::tui_events::{AgentEvent, EventEmitter};
 use crate::config::ExecutionMode;
 use crate::observability::dashboard::TokenUsage;
+use crate::safety::process_env::SanitizedEnvExt;
 
 /// Reason a headless run must not start, or `None` when it may proceed.
 ///
@@ -277,6 +278,7 @@ impl EventEmitter for AnswerCaptureEmitter {
 /// from a genuine seeding failure.
 fn head_exists() -> bool {
     std::process::Command::new("git")
+        .sanitized_env()
         .args(["rev-parse", "--verify", "HEAD"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -308,6 +310,7 @@ pub fn capture_patch() -> anyhow::Result<String> {
     // tracked-ignored file stays unchanged and only real working-tree edits
     // (modifications, new files, genuine deletions) appear in the patch.
     let read_tree = std::process::Command::new("git")
+        .sanitized_env()
         .env("GIT_INDEX_FILE", &tmp_index)
         .args(["read-tree", "HEAD"])
         .stdout(std::process::Stdio::null())
@@ -324,6 +327,7 @@ pub fn capture_patch() -> anyhow::Result<String> {
     }
 
     let add_status = std::process::Command::new("git")
+        .sanitized_env()
         .env("GIT_INDEX_FILE", &tmp_index)
         .args(["add", "-A"])
         .stdout(std::process::Stdio::null())
@@ -345,6 +349,7 @@ pub fn capture_patch() -> anyhow::Result<String> {
         "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
     };
     let out = std::process::Command::new("git")
+        .sanitized_env()
         .env("GIT_INDEX_FILE", &tmp_index)
         .args([
             "diff",

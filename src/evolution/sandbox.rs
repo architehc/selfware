@@ -3,6 +3,7 @@
 //! Each hypothesis gets its own container with resource limits.
 //! Containers are ephemeral — spun up, evaluated, and destroyed.
 
+use crate::safety::process_env::SanitizedEnvExt;
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -165,6 +166,7 @@ impl Sandbox {
         args.push("infinity".to_string());
 
         let output = Command::new("docker")
+            .sanitized_env_preserve(crate::safety::process_env::CONTAINER_RUNTIME_ENV)
             .args(&args)
             .output()
             .map_err(|e| SandboxError::DockerFailed(e.to_string()))?;
@@ -192,6 +194,7 @@ impl Sandbox {
         let start = Instant::now();
 
         let output = Command::new("docker")
+            .sanitized_env_preserve(crate::safety::process_env::CONTAINER_RUNTIME_ENV)
             .args(["exec", &self.container_name, "bash", "-c", cmd])
             .output()
             .map_err(|e| SandboxError::ExecFailed(e.to_string()))?;
@@ -212,6 +215,7 @@ impl Sandbox {
         std::fs::write(&patch_file, patch).map_err(|e| SandboxError::IoError(e.to_string()))?;
 
         let _ = Command::new("docker")
+            .sanitized_env_preserve(crate::safety::process_env::CONTAINER_RUNTIME_ENV)
             .args([
                 "cp",
                 &patch_file,
@@ -268,6 +272,7 @@ impl Sandbox {
     /// Get container resource usage stats
     fn get_stats(&self) -> Result<ContainerStats, SandboxError> {
         let output = Command::new("docker")
+            .sanitized_env_preserve(crate::safety::process_env::CONTAINER_RUNTIME_ENV)
             .args([
                 "stats",
                 "--no-stream",
@@ -306,6 +311,7 @@ impl Sandbox {
             return;
         }
         if let Err(e) = Command::new("docker")
+            .sanitized_env_preserve(crate::safety::process_env::CONTAINER_RUNTIME_ENV)
             .args(["rm", "-f", &self.container_name])
             .output()
         {

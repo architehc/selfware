@@ -49,6 +49,7 @@ use crate::config::Config;
 use crate::hooks::HookRegistry;
 use crate::memory::AgentMemory;
 use crate::output;
+use crate::safety::process_env::SanitizedEnvExt;
 use crate::safety::SafetyChecker;
 #[cfg(feature = "resilience")]
 use crate::self_healing::{SelfHealingConfig, SelfHealingEngine};
@@ -1351,7 +1352,17 @@ To call a tool, use this EXACT XML structure:
         // Apply evolved prompt if available (this modifies the full prompt)
         let mut final_prompt = system_prompt;
         if let Some(tournament) = self_improvement.evolve_prompt(&final_prompt, "system_prompt") {
-            if tournament.winner_prompt != final_prompt {
+            if !tournament.extends_baseline(&final_prompt) {
+                // Defense in depth: a winner that does not keep the full
+                // baseline as its prefix would erase tool schemas, safety
+                // rules and workspace info from the system prompt.
+                warn!(
+                    "Rejected evolved system prompt variant '{}': it does not extend the baseline prompt ({} vs {} bytes); keeping baseline",
+                    tournament.winner_strategy,
+                    tournament.winner_prompt.len(),
+                    final_prompt.len()
+                );
+            } else if tournament.winner_prompt != final_prompt {
                 info!(
                     "Applied evolved system prompt variant '{}' (predicted quality {:.2})",
                     tournament.winner_strategy, tournament.winner_score
@@ -3174,6 +3185,7 @@ To call a tool, use this EXACT XML structure:
     pub(super) fn capture_baseline_dirty_paths(&self) {
         let root = self::current_project_root();
         let output = std::process::Command::new("git")
+            .sanitized_env()
             .args(["diff", "-z", "--name-only", "HEAD", "--"])
             .current_dir(root)
             .output();

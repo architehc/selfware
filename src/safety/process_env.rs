@@ -66,6 +66,80 @@ pub fn sanitize_command_env_from<I, K, V>(
     }
 }
 
+/// Session variables a container runtime CLI (docker/podman) legitimately
+/// needs to reach its daemon/socket and read its own configuration: remote
+/// or rootless daemon endpoints, the CLI config/context directory, TLS
+/// material paths, and the XDG runtime/config/data dirs rootless podman
+/// resolves its socket and storage from. These are locations, not
+/// credentials (registry auth lives in files under `DOCKER_CONFIG`/`HOME`,
+/// which the CLI reads itself). Nothing here is forwarded INTO a container —
+/// that only happens via explicit `-e` flags.
+pub const CONTAINER_RUNTIME_ENV: &[&str] = &[
+    "DOCKER_HOST",
+    "DOCKER_CONTEXT",
+    "DOCKER_CONFIG",
+    "DOCKER_CERT_PATH",
+    "DOCKER_TLS_VERIFY",
+    "DOCKER_API_VERSION",
+    "DOCKER_BUILDKIT",
+    "COMPOSE_FILE",
+    "COMPOSE_PROJECT_NAME",
+    "CONTAINER_HOST",
+    "CONTAINER_CONNECTION",
+    "CONTAINERS_CONF",
+    "CONTAINERS_REGISTRIES_CONF",
+    "CONTAINERS_STORAGE_CONF",
+    "XDG_RUNTIME_DIR",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "USER",
+];
+
+/// [`sanitize_command_env`] for synchronous spawn sites built on
+/// `std::process::Command`: clear the inherited environment and re-add only
+/// the shared non-sensitive allowlist.
+pub fn sanitize_std_command_env(cmd: &mut std::process::Command) {
+    sanitize_std_command_env_preserve(cmd, &[]);
+}
+
+/// Builder-chain form of the sanitize helpers, for spawn sites written as a
+/// single `Command::new(..).args(..).output()` expression:
+///
+/// ```ignore
+/// Command::new("git").sanitized_env().args(["status"]).output()
+/// ```
+///
+/// Must come FIRST in the chain (right after `Command::new`): it clears the
+/// environment, so any `.env(..)` set before it would be dropped.
+pub trait SanitizedEnvExt {
+    /// Clear the inherited env and re-add the shared allowlist.
+    fn sanitized_env(&mut self) -> &mut Self;
+    /// As [`SanitizedEnvExt::sanitized_env`] plus the named parent vars.
+    fn sanitized_env_preserve(&mut self, preserve: &[&str]) -> &mut Self;
+}
+
+impl SanitizedEnvExt for std::process::Command {
+    fn sanitized_env(&mut self) -> &mut Self {
+        sanitize_std_command_env(self);
+        self
+    }
+    fn sanitized_env_preserve(&mut self, preserve: &[&str]) -> &mut Self {
+        sanitize_std_command_env_preserve(self, preserve);
+        self
+    }
+}
+
+impl SanitizedEnvExt for tokio::process::Command {
+    fn sanitized_env(&mut self) -> &mut Self {
+        sanitize_command_env(self);
+        self
+    }
+    fn sanitized_env_preserve(&mut self, preserve: &[&str]) -> &mut Self {
+        sanitize_command_env_preserve(self, preserve);
+        self
+    }
+}
+
 /// [`sanitize_command_env_preserve`] for synchronous spawn sites built on
 /// `std::process::Command` (e.g. backend probes that cannot `.await`).
 pub fn sanitize_std_command_env_preserve(cmd: &mut std::process::Command, preserve: &[&str]) {

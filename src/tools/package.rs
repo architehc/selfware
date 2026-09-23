@@ -15,6 +15,7 @@ use tokio::process::Command;
 
 use super::Tool;
 use crate::config::SafetyConfig;
+use crate::safety::process_env::SanitizedEnvExt;
 use crate::tools::file::{resolve_safety_config, validate_tool_path};
 
 /// Maximum output buffer size from a package command (10 MB).
@@ -825,6 +826,7 @@ struct PipPackage {
 async fn find_python() -> String {
     // Try python3 first
     if Command::new("python3")
+        .sanitized_env()
         .arg("--version")
         .output()
         .await

@@ -15,6 +15,7 @@ use std::path::Path;
 use std::process::Command;
 
 use super::Node;
+use crate::safety::process_env::SanitizedEnvExt;
 
 pub struct QualityAnalyzer {
     /// Compiler warning counts keyed by source file (e.g. "src/agent/mod.rs"),
@@ -96,6 +97,7 @@ impl Default for QualityAnalyzer {
 /// path without mutating the process-wide `PATH`.
 pub fn collect_warnings_from(cmd: &str) -> Option<HashMap<String, usize>> {
     let output = match Command::new(cmd)
+        .sanitized_env()
         .args(["check", "--message-format=json"])
         .output()
     {

@@ -369,7 +369,7 @@ impl super::tui_events::EventEmitter for EvolutionBridgeEmitter {
                 self.bus.emit(EvolutionEvent::AgentStream {
                     agent_id: self.agent_id.clone(),
                     content_preview: text.chars().take(80).collect(),
-                    tokens: text.len() / 4, // rough estimate
+                    tokens: crate::token_count::estimate_content_tokens(text),
                 });
             }
             super::tui_events::AgentEvent::Started => {

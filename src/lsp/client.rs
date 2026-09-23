@@ -3,6 +3,7 @@
 //! Manages connections to language servers (one per language), communicating
 //! via JSON-RPC 2.0 over stdio with `Content-Length` header framing.
 
+use crate::safety::process_env::SanitizedEnvExt;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -107,6 +108,7 @@ fn server_candidates(lang: Language) -> Vec<(String, Vec<String>)> {
 /// Check if a binary is available on PATH.
 async fn binary_exists(name: &str) -> bool {
     Command::new("which")
+        .sanitized_env()
         .arg(name)
         .stdout(Stdio::null())
         .stderr(Stdio::null())

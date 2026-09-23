@@ -233,3 +233,224 @@ async fn sanitized_env_forwards_proxy_credentials_when_opted_in() {
         "opt-in must forward proxy credentials verbatim; saw:\n{stdout}"
     );
 }
+
+// --- Secondary spawn sites (git/rg/docker/cargo helpers) --------------------
+//
+// A sentinel set on the Command BEFORE sanitizing stands in for an inherited
+// host secret: `env_clear` drops explicit and inherited vars alike, so this
+// exercises the same removal without mutating the process environment.
+
+const SENTINEL: &str = "SELFWARE_TEST_SENTINEL_SECRET";
+
+/// `std::process::Command` spawn sites (`sanitize_std_command_env`).
+#[test]
+#[cfg(not(windows))]
+fn std_sanitize_drops_sentinel_secret() {
+    let mut cmd = std::process::Command::new("/bin/sh");
+    cmd.env(SENTINEL, "leak-me");
+    sanitize_std_command_env(&mut cmd);
+    let out = cmd.args(["-c", "env"]).output().expect("spawn env");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains(SENTINEL), "sentinel leaked:\n{stdout}");
+    assert!(stdout.contains("PATH="), "allowlist PATH must survive");
+}
+
+/// Builder-chain spawn sites (`Command::new(..).sanitized_env()...`), std.
+#[test]
+#[cfg(not(windows))]
+fn std_chain_sanitized_env_drops_sentinel_and_keeps_later_env() {
+    let out = std::process::Command::new("/bin/sh")
+        .env(SENTINEL, "leak-me")
+        .sanitized_env()
+        .env("GIT_INDEX_FILE", "/tmp/idx")
+        .args(["-c", "env"])
+        .output()
+        .expect("spawn env");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains(SENTINEL), "sentinel leaked:\n{stdout}");
+    assert!(
+        stdout.contains("GIT_INDEX_FILE=/tmp/idx"),
+        "vars set after sanitizing must survive:\n{stdout}"
+    );
+}
+
+/// Builder-chain spawn sites, tokio.
+#[tokio::test]
+#[cfg(not(windows))]
+async fn tokio_chain_sanitized_env_drops_sentinel() {
+    let out = tokio::process::Command::new("/bin/sh")
+        .env(SENTINEL, "leak-me")
+        .env("RIPGREP_CONFIG_PATH", "/attacker/rgrc")
+        .sanitized_env()
+        .args(["-c", "env"])
+        .output()
+        .await
+        .expect("spawn env");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains(SENTINEL), "sentinel leaked:\n{stdout}");
+    assert!(
+        !stdout.contains("RIPGREP_CONFIG_PATH"),
+        "rg config path must not be forwarded:\n{stdout}"
+    );
+}
+
+/// Container runtime spawn sites keep the daemon-location vars docker/podman
+/// need, and nothing credential-bearing.
+#[tokio::test]
+#[cfg(not(windows))]
+async fn container_keep_list_forwards_daemon_location_not_secrets() {
+    let mut cmd = tokio::process::Command::new("/bin/sh");
+    sanitize_command_env_from(
+        &mut cmd,
+        CONTAINER_RUNTIME_ENV,
+        parent_env_with(&[
+            ("DOCKER_HOST", "unix:///run/user/1000/docker.sock"),
+            ("XDG_RUNTIME_DIR", "/run/user/1000"),
+            ("AWS_SECRET_ACCESS_KEY", "aws-secret-sentinel"),
+            ("GITHUB_TOKEN", "ghp_sentinel"),
+            (SENTINEL, "leak-me"),
+        ]),
+    );
+    let stdout = child_env(cmd).await;
+    assert!(stdout.contains("DOCKER_HOST=unix:///run/user/1000/docker.sock"));
+    assert!(stdout.contains("XDG_RUNTIME_DIR=/run/user/1000"));
+    for secret in ["aws-secret-sentinel", "ghp_sentinel", SENTINEL] {
+        assert!(!stdout.contains(secret), "{secret} leaked:\n{stdout}");
+    }
+    for name in CONTAINER_RUNTIME_ENV {
+        let lower = name.to_ascii_lowercase();
+        assert!(
+            !["token", "secret", "password", "key"]
+                .iter()
+                .any(|s| lower.contains(s)),
+            "container keep-list must not name credential vars: {name}"
+        );
+    }
+}
+
+/// Rule 5 guard: every `Command::new(` in non-test `src/` code must be
+/// sanitized (a `sanitize*`/`sanitized_env*`/`env_clear` call within the
+/// following lines), except the files listed here — each with the number of
+/// intentionally unsanitized spawns and why. Counts may only go DOWN.
+#[test]
+fn no_new_unsanitized_spawns_in_src() {
+    const WINDOW: usize = 30;
+    // (file, max unsanitized spawns, reason)
+    const ALLOWED: &[(&str, usize, &str)] = &[
+        (
+            "src/agent/interactive/mod.rs",
+            1,
+            "user `!cmd` shell escape",
+        ),
+        ("src/agent/mod.rs", 1, "user `!cmd` shell passthrough"),
+        (
+            "src/bench_harness/long_running/project.rs",
+            10,
+            "operator bench fixture git",
+        ),
+        (
+            "src/bench_harness/long_running/runner.rs",
+            4,
+            "operator bench: selfware self-exec needs API keys",
+        ),
+        (
+            "src/bench_harness/swebench_pro/dataset.rs",
+            1,
+            "operator bench: dataset loader needs HF creds",
+        ),
+        (
+            "src/bench_harness/swebench_pro/harness.rs",
+            11,
+            "operator bench: clones need credential helpers",
+        ),
+        (
+            "src/bench_harness/swebench_pro/runner.rs",
+            2,
+            "operator bench python evaluator",
+        ),
+        (
+            "src/boot/model.rs",
+            2,
+            "operator-launched local model server (GPU env)",
+        ),
+        (
+            "src/config/unpack.rs",
+            4,
+            "operator model setup (OLLAMA_HOST/OLLAMA_MODELS)",
+        ),
+        (
+            "src/doctor.rs",
+            1,
+            "`selfware doctor` probes the user's real toolchain env",
+        ),
+        (
+            "src/evolve/apply.rs",
+            1,
+            "selfware self-exec needs LLM credentials",
+        ),
+        ("src/input/mod.rs", 1, "user's own $EDITOR"),
+        (
+            "src/util.rs",
+            2,
+            "clipboard helper needs the display session env",
+        ),
+    ];
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut stack = vec![root.join("src")];
+    let mut violations = Vec::new();
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read src dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("read source");
+            let lines: Vec<&str> = text.lines().collect();
+            let test_start = lines
+                .windows(2)
+                .position(|w| w[0].trim() == "#[cfg(test)]" && w[1].contains("mod "))
+                .unwrap_or(lines.len());
+            let mut unsanitized = 0usize;
+            for (i, line) in lines.iter().enumerate().take(test_start) {
+                if line.trim_start().starts_with("//") || !line.contains("Command::new(") {
+                    continue;
+                }
+                let end = (i + WINDOW).min(lines.len());
+                let sanitized = lines[i..end]
+                    .iter()
+                    .any(|l| l.contains("sanitize") || l.contains("env_clear"));
+                if !sanitized {
+                    unsanitized += 1;
+                }
+            }
+            if unsanitized == 0 {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let allowed = ALLOWED
+                .iter()
+                .find(|(f, _, _)| *f == rel)
+                .map_or(0, |(_, n, _)| *n);
+            if unsanitized > allowed {
+                violations.push(format!(
+                    "{rel}: {unsanitized} unsanitized (allowed {allowed})"
+                ));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "spawns inheriting the full host env (route them through \
+         crate::safety::process_env):\n{}",
+        violations.join("\n")
+    );
+}

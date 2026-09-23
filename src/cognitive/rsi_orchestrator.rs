@@ -6,6 +6,7 @@ use crate::cognitive::self_edit::{
     SelfEditOrchestrator,
 };
 use crate::errors::{Result, SelfwareError};
+use crate::safety::process_env::SanitizedEnvExt;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -585,6 +586,7 @@ impl RSIOrchestrator {
         };
 
         let output = Command::new("bash")
+            .sanitized_env()
             .arg(&script_path)
             .env("OUT_DIR", &unique_out_dir)
             .env("SELFWARE_LEASE_HELD", "1")

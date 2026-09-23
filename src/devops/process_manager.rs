@@ -12,6 +12,7 @@
 //! This is essential for web/mobile development workflows where `npm run dev`
 //! or `cargo watch` need to stay alive while the agent makes changes.
 
+use crate::safety::process_env::SanitizedEnvExt;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use regex::Regex;
@@ -1297,6 +1298,7 @@ pub async fn bind_available_port() -> Option<(tokio::net::TcpListener, u16)> {
 #[cfg(unix)]
 pub async fn port_info(port: u16) -> Option<String> {
     let output = tokio::process::Command::new("lsof")
+        .sanitized_env()
         .args(["-i", &format!(":{}", port), "-P", "-n"])
         .output()
         .await

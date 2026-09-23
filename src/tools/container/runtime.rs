@@ -2,6 +2,7 @@
 //!
 //! Detects and manages Docker and Podman container runtimes.
 
+use crate::safety::process_env::SanitizedEnvExt;
 use anyhow::Result;
 use std::process::Stdio;
 use tokio::process::Command;
@@ -26,6 +27,7 @@ impl ContainerRuntime {
 pub async fn detect_runtime() -> Result<ContainerRuntime> {
     // Try Docker first
     if Command::new("docker")
+        .sanitized_env_preserve(crate::safety::process_env::CONTAINER_RUNTIME_ENV)
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -39,6 +41,7 @@ pub async fn detect_runtime() -> Result<ContainerRuntime> {
 
     // Try Podman
     if Command::new("podman")
+        .sanitized_env_preserve(crate::safety::process_env::CONTAINER_RUNTIME_ENV)
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())

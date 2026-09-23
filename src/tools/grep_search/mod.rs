@@ -5,6 +5,7 @@
 //! not available the tool falls back to a built-in regex walker.
 
 use crate::config::SafetyConfig;
+use crate::safety::process_env::SanitizedEnvExt;
 use crate::tools::file::{resolve_safety_config, validate_tool_path};
 use crate::tools::Tool;
 use anyhow::{Context, Result};
@@ -71,6 +72,7 @@ pub(crate) fn cached_regex(pattern: &str) -> Result<Regex> {
 /// Check whether the `rg` binary is available on PATH.
 fn rg_available() -> bool {
     std::process::Command::new("rg")
+        .sanitized_env()
         .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -95,6 +97,7 @@ fn run_ripgrep(
     safety: Option<&SafetyConfig>,
 ) -> Result<GrepSearchResult> {
     let mut cmd = std::process::Command::new("rg");
+    cmd.sanitized_env();
     crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
     cmd.arg("--json")
         .arg("--line-number")
