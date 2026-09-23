@@ -1418,16 +1418,38 @@ To call a tool, use this EXACT XML structure:
                             }
                             Err(e) => {
                                 warn!(
-                                    "Failed to discover tools from MCP server '{}': {}",
+                                    "Failed to discover tools from MCP server '{}': {:#}",
                                     server_config.name, e
+                                );
+                                // Visible in a default run (not just the log),
+                                // without making startup fatal.
+                                eprintln!(
+                                    "{}",
+                                    crate::mcp::client::startup_failure_line(
+                                        &server_config.name,
+                                        "failed to list tools",
+                                        &e
+                                    )
                                 );
                             }
                         }
                     }
                     Err(e) => {
                         warn!(
-                            "Failed to connect to MCP server '{}': {}",
+                            "Failed to connect to MCP server '{}': {:#}",
                             server_config.name, e
+                        );
+                        // Visible in a default run (not just the log), without
+                        // making startup fatal. No progress-event variant exists
+                        // for warnings, and the progress emitter is attached
+                        // after construction, so stderr is the channel.
+                        eprintln!(
+                            "{}",
+                            crate::mcp::client::startup_failure_line(
+                                &server_config.name,
+                                "failed to start",
+                                &e
+                            )
                         );
                     }
                 }

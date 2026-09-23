@@ -316,3 +316,174 @@ async fn drop_reaps_the_child_process() {
         "MCP child (pid {pid}) must be dead after transport drop"
     );
 }
+
+// -----------------------------------------------------------------------
+// Dead-server detection: EOF / broken pipe fail fast with a typed cause.
+// -----------------------------------------------------------------------
+
+/// A server whose stdout reaches EOF must fail pending and later requests
+/// immediately with `ServerExited`, not after the request timeout.
+#[cfg(unix)]
+#[tokio::test]
+async fn eof_fails_requests_fast_with_server_exited() {
+    use std::collections::HashMap;
+    let transport = StdioTransport::spawn_named(
+        "quitter",
+        "sh",
+        &["-c".to_string(), "echo bye >&2; exit 3".to_string()],
+        &HashMap::new(),
+    )
+    .await
+    .expect("spawn sh")
+    .with_request_timeout(std::time::Duration::from_secs(30));
+
+    let start = std::time::Instant::now();
+    let err = transport
+        .request("initialize", None)
+        .await
+        .expect_err("dead server must fail the request");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "EOF must fail fast, took {:?}",
+        start.elapsed()
+    );
+    let typed = err
+        .downcast_ref::<McpTransportError>()
+        .unwrap_or_else(|| panic!("expected typed transport error, got: {err:#}"));
+    match typed {
+        // The write may race the exit and hit EPIPE instead of the EOF path;
+        // both are fast, typed, fatal causes.
+        McpTransportError::ServerExited { server, .. }
+        | McpTransportError::BrokenPipe { server, .. } => assert_eq!(server, "quitter"),
+        other => panic!("unexpected cause: {other:?}"),
+    }
+
+    // Once the connection is recorded dead, every later request and
+    // notification fails immediately with the recorded cause.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while transport.dead_cause().is_none() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let cause = transport.dead_cause().expect("transport marked dead");
+    let start = std::time::Instant::now();
+    let again = transport.request("tools/list", None).await.unwrap_err();
+    assert!(start.elapsed() < std::time::Duration::from_millis(500));
+    assert_eq!(again.downcast_ref::<McpTransportError>(), Some(&cause));
+    assert!(transport.notify("notifications/x", None).await.is_err());
+}
+
+/// The EOF cause explains the exit: status and stderr tail.
+#[cfg(unix)]
+#[tokio::test]
+async fn eof_cause_reports_exit_status_and_stderr_tail() {
+    use std::collections::HashMap;
+    let transport = StdioTransport::spawn_named(
+        "noisy",
+        "sh",
+        &[
+            "-c".to_string(),
+            "echo 'fatal: no token' >&2; sleep 0.2; exit 7".to_string(),
+        ],
+        &HashMap::new(),
+    )
+    .await
+    .expect("spawn sh");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while transport.dead_cause().is_none() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let cause = transport.dead_cause().expect("transport marked dead");
+    let msg = cause.to_string();
+    assert!(
+        matches!(cause, McpTransportError::ServerExited { .. }),
+        "{msg}"
+    );
+    assert!(
+        msg.starts_with("MCP server 'noisy' exited / closed its output"),
+        "{msg}"
+    );
+    assert!(msg.contains('7'), "exit status should be reported: {msg}");
+    assert!(
+        msg.contains("fatal: no token"),
+        "stderr tail should be reported: {msg}"
+    );
+}
+
+/// Writing to a server that closed its stdin (but keeps running) yields a
+/// typed broken-pipe error — no panic, no SIGPIPE death of this process —
+/// and marks the transport dead so later requests fail fast.
+#[cfg(unix)]
+#[tokio::test]
+async fn write_to_closed_stdin_is_typed_broken_pipe() {
+    use std::collections::HashMap;
+    let transport = StdioTransport::spawn_named(
+        "deaf",
+        "sh",
+        // Close stdin, keep stdout open (so the reader sees no EOF), linger.
+        &["-c".to_string(), "exec 0<&-; sleep 30".to_string()],
+        &HashMap::new(),
+    )
+    .await
+    .expect("spawn sh")
+    .with_request_timeout(std::time::Duration::from_secs(2));
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // The first write may land before the child closed stdin (then it times
+    // out after 2s); retry until the pipe is observed broken.
+    let mut broken = None;
+    for _ in 0..5 {
+        let err = transport
+            .request("tools/call", Some(serde_json::json!({"name": "x"})))
+            .await
+            .expect_err("no reply expected");
+        match err.downcast_ref::<McpTransportError>() {
+            Some(e @ McpTransportError::BrokenPipe { .. }) => {
+                broken = Some(e.clone());
+                break;
+            }
+            Some(McpTransportError::TimedOut { .. }) => continue,
+            other => panic!("unexpected error: {other:?} ({err:#})"),
+        }
+    }
+    let broken = broken.expect("write to closed stdin must surface as BrokenPipe");
+    let msg = broken.to_string();
+    assert!(msg.contains("deaf") && msg.contains("broken pipe"), "{msg}");
+
+    // Dead now: the next request fails fast with the same cause.
+    let start = std::time::Instant::now();
+    let again = transport.request("tools/list", None).await.unwrap_err();
+    assert!(start.elapsed() < std::time::Duration::from_millis(500));
+    assert_eq!(again.downcast_ref::<McpTransportError>(), Some(&broken));
+}
+
+#[test]
+fn transport_error_messages_name_server_and_cause() {
+    let e = McpTransportError::TimedOut {
+        server: "s".into(),
+        method: "tools/call".into(),
+        secs: 60,
+    };
+    assert_eq!(
+        e.to_string(),
+        "MCP request 'tools/call' to server 's' timed out after 60s"
+    );
+    let e = McpTransportError::ServerExited {
+        server: "s".into(),
+        detail: " (exit status: 0)".into(),
+    };
+    assert_eq!(
+        e.to_string(),
+        "MCP server 's' exited / closed its output (exit status: 0)"
+    );
+    let io = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+    assert!(matches!(
+        McpTransportError::from_write_error("s", &io),
+        McpTransportError::BrokenPipe { .. }
+    ));
+    let io = anyhow::Error::new(std::io::Error::other("boom"));
+    assert!(matches!(
+        McpTransportError::from_write_error("s", &io),
+        McpTransportError::WriteFailed { .. }
+    ));
+}

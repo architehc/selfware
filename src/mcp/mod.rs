@@ -12,10 +12,10 @@ pub mod server;
 pub mod tool_bridge;
 pub mod transport;
 
-pub use client::McpClient;
+pub use client::{McpClient, McpToolCallError};
 pub use discovery::discover_tools;
 pub use tool_bridge::McpTool;
-pub use transport::{Framing, StdioTransport, Transport};
+pub use transport::{Framing, McpTransportError, StdioTransport, Transport};
 
 use serde::{Deserialize, Serialize};
 

@@ -7,7 +7,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use tracing::{debug, info};
 
-use super::transport::Transport;
+use super::transport::{McpTransportError, Transport};
 use super::McpServerConfig;
 
 /// MCP protocol version we support.
@@ -16,6 +16,47 @@ const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 /// Information about the client sent during initialization.
 const CLIENT_NAME: &str = "selfware";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// A failed `tools/call`, carrying the underlying cause in its own message.
+///
+/// Tool dispatch renders errors with `to_string()`, which for an
+/// `anyhow::Context` chain shows only the outermost message ("MCP tool call
+/// 'x' failed on server 'y'") and hides *why*. This type puts the cause in
+/// its `Display` so the model and user can tell an infrastructure failure
+/// (server exited, broken pipe, timeout) from a tool/policy error, and keeps
+/// the typed transport cause (if any) for programmatic inspection.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("MCP tool call '{tool}' failed on server '{server}': {cause}")]
+pub struct McpToolCallError {
+    pub tool: String,
+    pub server: String,
+    /// Human-readable cause (full error chain).
+    pub cause: String,
+    /// The typed transport failure, when the call failed at the transport
+    /// level rather than with a server-returned JSON-RPC error.
+    pub transport: Option<McpTransportError>,
+}
+
+/// One concise user-facing line for an MCP server that could not be brought
+/// up at startup, e.g. `MCP server 'x' failed to start: <cause>; its tools are
+/// unavailable`. The cause is the innermost typed transport failure when there
+/// is one (it already names the server and the reason), otherwise the last two
+/// links of the chain (e.g. "Failed to spawn MCP server: cmd: No such file or
+/// directory"), collapsed to a single line.
+pub fn startup_failure_line(server: &str, what: &str, err: &anyhow::Error) -> String {
+    let cause = if let Some(t) = err
+        .chain()
+        .find_map(|c| c.downcast_ref::<McpTransportError>())
+    {
+        t.to_string()
+    } else {
+        let links: Vec<String> = err.chain().map(|c| c.to_string()).collect();
+        let n = links.len();
+        links[n.saturating_sub(2)..].join(": ")
+    };
+    let cause: String = cause.split_whitespace().collect::<Vec<_>>().join(" ");
+    format!("MCP server '{server}' {what}: {cause}; its tools are unavailable")
+}
 
 /// MCP client wrapping a transport connection to a single MCP server.
 pub struct McpClient {
@@ -27,10 +68,15 @@ pub struct McpClient {
 impl McpClient {
     /// Connect to an MCP server and perform the initialization handshake.
     pub async fn connect(config: &McpServerConfig) -> Result<Self> {
-        let transport = super::StdioTransport::spawn(&config.command, &config.args, &config.env)
-            .await
-            .map(|t| t.with_framing(config.framing))
-            .with_context(|| format!("Failed to spawn MCP server '{}'", config.name))?;
+        let transport = super::StdioTransport::spawn_named(
+            &config.name,
+            &config.command,
+            &config.args,
+            &config.env,
+        )
+        .await
+        .map(|t| t.with_framing(config.framing))
+        .with_context(|| format!("Failed to spawn MCP server '{}'", config.name))?;
 
         let transport: Arc<dyn Transport> = Arc::new(transport);
         let mut client = Self {
@@ -133,11 +179,13 @@ impl McpClient {
             .transport
             .request("tools/call", Some(params))
             .await
-            .with_context(|| {
-                format!(
-                    "MCP tool call '{}' failed on server '{}'",
-                    name, self.server_name
-                )
+            .map_err(|e| {
+                anyhow::Error::new(McpToolCallError {
+                    tool: name.to_string(),
+                    server: self.server_name.clone(),
+                    cause: format!("{e:#}"),
+                    transport: e.downcast_ref::<McpTransportError>().cloned(),
+                })
             })?;
 
         // An MCP result with `isError: true` is a tool-level FAILURE, not a

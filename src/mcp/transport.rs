@@ -14,7 +14,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{oneshot, Mutex};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 // ---------------------------------------------------------------------------
 // Wire framing (newline-delimited JSON-RPC and LSP-style Content-Length).
@@ -209,6 +209,127 @@ impl std::fmt::Display for JsonRpcError {
     }
 }
 
+/// Default time a single JSON-RPC request waits for its response.
+pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 60;
+
+/// Typed, infrastructure-level failure of an MCP stdio connection.
+///
+/// These are *transport* failures (the server process died, its pipes broke,
+/// or it never answered) as opposed to JSON-RPC errors the server returned on
+/// purpose. Callers can `downcast_ref::<McpTransportError>()` on the
+/// `anyhow::Error` returned from [`Transport::request`] to tell the two apart.
+/// Cloneable so one death can fail every pending request with the same cause.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum McpTransportError {
+    /// The server's stdout reached EOF: the process exited or closed its output.
+    #[error("MCP server '{server}' exited / closed its output{detail}")]
+    ServerExited { server: String, detail: String },
+    /// Reading the server's stdout failed (I/O or framing error).
+    #[error("MCP server '{server}' output could not be read: {message}")]
+    ReadFailed { server: String, message: String },
+    /// Writing to the server's stdin hit a broken pipe (the server closed its
+    /// stdin or exited). SIGPIPE is ignored, so this surfaces as EPIPE.
+    #[error("MCP server '{server}' input is closed (broken pipe): {message}")]
+    BrokenPipe { server: String, message: String },
+    /// Writing to the server's stdin failed for another reason.
+    #[error("MCP server '{server}' write failed: {message}")]
+    WriteFailed { server: String, message: String },
+    /// The server did not answer the request in time.
+    #[error("MCP request '{method}' to server '{server}' timed out after {secs}s")]
+    TimedOut {
+        server: String,
+        method: String,
+        secs: u64,
+    },
+}
+
+impl McpTransportError {
+    /// Classify an I/O error from writing to the server's stdin.
+    fn from_write_error(server: &str, err: &anyhow::Error) -> Self {
+        let broken_pipe = err
+            .chain()
+            .filter_map(|c| c.downcast_ref::<std::io::Error>())
+            .any(|io| io.kind() == std::io::ErrorKind::BrokenPipe);
+        if broken_pipe {
+            Self::BrokenPipe {
+                server: server.to_string(),
+                message: format!("{err:#}"),
+            }
+        } else {
+            Self::WriteFailed {
+                server: server.to_string(),
+                message: format!("{err:#}"),
+            }
+        }
+    }
+}
+
+type PendingMap = HashMap<u64, oneshot::Sender<JsonRpcResponse>>;
+
+/// Shared liveness state: `None` while the connection is usable, otherwise
+/// the first fatal cause. Guarded together with the pending map (see
+/// [`mark_dead`]) so a request can never register after the drain and then
+/// wait out the full timeout.
+type DeadState = Arc<std::sync::Mutex<Option<McpTransportError>>>;
+
+/// Record the connection as dead (first cause wins) and fail every pending
+/// request immediately by dropping its response channel. The pending-map lock
+/// is held across both steps, and `request` checks the dead state under the
+/// same lock before registering, so no request can slip in between.
+async fn mark_dead(pending: &Mutex<PendingMap>, dead: &DeadState, cause: McpTransportError) {
+    let mut pending = pending.lock().await;
+    {
+        let mut slot = dead.lock().unwrap_or_else(|p| p.into_inner());
+        if slot.is_none() {
+            *slot = Some(cause);
+        }
+    }
+    // Dropping the senders wakes every waiter with `RecvError`; `request`
+    // then reports the recorded cause.
+    pending.clear();
+}
+
+fn dead_cause(dead: &DeadState) -> Option<McpTransportError> {
+    dead.lock().unwrap_or_else(|p| p.into_inner()).clone()
+}
+
+/// Keep the last few stderr lines of the server so an exit can be explained
+/// ("command not found", a stack trace, ...).
+const STDERR_TAIL_LINES: usize = 3;
+const STDERR_TAIL_LINE_MAX_CHARS: usize = 200;
+
+type StderrTail = Arc<std::sync::Mutex<std::collections::VecDeque<String>>>;
+
+/// Describe why the server's stdout closed: exit status (if the process has
+/// exited within a short grace period) and the tail of its stderr.
+async fn describe_exit(child: &Mutex<Child>, stderr_tail: &StderrTail) -> String {
+    let mut status = None;
+    // stdout EOF usually precedes reaping by a hair; poll briefly (<=200ms).
+    for _ in 0..20 {
+        if let Ok(mut c) = child.try_lock() {
+            if let Ok(Some(s)) = c.try_wait() {
+                status = Some(s);
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let mut detail = String::new();
+    if let Some(s) = status {
+        detail.push_str(&format!(" ({s})"));
+    }
+    let tail: Vec<String> = stderr_tail
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .cloned()
+        .collect();
+    if !tail.is_empty() {
+        detail.push_str(&format!("; stderr: {}", tail.join(" | ")));
+    }
+    detail
+}
+
 /// Trait for MCP transport implementations.
 #[async_trait]
 pub trait Transport: Send + Sync {
@@ -226,7 +347,14 @@ pub trait Transport: Send + Sync {
 pub struct StdioTransport {
     stdin: Arc<Mutex<tokio::process::ChildStdin>>,
     /// Pending responses keyed by request ID.
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
+    pending: Arc<Mutex<PendingMap>>,
+    /// First fatal cause once the connection died (EOF, read/write failure);
+    /// later requests fail fast with it instead of waiting for a timeout.
+    dead: DeadState,
+    /// Server name used in error messages.
+    server_name: String,
+    /// How long a request waits for its response.
+    request_timeout: std::time::Duration,
     next_id: AtomicU64,
     child: Arc<Mutex<Child>>,
     /// Background reader task handle.
@@ -243,6 +371,17 @@ impl StdioTransport {
     /// protocol 2024-11-05). Use [`with_framing`](Self::with_framing) to
     /// override this for legacy `Content-Length`-framed servers.
     pub async fn spawn(
+        command: &str,
+        args: &[String],
+        env: &HashMap<String, String>,
+    ) -> Result<Self> {
+        Self::spawn_named(command, command, args, env).await
+    }
+
+    /// Like [`spawn`](Self::spawn), but names the server in typed errors
+    /// (`MCP server '<name>' exited ...`).
+    pub async fn spawn_named(
+        server_name: &str,
         command: &str,
         args: &[String],
         env: &HashMap<String, String>,
@@ -284,9 +423,15 @@ impl StdioTransport {
             .take()
             .context("Failed to capture MCP server stderr")?;
 
-        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let pending: Arc<Mutex<PendingMap>> = Arc::new(Mutex::new(HashMap::new()));
         let pending_clone = Arc::clone(&pending);
+        let dead: DeadState = Arc::new(std::sync::Mutex::new(None));
+        let dead_clone = Arc::clone(&dead);
+        let stderr_tail: StderrTail = Arc::new(std::sync::Mutex::new(Default::default()));
+        let stderr_tail_reader = Arc::clone(&stderr_tail);
+        let child = Arc::new(Mutex::new(child));
+        let child_reader = Arc::clone(&child);
+        let reader_server_name = server_name.to_string();
 
         // Spawn background task to read JSON-RPC responses from stdout.
         // The framing of each incoming message is auto-detected (see
@@ -322,11 +467,39 @@ impl StdioTransport {
                         }
                     }
                     Ok(None) => {
-                        // EOF
+                        // EOF: the server exited or closed its stdout. Fail
+                        // every pending request now instead of letting each
+                        // one wait out its timeout.
+                        let detail = describe_exit(&child_reader, &stderr_tail_reader).await;
+                        warn!(
+                            "MCP server '{}' closed its output{}",
+                            reader_server_name, detail
+                        );
+                        mark_dead(
+                            &pending_clone,
+                            &dead_clone,
+                            McpTransportError::ServerExited {
+                                server: reader_server_name.clone(),
+                                detail,
+                            },
+                        )
+                        .await;
                         break;
                     }
                     Err(e) => {
-                        debug!("MCP stdout framing error: {}", e);
+                        warn!(
+                            "MCP server '{}' stdout read/framing error: {:#}",
+                            reader_server_name, e
+                        );
+                        mark_dead(
+                            &pending_clone,
+                            &dead_clone,
+                            McpTransportError::ReadFailed {
+                                server: reader_server_name.clone(),
+                                message: format!("{e:#}"),
+                            },
+                        )
+                        .await;
                         break;
                     }
                 }
@@ -350,6 +523,13 @@ impl StdioTransport {
                         let trimmed = line.trim();
                         if !trimmed.is_empty() {
                             debug!("MCP server stderr: {}", trimmed);
+                            let mut tail = stderr_tail.lock().unwrap_or_else(|p| p.into_inner());
+                            if tail.len() == STDERR_TAIL_LINES {
+                                tail.pop_front();
+                            }
+                            tail.push_back(
+                                trimmed.chars().take(STDERR_TAIL_LINE_MAX_CHARS).collect(),
+                            );
                         }
                     }
                     Err(e) => {
@@ -364,8 +544,11 @@ impl StdioTransport {
         Ok(Self {
             stdin: Arc::new(Mutex::new(stdin)),
             pending,
+            dead,
+            server_name: server_name.to_string(),
+            request_timeout: std::time::Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
             next_id: AtomicU64::new(1),
-            child: Arc::new(Mutex::new(child)),
+            child,
             reader_handle: Mutex::new(Some(reader_handle)),
             framing: Framing::default(),
         })
@@ -379,6 +562,36 @@ impl StdioTransport {
     pub fn with_framing(mut self, framing: Framing) -> Self {
         self.framing = framing;
         self
+    }
+
+    /// Override how long a request waits for its response (default 60s).
+    pub fn with_request_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+
+    /// The fatal cause, if the connection has died.
+    pub fn dead_cause(&self) -> Option<McpTransportError> {
+        dead_cause(&self.dead)
+    }
+
+    /// Write one framed message. A failure is classified (broken pipe vs
+    /// other) and marks the transport dead: a failed pipe write leaves the
+    /// stream in an unknown state (possibly a partial frame).
+    async fn write_body(&self, body: &str) -> std::result::Result<(), McpTransportError> {
+        let result = {
+            let mut stdin = self.stdin.lock().await;
+            write_framed_message(&mut *stdin, body, self.framing).await
+        };
+        match result {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let cause = McpTransportError::from_write_error(&self.server_name, &e);
+                warn!("{}", cause);
+                mark_dead(&self.pending, &self.dead, cause.clone()).await;
+                Err(cause)
+            }
+        }
     }
 }
 
@@ -396,39 +609,51 @@ impl Transport for StdioTransport {
 
         let body = serde_json::to_string(&request)?;
 
-        // Register pending response channel before sending
+        // Register pending response channel before sending. The dead check
+        // happens under the pending lock (see `mark_dead`), so a request can
+        // never register after the reader drained the map.
         let (tx, rx) = oneshot::channel();
         {
             let mut pending = self.pending.lock().await;
+            if let Some(cause) = dead_cause(&self.dead) {
+                return Err(cause.into());
+            }
             pending.insert(id, tx);
         }
 
         // Send the request in the configured framing (newline-delimited per
-        // the MCP stdio spec unless overridden via `with_framing`).
-        {
-            let mut stdin = self.stdin.lock().await;
-            // On a write failure, drop the now-orphaned pending entry so the map
-            // doesn't leak one slot per failed request.
-            if let Err(e) = write_framed_message(&mut *stdin, &body, self.framing).await {
-                self.pending.lock().await.remove(&id);
-                return Err(e);
-            }
+        // the MCP stdio spec unless overridden via `with_framing`). A write
+        // failure drops the pending entry (via `mark_dead`) and returns the
+        // typed cause (broken pipe etc.) immediately.
+        if let Err(cause) = self.write_body(&body).await {
+            self.pending.lock().await.remove(&id);
+            return Err(cause.into());
         }
 
         debug!("Sent JSON-RPC request: {} (id={})", method, id);
 
         // Wait for response with timeout
-        let response = match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
+        let response = match tokio::time::timeout(self.request_timeout, rx).await {
             Ok(Ok(resp)) => resp,
             Ok(Err(_)) => {
-                // Sender dropped without replying: drop the pending entry.
+                // Sender dropped without replying: the connection died.
                 self.pending.lock().await.remove(&id);
-                bail!("MCP response channel closed for '{}'", method);
+                let cause =
+                    dead_cause(&self.dead).unwrap_or_else(|| McpTransportError::ServerExited {
+                        server: self.server_name.clone(),
+                        detail: String::new(),
+                    });
+                return Err(cause.into());
             }
             Err(_) => {
                 // Timed out: drop the pending entry so it doesn't leak a slot.
                 self.pending.lock().await.remove(&id);
-                bail!("MCP request '{}' timed out after 60s", method);
+                return Err(McpTransportError::TimedOut {
+                    server: self.server_name.clone(),
+                    method: method.to_string(),
+                    secs: self.request_timeout.as_secs(),
+                }
+                .into());
             }
         };
 
@@ -451,8 +676,10 @@ impl Transport for StdioTransport {
 
         let body = serde_json::to_string(&notification)?;
 
-        let mut stdin = self.stdin.lock().await;
-        write_framed_message(&mut *stdin, &body, self.framing).await?;
+        if let Some(cause) = dead_cause(&self.dead) {
+            return Err(cause.into());
+        }
+        self.write_body(&body).await?;
 
         debug!("Sent JSON-RPC notification: {}", method);
         Ok(())
