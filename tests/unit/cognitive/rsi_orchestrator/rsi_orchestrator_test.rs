@@ -878,8 +878,11 @@ fn run_git(project_root: &Path, args: &[&str]) {
 
 #[test]
 fn test_run_projecte2e_real_lease_block_under_parent_lock() {
-    let script_content = std::fs::read_to_string("system_tests/projecte2e/run_projecte2e.sh")
-        .expect("must read run_projecte2e.sh");
+    let script_content = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/system_tests/projecte2e/run_projecte2e.sh"
+    ))
+    .expect("must read run_projecte2e.sh");
 
     let lines: Vec<&str> = script_content.lines().collect();
     let start = lines
@@ -965,8 +968,11 @@ fn test_run_projecte2e_real_lease_block_under_parent_lock() {
 
 #[test]
 fn test_run_full_sab_real_lease_block_under_parent_lock() {
-    let script_content = std::fs::read_to_string("system_tests/projecte2e/run_full_sab.sh")
-        .expect("must read run_full_sab.sh");
+    let script_content = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/system_tests/projecte2e/run_full_sab.sh"
+    ))
+    .expect("must read run_full_sab.sh");
 
     let lines: Vec<&str> = script_content.lines().collect();
     let start = lines
@@ -1047,8 +1053,11 @@ fn test_run_full_sab_real_lease_block_under_parent_lock() {
 
 #[test]
 fn test_lease_heal_fires_warning_and_locks_when_held_1_spoofed_unlocked() {
-    let script_content = std::fs::read_to_string("system_tests/projecte2e/run_full_sab.sh")
-        .expect("must read run_full_sab.sh");
+    let script_content = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/system_tests/projecte2e/run_full_sab.sh"
+    ))
+    .expect("must read run_full_sab.sh");
 
     let lines: Vec<&str> = script_content.lines().collect();
     let start = lines
@@ -1110,8 +1119,11 @@ fn test_lease_heal_fires_warning_and_locks_when_held_1_spoofed_unlocked() {
 
 #[test]
 fn test_run_projecte2e_lease_heal_fires_warning_and_locks_when_held_1_spoofed_unlocked() {
-    let script_content = std::fs::read_to_string("system_tests/projecte2e/run_projecte2e.sh")
-        .expect("must read run_projecte2e.sh");
+    let script_content = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/system_tests/projecte2e/run_projecte2e.sh"
+    ))
+    .expect("must read run_projecte2e.sh");
 
     let lines: Vec<&str> = script_content.lines().collect();
     let start = lines
@@ -1170,8 +1182,11 @@ fn test_run_projecte2e_lease_heal_fires_warning_and_locks_when_held_1_spoofed_un
 
 #[test]
 fn test_run_full_sab_scenario_git_isolation_leaves_parent_untouched() {
-    let script_content = std::fs::read_to_string("system_tests/projecte2e/run_full_sab.sh")
-        .expect("must read run_full_sab.sh");
+    let script_content = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/system_tests/projecte2e/run_full_sab.sh"
+    ))
+    .expect("must read run_full_sab.sh");
     assert!(
         script_content.contains("git init -q")
             && script_content.contains("SAB Benchmark")

@@ -1690,9 +1690,12 @@ impl Agent {
                 // Second time hitting terminal guard without any writes.
                 // Check if src/lib.rs already has substantial content (template project).
                 // If so, do NOT overwrite with scaffold — nudge targeted edits instead.
-                let existing_content = tokio::fs::read_to_string("src/lib.rs")
-                    .await
-                    .unwrap_or_default();
+                // Relative to the agent's workspace root, not the process cwd.
+                let existing_content = tokio::fs::read_to_string(
+                    crate::tools::workspace_root::current_path().join("src/lib.rs"),
+                )
+                .await
+                .unwrap_or_default();
                 let meaningful_lines = existing_content
                     .lines()
                     .filter(|l| {
