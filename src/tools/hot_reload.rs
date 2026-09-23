@@ -106,7 +106,7 @@ impl Tool for DynamicTool {
         let c_args = CString::new(args_str)?;
         let library = self.library.clone();
 
-        tokio::task::spawn_blocking(move || unsafe {
+        crate::tools::workspace_root::spawn_blocking(move || unsafe {
             let execute_sym: Symbol<unsafe extern "C" fn(*const c_char) -> *mut c_char> = library
                 .get(b"execute")
                 .map_err(|e| anyhow!("Failed to find execute symbol: {}", e))?;

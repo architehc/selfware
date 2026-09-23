@@ -110,7 +110,7 @@ async fn run_blocking<F>(f: F) -> Result<Value>
 where
     F: FnOnce() -> Result<Value> + Send + 'static,
 {
-    tokio::task::spawn_blocking(f)
+    crate::tools::workspace_root::spawn_blocking(f)
         .await
         .map_err(|e| anyhow!("graph tool task failed: {e}"))?
 }

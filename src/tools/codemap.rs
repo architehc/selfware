@@ -609,7 +609,7 @@ impl Tool for CodeMapTool {
         // it off the async hot path (subsequent calls are stat-only).
         let root = crate::tools::workspace_root::current_path();
         let focus_for_closure = focus.clone();
-        let nodes = tokio::task::spawn_blocking(move || {
+        let nodes = crate::tools::workspace_root::spawn_blocking(move || {
             build_code_map(&root, focus_for_closure.as_deref(), depth)
         })
         .await

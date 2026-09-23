@@ -148,7 +148,18 @@ pub(crate) async fn read_file_with_encoding(path: &Path) -> Result<(String, Vec<
 /// calling agent's workspace root (the same anchor `validate_tool_path` uses),
 /// NOT the process cwd — entering a git worktree moves only the agent's root.
 fn tool_path_validator(config: &SafetyConfig) -> PathValidator {
-    PathValidator::new(config, super::workspace_root::current_path())
+    PathValidator::new(config, canonical_workspace_root())
+}
+
+/// The agent's workspace root with symlinks resolved. The descriptor checks
+/// compare the OPENED file's real path (e.g. `/private/var/...` on macOS)
+/// against policy, so the root they anchor `./**`-style allow-lists at must be
+/// real too — an unresolved `/var/...` root (what a worktree path or a
+/// `tempdir()` returns on macOS) would refuse every file under it. The process
+/// cwd used to be canonical already; an explicit root is not, so resolve it.
+fn canonical_workspace_root() -> std::path::PathBuf {
+    let root = super::workspace_root::current_path();
+    std::fs::canonicalize(&root).unwrap_or(root)
 }
 
 /// Open `path` as a regular file whose DESCRIPTOR passed path policy
@@ -189,7 +200,7 @@ pub(crate) async fn read_file_checked(
 ) -> Result<(String, Vec<u8>)> {
     let path = path.to_string();
     let config = config.clone();
-    tokio::task::spawn_blocking(move || {
+    crate::tools::workspace_root::spawn_blocking(move || {
         let file = open_checked_regular(&path, &config)?;
         read_checked_handle(file, limit)
     })
@@ -400,7 +411,8 @@ impl Tool for FileRead {
             let file = {
                 let p = args.path.clone();
                 let cfg = safety.clone();
-                tokio::task::spawn_blocking(move || open_checked_regular(&p, &cfg)).await??
+                crate::tools::workspace_root::spawn_blocking(move || open_checked_regular(&p, &cfg))
+                    .await??
             };
             let (selected_content, lines_scanned, lossy, reached_eof) =
                 read_line_slice(file, start, end).await?;
@@ -1093,7 +1105,7 @@ impl Tool for DirectoryTree {
         let max_depth = args.max_depth;
         let include_hidden = args.include_hidden;
 
-        let tree: TreeNode = tokio::task::spawn_blocking(move || {
+        let tree: TreeNode = crate::tools::workspace_root::spawn_blocking(move || {
             // Use filter_entry (not filter_map) so hidden directories are not descended into.
             // filter_map would skip the hidden entry from output but still walk its children.
             /// Directories to never descend into — build artifacts, caches, VCS internals.
@@ -1229,8 +1241,7 @@ pub(crate) fn validate_tool_path(path: &str, config: &SafetyConfig) -> Result<()
     // Validate against the calling agent's explicit workspace root (the
     // task-local installed by tool dispatch), not the process cwd: entering
     // a worktree moves that root, never the process-global cwd.
-    let working_dir = crate::tools::workspace_root::current_path();
-    PathValidator::new(config, working_dir)
+    PathValidator::new(config, canonical_workspace_root())
         .validate(path)
         .map_err(|e| anyhow::anyhow!(e))
 }
@@ -1340,7 +1351,8 @@ pub(crate) async fn write_atomic_checked(
 /// is not re-validated.
 pub(crate) async fn write_all_atomic(files: &[(PathBuf, String)]) -> Result<()> {
     let files_owned: Vec<(PathBuf, String)> = files.to_vec();
-    tokio::task::spawn_blocking(move || write_all_blocking(&files_owned, None)).await?
+    crate::tools::workspace_root::spawn_blocking(move || write_all_blocking(&files_owned, None))
+        .await?
 }
 
 /// [`write_all_atomic`] for file tools: closes the validate-then-write race.
@@ -1361,7 +1373,10 @@ pub(crate) async fn write_all_atomic_checked(
 ) -> Result<()> {
     let files_owned: Vec<(PathBuf, String)> = files.to_vec();
     let config = config.clone();
-    tokio::task::spawn_blocking(move || write_all_blocking(&files_owned, Some(&config))).await?
+    crate::tools::workspace_root::spawn_blocking(move || {
+        write_all_blocking(&files_owned, Some(&config))
+    })
+    .await?
 }
 
 /// Delete a file through its pinned, re-validated parent directory
@@ -1370,7 +1385,7 @@ pub(crate) async fn write_all_atomic_checked(
 async fn remove_file_checked(path: &str, config: &SafetyConfig) -> Result<()> {
     let path = path.to_string();
     let config = config.clone();
-    tokio::task::spawn_blocking(move || -> Result<()> {
+    crate::tools::workspace_root::spawn_blocking(move || -> Result<()> {
         #[cfg(unix)]
         {
             use std::os::unix::ffi::OsStrExt;
