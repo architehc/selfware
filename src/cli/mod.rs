@@ -4233,7 +4233,8 @@ async fn handle_command(
                         result.improvements.len(),
                         result.total_duration.as_secs_f64(),
                     );
-                    return Err(anyhow::anyhow!(crate::errors::SelfwareError::Interrupted));
+                    // SIGTERM -> Terminated (143); SIGINT/ESC -> Cancelled (130).
+                    return Err(crate::errors::AgentError::for_current_shutdown().into());
                 }
 
                 if let Some(ref abort_reason) = result.aborted {
