@@ -1870,12 +1870,9 @@ impl Agent {
 
             // Fire PreToolUse hooks (may skip execution)
             let pre_ctx = HookContext::pre_tool(&name, &args_str);
-            if let HookAction::Skip { reason } = self.hook_registry.fire(&pre_ctx).await {
-                let skip_msg = format!(
-                    "POLICY BLOCK: Tool '{}' was blocked by PreToolUse hook policy: {}. \
-                     You MUST NOT attempt to bypass this policy using shell_exec or alternative tools.",
-                    name, reason
-                );
+            if let HookAction::Skip { reason, kind } = self.hook_registry.fire(&pre_ctx).await {
+                let (skip_msg, audit_reason, failure_kind) =
+                    crate::hooks::pre_tool_skip_message(&name, &reason, kind);
                 info!("{}", skip_msg);
                 let args_value: serde_json::Value =
                     serde_json::from_str(&args_str).unwrap_or(serde_json::Value::Null);
@@ -1883,13 +1880,10 @@ impl Agent {
                     &name,
                     &args_value,
                     false,
-                    crate::safety::yolo::AuditResult::Blocked(format!(
-                        "PreToolUse hook: {}",
-                        reason
-                    )),
+                    crate::safety::yolo::AuditResult::Blocked(audit_reason),
                     0,
                 );
-                self.record_failed_tool_attempt(&name, &args_str, "hook_policy", &skip_msg);
+                self.record_failed_tool_attempt(&name, &args_str, failure_kind, &skip_msg);
                 self.push_tool_skip_message(&call_id, use_native_fc, &skip_msg);
                 continue;
             }
@@ -2373,12 +2367,9 @@ impl Agent {
 
         // Fire PreToolUse hooks (may skip execution)
         let pre_ctx = HookContext::pre_tool(&name, &args_str);
-        if let HookAction::Skip { reason } = self.hook_registry.fire(&pre_ctx).await {
-            let skip_msg = format!(
-                "POLICY BLOCK: Tool '{}' was blocked by PreToolUse hook policy: {}. \
-                 You MUST NOT attempt to bypass this policy using shell_exec or alternative tools.",
-                name, reason
-            );
+        if let HookAction::Skip { reason, kind } = self.hook_registry.fire(&pre_ctx).await {
+            let (skip_msg, audit_reason, failure_kind) =
+                crate::hooks::pre_tool_skip_message(&name, &reason, kind);
             info!("{}", skip_msg);
             let args_value: serde_json::Value =
                 serde_json::from_str(&args_str).unwrap_or(serde_json::Value::Null);
@@ -2386,10 +2377,10 @@ impl Agent {
                 &name,
                 &args_value,
                 false,
-                crate::safety::yolo::AuditResult::Blocked(format!("PreToolUse hook: {}", reason)),
+                crate::safety::yolo::AuditResult::Blocked(audit_reason),
                 0,
             );
-            self.record_failed_tool_attempt(&name, &args_str, "hook_policy", &skip_msg);
+            self.record_failed_tool_attempt(&name, &args_str, failure_kind, &skip_msg);
             self.push_tool_skip_message(&call_id, use_native_fc, &skip_msg);
             return Ok(());
         }

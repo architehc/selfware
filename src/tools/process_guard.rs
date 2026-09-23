@@ -121,6 +121,38 @@ pub enum CommandRunError {
     Io(#[source] std::io::Error),
 }
 
+/// Grace period for the output drains after the direct child has exited.
+pub const DRAIN_GRACE: Duration = Duration::from_secs(1);
+/// Final wait for the output drains after the process group was killed.
+pub const DRAIN_AFTER_KILL: Duration = Duration::from_millis(500);
+
+type DrainSlot<'a> = (
+    &'a mut tokio::task::JoinHandle<Vec<u8>>,
+    &'a mut Option<Vec<u8>>,
+);
+
+/// Poll both drain tasks concurrently until `deadline`, storing each finished
+/// task's output in its slot. A handle whose slot is already filled is never
+/// polled again; a handle that is still pending at the deadline is left
+/// unpolled-to-completion and is safe to poll again later.
+async fn collect_drains_until(
+    deadline: tokio::time::Instant,
+    stdout: DrainSlot<'_>,
+    stderr: DrainSlot<'_>,
+) {
+    async fn one(deadline: tokio::time::Instant, (task, slot): DrainSlot<'_>) {
+        if slot.is_some() {
+            return;
+        }
+        if let Ok(res) = tokio::time::timeout_at(deadline, &mut *task).await {
+            // A JoinError (drain panicked/cancelled) still counts as finished:
+            // the handle is complete and must not be polled again.
+            *slot = Some(res.unwrap_or_default());
+        }
+    }
+    tokio::join!(one(deadline, stdout), one(deadline, stderr));
+}
+
 /// Execute a command with bounded output memory, process-group isolation,
 /// and timeout enforcement.
 ///
@@ -183,36 +215,45 @@ pub async fn run_command_bounded(
         }
     };
 
-    // Await the drains with a short grace period (1s) so a backgrounded
+    // Await the drains with a short grace period so a backgrounded
     // descendant holding the pipes open cannot block the caller indefinitely.
-    let drain_res = tokio::time::timeout(Duration::from_secs(1), async {
-        tokio::join!(&mut stdout_task, &mut stderr_task)
-    })
+    //
+    // Each drain has its own result slot and a handle is only polled while
+    // its slot is empty: a JoinHandle that completed during the grace period
+    // must never be polled again (Tokio panics "JoinHandle polled after
+    // completion"), and its output must survive into the result.
+    let mut stdout_slot: Option<Vec<u8>> = None;
+    let mut stderr_slot: Option<Vec<u8>> = None;
+    collect_drains_until(
+        tokio::time::Instant::now() + DRAIN_GRACE,
+        (&mut stdout_task, &mut stdout_slot),
+        (&mut stderr_task, &mut stderr_slot),
+    )
     .await;
 
-    let (stdout_bytes, mut stderr_bytes, killed_descendants) = match drain_res {
-        Ok((out, err)) => (out.unwrap_or_default(), err.unwrap_or_default(), false),
-        Err(_) => {
-            // Descendants are still running and holding the pipes open.
-            // Kill the process group to terminate lingering descendants.
-            pg_guard.kill();
-            // With the process group killed, the pipe write ends are closed.
-            // Await the drains with a 500ms timeout to collect the captured output.
-            let drain_after_kill = tokio::time::timeout(Duration::from_millis(500), async {
-                tokio::join!(&mut stdout_task, &mut stderr_task)
-            })
-            .await;
-            let (out, err) = match drain_after_kill {
-                Ok((o, e)) => (o.unwrap_or_default(), e.unwrap_or_default()),
-                Err(_) => {
-                    stdout_task.abort();
-                    stderr_task.abort();
-                    (Vec::new(), Vec::new())
-                }
-            };
-            (out, err, true)
+    let killed_descendants = stdout_slot.is_none() || stderr_slot.is_none();
+    if killed_descendants {
+        // Descendants are still running and holding a pipe open. Kill the
+        // process group; with it gone, the pipe write ends close and the
+        // remaining drain(s) reach EOF.
+        pg_guard.kill();
+        collect_drains_until(
+            tokio::time::Instant::now() + DRAIN_AFTER_KILL,
+            (&mut stdout_task, &mut stdout_slot),
+            (&mut stderr_task, &mut stderr_slot),
+        )
+        .await;
+        // A descendant that escaped the process group (e.g. setsid) can still
+        // hold a pipe: abort only the drains that never finished.
+        if stdout_slot.is_none() {
+            stdout_task.abort();
         }
-    };
+        if stderr_slot.is_none() {
+            stderr_task.abort();
+        }
+    }
+    let stdout_bytes = stdout_slot.unwrap_or_default();
+    let mut stderr_bytes = stderr_slot.unwrap_or_default();
 
     pg_guard.disarm();
 
@@ -220,7 +261,13 @@ pub async fn run_command_bounded(
         if !stderr_bytes.is_empty() && !stderr_bytes.ends_with(b"\n") {
             stderr_bytes.push(b'\n');
         }
-        stderr_bytes.extend_from_slice(b"[process_guard] Process group had lingering descendant processes that were killed after 1s grace period.\n");
+        stderr_bytes.extend_from_slice(
+            format!(
+                "[process_guard] Process group had lingering descendant processes that were killed after {:?} grace period.\n",
+                DRAIN_GRACE
+            )
+            .as_bytes(),
+        );
     }
 
     Ok(BoundedCommandOutput {
@@ -287,5 +334,46 @@ mod tests {
                 .contains("[process_guard] Process group had lingering descendant"),
             "stderr must contain diagnostic message"
         );
+    }
+
+    /// Regression: the first drain wait used to time out after ONE pipe had
+    /// already hit EOF (its JoinHandle completed inside `join!`), and the retry
+    /// `join!` re-polled that completed JoinHandle -> Tokio panic
+    /// "JoinHandle polled after completion", losing the captured output.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_run_command_bounded_one_pipe_closed_other_held_does_not_panic() {
+        // stdout closes as soon as the shell exits (nothing else holds it), but
+        // the backgrounded `sleep` inherits stderr and keeps it open.
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg("echo stdout-before-close; exec 1>&-; sleep 5 & echo stderr-line >&2");
+
+        let started = std::time::Instant::now();
+        let output = run_command_bounded(cmd, Duration::from_secs(10), 10_000)
+            .await
+            .expect("command should run and terminate descendants");
+
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "bounded drain must not wait for the 5s descendant, took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            output.killed_descendants,
+            "lingering sleep holding stderr must be reported as killed descendants"
+        );
+        assert!(!output.success());
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("stdout-before-close"),
+            "stdout captured before the first grace period expired must be preserved, got {:?}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("stderr-line"),
+            "stderr drained after the process-group kill must be preserved, got {stderr:?}"
+        );
+        assert!(stderr.contains("[process_guard] Process group had lingering descendant"));
     }
 }

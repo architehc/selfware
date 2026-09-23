@@ -7,7 +7,7 @@ use anyhow::Result;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-use super::{HookAction, HookConfig, HookContext};
+use super::{HookAction, HookConfig, HookContext, SkipKind};
 
 /// Maximum hook command output to capture (prevent unbounded memory).
 const MAX_OUTPUT_BYTES: usize = 64 * 1024; // 64 KB
@@ -18,19 +18,25 @@ const MAX_OUTPUT_BYTES: usize = 64 * 1024; // 64 KB
 /// - `{path}` → affected file path (if any)
 /// - `{tool}` → tool name (if any)
 ///
-/// The hook runs with a timeout. Non-zero exit codes are treated as errors
-/// but do not block execution (hooks are advisory by default).
-///
-/// For `PreToolUse` hooks, a non-zero exit code returns `HookAction::Skip`.
+/// Outcomes:
+/// - exit 0 → [`HookAction::Continue`]
+/// - non-zero exit on `PreToolUse` → [`HookAction::Skip`] with
+///   [`SkipKind::Policy`] (the hook decided to block the tool)
+/// - timeout / failure to start on `PreToolUse` → [`HookAction::Skip`] with
+///   [`SkipKind::HookFailure`]: the policy check never completed, so the tool
+///   must not run (fail closed), but this is not a policy decision
+/// - any failure on `PostToolUse` / `Stop` → [`HookAction::Error`] (non-fatal)
 pub async fn execute_hook(hook: &HookConfig, ctx: &HookContext) -> HookAction {
     let command = expand_placeholders(&hook.command, ctx);
+    let is_pre_tool = ctx.event == super::HookEvent::PreToolUse;
 
     debug!(
         "Executing hook: {} (event: {}, timeout: {}s)",
         command, ctx.event, hook.timeout_secs
     );
 
-    let timeout_duration = Duration::from_secs(hook.timeout_secs.max(1));
+    let timeout_secs = hook.timeout_secs.max(1);
+    let timeout_duration = Duration::from_secs(timeout_secs);
     let result = run_shell_command(&command, timeout_duration).await;
 
     match result {
@@ -50,23 +56,42 @@ pub async fn execute_hook(hook: &HookConfig, ctx: &HookContext) -> HookAction {
                 );
                 warn!("{}", msg);
 
-                // PreToolUse hook failure means "skip this tool"
-                if ctx.event == super::HookEvent::PreToolUse {
-                    HookAction::Skip { reason: msg }
+                // PreToolUse hook non-zero exit is a policy decision: skip the tool.
+                if is_pre_tool {
+                    HookAction::Skip {
+                        reason: msg,
+                        kind: SkipKind::Policy,
+                    }
                 } else {
                     HookAction::Error { message: msg }
                 }
             }
         }
         Ok(None) => {
-            let msg = format!("Hook '{}' timed out after {}s", command, hook.timeout_secs);
-            warn!("{}", msg);
-            HookAction::Error { message: msg }
+            let detail = format!("timed out after {}s", timeout_secs);
+            warn!("Hook '{}' {}", command, detail);
+            failure_action(is_pre_tool, &command, detail)
         }
         Err(e) => {
-            let msg = format!("Hook '{}' failed to run: {}", command, e);
-            warn!("{}", msg);
-            HookAction::Error { message: msg }
+            let detail = format!("failed to start: {}", e);
+            warn!("Hook '{}' {}", command, detail);
+            failure_action(is_pre_tool, &command, detail)
+        }
+    }
+}
+
+/// Map a hook that could not complete (timeout, spawn/wait failure) to an
+/// action. PreToolUse fails closed with an infrastructure-failure kind;
+/// other events stay non-fatal.
+fn failure_action(is_pre_tool: bool, command: &str, detail: String) -> HookAction {
+    if is_pre_tool {
+        HookAction::Skip {
+            reason: detail,
+            kind: SkipKind::HookFailure,
+        }
+    } else {
+        HookAction::Error {
+            message: format!("Hook '{}' {}", command, detail),
         }
     }
 }
@@ -74,38 +99,29 @@ pub async fn execute_hook(hook: &HookConfig, ctx: &HookContext) -> HookAction {
 /// Output from a shell command execution.
 #[derive(Debug)]
 struct ShellOutput {
+    /// The hook command's own exit status was 0. This is the hook's decision;
+    /// lingering descendants are reported separately in `killed_descendants`.
     success: bool,
     exit_code: i32,
     stdout: String,
     stderr: String,
-}
-
-/// Read a child pipe to EOF, keeping at most `MAX_OUTPUT_BYTES` in memory while
-/// still consuming the rest so the process isn't blocked on a full pipe.
-async fn drain_capped<R: tokio::io::AsyncRead + Unpin>(mut reader: R) -> Vec<u8> {
-    use tokio::io::AsyncReadExt;
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 8192];
-    loop {
-        match reader.read(&mut chunk).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                if buf.len() < MAX_OUTPUT_BYTES {
-                    let take = n.min(MAX_OUTPUT_BYTES - buf.len());
-                    buf.extend_from_slice(&chunk[..take]);
-                }
-                // Beyond the cap: keep reading to drain the pipe, discard excess.
-            }
-        }
-    }
-    buf
+    /// Descendants still held the output pipes after the hook exited and were
+    /// killed (see [`crate::tools::process_guard::run_command_bounded`]).
+    killed_descendants: bool,
 }
 
 /// Run a command via `sh -c` and capture output.
 ///
+/// Uses the shared [`crate::tools::process_guard::run_command_bounded`] runner
+/// (process-group isolation, capped output, bounded drains) so a hook that
+/// exits while a background descendant keeps stdout/stderr open cannot hang
+/// the agent past its timeout plus the drain grace period.
+///
 /// Returns `Ok(Some(output))` on normal completion, `Ok(None)` if the command
 /// timed out (the whole process group has been killed in that case).
 async fn run_shell_command(command: &str, timeout: Duration) -> Result<Option<ShellOutput>> {
+    use crate::tools::process_guard::{run_command_bounded, CommandRunError};
+
     let mut cmd = tokio::process::Command::new("sh");
     cmd.arg("-c").arg(command);
     // Hooks execute arbitrary repo-defined commands — do NOT hand them the
@@ -113,75 +129,26 @@ async fn run_shell_command(command: &str, timeout: Duration) -> Result<Option<Sh
     // Start from an empty environment and re-add the shared non-sensitive
     // allowlist (matches shell_exec / ProcessManager sanitization).
     crate::safety::process_env::sanitize_command_env(&mut cmd);
-
-    // Kill the child if the future is dropped (defense in depth; the timeout
-    // path also explicitly reaps the process group).
-    cmd.kill_on_drop(true);
-    // Run the child in its own process group so a timeout can reap the ENTIRE
-    // process tree (grandchildren included, e.g. a `sleep` or build), not just
-    // the direct shell — `kill_on_drop`/`child.kill()` only signal the
-    // immediate child, so descendants would otherwise orphan.
-    #[cfg(unix)]
-    cmd.process_group(0);
     cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
 
-    let mut child = cmd.spawn()?;
-    let child_pid = child.id();
-    let mut pg_guard = crate::tools::process_guard::ProcessGroupGuard::new(child_pid);
-
-    // Drain stdout/stderr concurrently (bounded) so a chatty hook can't
-    // deadlock on a full pipe or OOM the agent with unbounded output.
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
-    let stdout_task = tokio::spawn(async move {
-        match stdout_pipe {
-            Some(s) => drain_capped(s).await,
-            None => Vec::new(),
-        }
-    });
-    let stderr_task = tokio::spawn(async move {
-        match stderr_pipe {
-            Some(s) => drain_capped(s).await,
-            None => Vec::new(),
-        }
-    });
-
-    let wait_result = tokio::time::timeout(timeout, child.wait()).await;
-
-    match wait_result {
-        Ok(Ok(status)) => {
-            let stdout_bytes = stdout_task.await.unwrap_or_default();
-            let stderr_bytes = stderr_task.await.unwrap_or_default();
-            let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
-            let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
-            pg_guard.disarm();
+    match run_command_bounded(cmd, timeout, MAX_OUTPUT_BYTES).await {
+        Ok(out) => {
+            if out.killed_descendants {
+                warn!(
+                    "Hook '{}' exited but left descendant processes holding its output pipes; they were killed",
+                    command
+                );
+            }
             Ok(Some(ShellOutput {
-                success: status.success(),
-                exit_code: status.code().unwrap_or(-1),
-                stdout,
-                stderr,
+                success: out.status.success(),
+                exit_code: out.status.code().unwrap_or(-1),
+                stdout: String::from_utf8_lossy(&out.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+                killed_descendants: out.killed_descendants,
             }))
         }
-        Ok(Err(e)) => {
-            pg_guard.kill();
-            // Make sure the drain tasks don't leak.
-            let _ = stdout_task.await;
-            let _ = stderr_task.await;
-            Err(e.into())
-        }
-        Err(_) => {
-            // Timed out: kill the whole process group, then reap the child.
-            pg_guard.kill();
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            // Always await the drain tasks so they don't leak; the pipes close
-            // once the process (and its group) exit.
-            let _ = stdout_task.await;
-            let _ = stderr_task.await;
-            Ok(None)
-        }
+        Err(CommandRunError::Timeout(_)) => Ok(None),
+        Err(e) => Err(e.into()),
     }
 }
 

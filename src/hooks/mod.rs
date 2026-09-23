@@ -42,9 +42,59 @@ pub enum HookAction {
     /// Continue normal execution.
     Continue,
     /// Skip the current tool execution (only meaningful for PreToolUse).
-    Skip { reason: String },
-    /// An error occurred running the hook (logged but does not block).
+    ///
+    /// `kind` distinguishes a hook that *decided* to block the tool from a
+    /// hook that could not complete at all; both mean the tool must not run.
+    Skip { reason: String, kind: SkipKind },
+    /// An error occurred running a PostToolUse/Stop hook (logged but does not
+    /// block). PreToolUse hooks never surface this from [`HookRegistry::fire`]:
+    /// an incomplete policy check fails closed as `Skip { kind: HookFailure }`.
     Error { message: String },
+}
+
+/// Why a PreToolUse hook prevented a tool from running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipKind {
+    /// The hook ran to completion and exited non-zero: a policy decision.
+    Policy,
+    /// The hook could not complete (timed out, failed to start). The policy
+    /// check never produced a verdict, so the tool is not run (fail closed),
+    /// but this is an infrastructure failure, not a policy decision.
+    HookFailure,
+}
+
+/// Build the tool-result text, audit reason and failure kind for a tool that
+/// a PreToolUse hook prevented from running.
+///
+/// A [`SkipKind::Policy`] skip keeps the POLICY BLOCK wording (the hook exited
+/// non-zero: a real decision). A [`SkipKind::HookFailure`] skip says plainly
+/// that the hook could not complete — the tool was still not run (fail closed),
+/// but the model must not be told a policy forbade the operation.
+pub fn pre_tool_skip_message(
+    tool_name: &str,
+    reason: &str,
+    kind: SkipKind,
+) -> (String, String, &'static str) {
+    match kind {
+        SkipKind::Policy => (
+            format!(
+                "POLICY BLOCK: Tool '{}' was blocked by PreToolUse hook policy: {}. \
+                 You MUST NOT attempt to bypass this policy using shell_exec or alternative tools.",
+                tool_name, reason
+            ),
+            format!("PreToolUse hook: {}", reason),
+            "hook_policy",
+        ),
+        SkipKind::HookFailure => (
+            format!(
+                "Tool '{}' was not run: its PreToolUse policy hook could not complete ({}). \
+                 This is an infrastructure failure of the hook, not a policy decision.",
+                tool_name, reason
+            ),
+            format!("PreToolUse hook could not complete: {}", reason),
+            "hook_failure",
+        ),
+    }
 }
 
 /// Context passed to hooks when they fire.
@@ -159,7 +209,8 @@ impl HookRegistry {
     }
 
     /// Fire all hooks matching the given event and context.
-    /// Returns the combined action (Continue or Skip if any hook requests skip).
+    /// Returns the combined action: Continue, or the first Skip. For PreToolUse,
+    /// a hook that cannot complete fails closed (`Skip { kind: HookFailure }`).
     pub async fn fire(&self, ctx: &HookContext) -> HookAction {
         let matching: Vec<&HookConfig> = self
             .hooks
@@ -189,13 +240,35 @@ impl HookRegistry {
         for hook in matching {
             let result = shell_handler::execute_hook(hook, ctx).await;
             match result {
-                HookAction::Skip { ref reason } => {
+                HookAction::Skip {
+                    ref reason,
+                    kind: SkipKind::Policy,
+                } => {
                     info!("Hook requested skip: {}", reason);
                     return result;
                 }
+                HookAction::Skip {
+                    ref reason,
+                    kind: SkipKind::HookFailure,
+                } => {
+                    warn!(
+                        "PreToolUse hook could not complete; failing closed: {}",
+                        reason
+                    );
+                    return result;
+                }
+                HookAction::Error { ref message } if ctx.event == HookEvent::PreToolUse => {
+                    // Defense in depth: a PreToolUse hook error means the policy
+                    // check never completed. Never fail open.
+                    warn!("PreToolUse hook error; failing closed: {}", message);
+                    return HookAction::Skip {
+                        reason: message.clone(),
+                        kind: SkipKind::HookFailure,
+                    };
+                }
                 HookAction::Error { ref message } => {
+                    // Post/Stop hook errors are non-fatal.
                     warn!("Hook error (non-fatal): {}", message);
-                    // Continue despite hook errors — hooks should not block the agent
                 }
                 HookAction::Continue => {
                     debug!("Hook completed successfully: {}", hook.command);

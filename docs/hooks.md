@@ -42,11 +42,13 @@ The `command` string supports these placeholders:
 
 ## Hook Behavior
 
-- **PostToolUse hooks**: Run after the tool succeeds. Errors are logged but do not block the agent.
-- **PreToolUse hooks**: If the command exits non-zero, the tool execution is **skipped** (the hook can block operations).
-- **Stop hooks**: Run once when the agent completes its task.
+- **PostToolUse hooks**: Run after the tool succeeds. Errors (non-zero exit, timeout, failure to start) are logged but do not block the agent.
+- **PreToolUse hooks**: If the command exits non-zero, the tool execution is **skipped** as a policy block (the hook can block operations).
+  If the hook **times out or fails to start**, the policy check never completed, so the tool is also **not run** (fail closed). The agent is told this was an infrastructure failure of the hook, not a policy decision.
+- **Stop hooks**: Run once when the agent completes its task. Errors are logged but non-fatal.
 - Multiple hooks can fire for the same event. They run in order.
 - Hook stdout/stderr is captured (max 64KB). Output is logged at debug level.
+- Hooks run in their own process group. If a hook exits while a background process it started still holds stdout/stderr open, the agent waits a 1s grace period, kills the hook's process group, and waits at most 0.5s more for the output; a hook cannot hold the agent much past `timeout_secs` (about 1.5s of drain grace at most).
 
 ## Built-in Hook Presets
 
