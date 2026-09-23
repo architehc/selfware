@@ -84,6 +84,13 @@ fn canonicalize_message_order(messages: &mut Vec<Message>) {
         messages.insert(0, Message::system(merged_content));
     }
 
+    // Mid-conversation system pushes (hoisted above) and interrupted turns
+    // leave same-role neighbours behind, e.g. user(tool result) + user(hint)
+    // or user(interrupted prompt) + user(new prompt). Strict local chat
+    // templates (Mistral, Gemma, Llama-2: "Conversation roles must
+    // alternate") reject that, so fold plain-text same-role neighbours.
+    coalesce_adjacent_plain_turns(messages);
+
     let has_user = messages.iter().any(|m| m.role == "user");
     if !has_user {
         let insert_pos = if messages.first().map(|m| m.role.as_str()) == Some("system") {
@@ -116,6 +123,63 @@ fn canonicalize_message_order(messages: &mut Vec<Message>) {
     if !tail_is_open_pair && messages.last().map(|m| m.role.as_str()) == Some("assistant") {
         messages.push(Message::user("Continue with the task."));
     }
+}
+
+/// Whether a message is a plain text turn that may be folded into an adjacent
+/// message of the same role at send time.
+///
+/// Only `user` and `assistant` messages with `MessageContent::Text`, no
+/// `tool_calls`, no `tool_call_id` and no `name` qualify. XML tool-result user
+/// messages (`<tool_result>`) are excluded: they are protocol payloads the
+/// agent pairs with prior calls, and consecutive tool-result/user messages are
+/// legitimate in OpenAI-compatible APIs. Multimodal (`Blocks`) content is
+/// never merged so images keep their own message. Mirrors the conservative
+/// predicate of `Agent::is_mergeable_user_turn` in
+/// `agent/context_management.rs`.
+fn is_plain_mergeable_turn(message: &Message) -> bool {
+    if message.role != "user" && message.role != "assistant" {
+        return false;
+    }
+    if !matches!(message.content, MessageContent::Text(_)) {
+        return false;
+    }
+    if message.tool_calls.as_ref().is_some_and(|c| !c.is_empty())
+        || message.tool_call_id.is_some()
+        || message.name.is_some()
+    {
+        return false;
+    }
+    !(message.role == "user" && message.content.text().contains("<tool_result>"))
+}
+
+/// Merge adjacent plain-text user/user and assistant/assistant messages
+/// (joined with a blank line, order preserved). Anything that fails
+/// [`is_plain_mergeable_turn`] is left in place untouched; this pass never
+/// reorders messages.
+fn coalesce_adjacent_plain_turns(messages: &mut Vec<Message>) {
+    if messages.len() < 2 {
+        return;
+    }
+    let mut out: Vec<Message> = Vec::with_capacity(messages.len());
+    for message in messages.drain(..) {
+        if let Some(prev) = out.last_mut() {
+            if prev.role == message.role
+                && is_plain_mergeable_turn(prev)
+                && is_plain_mergeable_turn(&message)
+            {
+                let merged = format!("{}\n\n{}", prev.content.text(), message.content.text());
+                prev.content = MessageContent::Text(merged);
+                prev.reasoning_content =
+                    match (prev.reasoning_content.take(), message.reasoning_content) {
+                        (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
+                        (a, b) => a.or(b),
+                    };
+                continue;
+            }
+        }
+        out.push(message);
+    }
+    *messages = out;
 }
 
 fn maybe_prepend_disabled_thinking_instruction(

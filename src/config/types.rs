@@ -286,3 +286,66 @@ pub(crate) fn default_max_global() -> usize {
 #[cfg(test)]
 #[path = "../../tests/unit/config/types/types_test.rs"]
 mod tests;
+
+/// Desktop-automation configuration (loaded from `[computer]` in selfware.toml).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerConfig {
+    /// Optional window-placement policy (`[computer.window_policy]`). When
+    /// absent, window operations are unrestricted: no ownership gate, no
+    /// bounds check, and coordinates are sent to the window manager as-is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_policy: Option<WindowPolicy>,
+}
+
+/// A visible region in device coordinates. A window is inside when
+/// `x >= x_min`, `x + width <= x_max`, `y >= y_min` and
+/// `y + height <= y_max`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VisibleRegion {
+    pub x_min: i32,
+    pub x_max: i32,
+    pub y_min: i32,
+    pub y_max: i32,
+}
+
+fn default_request_scale() -> u32 {
+    1
+}
+
+/// Window-placement policy for `computer::WindowManager`
+/// (`[computer.window_policy]`). Every rule is optional; only the rules
+/// that are configured are enforced.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowPolicy {
+    /// When set, only windows whose (trimmed) title starts with this prefix
+    /// may be moved, resized, minimized or closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owned_title_prefix: Option<String>,
+    /// When set, moves and resizes must leave the window inside this region.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_region: Option<VisibleRegion>,
+    /// Divisor applied to `wmctrl -e` POSITION requests (sizes pass through).
+    /// Some compositors (mutter at 200% scaling) double position requests;
+    /// set this to 2 there. Default 1 (no scaling); 0 is treated as 1.
+    #[serde(default = "default_request_scale")]
+    pub request_scale: u32,
+    /// Re-read the window geometry with `wmctrl -lG` after a move or resize,
+    /// correct once if it landed outside `visible_region`, and fail loudly if
+    /// it still does or cannot be verified.
+    #[serde(default)]
+    pub verify_after_move: bool,
+}
+
+impl Default for WindowPolicy {
+    fn default() -> Self {
+        Self {
+            owned_title_prefix: None,
+            visible_region: None,
+            request_scale: default_request_scale(),
+            verify_after_move: false,
+        }
+    }
+}

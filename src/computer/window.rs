@@ -25,64 +25,77 @@ use super::SESSION_ENV_VARS;
 use crate::safety::process_env::sanitize_command_env_preserve;
 
 // ==========================================================================
-// AGENTS.md Rule 6 — window placement: stay inside the visible region, touch
-// only your own windows.
+// Window policy — optional placement/ownership rules.
 //
-// The X screen is 7680x2928 (GNOME X11, 200% scale). The visible area of the
-// main display is device coords x 0..=7680, y 768..=2928; the small VGA
-// monitor sits ABOVE it (x 3840..=4864, y 0..=768) and must never receive a
-// placement. mutter doubles `wmctrl -e` position requests: request = target/2
-// (sizes pass through 1:1). Only windows this session owns (sw-* study
-// terminals) may be repositioned, and every placement must be sanity-checked
-// after the fact with `wmctrl -lG` and fixed immediately if it lands outside.
-// These helpers are pure so they can be unit-tested without touching real
-// windows.
+// With NO policy configured the window manager behaves like any normal
+// desktop tool: every window may be moved/resized/minimized/closed, there are
+// no bounds, and `wmctrl -e` positions are sent as-is.
+//
+// `[computer.window_policy]` can opt into:
+// - `owned_title_prefix`: only windows whose title starts with the prefix may
+//   be moved, resized, minimized or closed (one gate for every mutating op).
+// - `visible_region`: moves and resizes must leave the window inside it.
+// - `request_scale`: divisor for `wmctrl -e` POSITION requests (mutter at
+//   200% scaling doubles them, so it needs 2); sizes pass through 1:1.
+// - `verify_after_move`: re-read `wmctrl -lG` after a move/resize, correct a
+//   wayward landing once, and fail loudly rather than leave it off-screen.
+//
+// The maintainer's desktop (AGENTS.md Rule 6) is reproduced by the block in
+// docs/configuration.md. These helpers are pure so they can be unit-tested
+// without touching real windows.
 // ==========================================================================
 
-/// Visible region of the main display, device coordinates (AGENTS.md Rule 6).
-const MAIN_DISPLAY_X_MAX: i32 = 7680;
-const MAIN_DISPLAY_Y_MIN: i32 = 768;
-const MAIN_DISPLAY_Y_MAX: i32 = 2928;
+pub use crate::config::{VisibleRegion, WindowPolicy};
 
-/// Title prefix of the study terminals this session owns. Only these windows
-/// may be repositioned.
-const SESSION_WINDOW_TITLE_PREFIX: &str = "sw-";
-
-/// mutter doubles `wmctrl -e` position requests: the value sent must be the
-/// device target divided by two. Floor division is exact for even targets and
-/// at most one device pixel short for odd ones — inside the sanity check's
-/// tolerance, and never past the target.
+/// Translate a device-coordinate target into the `wmctrl -e` position
+/// request for a compositor that multiplies requests by `scale` (mutter at
+/// 200% doubles them, so `scale = 2` there). `scale` 0 or 1 passes the target
+/// through. Division truncates: exact for multiples of `scale`, otherwise at
+/// most `scale - 1` device pixels short — never past the target.
 #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
-fn wmctrl_request_position(x: i32, y: i32) -> (i32, i32) {
-    (x / 2, y / 2)
+fn wmctrl_request_position(x: i32, y: i32, scale: u32) -> (i32, i32) {
+    let s = scale.max(1) as i32;
+    (x / s, y / s)
 }
 
-/// Rule 6 bounds check, applied to the `wmctrl -lG` listing AFTER a
-/// placement: the window must land at y >= 768 and x + width <= 7680 (the
-/// small VGA monitor at x 3840-4864, y 0-768 sits above the visible area, so
-/// the y bound keeps placements clear of it entirely).
+/// Whether a window at (x, y) of `width` x `height` lies entirely inside
+/// `region`.
 #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
-fn placement_inside_visible_region(x: i32, y: i32, width: u32, height: u32) -> bool {
-    x >= 0
-        && x.saturating_add(width as i32) <= MAIN_DISPLAY_X_MAX
-        && y >= MAIN_DISPLAY_Y_MIN
-        && y.saturating_add(height as i32) <= MAIN_DISPLAY_Y_MAX
+fn placement_inside_region(
+    region: &VisibleRegion,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) -> bool {
+    let w = i32::try_from(width).unwrap_or(i32::MAX);
+    let h = i32::try_from(height).unwrap_or(i32::MAX);
+    x >= region.x_min
+        && x.saturating_add(w) <= region.x_max
+        && y >= region.y_min
+        && y.saturating_add(h) <= region.y_max
 }
 
-/// Clamp a placement target into the visible region, for the "fix it
-/// immediately" correction step.
+/// Clamp a placement target into `region`, for the "fix it immediately"
+/// correction step. A window larger than the region is pinned to its
+/// top-left corner.
 #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
-fn clamp_to_visible_region(x: i32, y: i32, width: u32, height: u32) -> (i32, i32) {
-    let x_max = (MAIN_DISPLAY_X_MAX - width as i32).max(0);
-    let y_max = (MAIN_DISPLAY_Y_MAX - height as i32).max(MAIN_DISPLAY_Y_MIN);
-    (x.clamp(0, x_max), y.clamp(MAIN_DISPLAY_Y_MIN, y_max))
+fn clamp_to_region(region: &VisibleRegion, x: i32, y: i32, width: u32, height: u32) -> (i32, i32) {
+    let w = i32::try_from(width).unwrap_or(i32::MAX);
+    let h = i32::try_from(height).unwrap_or(i32::MAX);
+    let x_max = region.x_max.saturating_sub(w).max(region.x_min);
+    let y_max = region.y_max.saturating_sub(h).max(region.y_min);
+    (x.clamp(region.x_min, x_max), y.clamp(region.y_min, y_max))
 }
 
-/// Whether a window title belongs to this session (the sw-* study-terminals
-/// convention). Only these windows may be repositioned (AGENTS.md Rule 6).
+/// Whether `title` is owned under `prefix` (trimmed title starts with it).
+/// No prefix means every window is owned.
 #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
-fn session_owns_window(title: &str) -> bool {
-    title.trim().starts_with(SESSION_WINDOW_TITLE_PREFIX)
+fn window_title_owned(prefix: Option<&str>, title: &str) -> bool {
+    match prefix {
+        None => true,
+        Some(p) => title.trim().starts_with(p),
+    }
 }
 
 /// Extract (x, y, width, height) for `id` from `wmctrl -lG` output — the
@@ -196,28 +209,52 @@ pub struct WindowManager {
     /// Mapping from WindowId to app name for macOS focus operations
     #[cfg(target_os = "macos")]
     window_id_to_app: Arc<Mutex<HashMap<WindowId, String>>>,
+    /// Optional placement/ownership policy (`[computer.window_policy]`).
+    /// `None` means unrestricted.
+    policy: Option<WindowPolicy>,
 }
 
 impl WindowManager {
+    /// A window manager with no policy: no ownership gate, no bounds, and no
+    /// position scaling.
     pub fn new() -> Self {
+        Self::with_policy(None)
+    }
+
+    /// A window manager enforcing `policy` (or unrestricted when `None`).
+    pub fn with_policy(policy: Option<WindowPolicy>) -> Self {
         #[cfg(target_os = "linux")]
         {
             let display_server = DisplayServer::detect();
             info!("Detected display server: {:?}", display_server);
-            Self { display_server }
+            Self {
+                display_server,
+                policy,
+            }
         }
 
         #[cfg(target_os = "macos")]
         {
             Self {
                 window_id_to_app: Arc::new(Mutex::new(HashMap::new())),
+                policy,
             }
         }
 
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
-            Self {}
+            Self { policy }
         }
+    }
+
+    /// A window manager configured from the `[computer]` config section.
+    pub fn from_config(config: &crate::config::ComputerConfig) -> Self {
+        Self::with_policy(config.window_policy.clone())
+    }
+
+    /// The active window policy, if any.
+    pub fn policy(&self) -> Option<&WindowPolicy> {
+        self.policy.as_ref()
     }
 
     /// Get the detected display server (Linux only).
@@ -896,9 +933,117 @@ impl WindowManager {
         }
     }
 
+    /// Ownership gate shared by every mutating operation (move, resize,
+    /// minimize, close). With no `owned_title_prefix` configured this is a
+    /// no-op and returns `None` without listing windows. With one, the window
+    /// must be in the current list (which also proves it exists) and its
+    /// title must start with the prefix; the listed info is returned.
+    #[cfg(target_os = "linux")]
+    async fn enforce_ownership(&self, id: &WindowId, action: &str) -> Result<Option<WindowInfo>> {
+        let Some(prefix) = self
+            .policy
+            .as_ref()
+            .and_then(|p| p.owned_title_prefix.as_deref())
+        else {
+            return Ok(None);
+        };
+        let windows = self.list_windows_linux().await?;
+        let Some(target) = windows.into_iter().find(|w| w.id == *id) else {
+            anyhow::bail!(
+                "Refusing to {action} window 0x{:x}: not in the current window list \
+                 (computer.window_policy: only windows titled '{prefix}*' may be changed)",
+                id.0
+            );
+        };
+        if !window_title_owned(Some(prefix), &target.title) {
+            anyhow::bail!(
+                "Refusing to {action} window 0x{:x} ('{}'): title does not start with \
+                 '{prefix}' (computer.window_policy.owned_title_prefix)",
+                id.0,
+                target.title
+            );
+        }
+        Ok(Some(target))
+    }
+
+    /// Current geometry of `id` from the window list, or an error naming the
+    /// action when it is not listed (needed for pre-flight bounds checks).
+    #[cfg(target_os = "linux")]
+    async fn current_window_info(
+        &self,
+        id: &WindowId,
+        known: Option<WindowInfo>,
+        action: &str,
+    ) -> Result<WindowInfo> {
+        if let Some(info) = known {
+            return Ok(info);
+        }
+        let windows = self.list_windows_linux().await?;
+        windows.into_iter().find(|w| w.id == *id).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Refusing to {action} window 0x{:x}: not in the current window list, so the \
+                 computer.window_policy.visible_region check cannot be applied",
+                id.0
+            )
+        })
+    }
+
     #[cfg(target_os = "linux")]
     async fn resize_window_linux(&self, id: &WindowId, width: u32, height: u32) -> Result<()> {
-        // Try wmctrl first (uses resize/move)
+        let owned = self.enforce_ownership(id, "resize").await?;
+        let region = self.policy.as_ref().and_then(|p| p.visible_region);
+        let verify = self.policy.as_ref().is_some_and(|p| p.verify_after_move);
+
+        // Pre-flight bounds: the resized window keeps its position, so it
+        // must still fit in the configured region.
+        if let Some(region) = region {
+            let info = self.current_window_info(id, owned, "resize").await?;
+            if !placement_inside_region(&region, info.x, info.y, width, height) {
+                anyhow::bail!(
+                    "Refusing to resize window 0x{:x} to {width}x{height} at ({}, {}): it would \
+                     extend outside the configured visible region (x {}-{}, y {}-{}) \
+                     (computer.window_policy.visible_region)",
+                    id.0,
+                    info.x,
+                    info.y,
+                    region.x_min,
+                    region.x_max,
+                    region.y_min,
+                    region.y_max
+                );
+            }
+        }
+
+        self.resize_window_raw(id, width, height).await?;
+
+        if verify {
+            let geometry = self.verify_wmctrl_placement(id).await?;
+            match (geometry, region) {
+                (Some((lx, ly, lw, lh)), Some(region))
+                    if !placement_inside_region(&region, lx, ly, lw, lh) =>
+                {
+                    anyhow::bail!(
+                        "window 0x{:x} is at device ({lx}, {ly}) {lw}x{lh} after the resize — \
+                         outside the configured visible region \
+                         (computer.window_policy.visible_region)",
+                        id.0
+                    );
+                }
+                (Some(_), _) => {}
+                (None, _) => anyhow::bail!(
+                    "window 0x{:x} not found in `wmctrl -lG` after the resize — cannot verify \
+                     it (computer.window_policy.verify_after_move)",
+                    id.0
+                ),
+            }
+        }
+        Ok(())
+    }
+
+    /// Issue the resize itself: wmctrl (position -1,-1 is left alone, so no
+    /// request scaling applies), falling back to xdotool.
+    #[cfg(target_os = "linux")]
+    async fn resize_window_raw(&self, id: &WindowId, width: u32, height: u32) -> Result<()> {
         let mut cmd = tokio::process::Command::new("wmctrl");
         sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
         let result = cmd
@@ -947,36 +1092,44 @@ impl WindowManager {
 
     #[cfg(target_os = "linux")]
     async fn move_window_linux(&self, id: &WindowId, x: i32, y: i32) -> Result<()> {
-        // AGENTS.md Rule 6 ownership gate: only windows this session owns
-        // (sw-* study terminals) may be repositioned. The list also proves
-        // the window exists, so the post-placement check below has a real
-        // target instead of verifying a ghost.
-        let windows = self.list_windows_linux().await?;
-        let Some(target) = windows.iter().find(|w| w.id == *id) else {
-            anyhow::bail!(
-                "Refusing to move window 0x{:x}: not in the current window list \
-                 (AGENTS.md Rule 6 — only sw-* study terminals may be repositioned)",
-                id.0
-            );
-        };
-        if !session_owns_window(&target.title) {
-            anyhow::bail!(
-                "Refusing to move window 0x{:x} ('{}'): not a session-owned sw-* window \
-                 (AGENTS.md Rule 6 — only your own windows may be repositioned)",
-                id.0,
-                target.title
-            );
-        }
+        let owned = self.enforce_ownership(id, "move").await?;
+        let region = self.policy.as_ref().and_then(|p| p.visible_region);
+        let verify = self.policy.as_ref().is_some_and(|p| p.verify_after_move);
+        let scale = self.policy.as_ref().map(|p| p.request_scale).unwrap_or(1);
 
-        // Place, then verify against the `wmctrl -lG` listing and fix
-        // immediately if the landing is outside the visible region. mutter
-        // doubles `wmctrl -e` positions, so the request is the target / 2.
+        // Pre-flight bounds: refuse a target that would put the window
+        // (at its current size) outside the configured region.
+        let (known_w, known_h) = if let Some(region) = region {
+            let info = self.current_window_info(id, owned, "move").await?;
+            if !placement_inside_region(&region, x, y, info.width, info.height) {
+                anyhow::bail!(
+                    "Refusing to move window 0x{:x} ({}x{}) to ({x}, {y}): outside the \
+                     configured visible region (x {}-{}, y {}-{}) \
+                     (computer.window_policy.visible_region)",
+                    id.0,
+                    info.width,
+                    info.height,
+                    region.x_min,
+                    region.x_max,
+                    region.y_min,
+                    region.y_max
+                );
+            }
+            (info.width, info.height)
+        } else {
+            (0, 0)
+        };
+
+        // Place, then (when verification is configured) check the landing
+        // against `wmctrl -lG` and fix it immediately if it is outside the
+        // region: the compositor may still misplace a window (e.g. a wrong
+        // request_scale). A second miss fails loudly, never left off-screen.
         let mut attempt: u32 = 0;
         let mut target_x = x;
         let mut target_y = y;
         loop {
             attempt += 1;
-            let (req_x, req_y) = wmctrl_request_position(target_x, target_y);
+            let (req_x, req_y) = wmctrl_request_position(target_x, target_y, scale);
             let mut cmd = tokio::process::Command::new("wmctrl");
             sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
             let result = cmd
@@ -996,36 +1149,37 @@ impl WindowManager {
                 return self.move_window_xdotool(id, x, y).await;
             }
 
+            if !verify {
+                debug!("Moved window {} to {}, {}", id.0, target_x, target_y);
+                return Ok(());
+            }
+
             match self.verify_wmctrl_placement(id).await {
-                Ok(Some((lx, ly, lw, lh))) if placement_inside_visible_region(lx, ly, lw, lh) => {
+                Ok(Some((lx, ly, lw, lh)))
+                    if region.is_none_or(|r| placement_inside_region(&r, lx, ly, lw, lh)) =>
+                {
                     debug!("Moved window {} to {}, {}", id.0, lx, ly);
                     return Ok(());
                 }
                 Ok(geometry) => {
-                    // Out of bounds (or not listable). Fix immediately: clamp
-                    // into the visible region and try once more; a second
-                    // failure is reported loudly, never left as an off-screen
-                    // window (the previous bug parked windows above the
-                    // visible top edge by doubling unhalved requests).
-                    if attempt >= 2 {
+                    let Some(region) = region.filter(|_| attempt < 2) else {
                         let where_at = geometry
                             .map(|(gx, gy, gw, gh)| {
                                 format!("landed at device ({gx}, {gy}) {gw}x{gh}")
                             })
                             .unwrap_or_else(|| "no geometry in wmctrl -lG".to_string());
                         anyhow::bail!(
-                            "window 0x{:x} did not land in the visible region \
-                             (x 0-7680, y 768-2928) — {where_at}; refusing to leave it \
-                             off-screen (AGENTS.md Rule 6)",
+                            "window 0x{:x} could not be verified inside the configured visible \
+                             region — {where_at}; refusing to leave it misplaced \
+                             (computer.window_policy)",
                             id.0
                         );
-                    }
-                    let (clamped_x, clamped_y) = match geometry {
-                        Some((_, _, gw, gh)) => clamp_to_visible_region(target_x, target_y, gw, gh),
-                        None => {
-                            clamp_to_visible_region(target_x, target_y, target.width, target.height)
-                        }
                     };
+                    let (gw, gh) = geometry
+                        .map(|(_, _, gw, gh)| (gw, gh))
+                        .unwrap_or((known_w, known_h));
+                    let (clamped_x, clamped_y) =
+                        clamp_to_region(&region, target_x, target_y, gw, gh);
                     warn!(
                         "window 0x{:x} landed outside the visible region; correcting to \
                          ({}, {})",
@@ -1037,9 +1191,9 @@ impl WindowManager {
                 }
                 Err(_) => {
                     // `wmctrl -lG` is unavailable/failed, so the placement
-                    // cannot be verified. Fail closed per Rule 6 via the
-                    // xdotool path, whose own sanity check bails loudly rather
-                    // than accept an unverified placement.
+                    // cannot be verified. Fail closed via the xdotool path,
+                    // whose own check bails loudly rather than accept an
+                    // unverified placement.
                     warn!(
                         "wmctrl -lG verification failed after moving window {}",
                         id.0
@@ -1050,8 +1204,8 @@ impl WindowManager {
         }
     }
 
-    /// Run `wmctrl -lG` and return the geometry of `id` — the Rule 6
-    /// post-placement sanity check's data.
+    /// Run `wmctrl -lG` and return the geometry of `id` — the post-placement
+    /// verification's data.
     #[cfg(target_os = "linux")]
     async fn verify_wmctrl_placement(&self, id: &WindowId) -> Result<Option<(i32, i32, u32, u32)>> {
         let mut cmd = tokio::process::Command::new("wmctrl");
@@ -1067,9 +1221,10 @@ impl WindowManager {
         Ok(window_geometry_from_wmctrl_lg(&output.stdout, id.0))
     }
 
-    /// xdotool fallback for a move: xdotool does NOT double positions (that
-    /// is a wmctrl/mutter interaction), so the coordinates pass through
-    /// directly. The same Rule 6 sanity check runs afterwards.
+    /// xdotool fallback for a move: xdotool does NOT go through the
+    /// wmctrl/mutter request scaling, so the coordinates pass through
+    /// directly. When the policy asks for verification, the same check runs
+    /// afterwards.
     #[cfg(target_os = "linux")]
     async fn move_window_xdotool(&self, id: &WindowId, x: i32, y: i32) -> Result<()> {
         let mut cmd = tokio::process::Command::new("xdotool");
@@ -1089,21 +1244,28 @@ impl WindowManager {
             let stderr = String::from_utf8_lossy(&result.stderr);
             anyhow::bail!("Failed to move window: {}", stderr)
         }
-        // Rule 6 sanity check after placement by any means.
+        let verify = self.policy.as_ref().is_some_and(|p| p.verify_after_move);
+        if !verify {
+            debug!("Moved window {} to {}, {} via xdotool", id.0, x, y);
+            return Ok(());
+        }
+        let region = self.policy.as_ref().and_then(|p| p.visible_region);
         let geometry = self.verify_wmctrl_placement(id).await?;
         match geometry {
-            Some((lx, ly, lw, lh)) if placement_inside_visible_region(lx, ly, lw, lh) => {
+            Some((lx, ly, lw, lh))
+                if region.is_none_or(|r| placement_inside_region(&r, lx, ly, lw, lh)) =>
+            {
                 debug!("Moved window {} to {}, {} via xdotool", id.0, lx, ly);
                 Ok(())
             }
             Some((lx, ly, lw, lh)) => anyhow::bail!(
-                "window 0x{:x} landed at device ({lx}, {ly}) {lw}x{lh} — outside the visible \
-                 region (AGENTS.md Rule 6); refusing to leave it off-screen",
+                "window 0x{:x} landed at device ({lx}, {ly}) {lw}x{lh} — outside the configured \
+                 visible region (computer.window_policy); refusing to leave it misplaced",
                 id.0
             ),
             None => anyhow::bail!(
                 "window 0x{:x} not found in `wmctrl -lG` after the xdotool move — cannot \
-                 verify the placement (AGENTS.md Rule 6)",
+                 verify the placement (computer.window_policy.verify_after_move)",
                 id.0
             ),
         }
@@ -1111,6 +1273,7 @@ impl WindowManager {
 
     #[cfg(target_os = "linux")]
     async fn minimize_window_linux(&self, id: &WindowId) -> Result<()> {
+        self.enforce_ownership(id, "minimize").await?;
         // xdotool is the best option for minimize
         let mut cmd = tokio::process::Command::new("xdotool");
         sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
@@ -1150,6 +1313,7 @@ impl WindowManager {
 
     #[cfg(target_os = "linux")]
     async fn close_window_linux(&self, id: &WindowId) -> Result<()> {
+        self.enforce_ownership(id, "close").await?;
         // Try wmctrl first (graceful close)
         let mut cmd = tokio::process::Command::new("wmctrl");
         sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);

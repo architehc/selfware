@@ -4102,6 +4102,177 @@ fn test_canonicalize_system_after_user_single() {
 }
 
 // ============================================
+// Send-time role alternation (coalesce_adjacent_plain_turns)
+// ============================================
+
+fn assistant_with_call(id: &str) -> Message {
+    Message {
+        role: "assistant".to_string(),
+        content: types::MessageContent::Text(String::new()),
+        reasoning_content: None,
+        tool_calls: Some(vec![types::ToolCall {
+            id: id.to_string(),
+            call_type: "function".to_string(),
+            function: types::ToolFunction {
+                name: "shell_exec".to_string(),
+                arguments: "{}".to_string(),
+            },
+        }]),
+        tool_call_id: None,
+        name: None,
+    }
+}
+
+#[test]
+fn test_canonicalize_user_system_user_becomes_one_user() {
+    // A mid-conversation `Message::system` push between two user turns is
+    // hoisted to index 0; the two user neighbours it leaves behind must be
+    // folded so strict chat templates see alternating roles.
+    let mut msgs = vec![
+        Message::system("prompt"),
+        Message::user("do the task"),
+        Message::system("learning hint"),
+        Message::user("more detail"),
+    ];
+    canonicalize_message_order(&mut msgs);
+    assert_eq!(msgs.len(), 2);
+    assert_eq!(msgs[0].role, "system");
+    assert_eq!(msgs[0].content, "prompt\n\nlearning hint");
+    assert_eq!(msgs[1].role, "user");
+    assert_eq!(msgs[1].content, "do the task\n\nmore detail");
+}
+
+#[test]
+fn test_canonicalize_interrupted_user_turn_merges_with_new_prompt() {
+    let mut msgs = vec![
+        Message::system("sys"),
+        Message::user("first task"),
+        Message::assistant("partial"),
+        Message::assistant("more partial"),
+        Message::user("interrupted prompt"),
+        Message::user("new prompt"),
+    ];
+    canonicalize_message_order(&mut msgs);
+    let roles: Vec<&str> = msgs.iter().map(|m| m.role.as_str()).collect();
+    assert_eq!(roles, vec!["system", "user", "assistant", "user"]);
+    assert_eq!(msgs[2].content, "partial\n\nmore partial");
+    assert_eq!(msgs[3].content, "interrupted prompt\n\nnew prompt");
+}
+
+#[test]
+fn test_canonicalize_never_merges_tool_results() {
+    // XML tool results and role=tool messages are protocol payloads; they
+    // must keep their own message even when a same-role neighbour follows.
+    let mut msgs = vec![
+        Message::system("sys"),
+        Message::user("task"),
+        Message::assistant("calling"),
+        Message::user("<tool_result>ok</tool_result>"),
+        Message::user("follow-up hint"),
+        assistant_with_call("call_1"),
+        Message::tool("r1", "call_1"),
+        Message::tool("r2", "call_1"),
+        Message::user("after tools"),
+    ];
+    let before = msgs.len();
+    canonicalize_message_order(&mut msgs);
+    assert_eq!(msgs.len(), before, "nothing here may be merged");
+    assert_eq!(msgs[3].content, "<tool_result>ok</tool_result>");
+    assert_eq!(msgs[4].content, "follow-up hint");
+    assert_eq!(msgs[6].role, "tool");
+    assert_eq!(msgs[7].role, "tool");
+
+    // Two adjacent assistant messages where one carries tool_calls stay apart.
+    let mut msgs = vec![
+        Message::user("task"),
+        Message::assistant("thinking aloud"),
+        assistant_with_call("call_2"),
+    ];
+    canonicalize_message_order(&mut msgs);
+    assert_eq!(msgs.len(), 3);
+    assert!(msgs[2].tool_calls.is_some());
+    assert_eq!(msgs[1].content, "thinking aloud");
+}
+
+#[test]
+fn test_canonicalize_never_merges_images() {
+    let image = Message::user_multimodal(
+        types::MessageContent::Text("screenshot".to_string()).with_image("fakebase64"),
+    );
+    let mut msgs = vec![
+        Message::system("sys"),
+        Message::user("look"),
+        image,
+        Message::user("what is it?"),
+    ];
+    canonicalize_message_order(&mut msgs);
+    assert_eq!(msgs.len(), 4);
+    assert_eq!(msgs[2].content.image_count(), 1);
+    assert_eq!(msgs[1].content, "look");
+    assert_eq!(msgs[3].content, "what is it?");
+}
+
+#[test]
+fn test_canonicalize_random_sequences_alternate_plain_turns() {
+    // Property-style: across random role sequences, canonicalization never
+    // leaves two adjacent plain-text user or plain-text assistant messages,
+    // and it never drops text from any message.
+    // Deterministic xorshift so a failure is reproducible.
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next = move |bound: u64| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state % bound
+    };
+    for _ in 0..2000 {
+        let len = next(12) as usize;
+        let mut msgs = Vec::with_capacity(len);
+        for i in 0..len {
+            let m = match next(7) {
+                0 => Message::system(format!("s{i}")),
+                1 | 2 => Message::user(format!("u{i}")),
+                3 => Message::user(format!("<tool_result>t{i}</tool_result>")),
+                4 => Message::assistant(format!("a{i}")),
+                5 => Message::tool(format!("r{i}"), format!("c{i}")),
+                _ => Message::user_multimodal(
+                    types::MessageContent::Text(format!("img{i}")).with_image("b64"),
+                ),
+            };
+            msgs.push(m);
+        }
+        let texts: Vec<String> = msgs.iter().map(|m| m.content.text().to_string()).collect();
+        canonicalize_message_order(&mut msgs);
+
+        let is_plain = |m: &Message| {
+            (m.role == "user" || m.role == "assistant")
+                && matches!(m.content, types::MessageContent::Text(_))
+                && m.tool_calls.is_none()
+                && m.tool_call_id.is_none()
+                && !m.content.text().contains("<tool_result>")
+        };
+        for pair in msgs.windows(2) {
+            assert!(
+                !(pair[0].role == pair[1].role && is_plain(&pair[0]) && is_plain(&pair[1])),
+                "adjacent plain {} messages survived: {:?}",
+                pair[0].role,
+                msgs.iter()
+                    .map(|m| (&m.role, m.content.text()))
+                    .collect::<Vec<_>>()
+            );
+        }
+        let joined: String = msgs
+            .iter()
+            .map(|m| m.content.text().to_string())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        for t in texts {
+            assert!(joined.contains(&t), "text {t:?} was lost");
+        }
+    }
+}
+
+// ============================================
 // Additional Message Construction Tests
 // ============================================
 

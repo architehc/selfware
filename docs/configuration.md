@@ -502,6 +502,48 @@ cognitive = []
 config_keys = []
 ```
 
+## `[computer]` -- Desktop Automation
+
+### `[computer.window_policy]` -- Window placement and ownership
+
+Optional. With **no** policy configured, the window manager
+(`computer::WindowManager`) is unrestricted: any window may be moved, resized,
+minimized or closed, there are no bounds checks, and `wmctrl -e` positions are
+sent exactly as requested. Configure a policy to opt into restrictions; only
+the rules you set are enforced.
+
+```toml
+[computer.window_policy]
+# Only windows whose (trimmed) title starts with this prefix may be moved,
+# resized, minimized or closed. Every mutating operation shares this gate.
+# Default: unset (every window may be changed)
+owned_title_prefix = "sw-"
+
+# Device-coordinate region that moves and resizes must keep the window inside
+# (x >= x_min, x + width <= x_max, y >= y_min, y + height <= y_max). A request
+# that would leave the region is refused before anything is sent.
+# Default: unset (no bounds)
+visible_region = { x_min = 0, x_max = 7680, y_min = 768, y_max = 2928 }
+
+# Divisor applied to `wmctrl -e` POSITION requests (sizes pass through 1:1).
+# Some compositors multiply position requests — mutter at 200% scaling
+# doubles them — so set 2 there. 0 is treated as 1.
+# Default: 1
+request_scale = 2
+
+# After a move or resize, re-read the geometry with `wmctrl -lG`. A move that
+# landed outside `visible_region` is clamped back once; a second miss, or a
+# window that cannot be found in the listing, is reported as an error rather
+# than left off-screen.
+# Default: false
+verify_after_move = true
+```
+
+The block above is the exact policy for the maintainer's desktop described in
+`AGENTS.md` Rule 6 (GNOME X11 at 200% scale, 7680x2928 screen, visible area
+x 0–7680 / y 768–2928 with a small monitor above it, `sw-*` study terminals).
+Other machines should leave the section out or set only the rules they need.
+
 ## Feature Flags (Cargo)
 
 Selfware uses Cargo feature flags to gate optional modules. Enable them with `cargo build --features <flag>` (or `cargo install --git https://github.com/architehc/selfware --features <flag>`).

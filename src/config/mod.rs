@@ -213,6 +213,18 @@ pub struct Config {
     #[serde(default)]
     pub hooks: Vec<crate::hooks::HookConfig>,
 
+    /// Desktop-automation settings, e.g. an optional window-placement policy.
+    ///
+    /// ```toml
+    /// [computer.window_policy]
+    /// owned_title_prefix = "sw-"
+    /// visible_region = { x_min = 0, x_max = 7680, y_min = 768, y_max = 2928 }
+    /// request_scale = 2
+    /// verify_after_move = true
+    /// ```
+    #[serde(default)]
+    pub computer: ComputerConfig,
+
     /// Runtime execution mode (set via CLI, not persisted)
     #[serde(skip)]
     pub execution_mode: ExecutionMode,
@@ -372,6 +384,7 @@ impl std::fmt::Debug for Config {
             .field("qa", &self.qa)
             .field("mcp", &self.mcp)
             .field("hooks", &self.hooks)
+            .field("computer", &self.computer)
             .field("plan_mode", &self.plan_mode)
             .field("matched_profile", &self.matched_profile)
             .field("matched_profile_applied", &self.matched_profile_applied)
@@ -407,6 +420,7 @@ impl Default for Config {
             qa: crate::testing::qa_profiles::QaConfig::default(),
             mcp: crate::mcp::McpConfig::default(),
             hooks: Vec::new(),
+            computer: ComputerConfig::default(),
             execution_mode: ExecutionMode::default(),
             compact_mode: false,
             verbose_mode: false,

@@ -6,68 +6,175 @@ fn test_window_id() {
     assert_eq!(id.0, 42);
 }
 
-// AGENTS.md Rule 6 pure helpers: halving transform, visible-region bounds,
-// clamping, ownership, and the wmctrl -lG geometry parser. All platform-free
-// so they are exercised without touching a real desktop.
-#[test]
-fn wmctrl_request_position_halves_for_mutter() {
-    // mutter doubles wmctrl -e position requests: request = target / 2.
-    assert_eq!(wmctrl_request_position(1920, 800), (960, 400));
-    assert_eq!(wmctrl_request_position(0, 768), (0, 384));
-    assert_eq!(wmctrl_request_position(7680, 2928), (3840, 1464));
-    // Odd targets floor — at most one device pixel short, never past target.
-    assert_eq!(wmctrl_request_position(1921, 799), (960, 399));
+// Window-policy pure helpers: request scaling, region bounds, clamping,
+// ownership, and the wmctrl -lG geometry parser. All platform-free so they
+// are exercised without touching a real desktop.
+
+/// The maintainer's desktop from AGENTS.md Rule 6, as a config policy.
+fn rule6_policy() -> WindowPolicy {
+    WindowPolicy {
+        owned_title_prefix: Some("sw-".to_string()),
+        visible_region: Some(rule6_region()),
+        request_scale: 2,
+        verify_after_move: true,
+    }
+}
+
+fn rule6_region() -> VisibleRegion {
+    VisibleRegion {
+        x_min: 0,
+        x_max: 7680,
+        y_min: 768,
+        y_max: 2928,
+    }
 }
 
 #[test]
-fn placement_bounds_use_the_rule6_visible_region() {
-    // Visible area: x 0-7680, y 768-2928 device coords. The small VGA monitor
-    // sits ABOVE at y < 768 (x 3840-4864) and must never receive a placement.
-    assert!(placement_inside_visible_region(0, 768, 1920, 1080));
+fn wmctrl_request_position_default_scale_passes_through() {
+    // No policy / default request_scale = 1: normal machines get exactly the
+    // coordinates they asked for.
+    assert_eq!(wmctrl_request_position(1920, 800, 1), (1920, 800));
+    assert_eq!(wmctrl_request_position(0, 0, 1), (0, 0));
+    // A misconfigured 0 is treated as 1, never a division by zero.
+    assert_eq!(wmctrl_request_position(1921, 799, 0), (1921, 799));
+}
+
+#[test]
+fn wmctrl_request_position_halves_for_mutter_scale_2() {
+    // mutter at 200% doubles wmctrl -e position requests: request = target / 2.
+    assert_eq!(wmctrl_request_position(1920, 800, 2), (960, 400));
+    assert_eq!(wmctrl_request_position(0, 768, 2), (0, 384));
+    assert_eq!(wmctrl_request_position(7680, 2928, 2), (3840, 1464));
+    // Odd targets floor — at most one device pixel short, never past target.
+    assert_eq!(wmctrl_request_position(1921, 799, 2), (960, 399));
+}
+
+#[test]
+fn placement_bounds_use_the_configured_region() {
+    // Rule 6 region: x 0-7680, y 768-2928 device coords. The small VGA
+    // monitor sits ABOVE at y < 768 (x 3840-4864) and must never receive a
+    // placement.
+    let r = rule6_region();
+    assert!(placement_inside_region(&r, 0, 768, 1920, 1080));
     assert!(
-        !placement_inside_visible_region(0, 767, 1920, 1080),
+        !placement_inside_region(&r, 0, 767, 1920, 1080),
         "above the visible top edge"
     );
     assert!(
-        !placement_inside_visible_region(3844, 100, 800, 600),
+        !placement_inside_region(&r, 3844, 100, 800, 600),
         "on the small VGA monitor"
     );
     assert!(
-        !placement_inside_visible_region(6000, 768, 1800, 400),
+        !placement_inside_region(&r, 6000, 768, 1800, 400),
         "x + width beyond 7680"
     );
     assert!(
-        !placement_inside_visible_region(0, 768, 100, 3000),
+        !placement_inside_region(&r, 0, 768, 100, 3000),
         "y + height beyond 2928"
     );
     assert!(
-        !placement_inside_visible_region(-10, 768, 100, 100),
+        !placement_inside_region(&r, -10, 768, 100, 100),
         "negative x"
     );
+
+    // A different region is honoured, not the hardcoded Rule 6 one.
+    let small = VisibleRegion {
+        x_min: 100,
+        x_max: 1100,
+        y_min: 0,
+        y_max: 800,
+    };
+    assert!(placement_inside_region(&small, 100, 0, 1000, 800));
+    assert!(!placement_inside_region(&small, 99, 0, 10, 10));
+    assert!(!placement_inside_region(&small, 100, 0, 1001, 10));
+    // Oversized dimensions saturate instead of wrapping.
+    assert!(!placement_inside_region(&small, 100, 0, u32::MAX, 10));
 }
 
 #[test]
-fn clamp_to_visible_region_pulls_wayward_placements_back() {
+fn clamp_to_region_pulls_wayward_placements_back() {
     // A target above the visible top edge is exactly the failure the halving
     // fix (and its missing sanity check) used to produce: y=0 device requests
     // landed above the visible region.
-    let (cx, cy) = clamp_to_visible_region(1920, 200, 1200, 800);
+    let r = rule6_region();
+    let (cx, cy) = clamp_to_region(&r, 1920, 200, 1200, 800);
     assert_eq!(cy, 768, "clamped onto the visible top edge");
     assert_eq!(cx, 1920, "in-bounds x is untouched");
-    let (cx, cy) = clamp_to_visible_region(9000, 4000, 1200, 800);
+    let (cx, cy) = clamp_to_region(&r, 9000, 4000, 1200, 800);
     assert!(cx + 1200 <= 7680 && cy >= 768 && cy + 800 <= 2928);
     // A window wider than the display still clamps x without panicking.
-    let (cx, _) = clamp_to_visible_region(100, 768, 9000, 400);
+    let (cx, _) = clamp_to_region(&r, 100, 768, 9000, 400);
     assert_eq!(cx, 0);
+
+    let offset = VisibleRegion {
+        x_min: 50,
+        x_max: 650,
+        y_min: 10,
+        y_max: 410,
+    };
+    assert_eq!(clamp_to_region(&offset, 0, 0, 100, 100), (50, 10));
+    assert_eq!(clamp_to_region(&offset, 900, 900, 100, 100), (550, 310));
+    assert_eq!(clamp_to_region(&offset, 0, 0, 5000, 5000), (50, 10));
 }
 
 #[test]
-fn session_owns_window_matches_sw_prefix_only() {
-    assert!(session_owns_window("sw-1: study terminal"));
-    assert!(session_owns_window(" sw-arena-7 "));
-    assert!(!session_owns_window("Firefox"));
-    assert!(!session_owns_window("Terminal — sw-2")); // prefix, not contains
-    assert!(!session_owns_window(""));
+fn window_title_owned_honours_the_configured_prefix() {
+    let prefix = rule6_policy().owned_title_prefix;
+    let prefix = prefix.as_deref();
+    assert!(window_title_owned(prefix, "sw-1: study terminal"));
+    assert!(window_title_owned(prefix, " sw-arena-7 "));
+    assert!(!window_title_owned(prefix, "Firefox"));
+    assert!(!window_title_owned(prefix, "Terminal — sw-2")); // prefix, not contains
+    assert!(!window_title_owned(prefix, ""));
+    // No prefix configured: every window is owned (unrestricted default).
+    assert!(window_title_owned(None, "Firefox"));
+    assert!(window_title_owned(None, ""));
+    // A different prefix is honoured, not the hardcoded "sw-".
+    assert!(window_title_owned(Some("bench:"), "bench: run 3"));
+    assert!(!window_title_owned(Some("bench:"), "sw-1"));
+}
+
+#[test]
+fn window_policy_defaults_to_unrestricted() {
+    // No [computer] section at all: no policy.
+    let cfg: crate::config::ComputerConfig = toml::from_str("").unwrap();
+    assert!(cfg.window_policy.is_none());
+    let wm = WindowManager::from_config(&cfg);
+    assert!(wm.policy().is_none());
+    assert!(WindowManager::new().policy().is_none());
+
+    // An empty [computer.window_policy] block restricts nothing and scales
+    // nothing.
+    let cfg: crate::config::ComputerConfig = toml::from_str("[window_policy]\n").unwrap();
+    let p = cfg.window_policy.unwrap();
+    assert_eq!(p, WindowPolicy::default());
+    assert_eq!(p.request_scale, 1);
+    assert!(p.owned_title_prefix.is_none());
+    assert!(p.visible_region.is_none());
+    assert!(!p.verify_after_move);
+}
+
+#[test]
+fn documented_rule6_block_parses_to_the_rule6_policy() {
+    // The exact block docs/configuration.md gives for the maintainer's
+    // desktop (AGENTS.md Rule 6), parsed through the full Config.
+    let toml_src = r#"
+[computer.window_policy]
+owned_title_prefix = "sw-"
+visible_region = { x_min = 0, x_max = 7680, y_min = 768, y_max = 2928 }
+request_scale = 2
+verify_after_move = true
+"#;
+    let cfg: crate::config::Config = toml::from_str(toml_src).unwrap();
+    assert_eq!(cfg.computer.window_policy, Some(rule6_policy()));
+    let wm = WindowManager::from_config(&cfg.computer);
+    assert_eq!(wm.policy(), Some(&rule6_policy()));
+
+    // Typos are rejected rather than silently ignored.
+    assert!(toml::from_str::<crate::config::ComputerConfig>(
+        "[window_policy]\nowned_prefix = \"sw-\"\n"
+    )
+    .is_err());
 }
 
 #[test]
@@ -203,25 +310,29 @@ async fn test_get_active_window_does_not_panic() {
 
 #[tokio::test]
 async fn test_resize_window_does_not_panic() {
-    let wm = WindowManager::new();
+    // Policy-gated so a real desktop is never touched.
+    let wm = WindowManager::with_policy(Some(rule6_policy()));
     let _result = wm.resize_window(&WindowId(1), 800, 600).await;
 }
 
 #[tokio::test]
 async fn test_move_window_does_not_panic() {
-    let wm = WindowManager::new();
+    // Policy-gated so a real desktop is never touched.
+    let wm = WindowManager::with_policy(Some(rule6_policy()));
     let _result = wm.move_window(&WindowId(1), 100, 100).await;
 }
 
 #[tokio::test]
 async fn test_minimize_window_does_not_panic() {
-    let wm = WindowManager::new();
+    // Policy-gated so a real desktop is never touched.
+    let wm = WindowManager::with_policy(Some(rule6_policy()));
     let _result = wm.minimize_window(&WindowId(1)).await;
 }
 
 #[tokio::test]
 async fn test_close_window_does_not_panic() {
-    let wm = WindowManager::new();
+    // Policy-gated so a real desktop is never touched.
+    let wm = WindowManager::with_policy(Some(rule6_policy()));
     let _result = wm.close_window(&WindowId(1)).await;
 }
 
@@ -259,12 +370,31 @@ async fn test_linux_get_active_window_graceful() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn test_linux_window_operations_graceful() {
-    let wm = WindowManager::new();
+    // Under the ownership policy: a fake id is never listed, so every
+    // mutating op must be refused before any wmctrl/xdotool mutation runs.
+    let wm = WindowManager::with_policy(Some(rule6_policy()));
     // These should all fail gracefully, not panic
     let _ = wm.resize_window(&WindowId(999999), 800, 600).await;
     let _ = wm.move_window(&WindowId(999999), 100, 100).await;
     let _ = wm.minimize_window(&WindowId(999999)).await;
     let _ = wm.close_window(&WindowId(999999)).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn test_linux_policy_gates_every_mutating_op() {
+    // One ownership gate for move, resize, minimize and close alike
+    // (AGENTS.md Rule 5): an unlisted/unowned window is refused by each.
+    let wm = WindowManager::with_policy(Some(rule6_policy()));
+    let id = WindowId(0xdead_beef_u64);
+    for result in [
+        wm.move_window(&id, 1920, 800).await,
+        wm.resize_window(&id, 800, 600).await,
+        wm.minimize_window(&id).await,
+        wm.close_window(&id).await,
+    ] {
+        assert!(result.is_err(), "policy must refuse an unowned window");
+    }
 }
 
 // macOS-specific tests for window ID mapping and script generation

@@ -31,6 +31,9 @@ const KNOWN_CONFIG_KEYS: &[&str] = &[
     "qa",
     "mcp",
     "hooks",
+    "computer",
+    // computer sub-keys
+    "window_policy",
     // agent sub-keys
     "max_iterations",
     "step_timeout_secs",
