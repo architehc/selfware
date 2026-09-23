@@ -2,7 +2,7 @@
 //!
 //! The workspace root is the directory every tool resolves relative paths
 //! against, validates paths against (see
-//! [`crate::tools::file::validate_tool_path`]) and runs subprocesses in. It
+//! `crate::tools::file::validate_tool_path`) and runs subprocesses in. It
 //! used to be the PROCESS current directory, and entering a git worktree
 //! called `std::env::set_current_dir` — a single global shared by every Tokio
 //! worker thread, every concurrently running agent, background job, LSP server

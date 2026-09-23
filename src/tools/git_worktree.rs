@@ -18,7 +18,7 @@
 //! # Workspace root, not process cwd
 //!
 //! Entering a worktree moves the calling agent's
-//! [`WorkspaceRoot`](crate::tools::workspace_root::WorkspaceRoot) — the root
+//! [`WorkspaceRoot`] — the root
 //! its tool calls validate paths against, resolve relative paths against and
 //! start subprocesses in. It does NOT call `std::env::set_current_dir`: the
 //! process cwd is one global shared by every Tokio worker, every concurrently
@@ -497,7 +497,7 @@ pub fn is_in_worktree() -> bool {
 /// the directory now in effect.
 ///
 /// The path is validated against the workspace path policy FIRST, with the
-/// process-global safety config ([`validate_path`]) resolved against `root`.
+/// process-global safety config (`validate_path`) resolved against `root`.
 /// The `enter_worktree` tool validates with its own per-instance config on
 /// the execute path; this entry point is what the TUI `/worktree enter`
 /// handler goes through, and without the same check it could enter an

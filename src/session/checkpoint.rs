@@ -2098,7 +2098,7 @@ impl CheckpointManager {
     /// - **Status**: [`TaskStatus::InProgress`] qualifies (a crash or restart
     ///   leaves the status InProgress), and so does a [`TaskStatus::Failed`]
     ///   checkpoint whose terminal stop is the iteration/step-cap family —
-    ///   see [`terminal_stop_allows_autochain`]. `Paused` tasks and every
+    ///   see `terminal_stop_allows_autochain`. `Paused` tasks and every
     ///   other failure class stay explicit-`resume` territory: a crashed or
     ///   safety-stopped checkpoint must not auto-chain.
     /// - **User task**: the same gate `--continue` applies — session-exit

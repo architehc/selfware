@@ -888,7 +888,7 @@ impl PathValidator {
     }
 
     /// Open the parent directory of `path` as a pinned descriptor for
-    /// fd-relative writes (see [`open_parent_dir_fd`]). The lexical path is
+    /// fd-relative writes (see `open_parent_dir_fd`). The lexical path is
     /// validated first; then both the prospective and the final real
     /// directory locations are re-validated against this validator's policy.
     #[cfg(unix)]

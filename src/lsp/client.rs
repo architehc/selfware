@@ -127,7 +127,7 @@ const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Time the polite `shutdown` request waits before the server is killed.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 /// Default bound on waiting for indexing to finish before retrying an empty
-/// query once (see [`query_settling_indexing`]).
+/// query once (see `query_settling_indexing`).
 pub const DEFAULT_INDEXING_WAIT: Duration = Duration::from_secs(10);
 
 /// Typed, infrastructure-level failure of a language-server connection (same
