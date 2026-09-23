@@ -315,3 +315,167 @@ fn test_exit_code_constants() {
     assert_eq!(EXIT_SAFETY_ERROR, 5);
     assert_eq!(EXIT_CONFIRMATION_REQUIRED, 6);
 }
+
+// =========================================================================
+// Shutdown-reason → typed cancellation error (one shared mapping)
+// =========================================================================
+
+#[test]
+fn shutdown_reason_maps_sigterm_to_terminated_exit_143() {
+    let err = AgentError::from_shutdown_reason(Some(crate::ShutdownReason::SignalTerminate));
+    assert!(matches!(err, AgentError::Terminated(ref s) if s == "SIGTERM"));
+    assert_eq!(get_exit_code(&anyhow::Error::from(err)), 143);
+}
+
+#[test]
+fn shutdown_reason_maps_internal_timeout_to_cancelled_with_reason() {
+    let err = AgentError::from_shutdown_reason(Some(crate::ShutdownReason::Timeout));
+    assert!(matches!(err, AgentError::CancelledWithReason(ref s) if s == "timeout"));
+    assert_eq!(get_exit_code(&anyhow::Error::from(err)), EXIT_INTERRUPTED);
+}
+
+#[test]
+fn only_user_interrupt_or_no_latch_maps_to_bare_cancelled() {
+    for reason in [Some(crate::ShutdownReason::UserInterrupt), None] {
+        let err = AgentError::from_shutdown_reason(reason);
+        assert!(
+            matches!(err, AgentError::Cancelled),
+            "{reason:?} must be a user cancel"
+        );
+        assert_eq!(err.to_string(), "Task cancelled by user");
+    }
+}
+
+// =========================================================================
+// Provider context-overflow classification
+// =========================================================================
+
+/// Real-shaped provider bodies for "the prompt does not fit the window".
+const OVERFLOW_BODIES: &[(u16, &str)] = &[
+    // OpenAI / DeepSeek
+    (
+        400,
+        r#"{"error":{"message":"This model's maximum context length is 8192 tokens. However, your messages resulted in 9000 tokens (including 200 in the functions). Please reduce the length of the messages or functions.","type":"invalid_request_error","param":"messages","code":"context_length_exceeded"}}"#,
+    ),
+    // OpenAI newer wording
+    (
+        400,
+        r#"{"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","code":"context_length_exceeded"}}"#,
+    ),
+    // vLLM
+    (
+        400,
+        r#"{"object":"error","message":"This model's maximum context length is 32768 tokens. However, you requested 40035 tokens (39035 in the messages, 1000 in the completion). Please reduce the length of the messages or completion.","type":"BadRequestError","code":400}"#,
+    ),
+    // SGLang
+    (
+        400,
+        r#"{"object":"error","message":"The input (40000 tokens) is longer than the model's context length (32768 tokens).","type":"BadRequestError","code":400}"#,
+    ),
+    // llama.cpp server
+    (
+        400,
+        r#"{"error":{"code":400,"message":"the request exceeds the available context size, try increasing it","type":"exceed_context_size_error","n_prompt_tokens":9000,"n_ctx":8192}}"#,
+    ),
+    // Ollama
+    (
+        400,
+        r#"{"error":"input length exceeds maximum context length"}"#,
+    ),
+    // OpenRouter
+    (
+        400,
+        r#"{"error":{"message":"This endpoint's maximum context length is 131072 tokens. However, you requested about 140000 tokens (138000 of text input, 2000 in the output). Please reduce the length of either one.","code":400}}"#,
+    ),
+    // Anthropic-style
+    (
+        400,
+        r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 210000 tokens > 200000 maximum"}}"#,
+    ),
+    (
+        413,
+        r#"{"type":"error","error":{"type":"request_too_large","message":"Request exceeds the maximum allowed number of bytes."}}"#,
+    ),
+    // TGI
+    (
+        422,
+        r#"{"error":"Input validation error: `inputs` tokens + `max_new_tokens` must be <= 4096. Given: 4000 `inputs` tokens and 512 `max_new_tokens`","error_type":"validation"}"#,
+    ),
+    // Bare 413 with no body (proxy-level payload limit)
+    (413, ""),
+];
+
+#[test]
+fn provider_context_overflow_bodies_are_classified() {
+    for (status, body) in OVERFLOW_BODIES {
+        assert!(
+            is_provider_context_overflow(*status, body),
+            "HTTP {status} must classify as context overflow: {body}"
+        );
+        let err: anyhow::Error = ApiError::HttpStatus {
+            status: *status,
+            message: body.to_string(),
+        }
+        .into();
+        assert!(is_context_overflow_error(&err), "{status}: {body}");
+    }
+}
+
+#[test]
+fn genuine_client_errors_are_not_context_overflow() {
+    let genuine: &[(u16, &str)] = &[
+        (
+            400,
+            r#"{"error":{"message":"Invalid value for 'temperature': must be <= 2","type":"invalid_request_error"}}"#,
+        ),
+        (
+            400,
+            r#"{"error":{"message":"The model `gpt-9` does not exist","code":"model_not_found"}}"#,
+        ),
+        (
+            400,
+            r#"{"error":"messages with role 'tool' must immediately follow an assistant message with 'tool_calls'"}"#,
+        ),
+        (400, ""),
+        (
+            422,
+            r#"{"detail":[{"loc":["body","messages"],"msg":"field required"}]}"#,
+        ),
+        // Auth / not found / rate limit are never overflow, whatever the body says.
+        (401, "maximum context length is 8192 tokens"),
+        (403, "prompt is too long"),
+        (404, "context_length_exceeded"),
+        (
+            429,
+            "Rate limit reached: too many tokens per minute; context_length_exceeded",
+        ),
+        (500, "maximum context length"),
+    ];
+    for (status, body) in genuine {
+        assert!(
+            !is_provider_context_overflow(*status, body),
+            "HTTP {status} must NOT classify as context overflow: {body}"
+        );
+    }
+}
+
+#[test]
+fn context_overflow_is_found_through_anyhow_context() {
+    let err = anyhow::Error::from(ApiError::ContextOverflow("too big".into()))
+        .context("Streaming failed. Non-streaming fallback request also failed");
+    assert!(is_context_overflow_error(&err));
+    let plain: anyhow::Error = ApiError::Timeout.into();
+    assert!(!is_context_overflow_error(&plain));
+}
+
+#[test]
+fn reasoning_only_long_call_message_names_the_reasoning() {
+    let msg = ApiError::ReasoningOnlyLongCall {
+        elapsed_ms: 400_000,
+        reasoning_chars: 1234,
+    }
+    .to_string();
+    assert!(msg.contains("400000ms"), "{msg}");
+    assert!(msg.contains("1234 reasoning chars"), "{msg}");
+    assert!(!msg.contains("no reasoning"), "{msg}");
+}

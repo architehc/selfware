@@ -311,7 +311,10 @@ impl RunSupervisor {
                     wait_for_cancellation(&agent_cancel).await;
                     tokio::time::sleep(CANCELLATION_GRACE).await;
                 } => {
-                    Err(crate::errors::AgentError::Cancelled.into())
+                    // Same typed mapping as the agent loop: a SIGTERM that
+                    // latched the process-wide shutdown is Terminated, not a
+                    // user cancel; a supervisor-only cancel stays Cancelled.
+                    Err(crate::errors::AgentError::for_current_shutdown().into())
                 }
             };
             if agent_cancel.load(Ordering::Relaxed) {

@@ -688,3 +688,77 @@ async fn profile_max_retries_zero_fails_fast_on_both_paths() {
 
     server.abort();
 }
+
+// -----------------------------------------------------------------------
+// Provider context-window overflow is typed at the HTTP boundary
+// -----------------------------------------------------------------------
+
+#[test]
+fn http_status_error_types_provider_context_overflow() {
+    let body = r#"{"error":{"message":"This model's maximum context length is 8192 tokens. However, your messages resulted in 9000 tokens (including 200 in the functions).","code":"context_length_exceeded"}}"#;
+    let err = ApiClient::http_status_error(
+        "http://localhost:8000/v1",
+        reqwest::StatusCode::BAD_REQUEST,
+        body.to_string(),
+        None,
+    );
+    match err.downcast_ref::<crate::errors::ApiError>() {
+        Some(crate::errors::ApiError::ContextOverflow(msg)) => {
+            assert!(msg.contains("HTTP 400"), "{msg}");
+            assert!(msg.contains("maximum context length"), "{msg}");
+        }
+        other => panic!("expected ContextOverflow, got {other:?}"),
+    }
+    let too_large = ApiClient::http_status_error(
+        "http://localhost:8000/v1",
+        reqwest::StatusCode::PAYLOAD_TOO_LARGE,
+        String::new(),
+        None,
+    );
+    assert!(matches!(
+        too_large.downcast_ref::<crate::errors::ApiError>(),
+        Some(crate::errors::ApiError::ContextOverflow(_))
+    ));
+}
+
+#[test]
+fn http_status_error_keeps_genuine_client_errors_as_http_status() {
+    for (status, body) in [
+        (
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":"invalid temperature"}"#,
+        ),
+        (reqwest::StatusCode::UNAUTHORIZED, r#"{"error":"bad key"}"#),
+        (reqwest::StatusCode::FORBIDDEN, r#"{"error":"forbidden"}"#),
+        (
+            reqwest::StatusCode::NOT_FOUND,
+            r#"{"error":"model not found"}"#,
+        ),
+    ] {
+        let err =
+            ApiClient::http_status_error("http://localhost:8000/v1", status, body.into(), None);
+        assert!(
+            matches!(
+                err.downcast_ref::<crate::errors::ApiError>(),
+                Some(crate::errors::ApiError::HttpStatus { status: s, .. }) if *s == status.as_u16()
+            ),
+            "{status} must stay a typed HttpStatus"
+        );
+    }
+}
+
+#[test]
+fn context_overflow_body_mentioning_functions_is_not_a_tool_schema_400() {
+    // The OpenAI overflow body breaks tokens down "including N in the
+    // functions" — that must not latch XML tool mode for the session.
+    let body = r#"{"error":{"message":"This model's maximum context length is 8192 tokens. However, your messages resulted in 9000 tokens (including 200 in the functions).","code":"context_length_exceeded"}}"#;
+    assert!(!ApiClient::is_tool_schema_400(
+        reqwest::StatusCode::BAD_REQUEST,
+        body
+    ));
+    // A genuine tool-schema rejection still latches.
+    assert!(ApiClient::is_tool_schema_400(
+        reqwest::StatusCode::BAD_REQUEST,
+        r#"{"error":"tool_choice auto is not supported"}"#
+    ));
+}

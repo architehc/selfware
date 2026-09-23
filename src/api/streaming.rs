@@ -42,6 +42,48 @@ impl Drop for StreamCallTiming<'_> {
     }
 }
 
+/// Classify a stream that stopped on a timer (per-chunk stall or the
+/// per-call stream deadline) into its typed outcome.
+///
+/// - [`WallClockBudgetExceeded`] iff the RUN deadline has passed at `now`.
+///   Its `elapsed_secs` is RUN-elapsed (limit + overshoot past the deadline),
+///   the same clock `ApiClient::wall_budget_stop` reports — never the
+///   per-call elapsed time, which is unrelated to the run budget (a 10 s call
+///   late in a 600 s run would otherwise never trip, and a 700 s call early
+///   in it would trip while budget remained).
+/// - [`CallTimeBudgetExceeded`] when the configured per-call cap
+///   (`agent.max_call_secs`) has elapsed for THIS call.
+/// - [`ApiError::Timeout`] otherwise (chunk stall / adaptive bound).
+pub(crate) fn classify_stream_timeout(
+    now: Instant,
+    call_started: Option<Instant>,
+    call_cap_secs: Option<u64>,
+    run_deadline: Option<Instant>,
+    wall_limit_secs: Option<u64>,
+) -> anyhow::Error {
+    if let (Some(deadline), Some(limit)) = (run_deadline, wall_limit_secs) {
+        if now >= deadline {
+            let overshoot = now.saturating_duration_since(deadline).as_secs();
+            return WallClockBudgetExceeded {
+                elapsed_secs: limit.saturating_add(overshoot),
+                limit_secs: limit,
+            }
+            .into();
+        }
+    }
+    if let (Some(started), Some(cap)) = (call_started, call_cap_secs) {
+        let elapsed = now.saturating_duration_since(started);
+        if elapsed >= Duration::from_secs(cap) {
+            return CallTimeBudgetExceeded {
+                elapsed_secs: elapsed.as_secs(),
+                limit_secs: cap,
+            }
+            .into();
+        }
+    }
+    ApiError::Timeout.into()
+}
+
 /// A streaming response that yields chunks as they arrive
 pub struct StreamingResponse {
     response: reqwest::Response,
@@ -58,6 +100,12 @@ pub struct StreamingResponse {
     /// into the run's per-call latency stats when it exits.
     call_started: Option<Instant>,
     call_cap_secs: Option<u64>,
+    /// The RUN-level wall deadline (latched at the run's first billable
+    /// request) and the configured `agent.max_wall_secs` it was built from.
+    /// Distinct from `deadline`, which is the per-call stream deadline
+    /// (min of this and the per-call bound): a timeout is a wall-clock budget
+    /// stop only when THIS instant has passed.
+    run_deadline: Option<Instant>,
     wall_limit_secs: Option<u64>,
 }
 
@@ -85,6 +133,7 @@ impl StreamingResponse {
             prior_attempts: Vec::new(),
             call_started: None,
             call_cap_secs: None,
+            run_deadline: None,
             wall_limit_secs: None,
         }
     }
@@ -109,8 +158,16 @@ impl StreamingResponse {
         self
     }
 
-    pub(crate) fn with_wall_limit(mut self, limit: Option<u64>) -> Self {
-        self.wall_limit_secs = limit;
+    /// Attach the run-level wall deadline and the `agent.max_wall_secs`
+    /// limit it was derived from, so a stream timeout is classified as a
+    /// wall-clock budget stop iff the RUN deadline has passed.
+    pub(crate) fn with_run_deadline(
+        mut self,
+        run_deadline: Option<Instant>,
+        limit_secs: Option<u64>,
+    ) -> Self {
+        self.run_deadline = run_deadline;
+        self.wall_limit_secs = limit_secs;
         self
     }
 
@@ -159,31 +216,18 @@ impl StreamingResponse {
             let mut saw_valid_event = false;
 
             let call_cap_secs = self.call_cap_secs;
+            let run_deadline = self.run_deadline;
             let wall_limit_secs = self.wall_limit_secs;
             let call_started = self.call_started;
 
             let classify_timeout = || -> anyhow::Error {
-                if let (Some(started), Some(cap)) = (call_started, call_cap_secs) {
-                    let elapsed = started.elapsed();
-                    if elapsed >= Duration::from_secs(cap) {
-                        return CallTimeBudgetExceeded {
-                            elapsed_secs: elapsed.as_secs(),
-                            limit_secs: cap,
-                        }
-                        .into();
-                    }
-                }
-                if let (Some(started), Some(limit)) = (call_started, wall_limit_secs) {
-                    let elapsed = started.elapsed();
-                    if elapsed >= Duration::from_secs(limit) {
-                        return WallClockBudgetExceeded {
-                            elapsed_secs: elapsed.as_secs(),
-                            limit_secs: limit,
-                        }
-                        .into();
-                    }
-                }
-                ApiError::Timeout.into()
+                classify_stream_timeout(
+                    Instant::now(),
+                    call_started,
+                    call_cap_secs,
+                    run_deadline,
+                    wall_limit_secs,
+                )
             };
 
             loop {

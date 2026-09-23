@@ -897,14 +897,22 @@ impl Agent {
             // Retry once through the non-streaming path, then stop with a
             // reason: nudging an endpoint that keeps answering empty burns
             // the turn budget one empty turn at a time and never says why.
+            // Reasoning-only and truly-empty responses are different faults;
+            // the message and nudge name which one this was (Rule 3).
+            let reasoning_chars = response
+                .reasoning_content
+                .as_deref()
+                .map(|r| r.trim().len())
+                .unwrap_or(0)
+                + content.trim().len();
             if self.consecutive_empty_responses >= super::recovery::MAX_CONSECUTIVE_EMPTY_RESPONSES
             {
                 bail!(
-                    "EMPTY_RESPONSE_LOOP: {} consecutive empty assistant responses — the \
-                     provider returned no content, no reasoning and no tool calls each time. \
-                     The retry already went out non-streaming, so this is not a streaming \
-                     artifact: check the endpoint's parser / chat-template configuration.",
-                    self.consecutive_empty_responses
+                    "{}",
+                    super::recovery::empty_response_loop_message(
+                        self.consecutive_empty_responses,
+                        reasoning_chars,
+                    )
                 );
             }
             if self.config.agent.streaming && !self.force_non_streaming {
@@ -916,12 +924,7 @@ impl Agent {
             }
             info!("Rejected empty response as final answer — nudging for an actual answer");
             self.messages.push(crate::api::types::Message::user(
-                "<selfware_system_directive>\n\
-                 Your last response produced no deliverable content or tool calls (reasoning only). \
-                 Provide your actual final answer now (a concise summary of the completed work) \
-                 or call a tool.\n\
-                 </selfware_system_directive>"
-                    .to_string(),
+                super::recovery::empty_response_nudge(reasoning_chars).to_string(),
             ));
             return Ok(false);
         }

@@ -499,3 +499,105 @@ impl std::io::Write for CaptureWriter {
         Ok(())
     }
 }
+
+// -----------------------------------------------------------------------
+// classify_stream_timeout: run deadline vs per-call cap vs plain timeout
+// -----------------------------------------------------------------------
+
+mod stream_timeout_classification {
+    use super::super::classify_stream_timeout;
+    use crate::api::client::{CallTimeBudgetExceeded, WallClockBudgetExceeded};
+    use crate::errors::ApiError;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn wall_clock_fires_iff_run_deadline_passed_with_run_elapsed() {
+        let now = Instant::now() + Duration::from_secs(10_000);
+        // Late in a 600 s run: this call only started 10 s ago, but the RUN
+        // deadline passed 5 s ago. The old per-call comparison (10 s < 600 s)
+        // mis-typed this as a plain timeout.
+        let err = classify_stream_timeout(
+            now,
+            Some(now - Duration::from_secs(10)),
+            None,
+            Some(now - Duration::from_secs(5)),
+            Some(600),
+        );
+        let wall = err
+            .downcast_ref::<WallClockBudgetExceeded>()
+            .unwrap_or_else(|| panic!("expected WallClockBudgetExceeded, got {err}"));
+        assert_eq!(wall.limit_secs, 600);
+        assert_eq!(wall.elapsed_secs, 605, "run-elapsed, not call-elapsed");
+    }
+
+    #[test]
+    fn long_call_before_run_deadline_is_not_a_wall_clock_stop() {
+        let now = Instant::now() + Duration::from_secs(10_000);
+        // The call itself ran 700 s (> the 600 s limit) but the run deadline
+        // is still 100 s away: the old comparison claimed the wall budget
+        // was exhausted while budget remained.
+        let err = classify_stream_timeout(
+            now,
+            Some(now - Duration::from_secs(700)),
+            None,
+            Some(now + Duration::from_secs(100)),
+            Some(600),
+        );
+        assert!(err.downcast_ref::<WallClockBudgetExceeded>().is_none());
+        assert!(matches!(
+            err.downcast_ref::<ApiError>(),
+            Some(ApiError::Timeout)
+        ));
+    }
+
+    #[test]
+    fn per_call_cap_fires_when_run_deadline_not_passed() {
+        let now = Instant::now() + Duration::from_secs(10_000);
+        let err = classify_stream_timeout(
+            now,
+            Some(now - Duration::from_secs(31)),
+            Some(30),
+            Some(now + Duration::from_secs(100)),
+            Some(600),
+        );
+        let cap = err
+            .downcast_ref::<CallTimeBudgetExceeded>()
+            .unwrap_or_else(|| panic!("expected CallTimeBudgetExceeded, got {err}"));
+        assert_eq!(cap.limit_secs, 30);
+        assert_eq!(cap.elapsed_secs, 31);
+    }
+
+    #[test]
+    fn run_deadline_takes_precedence_over_call_cap() {
+        let now = Instant::now() + Duration::from_secs(10_000);
+        let err = classify_stream_timeout(
+            now,
+            Some(now - Duration::from_secs(31)),
+            Some(30),
+            Some(now),
+            Some(600),
+        );
+        assert!(err.downcast_ref::<WallClockBudgetExceeded>().is_some());
+    }
+
+    #[test]
+    fn chunk_stall_without_any_budget_is_plain_timeout() {
+        let now = Instant::now() + Duration::from_secs(10_000);
+        let err = classify_stream_timeout(
+            now,
+            Some(now - Duration::from_secs(5)),
+            Some(30),
+            Some(now + Duration::from_secs(100)),
+            Some(600),
+        );
+        assert!(matches!(
+            err.downcast_ref::<ApiError>(),
+            Some(ApiError::Timeout)
+        ));
+        let err = classify_stream_timeout(now, None, None, None, None);
+        assert!(matches!(
+            err.downcast_ref::<ApiError>(),
+            Some(ApiError::Timeout)
+        ));
+    }
+}

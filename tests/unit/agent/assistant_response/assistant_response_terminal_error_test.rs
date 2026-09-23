@@ -337,3 +337,125 @@ async fn explicitly_free_usage_is_displayed_as_zero_cost() {
     assert!(crate::cli::render_cost_line(&summary).contains("cost $0.0000"));
     server.await.unwrap();
 }
+
+// -----------------------------------------------------------------------
+// Provider context-window overflow is recoverable, not terminal
+// -----------------------------------------------------------------------
+
+#[test]
+fn context_overflow_http_status_is_not_terminal() {
+    // A 400 whose body is a provider "maximum context length" rejection must
+    // reach the compression recovery, not the terminal-4xx fast fail.
+    let err: anyhow::Error = crate::errors::ApiError::HttpStatus {
+        status: 400,
+        message: r#"{"error":{"code":"context_length_exceeded","message":"This model's maximum context length is 8192 tokens."}}"#.to_string(),
+    }
+    .into();
+    assert!(!is_terminal_api_client_error(&err));
+    let typed: anyhow::Error =
+        crate::errors::ApiError::ContextOverflow("prompt too long".into()).into();
+    assert!(!is_terminal_api_client_error(&typed));
+    // A genuine bad request stays terminal.
+    let genuine: anyhow::Error = crate::errors::ApiError::HttpStatus {
+        status: 400,
+        message: r#"{"error":"Invalid value for 'temperature'"}"#.to_string(),
+    }
+    .into();
+    assert!(is_terminal_api_client_error(&genuine));
+}
+
+/// A streamed request rejected as too long must surface as the typed
+/// ContextOverflow (for the loop's compression recovery) and must NOT be
+/// re-sent over the non-streaming endpoint — the payload is identical.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn streaming_context_overflow_is_typed_and_not_refallen_back() {
+    let server = MockLlmServer::builder()
+        .with_default_response(MockResponse::Error {
+            status: 400,
+            body: r#"{"object":"error","message":"This model's maximum context length is 4096 tokens. However, you requested 4035 tokens (3035 in the messages, 1000 in the completion). Please reduce the length of the messages or completion.","type":"BadRequestError","code":400}"#.to_string(),
+        })
+        .build()
+        .await;
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), true);
+    config.retry = crate::config::RetrySettings {
+        max_retries: 0,
+        base_delay_ms: 1,
+        max_delay_ms: 1,
+    };
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.messages.push(Message::user("Hello"));
+
+    let err = agent
+        .get_assistant_step_response(false)
+        .await
+        .err()
+        .expect("provider overflow must propagate as an error");
+    assert!(
+        err.chain().any(|c| matches!(
+            c.downcast_ref::<crate::errors::ApiError>(),
+            Some(crate::errors::ApiError::ContextOverflow(_))
+        )),
+        "expected typed ContextOverflow, got: {err:#}"
+    );
+    assert!(!is_terminal_api_client_error(&err));
+    assert!(!super::super::task_runner::is_fatal_loop_error(&err));
+    let requests = server.captured_request_bodies().await;
+    assert_eq!(
+        requests.len(),
+        1,
+        "an overflow must not be re-sent non-streaming, got {} requests",
+        requests.len()
+    );
+    server.stop().await;
+}
+
+// -----------------------------------------------------------------------
+// Streamed long empty / reasoning-only call outcome
+// -----------------------------------------------------------------------
+
+#[test]
+fn streamed_long_reasoning_only_call_is_typed_reasoning_only() {
+    let out =
+        streamed_long_empty_call_outcome(90_000, 60_000, "", Some("  thinking about it  "), false);
+    match out {
+        Some(crate::errors::ApiError::ReasoningOnlyLongCall {
+            elapsed_ms,
+            reasoning_chars,
+        }) => {
+            assert_eq!(elapsed_ms, 90_000);
+            assert_eq!(reasoning_chars, "thinking about it".len());
+        }
+        other => panic!("expected ReasoningOnlyLongCall, got {other:?}"),
+    }
+    // Inline <think> content with an empty answer is reasoning too.
+    assert!(matches!(
+        streamed_long_empty_call_outcome(90_000, 60_000, "<think>hmm</think>", None, false),
+        Some(crate::errors::ApiError::ReasoningOnlyLongCall { .. })
+    ));
+}
+
+#[test]
+fn streamed_long_truly_empty_call_is_zero_content() {
+    assert!(matches!(
+        streamed_long_empty_call_outcome(61_000, 60_000, "  ", None, false),
+        Some(crate::errors::ApiError::ZeroContentLongCall { elapsed_ms: 61_000 })
+    ));
+    assert!(matches!(
+        streamed_long_empty_call_outcome(61_000, 60_000, "", Some("   "), false),
+        Some(crate::errors::ApiError::ZeroContentLongCall { .. })
+    ));
+}
+
+#[test]
+fn streamed_long_call_outcome_stands_down_when_not_applicable() {
+    // Short call: pass through as an ordinary empty turn.
+    assert!(streamed_long_empty_call_outcome(59_999, 60_000, "", Some("r"), false).is_none());
+    // A tool call is a deliverable.
+    assert!(streamed_long_empty_call_outcome(90_000, 60_000, "", Some("r"), true).is_none());
+    // Answer text is a deliverable.
+    assert!(streamed_long_empty_call_outcome(90_000, 60_000, "done", None, false).is_none());
+}

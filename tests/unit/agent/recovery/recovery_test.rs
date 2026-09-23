@@ -269,3 +269,33 @@ fn test_looks_like_malformed_tool_xml() {
     let empty_name = "<tool>\n<name></name>\n<arguments>{}</arguments>\n</tool>";
     assert!(looks_like_malformed_tool_xml(empty_name));
 }
+
+#[test]
+fn empty_response_loop_message_distinguishes_reasoning_only_from_empty() {
+    let empty = empty_response_loop_message(2, 0);
+    assert!(empty.starts_with("EMPTY_RESPONSE_LOOP: 2 consecutive empty assistant responses"));
+    assert!(
+        empty.contains("no content, no reasoning and no tool calls"),
+        "{empty}"
+    );
+
+    let reasoning = empty_response_loop_message(2, 812);
+    assert!(reasoning.starts_with("EMPTY_RESPONSE_LOOP: 2 consecutive empty assistant responses"));
+    assert!(reasoning.contains("reasoning-only"), "{reasoning}");
+    assert!(reasoning.contains("812 reasoning chars"), "{reasoning}");
+    assert!(
+        !reasoning.contains("no reasoning"),
+        "must not claim no reasoning when reasoning arrived: {reasoning}"
+    );
+}
+
+#[test]
+fn empty_response_nudge_matches_what_the_response_was() {
+    assert!(empty_response_nudge(10).contains("(reasoning only)"));
+    let empty = empty_response_nudge(0);
+    assert!(!empty.contains("reasoning only"), "{empty}");
+    assert!(
+        empty.contains("no content, no reasoning, no tool calls"),
+        "{empty}"
+    );
+}

@@ -325,11 +325,18 @@ impl Agent {
         // Stays `None` only if all branches return early via `?`.
         #[allow(unused_assignments)]
         let mut chat_metadata: Option<crate::api::types::ChatMetadata> = None;
+        // Whole-call wall time of a SUCCESSFUL streamed call (send → stream
+        // end). `ChatMetadata::elapsed_ms` on the streamed path is only
+        // time-to-headers, so the zero-content long-call check needs its own
+        // clock. `None` for the non-streaming path, whose client already
+        // types a long empty call as `ZeroContentLongCall`.
+        let mut streamed_call_elapsed_ms: Option<u64> = None;
         // `force_non_streaming` latches after a streamed turn came back empty: the
         // streaming path is the one that produced nothing, so the retry uses the
         // path that did not rather than repeating the failing request.
         let (content, reasoning) = if self.config.agent.streaming && !self.force_non_streaming {
             let mut local_meta = crate::api::types::ChatMetadata::default();
+            let stream_call_started = std::time::Instant::now();
             match self
                 .chat_streaming(
                     request_messages.clone(),
@@ -341,6 +348,8 @@ impl Agent {
             {
                 Ok((content, reasoning, stream_tool_calls)) => {
                     chat_metadata = Some(local_meta);
+                    streamed_call_elapsed_ms =
+                        Some(stream_call_started.elapsed().as_millis() as u64);
                     if self.effective_native_fc() {
                         let has_native = stream_tool_calls
                             .as_ref()
@@ -382,7 +391,7 @@ impl Agent {
                     // fall back or retry — so the loop saves one checkpoint and
                     // exits cleanly without claiming completion.
                     if self.is_cancelled() {
-                        return Err(crate::errors::AgentError::Cancelled.into());
+                        return Err(crate::errors::AgentError::for_current_shutdown().into());
                     }
 
                     // Detect "Assistant response prefill incompatible" 400s for
@@ -401,9 +410,18 @@ impl Agent {
                     // the remediation hint under a fallback error. Only fall
                     // back for transport/streaming-level failures where a
                     // non-streaming retry could plausibly succeed.
-                    if is_terminal_api_client_error(&stream_err) {
+                    // A context-window overflow is equally identical over the
+                    // non-streaming endpoint (same payload); surface it to the
+                    // loop's compression recovery instead of re-sending it.
+                    let context_overflow = crate::errors::is_context_overflow_error(&stream_err);
+                    if is_terminal_api_client_error(&stream_err) || context_overflow {
                         warn!(
-                            "Streaming request failed with terminal client error ({}); not falling back to non-streaming",
+                            "Streaming request failed with {} ({}); not falling back to non-streaming",
+                            if context_overflow {
+                                "context-window overflow"
+                            } else {
+                                "terminal client error"
+                            },
                             stream_err
                         );
                         self.log_turn_end_event(
@@ -439,7 +457,9 @@ impl Agent {
                         Ok((response, meta)) => (response, meta),
                         Err(e) => {
                             if self.is_cancelled() {
-                                return Err(crate::errors::AgentError::Cancelled.into());
+                                return Err(
+                                    crate::errors::AgentError::for_current_shutdown().into()
+                                );
                             }
                             self.log_turn_end_event(
                                 "assistant_step",
@@ -509,7 +529,7 @@ impl Agent {
                 Ok((response, meta)) => (response, meta),
                 Err(e) => {
                     if self.is_cancelled() {
-                        return Err(crate::errors::AgentError::Cancelled.into());
+                        return Err(crate::errors::AgentError::for_current_shutdown().into());
                     }
                     if e.to_string()
                         .to_lowercase()
@@ -636,6 +656,28 @@ impl Agent {
                         r.len()
                     );
                 }
+            }
+        }
+
+        // Streamed mirror of the non-streaming client's zero-content
+        // long-call outcome: a streamed call that COMPLETED after a long wait
+        // but delivered no answer and no tool call must fail typed with the
+        // elapsed time named, not pass through as an empty turn. The
+        // reasoning-bearing shape gets its own variant so the report never
+        // says "no reasoning" when the model did think.
+        if let Some(elapsed_ms) = streamed_call_elapsed_ms {
+            let has_tool_calls = native_tool_calls.as_ref().is_some_and(|c| !c.is_empty())
+                || text_fallback_tool_calls
+                    .as_ref()
+                    .is_some_and(|c| !c.is_empty());
+            if let Some(err) = streamed_long_empty_call_outcome(
+                elapsed_ms,
+                self.client.zero_content_long_call_threshold_ms(),
+                &content,
+                reasoning.as_deref(),
+                has_tool_calls,
+            ) {
+                return Err(err.into());
             }
         }
 
@@ -803,6 +845,12 @@ impl Agent {
 /// duplicates a call that can never succeed and delays the remediation hint
 /// the client attached. 5xx / 429 / network errors remain retryable.
 ///
+/// NOT terminal: a provider context-window rejection (a 400/413/422 whose
+/// body names the context length — see
+/// [`crate::errors::is_provider_context_overflow`]). The client types those
+/// as `ApiError::ContextOverflow`; this exclusion covers any raw
+/// `HttpStatus` that slipped past, so the loop can compress and retry.
+///
 /// Also terminal: [`WallClockBudgetExceeded`](crate::api::client::WallClockBudgetExceeded).
 /// The run-level wall budget is already exhausted, so a planning-level retry
 /// would only burn backoff sleeps (the client blocks the actual billable
@@ -828,9 +876,52 @@ pub(super) fn is_terminal_api_client_error(e: &anyhow::Error) -> bool {
         }
         matches!(
             cause.downcast_ref::<crate::errors::ApiError>(),
-            Some(crate::errors::ApiError::HttpStatus { status, .. })
-                if (400..500).contains(status) && *status != 429
+            Some(crate::errors::ApiError::HttpStatus { status, message })
+                if (400..500).contains(status)
+                    && *status != 429
+                    && !crate::errors::is_provider_context_overflow(*status, message)
         )
+    })
+}
+
+/// Typed outcome for a streamed call that completed after at least
+/// `threshold_ms` without an answer or a tool call. Pure so both shapes are
+/// unit-testable without a live stream.
+///
+/// - no content, no reasoning → [`ApiError::ZeroContentLongCall`]
+/// - reasoning only (field or inline `<think>` block) →
+///   [`ApiError::ReasoningOnlyLongCall`]
+///
+/// `None` below the threshold, when any tool call arrived, or when the
+/// content carries deliverable text.
+///
+/// [`ApiError::ZeroContentLongCall`]: crate::errors::ApiError::ZeroContentLongCall
+/// [`ApiError::ReasoningOnlyLongCall`]: crate::errors::ApiError::ReasoningOnlyLongCall
+pub(super) fn streamed_long_empty_call_outcome(
+    elapsed_ms: u64,
+    threshold_ms: u64,
+    content: &str,
+    reasoning: Option<&str>,
+    has_tool_calls: bool,
+) -> Option<crate::errors::ApiError> {
+    if elapsed_ms < threshold_ms || has_tool_calls {
+        return None;
+    }
+    if !super::recovery::strip_think_blocks(content)
+        .trim()
+        .is_empty()
+    {
+        return None;
+    }
+    // Inline <think> text in an otherwise-empty content counts as reasoning.
+    let reasoning_chars = reasoning.map(|r| r.trim().len()).unwrap_or(0) + content.trim().len();
+    Some(if reasoning_chars == 0 {
+        crate::errors::ApiError::ZeroContentLongCall { elapsed_ms }
+    } else {
+        crate::errors::ApiError::ReasoningOnlyLongCall {
+            elapsed_ms,
+            reasoning_chars,
+        }
     })
 }
 

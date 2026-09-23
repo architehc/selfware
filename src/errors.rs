@@ -182,6 +182,20 @@ pub enum ApiError {
     )]
     ZeroContentLongCall { elapsed_ms: u64 },
 
+    /// A (streamed) call COMPLETED after a long wall-clock time and produced
+    /// ONLY a reasoning trace: no answer content, no tool calls, and a
+    /// `finish_reason` other than `length` (that shape is
+    /// `ReasoningBudgetExhausted`). The reasoning-bearing sibling of
+    /// `ZeroContentLongCall`, named separately so the report never claims
+    /// "no reasoning" when the model did think — it just never answered.
+    #[error(
+        "LLM call returned reasoning only after {elapsed_ms}ms ({reasoning_chars} reasoning chars, empty answer, no tool calls) — the provider burned the wait without producing a deliverable"
+    )]
+    ReasoningOnlyLongCall {
+        elapsed_ms: u64,
+        reasoning_chars: usize,
+    },
+
     #[error("Invalid token usage from API: {0}")]
     InvalidUsage(String),
 }
@@ -396,6 +410,102 @@ pub enum SessionError {
 }
 
 pub type Result<T> = std::result::Result<T, SelfwareError>;
+
+impl AgentError {
+    /// The typed cancellation error for a given shutdown cause.
+    ///
+    /// SIGTERM (including `timeout(1)` killing the process) is `Terminated`
+    /// (exit 143), the internal run timeout is `CancelledWithReason("timeout")`,
+    /// and only a genuine user interrupt — or a cancel token tripped with no
+    /// process-wide shutdown latched (e.g. a supervisor cancel) — is the bare
+    /// `Cancelled` ("Task cancelled by user"). Every site that aborts because
+    /// of the shutdown latch must go through this so a signal-killed run is
+    /// never misreported as a user cancellation.
+    pub fn from_shutdown_reason(reason: Option<crate::ShutdownReason>) -> Self {
+        match reason {
+            Some(crate::ShutdownReason::SignalTerminate) => {
+                AgentError::Terminated("SIGTERM".to_string())
+            }
+            Some(crate::ShutdownReason::Timeout) => {
+                AgentError::CancelledWithReason("timeout".to_string())
+            }
+            Some(crate::ShutdownReason::UserInterrupt) | None => AgentError::Cancelled,
+        }
+    }
+
+    /// [`from_shutdown_reason`](Self::from_shutdown_reason) for the
+    /// process-wide shutdown latch as it stands right now.
+    pub fn for_current_shutdown() -> Self {
+        Self::from_shutdown_reason(crate::shutdown_reason())
+    }
+}
+
+/// Provider error-body markers for "the prompt does not fit the model's
+/// context window". Lower-case substrings; the body is lower-cased first.
+///
+/// - OpenAI / DeepSeek / OpenRouter / vLLM / Mistral: `context_length_exceeded`,
+///   "This model's maximum context length is N tokens",
+///   "Please reduce the length of the messages", "exceeds the context window"
+/// - SGLang: "... is longer than the model's context length (N tokens)"
+/// - llama.cpp: `exceed_context_size_error`, "the request exceeds the
+///   available context size"
+/// - Ollama: "input length exceeds maximum context length"
+/// - Anthropic-style: "prompt is too long: N tokens > M maximum",
+///   `request_too_large`
+/// - TGI: "`inputs` tokens + `max_new_tokens` must be <= N"
+/// - Gemini-style: "input token count (N) exceeds the maximum number of tokens"
+const CONTEXT_OVERFLOW_BODY_MARKERS: &[&str] = &[
+    "context_length_exceeded",
+    "maximum context length",
+    "max context length",
+    "model's context length",
+    "exceeds the context window",
+    "exceeds the model's context window",
+    "context window exceeded",
+    "exceed_context_size_error",
+    "exceeds the available context size",
+    "reduce the length of the messages",
+    "prompt is too long",
+    "prompt too long",
+    "request_too_large",
+    "`inputs` tokens + `max_new_tokens`",
+    "input token count",
+];
+
+/// True when an HTTP error response from a provider says the request did not
+/// fit the model's context window — a condition context COMPRESSION can fix,
+/// unlike a genuine bad request (invalid model, malformed payload, auth).
+///
+/// Only client-error statuses qualify: 400 / 413 / 422 with a recognised
+/// body marker, or a bare 413 (Payload Too Large — for a chat-completions
+/// request the only oversized part is the prompt). 401/403/404/429 are never
+/// context overflow regardless of body text.
+pub fn is_provider_context_overflow(status: u16, body: &str) -> bool {
+    match status {
+        413 => true,
+        400 | 422 => {
+            let lower = body.to_lowercase();
+            CONTEXT_OVERFLOW_BODY_MARKERS
+                .iter()
+                .any(|marker| lower.contains(marker))
+        }
+        _ => false,
+    }
+}
+
+/// True when the error chain carries a context-window overflow: the typed
+/// [`ApiError::ContextOverflow`] (client pre-flight or classified provider
+/// response), or an un-reclassified `HttpStatus` whose body names one.
+pub fn is_context_overflow_error(e: &anyhow::Error) -> bool {
+    e.chain()
+        .any(|cause| match cause.downcast_ref::<ApiError>() {
+            Some(ApiError::ContextOverflow(_)) => true,
+            Some(ApiError::HttpStatus { status, message }) => {
+                is_provider_context_overflow(*status, message)
+            }
+            _ => false,
+        })
+}
 
 /// Check if an anyhow error is a confirmation-required error (fatal in non-interactive mode)
 pub fn is_confirmation_error(e: &anyhow::Error) -> bool {

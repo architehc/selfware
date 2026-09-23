@@ -312,12 +312,18 @@ impl Agent {
                 if self.consecutive_empty_responses
                     >= super::recovery::MAX_CONSECUTIVE_EMPTY_RESPONSES
                 {
+                    let reasoning_chars = assistant_msg
+                        .reasoning_content
+                        .as_deref()
+                        .map(|r| r.trim().len())
+                        .unwrap_or(0)
+                        + content.text().trim().len();
                     bail!(
-                        "EMPTY_RESPONSE_LOOP: {} consecutive empty assistant responses — the \
-                         provider returned no content, no reasoning and no tool calls each time. \
-                         The retry already went out non-streaming, so this is not a streaming \
-                         artifact: check the endpoint's parser / chat-template configuration.",
-                        self.consecutive_empty_responses
+                        "{}",
+                        super::recovery::empty_response_loop_message(
+                            self.consecutive_empty_responses,
+                            reasoning_chars,
+                        )
                     );
                 }
                 if self.config.agent.streaming && !self.force_non_streaming {

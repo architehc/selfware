@@ -22,6 +22,50 @@ pub(super) const MAX_TOTAL_NO_ACTION_PROMPTS: usize = 500;
 /// breaker aborts the run. Shared by the execution and planning paths so the
 /// two sides of the recovery story cannot drift apart.
 pub(super) const MAX_CONSECUTIVE_EMPTY_RESPONSES: usize = 2;
+
+/// Terminal `EMPTY_RESPONSE_LOOP` message, shared by the execution and
+/// planning paths. Names what the LAST response actually carried: a
+/// reasoning-only response (the model thought but never answered or called a
+/// tool) is a different diagnosis from a truly empty one (nothing at all —
+/// usually a parser / chat-template problem), and claiming "no reasoning"
+/// when reasoning arrived sends the operator after the wrong fault.
+pub(super) fn empty_response_loop_message(count: usize, last_reasoning_chars: usize) -> String {
+    let shape = if last_reasoning_chars > 0 {
+        format!(
+            "the provider returned no deliverable content and no tool calls each time \
+             (last response was reasoning-only: {last_reasoning_chars} reasoning chars, \
+             no answer). The model is thinking without answering: check reasoning \
+             effort / max_tokens and the endpoint's reasoning parser."
+        )
+    } else {
+        "the provider returned no content, no reasoning and no tool calls each time. \
+         Check the endpoint's parser / chat-template configuration."
+            .to_string()
+    };
+    format!(
+        "EMPTY_RESPONSE_LOOP: {count} consecutive empty assistant responses — {shape} \
+         The retry already went out non-streaming, so this is not a streaming artifact."
+    )
+}
+
+/// The nudge injected after an empty execution response — worded for what the
+/// response actually was, so the model is not told it produced "reasoning only"
+/// when it produced nothing.
+pub(super) fn empty_response_nudge(reasoning_chars: usize) -> &'static str {
+    if reasoning_chars > 0 {
+        "<selfware_system_directive>\n\
+         Your last response produced no deliverable content or tool calls (reasoning only). \
+         Provide your actual final answer now (a concise summary of the completed work) \
+         or call a tool.\n\
+         </selfware_system_directive>"
+    } else {
+        "<selfware_system_directive>\n\
+         Your last response was empty (no content, no reasoning, no tool calls). \
+         Provide your actual final answer now (a concise summary of the completed work) \
+         or call a tool.\n\
+         </selfware_system_directive>"
+    }
+}
 pub(super) const FILE_DISCOVERY_TOOLS: &str = "directory_tree, glob_find, or grep_search";
 
 /// Result of the intent-without-action check.

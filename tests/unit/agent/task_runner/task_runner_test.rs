@@ -3825,3 +3825,144 @@ async fn test_maybe_inject_commit_mode_uses_cumulative_budget_elapsed_secs() {
     );
     server.stop().await;
 }
+
+// -----------------------------------------------------------------------
+// Provider context-window overflow: recoverable, bounded
+// -----------------------------------------------------------------------
+
+#[test]
+fn context_overflow_is_not_a_fatal_loop_error_but_genuine_400_is() {
+    let overflow: anyhow::Error =
+        crate::errors::ApiError::ContextOverflow("provider rejected".into()).into();
+    assert!(!is_fatal_loop_error(&overflow));
+    let raw_overflow: anyhow::Error = crate::errors::ApiError::HttpStatus {
+        status: 413,
+        message: String::new(),
+    }
+    .into();
+    assert!(!is_fatal_loop_error(&raw_overflow));
+    for status in [400u16, 401, 403, 404] {
+        let genuine: anyhow::Error = crate::errors::ApiError::HttpStatus {
+            status,
+            message: r#"{"error":"The model `nope` does not exist"}"#.to_string(),
+        }
+        .into();
+        assert!(
+            is_fatal_loop_error(&genuine),
+            "genuine {status} must stay fatal"
+        );
+    }
+}
+
+#[test]
+fn recovery_error_text_keeps_overflow_marker_through_context() {
+    // anyhow's Display shows only the outer context — the ErrorRecovery
+    // router must still see the overflow.
+    let err = anyhow::Error::from(crate::errors::ApiError::ContextOverflow(
+        "prompt is too long".into(),
+    ))
+    .context("Streaming failed: x. Non-streaming fallback request also failed");
+    let text = recovery_error_text(&err);
+    assert!(is_context_overflow_text(&text), "{text}");
+    assert!(text.contains("prompt is too long"), "{text}");
+
+    let raw = anyhow::Error::from(crate::errors::ApiError::HttpStatus {
+        status: 400,
+        message: "prompt is too long: 210000 tokens > 200000 maximum".into(),
+    })
+    .context("planning failed");
+    assert!(is_context_overflow_text(&recovery_error_text(&raw)));
+
+    // Non-overflow errors keep their ordinary text.
+    let other = anyhow::anyhow!("boom").context("outer");
+    assert_eq!(recovery_error_text(&other), "outer");
+    assert!(!is_context_overflow_text("outer"));
+}
+
+#[test]
+fn context_overflow_recovery_bound_is_tighter_than_generic() {
+    // The compress-and-retry loop must terminate well before the generic
+    // 12-pass error-recovery backstop.
+    const { assert!(MAX_CONSECUTIVE_CONTEXT_OVERFLOW_RECOVERIES >= 1) };
+    const { assert!(MAX_CONSECUTIVE_CONTEXT_OVERFLOW_RECOVERIES < 12) };
+}
+
+/// A provider that keeps rejecting the prompt as too long must be retried
+/// (after compression) instead of killing the run on the first 400, and the
+/// retries must be bounded.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn run_task_provider_context_overflow_is_retried_with_compression_and_bounded() {
+    let server = MockLlmServer::builder()
+        .with_default_response(MockResponse::Error {
+            status: 400,
+            body: r#"{"error":{"message":"This model's maximum context length is 4096 tokens. However, your messages resulted in 9000 tokens.","type":"invalid_request_error","code":"context_length_exceeded"}}"#.to_string(),
+        })
+        .build()
+        .await;
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.retry = crate::config::RetrySettings {
+        max_retries: 0,
+        base_delay_ms: 1,
+        max_delay_ms: 1,
+    };
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let err = agent
+        .run_task("Summarize the repo")
+        .await
+        .expect_err("a prompt the provider never accepts must stop the run");
+    assert!(
+        crate::errors::is_context_overflow_error(&err),
+        "the stop must be the typed overflow, got: {err:#}"
+    );
+    let requests = server.captured_request_bodies().await.len();
+    assert!(
+        requests > 1,
+        "an overflow must be retried after compression, not treated as a fatal 400 (got {requests} request)"
+    );
+    assert!(
+        requests <= 16,
+        "overflow recovery must be bounded, got {requests} requests"
+    );
+    server.stop().await;
+}
+
+/// Positive control: a genuine 400 (bad model) stays fatal — one request.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn run_task_genuine_400_stays_fatal() {
+    let server = MockLlmServer::builder()
+        .with_default_response(MockResponse::Error {
+            status: 400,
+            body: r#"{"error":{"message":"The model `nope` does not exist","code":"model_not_found"}}"#
+                .to_string(),
+        })
+        .build()
+        .await;
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.retry = crate::config::RetrySettings {
+        max_retries: 0,
+        base_delay_ms: 1,
+        max_delay_ms: 1,
+    };
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let err = agent
+        .run_task("Summarize the repo")
+        .await
+        .expect_err("a genuine 400 must stop the run");
+    assert!(!crate::errors::is_context_overflow_error(&err), "{err:#}");
+    assert_eq!(
+        server.captured_request_bodies().await.len(),
+        1,
+        "a genuine 400 is terminal: no retries"
+    );
+    server.stop().await;
+}

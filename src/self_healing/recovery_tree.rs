@@ -101,6 +101,16 @@ pub enum FailureKind {
 pub fn classify(error_message: &str) -> FailureKind {
     let msg = error_message.to_lowercase();
 
+    // Typed context overflow (`ApiError::ContextOverflow` display, which the
+    // client also uses for provider "prompt exceeds the context window"
+    // rejections). Checked FIRST: provider bodies carry token counts and
+    // words that the markers below would misroute — "4035 tokens" contains
+    // "403" (AuthError → credential reload instead of compression), and
+    // "including N in the tools" contains "tool" (ToolTimeout).
+    if msg.trim_start().starts_with("context overflow") {
+        return FailureKind::ContextOverflow;
+    }
+
     // Hook errors are tool/process failures, never LLM endpoint reachability issues
     if msg.contains("hook") {
         if msg.contains("timeout") || msg.contains("timed out") {

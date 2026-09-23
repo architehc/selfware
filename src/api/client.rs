@@ -718,7 +718,7 @@ impl ApiClient {
     /// unreachable exactly when configured. 60 s matches the observed failure
     /// regime (5–7 minute zero-content calls) while staying far above any
     /// healthy fast response.
-    fn zero_content_long_call_threshold_ms(&self) -> u64 {
+    pub(crate) fn zero_content_long_call_threshold_ms(&self) -> u64 {
         #[cfg(test)]
         if let Some(ms) = self.zero_content_threshold_override_ms {
             return ms;
@@ -1316,7 +1316,13 @@ impl ApiClient {
                                     .with_attempt(attempt_usage, prior_receipts)
                                     .with_call_started(attempt_started)
                                     .with_call_cap(call_cap_secs)
-                                    .with_wall_limit(self.config.agent.max_wall_secs),
+                                    .with_run_deadline(
+                                        deadline,
+                                        // Same `.max(1)` clamp run_wall_deadline
+                                        // applies, so the reported limit matches
+                                        // the deadline it came from.
+                                        self.config.agent.max_wall_secs.map(|s| s.max(1)),
+                                    ),
                                     body,
                                 ));
                             }
@@ -1391,7 +1397,11 @@ impl ApiClient {
     }
 
     pub(crate) fn is_tool_schema_400(status: reqwest::StatusCode, body: &str) -> bool {
+        // A context-window rejection often mentions tools/functions in its
+        // token breakdown ("... including 200 in the functions"); it is not a
+        // tool-schema rejection and must not latch XML mode for the session.
         status == reqwest::StatusCode::BAD_REQUEST
+            && !crate::errors::is_provider_context_overflow(status.as_u16(), body)
             && ["tool", "function", "schema", "tool_call"]
                 .iter()
                 .any(|marker| body.to_lowercase().contains(marker))
@@ -1546,6 +1556,21 @@ impl ApiClient {
             Some(key) if key.expose().trim().len() >= 8 => body.replace(key.expose(), "[REDACTED]"),
             _ => body,
         };
+        // A provider-side "prompt exceeds the context window" rejection
+        // (OpenAI-compatible `context_length_exceeded`, SGLang/vLLM/llama.cpp/
+        // Ollama/OpenRouter/Anthropic-style bodies, or a 413) is NOT a
+        // terminal bad request: the agent can compress its history and retry.
+        // Type it as ContextOverflow — the same variant the client's own
+        // pre-flight budget check raises — so it reaches the compression
+        // recovery instead of the terminal-4xx fast-fail.
+        if crate::errors::is_provider_context_overflow(status.as_u16(), &body) {
+            return ApiError::ContextOverflow(format!(
+                "provider rejected the request as exceeding the model context window (HTTP {}): {}",
+                status.as_u16(),
+                body.trim()
+            ))
+            .into();
+        }
         let message = if status == reqwest::StatusCode::UNAUTHORIZED {
             format!(
                 "{}\nHint: authentication failed against '{}'. Set SELFWARE_API_KEY{} in your \

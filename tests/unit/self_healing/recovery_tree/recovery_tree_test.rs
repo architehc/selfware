@@ -679,3 +679,14 @@ fn test_credential_reload_resolves_when_key_present() {
         other => panic!("expected Resolved(ReloadCredentials), got {:?}", other),
     }
 }
+
+#[test]
+fn classify_typed_context_overflow_beats_token_counts_and_tool_words() {
+    // "4035 tokens" contains "403" and the body mentions tools: before the
+    // typed-prefix check this misrouted to AuthError (credential reload
+    // instead of compression).
+    let msg = "Context overflow: provider rejected the request as exceeding the model \
+               context window (HTTP 400): This model's maximum context length is 4096 \
+               tokens. However, you requested 4035 tokens (including 200 in the tools).";
+    assert_eq!(classify(msg), FailureKind::ContextOverflow);
+}

@@ -247,6 +247,43 @@ pub(super) fn is_fatal_loop_error(error: &anyhow::Error) -> bool {
         || msg.contains("EMPTY_RESPONSE_LOOP")
 }
 
+/// Consecutive context-overflow recoveries (compress + retry) allowed before
+/// the run fails with a typed reason. Compression that cannot bring the
+/// request under the provider's window will not succeed on a fourth try, and
+/// each retry is a billable request the provider rejects.
+pub(super) const MAX_CONSECUTIVE_CONTEXT_OVERFLOW_RECOVERIES: u32 = 3;
+
+/// The error text carried into `AgentState::ErrorRecovery`.
+///
+/// `ErrorRecovery` routes on this string, but `anyhow`'s `Display` shows only
+/// the OUTERMOST context layer — a context-window overflow wrapped by
+/// `.with_context(..)` (e.g. the streaming→non-streaming fallback) would lose
+/// its `Context overflow:` marker and miss the compression recovery. For an
+/// overflow anywhere in the chain, lead with the typed cause's text.
+pub(super) fn recovery_error_text(error: &anyhow::Error) -> String {
+    if crate::errors::is_context_overflow_error(error) {
+        for cause in error.chain() {
+            match cause.downcast_ref::<crate::errors::ApiError>() {
+                Some(overflow @ crate::errors::ApiError::ContextOverflow(_)) => {
+                    return overflow.to_string();
+                }
+                Some(crate::errors::ApiError::HttpStatus { .. }) => {
+                    return format!("Context overflow: {cause}");
+                }
+                _ => {}
+            }
+        }
+    }
+    error.to_string()
+}
+
+/// True when an `ErrorRecovery` error string is a context-window overflow
+/// (the typed `ApiError::ContextOverflow` display, or the client's
+/// pre-flight `CONTEXT OVERFLOW` log wording).
+pub(super) fn is_context_overflow_text(error: &str) -> bool {
+    error.contains("CONTEXT OVERFLOW") || error.contains("Context overflow")
+}
+
 /// Human-facing end-of-run summary (headless text mode). Every field comes
 /// from tracked run state — no invented numbers (AGENTS.md rule 3): token
 /// and cost totals are the API-usage accumulators, files changed is the
@@ -1283,6 +1320,10 @@ impl Agent {
         // burning the entire max_iterations budget.
         let mut consecutive_error_recoveries = 0u32;
         const MAX_CONSECUTIVE_ERROR_RECOVERIES: u32 = 12;
+        // Tighter bound for context-overflow compress-and-retry: see
+        // MAX_CONSECUTIVE_CONTEXT_OVERFLOW_RECOVERIES. Reset with the generic
+        // counter on every successful continuation.
+        let mut consecutive_context_overflow_recoveries = 0u32;
 
         // Bounded guard: track consecutive planning turns that make no progress
         // (no tool calls / no state transition). Planning does not consume the
@@ -1365,23 +1406,19 @@ impl Agent {
             self.enforce_hard_budgets(task_description).await?;
 
             if self.is_cancelled() {
-                let reason = crate::shutdown_reason();
-                let (user_msg, outcome_msg, err) = match reason {
-                    Some(crate::ShutdownReason::SignalTerminate) => (
-                        "[Task terminated by SIGTERM]",
-                        "Task terminated by SIGTERM",
-                        crate::errors::AgentError::Terminated("SIGTERM".to_string()),
-                    ),
-                    Some(crate::ShutdownReason::Timeout) => (
-                        "[Task cancelled by timeout]",
-                        "Task cancelled by timeout",
-                        crate::errors::AgentError::CancelledWithReason("timeout".to_string()),
-                    ),
-                    _ => (
-                        "[Task interrupted by user]",
-                        "Task interrupted by user",
-                        crate::errors::AgentError::Cancelled,
-                    ),
+                // One shared mapping (AgentError::for_current_shutdown) for
+                // every shutdown-latch exit, so the loop-top check and the
+                // mid-call aborts (assistant_response, run_supervisor) can
+                // never disagree on Terminated vs Cancelled.
+                let err = crate::errors::AgentError::for_current_shutdown();
+                let (user_msg, outcome_msg) = match &err {
+                    crate::errors::AgentError::Terminated(_) => {
+                        ("[Task terminated by SIGTERM]", "Task terminated by SIGTERM")
+                    }
+                    crate::errors::AgentError::CancelledWithReason(_) => {
+                        ("[Task cancelled by timeout]", "Task cancelled by timeout")
+                    }
+                    _ => ("[Task interrupted by user]", "Task interrupted by user"),
                 };
                 cli_println!(
                     "{}",
@@ -1454,6 +1491,21 @@ impl Agent {
                                             Some(&e.to_string()),
                                         );
                                         return Err(e);
+                                    }
+                                    // A context-window overflow will fail
+                                    // identically on retry unless the history
+                                    // shrinks first — compress before the
+                                    // (bounded) planning retry. No backoff: the
+                                    // provider is healthy, the payload changed.
+                                    if crate::errors::is_context_overflow_error(&e) {
+                                        warn!(
+                                            "Planning hit a context-window overflow (attempt {}/{}) — hard-compressing before retry",
+                                            planning_attempt, MAX_PLANNING_RETRIES
+                                        );
+                                        self.messages =
+                                            self.compressor.hard_compress(&self.messages);
+                                        self.trim_message_history();
+                                        continue;
                                     }
                                     let backoff = std::time::Duration::from_secs(
                                         2u64.saturating_pow(planning_attempt).min(30),
@@ -1567,6 +1619,7 @@ impl Agent {
                                 self.reset_self_healing_retry();
                             }
                             consecutive_error_recoveries = 0;
+                            consecutive_context_overflow_recoveries = 0;
                             self.rigor_mode = false;
                             self.rigor_directive_injected = false;
                         }
@@ -1618,7 +1671,7 @@ impl Agent {
                                 checkpoint.log_error(0, e.to_string(), true);
                             }
                             self.set_loop_state(AgentState::ErrorRecovery {
-                                error: e.to_string(),
+                                error: recovery_error_text(&e),
                             })?;
                         }
                     }
@@ -1799,6 +1852,7 @@ impl Agent {
                                 self.reset_self_healing_retry();
                             }
                             consecutive_error_recoveries = 0;
+                            consecutive_context_overflow_recoveries = 0;
                             self.rigor_mode = false;
                             self.rigor_directive_injected = false;
                             // A billable step just ran; a crossed cap must stop the run rather than
@@ -1892,7 +1946,7 @@ impl Agent {
                                 checkpoint.log_error(step, e.to_string(), true);
                             }
                             self.set_loop_state(AgentState::ErrorRecovery {
-                                error: e.to_string(),
+                                error: recovery_error_text(&e),
                             })?;
                         }
                     }
@@ -1930,6 +1984,34 @@ impl Agent {
                             ),
                         })?;
                         continue;
+                    }
+
+                    // Bounded context-overflow recovery: each pass compresses
+                    // and re-sends. If the provider still rejects the request
+                    // after MAX passes, compression cannot fit it — fail with
+                    // a typed reason rather than spend the generic 12-pass
+                    // budget on requests the provider will keep rejecting.
+                    if is_context_overflow_text(&error) {
+                        consecutive_context_overflow_recoveries += 1;
+                        if consecutive_context_overflow_recoveries
+                            > MAX_CONSECUTIVE_CONTEXT_OVERFLOW_RECOVERIES
+                        {
+                            warn!(
+                                "Context overflow persisted after {} compress-and-retry passes — failing task",
+                                MAX_CONSECUTIVE_CONTEXT_OVERFLOW_RECOVERIES
+                            );
+                            record_state_transition("ErrorRecovery", "Failed");
+                            if let Some(ref mut checkpoint) = self.current_checkpoint {
+                                checkpoint.log_error(0, error.to_string(), false);
+                            }
+                            self.set_loop_state(AgentState::Failed {
+                                reason: format!(
+                                    "Context overflow recovery exhausted after {} compress-and-retry passes: {}",
+                                    MAX_CONSECUTIVE_CONTEXT_OVERFLOW_RECOVERIES, error
+                                ),
+                            })?;
+                            continue;
+                        }
                     }
 
                     // --- Recovery tree (INCREMENT 2) ---
@@ -2019,7 +2101,7 @@ impl Agent {
                     // Context overflow: the message history is too large.
                     // Hard-compress before retrying — adding more messages would
                     // only make things worse.
-                    if error.contains("CONTEXT OVERFLOW") || error.contains("Context overflow") {
+                    if is_context_overflow_text(&error) {
                         warn!("Context overflow detected — hard-compressing before retry");
                         self.messages = self.compressor.hard_compress(&self.messages);
                         self.trim_message_history();
