@@ -99,6 +99,20 @@ impl Agent {
             debug!("{name} could not be executed; no check ran, so nothing is recorded");
             return;
         }
+        // A test runner that executed ZERO tests (`cargo test typo_filter`
+        // exits 0 with `running 0 tests`; pytest exit 5 `no tests ran`) ran
+        // no check either. Crediting it verified a mutation on nothing;
+        // recording it as a failure would park a check that never executed
+        // under its own identity, as with 127 above. Record nothing — the
+        // gate stays StaleVerification until a real check runs, and compile
+        // checks (`cargo check`) keep their own credit path for test-free
+        // projects.
+        let args_value =
+            serde_json::from_str::<serde_json::Value>(args_str).unwrap_or(serde_json::Value::Null);
+        if verification_call_ran_no_tests(name, &args_value, result_str) {
+            debug!("{name} executed no tests; no check ran, so nothing is recorded");
+            return;
+        }
         let command = serde_json::from_str::<serde_json::Value>(args_str)
             .ok()
             .and_then(|v| {
@@ -1965,7 +1979,10 @@ impl Agent {
                     .await;
                     let elapsed = start.elapsed().as_millis() as u64;
                     match execution {
-                        Ok(Ok(result)) => {
+                        Ok(Ok(mut result)) => {
+                            // A test run that executed zero tests is not a
+                            // green check (same rule as the single path).
+                            annotate_zero_test_verification(&tool_name, &tool_args, &mut result);
                             let tool_success = tool_result_value_indicates_success(&result);
                             let result_str =
                                 serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
@@ -3286,8 +3303,10 @@ impl Agent {
             // git_status/git_diff/grep results don't contain the edited path
             // in their key anyway. Clear all read caches so the agent never
             // sees pre-edit output and concludes its edit vanished.
-            let is_clippy_fix = name == "cargo_clippy"
-                && args.get("fix").and_then(|v| v.as_bool()).unwrap_or(false);
+            // Opaque mutations (cargo_fmt, cargo_clippy{fix}, package
+            // installs, npm_run scripts) name no written path at all: a
+            // `path` arg there is a working directory, not an edited file.
+            let is_opaque_mutation = tool_call_is_opaque_mutation(name, args);
             if matches!(
                 name,
                 "shell_exec"
@@ -3299,7 +3318,7 @@ impl Agent {
                     | "file_multi_edit"
                     | "patch_apply"
                     | "cargo_fmt"
-            ) || is_clippy_fix
+            ) || is_opaque_mutation
             {
                 self.cache_manager.tool_cache.clear().await;
             }
@@ -3425,8 +3444,10 @@ impl Agent {
         }
 
         match execution {
-            Ok(Ok(result)) => {
+            Ok(Ok(mut result)) => {
                 let elapsed = start_time.elapsed().as_millis() as u64;
+                // A test run that executed zero tests is not a green check.
+                annotate_zero_test_verification(name, args, &mut result);
                 let result_str = serde_json::to_string(&result)?;
                 let tool_success = tool_result_value_indicates_success(&result);
                 let summary = crate::output::semantic_summary(

@@ -602,4 +602,85 @@ mod agent_lifecycle {
             "and must carry the revision it concerned, or staleness cannot be judged"
         );
     }
+
+    /// A mistyped test filter exits 0 having executed nothing. It must neither
+    /// credit the edit as verified nor park a failure under a check that never
+    /// ran; the gate stays StaleVerification until a real run passes.
+    #[tokio::test]
+    async fn a_test_run_that_executed_zero_tests_earns_no_credit() {
+        let (mut agent, _dir) = agent().await;
+        dispatch(
+            &mut agent,
+            "file_write",
+            json!({ "path": "calculator.py", "content": "def add(a, b): return a + b\n" }),
+            true,
+        );
+
+        let args = json!({ "command": "cargo test typo_filter" });
+        agent.note_tool_call_lifecycle(
+            "shell_exec",
+            &args,
+            &args.to_string(),
+            true,
+            r#"{"exit_code":0,"stdout":"running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out","stderr":""}"#,
+        );
+        assert_eq!(
+            agent.last_successful_verification_mutation_sequence, 0,
+            "0 tests executed is not a passing verification"
+        );
+        assert!(
+            agent.verification_failures.is_empty(),
+            "nor is it a failing one — no check ran: {:?}",
+            agent.verification_failures.outstanding()
+        );
+        let refusal = verification_refusal(&mut agent).await;
+        assert!(
+            !refusal
+                .as_deref()
+                .is_some_and(|r| r.contains("FailingTestsAccepted")),
+            "a run that executed nothing must not park a failing check: {refusal:?}"
+        );
+
+        // The same through the structured cargo_test tool.
+        let args = json!({ "test_name": "typo_filter" });
+        agent.note_tool_call_lifecycle(
+            "cargo_test",
+            &args,
+            &args.to_string(),
+            false,
+            r#"{"success":false,"no_tests_ran":true,"summary":{"passed":0,"failed":0,"ignored":0,"total":0},"stdout":"","stderr":""}"#,
+        );
+        assert!(agent.verification_failures.is_empty());
+        assert_eq!(agent.last_successful_verification_mutation_sequence, 0);
+
+        // A run that really executed tests releases the gate.
+        let args = json!({ "command": "cargo test" });
+        agent.note_tool_call_lifecycle(
+            "shell_exec",
+            &args,
+            &args.to_string(),
+            true,
+            r#"{"exit_code":0,"stdout":"test result: ok. 3 passed; 0 failed; 0 ignored","stderr":""}"#,
+        );
+        assert_eq!(agent.last_successful_verification_mutation_sequence, 1);
+        let refusal = verification_refusal(&mut agent).await;
+        assert!(refusal.is_none(), "a real pass verifies: {refusal:?}");
+    }
+
+    /// `cargo clippy --fix` rewrites source. It must advance the mutation
+    /// sequence like `cargo_fmt`, so an earlier green run no longer covers
+    /// the tree it changed.
+    #[tokio::test]
+    async fn clippy_fix_advances_the_sequence_and_plain_clippy_does_not() {
+        let (mut agent, _dir) = agent().await;
+        dispatch(&mut agent, "cargo_clippy", json!({}), true);
+        assert_eq!(agent.mutation_sequence, 0, "a lint run edits nothing");
+        dispatch(&mut agent, "cargo_clippy", json!({ "fix": true }), true);
+        assert_eq!(
+            agent.mutation_sequence, 1,
+            "clippy --fix rewrote source; the sequence must move"
+        );
+        dispatch(&mut agent, "npm_install", json!({}), true);
+        assert_eq!(agent.mutation_sequence, 2, "an install rewrites lockfiles");
+    }
 }

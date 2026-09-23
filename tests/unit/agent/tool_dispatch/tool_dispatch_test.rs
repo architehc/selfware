@@ -5977,3 +5977,242 @@ async fn every_writing_tool_marks_its_paths_for_the_run_summary() {
         "a failed write must not count as a change"
     );
 }
+
+// ---- Zero-test runs earn no verification credit (AGENTS.md rule 3) ----
+
+#[test]
+fn zero_test_runner_output_is_recognised_across_runners() {
+    for output in [
+        // cargo test with a filter that matched nothing, every binary empty.
+        "running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored",
+        // ignored-only libtest run
+        "test result: ok. 0 passed; 0 failed; 3 ignored",
+        // pytest (exit 5)
+        "collected 0 items\n\n============ no tests ran in 0.01s ============",
+        // pytest -k typo
+        "collected 12 items / 12 deselected\n\n==== 12 deselected in 0.02s ====",
+        // unittest
+        "\n----------------------------------------------------------------------\nRan 0 tests in 0.000s\n\nOK",
+        "Ran 0 tests in 0.000s\n\nNO TESTS RAN",
+        // go test
+        "?   \texample.com/m\t[no test files]",
+        "ok  \texample.com/m\t0.002s [no tests to run]",
+        "testing: warning: no tests to run\nPASS\nok  \texample.com/m\t0.002s [no tests to run]",
+        // jest / vitest
+        "No tests found, exiting with code 1\nRun with `--passWithNoTests` to exit with code 0",
+        "No test files found, exiting with code 1",
+        // mocha
+        "\n  0 passing (1ms)\n",
+        // node --test TAP
+        "# tests 0\n# suites 0\n# pass 0\n# fail 0",
+    ] {
+        assert!(
+            runner_output_proves_no_tests_ran(output),
+            "zero-test output not recognised: {output:?}"
+        );
+        assert!(
+            !runner_output_proves_success(output),
+            "zero-test output must not earn success credit: {output:?}"
+        );
+    }
+}
+
+#[test]
+fn runs_that_executed_tests_are_not_zero_test_runs() {
+    for output in [
+        // A real suite beside an empty doc-test binary: the sum is what counts.
+        "test result: ok. 4 passed; 0 failed; 0 ignored\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored",
+        "===== 3 passed in 0.04s =====",
+        "Ran 2 tests in 0.001s\n\nOK",
+        "?   \texample.com/m/cmd\t[no test files]\nok  \texample.com/m\t0.004s",
+        "  5 passing (8ms)",
+        "# tests 2\n# pass 2\n# fail 0",
+    ] {
+        assert!(
+            !runner_output_proves_no_tests_ran(output),
+            "executed-test output misread as zero tests: {output:?}"
+        );
+        assert!(
+            runner_output_proves_success(output),
+            "a genuine pass must keep its credit: {output:?}"
+        );
+    }
+    // A failure is a failure, never "no tests ran".
+    assert!(!runner_output_proves_no_tests_ran(
+        "test result: FAILED. 0 passed; 1 failed"
+    ));
+    assert!(!runner_output_proves_no_tests_ran(
+        "error[E0425]: cannot find value `x`\nerror: could not compile `c`"
+    ));
+    // Unrelated output is not a zero-test verdict.
+    assert!(!runner_output_proves_no_tests_ran("Finished dev profile"));
+    assert!(!runner_output_proves_no_tests_ran(""));
+}
+
+#[test]
+fn libtest_summary_alone_is_not_success_credit() {
+    // `test result: ok` and `0 failed` are printed by a binary that ran
+    // nothing, so neither is a success marker without an executed test.
+    assert!(!runner_output_proves_success(
+        "test result: ok. 0 passed; 0 failed; 0 ignored"
+    ));
+    assert!(!runner_output_proves_success("0 failed"));
+    assert!(runner_output_proves_success(
+        "test result: ok. 1 passed; 0 failed"
+    ));
+}
+
+#[test]
+fn a_structured_cargo_test_result_with_no_tests_ran_is_recognised() {
+    let result = r#"{"success":false,"no_tests_ran":true,"summary":{"passed":0,"failed":0,"ignored":0,"total":0},"stdout":"","stderr":""}"#;
+    assert!(runner_output_proves_no_tests_ran(result));
+    assert!(verification_call_ran_no_tests(
+        "cargo_test",
+        &serde_json::json!({"test_name": "typo"}),
+        result
+    ));
+}
+
+#[test]
+fn only_test_executing_calls_are_zero_test_runs() {
+    let zero = r#"{"exit_code":0,"stdout":"running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored","stderr":""}"#;
+    assert!(verification_call_ran_no_tests(
+        "shell_exec",
+        &serde_json::json!({"command": "cargo test typo_filter"}),
+        zero
+    ));
+    // A compile check legitimately runs no tests and keeps its credit.
+    assert!(!verification_call_ran_no_tests(
+        "shell_exec",
+        &serde_json::json!({"command": "cargo check"}),
+        zero
+    ));
+    assert!(!verification_call_ran_no_tests(
+        "cargo_check",
+        &serde_json::json!({}),
+        zero
+    ));
+}
+
+#[test]
+fn a_shell_test_run_that_executed_nothing_is_annotated_as_not_successful() {
+    let args = serde_json::json!({"command": "cargo test typo_filter"});
+    let mut result = serde_json::json!({
+        "exit_code": 0,
+        "stdout": "running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out",
+        "stderr": ""
+    });
+    assert!(annotate_zero_test_verification(
+        "shell_exec",
+        &args,
+        &mut result
+    ));
+    assert_eq!(result["success"], false);
+    assert_eq!(result["no_tests_ran"], true);
+    assert!(result["message"]
+        .as_str()
+        .is_some_and(|m| m.contains("No tests ran")));
+    assert!(!tool_result_value_indicates_success(&result));
+
+    // A real pass is untouched.
+    let mut passing = serde_json::json!({
+        "exit_code": 0,
+        "stdout": "test result: ok. 3 passed; 0 failed; 0 ignored",
+        "stderr": ""
+    });
+    assert!(!annotate_zero_test_verification(
+        "shell_exec",
+        &args,
+        &mut passing
+    ));
+    assert!(passing.get("success").is_none());
+    assert!(tool_result_value_indicates_success(&passing));
+
+    // A cargo_test result keeps the tool's own (more specific) message.
+    let mut cargo = serde_json::json!({
+        "success": false,
+        "no_tests_ran": true,
+        "message": "No tests ran: the filter `typo` matched no test",
+        "stdout": "", "stderr": ""
+    });
+    assert!(annotate_zero_test_verification(
+        "cargo_test",
+        &serde_json::json!({"test_name": "typo"}),
+        &mut cargo
+    ));
+    assert_eq!(
+        cargo["message"],
+        "No tests ran: the filter `typo` matched no test"
+    );
+}
+
+// ---- Autofix modes are mutations ----
+
+#[test]
+fn cargo_clippy_fix_is_a_mutation_and_plain_clippy_is_not() {
+    let fix = serde_json::json!({"fix": true});
+    assert!(tool_call_is_mutating("cargo_clippy", &fix));
+    assert!(tool_call_is_opaque_mutation("cargo_clippy", &fix));
+    assert!(!tool_call_is_observational(
+        "cargo_clippy",
+        r#"{"fix": true}"#
+    ));
+    assert!(tool_call_counts_as_state_change(
+        "cargo_clippy",
+        r#"{"fix": true}"#
+    ));
+    // It still counts as a verification run.
+    assert!(tool_call_is_verification(
+        "cargo_clippy",
+        r#"{"fix": true}"#
+    ));
+
+    for args in [serde_json::json!({}), serde_json::json!({"fix": false})] {
+        assert!(!tool_call_is_mutating("cargo_clippy", &args));
+        assert!(!tool_call_is_opaque_mutation("cargo_clippy", &args));
+    }
+    assert!(tool_call_is_observational("cargo_clippy", "{}"));
+    assert!(!tool_call_counts_as_state_change("cargo_clippy", "{}"));
+}
+
+#[test]
+fn package_tools_are_opaque_mutations() {
+    for tool in ["npm_install", "yarn_install", "pip_install"] {
+        let args = serde_json::json!({"packages": ["x"]});
+        assert!(tool_call_is_mutating(tool, &args), "{tool}");
+        assert!(tool_call_is_opaque_mutation(tool, &args), "{tool}");
+    }
+    let build = serde_json::json!({"script": "lint:fix"});
+    assert!(tool_call_is_mutating("npm_run", &build));
+    assert!(tool_call_is_opaque_mutation("npm_run", &build));
+    // Parity with shell `npm test`, which is read-only.
+    let test = serde_json::json!({"script": "test"});
+    assert!(!tool_call_is_mutating("npm_run", &test));
+    // Nothing file-writing is claimed: the paths are unknown.
+    assert!(
+        written_paths_for_tool_call("cargo_clippy", &serde_json::json!({"fix": true})).is_empty()
+    );
+}
+
+#[test]
+fn shell_autofix_flags_are_not_observational() {
+    for command in [
+        "cargo clippy --fix --allow-dirty",
+        "cargo clippy --all-targets --fix",
+        "npx eslint --fix src",
+        "ruff check --fix .",
+        "ruff check --fix-only .",
+        "npx prettier --write .",
+    ] {
+        assert!(!shell_command_is_observational(command), "{command}");
+        assert!(
+            tool_call_is_mutating("shell_exec", &serde_json::json!({ "command": command })),
+            "{command}"
+        );
+    }
+    // Word-exact: similar-looking read-only flags stay read-only.
+    assert!(shell_command_is_observational(
+        "grep --fixed-strings foo src"
+    ));
+    assert!(shell_command_is_observational("cargo clippy --all-targets"));
+}

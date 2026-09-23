@@ -80,7 +80,16 @@ pub enum TestStatus {
 /// Structured output from cargo test
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CargoTestOutput {
+    /// True only when the run EXECUTED at least one test and none failed. A
+    /// run that executed zero tests (a mistyped filter, an ignored-only
+    /// suite) is not a passing verification, whatever cargo's exit status.
     pub success: bool,
+    /// The run exited cleanly but executed no tests — see [`Self::message`].
+    #[serde(default)]
+    pub no_tests_ran: bool,
+    /// Human-readable explanation when the outcome needs one (zero tests).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
     pub summary: TestSummary,
     pub tests: Vec<TestResult>,
     pub failures: Vec<FailureDetail>,
@@ -262,8 +271,18 @@ impl Tool for CargoTest {
             .filter(|t| t.status == TestStatus::Ignored)
             .count();
 
+        let (success, no_tests_ran, message) = test_run_verdict(
+            output.success(),
+            passed,
+            failed,
+            &stdout,
+            args.get("test_name").and_then(|v| v.as_str()),
+        );
+
         let result = CargoTestOutput {
-            success: output.success() && failed == 0,
+            success,
+            no_tests_ran,
+            message,
             summary: TestSummary {
                 passed,
                 failed,
@@ -575,6 +594,61 @@ impl Tool for CargoFmt {
 }
 
 /// Parse test output into structured results
+/// The honest verdict of a `cargo test` run: `(success, no_tests_ran,
+/// message)`.
+///
+/// A clean exit that executed nothing (`cargo test typo_filter` matches no
+/// test and still exits 0) proves nothing about the code; reporting it as
+/// success let the dispatcher mark a mutation verified. Such a run is
+/// `success: false` with `no_tests_ran: true` and a message saying why.
+pub(crate) fn test_run_verdict(
+    exit_ok: bool,
+    passed: usize,
+    failed: usize,
+    stdout: &str,
+    filter: Option<&str>,
+) -> (bool, bool, Option<String>) {
+    let no_tests_ran = exit_ok && passed + failed == 0 && libtest_summary_executed(stdout) == 0;
+    let message = no_tests_ran.then(|| match filter {
+        Some(filter) => format!(
+            "No tests ran: the filter `{filter}` matched no test (cargo exited 0 with 0 tests \
+             executed). This is not a passing verification — check the test name, or run \
+             cargo_test without a filter."
+        ),
+        None => "No tests ran: cargo exited 0 but executed 0 tests. This is not a passing \
+                 verification; if the project has no tests, cargo_check provides compile \
+                 evidence."
+            .to_string(),
+    });
+    (
+        exit_ok && failed == 0 && !no_tests_ran,
+        no_tests_ran,
+        message,
+    )
+}
+
+/// Tests EXECUTED according to libtest's `test result:` summary lines
+/// (`passed + failed`, summed across every test binary). A backstop for
+/// output whose per-test `test x ... ok` lines were not captured, so a run
+/// that really executed tests is never reported as having run none.
+fn libtest_summary_executed(output: &str) -> usize {
+    output
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("test result:"))
+        .map(|rest| {
+            let mut executed = 0usize;
+            let words: Vec<&str> = rest.split_whitespace().collect();
+            for pair in words.windows(2) {
+                let word = pair[1].trim_end_matches([';', ',', '.']);
+                if word == "passed" || word == "failed" {
+                    executed += pair[0].parse::<usize>().unwrap_or(0);
+                }
+            }
+            executed
+        })
+        .sum()
+}
+
 fn parse_test_output(stdout: &str, stderr: &str) -> (Vec<TestResult>, Vec<FailureDetail>) {
     let mut tests = Vec::new();
     let mut failures = Vec::new();

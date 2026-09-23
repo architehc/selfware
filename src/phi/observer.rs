@@ -50,7 +50,23 @@ pub const COMPILE_ONLY_TOOLS: &[&str] = &["cargo_check"];
 /// `cargo_fmt` reformats the workspace. It genuinely mutates, and the observer
 /// genuinely cannot say what it touched — so it is recorded as an opaque
 /// mutation rather than left out. Silence would report the tree as unchanged.
-pub const OPAQUE_MUTATION_TOOLS: &[&str] = &["cargo_fmt"];
+/// The package tools rewrite lockfiles, manifests and dependency trees
+/// (`npm_run` runs arbitrary package scripts such as `lint --fix`), and
+/// `cargo_clippy` with `fix: true` rewrites source.
+///
+/// Whether a given call may have mutated is decided per call by the
+/// dispatcher's `tool_call_is_opaque_mutation` — the single rule the
+/// mutation sequence and the tool cache also use — so `cargo_fmt{check}`,
+/// a plain `cargo_clippy` lint run and `npm_run{script:"test"}` are recorded
+/// as opaque runs that did NOT mutate.
+pub const OPAQUE_MUTATION_TOOLS: &[&str] = &[
+    "cargo_fmt",
+    "cargo_clippy",
+    "npm_install",
+    "yarn_install",
+    "pip_install",
+    "npm_run",
+];
 
 /// Tools that run arbitrary commands, which may or may not be verification and
 /// may or may not mutate. Their command text decides, via the authoritative
@@ -348,6 +364,20 @@ pub fn classify(call: &ToolCallRecord<'_>) -> Vec<ObservedEvent> {
             // shell_command_is_verification and run no tests; reusing that
             // boolean recreated, through shell dispatch, the exact bug that
             // removing cargo_check from TEST_EXECUTION_TOOLS had just fixed.
+            // A test runner that executed ZERO tests (mistyped filter, no
+            // test files) exits 0 but tested nothing: recorded as an opaque
+            // run so it discharges no obligation.
+            Some(VerificationKind::TestExecution)
+                if call.output.is_some_and(
+                    crate::agent::tool_dispatch::helpers::runner_output_proves_no_tests_ran,
+                ) =>
+            {
+                return vec![ObservedEvent::OpaqueRun {
+                    command: command.to_string(),
+                    outcome,
+                    may_have_mutated,
+                }];
+            }
             Some(VerificationKind::TestExecution) => {
                 let mut events = vec![ObservedEvent::RunFinished {
                     command: command.to_string(),
@@ -393,6 +423,20 @@ pub fn classify(call: &ToolCallRecord<'_>) -> Vec<ObservedEvent> {
         }
     }
 
+    if TEST_EXECUTION_TOOLS.contains(&call.tool)
+        && call
+            .output
+            .is_some_and(crate::agent::tool_dispatch::helpers::runner_output_proves_no_tests_ran)
+    {
+        // `cargo_test` that executed zero tests: nothing ran, nothing is
+        // discharged, and it is not a red suite either.
+        return vec![ObservedEvent::OpaqueRun {
+            command: call.tool.to_string(),
+            outcome,
+            may_have_mutated: false,
+        }];
+    }
+
     if TEST_EXECUTION_TOOLS.contains(&call.tool) {
         // Recorded whatever the outcome: a failed run is evidence the work is
         // not done, and losing it makes a red session look merely quiet.
@@ -408,7 +452,10 @@ pub fn classify(call: &ToolCallRecord<'_>) -> Vec<ObservedEvent> {
         return vec![ObservedEvent::OpaqueRun {
             command: call.tool.to_string(),
             outcome,
-            may_have_mutated: true,
+            may_have_mutated: crate::agent::tool_dispatch::helpers::tool_call_is_opaque_mutation(
+                call.tool,
+                call.arguments,
+            ),
         }];
     }
 

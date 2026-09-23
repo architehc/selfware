@@ -215,3 +215,68 @@ fn test_text_tool_call_not_cached_via_parse() {
         "plain text should not be detected as a tool call"
     );
 }
+
+// ---- Recursive search results do not survive an edit beneath their root ----
+
+#[tokio::test]
+async fn an_edit_invalidates_a_recursive_search_rooted_above_it() {
+    let manager = CacheManager::default();
+    let cache = &manager.tool_cache;
+    let grep = serde_json::json!({"pattern": "fn answer", "path": "."});
+    let glob = serde_json::json!({"pattern": "**/*.rs", "path": "src"});
+    let symbols = serde_json::json!({"query": "answer"});
+    let tree = serde_json::json!({"path": "."});
+    let other_file = serde_json::json!({"path": "README.md"});
+    cache
+        .set("grep_search", &grep, serde_json::json!(["old hit"]))
+        .await;
+    cache
+        .set("glob_find", &glob, serde_json::json!(["src/lib.rs"]))
+        .await;
+    cache
+        .set("symbol_search", &symbols, serde_json::json!(["old"]))
+        .await;
+    cache
+        .set("directory_tree", &tree, serde_json::json!(["src/"]))
+        .await;
+    cache
+        .set("file_read", &other_file, serde_json::json!("readme"))
+        .await;
+    assert!(cache.get("grep_search", &grep).await.is_some());
+
+    // The dispatcher's path for `file_edit {path: "src/x.rs"}`.
+    manager.invalidate_path_and_git("src/x.rs").await;
+
+    assert!(
+        cache.get("grep_search", &grep).await.is_none(),
+        "a grep rooted at `.` covers src/x.rs and must re-run after the edit"
+    );
+    assert!(cache.get("glob_find", &glob).await.is_none());
+    assert!(cache.get("symbol_search", &symbols).await.is_none());
+    assert!(
+        cache.get("directory_tree", &tree).await.is_none(),
+        "a new file changes the listing"
+    );
+    // An unrelated single-file read is not a tree-scoped result; its own
+    // mtime check covers it.
+    assert!(cache.get("file_read", &other_file).await.is_some());
+}
+
+#[tokio::test]
+async fn invalidate_path_also_drops_tree_scoped_entries() {
+    let cache = ToolCache::new();
+    let grep = serde_json::json!({"pattern": "x", "path": "/abs/project"});
+    cache
+        .set("grep_search", &grep, serde_json::json!(["hit"]))
+        .await;
+    cache.invalidate_path("/abs/project/src/deep/file.rs").await;
+    assert!(cache.get("grep_search", &grep).await.is_none());
+}
+
+#[test]
+fn package_tools_invalidate_the_cache() {
+    for tool in ["npm_install", "yarn_install", "pip_install", "npm_run"] {
+        assert!(invalidates_cache(tool), "{tool}");
+    }
+    assert!(invalidates_cache("cargo_clippy"));
+}

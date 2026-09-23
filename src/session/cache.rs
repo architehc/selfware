@@ -131,18 +131,30 @@ impl ToolCache {
         }
     }
 
-    /// Invalidate entries related to a specific file path
+    /// Invalidate entries related to a specific file path.
+    ///
+    /// Also drops every cached search/listing result: a `grep_search` or
+    /// `glob_find` rooted at `.` (or any ancestor directory) covers the edited
+    /// file without its path appearing in the cache key, and the mtime
+    /// backstop in [`Self::get`] only checks the root directory, whose mtime
+    /// an in-place edit does not change.
     #[allow(dead_code)]
     pub async fn invalidate_path(&self, path: &str) {
         let mut entries = self.entries.write().await;
-        entries.retain(|key, _| !key.contains(path));
+        entries.retain(|key, _| !key.contains(path) && !is_tree_scoped_key(key));
     }
 
-    /// Invalidate entries related to a specific file path as well as git status/diff caches
+    /// Invalidate entries related to a specific file path as well as the
+    /// git status/diff caches and every search/listing result (see
+    /// [`Self::invalidate_path`] for why a single path cannot be matched
+    /// against a recursive search's key).
     pub async fn invalidate_git_and_path(&self, path: &str) {
         let mut entries = self.entries.write().await;
         entries.retain(|key, _| {
-            !key.contains(path) && !key.starts_with("git_status") && !key.starts_with("git_diff")
+            !key.contains(path)
+                && !key.starts_with("git_status")
+                && !key.starts_with("git_diff")
+                && !is_tree_scoped_key(key)
         });
     }
 
@@ -183,6 +195,27 @@ pub struct CacheStats {
     pub default_ttl_secs: u64,
 }
 
+/// Tools whose result is computed over a directory TREE (recursive search,
+/// globbing, symbol/code queries, listings) rather than one named file. Any
+/// file mutation beneath their root can change their answer while their
+/// cache key names only the root, so every file mutation invalidates them.
+/// Correctness over hit rate: all of them are dropped, not just those whose
+/// root is an ancestor of the edited path — relative and absolute spellings
+/// of one root cannot be compared reliably from the key alone.
+pub const TREE_SCOPED_TOOLS: &[&str] = &[
+    "grep_search",
+    "glob_find",
+    "symbol_search",
+    "code_query",
+    "directory_tree",
+];
+
+/// Does this cache key belong to a [`TREE_SCOPED_TOOLS`] entry?
+fn is_tree_scoped_key(key: &str) -> bool {
+    key.split_once(':')
+        .is_some_and(|(tool, _)| TREE_SCOPED_TOOLS.contains(&tool))
+}
+
 /// Check if a tool is cacheable (read-only operations)
 pub fn is_cacheable(tool_name: &str) -> bool {
     matches!(
@@ -220,6 +253,13 @@ pub fn invalidates_cache(tool_name: &str) -> bool {
             | "patch_apply"
             | "write_file"
             | "edit_file"
+            // Opaque workspace mutations: lockfiles, manifests, generated
+            // files and arbitrary package scripts. They name no written
+            // path, so the dispatcher clears the whole tool cache for them.
+            | "npm_install"
+            | "yarn_install"
+            | "pip_install"
+            | "npm_run"
     )
 }
 

@@ -910,6 +910,18 @@ pub(crate) fn shell_command_is_observational(command: &str) -> bool {
         return false;
     }
 
+    // Autofix / write-in-place flags turn a read-only checker into a writer:
+    // `cargo clippy --fix` matched the `cargo clippy` read-only prefix below
+    // and never advanced the mutation sequence (same for `eslint --fix`,
+    // `ruff check --fix`, `prettier --write`). Word-exact so
+    // `grep --fixed-strings` stays read-only.
+    if words.iter().any(|word| {
+        matches!(*word, "--fix" | "--fix-only" | "--write" | "--in-place")
+            || word.starts_with("--fix=")
+    }) {
+        return false;
+    }
+
     if words.first().copied() == Some("wmctrl") {
         let has_mutating = words[1..].iter().any(|word| {
             word.starts_with("-r")
@@ -1124,9 +1136,38 @@ pub(crate) fn tool_call_writes_file(name: &str) -> bool {
     )
 }
 
+/// `cargo_clippy` with `fix: true` runs `cargo clippy --fix`, which rewrites
+/// source files it does not name.
+pub(crate) fn cargo_clippy_applies_fixes(name: &str, args: &serde_json::Value) -> bool {
+    name == "cargo_clippy" && args.get("fix").and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// Registered tools that rewrite workspace files WITHOUT naming them:
+/// `cargo_fmt` (unless `check`), `cargo_clippy` with `fix`, and the package
+/// tools, which rewrite lockfiles/manifests and dependency trees
+/// (`npm_install`, `yarn_install`, `pip_install`) or run arbitrary
+/// package.json scripts (`npm_run` — `lint --fix`, `format`, `build`; the
+/// `test` script is treated as read-only, like shell `npm test`).
+/// Their written paths are unknown, so every consumer must treat them as
+/// "anything may have changed" (full cache invalidation, no path list).
+pub(crate) fn tool_call_is_opaque_mutation(name: &str, args: &serde_json::Value) -> bool {
+    match name {
+        "cargo_fmt" => !args.get("check").and_then(Value::as_bool).unwrap_or(false),
+        "cargo_clippy" => cargo_clippy_applies_fixes(name, args),
+        "npm_install" | "yarn_install" | "pip_install" => true,
+        // Parity with the shell classifier, where `npm test` is read-only
+        // and `npm run <anything else>` is not.
+        "npm_run" => args.get("script").and_then(Value::as_str) != Some("test"),
+        _ => false,
+    }
+}
+
 pub(crate) fn tool_call_is_mutating(name: &str, args: &serde_json::Value) -> bool {
-    if name == "cargo_fmt" {
-        return !args.get("check").and_then(Value::as_bool).unwrap_or(false);
+    if matches!(
+        name,
+        "cargo_fmt" | "cargo_clippy" | "npm_install" | "yarn_install" | "pip_install" | "npm_run"
+    ) {
+        return tool_call_is_opaque_mutation(name, args);
     }
     if matches!(
         name,
@@ -1781,9 +1822,9 @@ pub(crate) fn runner_output_proves_failure(output: &str) -> bool {
 /// [`shell_command_is_masked_verification`]). Fail-closed (AGENTS.md rule 3):
 /// only these success markers count —
 ///
-/// - `test result: ok`       (libtest / cargo test summary line),
-/// - `0 failed`              (zero-failure tallies in libtest summaries),
-/// - `N passed`, N > 0       (pytest / jest / vitest summaries),
+/// - `N passed`, N > 0       (libtest / pytest / jest / vitest summaries;
+///   `test result: ok` and `0 failed` alone are not credit — a libtest
+///   binary that ran nothing prints both),
 /// - `N passing`, N > 0      (mocha),
 /// - `Ran N tests in …` (N > 0) PLUS a line that is exactly `OK` or starts
 ///   `OK (` (`OK (skipped=1)`) — Python unittest; `Ran` alone is not a
@@ -1797,16 +1838,21 @@ pub(crate) fn runner_output_proves_failure(output: &str) -> bool {
 /// tally, and a Python traceback — so output bearing both a success marker
 /// and a failure marker earns nothing.
 pub(crate) fn runner_output_proves_success(output: &str) -> bool {
+    // A run that executed zero tests (`test result: ok. 0 passed; 0 failed`,
+    // pytest `no tests ran`, go `[no tests to run]`, jest `No tests found`)
+    // carries success-shaped text but proves nothing (AGENTS.md rule 3).
+    if runner_output_proves_no_tests_ran(output) {
+        return false;
+    }
     let text = captured_runner_output(output);
     let lower = text.to_lowercase();
-    let mut saw_zero_failed = false;
     let mut from = 0;
     while let Some(rel) = lower[from..].find("failed") {
         let abs = from + rel;
-        match failed_count_before(&lower, abs) {
-            Some(0) => saw_zero_failed = true,
-            // A nonzero count or a bare "failed" vetoes the credit.
-            _ => return false,
+        // A nonzero count or a bare "failed" vetoes the credit; `0 failed`
+        // is neutral.
+        if failed_count_before(&lower, abs) != Some(0) {
+            return false;
         }
         from = abs + 1;
     }
@@ -1827,18 +1873,150 @@ pub(crate) fn runner_output_proves_success(output: &str) -> bool {
         && lines
             .iter()
             .any(|line| *line == "OK" || line.starts_with("OK ("));
-    let go_ok = text.lines().any(is_go_test_ok_line);
+    let go_ok = text
+        .lines()
+        .any(|line| is_go_test_ok_line(line) && !go_ok_line_ran_nothing(line));
     let tap_ok = lines
         .iter()
         .any(|line| tap_count(line, "pass").is_some_and(|n| n > 0))
         && lines.iter().any(|line| tap_count(line, "fail") == Some(0));
-    lower.contains("test result: ok")
-        || saw_zero_failed
-        || positive_tally("passed")
+    // `test result: ok` and a `0 failed` tally are NOT success markers on
+    // their own: libtest prints both for a binary that ran nothing. The
+    // libtest/pytest/jest/vitest credit is the executed-test tally `N passed`
+    // (N > 0), which every passing libtest summary carries.
+    positive_tally("passed") || positive_tally("passing") || unittest_ok || go_ok || tap_ok
+}
+
+/// A go `ok  \t<pkg>\t<dur> [no tests to run]` line: the package passed
+/// because a `-run` filter matched no test in it.
+fn go_ok_line_ran_nothing(line: &str) -> bool {
+    line.contains("[no tests to run]")
+}
+
+/// Unambiguous evidence that a test runner finished WITHOUT EXECUTING ANY
+/// TEST — the classic case being a mistyped filter (`cargo test typo`
+/// exits 0 with `running 0 tests` in every binary). Such a run is neither a
+/// pass nor a failure of the code: it must earn no verification credit, and
+/// recording it as a failure would park a check that never ran (the same
+/// reasoning as the 126/127 "could not execute" skip).
+///
+/// Recognised zero-execution markers:
+/// - a structured `cargo_test` result with `no_tests_ran: true`;
+/// - libtest `test result:` summaries whose `N passed` tallies sum to zero;
+/// - pytest `no tests ran` / an `N deselected` with nothing passed;
+/// - unittest `Ran 0 tests` / `NO TESTS RAN`;
+/// - go `[no test files]` / `[no tests to run]` / `testing: warning: no
+///   tests to run` with no package that actually ran tests;
+/// - jest `No tests found`, vitest `No test files found`;
+/// - mocha `0 passing`, node TAP `# tests 0`.
+///
+/// Any failure marker or any evidence of an executed test (a positive
+/// `passed`/`passing` tally, `Ran N` with N > 0, a go `ok` line that ran
+/// tests, a positive TAP `# pass`) vetoes the verdict, so a multi-binary run
+/// where only the doc-tests were empty still counts as having run tests.
+pub(crate) fn runner_output_proves_no_tests_ran(output: &str) -> bool {
+    if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(output) {
+        if map.get("no_tests_ran").and_then(Value::as_bool) == Some(true) {
+            return true;
+        }
+    }
+    if runner_output_proves_failure(output) {
+        return false;
+    }
+    let text = captured_runner_output(output);
+    let lower = text.to_lowercase();
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    let positive_tally = |word: &str| tallies_before(&lower, word).iter().any(|&n| n > 0);
+    let zero_tally = |word: &str| tallies_before(&lower, word).contains(&0);
+
+    let executed = positive_tally("passed")
         || positive_tally("passing")
-        || unittest_ok
-        || go_ok
-        || tap_ok
+        || lines
+            .iter()
+            .any(|line| unittest_ran_count(line).is_some_and(|n| n > 0))
+        || text
+            .lines()
+            .any(|line| is_go_test_ok_line(line) && !go_ok_line_ran_nothing(line))
+        || lines
+            .iter()
+            .any(|line| tap_count(line, "pass").is_some_and(|n| n > 0));
+    if executed {
+        return false;
+    }
+
+    // libtest: a `test result:` summary that carries its tallies, every
+    // `N passed` being zero (checked above). A bare `test result: ok` with no
+    // tally is ambiguous, not proof that nothing ran.
+    (lines
+        .iter()
+        .any(|line| line.to_lowercase().starts_with("test result:"))
+        && !tallies_before(&lower, "passed").is_empty())
+        || lower.contains("no tests ran")
+        || positive_tally("deselected")
+        || lines.iter().any(|line| unittest_ran_count(line) == Some(0))
+        || lower.contains("[no test files]")
+        || lower.contains("[no tests to run]")
+        || lower.contains("no tests to run")
+        || lower.contains("no tests found")
+        || lower.contains("no test files found")
+        || zero_tally("passing")
+        || lines.iter().any(|line| tap_count(line, "tests") == Some(0))
+}
+
+/// Did this verification call run a TEST RUNNER that executed no test?
+/// Only test-executing calls qualify (`cargo_test`, a shell command whose
+/// [`VerificationKind`] is `TestExecution`): compile checks legitimately run
+/// no tests and keep their compile credit, so a project with no tests at all
+/// is still verifiable through `cargo check` & co.
+pub(crate) fn verification_call_ran_no_tests(name: &str, args: &Value, result: &str) -> bool {
+    let runs_tests = match name {
+        "cargo_test" => true,
+        "shell_exec" | "pty_shell" => {
+            args.get("command")
+                .and_then(Value::as_str)
+                .is_some_and(|command| {
+                    shell_command_verification_kind(command)
+                        == Some(VerificationKind::TestExecution)
+                })
+        }
+        _ => false,
+    };
+    runs_tests && runner_output_proves_no_tests_ran(result)
+}
+
+/// Mark a test-runner result that executed zero tests as NOT successful,
+/// with an honest message, before the dispatcher derives `tool_success`
+/// from it. A mistyped `cargo test <filter>` via shell exits 0; left alone,
+/// every checkpoint-scan consumer of the logged success flag would credit
+/// it as a green verification. Returns true when the result was annotated.
+pub(crate) fn annotate_zero_test_verification(
+    name: &str,
+    args: &Value,
+    result: &mut Value,
+) -> bool {
+    let args_str = serde_json::to_string(args).unwrap_or_default();
+    if !tool_call_is_verification(name, &args_str) {
+        return false;
+    }
+    let result_str = serde_json::to_string(&*result).unwrap_or_default();
+    if !verification_call_ran_no_tests(name, args, &result_str) {
+        return false;
+    }
+    if let Value::Object(map) = result {
+        map.insert("success".to_string(), Value::Bool(false));
+        map.insert("no_tests_ran".to_string(), Value::Bool(true));
+        map.entry("message".to_string()).or_insert_with(|| {
+            Value::String(
+                "No tests ran: the test runner exited without executing a single test \
+                 (a filter that matched nothing, or no test files). This is not a passing \
+                 verification — fix the filter/path, or use a compile check if the project \
+                 has no tests."
+                    .to_string(),
+            )
+        });
+        return true;
+    }
+    false
 }
 
 /// Why a masked verification run earned no success credit, phrased to
@@ -2466,6 +2644,10 @@ pub(crate) fn tool_call_is_verification(name: &str, args_str: &str) -> bool {
 
 pub(crate) fn tool_call_is_observational(name: &str, args_str: &str) -> bool {
     match name {
+        // `cargo clippy --fix` rewrites source; only a plain lint run observes.
+        "cargo_clippy" => !serde_json::from_str::<Value>(args_str)
+            .ok()
+            .is_some_and(|args| cargo_clippy_applies_fixes(name, &args)),
         "cargo_fmt" => serde_json::from_str::<Value>(args_str)
             .ok()
             .and_then(|args| args.get("check").and_then(Value::as_bool))
@@ -2481,7 +2663,6 @@ pub(crate) fn tool_call_is_observational(name: &str, args_str: &str) -> bool {
         | "tool_search"
         | "cargo_check"
         | "cargo_test"
-        | "cargo_clippy"
         | crate::tools::context::CONTEXT_BULK_READ
         | crate::tools::context::CONTEXT_SUMMARY
         | crate::tools::context::CONTEXT_STATUS
@@ -2511,7 +2692,10 @@ pub(crate) fn tool_call_counts_as_state_change(name: &str, args_str: &str) -> bo
                     .map(|command| !shell_command_is_observational(command))
             })
             .unwrap_or(false),
-        "cargo_check" | "cargo_test" | "cargo_clippy" => false,
+        "cargo_check" | "cargo_test" => false,
+        "cargo_clippy" => serde_json::from_str::<Value>(args_str)
+            .ok()
+            .is_some_and(|args| cargo_clippy_applies_fixes(name, &args)),
         _ => !tool_call_is_observational(name, args_str),
     }
 }

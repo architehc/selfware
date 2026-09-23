@@ -43,10 +43,12 @@ fn every_registry_tool_is_explicitly_classified_or_explicitly_inert() {
     // name vanished before the assertion. Every registry tool must now be
     // accounted for by name, with no filter in between.
     //
-    // `cargo_fmt` is the live example: it rewrites files and is not in
-    // MUTATING_TOOLS. It is listed below as a KNOWN uncovered mutation so the
-    // gap is recorded rather than implied by omission.
+    // It then swept only CRITICAL_TOOLS (the always-on subset), so deferred
+    // tools that rewrite the tree -- npm_install, yarn_install, pip_install,
+    // npm_run, cargo_clippy{fix} -- produced no event at all and nothing
+    // failed. The sweep now walks the FULL registry.
     const KNOWN_INERT: &[&str] = &[
+        // Reads, searches and analysis: nothing on disk changes.
         "file_read",
         "directory_tree",
         "grep_search",
@@ -55,30 +57,203 @@ fn every_registry_tool_is_explicitly_classified_or_explicitly_inert() {
         "git_status",
         "git_diff",
         "tool_search",
+        "code_introspect",
+        "code_map",
+        "code_metrics",
+        "code_plan",
+        "code_query",
+        "code_diff_plan",
+        "context_action",
+        "context_budget",
+        "context_pack",
+        "cycles",
+        "dups",
+        "graph_summary",
+        "hotspots",
+        "impact",
+        "neighbors",
+        "test_map",
+        "localize_issue",
+        "lsp_diagnostics",
+        "lsp_document_symbols",
+        "lsp_find_references",
+        "lsp_goto_definition",
+        "lsp_goto_implementation",
+        "lsp_hover",
+        "lsp_workspace_symbols",
+        "knowledge_query",
+        "knowledge_stats",
+        "npm_scripts",
+        "pip_list",
+        "pip_freeze",
+        "port_check",
+        "process_list",
+        "process_logs",
+        "container_images",
+        "container_list",
+        "container_logs",
+        "list_worktrees",
+        "browser_fetch",
+        "browser_links",
+        "browser_eval",
+        "vision_analyze",
+        "vision_compare",
+        "ask_user",
+        "http_request",
+    ];
+    // Side effects OUTSIDE the working tree's file content: git history and
+    // remotes, the knowledge graph, images/containers without a workspace
+    // command, the desktop and browser, screenshots/PDF artifacts, plugin
+    // registration and the agent's own workspace root. Not file mutations the
+    // ledger could attribute an obligation to.
+    const EXTERNAL_STATE: &[&str] = &[
+        "git_commit",
+        "git_checkpoint",
+        "git_push",
+        "knowledge_add",
+        "knowledge_relate",
+        "knowledge_remove",
+        "knowledge_clear",
+        "knowledge_export",
+        "knowledge_auto_extract",
+        "container_build",
+        "container_pull",
+        "container_remove",
+        "container_stop",
+        "compose_down",
+        "process_stop",
+        "computer_mouse",
+        "computer_screen",
+        "computer_window",
+        "browser_screenshot",
+        "browser_pdf",
+        "screen_capture",
+        "hot_reload",
+        "enter_worktree",
+        "exit_worktree",
     ];
     // Mutating, and knowingly not yet observed. Emptying this list is the goal;
-    // it exists so the gap cannot be forgotten.
-    // Emptied: cargo_fmt is now observed as an opaque mutation.
-    const KNOWN_UNCOVERED_MUTATIONS: &[&str] = &[];
+    // it exists so the gap cannot be forgotten. Each runs an arbitrary
+    // command or input stream that CAN reach the working tree (a bind-mounted
+    // container, a background process started in the workspace, keystrokes
+    // into an editor, a scripted browser page) without the observer being able
+    // to tell whether it did.
+    // (cargo_fmt left this list when it became an opaque mutation.)
+    const KNOWN_UNCOVERED_MUTATIONS: &[&str] = &[
+        "container_run",
+        "container_exec",
+        "compose_up",
+        "process_start",
+        "process_restart",
+        "computer_keyboard",
+        "page_control",
+    ];
 
+    let registry = crate::tools::ToolRegistry::new();
     let mut unaccounted = Vec::new();
-    for tool in crate::tools::CRITICAL_TOOLS {
-        let known = MUTATING_TOOLS.contains(tool)
-            || TEST_EXECUTION_TOOLS.contains(tool)
-            || COMPILE_ONLY_TOOLS.contains(tool)
-            || SHELL_TOOLS.contains(tool)
-            || OPAQUE_MUTATION_TOOLS.contains(tool)
-            || KNOWN_INERT.contains(tool)
-            || KNOWN_UNCOVERED_MUTATIONS.contains(tool);
+    for tool in registry.list() {
+        let tool = tool.name();
+        let known = MUTATING_TOOLS.contains(&tool)
+            || TEST_EXECUTION_TOOLS.contains(&tool)
+            || COMPILE_ONLY_TOOLS.contains(&tool)
+            || SHELL_TOOLS.contains(&tool)
+            || OPAQUE_MUTATION_TOOLS.contains(&tool)
+            || KNOWN_INERT.contains(&tool)
+            || EXTERNAL_STATE.contains(&tool)
+            || KNOWN_UNCOVERED_MUTATIONS.contains(&tool);
         if !known {
-            unaccounted.push(*tool);
+            unaccounted.push(tool.to_string());
         }
     }
+    unaccounted.sort();
     assert!(
         unaccounted.is_empty(),
         "registry tools the observer neither classifies nor declares inert: {unaccounted:?}. \
          Add each to a list above -- silence means mutations through it create no obligation."
     );
+    // The always-on subset is part of the registry; keep it covered even if a
+    // future registry build gates a critical tool behind a feature.
+    for tool in crate::tools::CRITICAL_TOOLS {
+        assert!(
+            registry.list().iter().any(|t| t.name() == *tool),
+            "critical tool {tool} is missing from the registry the sweep walks"
+        );
+    }
+}
+
+#[test]
+fn package_tools_and_clippy_fix_are_recorded_as_opaque_mutations() {
+    for (tool, args) in [
+        ("npm_install", json!({})),
+        ("yarn_install", json!({})),
+        ("pip_install", json!({"packages": ["requests"]})),
+        ("npm_run", json!({"script": "lint:fix"})),
+        ("cargo_clippy", json!({"fix": true})),
+    ] {
+        match classify(&call(tool, &args, 1)).as_slice() {
+            [ObservedEvent::OpaqueRun {
+                may_have_mutated, ..
+            }] => assert!(*may_have_mutated, "{tool} may have rewritten files"),
+            other => panic!("{tool}: expected an opaque mutation, got {other:?}"),
+        }
+    }
+    // The non-writing modes are recorded, but not as mutations.
+    for (tool, args) in [
+        ("cargo_clippy", json!({})),
+        ("cargo_clippy", json!({"fix": false})),
+        ("cargo_fmt", json!({"check": true})),
+        ("npm_run", json!({"script": "test"})),
+    ] {
+        match classify(&call(tool, &args, 1)).as_slice() {
+            [ObservedEvent::OpaqueRun {
+                may_have_mutated, ..
+            }] => assert!(!*may_have_mutated, "{tool} {args} writes nothing"),
+            other => panic!("{tool}: expected an opaque run, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_test_run_that_executed_zero_tests_discharges_nothing() {
+    // `cargo test typo_filter` exits 0 with `running 0 tests`: a RunFinished
+    // Passed would discharge obligations on a run that tested nothing.
+    let args = json!({"command": "cargo test typo_filter"});
+    let output = r#"{"exit_code":0,"stdout":"running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out","stderr":""}"#;
+    let events = classify(&shell_call("shell_exec", &args, output));
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, ObservedEvent::RunFinished { .. })),
+        "zero tests executed is not a test run: {events:?}"
+    );
+    assert!(matches!(
+        events.as_slice(),
+        [ObservedEvent::OpaqueRun { .. }]
+    ));
+
+    // The structured tool, likewise.
+    let args = json!({"test_name": "typo_filter"});
+    let output = r#"{"success":false,"no_tests_ran":true,"summary":{"passed":0,"failed":0,"ignored":0,"total":0},"stdout":"","stderr":""}"#;
+    let mut record = shell_call("cargo_test", &args, output);
+    record.succeeded = false;
+    match classify(&record).as_slice() {
+        [ObservedEvent::OpaqueRun {
+            may_have_mutated, ..
+        }] => assert!(!*may_have_mutated),
+        other => panic!("expected an opaque run, got {other:?}"),
+    }
+
+    // A real run is still a RunFinished.
+    let args = json!({"command": "cargo test"});
+    let output =
+        r#"{"exit_code":0,"stdout":"test result: ok. 2 passed; 0 failed; 0 ignored","stderr":""}"#;
+    assert!(matches!(
+        classify(&shell_call("shell_exec", &args, output)).as_slice(),
+        [ObservedEvent::RunFinished {
+            outcome: Outcome::Passed,
+            ..
+        }]
+    ));
 }
 
 #[test]

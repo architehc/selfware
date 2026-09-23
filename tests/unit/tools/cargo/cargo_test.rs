@@ -364,6 +364,8 @@ fn test_test_summary_struct() {
 fn test_cargo_test_output_struct() {
     let output = CargoTestOutput {
         success: true,
+        no_tests_ran: false,
+        message: None,
         summary: TestSummary {
             passed: 5,
             failed: 0,
@@ -678,6 +680,8 @@ fn test_test_summary_totals() {
 fn test_cargo_test_output_with_failures() {
     let output = CargoTestOutput {
         success: false,
+        no_tests_ran: false,
+        message: None,
         summary: TestSummary {
             passed: 5,
             failed: 2,
@@ -767,4 +771,110 @@ fn test_cargo_clippy_output_with_lints() {
     assert!(output.success);
     assert_eq!(output.warning_count, 1);
     assert_eq!(output.fixable, 1);
+}
+
+// ---- Zero-test runs are not passing verifications ----
+
+#[test]
+fn a_filter_that_matched_nothing_is_not_success() {
+    // `cargo test typo_filter` exits 0 with every binary reporting 0 tests.
+    let stdout = "running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 42 filtered out\n\n\
+                  running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out\n";
+    let (success, no_tests_ran, message) =
+        test_run_verdict(true, 0, 0, stdout, Some("typo_filter"));
+    assert!(!success, "0 tests executed must not report success");
+    assert!(no_tests_ran);
+    let message = message.expect("an honest explanation");
+    assert!(message.contains("typo_filter"), "{message}");
+    assert!(message.contains("matched no test"), "{message}");
+}
+
+#[test]
+fn an_unfiltered_run_with_no_tests_is_not_success_either() {
+    let stdout = "running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored\n";
+    let (success, no_tests_ran, message) = test_run_verdict(true, 0, 0, stdout, None);
+    assert!(!success);
+    assert!(no_tests_ran);
+    assert!(message.is_some_and(|m| m.contains("cargo_check")));
+}
+
+#[test]
+fn an_ignored_only_run_executed_nothing() {
+    let stdout = "running 2 tests\ntest a ... ignored\ntest b ... ignored\n\n\
+                  test result: ok. 0 passed; 0 failed; 2 ignored\n";
+    let (success, no_tests_ran, _) = test_run_verdict(true, 0, 0, stdout, None);
+    assert!(!success);
+    assert!(no_tests_ran);
+}
+
+#[test]
+fn a_real_passing_run_is_still_success() {
+    let stdout = "running 3 tests\ntest a ... ok\ntest b ... ok\ntest c ... ok\n\n\
+                  test result: ok. 3 passed; 0 failed; 0 ignored\n\n\
+                  running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored\n";
+    let (success, no_tests_ran, message) = test_run_verdict(true, 3, 0, stdout, None);
+    assert!(
+        success,
+        "empty doc-test binary beside a real suite still passes"
+    );
+    assert!(!no_tests_ran);
+    assert!(message.is_none());
+}
+
+#[test]
+fn summary_lines_backstop_missing_per_test_lines() {
+    // Per-test lines absent (e.g. not captured) but the summary proves tests ran.
+    let stdout = "test result: ok. 5 passed; 0 failed; 0 ignored\n";
+    assert_eq!(libtest_summary_executed(stdout), 5);
+    let (success, no_tests_ran, _) = test_run_verdict(true, 0, 0, stdout, None);
+    assert!(success);
+    assert!(!no_tests_ran);
+}
+
+#[test]
+fn summary_executed_sums_passed_and_failed_across_binaries() {
+    let stdout = "test result: FAILED. 2 passed; 1 failed; 0 ignored\n\
+                  test result: ok. 4 passed; 0 failed; 1 ignored\n";
+    assert_eq!(libtest_summary_executed(stdout), 7);
+}
+
+#[test]
+fn a_failing_run_is_failure_not_zero_tests() {
+    let (success, no_tests_ran, message) = test_run_verdict(false, 2, 1, "", None);
+    assert!(!success);
+    assert!(!no_tests_ran);
+    assert!(message.is_none());
+}
+
+#[test]
+fn a_compile_failure_is_not_reported_as_zero_tests() {
+    // Exit non-zero with no tests parsed: a build failure, not "no tests".
+    let (success, no_tests_ran, _) =
+        test_run_verdict(false, 0, 0, "error[E0425]: cannot find value", None);
+    assert!(!success);
+    assert!(!no_tests_ran);
+}
+
+#[test]
+fn no_tests_ran_serializes_for_the_dispatcher() {
+    let output = CargoTestOutput {
+        success: false,
+        no_tests_ran: true,
+        message: Some("No tests ran".to_string()),
+        summary: TestSummary {
+            passed: 0,
+            failed: 0,
+            ignored: 0,
+            total: 0,
+        },
+        tests: vec![],
+        failures: vec![],
+        stdout: String::new(),
+        stderr: String::new(),
+        exit_code: Some(0),
+    };
+    let value = serde_json::to_value(&output).unwrap();
+    assert_eq!(value["success"], false);
+    assert_eq!(value["no_tests_ran"], true);
+    assert_eq!(value["message"], "No tests ran");
 }
