@@ -14,6 +14,7 @@ use tokio::sync::OnceCell;
 
 use super::Tool;
 use crate::config::SafetyConfig;
+use crate::lsp::client::LspQueryOutcome;
 use crate::lsp::LspClient;
 use crate::tools::file::{resolve_safety_config, validate_tool_path};
 
@@ -150,6 +151,72 @@ pub fn create_lsp_tools(
     )
 }
 
+/// Message for an EMPTY result produced while the server was still indexing.
+const INDEXING_INCOMPLETE_MESSAGE: &str =
+    "incomplete: the language server is still indexing the workspace, so this empty result \
+     is NOT a confirmed absence (the index may not cover it yet). Retry after indexing \
+     finishes, or fall back to text search.";
+
+/// Note attached to a NON-empty result produced while the server was indexing.
+const INDEXING_PARTIAL_NOTE: &str =
+    "the language server was still indexing; results may be partial";
+
+/// Build the response for a list-valued LSP query (Rule 3: never a plain
+/// `ok`/`not_found` for an empty result the server could not vouch for).
+///
+/// - empty while indexing -> `status: "incomplete"` (count 0, with message)
+/// - empty, indexing done -> `not_found` when `not_found_message` is given,
+///   otherwise `ok` with count 0 (a confirmed zero)
+/// - non-empty -> `ok` with count; flagged `server_indexing` + note when the
+///   server was still indexing.
+fn list_response<T: serde::Serialize>(
+    key: &str,
+    outcome: &LspQueryOutcome<Vec<T>>,
+    not_found_message: Option<&str>,
+) -> Value {
+    let items = &outcome.value;
+    if items.is_empty() {
+        if outcome.still_indexing {
+            return json!({
+                "status": "incomplete",
+                "server_indexing": true,
+                "count": 0,
+                key: items,
+                "message": INDEXING_INCOMPLETE_MESSAGE,
+            });
+        }
+        if let Some(message) = not_found_message {
+            return json!({ "status": "not_found", "message": message });
+        }
+    }
+    let mut response = json!({
+        "status": "ok",
+        "count": items.len(),
+        key: items,
+    });
+    if outcome.still_indexing {
+        response["server_indexing"] = json!(true);
+        response["note"] = json!(INDEXING_PARTIAL_NOTE);
+    }
+    response
+}
+
+/// Build the `lsp_hover` response (same indexing honesty as [`list_response`]).
+fn hover_response(outcome: &LspQueryOutcome<Option<String>>) -> Value {
+    match &outcome.value {
+        Some(text) => json!({ "status": "ok", "hover": text }),
+        None if outcome.still_indexing => json!({
+            "status": "incomplete",
+            "server_indexing": true,
+            "message": INDEXING_INCOMPLETE_MESSAGE,
+        }),
+        None => json!({
+            "status": "not_found",
+            "message": "No hover information available at the given position"
+        }),
+    }
+}
+
 /// Validate that an LSP tool's `file` argument is safe to access.
 fn validate_lsp_file(path: &str, safety_config: Option<&SafetyConfig>) -> Result<()> {
     let safety = resolve_safety_config(safety_config);
@@ -198,21 +265,15 @@ impl Tool for LspGotoDefinitionTool {
             .unwrap_or_default();
         client.did_open(&args.file, &content).await?;
 
-        let locations = client
+        let outcome = client
             .goto_definition(&args.file, args.line, args.column)
             .await?;
 
-        if locations.is_empty() {
-            Ok(json!({
-                "status": "not_found",
-                "message": "No definition found at the given position"
-            }))
-        } else {
-            Ok(json!({
-                "status": "ok",
-                "definitions": locations
-            }))
-        }
+        Ok(list_response(
+            "definitions",
+            &outcome,
+            Some("No definition found at the given position"),
+        ))
     }
 }
 
@@ -256,15 +317,11 @@ impl Tool for LspFindReferencesTool {
             .unwrap_or_default();
         client.did_open(&args.file, &content).await?;
 
-        let locations = client
+        let outcome = client
             .find_references(&args.file, args.line, args.column)
             .await?;
 
-        Ok(json!({
-            "status": "ok",
-            "count": locations.len(),
-            "references": locations
-        }))
+        Ok(list_response("references", &outcome, None))
     }
 }
 
@@ -306,13 +363,9 @@ impl Tool for LspDocumentSymbolsTool {
             .unwrap_or_default();
         client.did_open(&args.file, &content).await?;
 
-        let symbols = client.document_symbols(&args.file).await?;
+        let outcome = client.document_symbols(&args.file).await?;
 
-        Ok(json!({
-            "status": "ok",
-            "count": symbols.len(),
-            "symbols": symbols
-        }))
+        Ok(list_response("symbols", &outcome, None))
     }
 }
 
@@ -356,18 +409,9 @@ impl Tool for LspHoverTool {
             .unwrap_or_default();
         client.did_open(&args.file, &content).await?;
 
-        let info = client.hover(&args.file, args.line, args.column).await?;
+        let outcome = client.hover(&args.file, args.line, args.column).await?;
 
-        match info {
-            Some(text) => Ok(json!({
-                "status": "ok",
-                "hover": text
-            })),
-            None => Ok(json!({
-                "status": "not_found",
-                "message": "No hover information available at the given position"
-            })),
-        }
+        Ok(hover_response(&outcome))
     }
 }
 
@@ -534,20 +578,13 @@ impl Tool for LspWorkspaceSymbolsTool {
         let args: Args = serde_json::from_value(args)?;
         let client = self.handle.get().await?;
 
-        let symbols = client.workspace_symbol(&args.query).await?;
+        let outcome = client.workspace_symbol(&args.query).await?;
 
-        if symbols.is_empty() {
-            Ok(json!({
-                "status": "not_found",
-                "message": "No workspace symbols matched the query"
-            }))
-        } else {
-            Ok(json!({
-                "status": "ok",
-                "count": symbols.len(),
-                "symbols": symbols
-            }))
-        }
+        Ok(list_response(
+            "symbols",
+            &outcome,
+            Some("No workspace symbols matched the query"),
+        ))
     }
 }
 
@@ -587,21 +624,15 @@ impl Tool for LspGotoImplementationTool {
         validate_lsp_file(&args.file, self.handle.safety_config.as_ref())?;
         let client = self.handle.get().await?;
 
-        let locations = client
+        let outcome = client
             .goto_implementation(&args.file, args.line, args.column)
             .await?;
 
-        if locations.is_empty() {
-            Ok(json!({
-                "status": "not_found",
-                "message": "No implementation found at the given position"
-            }))
-        } else {
-            Ok(json!({
-                "status": "ok",
-                "implementations": locations
-            }))
-        }
+        Ok(list_response(
+            "implementations",
+            &outcome,
+            Some("No implementation found at the given position"),
+        ))
     }
 }
 

@@ -234,7 +234,29 @@ impl Tool for ComputerScreenTool {
 }
 
 /// Window management tool — list, focus, launch, get active window.
-pub struct ComputerWindowTool;
+///
+/// Carries the `[computer]` config so every `WindowManager` it builds applies
+/// the configured `[computer.window_policy]` (ownership gate, visible region,
+/// request scale). `ComputerWindowTool::default()` means "no policy"
+/// (unrestricted), matching an absent `[computer.window_policy]` block.
+#[derive(Debug, Clone, Default)]
+pub struct ComputerWindowTool {
+    config: crate::config::ComputerConfig,
+}
+
+impl ComputerWindowTool {
+    /// A window tool enforcing the `[computer]` config (its window policy).
+    pub fn from_config(config: &crate::config::ComputerConfig) -> Self {
+        Self {
+            config: config.clone(),
+        }
+    }
+
+    /// The window manager this tool drives, built from its config.
+    fn window_manager(&self) -> crate::computer::WindowManager {
+        crate::computer::WindowManager::from_config(&self.config)
+    }
+}
 
 #[async_trait]
 impl Tool for ComputerWindowTool {
@@ -271,7 +293,7 @@ impl Tool for ComputerWindowTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'action' field"))?;
 
-        let wm = crate::computer::WindowManager::new();
+        let wm = self.window_manager();
 
         match action {
             "list" => {

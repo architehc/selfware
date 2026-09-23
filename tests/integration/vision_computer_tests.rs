@@ -232,7 +232,7 @@ async fn test_window_management_chain() {
         return;
     }
 
-    let window = ComputerWindowTool;
+    let window = ComputerWindowTool::default();
 
     let r = window.execute(json!({"action": "list"})).await.unwrap();
     assert_eq!(r["status"], "ok");

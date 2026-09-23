@@ -296,3 +296,391 @@ fn test_diagnostic_serialization() {
     assert_eq!(json["severity"], "error");
     assert_eq!(json["message"], "type mismatch");
 }
+
+// ---------------------------------------------------------------------------
+// Indexing state: active progress tokens are tracked as a set
+// ---------------------------------------------------------------------------
+
+async fn dispatch_progress(
+    indexing: &Arc<std::sync::Mutex<IndexingState>>,
+    token: serde_json::Value,
+    kind: &str,
+) {
+    let pending: Arc<Mutex<PendingMap>> = Arc::new(Mutex::new(HashMap::new()));
+    let diags = Arc::new(Mutex::new(HashMap::new()));
+    let msg = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "$/progress",
+        "params": { "token": token, "value": { "kind": kind, "title": "x" } }
+    });
+    LspServerConnection::dispatch_message(msg, &pending, &diags, indexing).await;
+}
+
+#[tokio::test]
+async fn indexing_stays_active_until_every_progress_stream_ends() {
+    let indexing = Arc::new(std::sync::Mutex::new(IndexingState::default()));
+    let is = |i: &Arc<std::sync::Mutex<IndexingState>>| i.lock().unwrap().is_indexing();
+
+    dispatch_progress(
+        &indexing,
+        serde_json::json!("rustAnalyzer/Fetching"),
+        "begin",
+    )
+    .await;
+    dispatch_progress(
+        &indexing,
+        serde_json::json!("rustAnalyzer/Indexing"),
+        "begin",
+    )
+    .await;
+    dispatch_progress(&indexing, serde_json::json!(7), "begin").await;
+    assert!(is(&indexing));
+
+    // Ending ONE stream must not clear indexing while others still run
+    // (the old AtomicBool was cleared by any `end`).
+    dispatch_progress(&indexing, serde_json::json!("rustAnalyzer/Fetching"), "end").await;
+    assert!(is(&indexing), "other progress streams are still active");
+    dispatch_progress(&indexing, serde_json::json!(7), "report").await;
+    dispatch_progress(&indexing, serde_json::json!(7), "end").await;
+    assert!(is(&indexing), "Indexing stream is still active");
+
+    dispatch_progress(&indexing, serde_json::json!("rustAnalyzer/Indexing"), "end").await;
+    assert!(!is(&indexing), "all streams ended");
+}
+
+#[test]
+fn server_status_busy_counts_as_indexing() {
+    let mut st = IndexingState::default();
+    assert!(!st.is_indexing());
+    st.server_busy = true;
+    assert!(st.is_indexing());
+}
+
+// ---------------------------------------------------------------------------
+// query_settling_indexing: empty-while-indexing waits (bounded), retries once
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn empty_result_while_indexing_retries_after_indexing_finishes() {
+    use std::sync::atomic::AtomicUsize;
+    let indexing = Arc::new(AtomicBool::new(true));
+    let calls = Arc::new(AtomicUsize::new(0));
+
+    // Indexing finishes after 150ms.
+    {
+        let indexing = Arc::clone(&indexing);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            indexing.store(false, Ordering::SeqCst);
+        });
+    }
+
+    let probe = Arc::clone(&indexing);
+    let outcome = query_settling_indexing(
+        move || probe.load(Ordering::SeqCst),
+        Vec::is_empty,
+        Duration::from_secs(10),
+        || {
+            let calls = Arc::clone(&calls);
+            async move {
+                // First answer (mid-indexing) is empty; the retry sees results.
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Ok(vec![])
+                } else {
+                    Ok(vec![1u32, 2, 3])
+                }
+            }
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "retried exactly once");
+    assert_eq!(outcome.value, vec![1, 2, 3]);
+    assert!(!outcome.still_indexing);
+}
+
+#[tokio::test]
+async fn empty_result_while_indexing_never_ends_is_marked_incomplete_after_bounded_wait() {
+    use std::sync::atomic::AtomicUsize;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let start = std::time::Instant::now();
+    let outcome = query_settling_indexing(
+        || true,
+        Vec::<u32>::is_empty,
+        Duration::from_millis(200),
+        || {
+            let calls = Arc::clone(&calls);
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(vec![])
+            }
+        },
+    )
+    .await
+    .unwrap();
+    let elapsed = start.elapsed();
+
+    assert!(outcome.value.is_empty());
+    assert!(
+        outcome.still_indexing,
+        "an empty result the index could not vouch for must be flagged"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "one bounded retry");
+    assert!(elapsed >= Duration::from_millis(190), "waited: {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(3), "bounded: {elapsed:?}");
+}
+
+#[tokio::test]
+async fn nonempty_or_idle_results_are_not_delayed() {
+    use std::sync::atomic::AtomicUsize;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = Arc::clone(&calls);
+    let outcome = query_settling_indexing(
+        || true,
+        Vec::is_empty,
+        Duration::from_secs(10),
+        move || {
+            let c = Arc::clone(&c);
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(vec![5u32])
+            }
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(outcome.value, vec![5]);
+    assert!(
+        outcome.still_indexing,
+        "partial-results flag still reported"
+    );
+
+    let start = std::time::Instant::now();
+    let outcome = query_settling_indexing(
+        || false,
+        Vec::<u32>::is_empty,
+        Duration::from_secs(10),
+        || async { Ok(vec![]) },
+    )
+    .await
+    .unwrap();
+    assert!(outcome.value.is_empty() && !outcome.still_indexing);
+    assert!(start.elapsed() < Duration::from_millis(500));
+}
+
+// ---------------------------------------------------------------------------
+// Child death: fail fast with the real cause
+// ---------------------------------------------------------------------------
+
+#[test]
+fn remediation_hint_recognizes_missing_rustup_component() {
+    let old = vec![
+        "error: Unknown binary 'rust-analyzer' in official toolchain 'stable-aarch64-apple-darwin'."
+            .to_string(),
+    ];
+    let hint = remediation_hint("rust-analyzer", &old).expect("hint");
+    assert!(hint.contains("rust-analyzer is not installed for this toolchain"));
+    assert!(hint.contains("rustup component add rust-analyzer"));
+
+    let new = vec![
+        "error: 'rust-analyzer' is not installed for the toolchain 'stable-x86_64-unknown-linux-gnu'."
+            .to_string(),
+        "To install, run `rustup component add rust-analyzer`".to_string(),
+    ];
+    assert!(remediation_hint("rust-analyzer", &new).is_some());
+
+    assert!(remediation_hint("gopls", &["panic: boom".to_string()]).is_none());
+}
+
+/// A rustup-proxy-like server that prints the "Unknown binary" error and
+/// exits immediately, appending to `counter` on every spawn.
+#[cfg(unix)]
+fn exiting_server_candidates(counter: &Path) -> Vec<(String, Vec<String>)> {
+    let script = format!(
+        "echo spawned >> '{}'; \
+         echo \"error: Unknown binary 'rust-analyzer' in official toolchain 'stable-aarch64-apple-darwin'.\" >&2; \
+         exit 1",
+        counter.display()
+    );
+    vec![("sh".to_string(), vec!["-c".to_string(), script])]
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn server_that_exits_immediately_fails_fast_with_cause_and_is_not_retried() {
+    let dir = tempfile::tempdir().unwrap();
+    let counter = dir.path().join("spawns.txt");
+    let file = dir.path().join("lib.rs");
+    std::fs::write(&file, "fn main() {}\n").unwrap();
+    let file = file.to_str().unwrap().to_string();
+
+    let client = LspClient::new(dir.path())
+        .with_server_candidates(Language::Rust, exiting_server_candidates(&counter));
+
+    let start = std::time::Instant::now();
+    let err = client
+        .find_references(&file, 0, 0)
+        .await
+        .expect_err("a dead server must fail the call");
+    let elapsed = start.elapsed();
+    let msg = format!("{err:#}");
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "dead server must fail well under the 5s/30s timeouts, took {elapsed:?}: {msg}"
+    );
+    assert!(
+        msg.contains("rust-analyzer is not installed for this toolchain")
+            && msg.contains("rustup component add rust-analyzer"),
+        "real cause + remediation expected, got: {msg}"
+    );
+    assert!(
+        msg.contains("Unknown binary"),
+        "stderr tail expected: {msg}"
+    );
+    assert!(
+        !msg.contains("No LSP server available"),
+        "must not claim the server is missing: {msg}"
+    );
+
+    // Remembered for the session: the next call fails immediately with the
+    // recorded cause and does NOT spawn the server again.
+    let start = std::time::Instant::now();
+    let again = client
+        .goto_definition(&file, 0, 0)
+        .await
+        .expect_err("failed start is remembered");
+    let again_msg = format!("{again:#}");
+    assert!(start.elapsed() < Duration::from_millis(200), "{again_msg}");
+    assert!(
+        again_msg.contains("failed to start earlier") && again_msg.contains("rustup component add"),
+        "{again_msg}"
+    );
+    let spawns = std::fs::read_to_string(&counter).unwrap();
+    assert_eq!(spawns.lines().count(), 1, "server spawned once: {spawns:?}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn missing_server_binary_still_reports_not_installed() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = LspClient::new(dir.path()).with_server_candidates(
+        Language::Go,
+        vec![("selfware-no-such-lsp-binary-xyz".to_string(), vec![])],
+    );
+    let err = client
+        .find_references(dir.path().join("main.go").to_str().unwrap(), 0, 0)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("No LSP server available"),
+        "{err:#}"
+    );
+}
+
+/// A server that answers `initialize` and then dies while a request is
+/// pending: the pending request must fail as soon as the process exits (not
+/// after the 30s request timeout), with exit status + stderr.
+#[cfg(unix)]
+#[tokio::test]
+async fn server_dying_mid_session_fails_pending_request_fast() {
+    let body = r#"{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}"#;
+    let script = format!(
+        "dd bs=1 count=1 >/dev/null 2>&1; \
+         printf 'Content-Length: %d\\r\\n\\r\\n%s' {} '{}'; \
+         sleep 1; echo 'fatal: index corrupted' >&2; exit 3",
+        body.len(),
+        body
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let conn = LspServerConnection::spawn(
+        "sh",
+        &["-c".to_string(), script],
+        dir.path(),
+        Language::Rust,
+    )
+    .await
+    .expect("spawn fake server");
+    conn.initialize()
+        .await
+        .expect("fake server answers initialize");
+
+    let start = std::time::Instant::now();
+    let err = conn
+        .request("textDocument/references", serde_json::json!({}))
+        .await
+        .expect_err("server dies with the request pending");
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "pending request must fail when the server exits, took {elapsed:?}"
+    );
+    let typed = err
+        .downcast_ref::<LspTransportError>()
+        .unwrap_or_else(|| panic!("expected typed transport error, got {err:#}"));
+    let msg = typed.to_string();
+    assert!(
+        matches!(typed, LspTransportError::ServerExited { .. }),
+        "{msg}"
+    );
+    assert!(msg.contains('3'), "exit status expected: {msg}");
+    assert!(msg.contains("fatal: index corrupted"), "stderr tail: {msg}");
+
+    // Dead now: later requests and notifications fail immediately.
+    let start = std::time::Instant::now();
+    let again = conn
+        .request("textDocument/hover", serde_json::json!({}))
+        .await
+        .unwrap_err();
+    assert!(start.elapsed() < Duration::from_millis(200));
+    assert_eq!(again.downcast_ref::<LspTransportError>(), Some(typed));
+    assert!(conn
+        .notify("textDocument/didClose", serde_json::json!({}))
+        .await
+        .is_err());
+}
+
+/// Writing to a server that closed its stdin (but keeps running, so the
+/// reader sees no EOF) is a typed broken pipe that marks the connection dead.
+#[cfg(unix)]
+#[tokio::test]
+async fn write_to_closed_stdin_is_typed_broken_pipe() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = LspServerConnection::spawn(
+        "sh",
+        &["-c".to_string(), "exec 0<&-; sleep 30".to_string()],
+        dir.path(),
+        Language::Rust,
+    )
+    .await
+    .expect("spawn sh");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let mut broken = None;
+    for _ in 0..5 {
+        let err = conn
+            .request_with_timeout(
+                "textDocument/hover",
+                serde_json::json!({}),
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap_err();
+        match err.downcast_ref::<LspTransportError>() {
+            Some(e @ LspTransportError::BrokenPipe { .. }) => {
+                broken = Some(e.clone());
+                break;
+            }
+            Some(LspTransportError::TimedOut { .. }) => continue,
+            other => panic!("unexpected error: {other:?} ({err:#})"),
+        }
+    }
+    let broken = broken.expect("write to closed stdin must surface as BrokenPipe");
+    assert!(broken.to_string().contains("broken pipe"), "{broken}");
+    let start = std::time::Instant::now();
+    let again = conn.request("x", serde_json::json!({})).await.unwrap_err();
+    assert!(start.elapsed() < Duration::from_millis(200));
+    assert_eq!(again.downcast_ref::<LspTransportError>(), Some(&broken));
+    conn.kill_now().await;
+}

@@ -98,10 +98,112 @@ struct BridgeResponse {
 /// captured copy is bounded.
 const MAX_BRIDGE_STDERR_LINES: usize = 400;
 
+/// Typed, infrastructure-level failure of the Playwright bridge process (same
+/// shape as `mcp::transport::McpTransportError`): the bridge died, its pipes
+/// broke, or it never answered — as opposed to a Playwright error the bridge
+/// reported on purpose (`success: false`). Cloneable so one death fails every
+/// pending command with the same cause.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BridgeTransportError {
+    /// The bridge's stdout reached EOF: Node exited or closed its output.
+    #[error("Playwright bridge exited / closed its output{detail}")]
+    Exited { detail: String },
+    /// Reading the bridge's stdout failed.
+    #[error("Playwright bridge output could not be read: {message}")]
+    ReadFailed { message: String },
+    /// Writing to the bridge's stdin hit a broken pipe (the bridge exited or
+    /// closed its stdin). SIGPIPE is ignored, so this surfaces as EPIPE.
+    #[error("Playwright bridge input is closed (broken pipe){detail}")]
+    BrokenPipe { detail: String },
+    /// Writing to the bridge's stdin failed for another reason.
+    #[error("Playwright bridge write failed: {message}")]
+    WriteFailed { message: String },
+    /// The bridge did not answer in time (the bridge is NOT marked dead).
+    #[error("Playwright-bridge command timed out after {timeout_ms}ms")]
+    TimedOut { timeout_ms: u64 },
+}
+
+type BridgePending = HashMap<u64, oneshot::Sender<BridgeResponse>>;
+
+/// `None` while the bridge is usable, otherwise the first fatal cause. Checked
+/// under the pending-map lock so no command registers after the drain.
+type BridgeDeadState = Arc<std::sync::Mutex<Option<BridgeTransportError>>>;
+
+/// Last few bridge stderr lines, used to explain an exit
+/// ("Cannot find module 'playwright'", a Node stack trace, ...).
+const BRIDGE_STDERR_TAIL_LINES: usize = 5;
+const BRIDGE_STDERR_TAIL_LINE_MAX_CHARS: usize = 300;
+
+type BridgeStderrTail = Arc<std::sync::Mutex<std::collections::VecDeque<String>>>;
+
+/// Record the bridge as dead (first cause wins) and fail every pending
+/// command immediately by dropping its response channel.
+async fn mark_bridge_dead(
+    pending: &Mutex<BridgePending>,
+    dead: &BridgeDeadState,
+    cause: BridgeTransportError,
+) {
+    let mut pending = pending.lock().await;
+    {
+        let mut slot = dead.lock().unwrap_or_else(|p| p.into_inner());
+        if slot.is_none() {
+            *slot = Some(cause);
+        }
+    }
+    pending.clear();
+}
+
+fn bridge_dead_cause(dead: &BridgeDeadState) -> Option<BridgeTransportError> {
+    dead.lock().unwrap_or_else(|p| p.into_inner()).clone()
+}
+
+/// Describe why the bridge's pipes closed: exit status (if Node exited within
+/// a short grace period) and the tail of its stderr. Waits (<=300ms) for both
+/// the exit status and the stderr drain.
+async fn describe_bridge_exit(
+    child: &Mutex<Child>,
+    stderr_tail: &BridgeStderrTail,
+    stderr_done: &std::sync::atomic::AtomicBool,
+) -> String {
+    let mut status = None;
+    for _ in 0..30 {
+        if status.is_none() {
+            if let Ok(mut c) = child.try_lock() {
+                if let Ok(Some(s)) = c.try_wait() {
+                    status = Some(s);
+                }
+            }
+        }
+        if status.is_some() && stderr_done.load(Ordering::Acquire) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let mut detail = String::new();
+    if let Some(s) = status {
+        detail.push_str(&format!(" ({s})"));
+    }
+    let tail: Vec<String> = stderr_tail
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .cloned()
+        .collect();
+    if !tail.is_empty() {
+        detail.push_str(&format!("; stderr: {}", tail.join(" | ")));
+    }
+    detail
+}
+
 /// Manages the lifecycle of the playwright-bridge.js child process.
 struct PlaywrightBridge {
     stdin: Arc<Mutex<tokio::process::ChildStdin>>,
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<BridgeResponse>>>>,
+    pending: Arc<Mutex<BridgePending>>,
+    /// First fatal cause once the bridge died (EOF, read/write failure);
+    /// later commands fail fast with it instead of waiting for a timeout.
+    dead: BridgeDeadState,
+    stderr_tail: BridgeStderrTail,
+    stderr_done: Arc<std::sync::atomic::AtomicBool>,
     next_id: AtomicU64,
     child: Arc<Mutex<Child>>,
     reader_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -149,13 +251,21 @@ impl PlaywrightBridge {
         bridge_script: &std::path::Path,
         extra_args: &[&str],
     ) -> Result<Self> {
-        info!("Spawning playwright-bridge: {}", bridge_script.display());
+        let mut args: Vec<&str> = Vec::with_capacity(extra_args.len() + 1);
+        let script = bridge_script.to_string_lossy();
+        args.push(&script);
+        args.extend_from_slice(extra_args);
+        Self::spawn_program("node", &args).await
+    }
 
-        let mut cmd = Command::new("node");
-        cmd.arg(bridge_script);
-        for arg in extra_args {
-            cmd.arg(arg);
-        }
+    /// Spawn `program args...` as the bridge process. Production always runs
+    /// `node <bridge script>`; tests substitute `sh -c ...` stubs to exercise
+    /// the transport (exit, broken pipe) without Node or a browser.
+    async fn spawn_program(program: &str, args: &[&str]) -> Result<Self> {
+        info!("Spawning playwright-bridge: {} {:?}", program, args);
+
+        let mut cmd = Command::new(program);
+        cmd.args(args);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -199,7 +309,7 @@ impl PlaywrightBridge {
 
         let mut child = cmd
             .spawn()
-            .with_context(|| format!("Failed to spawn playwright-bridge: {:?}", bridge_script))?;
+            .with_context(|| format!("Failed to spawn playwright-bridge: {program} {args:?}"))?;
 
         // Capture the process-group id at spawn. The bridge child runs in its
         // own process group (see `process_group(0)` above), so the pgid equals
@@ -223,16 +333,55 @@ impl PlaywrightBridge {
             .take()
             .context("Failed to capture playwright-bridge stderr")?;
 
-        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<BridgeResponse>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let pending: Arc<Mutex<BridgePending>> = Arc::new(Mutex::new(HashMap::new()));
         let pending_clone = Arc::clone(&pending);
+        let dead: BridgeDeadState = Arc::new(std::sync::Mutex::new(None));
+        let stderr_tail: BridgeStderrTail = Arc::new(std::sync::Mutex::new(Default::default()));
+        let stderr_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let child = Arc::new(Mutex::new(child));
 
-        // Background reader task — reads NDJSON responses from stdout
+        let reader_dead = Arc::clone(&dead);
+        let reader_child = Arc::clone(&child);
+        let reader_tail = Arc::clone(&stderr_tail);
+        let reader_stderr_done = Arc::clone(&stderr_done);
+
+        // Background reader task — reads NDJSON responses from stdout. On EOF
+        // or a read error the bridge is marked dead and every pending command
+        // fails immediately with the cause (exit status + stderr tail),
+        // instead of each one waiting out its timeout.
         let reader_handle = tokio::spawn(async move {
             let reader = BufReader::new(stdout);
             let mut lines = reader.lines();
 
-            while let Ok(Some(line)) = lines.next_line().await {
+            loop {
+                let line = match lines.next_line().await {
+                    Ok(Some(line)) => line,
+                    Ok(None) => {
+                        let detail =
+                            describe_bridge_exit(&reader_child, &reader_tail, &reader_stderr_done)
+                                .await;
+                        warn!("Playwright bridge closed its output{}", detail);
+                        mark_bridge_dead(
+                            &pending_clone,
+                            &reader_dead,
+                            BridgeTransportError::Exited { detail },
+                        )
+                        .await;
+                        break;
+                    }
+                    Err(e) => {
+                        warn!("Playwright bridge stdout read error: {}", e);
+                        mark_bridge_dead(
+                            &pending_clone,
+                            &reader_dead,
+                            BridgeTransportError::ReadFailed {
+                                message: e.to_string(),
+                            },
+                        )
+                        .await;
+                        break;
+                    }
+                };
                 let line = line.trim().to_string();
                 if line.is_empty() {
                     continue;
@@ -270,6 +419,8 @@ impl PlaywrightBridge {
         // concurrently now; only the first [`MAX_BRIDGE_STDERR_LINES`] lines
         // are retained (for diagnostics), everything beyond the cap is still
         // consumed, never buffered.
+        let drain_tail = Arc::clone(&stderr_tail);
+        let drain_done = Arc::clone(&stderr_done);
         let stderr_handle = tokio::spawn(async move {
             let reader = BufReader::new(stderr);
             let mut lines = reader.lines();
@@ -280,15 +431,33 @@ impl PlaywrightBridge {
                     warn!("playwright-bridge stderr: {}", line);
                 }
                 // Beyond the cap: keep draining so the pipe never fills up.
+                // A short rolling tail explains an exit in error messages.
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    let mut tail = drain_tail.lock().unwrap_or_else(|p| p.into_inner());
+                    if tail.len() == BRIDGE_STDERR_TAIL_LINES {
+                        tail.pop_front();
+                    }
+                    tail.push_back(
+                        trimmed
+                            .chars()
+                            .take(BRIDGE_STDERR_TAIL_LINE_MAX_CHARS)
+                            .collect(),
+                    );
+                }
             }
+            drain_done.store(true, Ordering::Release);
             debug!("Playwright-bridge stderr reader exited");
         });
 
         Ok(Self {
             stdin: Arc::new(Mutex::new(stdin)),
             pending,
+            dead,
+            stderr_tail,
+            stderr_done,
             next_id: AtomicU64::new(1),
-            child: Arc::new(Mutex::new(child)),
+            child,
             reader_handle: Mutex::new(Some(reader_handle)),
             stderr_handle: Mutex::new(Some(stderr_handle)),
             #[cfg(unix)]
@@ -307,24 +476,31 @@ impl PlaywrightBridge {
         let mut bytes = serde_json::to_vec(&command)?;
         bytes.push(b'\n');
 
-        // Register pending response channel before sending
+        // Register pending response channel before sending. The dead check
+        // shares the pending lock with the reader's drain, so a command can
+        // never register after the bridge died and then wait out its timeout.
         let (tx, rx) = oneshot::channel();
         {
             let mut pending = self.pending.lock().await;
+            if let Some(cause) = self.dead_cause() {
+                return Err(anyhow::Error::new(cause));
+            }
             pending.insert(id, tx);
         }
 
         // Send command; on any write failure, drop the now-orphaned pending
-        // entry so the map doesn't leak one slot per failed request.
+        // entry so the map doesn't leak one slot per failed request, and mark
+        // the bridge dead (a broken pipe means it is gone).
         {
             let mut stdin = self.stdin.lock().await;
-            if let Err(e) = stdin.write_all(&bytes).await {
+            let written = match stdin.write_all(&bytes).await {
+                Ok(()) => stdin.flush().await,
+                Err(e) => Err(e),
+            };
+            drop(stdin);
+            if let Err(e) = written {
                 self.pending.lock().await.remove(&id);
-                return Err(e).context("Failed to write to playwright-bridge stdin");
-            }
-            if let Err(e) = stdin.flush().await {
-                self.pending.lock().await.remove(&id);
-                return Err(e).context("Failed to flush playwright-bridge stdin");
+                return Err(anyhow::Error::new(self.write_failed(e).await));
             }
         }
 
@@ -335,14 +511,22 @@ impl PlaywrightBridge {
         let response = match tokio::time::timeout(timeout_dur, rx).await {
             Ok(Ok(resp)) => resp,
             Ok(Err(_)) => {
-                // Sender dropped without replying: drop the pending entry.
+                // Sender dropped without replying: the reader marked the
+                // bridge dead. Report the recorded cause.
                 self.pending.lock().await.remove(&id);
-                bail!("Playwright-bridge response channel closed");
+                let cause = self
+                    .dead_cause()
+                    .unwrap_or_else(|| BridgeTransportError::Exited {
+                        detail: String::new(),
+                    });
+                return Err(anyhow::Error::new(cause));
             }
             Err(_) => {
                 // Timed out: drop the pending entry so it doesn't leak a slot.
                 self.pending.lock().await.remove(&id);
-                bail!("Playwright-bridge command timed out after {}ms", timeout_ms);
+                return Err(anyhow::Error::new(BridgeTransportError::TimedOut {
+                    timeout_ms,
+                }));
             }
         };
 
@@ -354,6 +538,29 @@ impl PlaywrightBridge {
         }
 
         Ok(response.result.unwrap_or(json!(null)))
+    }
+
+    /// The recorded fatal cause, if the bridge is dead.
+    fn dead_cause(&self) -> Option<BridgeTransportError> {
+        bridge_dead_cause(&self.dead)
+    }
+
+    /// Classify a stdin write failure, mark the bridge dead, and return the
+    /// recorded cause (the reader's `Exited` may win the race — equally fatal,
+    /// and it carries the exit status).
+    async fn write_failed(&self, err: std::io::Error) -> BridgeTransportError {
+        let cause = if err.kind() == std::io::ErrorKind::BrokenPipe {
+            BridgeTransportError::BrokenPipe {
+                detail: describe_bridge_exit(&self.child, &self.stderr_tail, &self.stderr_done)
+                    .await,
+            }
+        } else {
+            BridgeTransportError::WriteFailed {
+                message: err.to_string(),
+            }
+        };
+        mark_bridge_dead(&self.pending, &self.dead, cause.clone()).await;
+        self.dead_cause().unwrap_or(cause)
     }
 
     /// SIGKILL every member of the bridge's process group.
@@ -376,12 +583,14 @@ impl PlaywrightBridge {
     async fn shutdown(&self) -> Result<()> {
         info!("Shutting down playwright-bridge");
 
-        // Send shutdown command
-        let _ = self.send(json!({"action": "shutdown"}), 5000).await;
+        // Send shutdown command (a dead bridge cannot answer — skip it).
+        if self.dead_cause().is_none() {
+            let _ = self.send(json!({"action": "shutdown"}), 5000).await;
 
-        // Give it a moment, then force kill the whole process group (Node +
-        // Chromium children — `child.kill()` alone would orphan the latter).
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            // Give it a moment, then force kill the whole process group (Node +
+            // Chromium children — `child.kill()` alone would orphan the latter).
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
 
         self.kill_bridge_group();
         let mut child = self.child.lock().await;
@@ -649,6 +858,14 @@ impl PageController {
     /// Ensure the bridge is running, spawning it if necessary.
     async fn ensure_bridge(&self) -> Result<()> {
         let mut bridge = self.bridge.lock().await;
+        if let Some(cause) = bridge.as_ref().and_then(|b| b.dead_cause()) {
+            // The previous bridge died (its pending command already failed
+            // with the cause); tear it down and start a fresh one.
+            warn!("Restarting Playwright bridge after: {cause}");
+            if let Some(old) = bridge.take() {
+                let _ = old.shutdown().await;
+            }
+        }
         if bridge.is_none() {
             *bridge = Some(PlaywrightBridge::spawn().await?);
         }

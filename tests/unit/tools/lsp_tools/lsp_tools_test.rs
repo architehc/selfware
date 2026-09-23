@@ -106,9 +106,11 @@ fn test_validate_lsp_file_rejects_etc_passwd() {
 
 #[test]
 fn test_validate_lsp_file_allows_workspace_file() {
-    let cwd = std::env::current_dir().unwrap();
+    // Pin the file to the crate root and hold the cwd lock: reading the
+    // process cwd unguarded raced with tests that call set_current_dir.
+    let _guard = crate::test_support::CwdGuard::hold();
     let config = default_test_safety_config();
-    let file = cwd.join("src/tools/lsp_tools.rs");
+    let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tools/lsp_tools.rs");
     let result = validate_lsp_file(file.to_str().unwrap(), Some(&config));
     assert!(
         result.is_ok(),
@@ -236,4 +238,101 @@ fn test_diagnostics_response_counts_severities() {
     assert_eq!(result["errors"], 1);
     assert_eq!(result["warnings"], 1);
     assert_eq!(result["diagnostics"].as_array().unwrap().len(), 3);
+}
+
+// -- indexing honesty (Rule 3) -------------------------------------------
+
+fn loc(line: u32) -> crate::lsp::client::Location {
+    crate::lsp::client::Location {
+        file: "/w/src/lib.rs".into(),
+        line,
+        column: 0,
+    }
+}
+
+#[test]
+fn test_references_empty_while_indexing_is_incomplete_not_ok() {
+    // 0 references while the server is still indexing is NOT a confirmed
+    // zero: it must not be reported as a plain `ok, count 0`.
+    let outcome = LspQueryOutcome::<Vec<crate::lsp::client::Location>> {
+        value: vec![],
+        still_indexing: true,
+    };
+    let r = list_response("references", &outcome, None);
+    assert_eq!(r["status"], "incomplete", "{r}");
+    assert_eq!(r["server_indexing"], true);
+    assert_eq!(r["count"], 0);
+    assert!(
+        r["message"].as_str().unwrap().contains("still indexing"),
+        "{r}"
+    );
+}
+
+#[test]
+fn test_definition_empty_while_indexing_is_incomplete_not_not_found() {
+    let outcome = LspQueryOutcome::<Vec<crate::lsp::client::Location>> {
+        value: vec![],
+        still_indexing: true,
+    };
+    let r = list_response("definitions", &outcome, Some("No definition found"));
+    assert_eq!(r["status"], "incomplete", "{r}");
+}
+
+#[test]
+fn test_list_response_after_indexing_is_confirmed() {
+    let done_empty = LspQueryOutcome::<Vec<crate::lsp::client::Location>> {
+        value: vec![],
+        still_indexing: false,
+    };
+    // References: a confirmed zero stays `ok, count 0`.
+    let r = list_response("references", &done_empty, None);
+    assert_eq!(r["status"], "ok");
+    assert_eq!(r["count"], 0);
+    assert!(r.get("server_indexing").is_none());
+    // Definition: a confirmed miss is `not_found`.
+    let r = list_response("definitions", &done_empty, Some("No definition found"));
+    assert_eq!(r["status"], "not_found");
+    assert_eq!(r["message"], "No definition found");
+
+    let found = LspQueryOutcome {
+        value: vec![loc(3), loc(9)],
+        still_indexing: false,
+    };
+    let r = list_response("references", &found, None);
+    assert_eq!(r["status"], "ok");
+    assert_eq!(r["count"], 2);
+    assert_eq!(r["references"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn test_list_response_nonempty_while_indexing_flags_partial() {
+    let partial = LspQueryOutcome {
+        value: vec![loc(1)],
+        still_indexing: true,
+    };
+    let r = list_response("references", &partial, None);
+    assert_eq!(r["status"], "ok");
+    assert_eq!(r["count"], 1);
+    assert_eq!(r["server_indexing"], true);
+    assert!(r["note"].as_str().unwrap().contains("partial"), "{r}");
+}
+
+#[test]
+fn test_hover_response_indexing_honesty() {
+    let r = hover_response(&LspQueryOutcome {
+        value: None,
+        still_indexing: true,
+    });
+    assert_eq!(r["status"], "incomplete");
+    let r = hover_response(&LspQueryOutcome {
+        value: None,
+        still_indexing: false,
+    });
+    assert_eq!(r["status"], "not_found");
+    let r = hover_response(&LspQueryOutcome {
+        value: Some("fn f()".to_string()),
+        still_indexing: false,
+    });
+    assert_eq!(r["status"], "ok");
+    assert_eq!(r["hover"], "fn f()");
 }

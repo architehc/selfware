@@ -1057,6 +1057,11 @@ impl Agent {
             config.ui.allow_clarification,
             3,
         ));
+        // Same for computer_window: the registry default has no window
+        // policy; wire the configured [computer.window_policy].
+        tools.register_deferred(crate::tools::computer::ComputerWindowTool::from_config(
+            &config.computer,
+        ));
         tools.rebuild_search_index();
         let memory = AgentMemory::new(&config)?;
         let safety = SafetyChecker::new(&config.safety);

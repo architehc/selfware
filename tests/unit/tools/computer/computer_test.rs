@@ -338,19 +338,19 @@ async fn test_screen_tool_unknown_action() {
 
 #[test]
 fn test_window_tool_name() {
-    let tool = ComputerWindowTool;
+    let tool = ComputerWindowTool::default();
     assert_eq!(tool.name(), "computer_window");
 }
 
 #[test]
 fn test_window_tool_description() {
-    let tool = ComputerWindowTool;
+    let tool = ComputerWindowTool::default();
     assert!(tool.description().contains("window"));
 }
 
 #[test]
 fn test_window_tool_schema() {
-    let tool = ComputerWindowTool;
+    let tool = ComputerWindowTool::default();
     let schema = tool.schema();
     assert_eq!(schema["type"], "object");
     let actions = schema["properties"]["action"]["enum"].as_array().unwrap();
@@ -363,14 +363,14 @@ fn test_window_tool_schema() {
 
 #[tokio::test]
 async fn test_window_tool_missing_action() {
-    let tool = ComputerWindowTool;
+    let tool = ComputerWindowTool::default();
     let result = tool.execute(json!({})).await;
     assert!(result.is_err());
 }
 
 #[tokio::test]
 async fn test_window_tool_unknown_action() {
-    let tool = ComputerWindowTool;
+    let tool = ComputerWindowTool::default();
     let result = tool.execute(json!({"action": "explode"})).await;
     assert!(result.is_err());
     assert!(result
@@ -381,7 +381,7 @@ async fn test_window_tool_unknown_action() {
 
 #[tokio::test]
 async fn test_window_tool_list() {
-    let tool = ComputerWindowTool;
+    let tool = ComputerWindowTool::default();
     let result = tool.execute(json!({"action": "list"})).await.unwrap();
     assert_eq!(result["status"], "ok");
     assert!(result["windows"].is_array());
@@ -389,7 +389,7 @@ async fn test_window_tool_list() {
 
 #[tokio::test]
 async fn test_window_tool_focus_missing_id() {
-    let tool = ComputerWindowTool;
+    let tool = ComputerWindowTool::default();
     let result = tool.execute(json!({"action": "focus"})).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("window_id"));
@@ -421,7 +421,7 @@ async fn test_window_tool_focus_with_id() {
         eprintln!("Skipping test: neither wmctrl nor xdotool available");
         return;
     }
-    let tool = ComputerWindowTool;
+    let tool = ComputerWindowTool::default();
     let active_window = std::process::Command::new("xdotool")
         .arg("getactivewindow")
         .output()
@@ -442,8 +442,51 @@ async fn test_window_tool_focus_with_id() {
 
 #[tokio::test]
 async fn test_window_tool_launch_missing_name() {
-    let tool = ComputerWindowTool;
+    let tool = ComputerWindowTool::default();
     let result = tool.execute(json!({"action": "launch"})).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("app_name"));
+}
+
+// ── Window policy wiring ([computer.window_policy]) ──────────────
+
+#[test]
+fn test_window_tool_applies_configured_window_policy() {
+    let policy = crate::config::WindowPolicy {
+        owned_title_prefix: Some("sw-".to_string()),
+        visible_region: Some(crate::config::VisibleRegion {
+            x_min: 0,
+            x_max: 7680,
+            y_min: 768,
+            y_max: 2928,
+        }),
+        request_scale: 2,
+        verify_after_move: true,
+    };
+    let config = crate::config::ComputerConfig {
+        window_policy: Some(policy.clone()),
+    };
+
+    let tool = ComputerWindowTool::from_config(&config);
+    assert_eq!(
+        tool.window_manager().policy(),
+        Some(&policy),
+        "computer_window must build its WindowManager from [computer.window_policy]"
+    );
+}
+
+#[test]
+fn test_window_tool_default_has_no_policy() {
+    // No [computer.window_policy] block -> unrestricted, same as
+    // WindowManager::from_config(&ComputerConfig::default()).
+    assert!(ComputerWindowTool::default()
+        .window_manager()
+        .policy()
+        .is_none());
+    assert!(
+        ComputerWindowTool::from_config(&crate::config::ComputerConfig::default())
+            .window_manager()
+            .policy()
+            .is_none()
+    );
 }

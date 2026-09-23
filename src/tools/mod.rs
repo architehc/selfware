@@ -579,7 +579,9 @@ impl ToolRegistry {
         registry.register_deferred(computer::ComputerMouseTool);
         registry.register_deferred(computer::ComputerKeyboardTool);
         registry.register_deferred(computer::ComputerScreenTool);
-        registry.register_deferred(computer::ComputerWindowTool);
+        // No [computer] config here; Agent::new re-registers it with
+        // config.computer so [computer.window_policy] applies.
+        registry.register_deferred(computer::ComputerWindowTool::default());
 
         // Deferred: Issue localization
         registry.register_deferred(if let Some(cfg) = safety_config {

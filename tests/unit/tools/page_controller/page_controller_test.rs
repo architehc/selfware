@@ -106,8 +106,13 @@ async fn test_page_control_invalid_action() {
 
 #[test]
 fn test_validate_url_allows_workspace_file() {
-    let _guard = crate::test_support::CwdGuard::hold();
-    let workspace_file = NamedTempFile::new_in(std::env::current_dir().unwrap()).unwrap();
+    // Hermetic workspace: a fresh tempdir becomes the cwd (under the shared
+    // cwd lock, restored on drop) instead of creating the file in whatever
+    // the process cwd happens to be — that raced with tests that call
+    // set_current_dir, and littered the checkout.
+    let workspace = tempdir().unwrap();
+    let _guard = crate::test_support::CwdGuard::enter(workspace.path());
+    let workspace_file = NamedTempFile::new_in(workspace.path()).unwrap();
     fs::write(workspace_file.path(), "<html><body>ok</body></html>").unwrap();
     let url = format!("file://{}", workspace_file.path().display());
 
@@ -454,4 +459,137 @@ async fn test_bridge_stderr_saturation_and_group_termination() {
         wait_until_pid_dead(sleeper_pid, std::time::Duration::from_secs(5)).await,
         "the bridge's child must be killed together with Node (group kill), not orphaned"
     );
+}
+
+// ── Bridge death: fail fast with the real cause ────────────────────────
+//
+// `sh` stubs stand in for Node so the transport is exercised without a
+// browser: the bridge dying must fail pending commands immediately (not after
+// timeout_ms + 5s) with the exit status and stderr tail.
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bridge_that_exits_immediately_fails_fast_with_cause() {
+    let bridge = PlaywrightBridge::spawn_program(
+        "sh",
+        &[
+            "-c",
+            "echo \"Error: Cannot find module 'playwright'\" >&2; exit 1",
+        ],
+    )
+    .await
+    .expect("spawn sh stub");
+
+    let start = std::time::Instant::now();
+    let err = bridge
+        .send(json!({"action": "title"}), 30_000)
+        .await
+        .expect_err("a dead bridge must fail the command");
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "must fail well under the 35s command timeout, took {elapsed:?}: {err:#}"
+    );
+    let typed = err
+        .downcast_ref::<BridgeTransportError>()
+        .unwrap_or_else(|| panic!("expected typed bridge error, got {err:#}"));
+    match typed {
+        // The write may race the exit and hit EPIPE instead of the EOF path;
+        // both are fast, typed, fatal causes that carry the exit detail.
+        BridgeTransportError::Exited { detail } | BridgeTransportError::BrokenPipe { detail } => {
+            assert!(
+                detail.contains("Cannot find module 'playwright'"),
+                "stderr tail expected: {typed}"
+            );
+        }
+        other => panic!("unexpected cause: {other:?}"),
+    }
+
+    // Dead now: the next command fails immediately with the same cause.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while bridge.dead_cause().is_none() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let cause = bridge.dead_cause().expect("bridge marked dead");
+    let start = std::time::Instant::now();
+    let again = bridge
+        .send(json!({"action": "url"}), 30_000)
+        .await
+        .unwrap_err();
+    assert!(start.elapsed() < std::time::Duration::from_millis(200));
+    assert_eq!(again.downcast_ref::<BridgeTransportError>(), Some(&cause));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bridge_dying_mid_command_fails_pending_command_fast() {
+    // Reads the command, never answers, then dies.
+    let bridge = PlaywrightBridge::spawn_program(
+        "sh",
+        &[
+            "-c",
+            "read line; sleep 0.5; echo 'chromium crashed' >&2; exit 4",
+        ],
+    )
+    .await
+    .expect("spawn sh stub");
+
+    let start = std::time::Instant::now();
+    let err = bridge
+        .send(
+            json!({"action": "goto", "url": "https://example.com"}),
+            30_000,
+        )
+        .await
+        .expect_err("bridge dies with the command pending");
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "pending command must fail when the bridge exits, took {elapsed:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        matches!(
+            err.downcast_ref::<BridgeTransportError>(),
+            Some(BridgeTransportError::Exited { .. })
+        ),
+        "{err:#}"
+    );
+    assert!(msg.contains('4'), "exit status expected: {msg}");
+    assert!(
+        msg.contains("chromium crashed"),
+        "stderr tail expected: {msg}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bridge_write_to_closed_stdin_is_typed_broken_pipe() {
+    let bridge = PlaywrightBridge::spawn_program("sh", &["-c", "exec 0<&-; sleep 30"])
+        .await
+        .expect("spawn sh stub");
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let mut broken = None;
+    for _ in 0..5 {
+        // timeout_ms 0 => waits 5s at most per attempt.
+        let err = bridge
+            .send(json!({"action": "title"}), 0)
+            .await
+            .unwrap_err();
+        match err.downcast_ref::<BridgeTransportError>() {
+            Some(e @ BridgeTransportError::BrokenPipe { .. }) => {
+                broken = Some(e.clone());
+                break;
+            }
+            Some(BridgeTransportError::TimedOut { .. }) => continue,
+            other => panic!("unexpected error: {other:?} ({err:#})"),
+        }
+    }
+    let broken = broken.expect("write to closed stdin must surface as BrokenPipe");
+    assert!(broken.to_string().contains("broken pipe"), "{broken}");
+    let start = std::time::Instant::now();
+    let again = bridge.send(json!({"action": "url"}), 0).await.unwrap_err();
+    assert!(start.elapsed() < std::time::Duration::from_millis(200));
+    assert_eq!(again.downcast_ref::<BridgeTransportError>(), Some(&broken));
 }

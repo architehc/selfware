@@ -6,11 +6,12 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{oneshot, Mutex};
@@ -89,15 +90,18 @@ impl Language {
 }
 
 /// Server binary candidates for each language, tried in order.
-fn server_candidates(lang: Language) -> Vec<(&'static str, Vec<&'static str>)> {
-    match lang {
+fn server_candidates(lang: Language) -> Vec<(String, Vec<String>)> {
+    let list: Vec<(&str, Vec<&str>)> = match lang {
         Language::Rust => vec![("rust-analyzer", vec![])],
         Language::Python => vec![("pyright-langserver", vec!["--stdio"]), ("pylsp", vec![])],
         Language::TypeScript | Language::JavaScript => {
             vec![("typescript-language-server", vec!["--stdio"])]
         }
         Language::Go => vec![("gopls", vec!["serve"])],
-    }
+    };
+    list.into_iter()
+        .map(|(c, a)| (c.to_string(), a.into_iter().map(String::from).collect()))
+        .collect()
 }
 
 /// Check if a binary is available on PATH.
@@ -113,16 +117,270 @@ async fn binary_exists(name: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Typed transport failures
+// ---------------------------------------------------------------------------
+
+/// Default time a `textDocument/*` / `workspace/*` request waits.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Time the `initialize` handshake waits.
+const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Time the polite `shutdown` request waits before the server is killed.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+/// Default bound on waiting for indexing to finish before retrying an empty
+/// query once (see [`query_settling_indexing`]).
+pub const DEFAULT_INDEXING_WAIT: Duration = Duration::from_secs(10);
+
+/// Typed, infrastructure-level failure of a language-server connection (same
+/// shape as `mcp::transport::McpTransportError`).
+///
+/// These are *transport* failures — the server process died, its pipes broke,
+/// or it never answered — as opposed to JSON-RPC errors the server returned on
+/// purpose. Cloneable so one death can fail every pending request with the
+/// same cause. Callers can `downcast_ref::<LspTransportError>()`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum LspTransportError {
+    /// The server's stdout reached EOF: the process exited or closed its output.
+    #[error("LSP server '{server}' exited / closed its output{detail}")]
+    ServerExited { server: String, detail: String },
+    /// Reading the server's stdout failed (I/O or framing error).
+    #[error("LSP server '{server}' output could not be read: {message}")]
+    ReadFailed { server: String, message: String },
+    /// Writing to the server's stdin hit a broken pipe (the server exited or
+    /// closed its stdin). SIGPIPE is ignored, so this surfaces as EPIPE.
+    #[error("LSP server '{server}' input is closed (broken pipe){detail}")]
+    BrokenPipe { server: String, detail: String },
+    /// Writing to the server's stdin failed for another reason.
+    #[error("LSP server '{server}' write failed: {message}")]
+    WriteFailed { server: String, message: String },
+    /// The server did not answer the request in time (the connection is NOT
+    /// marked dead — a slow server may still answer later requests).
+    #[error("LSP request '{method}' to server '{server}' timed out after {secs}s")]
+    TimedOut {
+        server: String,
+        method: String,
+        secs: u64,
+    },
+}
+
+fn is_broken_pipe(err: &anyhow::Error) -> bool {
+    err.chain()
+        .filter_map(|c| c.downcast_ref::<std::io::Error>())
+        .any(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
+}
+
+type PendingMap = HashMap<u64, oneshot::Sender<Value>>;
+
+/// `None` while the connection is usable, otherwise the first fatal cause.
+/// Checked under the pending-map lock (see [`mark_dead`]) so no request can
+/// register after the drain and then wait out its full timeout.
+type DeadState = Arc<std::sync::Mutex<Option<LspTransportError>>>;
+
+/// Record the connection as dead (first cause wins) and fail every pending
+/// request immediately by dropping its response channel.
+async fn mark_dead(pending: &Mutex<PendingMap>, dead: &DeadState, cause: LspTransportError) {
+    let mut pending = pending.lock().await;
+    {
+        let mut slot = dead.lock().unwrap_or_else(|p| p.into_inner());
+        if slot.is_none() {
+            *slot = Some(cause);
+        }
+    }
+    // Dropping the senders wakes every waiter with `RecvError`; `request`
+    // then reports the recorded cause.
+    pending.clear();
+}
+
+fn dead_cause(dead: &DeadState) -> Option<LspTransportError> {
+    dead.lock().unwrap_or_else(|p| p.into_inner()).clone()
+}
+
+/// Keep the last few stderr lines of the server so an exit can be explained
+/// (rustup's "Unknown binary 'rust-analyzer'", a stack trace, ...).
+const STDERR_TAIL_LINES: usize = 5;
+const STDERR_TAIL_LINE_MAX_CHARS: usize = 300;
+
+type StderrTail = Arc<std::sync::Mutex<std::collections::VecDeque<String>>>;
+
+/// Actionable remediation for well-known "server not really installed"
+/// failures. rustup installs a `rust-analyzer` proxy on PATH even when the
+/// component is missing; the proxy then exits immediately with
+/// `error: Unknown binary 'rust-analyzer' in official toolchain ...` (older
+/// rustup) or `error: 'rust-analyzer' is not installed for the toolchain ...`
+/// (newer rustup).
+fn remediation_hint(server: &str, stderr: &[String]) -> Option<String> {
+    let joined = stderr.join("\n");
+    let rustup_missing_component = joined.contains("Unknown binary")
+        || joined.contains("is not installed for the toolchain")
+        || joined.contains("rustup component add");
+    if !rustup_missing_component {
+        return None;
+    }
+    let component = if joined.contains("rust-analyzer") || server.ends_with("rust-analyzer") {
+        "rust-analyzer".to_string()
+    } else {
+        Path::new(server)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| server.to_string())
+    };
+    Some(format!(
+        "{component} is not installed for this toolchain; run `rustup component add {component}`"
+    ))
+}
+
+/// Describe why the server's pipes closed: exit status (if the process has
+/// exited within a short grace period), a remediation hint for known causes,
+/// and the tail of its stderr. Waits (<=300ms) for both the exit status and
+/// the stderr drain, since stdout EOF usually precedes both by a hair.
+async fn describe_exit(
+    server: &str,
+    child: &Mutex<Child>,
+    stderr_tail: &StderrTail,
+    stderr_done: &AtomicBool,
+) -> String {
+    let mut status = None;
+    for _ in 0..30 {
+        if status.is_none() {
+            if let Ok(mut c) = child.try_lock() {
+                if let Ok(Some(s)) = c.try_wait() {
+                    status = Some(s);
+                }
+            }
+        }
+        if status.is_some() && stderr_done.load(Ordering::Acquire) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let mut detail = String::new();
+    if let Some(s) = status {
+        detail.push_str(&format!(" ({s})"));
+    }
+    let tail: Vec<String> = stderr_tail
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .cloned()
+        .collect();
+    if let Some(hint) = remediation_hint(server, &tail) {
+        detail.push_str(&format!(": {hint}"));
+    }
+    if !tail.is_empty() {
+        detail.push_str(&format!("; stderr: {}", tail.join(" | ")));
+    }
+    detail
+}
+
+// ---------------------------------------------------------------------------
+// Indexing state
+// ---------------------------------------------------------------------------
+
+/// Tracks whether the server is still indexing.
+///
+/// Servers report work through `$/progress` streams, several of which may be
+/// active at once (rust-analyzer: "Fetching", "Roots Scanned", "Indexing",
+/// ...). A single boolean was cleared by ANY stream's `end` while others were
+/// still running, so an empty result during indexing was reported as a plain
+/// "ok, 0 references". Active tokens are tracked as a set instead.
+#[derive(Debug, Default)]
+struct IndexingState {
+    /// Progress tokens that have sent `begin` but not yet `end`.
+    active_tokens: HashSet<String>,
+    /// `experimental/serverStatus` said the server is not quiescent.
+    server_busy: bool,
+}
+
+impl IndexingState {
+    fn is_indexing(&self) -> bool {
+        !self.active_tokens.is_empty() || self.server_busy
+    }
+
+    /// Apply a `$/progress` notification's params.
+    fn apply_progress(&mut self, params: &Value) {
+        let token = match params.get("token") {
+            Some(Value::String(s)) => s.clone(),
+            Some(other) => other.to_string(),
+            None => String::new(),
+        };
+        match params
+            .get("value")
+            .and_then(|v| v.get("kind"))
+            .and_then(|k| k.as_str())
+        {
+            Some("begin") => {
+                self.active_tokens.insert(token);
+            }
+            Some("end") => {
+                self.active_tokens.remove(&token);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Result of an LSP query plus whether the server was still indexing when it
+/// was produced. An EMPTY value with `still_indexing` is NOT a confirmed
+/// "nothing found" (Rule 3): the index may simply not cover it yet.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LspQueryOutcome<T> {
+    pub value: T,
+    pub still_indexing: bool,
+}
+
+/// Run `query`; if it comes back empty while the server is indexing, wait (at
+/// most `max_wait`) for indexing to finish, then retry once. The outcome says
+/// whether the server was still indexing when the returned value was produced.
+pub(crate) async fn query_settling_indexing<T, Q, Fut>(
+    is_indexing: impl Fn() -> bool,
+    is_empty: impl Fn(&T) -> bool,
+    max_wait: Duration,
+    mut query: Q,
+) -> Result<LspQueryOutcome<T>>
+where
+    Q: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let first = query().await?;
+    if !is_empty(&first) || !is_indexing() {
+        return Ok(LspQueryOutcome {
+            still_indexing: is_indexing(),
+            value: first,
+        });
+    }
+    debug!("LSP query empty while the server is indexing; waiting up to {max_wait:?}");
+    let deadline = tokio::time::Instant::now() + max_wait;
+    while is_indexing() {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        tokio::time::sleep((deadline - now).min(Duration::from_millis(100))).await;
+    }
+    let second = query().await?;
+    Ok(LspQueryOutcome {
+        still_indexing: is_indexing(),
+        value: second,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // LSP transport (Content-Length framed JSON-RPC 2.0)
 // ---------------------------------------------------------------------------
 
 /// A single connection to a language server process.
 struct LspServerConnection {
     stdin: Arc<Mutex<tokio::process::ChildStdin>>,
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>,
+    pending: Arc<Mutex<PendingMap>>,
+    /// First fatal cause once the connection died (EOF, read/write failure);
+    /// later requests fail fast with it instead of waiting for a timeout.
+    dead: DeadState,
+    /// Server command, used in error messages.
+    server_name: String,
+    stderr_tail: StderrTail,
+    stderr_done: Arc<AtomicBool>,
     /// Published diagnostics keyed by file URI.
     diagnostics: Arc<Mutex<HashMap<String, Vec<Diagnostic>>>>,
-    is_indexing: Arc<AtomicBool>,
+    indexing: Arc<std::sync::Mutex<IndexingState>>,
     next_id: AtomicU64,
     child: Arc<Mutex<Child>>,
     reader_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -132,7 +390,12 @@ struct LspServerConnection {
 
 impl LspServerConnection {
     /// Spawn the language server and start the background reader.
-    async fn spawn(command: &str, args: &[&str], root: &Path, language: Language) -> Result<Self> {
+    async fn spawn(
+        command: &str,
+        args: &[String],
+        root: &Path,
+        language: Language,
+    ) -> Result<Self> {
         info!(
             "Spawning LSP server: {} {:?} (lang={:?})",
             command, args, language
@@ -143,6 +406,7 @@ impl LspServerConnection {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .current_dir(root);
 
         // A language server is third-party code that should not inherit the
@@ -177,47 +441,121 @@ impl LspServerConnection {
             .stdout
             .take()
             .context("Failed to capture LSP stdout")?;
+        // stderr was piped but never read: a chatty server could fill the OS
+        // pipe buffer and block forever, and an exit's real cause (e.g.
+        // rustup's "Unknown binary 'rust-analyzer'") was invisible. Drain it
+        // and keep a short tail for error messages.
+        let stderr = child
+            .stderr
+            .take()
+            .context("Failed to capture LSP stderr")?;
 
-        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let pending: Arc<Mutex<PendingMap>> = Arc::new(Mutex::new(HashMap::new()));
         let diagnostics: Arc<Mutex<HashMap<String, Vec<Diagnostic>>>> =
             Arc::new(Mutex::new(HashMap::new()));
-        let is_indexing = Arc::new(AtomicBool::new(false));
+        let indexing = Arc::new(std::sync::Mutex::new(IndexingState::default()));
+        let dead: DeadState = Arc::new(std::sync::Mutex::new(None));
+        let stderr_tail: StderrTail = Arc::new(std::sync::Mutex::new(Default::default()));
+        let stderr_done = Arc::new(AtomicBool::new(false));
+        let child = Arc::new(Mutex::new(child));
 
-        let pending_clone = Arc::clone(&pending);
-        let diag_clone = Arc::clone(&diagnostics);
-        let indexing_clone = Arc::clone(&is_indexing);
-
-        // Background task: read Content-Length framed messages from stdout.
-        let reader_handle = tokio::spawn(async move {
-            let mut reader = BufReader::new(stdout);
-            loop {
-                match read_lsp_message(&mut reader).await {
-                    Ok(Some(msg)) => {
-                        Self::dispatch_message(msg, &pending_clone, &diag_clone, &indexing_clone)
-                            .await;
-                    }
-                    Ok(None) => {
-                        debug!("LSP stdout closed");
-                        break;
-                    }
-                    Err(e) => {
-                        debug!("LSP read error: {}", e);
-                        break;
+        // Background task: drain stderr, keeping the last few lines.
+        {
+            let stderr_tail = Arc::clone(&stderr_tail);
+            let stderr_done = Arc::clone(&stderr_done);
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stderr);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    match reader.read_line(&mut line).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {
+                            let trimmed = line.trim();
+                            if !trimmed.is_empty() {
+                                debug!("LSP server stderr: {}", trimmed);
+                                let mut tail =
+                                    stderr_tail.lock().unwrap_or_else(|p| p.into_inner());
+                                if tail.len() == STDERR_TAIL_LINES {
+                                    tail.pop_front();
+                                }
+                                tail.push_back(
+                                    trimmed.chars().take(STDERR_TAIL_LINE_MAX_CHARS).collect(),
+                                );
+                            }
+                        }
                     }
                 }
-            }
-        });
+                stderr_done.store(true, Ordering::Release);
+            });
+        }
+
+        // Background task: read Content-Length framed messages from stdout.
+        // On EOF / read error the connection is marked dead and every pending
+        // request fails immediately with the cause (exit status + stderr
+        // tail) instead of waiting out its 5s/30s timeout.
+        let reader_handle = {
+            let pending = Arc::clone(&pending);
+            let diagnostics = Arc::clone(&diagnostics);
+            let indexing = Arc::clone(&indexing);
+            let dead = Arc::clone(&dead);
+            let stderr_tail = Arc::clone(&stderr_tail);
+            let stderr_done = Arc::clone(&stderr_done);
+            let child = Arc::clone(&child);
+            let server = command.to_string();
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stdout);
+                loop {
+                    match read_lsp_message(&mut reader).await {
+                        Ok(Some(msg)) => {
+                            Self::dispatch_message(msg, &pending, &diagnostics, &indexing).await;
+                        }
+                        Ok(None) => {
+                            let detail =
+                                describe_exit(&server, &child, &stderr_tail, &stderr_done).await;
+                            warn!("LSP server '{}' closed its output{}", server, detail);
+                            mark_dead(
+                                &pending,
+                                &dead,
+                                LspTransportError::ServerExited {
+                                    server: server.clone(),
+                                    detail,
+                                },
+                            )
+                            .await;
+                            break;
+                        }
+                        Err(e) => {
+                            warn!("LSP server '{}' stdout read/framing error: {:#}", server, e);
+                            mark_dead(
+                                &pending,
+                                &dead,
+                                LspTransportError::ReadFailed {
+                                    server: server.clone(),
+                                    message: format!("{e:#}"),
+                                },
+                            )
+                            .await;
+                            break;
+                        }
+                    }
+                }
+            })
+        };
 
         let root_uri = format!("file://{}", root.display());
 
         Ok(Self {
             stdin: Arc::new(Mutex::new(stdin)),
             pending,
+            dead,
+            server_name: command.to_string(),
+            stderr_tail,
+            stderr_done,
             diagnostics,
-            is_indexing,
+            indexing,
             next_id: AtomicU64::new(1),
-            child: Arc::new(Mutex::new(child)),
+            child,
             reader_handle: Mutex::new(Some(reader_handle)),
             language,
             root_uri,
@@ -227,9 +565,9 @@ impl LspServerConnection {
     /// Route an incoming JSON message to the right handler.
     async fn dispatch_message(
         msg: Value,
-        pending: &Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>,
+        pending: &Arc<Mutex<PendingMap>>,
         diagnostics: &Arc<Mutex<HashMap<String, Vec<Diagnostic>>>>,
-        indexing: &Arc<AtomicBool>,
+        indexing: &Arc<std::sync::Mutex<IndexingState>>,
     ) {
         // Is it a response (has "id" + either "result" or "error")?
         if let Some(id) = msg.get("id").and_then(|v| v.as_u64()) {
@@ -251,29 +589,36 @@ impl LspServerConnection {
                 }
             } else if method == "$/progress" {
                 if let Some(params) = msg.get("params") {
-                    if let Some(val) = params.get("value") {
-                        if let Some(kind) = val.get("kind").and_then(|k| k.as_str()) {
-                            match kind {
-                                "begin" => indexing.store(true, Ordering::Relaxed),
-                                "end" => indexing.store(false, Ordering::Relaxed),
-                                _ => {}
-                            }
-                        }
-                    }
+                    indexing
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .apply_progress(params);
                 }
             } else if method == "experimental/serverStatus" {
                 if let Some(params) = msg.get("params") {
                     if let Some(quiescent) = params.get("quiescent").and_then(|q| q.as_bool()) {
-                        indexing.store(!quiescent, Ordering::Relaxed);
+                        indexing
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .server_busy = !quiescent;
                     }
                 }
             }
         }
     }
 
-    /// Check if this server is currently indexing.
+    /// Check if this server is currently indexing (any progress stream still
+    /// active, or the server reported itself non-quiescent).
     pub fn is_indexing(&self) -> bool {
-        self.is_indexing.load(Ordering::Relaxed)
+        self.indexing
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_indexing()
+    }
+
+    /// The recorded fatal cause, if the connection is dead.
+    fn dead_cause(&self) -> Option<LspTransportError> {
+        dead_cause(&self.dead)
     }
 
     /// Parse and store diagnostics from `textDocument/publishDiagnostics`.
@@ -322,6 +667,26 @@ impl LspServerConnection {
 
     /// Send a JSON-RPC request and wait for the response (with timeout).
     async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        let timeout = if method == "initialize" {
+            INITIALIZE_TIMEOUT
+        } else {
+            REQUEST_TIMEOUT
+        };
+        self.request_with_timeout(method, params, timeout).await
+    }
+
+    /// Send a JSON-RPC request and wait at most `timeout` for the response.
+    ///
+    /// Fails fast with a typed [`LspTransportError`] when the server is (or
+    /// becomes) dead: registration checks the dead state under the pending
+    /// lock, the reader drains pending requests on EOF, and write errors mark
+    /// the connection dead.
+    async fn request_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
 
         let msg = serde_json::json!({
@@ -334,19 +699,39 @@ impl LspServerConnection {
         let (tx, rx) = oneshot::channel();
         {
             let mut pending = self.pending.lock().await;
+            if let Some(cause) = self.dead_cause() {
+                return Err(anyhow::Error::new(cause));
+            }
             pending.insert(id, tx);
         }
 
-        self.send_message(&msg).await?;
+        if let Err(e) = self.send_message(&msg).await {
+            self.pending.lock().await.remove(&id);
+            return Err(anyhow::Error::new(self.write_failed(&e).await));
+        }
         debug!("Sent LSP request: {} (id={})", method, id);
 
-        let timeout_secs = if method == "initialize" { 5 } else { 30 };
-        let response = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx)
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!("LSP request '{}' timed out after {}s", method, timeout_secs)
-            })?
-            .map_err(|_| anyhow::anyhow!("LSP response channel closed for '{}'", method))?;
+        let response = match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(_)) => {
+                // Sender dropped: the reader marked the connection dead.
+                let cause = self
+                    .dead_cause()
+                    .unwrap_or_else(|| LspTransportError::ServerExited {
+                        server: self.server_name.clone(),
+                        detail: String::new(),
+                    });
+                return Err(anyhow::Error::new(cause));
+            }
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                return Err(anyhow::Error::new(LspTransportError::TimedOut {
+                    server: self.server_name.clone(),
+                    method: method.to_string(),
+                    secs: timeout.as_secs(),
+                }));
+            }
+        };
 
         if let Some(error) = response.get("error") {
             let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
@@ -360,14 +745,44 @@ impl LspServerConnection {
         Ok(response.get("result").cloned().unwrap_or(Value::Null))
     }
 
+    /// Classify a stdin write failure, mark the connection dead, and return
+    /// the recorded cause (the reader's `ServerExited` may win the race — it
+    /// is equally fatal and carries the exit status).
+    async fn write_failed(&self, err: &anyhow::Error) -> LspTransportError {
+        let cause = if is_broken_pipe(err) {
+            LspTransportError::BrokenPipe {
+                server: self.server_name.clone(),
+                detail: describe_exit(
+                    &self.server_name,
+                    &self.child,
+                    &self.stderr_tail,
+                    &self.stderr_done,
+                )
+                .await,
+            }
+        } else {
+            LspTransportError::WriteFailed {
+                server: self.server_name.clone(),
+                message: format!("{err:#}"),
+            }
+        };
+        mark_dead(&self.pending, &self.dead, cause.clone()).await;
+        self.dead_cause().unwrap_or(cause)
+    }
+
     /// Send a JSON-RPC notification (no response expected).
     async fn notify(&self, method: &str, params: Value) -> Result<()> {
+        if let Some(cause) = self.dead_cause() {
+            return Err(anyhow::Error::new(cause));
+        }
         let msg = serde_json::json!({
             "jsonrpc": "2.0",
             "method": method,
             "params": params,
         });
-        self.send_message(&msg).await?;
+        if let Err(e) = self.send_message(&msg).await {
+            return Err(anyhow::Error::new(self.write_failed(&e).await));
+        }
         debug!("Sent LSP notification: {}", method);
         Ok(())
     }
@@ -427,27 +842,36 @@ impl LspServerConnection {
         Ok(result)
     }
 
+    /// Kill the server immediately (no polite shutdown) — used when it never
+    /// finished starting, so a hung server is not waited on again.
+    async fn kill_now(&self) {
+        let mut child = self.child.lock().await;
+        let _ = child.kill().await;
+        drop(child);
+        if let Some(h) = self.reader_handle.lock().await.take() {
+            h.abort();
+        }
+    }
+
     /// Gracefully shut down the server.
     async fn shutdown(&self) -> Result<()> {
         info!("Shutting down LSP server for {:?}", self.language);
 
-        // Send shutdown request (server should respond)
-        let _ = self.request("shutdown", Value::Null).await;
+        // A dead server cannot answer; skip the polite handshake entirely.
+        if self.dead_cause().is_none() {
+            // Send shutdown request (server should respond)
+            let _ = self
+                .request_with_timeout("shutdown", Value::Null, SHUTDOWN_TIMEOUT)
+                .await;
 
-        // Send exit notification
-        let _ = self.notify("exit", Value::Null).await;
+            // Send exit notification
+            let _ = self.notify("exit", Value::Null).await;
 
-        // Give the server a moment to exit gracefully, then kill
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-        let mut child = self.child.lock().await;
-        let _ = child.kill().await;
-
-        let mut handle = self.reader_handle.lock().await;
-        if let Some(h) = handle.take() {
-            h.abort();
+            // Give the server a moment to exit gracefully, then kill
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
+        self.kill_now().await;
         Ok(())
     }
 }
@@ -505,13 +929,24 @@ async fn read_lsp_message<R: tokio::io::AsyncRead + Unpin>(
 /// Client that manages language server connections for multiple languages.
 ///
 /// Lazily starts the appropriate server on the first request for a given
-/// language, and keeps it alive for the session. If a server crashes, it
-/// is restarted on the next request.
+/// language, and keeps it alive for the session. If a running server crashes,
+/// it is restarted on the next request. A server that FAILED TO START is
+/// remembered for the session: later calls fail immediately with the recorded
+/// cause instead of re-spawning it and waiting again.
 pub struct LspClient {
     connections: Arc<Mutex<HashMap<Language, Arc<LspServerConnection>>>>,
     project_root: PathBuf,
     /// Per-document version counters for `textDocument/didChange`.
     document_versions: Arc<Mutex<HashMap<String, u32>>>,
+    /// Start failures recorded this session, keyed by language.
+    failed_starts: Arc<Mutex<HashMap<Language, String>>>,
+    /// Serializes check-and-start so concurrent calls never race to spawn two
+    /// servers for the same language.
+    start_lock: Mutex<()>,
+    /// Replacement server candidates per language (tests, custom setups).
+    candidate_overrides: HashMap<Language, Vec<(String, Vec<String>)>>,
+    /// Upper bound on waiting for indexing before retrying an empty query.
+    indexing_wait: Duration,
 }
 
 impl LspClient {
@@ -521,7 +956,29 @@ impl LspClient {
             connections: Arc::new(Mutex::new(HashMap::new())),
             project_root: project_root.to_path_buf(),
             document_versions: Arc::new(Mutex::new(HashMap::new())),
+            failed_starts: Arc::new(Mutex::new(HashMap::new())),
+            start_lock: Mutex::new(()),
+            candidate_overrides: HashMap::new(),
+            indexing_wait: DEFAULT_INDEXING_WAIT,
         }
+    }
+
+    /// Use `candidates` (command, args) instead of the built-in server list
+    /// for `lang`.
+    pub fn with_server_candidates(
+        mut self,
+        lang: Language,
+        candidates: Vec<(String, Vec<String>)>,
+    ) -> Self {
+        self.candidate_overrides.insert(lang, candidates);
+        self
+    }
+
+    /// Override how long an empty query waits for indexing to finish before
+    /// its single retry (default [`DEFAULT_INDEXING_WAIT`]).
+    pub fn with_indexing_wait(mut self, wait: Duration) -> Self {
+        self.indexing_wait = wait;
+        self
     }
 
     /// Initialize (or lazily start) the language server for the given file.
@@ -539,36 +996,55 @@ impl LspClient {
 
     /// Get or start the connection for a language.
     async fn connection_for(&self, lang: Language) -> Result<Arc<LspServerConnection>> {
+        let _start = self.start_lock.lock().await;
         {
-            let conns = self.connections.lock().await;
+            let mut conns = self.connections.lock().await;
             if let Some(conn) = conns.get(&lang) {
-                // Check if the process is still alive.
-                let mut child = conn.child.lock().await;
-                match child.try_wait() {
-                    Ok(Some(_status)) => {
-                        // Process exited; fall through to restart.
-                        drop(child);
-                        drop(conns);
-                    }
-                    Ok(None) => {
-                        // Still running.
-                        return Ok(Arc::clone(conn));
-                    }
-                    Err(_) => {
-                        // Can't check; assume alive.
-                        return Ok(Arc::clone(conn));
-                    }
+                let alive = if conn.dead_cause().is_some() {
+                    false
+                } else {
+                    // Check if the process is still alive (can't check =>
+                    // assume alive).
+                    let mut child = conn.child.lock().await;
+                    !matches!(child.try_wait(), Ok(Some(_)))
+                };
+                if alive {
+                    return Ok(Arc::clone(conn));
+                }
+                // Died mid-session: drop it and fall through to restart.
+                if let Some(old) = conns.remove(&lang) {
+                    old.kill_now().await;
                 }
             }
         }
 
-        // Need to start a new server.
-        self.start_server(lang).await
+        if let Some(cause) = self.failed_starts.lock().await.get(&lang) {
+            bail!(
+                "LSP server for {:?} is unavailable this session (it failed to start earlier \
+                 and is not retried; restart selfware after fixing it): {}",
+                lang,
+                cause
+            );
+        }
+
+        match self.start_server(lang).await {
+            Ok(conn) => Ok(conn),
+            Err(e) => {
+                let cause = format!("{e:#}");
+                self.failed_starts.lock().await.insert(lang, cause.clone());
+                Err(e)
+            }
+        }
     }
 
     /// Start a language server, initialize it, and store the connection.
     async fn start_server(&self, lang: Language) -> Result<Arc<LspServerConnection>> {
-        let candidates = server_candidates(lang);
+        let candidates = self
+            .candidate_overrides
+            .get(&lang)
+            .cloned()
+            .unwrap_or_else(|| server_candidates(lang));
+        let mut failures: Vec<String> = Vec::new();
 
         for (cmd, args) in &candidates {
             if !binary_exists(cmd).await {
@@ -576,13 +1052,14 @@ impl LspClient {
                 continue;
             }
 
-            let str_args: Vec<&str> = args.to_vec();
-            match LspServerConnection::spawn(cmd, &str_args, &self.project_root, lang).await {
+            match LspServerConnection::spawn(cmd, args, &self.project_root, lang).await {
                 Ok(conn) => {
-                    // Run the initialize handshake.
+                    // Run the initialize handshake. A dead server fails this
+                    // fast with its exit cause (stderr tail, remediation).
                     if let Err(e) = conn.initialize().await {
-                        warn!("LSP initialize failed for {}: {}", cmd, e);
-                        let _ = conn.shutdown().await;
+                        warn!("LSP initialize failed for {}: {:#}", cmd, e);
+                        failures.push(format!("{e:#}"));
+                        conn.kill_now().await;
                         continue;
                     }
 
@@ -592,16 +1069,27 @@ impl LspClient {
                     return Ok(conn);
                 }
                 Err(e) => {
-                    debug!("Failed to spawn {}: {}", cmd, e);
+                    debug!("Failed to spawn {}: {:#}", cmd, e);
+                    failures.push(format!("{e:#}"));
                     continue;
                 }
             }
         }
 
+        if failures.is_empty() {
+            bail!(
+                "No LSP server available for {:?}. Install one of: {:?}",
+                lang,
+                candidates
+                    .iter()
+                    .map(|(c, _)| c.as_str())
+                    .collect::<Vec<_>>()
+            )
+        }
         bail!(
-            "No LSP server available for {:?}. Install one of: {:?}",
+            "LSP server for {:?} failed to start: {}",
             lang,
-            candidates.iter().map(|(c, _)| *c).collect::<Vec<_>>()
+            failures.join("; ")
         )
     }
 
@@ -733,8 +1221,57 @@ impl LspClient {
         .await
     }
 
+    /// Run `query` against `conn`; an empty result while the server is
+    /// indexing waits (bounded) for indexing to finish and is retried once.
+    async fn settled<T, Q, Fut>(
+        &self,
+        conn: &Arc<LspServerConnection>,
+        is_empty: impl Fn(&T) -> bool,
+        query: Q,
+    ) -> Result<LspQueryOutcome<T>>
+    where
+        Q: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let probe = Arc::clone(conn);
+        query_settling_indexing(
+            move || probe.is_indexing(),
+            is_empty,
+            self.indexing_wait,
+            query,
+        )
+        .await
+    }
+
+    /// Issue a position-based location request (`definition`, `references`,
+    /// `implementation`) with indexing settling.
+    async fn location_query(
+        &self,
+        conn: &Arc<LspServerConnection>,
+        method: &'static str,
+        params: Value,
+    ) -> Result<LspQueryOutcome<Vec<Location>>> {
+        self.settled(conn, Vec::is_empty, || {
+            let conn = Arc::clone(conn);
+            let params = params.clone();
+            async move {
+                let result = conn.request(method, params).await?;
+                Self::parse_locations(&result)
+            }
+        })
+        .await
+    }
+
     /// Go to the definition of the symbol at the given position.
-    pub async fn goto_definition(&self, file: &str, line: u32, col: u32) -> Result<Vec<Location>> {
+    ///
+    /// `still_indexing` on an empty outcome means "not found YET", not a
+    /// confirmed absence.
+    pub async fn goto_definition(
+        &self,
+        file: &str,
+        line: u32,
+        col: u32,
+    ) -> Result<LspQueryOutcome<Vec<Location>>> {
         let lang = Language::from_path(file)
             .ok_or_else(|| anyhow::anyhow!("Cannot detect language for: {}", file))?;
         let conn = self.connection_for(lang).await?;
@@ -742,95 +1279,104 @@ impl LspClient {
         let content = tokio::fs::read_to_string(&file).await.unwrap_or_default();
         self.did_open(file, &content).await?;
 
-        let result = conn
-            .request(
+        let outcome = self
+            .location_query(
+                &conn,
                 "textDocument/definition",
                 serde_json::json!({
                     "textDocument": { "uri": Self::file_uri(file) },
                     "position": { "line": line, "character": col }
                 }),
             )
-            .await?;
+            .await;
 
         // Close the document so the server doesn't leak it.
         let _ = self.did_close(file).await;
-
-        let locations = Self::parse_locations(&result)?;
-        if locations.is_empty() && conn.is_indexing() {
-            debug!("LSP goto_definition returned empty results while server is still indexing");
-        }
-        Ok(locations)
+        outcome
     }
 
     /// Find all references to the symbol at the given position.
-    pub async fn find_references(&self, file: &str, line: u32, col: u32) -> Result<Vec<Location>> {
+    ///
+    /// `still_indexing` on an empty outcome means "0 references found SO
+    /// FAR", not a confirmed zero.
+    pub async fn find_references(
+        &self,
+        file: &str,
+        line: u32,
+        col: u32,
+    ) -> Result<LspQueryOutcome<Vec<Location>>> {
         let lang = Language::from_path(file)
             .ok_or_else(|| anyhow::anyhow!("Cannot detect language for: {}", file))?;
         let conn = self.connection_for(lang).await?;
 
-        let result = conn
-            .request(
-                "textDocument/references",
-                serde_json::json!({
-                    "textDocument": { "uri": Self::file_uri(file) },
-                    "position": { "line": line, "character": col },
-                    "context": { "includeDeclaration": true }
-                }),
-            )
-            .await?;
-
-        let locations = Self::parse_locations(&result)?;
-        if locations.is_empty() && conn.is_indexing() {
-            debug!("LSP find_references returned empty results while server is still indexing");
-        }
-        Ok(locations)
+        self.location_query(
+            &conn,
+            "textDocument/references",
+            serde_json::json!({
+                "textDocument": { "uri": Self::file_uri(file) },
+                "position": { "line": line, "character": col },
+                "context": { "includeDeclaration": true }
+            }),
+        )
+        .await
     }
 
     /// List all symbols in a document.
-    pub async fn document_symbols(&self, file: &str) -> Result<Vec<SymbolInfo>> {
+    pub async fn document_symbols(&self, file: &str) -> Result<LspQueryOutcome<Vec<SymbolInfo>>> {
         let lang = Language::from_path(file)
             .ok_or_else(|| anyhow::anyhow!("Cannot detect language for: {}", file))?;
         let conn = self.connection_for(lang).await?;
+        let params = serde_json::json!({
+            "textDocument": { "uri": Self::file_uri(file) }
+        });
 
-        let result = conn
-            .request(
-                "textDocument/documentSymbol",
-                serde_json::json!({
-                    "textDocument": { "uri": Self::file_uri(file) }
-                }),
-            )
-            .await?;
-
-        Self::parse_symbols(&result)
+        self.settled(&conn, Vec::is_empty, || {
+            let conn = Arc::clone(&conn);
+            let params = params.clone();
+            async move {
+                let result = conn.request("textDocument/documentSymbol", params).await?;
+                Self::parse_symbols(&result)
+            }
+        })
+        .await
     }
 
     /// Get hover information for a symbol.
-    pub async fn hover(&self, file: &str, line: u32, col: u32) -> Result<Option<String>> {
+    pub async fn hover(
+        &self,
+        file: &str,
+        line: u32,
+        col: u32,
+    ) -> Result<LspQueryOutcome<Option<String>>> {
         let lang = Language::from_path(file)
             .ok_or_else(|| anyhow::anyhow!("Cannot detect language for: {}", file))?;
         let conn = self.connection_for(lang).await?;
+        let params = serde_json::json!({
+            "textDocument": { "uri": Self::file_uri(file) },
+            "position": { "line": line, "character": col }
+        });
 
-        let result = conn
-            .request(
-                "textDocument/hover",
-                serde_json::json!({
-                    "textDocument": { "uri": Self::file_uri(file) },
-                    "position": { "line": line, "character": col }
-                }),
-            )
-            .await?;
+        self.settled(&conn, Option::is_none, || {
+            let conn = Arc::clone(&conn);
+            let params = params.clone();
+            async move {
+                let result = conn.request("textDocument/hover", params).await?;
+                Ok(Self::parse_hover(&result))
+            }
+        })
+        .await
+    }
 
+    /// Extract hover text: `contents` can be a string, MarkupContent, or array.
+    fn parse_hover(result: &Value) -> Option<String> {
         if result.is_null() {
-            return Ok(None);
+            return None;
         }
-
-        // Hover result can have "contents" as string, MarkupContent, or array.
-        let contents = result.get("contents");
-        match contents {
-            Some(Value::String(s)) => Ok(Some(s.clone())),
+        match result.get("contents") {
+            Some(Value::String(s)) => Some(s.clone()),
             Some(Value::Object(obj)) => {
                 // MarkupContent: { kind: "markdown"|"plaintext", value: "..." }
-                Ok(obj.get("value").and_then(|v| v.as_str()).map(String::from))
+                obj.get("value").and_then(|v| v.as_str()).map(String::from)
             }
             Some(Value::Array(arr)) => {
                 let parts: Vec<String> = arr
@@ -844,12 +1390,12 @@ impl LspClient {
                     })
                     .collect();
                 if parts.is_empty() {
-                    Ok(None)
+                    None
                 } else {
-                    Ok(Some(parts.join("\n\n")))
+                    Some(parts.join("\n\n"))
                 }
             }
-            _ => Ok(None),
+            _ => None,
         }
     }
 
@@ -864,36 +1410,61 @@ impl LspClient {
         Ok(diag_store.get(&uri).cloned().unwrap_or_default())
     }
 
+    /// `workspace/symbol` against one connection, with indexing settling.
+    async fn workspace_symbol_on(
+        &self,
+        conn: &Arc<LspServerConnection>,
+        query: &str,
+    ) -> Result<LspQueryOutcome<Vec<SymbolInfo>>> {
+        let params = serde_json::json!({ "query": query });
+        self.settled(conn, Vec::is_empty, || {
+            let conn = Arc::clone(conn);
+            let params = params.clone();
+            async move {
+                let result = conn.request("workspace/symbol", params).await?;
+                Self::parse_symbols(&result)
+            }
+        })
+        .await
+    }
+
     /// Find workspace symbols matching a query string.
-    pub async fn workspace_symbol(&self, query: &str) -> Result<Vec<SymbolInfo>> {
+    pub async fn workspace_symbol(&self, query: &str) -> Result<LspQueryOutcome<Vec<SymbolInfo>>> {
         // Try existing connections first.
         let langs: Vec<Language> = {
             let conns = self.connections.lock().await;
             conns.keys().cloned().collect()
         };
 
+        let mut any_indexing = false;
+        let mut queried: HashSet<Language> = HashSet::new();
         for lang in langs {
             if let Ok(conn) = self.connection_for(lang).await {
-                let result = conn
-                    .request("workspace/symbol", serde_json::json!({ "query": query }))
-                    .await?;
-                let symbols = Self::parse_symbols(&result)?;
-                if !symbols.is_empty() {
-                    return Ok(symbols);
+                queried.insert(lang);
+                let outcome = self.workspace_symbol_on(&conn, query).await?;
+                if !outcome.value.is_empty() {
+                    return Ok(outcome);
                 }
+                any_indexing |= outcome.still_indexing;
             }
         }
 
-        // No existing connections — try to start a server for the dominant language.
+        // Nothing yet — try (starting) a server for the dominant language.
         if let Some(lang) = detect_dominant_language(&self.project_root).await {
-            let conn = self.connection_for(lang).await?;
-            let result = conn
-                .request("workspace/symbol", serde_json::json!({ "query": query }))
-                .await?;
-            return Self::parse_symbols(&result);
+            if !queried.contains(&lang) {
+                let conn = self.connection_for(lang).await?;
+                let mut outcome = self.workspace_symbol_on(&conn, query).await?;
+                if outcome.value.is_empty() {
+                    outcome.still_indexing |= any_indexing;
+                }
+                return Ok(outcome);
+            }
         }
 
-        Ok(vec![])
+        Ok(LspQueryOutcome {
+            value: vec![],
+            still_indexing: any_indexing,
+        })
     }
 
     /// Go to the implementation of a symbol at a given position.
@@ -902,7 +1473,7 @@ impl LspClient {
         file: &str,
         line: u32,
         col: u32,
-    ) -> Result<Vec<Location>> {
+    ) -> Result<LspQueryOutcome<Vec<Location>>> {
         let lang = Language::from_path(file)
             .ok_or_else(|| anyhow::anyhow!("Cannot detect language for: {}", file))?;
         let conn = self.connection_for(lang).await?;
@@ -910,20 +1481,20 @@ impl LspClient {
         let content = tokio::fs::read_to_string(&file).await.unwrap_or_default();
         self.did_open(file, &content).await?;
 
-        let result = conn
-            .request(
+        let outcome = self
+            .location_query(
+                &conn,
                 "textDocument/implementation",
                 serde_json::json!({
                     "textDocument": { "uri": Self::file_uri(file) },
                     "position": { "line": line, "character": col }
                 }),
             )
-            .await?;
+            .await;
 
         // Close the document so the server doesn't leak it.
         let _ = self.did_close(file).await;
-
-        Self::parse_locations(&result)
+        outcome
     }
 
     /// Gracefully shut down all connected language servers.
