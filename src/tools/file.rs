@@ -11,6 +11,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, RwLock};
+#[cfg(not(unix))]
 use tempfile::NamedTempFile;
 
 /// Global safety configuration set at startup from the user-loaded config.
@@ -108,6 +109,11 @@ pub(crate) fn is_file_stale(path: &str) -> Option<bool> {
     let snapshot = guard.get(path)?;
 
     let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_file() {
+        // A FIFO/device swapped in after the read would hang or stream
+        // forever below; a changed file type is a change.
+        return Some(true);
+    }
     let current_mtime = metadata
         .modified()
         .ok()
@@ -129,10 +135,65 @@ pub(crate) fn is_file_stale(path: &str) -> Option<bool> {
 }
 
 /// Read a file as raw bytes and convert to String, handling non-UTF8 gracefully.
+///
+/// Path-based: kept for callers outside this module that have not moved to
+/// descriptor-checked reads. File tools here use [`read_file_checked`].
 pub(crate) async fn read_file_with_encoding(path: &Path) -> Result<(String, Vec<u8>)> {
     let bytes = tokio::fs::read(path).await?;
     let text = String::from_utf8_lossy(&bytes).into_owned();
     Ok((text, bytes))
+}
+
+/// The validator file tools use: the tool's resolved config anchored at the
+/// process working directory (the same anchor `validate_tool_path` uses).
+fn tool_path_validator(config: &SafetyConfig) -> PathValidator {
+    let working_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    PathValidator::new(config, working_dir)
+}
+
+/// Open `path` as a regular file whose DESCRIPTOR passed path policy
+/// (see [`PathValidator::open_regular_file`]). All reads must go through the
+/// returned handle — re-opening by path would reintroduce the
+/// validate-then-reopen race. FIFOs, sockets, devices and directories are
+/// refused without blocking.
+pub(crate) fn open_checked_regular(path: &str, config: &SafetyConfig) -> Result<std::fs::File> {
+    tool_path_validator(config)
+        .open_regular_file(path)
+        .map(|v| v.file)
+        .map_err(|e| anyhow::anyhow!(e))
+}
+
+/// Read all bytes from an already-checked handle, refusing anything larger
+/// than `limit` (checked against the descriptor's own size, not the path's).
+fn read_checked_handle(mut file: std::fs::File, limit: Option<u64>) -> Result<(String, Vec<u8>)> {
+    use std::io::Read;
+    if let Some(limit) = limit {
+        let size = file.metadata()?.len();
+        if size > limit {
+            return Err(ToolError::FileTooLarge { size, limit }.into());
+        }
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    Ok((text, bytes))
+}
+
+/// Descriptor-checked counterpart of [`read_file_with_encoding`]: validate,
+/// open once, re-validate the descriptor's real path, read from that same
+/// descriptor.
+pub(crate) async fn read_file_checked(
+    path: &str,
+    config: &SafetyConfig,
+    limit: Option<u64>,
+) -> Result<(String, Vec<u8>)> {
+    let path = path.to_string();
+    let config = config.clone();
+    tokio::task::spawn_blocking(move || {
+        let file = open_checked_regular(&path, &config)?;
+        read_checked_handle(file, limit)
+    })
+    .await?
 }
 
 /// Detect the line ending style of existing content.
@@ -330,13 +391,17 @@ impl Tool for FileRead {
         let args: Args = serde_json::from_value(args)?;
         let safety = resolve_safety_config(self.safety_config.as_ref());
         validate_tool_path(&args.path, &safety)?;
-        let path = PathBuf::from(&args.path);
 
         // A line_range lets us stream ONLY the requested slice, so a large file
         // can be sliced without loading it whole or tripping the size limit.
         if let Some((start, end)) = args.line_range {
+            let file = {
+                let p = args.path.clone();
+                let cfg = safety.clone();
+                tokio::task::spawn_blocking(move || open_checked_regular(&p, &cfg)).await??
+            };
             let (selected_content, lines_scanned, lossy, reached_eof) =
-                read_line_slice(&path, start, end).await?;
+                read_line_slice(file, start, end).await?;
             let lines_returned = selected_content.lines().count();
             if reached_eof {
                 // The scan consumed the whole file, so lines_scanned is the
@@ -364,18 +429,9 @@ impl Tool for FileRead {
             }
         }
 
-        // Whole-file read: guard against OOM on huge files.
-        if let Ok(metadata) = tokio::fs::metadata(&path).await {
-            if metadata.len() > MAX_READ_SIZE {
-                return Err(ToolError::FileTooLarge {
-                    size: metadata.len(),
-                    limit: MAX_READ_SIZE,
-                }
-                .into());
-            }
-        }
-
-        let (content, bytes) = read_file_with_encoding(&path).await?;
+        // Whole-file read: guard against OOM on huge files (checked against
+        // the opened descriptor's size inside read_file_checked).
+        let (content, bytes) = read_file_checked(&args.path, &safety, Some(MAX_READ_SIZE)).await?;
         let valid_utf8 = std::str::from_utf8(&bytes).is_ok();
 
         // Record snapshot for stale-guard detection
@@ -412,8 +468,7 @@ impl Tool for FileWrite {
             "type": "object",
             "properties": {
                 "path": {"type": "string"},
-                "content": {"type": "string"},
-                "backup": {"type": "boolean", "default": true}
+                "content": {"type": "string"}
             },
             "required": ["path", "content"]
         })
@@ -426,8 +481,14 @@ impl Tool for FileWrite {
             path: String,
             #[serde(alias = "text", alias = "body")]
             content: String,
-            #[serde(default = "default_true")]
-            backup: bool,
+            /// Accepted for compatibility with callers that still send it,
+            /// and ignored: on-disk `<file>.bak` siblings littered users'
+            /// workspaces (src/lib.rs.bak, README.md.bak). Undo comes from
+            /// the in-memory edit history; crash safety comes from the
+            /// atomic temp+rename write.
+            #[serde(default)]
+            #[allow(dead_code)]
+            backup: Option<bool>,
         }
 
         let args: Args = serde_json::from_value(args)?;
@@ -454,37 +515,35 @@ impl Tool for FileWrite {
             }
         }
 
-        // Detect existing line endings and preserve them
-        let content_to_write = if path.exists() {
-            let (existing, existing_bytes) = read_file_with_encoding(&path).await?;
+        // Detect existing line endings and preserve them. `exists()` follows
+        // symlinks and returns false for a missing target; anything that
+        // does exist is read through the descriptor-checked path, which
+        // also refuses FIFOs/devices/directories instead of blocking on them.
+        let existing = if path.exists() {
+            Some(read_file_checked(&args.path, &safety, None).await?)
+        } else {
+            None
+        };
+        let content_to_write = if let Some((existing_text, existing_bytes)) = &existing {
             // Overwriting is a full replace, but refuse to touch a non-UTF-8
             // file: the caller likely believes it is text, and the lossy read
             // above hides what is actually on disk.
-            ensure_valid_utf8(&existing_bytes, &args.path, "file_write")?;
-            let line_ending = detect_line_ending(&existing);
-            preserve_line_endings(&args.content, line_ending)
+            ensure_valid_utf8(existing_bytes, &args.path, "file_write")?;
+            let line_ending = detect_line_ending(existing_text);
+            let content_to_write = preserve_line_endings(&args.content, line_ending);
+            // Detect no-op writes (content identical to existing file).
+            // Valid UTF-8 was just proven, so the lossy text is exact.
+            if *existing_text == content_to_write {
+                return Err(ToolError::EditNoOp.into());
+            }
+            content_to_write
         } else {
             args.content.clone()
         };
 
-        // Detect no-op writes (content identical to existing file)
-        if path.exists() {
-            if let Ok(existing) = tokio::fs::read_to_string(&path).await {
-                if existing == content_to_write {
-                    return Err(ToolError::EditNoOp.into());
-                }
-            }
-        }
-
         validate_rust_source_if_needed(&path, &content_to_write)?;
 
-        // Create backup if exists
-        if args.backup && path.exists() {
-            let backup_path = format!("{}.bak", args.path);
-            tokio::fs::copy(&path, &backup_path).await?;
-        }
-
-        write_atomic(&path, &content_to_write).await?;
+        write_atomic_checked(&path, &content_to_write, &safety).await?;
         clear_file_snapshot(&args.path);
 
         Ok(serde_json::json!({
@@ -548,7 +607,7 @@ impl Tool for FileEdit {
             .into());
         }
 
-        let (content, original_bytes) = read_file_with_encoding(Path::new(&args.path)).await?;
+        let (content, original_bytes) = read_file_checked(&args.path, &safety, None).await?;
         ensure_valid_utf8(&original_bytes, &args.path, "file_edit")?;
         let line_ending = detect_line_ending(&content);
 
@@ -589,7 +648,7 @@ impl Tool for FileEdit {
         let new_content = content.replace(&args.old_str, &args.new_str);
         let new_content = preserve_line_endings(&new_content, line_ending);
         validate_rust_source_if_needed(Path::new(&args.path), &new_content)?;
-        write_atomic(Path::new(&args.path), &new_content).await?;
+        write_atomic_checked(Path::new(&args.path), &new_content, &safety).await?;
         clear_file_snapshot(&args.path);
 
         Ok(serde_json::json!({
@@ -663,7 +722,7 @@ impl Tool for FileDelete {
             .into());
         }
 
-        tokio::fs::remove_file(&path)
+        remove_file_checked(&args.path, &safety)
             .await
             .with_context(|| format!("Failed to delete file: {}", args.path))?;
 
@@ -764,7 +823,7 @@ impl Tool for FileMultiEdit {
         let mut file_line_endings: HashMap<String, &'static str> = HashMap::new();
 
         for (path, edits) in &edits_by_file {
-            let (content, original_bytes) = read_file_with_encoding(Path::new(path)).await?;
+            let (content, original_bytes) = read_file_checked(path, &safety, None).await?;
             ensure_valid_utf8(&original_bytes, path, "file_multi_edit")?;
             file_line_endings.insert(path.clone(), detect_line_ending(&content));
 
@@ -873,7 +932,7 @@ impl Tool for FileMultiEdit {
             finals.push((PathBuf::from(path), final_content));
         }
 
-        write_all_atomic(&finals).await?;
+        write_all_atomic_checked(&finals, &safety).await?;
         for (path, _) in &finals {
             clear_file_snapshot(&path.to_string_lossy());
         }
@@ -1120,9 +1179,6 @@ impl Tool for DirectoryTree {
     }
 }
 
-fn default_true() -> bool {
-    true
-}
 fn default_three() -> usize {
     3
 }
@@ -1188,8 +1244,11 @@ fn validate_rust_source_if_needed(path: &Path, content: &str) -> Result<()> {
 /// Returns the joined slice, the number of lines scanned (== the true total
 /// only when the scan reached EOF), and whether any returned line contained
 /// invalid UTF-8 (i.e. the returned text is lossy rather than exact).
+///
+/// Takes the descriptor-checked handle from [`open_checked_regular`] — never
+/// a path — so the slice is read from exactly the object that was validated.
 async fn read_line_slice(
-    path: &Path,
+    file: std::fs::File,
     start: usize,
     end: usize,
 ) -> Result<(String, usize, bool, bool)> {
@@ -1197,7 +1256,7 @@ async fn read_line_slice(
     // Preserve the legacy contract that an inverted range (end < start) yields
     // the single line at `start`.
     let effective_end = end.max(start);
-    let file = tokio::fs::File::open(path).await?;
+    let file = tokio::fs::File::from_std(file);
     let mut reader = BufReader::new(file);
     let mut selected: Vec<String> = Vec::new();
     let mut lineno = 0usize;
@@ -1235,18 +1294,24 @@ async fn read_line_slice(
 /// Write content to a file atomically using a temporary file and rename.
 ///
 /// The existing file's permission mode is carried over to the replacement —
-/// `NamedTempFile` is created `0600`, so without this an executable would
+/// the temp file is created `0600`, so without this an executable would
 /// silently lose `+x` and a shared config would become owner-only on every
 /// edit. New files keep the temp-file default.
+///
+/// No policy re-check: for callers outside this module that validated with
+/// their own config. File tools use [`write_atomic_checked`].
 pub(crate) async fn write_atomic(path: &Path, content: &str) -> Result<()> {
     write_all_atomic(&[(path.to_path_buf(), content.to_string())]).await
 }
 
-/// Capture the unix permission mode of an existing file, if it exists.
-#[cfg(unix)]
-fn existing_file_mode(path: &Path) -> Option<u32> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).ok().map(|m| m.permissions().mode())
+/// [`write_atomic`] with the pinned parent directory's real location
+/// re-validated against `config` (see [`write_all_atomic_checked`]).
+pub(crate) async fn write_atomic_checked(
+    path: &Path,
+    content: &str,
+    config: &SafetyConfig,
+) -> Result<()> {
+    write_all_atomic_checked(&[(path.to_path_buf(), content.to_string())], config).await
 }
 
 /// Atomically write several files at once: stage every replacement in a temp
@@ -1254,61 +1319,387 @@ fn existing_file_mode(path: &Path) -> Option<u32> {
 /// persisted are rolled back from their captured pre-images so a multi-file
 /// batch never commits half-way. Each replacement inherits the target's
 /// existing permission mode (see [`write_atomic`]).
+///
+/// On Unix all I/O is fd-relative to the pinned parent directory (see
+/// [`write_all_atomic_checked`]); without a config, the directory's location
+/// is not re-validated.
 pub(crate) async fn write_all_atomic(files: &[(PathBuf, String)]) -> Result<()> {
-    // Capture pre-images up front so a mid-batch persist failure can roll back.
-    let mut pre_images: Vec<(PathBuf, Option<Vec<u8>>)> = Vec::with_capacity(files.len());
-    for (path, _) in files {
-        pre_images.push((path.clone(), tokio::fs::read(path).await.ok()));
-    }
-
-    // NamedTempFile and Write::write_all are sync APIs; offload to a blocking
-    // thread so we don't block the async executor.
     let files_owned: Vec<(PathBuf, String)> = files.to_vec();
-    tokio::task::spawn_blocking(move || {
-        // Phase 1: stage every replacement in a temp file in the target dir.
-        let mut staged: Vec<(NamedTempFile, PathBuf)> = Vec::with_capacity(files_owned.len());
-        for (path, content) in &files_owned {
-            let parent = path
-                .parent()
-                .ok_or_else(|| anyhow::anyhow!("Invalid file path (no parent)"))?;
-            std::fs::create_dir_all(parent)?;
-            let mut temp = NamedTempFile::new_in(parent)?;
-            temp.write_all(content.as_bytes())?;
-            #[cfg(unix)]
-            if let Some(mode) = existing_file_mode(path) {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(
-                    temp.path(),
-                    std::fs::Permissions::from_mode(mode & 0o7777),
-                )?;
-            }
-            staged.push((temp, path.clone()));
-        }
+    tokio::task::spawn_blocking(move || write_all_blocking(&files_owned, None)).await?
+}
 
-        // Phase 2: persist them all; roll back earlier persists on failure.
-        for (idx, (temp, path)) in staged.into_iter().enumerate() {
-            if let Err(e) = temp.persist(&path) {
-                for (rb_path, pre_image) in pre_images.iter().take(idx) {
-                    match pre_image {
-                        Some(bytes) => {
-                            let _ = std::fs::write(rb_path, bytes);
-                        }
-                        None => {
-                            let _ = std::fs::remove_file(rb_path);
-                        }
-                    }
-                }
-                return Err(anyhow::anyhow!(
-                    "Failed to persist atomic write to {}: {} (rolled back {} earlier file(s))",
-                    path.display(),
-                    e,
-                    idx
-                ));
+/// [`write_all_atomic`] for file tools: closes the validate-then-write race.
+///
+/// On Unix each target's parent directory is opened ONCE as a descriptor
+/// (missing directories created with `mkdirat` + `openat(O_NOFOLLOW)`), the
+/// descriptor's real path is re-validated against `config`, and every
+/// subsequent operation — pre-image read, temp create
+/// (`openat(O_CREAT|O_EXCL|O_NOFOLLOW)`), `fsync`, `renameat`, rollback — is
+/// relative to that same descriptor. An intermediate directory swapped for a
+/// symlink after validation is refused (its real path is outside policy) or,
+/// if swapped after the directory was pinned, cannot redirect the write.
+/// Non-regular targets (FIFO, device, directory) are refused before anything
+/// is touched. Non-Unix platforms keep the path-based behaviour.
+pub(crate) async fn write_all_atomic_checked(
+    files: &[(PathBuf, String)],
+    config: &SafetyConfig,
+) -> Result<()> {
+    let files_owned: Vec<(PathBuf, String)> = files.to_vec();
+    let config = config.clone();
+    tokio::task::spawn_blocking(move || write_all_blocking(&files_owned, Some(&config))).await?
+}
+
+/// Delete a file through its pinned, re-validated parent directory
+/// (`unlinkat`), so a directory swapped after validation cannot redirect the
+/// unlink outside the workspace. Non-Unix: path-based `remove_file`.
+async fn remove_file_checked(path: &str, config: &SafetyConfig) -> Result<()> {
+    let path = path.to_string();
+    let config = config.clone();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            use std::os::unix::io::AsRawFd;
+            let (dir, name) = tool_path_validator(&config)
+                .open_parent_dir(&path, false)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            let c_name = std::ffi::CString::new(name.as_bytes())?;
+            // SAFETY: single NUL-terminated component, live directory fd.
+            // Flags 0 = never removes a directory.
+            if unsafe { libc::unlinkat(dir.as_raw_fd(), c_name.as_ptr(), 0) } != 0 {
+                return Err(std::io::Error::last_os_error().into());
             }
+            Ok(())
         }
-        Ok(())
+        #[cfg(not(unix))]
+        {
+            let _ = &config;
+            std::fs::remove_file(&path)?;
+            Ok(())
+        }
     })
     .await?
+}
+
+#[cfg(all(test, unix))]
+static FAIL_RENAME_FOR: OnceLock<Mutex<Vec<PathBuf>>> = OnceLock::new();
+
+/// Test hook: make the commit-phase `renameat` for `path` fail, to exercise
+/// the rollback path deterministically.
+#[cfg(all(test, unix))]
+pub(crate) fn inject_rename_failure_for_tests(path: &Path) {
+    FAIL_RENAME_FOR
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .unwrap()
+        .push(path.to_path_buf());
+}
+
+#[cfg(unix)]
+fn rename_should_fail_for_tests(_path: &Path) -> bool {
+    #[cfg(test)]
+    {
+        if let Some(lock) = FAIL_RENAME_FOR.get() {
+            if let Ok(guard) = lock.lock() {
+                return guard.iter().any(|p| p == _path);
+            }
+        }
+    }
+    false
+}
+
+/// What was at a target before the batch, for rollback.
+#[cfg(unix)]
+enum PreImage {
+    Missing,
+    Bytes(Vec<u8>),
+    /// The target was a symlink (renameat replaces the link itself).
+    Symlink(std::ffi::CString),
+}
+
+#[cfg(unix)]
+struct PinnedTarget {
+    dir: std::fs::File,
+    name: std::ffi::CString,
+    display: PathBuf,
+    pre_image: PreImage,
+    mode: Option<u32>,
+}
+
+#[cfg(unix)]
+fn temp_name() -> std::ffi::CString {
+    std::ffi::CString::new(format!(".sw-{}.tmp", uuid::Uuid::new_v4().simple()))
+        .expect("generated name has no NUL")
+}
+
+/// Capture a target's pre-image relative to its pinned directory. The final
+/// component is opened `O_NOFOLLOW|O_NONBLOCK`: a symlink is recorded as a
+/// symlink (never read through), and a FIFO/device/directory is refused.
+#[cfg(unix)]
+fn capture_pre_image(
+    dir: &std::fs::File,
+    name: &std::ffi::CStr,
+    display: &Path,
+) -> Result<(PreImage, Option<u32>)> {
+    use std::io::Read;
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    // SAFETY: NUL-terminated single component, live directory descriptor.
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::NotFound {
+            return Ok((PreImage::Missing, None));
+        }
+        if err.raw_os_error() == Some(libc::ELOOP) {
+            let mut buf = vec![0u8; libc::PATH_MAX as usize];
+            // SAFETY: buffer length passed matches the allocation.
+            let n = unsafe {
+                libc::readlinkat(
+                    dir.as_raw_fd(),
+                    name.as_ptr(),
+                    buf.as_mut_ptr() as *mut libc::c_char,
+                    buf.len(),
+                )
+            };
+            if n < 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            buf.truncate(n as usize);
+            // Carry the link target's mode over, as the path-based write did.
+            let mode = std::fs::metadata(display)
+                .ok()
+                .map(|m| m.permissions().mode());
+            return Ok((PreImage::Symlink(std::ffi::CString::new(buf)?), mode));
+        }
+        return Err(err.into());
+    }
+    // SAFETY: the new descriptor is owned exactly once by the File.
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(anyhow::anyhow!(
+            crate::safety::path_validator::not_regular_error(display, &meta)
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok((PreImage::Bytes(bytes), Some(meta.permissions().mode())))
+}
+
+/// Create `tmp` in the pinned directory (`O_CREAT|O_EXCL|O_NOFOLLOW`), write,
+/// apply `mode`, fsync.
+#[cfg(unix)]
+fn stage_temp(
+    dir: &std::fs::File,
+    tmp: &std::ffi::CStr,
+    bytes: &[u8],
+    mode: Option<u32>,
+) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    // SAFETY: NUL-terminated single component, live directory descriptor.
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            tmp.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600 as libc::c_uint,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: the new descriptor is owned exactly once by the File.
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let result = (|| {
+        file.write_all(bytes)?;
+        if let Some(mode) = mode {
+            file.set_permissions(std::fs::Permissions::from_mode(mode & 0o7777))?;
+        }
+        file.sync_all()
+    })();
+    if result.is_err() {
+        unlink_at(dir, tmp);
+    }
+    result
+}
+
+#[cfg(unix)]
+fn unlink_at(dir: &std::fs::File, name: &std::ffi::CStr) {
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: NUL-terminated single component, live directory descriptor.
+    unsafe {
+        libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0);
+    }
+}
+
+#[cfg(unix)]
+fn rename_at(
+    dir: &std::fs::File,
+    from: &std::ffi::CStr,
+    to: &std::ffi::CStr,
+) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: both names are single components resolved against the same
+    // pinned directory; renameat replaces a destination symlink itself,
+    // never its target.
+    if unsafe { libc::renameat(dir.as_raw_fd(), from.as_ptr(), dir.as_raw_fd(), to.as_ptr()) } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Best-effort restore of one target's pre-image, relative to its pinned dir.
+#[cfg(unix)]
+fn restore_pre_image(target: &PinnedTarget) {
+    use std::os::unix::io::AsRawFd;
+    match &target.pre_image {
+        PreImage::Missing => unlink_at(&target.dir, &target.name),
+        PreImage::Bytes(bytes) => {
+            let tmp = temp_name();
+            if stage_temp(&target.dir, &tmp, bytes, target.mode).is_ok()
+                && rename_at(&target.dir, &tmp, &target.name).is_err()
+            {
+                unlink_at(&target.dir, &tmp);
+            }
+        }
+        PreImage::Symlink(link) => {
+            let tmp = temp_name();
+            // SAFETY: NUL-terminated strings, live directory descriptor.
+            let ok =
+                unsafe { libc::symlinkat(link.as_ptr(), target.dir.as_raw_fd(), tmp.as_ptr()) }
+                    == 0;
+            if ok && rename_at(&target.dir, &tmp, &target.name).is_err() {
+                unlink_at(&target.dir, &tmp);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn write_all_blocking(files: &[(PathBuf, String)], config: Option<&SafetyConfig>) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let validator = config.map(tool_path_validator);
+
+    // Phase 0: pin every parent directory (creating missing ones) and
+    // capture pre-images. Nothing is modified except creating directories
+    // that the policy check already approved.
+    let mut targets: Vec<PinnedTarget> = Vec::with_capacity(files.len());
+    for (path, _) in files {
+        let (dir, name) = match &validator {
+            Some(v) => v
+                .open_parent_dir(&path.to_string_lossy(), true)
+                .map_err(|e| anyhow::anyhow!(e))?,
+            None => crate::safety::path_validator::open_parent_dir_fd(path, true, &|_| Ok(()))
+                .map_err(|e| anyhow::anyhow!(e))?,
+        };
+        let name = std::ffi::CString::new(name.as_bytes())?;
+        let (pre_image, mode) = capture_pre_image(&dir, &name, path)?;
+        targets.push(PinnedTarget {
+            dir,
+            name,
+            display: path.clone(),
+            pre_image,
+            mode,
+        });
+    }
+
+    // Phase 1: stage every replacement in a temp file in its pinned dir.
+    let mut staged: Vec<std::ffi::CString> = Vec::with_capacity(files.len());
+    for (target, (_, content)) in targets.iter().zip(files) {
+        let tmp = temp_name();
+        if let Err(e) = stage_temp(&target.dir, &tmp, content.as_bytes(), target.mode) {
+            for (t, s) in targets.iter().zip(&staged) {
+                unlink_at(&t.dir, s);
+            }
+            return Err(anyhow::anyhow!(
+                "Failed to stage atomic write to {}: {}",
+                target.display.display(),
+                e
+            ));
+        }
+        staged.push(tmp);
+    }
+
+    // Phase 2: renameat them all; roll back earlier renames on failure.
+    for (idx, (target, tmp)) in targets.iter().zip(&staged).enumerate() {
+        let result = if rename_should_fail_for_tests(&target.display) {
+            Err(std::io::Error::other("injected rename failure"))
+        } else {
+            rename_at(&target.dir, tmp, &target.name)
+        };
+        if let Err(e) = result {
+            for (t, s) in targets.iter().zip(&staged).skip(idx) {
+                unlink_at(&t.dir, s);
+            }
+            for t in targets.iter().take(idx) {
+                restore_pre_image(t);
+            }
+            return Err(anyhow::anyhow!(
+                "Failed to persist atomic write to {}: {} (rolled back {} earlier file(s))",
+                target.display.display(),
+                e,
+                idx
+            ));
+        }
+    }
+    // Make the renames durable; best effort (not every fs supports it).
+    for t in &targets {
+        let _ = t.dir.sync_all();
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_all_blocking(files: &[(PathBuf, String)], _config: Option<&SafetyConfig>) -> Result<()> {
+    // Capture pre-images up front so a mid-batch persist failure can roll back.
+    let pre_images: Vec<(PathBuf, Option<Vec<u8>>)> = files
+        .iter()
+        .map(|(path, _)| (path.clone(), std::fs::read(path).ok()))
+        .collect();
+
+    // Phase 1: stage every replacement in a temp file in the target dir.
+    let mut staged: Vec<(NamedTempFile, PathBuf)> = Vec::with_capacity(files.len());
+    for (path, content) in files {
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Invalid file path (no parent)"))?;
+        std::fs::create_dir_all(parent)?;
+        let mut temp = NamedTempFile::new_in(parent)?;
+        temp.write_all(content.as_bytes())?;
+        staged.push((temp, path.clone()));
+    }
+
+    // Phase 2: persist them all; roll back earlier persists on failure.
+    for (idx, (temp, path)) in staged.into_iter().enumerate() {
+        if let Err(e) = temp.persist(&path) {
+            for (rb_path, pre_image) in pre_images.iter().take(idx) {
+                match pre_image {
+                    Some(bytes) => {
+                        let _ = std::fs::write(rb_path, bytes);
+                    }
+                    None => {
+                        let _ = std::fs::remove_file(rb_path);
+                    }
+                }
+            }
+            return Err(anyhow::anyhow!(
+                "Failed to persist atomic write to {}: {} (rolled back {} earlier file(s))",
+                path.display(),
+                e,
+                idx
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Refuse to rewrite a file whose bytes are not valid UTF-8.

@@ -100,7 +100,7 @@ async fn test_file_write_creates_directories() {
 }
 
 #[tokio::test]
-async fn test_file_write_with_backup() {
+async fn test_file_write_backup_flag_leaves_no_bak() {
     setup_test_mode();
     let dir = TempDir::new().unwrap();
     let file_path = dir.path().join("existing.txt");
@@ -116,9 +116,10 @@ async fn test_file_write_with_backup() {
     let result = tool.execute(args).await.unwrap();
     assert!(result.get("success").unwrap().as_bool().unwrap());
 
+    // `<file>.bak` siblings were removed (workspace litter); the legacy
+    // flag is accepted and ignored.
     let backup_path = dir.path().join("existing.txt.bak");
-    assert!(backup_path.exists());
-    assert_eq!(fs::read_to_string(backup_path).unwrap(), "original");
+    assert!(!backup_path.exists());
     assert_eq!(fs::read_to_string(&file_path).unwrap(), "new content");
 }
 

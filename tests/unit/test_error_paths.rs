@@ -198,7 +198,7 @@ mod file_write_error_tests {
     }
 
     #[tokio::test]
-    async fn test_file_write_backup_created() {
+    async fn test_file_write_backup_flag_leaves_no_bak() {
         setup_test_mode();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("original.txt");
@@ -214,13 +214,11 @@ mod file_write_error_tests {
             .await;
         assert!(result.is_ok());
 
-        // Check backup exists
+        // `<file>.bak` siblings were removed (workspace litter); the legacy
+        // flag is accepted and ignored.
         let backup_path = dir.path().join("original.txt.bak");
-        assert!(backup_path.exists());
-        assert_eq!(
-            fs::read_to_string(&backup_path).unwrap(),
-            "original content"
-        );
+        assert!(!backup_path.exists());
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "new content");
     }
 
     #[tokio::test]

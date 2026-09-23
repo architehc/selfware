@@ -485,3 +485,123 @@ fn missing_path_ancestry_has_a_bounded_resolution_budget() {
     ));
     assert!(validator.validate("new/nested/module/file.rs").is_ok());
 }
+
+// ===== descriptor-level TOCTOU + FIFO tests =====
+
+#[cfg(unix)]
+mod fd_checked_io {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    /// `<root>/ws/sub/file.txt` (inside) and `<root>/outside/file.txt`.
+    /// Only `ws/**` is allowed.
+    fn setup() -> (tempfile::TempDir, PathBuf, PathBuf, PathValidator) {
+        let root = tempfile::tempdir().unwrap();
+        let root_c = root.path().canonicalize().unwrap();
+        let ws = root_c.join("ws");
+        let outside = root_c.join("outside");
+        std::fs::create_dir_all(ws.join("sub")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(ws.join("sub/file.txt"), "inside").unwrap();
+        std::fs::write(outside.join("file.txt"), "SECRET").unwrap();
+        let allowed = format!("{}/**", ws.display());
+        let validator = PathValidator::new(&make_config(vec![&allowed], vec![]), ws.clone());
+        (root, ws, outside, validator)
+    }
+
+    /// Replace the intermediate directory `ws/sub` with a symlink to `outside`.
+    fn swap_sub_for_symlink(ws: &Path, outside: &Path) {
+        std::fs::rename(ws.join("sub"), ws.join("sub_old")).unwrap();
+        symlink(outside, ws.join("sub")).unwrap();
+    }
+
+    #[test]
+    fn open_regular_file_reads_normal_file() {
+        let (_root, ws, _outside, v) = setup();
+        let mut vf = v
+            .open_regular_file(&ws.join("sub/file.txt").to_string_lossy())
+            .unwrap();
+        let mut s = String::new();
+        std::io::Read::read_to_string(&mut vf.file, &mut s).unwrap();
+        assert_eq!(s, "inside");
+    }
+
+    #[test]
+    fn open_regular_file_refuses_dir_swapped_after_validation() {
+        let (_root, ws, outside, v) = setup();
+        let target = ws.join("sub/file.txt");
+        // The lexical path passes validation; the swap happens inside the
+        // race window, before the descriptor is opened.
+        assert!(v.validate(&target.to_string_lossy()).is_ok());
+        let (ws2, out2) = (ws.clone(), outside.clone());
+        set_after_lexical_validate_hook(Box::new(move || swap_sub_for_symlink(&ws2, &out2)));
+        let err = v
+            .open_regular_file(&target.to_string_lossy())
+            .expect_err("descriptor resolved outside the allowed root must be refused");
+        assert!(
+            err.to_string().contains("not in allowed list"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn open_parent_dir_refuses_dir_swapped_after_validation() {
+        let (_root, ws, outside, v) = setup();
+        let target = ws.join("sub/new.txt");
+        let (ws2, out2) = (ws.clone(), outside.clone());
+        set_after_lexical_validate_hook(Box::new(move || swap_sub_for_symlink(&ws2, &out2)));
+        assert!(v.open_parent_dir(&target.to_string_lossy(), true).is_err());
+        assert!(!outside.join("new.txt").exists());
+    }
+
+    #[test]
+    fn open_parent_dir_refuses_before_creating_under_swapped_ancestor() {
+        let (_root, ws, outside, v) = setup();
+        let target = ws.join("sub/deep/er/new.txt");
+        let (ws2, out2) = (ws.clone(), outside.clone());
+        set_after_lexical_validate_hook(Box::new(move || swap_sub_for_symlink(&ws2, &out2)));
+        assert!(v.open_parent_dir(&target.to_string_lossy(), true).is_err());
+        assert!(
+            !outside.join("deep").exists(),
+            "no directory may be created under a swapped-in ancestor"
+        );
+    }
+
+    #[test]
+    fn open_parent_dir_creates_missing_directories() {
+        let (_root, ws, _outside, v) = setup();
+        let target = ws.join("new/nested/dir/file.txt");
+        let (_dir, name) = v.open_parent_dir(&target.to_string_lossy(), true).unwrap();
+        assert_eq!(name, std::ffi::OsString::from("file.txt"));
+        assert!(ws.join("new/nested/dir").is_dir());
+    }
+
+    #[test]
+    fn fifo_is_rejected_without_hanging() {
+        let (_root, ws, _outside, v) = setup();
+        let fifo = ws.join("sub/pipe");
+        let c = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+        // SAFETY: valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let fifo_s = fifo.to_string_lossy().into_owned();
+        std::thread::spawn(move || {
+            let validated = v.validate(&fifo_s).is_ok();
+            let opened = v
+                .open_regular_file(&fifo_s)
+                .map(|_| ())
+                .map_err(|e| e.to_string());
+            let _ = tx.send((validated, opened));
+        });
+        let (validated, opened) = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("validation/open of a FIFO must not block");
+        assert!(
+            validated,
+            "a FIFO path inside the workspace is a valid path"
+        );
+        let err = opened.expect_err("a FIFO must be refused for file I/O");
+        assert!(err.contains("FIFO"), "error should name the FIFO: {err}");
+    }
+}

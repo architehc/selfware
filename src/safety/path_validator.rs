@@ -23,17 +23,38 @@ const O_NOFOLLOW: i32 = 0;
 
 /// Atomically open a path with O_NOFOLLOW to prevent TOCTOU symlink races.
 /// Returns the real path of the opened file descriptor.
+///
+/// The open is `O_NONBLOCK`: validation must never hang on a FIFO (an
+/// `O_RDONLY` open of a FIFO with no writer blocks forever). The descriptor
+/// is only used to resolve the real path and is dropped immediately; the
+/// I/O layer re-opens through [`PathValidator::open_regular_file`] /
+/// [`open_parent_dir_fd`] and rejects non-regular files there.
 #[cfg(unix)]
 fn open_nofollow_and_resolve(path: &Path) -> std::io::Result<PathBuf> {
     use std::os::unix::fs::OpenOptionsExt;
-    use std::os::unix::io::AsRawFd;
 
     let fd = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(O_NOFOLLOW)
+        .custom_flags(O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(path)?;
+    fd_real_path(&fd, path)
+}
 
-    let raw_fd = fd.as_raw_fd();
+#[cfg(not(unix))]
+fn open_nofollow_and_resolve(path: &Path) -> std::io::Result<PathBuf> {
+    path.canonicalize()
+}
+
+/// Resolve the real (symlink-free) path of an open descriptor.
+///
+/// Linux: `/proc/self/fd/N`; macOS: `F_GETPATH`. Both describe the object the
+/// descriptor actually refers to, so a path swapped after the open cannot
+/// change the answer. Other Unix platforms without either fall back to
+/// canonicalizing `fallback` (the path that was opened).
+#[cfg(unix)]
+pub(crate) fn fd_real_path(file: &std::fs::File, fallback: &Path) -> std::io::Result<PathBuf> {
+    use std::os::unix::io::AsRawFd;
+    let raw_fd = file.as_raw_fd();
 
     // Linux: resolve via /proc/self/fd which is atomic
     let fd_path = format!("/proc/self/fd/{}", raw_fd);
@@ -45,31 +66,220 @@ fn open_nofollow_and_resolve(path: &Path) -> std::io::Result<PathBuf> {
     // macOS: use F_GETPATH to resolve fd to path atomically (no TOCTOU)
     #[cfg(target_os = "macos")]
     {
-        const F_GETPATH: i32 = 50;
-        const MAXPATHLEN: usize = 1024;
-        let mut buf = vec![0u8; MAXPATHLEN];
-        let ret = unsafe {
-            extern "C" {
-                fn fcntl(fd: i32, cmd: i32, ...) -> i32;
-            }
-            fcntl(raw_fd, F_GETPATH, buf.as_mut_ptr())
-        };
+        let mut buf = vec![0u8; libc::PATH_MAX as usize];
+        // SAFETY: F_GETPATH writes at most MAXPATHLEN (== PATH_MAX) bytes
+        // into `buf`, which is exactly that long; `raw_fd` is live for the
+        // borrow of `file`.
+        let ret = unsafe { libc::fcntl(raw_fd, libc::F_GETPATH, buf.as_mut_ptr()) };
         if ret != -1 {
             let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
             buf.truncate(len);
-            return Ok(PathBuf::from(std::ffi::OsString::from(
-                String::from_utf8_lossy(&buf).into_owned(),
-            )));
+            use std::os::unix::ffi::OsStringExt;
+            return Ok(PathBuf::from(std::ffi::OsString::from_vec(buf)));
         }
     }
 
     // Final fallback for other Unix platforms without /proc
-    path.canonicalize()
+    fallback.canonicalize()
 }
 
-#[cfg(not(unix))]
-fn open_nofollow_and_resolve(path: &Path) -> std::io::Result<PathBuf> {
-    path.canonicalize()
+/// Refusal for a path that exists but is not a regular file (FIFO, socket,
+/// device, directory). Reading a FIFO blocks forever; writing through a
+/// device node is never what a file tool means.
+pub(crate) fn not_regular_error(path: &Path, meta: &std::fs::Metadata) -> SelfwareError {
+    let ft = meta.file_type();
+    let kind = if ft.is_dir() {
+        "a directory"
+    } else {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileTypeExt;
+            if ft.is_fifo() {
+                "a FIFO (named pipe)"
+            } else if ft.is_socket() {
+                "a socket"
+            } else if ft.is_block_device() || ft.is_char_device() {
+                "a device node"
+            } else {
+                "not a regular file"
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            "not a regular file"
+        }
+    };
+    SelfwareError::Safety(SafetyError::BlockedPath {
+        path: format!(
+            "{} is {} — file tools only read and write regular files",
+            path.display(),
+            kind
+        ),
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test hook fired between lexical validation and the descriptor open,
+    /// i.e. inside the race window the descriptor re-check exists to close.
+    static AFTER_LEXICAL_VALIDATE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(crate) fn set_after_lexical_validate_hook(hook: Box<dyn FnOnce()>) {
+    AFTER_LEXICAL_VALIDATE.with(|h| *h.borrow_mut() = Some(hook));
+}
+
+#[cfg(test)]
+fn run_after_lexical_validate_hook() {
+    if let Some(hook) = AFTER_LEXICAL_VALIDATE.with(|h| h.borrow_mut().take()) {
+        hook();
+    }
+}
+
+/// A regular file opened for reading whose descriptor's real path passed
+/// the same policy check as the lexical path. Read from `file`, never by
+/// re-opening `real_path`: the path is informational only.
+#[derive(Debug)]
+pub struct ValidatedFile {
+    pub file: std::fs::File,
+    pub real_path: PathBuf,
+}
+
+/// Open `dir` as a directory descriptor (following symlinks; the caller
+/// validates the descriptor's real path).
+#[cfg(unix)]
+fn open_dir(dir: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(dir)
+}
+
+/// `openat(dirfd, name, O_DIRECTORY|O_NOFOLLOW)`: descend exactly one
+/// component relative to a pinned directory, refusing a symlink.
+#[cfg(unix)]
+fn openat_dir_nofollow(
+    dir: &std::fs::File,
+    name: &std::ffi::OsStr,
+) -> std::io::Result<std::fs::File> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    let c_name = std::ffi::CString::new(name.as_bytes())?;
+    // SAFETY: `c_name` is a valid NUL-terminated single component and `dir`
+    // owns a live descriptor for the duration of the call.
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            c_name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: the new descriptor is owned exactly once by the File.
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
+/// Open (optionally creating) the parent directory of `target` as a pinned
+/// descriptor for fd-relative I/O, and prove it is still an allowed location.
+///
+/// * The deepest existing ancestor is opened and its real path — together
+///   with the not-yet-existing tail — is passed to `check` BEFORE any
+///   directory is created, so a swapped ancestor never gets directories
+///   created under it.
+/// * Missing components are created with `mkdirat` and entered with
+///   `openat(O_DIRECTORY|O_NOFOLLOW)` relative to the previous descriptor,
+///   so a symlink planted mid-walk is refused rather than followed.
+/// * The final directory's real path (from the descriptor, not the path)
+///   joined with the file name is passed to `check` again.
+///
+/// This is the portable equivalent of Linux `openat2(RESOLVE_BENEATH)` /
+/// macOS `O_NOFOLLOW_ANY`: instead of forbidding every symlink on the way
+/// (which would break legitimately symlinked workspaces such as macOS
+/// `/tmp -> /private/tmp`), it validates where the pinned descriptor really
+/// is. Returns the directory descriptor and the target's final component;
+/// every later `openat`/`renameat`/`unlinkat` against this descriptor lands
+/// in the checked directory even if the path is swapped afterwards.
+#[cfg(unix)]
+pub(crate) fn open_parent_dir_fd(
+    target: &Path,
+    create: bool,
+    check: &dyn Fn(&Path) -> Result<()>,
+) -> Result<(std::fs::File, std::ffi::OsString)> {
+    use std::path::Component;
+    let name = match target.components().next_back() {
+        Some(Component::Normal(n)) => n.to_os_string(),
+        _ => {
+            return Err(SelfwareError::Safety(
+                SafetyError::PathCanonicalizationFailed {
+                    path: target.display().to_string(),
+                },
+            ))
+        }
+    };
+    let parent = match target.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+
+    // Find the deepest existing ancestor; collect the missing tail.
+    const MAX_MISSING: usize = 128;
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = parent.clone();
+    let anchor = loop {
+        match open_dir(&cur) {
+            Ok(f) => break f,
+            Err(e) if create && e.kind() == std::io::ErrorKind::NotFound => {
+                if missing.len() >= MAX_MISSING {
+                    return Err(e.into());
+                }
+                match cur.components().next_back() {
+                    Some(Component::Normal(n)) => missing.push(n.to_os_string()),
+                    // `..`, `.` or a root in the missing tail cannot be
+                    // created component-wise; refuse rather than guess.
+                    _ => return Err(e.into()),
+                }
+                cur = match cur.parent() {
+                    Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+                    _ => PathBuf::from("."),
+                };
+            }
+            Err(e) => return Err(e.into()),
+        }
+    };
+    missing.reverse();
+
+    let anchor_real = fd_real_path(&anchor, &cur)?;
+    let mut prospective = anchor_real;
+    for comp in &missing {
+        prospective.push(comp);
+    }
+    prospective.push(&name);
+    check(&prospective)?;
+
+    let mut dir = anchor;
+    for comp in &missing {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::io::AsRawFd;
+        let c_comp = std::ffi::CString::new(comp.as_bytes()).map_err(std::io::Error::from)?;
+        // SAFETY: single NUL-terminated component, live directory descriptor.
+        let rc = unsafe { libc::mkdirat(dir.as_raw_fd(), c_comp.as_ptr(), 0o777) };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(err.into());
+            }
+        }
+        dir = openat_dir_nofollow(&dir, comp)?;
+    }
+
+    let real_dir = fd_real_path(&dir, &parent)?;
+    check(&real_dir.join(&name))?;
+    Ok((dir, name))
 }
 
 /// Canonicalize a path and fail closed if the filesystem cannot resolve it.
@@ -619,6 +829,90 @@ impl PathValidator {
             }
         }
         Ok(false)
+    }
+
+    /// Open `path` as a regular file for reading and prove the object actually
+    /// opened is allowed.
+    ///
+    /// Closes the validate-then-reopen TOCTOU: the lexical path is validated
+    /// first (as [`Self::validate`]), then opened `O_NONBLOCK` (a FIFO cannot
+    /// hang the open), `fstat`ed (non-regular files are refused with a clear
+    /// error), and the DESCRIPTOR's real path is validated again. Whatever
+    /// the filesystem did between the two steps — an intermediate directory
+    /// swapped for a symlink, a file renamed in — the returned handle refers
+    /// to an object whose real location passed policy. Read from
+    /// [`ValidatedFile::file`]; never re-open by path.
+    pub fn open_regular_file(&self, path: &str) -> Result<ValidatedFile> {
+        self.validate(path)?;
+        #[cfg(test)]
+        run_after_lexical_validate_hook();
+        let target = self.absolute(path);
+
+        #[cfg(unix)]
+        let file = {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+                .open(&target)?
+        };
+        #[cfg(not(unix))]
+        let file = std::fs::File::open(&target)?;
+
+        let meta = file.metadata()?;
+        if !meta.is_file() {
+            return Err(not_regular_error(&target, &meta));
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            // Regular file confirmed: restore blocking mode for the reader.
+            // SAFETY: plain fcntl flag get/set on a live descriptor.
+            unsafe {
+                let fd = file.as_raw_fd();
+                let flags = libc::fcntl(fd, libc::F_GETFL);
+                if flags != -1 {
+                    libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK);
+                }
+            }
+        }
+
+        #[cfg(unix)]
+        let real_path = fd_real_path(&file, &target)?;
+        #[cfg(not(unix))]
+        let real_path = canonicalize_or_fail(&target)?;
+
+        self.validate(&real_path.to_string_lossy())?;
+        Ok(ValidatedFile { file, real_path })
+    }
+
+    /// Open the parent directory of `path` as a pinned descriptor for
+    /// fd-relative writes (see [`open_parent_dir_fd`]). The lexical path is
+    /// validated first; then both the prospective and the final real
+    /// directory locations are re-validated against this validator's policy.
+    #[cfg(unix)]
+    pub fn open_parent_dir(
+        &self,
+        path: &str,
+        create: bool,
+    ) -> Result<(std::fs::File, std::ffi::OsString)> {
+        self.validate(path)?;
+        #[cfg(test)]
+        run_after_lexical_validate_hook();
+        open_parent_dir_fd(&self.absolute(path), create, &|real: &Path| {
+            self.validate(&real.to_string_lossy())
+        })
+    }
+
+    /// `path` as given, anchored at the working directory when relative.
+    fn absolute(&self, path: &str) -> PathBuf {
+        let raw = Path::new(path);
+        if raw.is_absolute() {
+            raw.to_path_buf()
+        } else {
+            self.working_dir.join(raw)
+        }
     }
 
     /// Check for symlink-based attacks.

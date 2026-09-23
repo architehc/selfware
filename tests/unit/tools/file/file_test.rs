@@ -216,7 +216,9 @@ async fn test_file_write_success() {
 }
 
 #[tokio::test]
-async fn test_file_write_creates_backup() {
+async fn test_file_write_never_leaves_bak_sibling() {
+    // `<file>.bak` siblings were removed (they littered users' workspaces,
+    // e.g. src/lib.rs.bak). A legacy `"backup": true` is accepted and ignored.
     let temp_dir = TempDir::new().unwrap();
     let file_path = temp_dir.path().join("existing.txt");
     fs::write(&file_path, "original content").unwrap();
@@ -230,11 +232,19 @@ async fn test_file_write_creates_backup() {
 
     tool.execute(args).await.unwrap();
 
-    // Check backup exists
+    assert_eq!(fs::read_to_string(&file_path).unwrap(), "new content");
     let backup_path = temp_dir.path().join("existing.txt.bak");
-    assert!(backup_path.exists());
-    let backup_content = fs::read_to_string(&backup_path).unwrap();
-    assert_eq!(backup_content, "original content");
+    assert!(!backup_path.exists(), "file_write must not leave a .bak");
+    let entries: Vec<_> = fs::read_dir(temp_dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(entries, vec!["existing.txt".to_string()], "no litter");
+    assert!(
+        tool.schema()["properties"].get("backup").is_none(),
+        "schema must not advertise a backup option that does nothing"
+    );
 }
 
 #[tokio::test]
@@ -590,11 +600,6 @@ async fn test_directory_tree_includes_hidden() {
     // Should contain .hidden
     let has_hidden = entries.iter().any(|(name, _)| name.contains(".hidden"));
     assert!(has_hidden);
-}
-
-#[test]
-fn test_default_true() {
-    assert!(default_true());
 }
 
 #[test]
@@ -1523,6 +1528,72 @@ async fn test_file_multi_edit_reports_files_in_deterministic_order() {
     assert_eq!(files, sorted, "files list must be deterministically sorted");
 }
 
+/// Unix: a directory target is now refused in the pin/pre-image phase (it
+/// is not a regular file), so the persist failure is injected at the
+/// `renameat` of the second target instead. Same rollback contract.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_write_all_atomic_rolls_back_on_persist_failure() {
+    let temp_dir = TempDir::new().unwrap();
+    let good = temp_dir.path().join("good.txt");
+    fs::write(&good, "original\n").unwrap();
+    let second = temp_dir.path().join("second.txt");
+    fs::write(&second, "second original\n").unwrap();
+    let created = temp_dir.path().join("created.txt");
+    inject_rename_failure_for_tests(&second);
+
+    let files = vec![
+        (good.clone(), "modified\n".to_string()),
+        (created.clone(), "new\n".to_string()),
+        (second.clone(), "whatever".to_string()),
+    ];
+    let result = write_all_atomic(&files).await;
+    let err = result.expect_err("injected persist failure must fail the batch");
+    assert!(
+        err.to_string().contains("rolled back 2"),
+        "error should mention rollback: {err}"
+    );
+    assert_eq!(
+        fs::read_to_string(&good).unwrap(),
+        "original\n",
+        "the already-persisted file must be rolled back to its pre-image"
+    );
+    assert!(
+        !created.exists(),
+        "a file that did not exist before the batch must be removed on rollback"
+    );
+    assert_eq!(fs::read_to_string(&second).unwrap(), "second original\n");
+    let leftovers: Vec<_> = fs::read_dir(temp_dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "temp files leaked: {leftovers:?}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_write_all_atomic_refuses_directory_target_before_touching_anything() {
+    let temp_dir = TempDir::new().unwrap();
+    let good = temp_dir.path().join("good.txt");
+    fs::write(&good, "original\n").unwrap();
+    let dir_target = temp_dir.path().join("a_directory");
+    fs::create_dir(&dir_target).unwrap();
+
+    let files = vec![
+        (good.clone(), "modified\n".to_string()),
+        (dir_target.clone(), "whatever".to_string()),
+    ];
+    let err = write_all_atomic(&files)
+        .await
+        .expect_err("a directory target must be refused");
+    assert!(err.to_string().contains("directory"), "unexpected: {err}");
+    assert_eq!(fs::read_to_string(&good).unwrap(), "original\n");
+    assert!(dir_target.is_dir());
+}
+
+#[cfg(not(unix))]
 #[tokio::test]
 async fn test_write_all_atomic_rolls_back_on_persist_failure() {
     let temp_dir = TempDir::new().unwrap();
@@ -1569,4 +1640,264 @@ async fn test_write_all_atomic_staging_failure_touches_nothing() {
     let result = write_all_atomic(&files).await;
     assert!(result.is_err());
     assert_eq!(fs::read_to_string(&good).unwrap(), "original\n");
+}
+
+// ---------------------------------------------------------------------------
+// Descriptor-checked I/O: TOCTOU directory swaps and FIFOs (Unix)
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+mod fd_checked {
+    use super::*;
+    use std::os::unix::fs::symlink;
+    use std::time::Duration;
+
+    /// `<root>/ws/sub/file.txt` inside, `<root>/outside/file.txt` outside;
+    /// config allows only `ws/**`.
+    fn setup() -> (TempDir, PathBuf, PathBuf, SafetyConfig) {
+        let root = TempDir::new().unwrap();
+        let root_c = root.path().canonicalize().unwrap();
+        let ws = root_c.join("ws");
+        let outside = root_c.join("outside");
+        fs::create_dir_all(ws.join("sub")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(ws.join("sub/file.txt"), "inside\n").unwrap();
+        fs::write(outside.join("file.txt"), "SECRET\n").unwrap();
+        let cfg = restricted_safety_config(&ws);
+        (root, ws, outside, cfg)
+    }
+
+    fn swap_sub_for_symlink(ws: &Path, outside: &Path) {
+        fs::rename(ws.join("sub"), ws.join("sub_old")).unwrap();
+        symlink(outside, ws.join("sub")).unwrap();
+    }
+
+    fn mkfifo(path: &Path) {
+        let c = std::ffi::CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        // SAFETY: valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    }
+
+    #[tokio::test]
+    async fn read_checked_reads_normal_file() {
+        let (_root, ws, _outside, cfg) = setup();
+        let p = ws.join("sub/file.txt");
+        let (text, _) = read_file_checked(&p.to_string_lossy(), &cfg, None)
+            .await
+            .unwrap();
+        assert_eq!(text, "inside\n");
+    }
+
+    #[tokio::test]
+    async fn read_checked_refuses_swapped_intermediate_dir() {
+        let (_root, ws, outside, cfg) = setup();
+        let p = ws.join("sub/file.txt");
+        let p_s = p.to_string_lossy().into_owned();
+        // Validation passes while `sub` is a real directory ...
+        validate_tool_path(&p_s, &cfg).unwrap();
+        // ... then `sub` is swapped for a symlink before the I/O.
+        swap_sub_for_symlink(&ws, &outside);
+        let err = read_file_checked(&p_s, &cfg, None)
+            .await
+            .expect_err("read through a swapped-in symlinked dir must be refused");
+        assert!(!err.to_string().contains("SECRET"));
+        // The line-slice path goes through the same checked open.
+        let err = FileRead::with_safety_config(cfg.clone())
+            .execute(serde_json::json!({"path": p_s, "line_range": [1, 1]}))
+            .await;
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn write_checked_refuses_swapped_intermediate_dir() {
+        let (_root, ws, outside, cfg) = setup();
+        let p = ws.join("sub/file.txt");
+        validate_tool_path(&p.to_string_lossy(), &cfg).unwrap();
+        swap_sub_for_symlink(&ws, &outside);
+        let err = write_all_atomic_checked(&[(p.clone(), "PWNED\n".to_string())], &cfg).await;
+        assert!(err.is_err(), "write through swapped dir must be refused");
+        assert_eq!(
+            fs::read_to_string(outside.join("file.txt")).unwrap(),
+            "SECRET\n"
+        );
+        let new = ws.join("sub/new_dir/created.txt");
+        assert!(write_all_atomic_checked(&[(new, "x".to_string())], &cfg)
+            .await
+            .is_err());
+        assert!(!outside.join("new_dir").exists());
+    }
+
+    #[tokio::test]
+    async fn write_through_pinned_dir_cannot_be_redirected_by_later_swap() {
+        let (_root, ws, outside, cfg) = setup();
+        let p = ws.join("sub/file.txt");
+        // Pin the directory, THEN swap the path: fd-relative I/O must still
+        // land in the pinned (now renamed) directory, never in `outside`.
+        let (dir, name) = tool_path_validator(&cfg)
+            .open_parent_dir(&p.to_string_lossy(), false)
+            .unwrap();
+        swap_sub_for_symlink(&ws, &outside);
+        let name = std::ffi::CString::new(name.to_string_lossy().as_bytes()).unwrap();
+        let tmp = temp_name();
+        stage_temp(&dir, &tmp, b"written\n", None).unwrap();
+        rename_at(&dir, &tmp, &name).unwrap();
+        assert_eq!(
+            fs::read_to_string(outside.join("file.txt")).unwrap(),
+            "SECRET\n"
+        );
+        assert_eq!(
+            fs::read_to_string(ws.join("sub_old/file.txt")).unwrap(),
+            "written\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_refuses_swapped_intermediate_dir() {
+        let (_root, ws, outside, cfg) = setup();
+        let p = ws.join("sub/file.txt");
+        validate_tool_path(&p.to_string_lossy(), &cfg).unwrap();
+        swap_sub_for_symlink(&ws, &outside);
+        let result = FileDelete::with_safety_config(cfg)
+            .execute(serde_json::json!({"path": p.to_string_lossy()}))
+            .await;
+        assert!(result.is_err());
+        assert!(outside.join("file.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn delete_still_works() {
+        let (_root, ws, _outside, cfg) = setup();
+        let p = ws.join("sub/file.txt");
+        FileDelete::with_safety_config(cfg)
+            .execute(serde_json::json!({"path": p.to_string_lossy()}))
+            .await
+            .unwrap();
+        assert!(!p.exists());
+    }
+
+    #[tokio::test]
+    async fn file_tools_refuse_fifo_quickly() {
+        let (_root, ws, _outside, cfg) = setup();
+        let fifo = ws.join("sub/pipe");
+        mkfifo(&fifo);
+        let f = fifo.to_string_lossy().into_owned();
+
+        let read = tokio::time::timeout(
+            Duration::from_secs(10),
+            FileRead::with_safety_config(cfg.clone()).execute(serde_json::json!({"path": f})),
+        )
+        .await
+        .expect("file_read on a FIFO must not hang");
+        let err = read.expect_err("file_read must refuse a FIFO");
+        assert!(err.to_string().contains("FIFO"), "unexpected: {err}");
+
+        let slice = tokio::time::timeout(
+            Duration::from_secs(10),
+            FileRead::with_safety_config(cfg.clone())
+                .execute(serde_json::json!({"path": f, "line_range": [1, 2]})),
+        )
+        .await
+        .expect("line-range read on a FIFO must not hang");
+        assert!(slice.is_err());
+
+        let write = tokio::time::timeout(
+            Duration::from_secs(10),
+            FileWrite::with_safety_config(cfg.clone())
+                .execute(serde_json::json!({"path": f, "content": "x"})),
+        )
+        .await
+        .expect("file_write on a FIFO must not hang");
+        assert!(write.is_err());
+
+        let edit = tokio::time::timeout(
+            Duration::from_secs(10),
+            FileEdit::with_safety_config(cfg.clone())
+                .execute(serde_json::json!({"path": f, "old_str": "a", "new_str": "b"})),
+        )
+        .await
+        .expect("file_edit on a FIFO must not hang");
+        assert!(edit.is_err());
+
+        let raw = tokio::time::timeout(
+            Duration::from_secs(10),
+            write_all_atomic(&[(fifo.clone(), "x".to_string())]),
+        )
+        .await
+        .expect("write_all_atomic on a FIFO must not hang");
+        assert!(raw.is_err());
+        use std::os::unix::fs::FileTypeExt;
+        assert!(fs::symlink_metadata(&fifo).unwrap().file_type().is_fifo());
+    }
+
+    #[tokio::test]
+    async fn normal_read_write_edit_and_create_in_new_dir_still_work() {
+        let (_root, ws, _outside, cfg) = setup();
+        let p = ws.join("sub/file.txt");
+        let p_s = p.to_string_lossy().into_owned();
+
+        let r = FileRead::with_safety_config(cfg.clone())
+            .execute(serde_json::json!({"path": p_s}))
+            .await
+            .unwrap();
+        assert_eq!(r["content"], "inside\n");
+
+        FileEdit::with_safety_config(cfg.clone())
+            .execute(serde_json::json!({"path": p_s, "old_str": "side", "new_str": "SIDE"}))
+            .await
+            .unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), "inSIDE\n");
+
+        FileWrite::with_safety_config(cfg.clone())
+            .execute(serde_json::json!({"path": p_s, "content": "rewritten\n"}))
+            .await
+            .unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), "rewritten\n");
+
+        let nested = ws.join("brand/new/dir/file.rs");
+        FileWrite::with_safety_config(cfg.clone())
+            .execute(serde_json::json!({
+                "path": nested.to_string_lossy(),
+                "content": "fn main() {}\n"
+            }))
+            .await
+            .unwrap();
+        assert_eq!(fs::read_to_string(&nested).unwrap(), "fn main() {}\n");
+
+        let r = FileRead::with_safety_config(cfg)
+            .execute(serde_json::json!({"path": p_s, "line_range": [1, 1]}))
+            .await
+            .unwrap();
+        assert_eq!(r["content"], "rewritten");
+        let names: Vec<String> = fs::read_dir(ws.join("sub"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["file.txt".to_string()], "no temp/.bak litter");
+    }
+
+    #[tokio::test]
+    async fn rollback_restores_a_symlink_target_as_a_symlink() {
+        let temp_dir = TempDir::new().unwrap();
+        let real = temp_dir.path().join("real.txt");
+        fs::write(&real, "real\n").unwrap();
+        let link = temp_dir.path().join("link.txt");
+        symlink("real.txt", &link).unwrap();
+        let second = temp_dir.path().join("second.txt");
+        fs::write(&second, "2\n").unwrap();
+        inject_rename_failure_for_tests(&second);
+
+        let err = write_all_atomic(&[
+            (link.clone(), "replaced\n".to_string()),
+            (second.clone(), "x".to_string()),
+        ])
+        .await;
+        assert!(err.is_err());
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_link(&link).unwrap(), PathBuf::from("real.txt"));
+        assert_eq!(fs::read_to_string(&real).unwrap(), "real\n");
+    }
 }
