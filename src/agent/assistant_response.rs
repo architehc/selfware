@@ -127,24 +127,42 @@ impl Agent {
             info!("Context compression triggered");
             match self.compressor.compress(&self.client, &self.messages).await {
                 Ok((compressed, _usage)) => {
-                    self.messages = compressed;
-                    // Account the summarizer LLM call against the budget.
-                    // Delta-add (never total = input + output): after a resume,
-                    // `total` carries the restored prior-run budget whose
-                    // input/output split was not persisted.
-                    self.sync_api_usage();
-                    self.log_context_compression_event(
-                        super::session_log::ContextCompressionLogDetails {
-                            strategy: "summary",
-                            success: true,
-                            before_messages: before_compression_messages,
-                            after_messages: self.messages.len(),
-                            before_tokens: before_compression_tokens,
-                            after_tokens: self.compressor.estimate_tokens(&self.messages),
-                            threshold: compression_threshold,
-                            error: None,
-                        },
-                    );
+                    let after_tokens = self.compressor.estimate_tokens(&compressed);
+                    let did_compress = after_tokens < before_compression_tokens
+                        || compressed.len() < before_compression_messages;
+                    if did_compress {
+                        self.messages = compressed;
+                        self.sync_api_usage();
+                        self.log_context_compression_event(
+                            super::session_log::ContextCompressionLogDetails {
+                                strategy: "summary",
+                                success: true,
+                                before_messages: before_compression_messages,
+                                after_messages: self.messages.len(),
+                                before_tokens: before_compression_tokens,
+                                after_tokens,
+                                threshold: compression_threshold,
+                                error: None,
+                            },
+                        );
+                    } else {
+                        warn!("Context compression summary yielded no size reduction, using hard fallback");
+                        self.messages = self.compressor.hard_compress(&self.messages);
+                        let final_tokens = self.compressor.estimate_tokens(&self.messages);
+                        self.sync_api_usage();
+                        self.log_context_compression_event(
+                            super::session_log::ContextCompressionLogDetails {
+                                strategy: "hard_fallback",
+                                success: final_tokens < before_compression_tokens,
+                                before_messages: before_compression_messages,
+                                after_messages: self.messages.len(),
+                                before_tokens: before_compression_tokens,
+                                after_tokens: final_tokens,
+                                threshold: compression_threshold,
+                                error: Some("summary yielded no reduction"),
+                            },
+                        );
+                    }
                 }
                 Err(e) => {
                     warn!("Compression failed, using hard limit: {}", e);
@@ -264,6 +282,18 @@ impl Agent {
         // results — re-run the pairing invariants after boundary injection so
         // an orphaned pair can never reach the provider (HTTP 400).
         request_messages = Agent::apply_tool_call_pair_invariants(request_messages);
+
+        // Ensure the fully-assembled request (including injected hints, project tree, and RAG)
+        // stays strictly within the context budget so small context windows (24k/40k) never overflow.
+        if crate::token_count::estimate_messages_tokens(&request_messages) > self.max_context_tokens
+        {
+            Self::trim_messages(
+                &mut request_messages,
+                self.max_context_tokens,
+                self.current_task_anchor_index(),
+            );
+            request_messages = Agent::apply_tool_call_pair_invariants(request_messages);
+        }
 
         // Captured per-call metadata (request body, finish_reason, tokens,
         // elapsed_ms) — populated by whichever branch makes the actual call.

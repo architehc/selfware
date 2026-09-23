@@ -443,7 +443,7 @@ impl ApiClient {
         let request_timeout = config.agent.step_timeout_secs.max(60);
         let client = Client::builder()
             .timeout(Duration::from_secs(request_timeout))
-            .connect_timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(5))
             .build()
             .context("Failed to build HTTP client")?;
 
@@ -453,7 +453,7 @@ impl ApiClient {
         // header/response `tokio::time::timeout`) so a slow-but-healthy
         // generation from a local model is never aborted mid-flight.
         let stream_client = Client::builder()
-            .connect_timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(5))
             .build()
             .context("Failed to build streaming HTTP client")?;
 
@@ -726,6 +726,17 @@ impl ApiClient {
         ZERO_CONTENT_LONG_CALL_THRESHOLD_MS
     }
 
+    fn circuit_open_error(&self) -> ApiError {
+        if let Some(cause) = self.circuit_breaker.last_error() {
+            ApiError::Network(format!(
+                "Circuit breaker is open - API is unavailable (last error: {})",
+                cause
+            ))
+        } else {
+            ApiError::Network("Circuit breaker is open - API is unavailable".to_string())
+        }
+    }
+
     pub async fn completion(
         &self,
         prompt: &str,
@@ -739,10 +750,7 @@ impl ApiClient {
             )
             .await
             .map_err(|e| match e {
-                CircuitBreakerError::CircuitOpen => {
-                    ApiError::Network("Circuit breaker is open - API is unavailable".to_string())
-                        .into()
-                }
+                CircuitBreakerError::CircuitOpen => self.circuit_open_error().into(),
                 CircuitBreakerError::OperationFailed(err) => err,
             })
     }
@@ -1147,10 +1155,7 @@ impl ApiClient {
             .await
             .map_err(|e| -> anyhow::Error {
                 match e {
-                    CircuitBreakerError::CircuitOpen => ApiError::Network(
-                        "Circuit breaker is open - API is unavailable".to_string(),
-                    )
-                    .into(),
+                    CircuitBreakerError::CircuitOpen => self.circuit_open_error().into(),
                     CircuitBreakerError::OperationFailed(err) => err,
                 }
             })?;
@@ -1658,10 +1663,7 @@ impl ApiClient {
             )
             .await
             .map_err(|e| match e {
-                CircuitBreakerError::CircuitOpen => {
-                    ApiError::Network("Circuit breaker is open - API is unavailable".to_string())
-                        .into()
-                }
+                CircuitBreakerError::CircuitOpen => self.circuit_open_error().into(),
                 CircuitBreakerError::OperationFailed(err) => err,
             })
     }

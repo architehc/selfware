@@ -572,10 +572,15 @@ async fn run_llm_doctor_inner(config: &Config) -> Result<(DoctorReport, bool)> {
         Some(target) => format!("multimodal (vision: {})", target),
         None => "multimodal (vision)".to_string(),
     };
-    had_fail |= print_unified_check(&check_name, mm_status, &mm_detail, mm_fix.as_deref());
+    had_fail |= print_unified_check(
+        &check_name,
+        mm_status.clone(),
+        &mm_detail,
+        mm_fix.as_deref(),
+    );
     report.capabilities.push(DoctorCheckResult {
         name: check_name,
-        status: mm_status.into(),
+        status: mm_status,
         detail: mm_detail,
         fix_hint: mm_fix,
     });
@@ -643,31 +648,36 @@ async fn run_llm_doctor_inner(config: &Config) -> Result<(DoctorReport, bool)> {
 /// `had_fail` flag).
 fn print_unified_check(
     name: &str,
-    status: DoctorCheckStatus,
+    status: impl Into<CheckOutcome>,
     detail: &str,
     fix_hint: Option<&str>,
 ) -> bool {
-    let (tag, line) = match status {
-        DoctorCheckStatus::Ok => (
+    let outcome = status.into();
+    let (tag, line) = match outcome {
+        CheckOutcome::Pass => (
             "[PASS]".green().bold().to_string(),
             format!("{} — {}", name, detail).green().to_string(),
         ),
-        DoctorCheckStatus::Warning => (
+        CheckOutcome::Warn => (
             "[WARN]".yellow().bold().to_string(),
             format!("{} — {}", name, detail).yellow().to_string(),
         ),
-        DoctorCheckStatus::Missing => (
+        CheckOutcome::Fail => (
             "[FAIL]".red().bold().to_string(),
             format!("{} — {}", name, detail).red().to_string(),
         ),
+        CheckOutcome::Skip => (
+            "[SKIP]".cyan().bold().to_string(),
+            format!("{} — {}", name, detail).dimmed().to_string(),
+        ),
     };
     println!("  {} {}", tag, line);
-    if status != DoctorCheckStatus::Ok {
+    if outcome != CheckOutcome::Pass && outcome != CheckOutcome::Skip {
         if let Some(hint) = fix_hint {
             println!("         {} {}", "How to fix:".bold().cyan(), hint);
         }
     }
-    status == DoctorCheckStatus::Missing
+    outcome == CheckOutcome::Fail
 }
 
 /// Behavioral vision conditioning probe outcome.
@@ -703,10 +713,10 @@ pub(crate) fn map_vision_status_and_detail(
     outcome: Option<VisionProbeOutcome>,
     target_label: Option<&str>,
     is_vision_expected: bool,
-) -> (DoctorCheckStatus, String, Option<String>) {
+) -> (CheckOutcome, String, Option<String>) {
     match outcome {
         Some(VisionProbeOutcome::Conditioned) => (
-            DoctorCheckStatus::Ok,
+            CheckOutcome::Pass,
             match target_label {
                 Some(t) => format!(
                     "target {} conditioned on image input (red/blue control probes passed)",
@@ -718,7 +728,7 @@ pub(crate) fn map_vision_status_and_detail(
             None,
         ),
         Some(VisionProbeOutcome::Inconclusive) => (
-            DoctorCheckStatus::Warning,
+            CheckOutcome::Warn,
             match target_label {
                 Some(t) => format!(
                     "vision capability unknown for {} (probe inconclusive or empty response)",
@@ -733,7 +743,7 @@ pub(crate) fn map_vision_status_and_detail(
             ),
         ),
         Some(VisionProbeOutcome::Unconditioned) => (
-            DoctorCheckStatus::Warning,
+            CheckOutcome::Warn,
             match target_label {
                 Some(t) => format!(
                     "vision probe on {} failed image conditioning (color invariant or inverted)",
@@ -748,7 +758,7 @@ pub(crate) fn map_vision_status_and_detail(
             ),
         ),
         Some(VisionProbeOutcome::Unauthorized) => (
-            DoctorCheckStatus::Warning,
+            CheckOutcome::Warn,
             match target_label {
                 Some(t) => format!(
                     "vision probe for {} failed: authentication error (HTTP 401/403)",
@@ -764,7 +774,7 @@ pub(crate) fn map_vision_status_and_detail(
         None => {
             if is_vision_expected {
                 (
-                    DoctorCheckStatus::Warning,
+                    CheckOutcome::Warn,
                     match target_label {
                         Some(t) => format!(
                             "vision suggested for {} but vision probe was not completed",
@@ -780,7 +790,7 @@ pub(crate) fn map_vision_status_and_detail(
                 )
             } else {
                 (
-                    DoctorCheckStatus::Ok,
+                    CheckOutcome::Skip,
                     "no vision modality configured (text-only model)".to_string(),
                     None,
                 )

@@ -101,10 +101,20 @@ pub enum FailureKind {
 pub fn classify(error_message: &str) -> FailureKind {
     let msg = error_message.to_lowercase();
 
+    // Hook errors are tool/process failures, never LLM endpoint reachability issues
+    if msg.contains("hook") {
+        if msg.contains("timeout") || msg.contains("timed out") {
+            return FailureKind::ToolTimeout;
+        }
+        return FailureKind::ToolError;
+    }
+
     // ---- LlmUnreachable (connection-level) ----
     let llm_unreachable_markers = [
         "connection refused",
-        "connect",
+        "failed to connect",
+        "cannot connect",
+        "could not connect",
         "timed out connecting",
         "dns",
         "unreachable",

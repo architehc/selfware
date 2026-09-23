@@ -132,9 +132,24 @@ impl ToolCache {
     }
 
     /// Invalidate entries related to a specific file path
+    #[allow(dead_code)]
     pub async fn invalidate_path(&self, path: &str) {
         let mut entries = self.entries.write().await;
         entries.retain(|key, _| !key.contains(path));
+    }
+
+    /// Invalidate entries related to a specific file path as well as git status/diff caches
+    pub async fn invalidate_git_and_path(&self, path: &str) {
+        let mut entries = self.entries.write().await;
+        entries.retain(|key, _| {
+            !key.contains(path) && !key.starts_with("git_status") && !key.starts_with("git_diff")
+        });
+    }
+
+    /// Invalidate git status and git diff cache entries
+    pub async fn invalidate_git(&self) {
+        let mut entries = self.entries.write().await;
+        entries.retain(|key, _| !key.starts_with("git_status") && !key.starts_with("git_diff"));
     }
 
     /// Clear all entries
@@ -191,6 +206,8 @@ pub fn invalidates_cache(tool_name: &str) -> bool {
         tool_name,
         "file_write"
             | "file_edit"
+            | "file_fim_edit"
+            | "cargo_fmt"
             | "file_delete"
             | "file_multi_edit"
             | "git_commit"
@@ -470,8 +487,15 @@ impl CacheManager {
     }
 
     /// Invalidate caches for a file path
+    #[allow(dead_code)]
     pub async fn invalidate_path(&self, path: &str) {
         self.tool_cache.invalidate_path(path).await;
+        self.llm_cache.invalidate_path(path).await;
+    }
+
+    /// Invalidate caches for a file path, and also invalidate git status and diff caches
+    pub async fn invalidate_path_and_git(&self, path: &str) {
+        self.tool_cache.invalidate_git_and_path(path).await;
         self.llm_cache.invalidate_path(path).await;
     }
 }

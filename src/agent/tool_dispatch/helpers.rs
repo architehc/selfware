@@ -488,6 +488,75 @@ pub(crate) fn mention_is_unnegated(lower: &str, needle: &str) -> bool {
     false
 }
 
+fn is_question_without_edit_imperative(lower: &str) -> bool {
+    let trimmed = lower.trim();
+    let is_q = trimmed.ends_with('?')
+        || [
+            "how to ",
+            "how do ",
+            "how does ",
+            "how can ",
+            "where is ",
+            "where are ",
+            "can you ",
+            "could you ",
+            "what is ",
+            "what are ",
+            "why is ",
+            "why does ",
+            "is there ",
+            "are there ",
+            "which ",
+        ]
+        .iter()
+        .any(|p| trimmed.starts_with(p));
+
+    if !is_q {
+        return false;
+    }
+
+    let edit_imperatives = [
+        "fix ",
+        "implement ",
+        "refactor ",
+        "rename ",
+        "modify ",
+        "delete ",
+        "remove ",
+        "edit ",
+        "write ",
+        "create ",
+        "update ",
+        "add ",
+    ];
+
+    if edit_imperatives
+        .iter()
+        .any(|verb| trimmed.starts_with(verb))
+    {
+        return false;
+    }
+
+    let mut after_polite = trimmed;
+    if let Some(rest) = after_polite.strip_prefix("can you ") {
+        after_polite = rest.trim_start();
+    } else if let Some(rest) = after_polite.strip_prefix("could you ") {
+        after_polite = rest.trim_start();
+    }
+    if let Some(rest) = after_polite.strip_prefix("please ") {
+        after_polite = rest.trim_start();
+    }
+
+    if edit_imperatives
+        .iter()
+        .any(|verb| after_polite.starts_with(verb))
+    {
+        return false;
+    }
+
+    true
+}
+
 pub fn task_requires_mutation(task_context: &str) -> bool {
     let lower = task_context.to_lowercase();
     let prose_command = [
@@ -541,6 +610,9 @@ pub fn task_requires_mutation(task_context: &str) -> bool {
     .iter()
     .any(|v| lower.contains(v));
     if is_review_deliverable && !has_edit_verb {
+        return false;
+    }
+    if is_question_without_edit_imperative(&lower) {
         return false;
     }
     [

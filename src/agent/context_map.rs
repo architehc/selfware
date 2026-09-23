@@ -660,8 +660,9 @@ impl ContextMap {
 
     /// Render the L1 project tree as a compact string.
     pub fn render_tree(&self) -> String {
-        /// Max files to render in the tree. Keeps system prompt bounded.
-        const MAX_TREE_LINES: usize = 500;
+        // Max files to render in the tree. Scales dynamically with context budget
+        // so small context windows (24k/40k) don't get blown out by 500 lines of tree.
+        let max_tree_lines = (self.budget / 400).clamp(50, 200);
 
         let mut lines: Vec<String> = Vec::new();
         let mut sorted: Vec<_> = self.entries.values().collect();
@@ -682,7 +683,7 @@ impl ContextMap {
         });
 
         for (shown, entry) in sorted.iter().enumerate() {
-            if shown >= MAX_TREE_LINES {
+            if shown >= max_tree_lines {
                 lines.push(format!(
                     "\n  ... and {} more files (use directory_tree for full listing)",
                     total_files - shown

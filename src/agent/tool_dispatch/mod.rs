@@ -1861,20 +1861,34 @@ impl Agent {
             // Fire PreToolUse hooks (may skip execution)
             let pre_ctx = HookContext::pre_tool(&name, &args_str);
             if let HookAction::Skip { reason } = self.hook_registry.fire(&pre_ctx).await {
-                let skip_msg = format!("Tool skipped by PreToolUse hook: {}", reason);
+                let skip_msg = format!(
+                    "POLICY BLOCK: Tool '{}' was blocked by PreToolUse hook policy: {}. \
+                     You MUST NOT attempt to bypass this policy using shell_exec or alternative tools.",
+                    name, reason
+                );
                 info!("{}", skip_msg);
-                self.push_tool_result_message(
-                    use_native_fc,
-                    &call_id,
+                let args_value: serde_json::Value =
+                    serde_json::from_str(&args_str).unwrap_or(serde_json::Value::Null);
+                self.yolo_manager.record_operation(
                     &name,
-                    &args_str,
+                    &args_value,
                     false,
-                    &skip_msg,
-                )
-                .await;
+                    crate::safety::yolo::AuditResult::Blocked(format!(
+                        "PreToolUse hook: {}",
+                        reason
+                    )),
+                    0,
+                );
+                self.record_failed_tool_attempt(&name, &args_str, "hook_policy", &skip_msg);
+                self.push_tool_skip_message(&call_id, use_native_fc, &skip_msg);
                 continue;
             }
 
+            self.note_total_tool_call();
+            self.emit_progress(super::progress::ProgressEvent::ToolCallStarted {
+                tool: name.clone(),
+                args_short: super::progress::short_args_for(&name, &args),
+            });
             self.emit_event(AgentEvent::ToolStarted { name: name.clone() });
 
             validated.push(ValidatedTool {
@@ -1998,6 +2012,11 @@ impl Agent {
             }
 
             let duration_ms = vt.start_time.elapsed().as_millis() as u64;
+            self.emit_progress(super::progress::ProgressEvent::ToolCallCompleted {
+                tool: vt.name.clone(),
+                ok: success,
+                elapsed_ms: duration_ms,
+            });
             self.emit_event(AgentEvent::ToolCompleted {
                 name: vt.name.clone(),
                 success,
@@ -2345,17 +2364,23 @@ impl Agent {
         // Fire PreToolUse hooks (may skip execution)
         let pre_ctx = HookContext::pre_tool(&name, &args_str);
         if let HookAction::Skip { reason } = self.hook_registry.fire(&pre_ctx).await {
-            let skip_msg = format!("Tool skipped by PreToolUse hook: {}", reason);
+            let skip_msg = format!(
+                "POLICY BLOCK: Tool '{}' was blocked by PreToolUse hook policy: {}. \
+                 You MUST NOT attempt to bypass this policy using shell_exec or alternative tools.",
+                name, reason
+            );
             info!("{}", skip_msg);
-            self.push_tool_result_message(
-                use_native_fc,
-                &call_id,
+            let args_value: serde_json::Value =
+                serde_json::from_str(&args_str).unwrap_or(serde_json::Value::Null);
+            self.yolo_manager.record_operation(
                 &name,
-                &args_str,
+                &args_value,
                 false,
-                &skip_msg,
-            )
-            .await;
+                crate::safety::yolo::AuditResult::Blocked(format!("PreToolUse hook: {}", reason)),
+                0,
+            );
+            self.record_failed_tool_attempt(&name, &args_str, "hook_policy", &skip_msg);
+            self.push_tool_skip_message(&call_id, use_native_fc, &skip_msg);
             return Ok(());
         }
 
@@ -3245,7 +3270,9 @@ impl Agent {
         // Invalidate cache entries when a mutating tool targets a specific path
         if crate::session::cache::invalidates_cache(name) {
             if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                self.cache_manager.invalidate_path(path).await;
+                self.cache_manager.invalidate_path_and_git(path).await;
+            } else {
+                self.cache_manager.tool_cache.invalidate_git().await;
             }
             // Mutations that can't be reduced to one `path` arg — shells run
             // arbitrary commands, file_multi_edit carries an `edits` array,
@@ -3259,8 +3286,10 @@ impl Agent {
                     | "pty_shell"
                     | "git_commit"
                     | "git_checkout"
+                    | "git_reset"
                     | "file_multi_edit"
                     | "patch_apply"
+                    | "cargo_fmt"
             ) {
                 self.cache_manager.tool_cache.clear().await;
             }

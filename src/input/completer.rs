@@ -40,25 +40,47 @@ impl SelfwareCompleter {
         span_start: usize,
         span_end: usize,
     ) -> Vec<Suggestion> {
+        let clean_prefix = prefix.strip_prefix('/').unwrap_or(prefix);
         let mut suggestions: Vec<(i64, Suggestion)> = self
             .commands
             .iter()
             .filter_map(|cmd| {
-                self.matcher.fuzzy_match(cmd, prefix).map(|score| {
-                    (
-                        score,
-                        Suggestion {
-                            value: cmd.clone(),
-                            description: Some(self.command_description(cmd)),
-                            style: None,
-                            extra: None,
-                            span: Span::new(span_start, span_end),
-                            append_whitespace: true,
-                            match_indices: None,
-                            display_override: None,
-                        },
-                    )
-                })
+                let clean_cmd = cmd.strip_prefix('/').unwrap_or(cmd);
+                let base_score = self
+                    .matcher
+                    .fuzzy_match(cmd, prefix)
+                    .or_else(|| self.matcher.fuzzy_match(clean_cmd, clean_prefix))?;
+
+                let mut score = base_score;
+                // Reward exact prefix matches
+                if clean_cmd.starts_with(clean_prefix) {
+                    score += 100;
+                }
+                if clean_cmd == clean_prefix {
+                    score += 200;
+                }
+                // When typing 'q', 'exit', or variants, strongly prioritize quit/exit commands over queue
+                if ((clean_prefix == "q" || clean_prefix == "qui" || clean_prefix == "quit")
+                    && (clean_cmd == "q" || clean_cmd == "quit"))
+                    || ((clean_prefix == "e" || clean_prefix == "ex" || clean_prefix == "exit")
+                        && clean_cmd == "exit")
+                {
+                    score += 1000;
+                }
+
+                Some((
+                    score,
+                    Suggestion {
+                        value: cmd.clone(),
+                        description: Some(self.command_description(cmd)),
+                        style: None,
+                        extra: None,
+                        span: Span::new(span_start, span_end),
+                        append_whitespace: true,
+                        match_indices: None,
+                        display_override: None,
+                    },
+                ))
             })
             .collect();
 
@@ -188,7 +210,7 @@ impl SelfwareCompleter {
     fn command_description(&self, cmd: &str) -> String {
         if let Some(desc) = super::command_registry::command_description(cmd) {
             desc.to_string()
-        } else if cmd == "exit" || cmd == "quit" {
+        } else if cmd == "exit" || cmd == "quit" || cmd == "q" {
             "Exit interactive mode".to_string()
         } else {
             "Command".to_string()
@@ -286,7 +308,14 @@ impl Completer for SelfwareCompleter {
                     .rfind(char::is_whitespace)
                     .map(|i| i + 1)
                     .unwrap_or(0);
-                self.complete_tools_with_span(&prefix, word_start, pos)
+                let tool_suggestions = self.complete_tools_with_span(&prefix, word_start, pos);
+                if !tool_suggestions.is_empty() {
+                    tool_suggestions
+                } else if word_start == 0 {
+                    self.complete_commands_with_span(&prefix, word_start, pos)
+                } else {
+                    Vec::new()
+                }
             }
             CompletionContext::Path(prefix) => {
                 // Path completion starts at the beginning of the path

@@ -12,6 +12,7 @@ pub struct CircuitBreaker {
     success_count: AtomicU32,
     config: CircuitBreakerConfig,
     last_failure_time: RwLock<Option<Instant>>,
+    last_failure_reason: std::sync::RwLock<Option<String>>,
     last_state_change: RwLock<Instant>,
 }
 
@@ -76,8 +77,17 @@ impl CircuitBreaker {
             success_count: AtomicU32::new(0),
             config,
             last_failure_time: RwLock::new(None),
+            last_failure_reason: std::sync::RwLock::new(None),
             last_state_change: RwLock::new(Instant::now()),
         }
+    }
+
+    /// Return the root error message of the last recorded failure, if any.
+    pub fn last_error(&self) -> Option<String> {
+        self.last_failure_reason
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
     }
 
     /// Get current circuit state
@@ -105,6 +115,7 @@ impl CircuitBreaker {
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<T, E>>,
+        E: std::fmt::Display,
     {
         self.call_with_classifier(operation, |_| true).await
     }
@@ -123,6 +134,7 @@ impl CircuitBreaker {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<T, E>>,
         P: FnOnce(&E) -> bool,
+        E: std::fmt::Display,
     {
         // Check current state
         match self.current_state() {
@@ -153,7 +165,7 @@ impl CircuitBreaker {
             }
             Err(e) => {
                 if counts_toward_failure(&e) {
-                    self.on_failure().await;
+                    self.on_failure_with_reason(Some(format!("{e}"))).await;
                 }
                 Err(CircuitBreakerError::OperationFailed(e))
             }
@@ -161,8 +173,11 @@ impl CircuitBreaker {
     }
 
     /// Handle successful operation
-    async fn on_success(&self) {
+    pub async fn on_success(&self) {
         let success_count = self.success_count.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Ok(mut guard) = self.last_failure_reason.write() {
+            *guard = None;
+        }
         debug!(success_count = success_count, "Operation succeeded");
 
         if self.current_state() == CircuitState::HalfOpen {
@@ -177,9 +192,18 @@ impl CircuitBreaker {
     }
 
     /// Handle failed operation
-    async fn on_failure(&self) {
+    pub async fn on_failure(&self) {
+        self.on_failure_with_reason(None).await;
+    }
+
+    async fn on_failure_with_reason(&self, reason: Option<String>) {
         let failure_count = self.failure_count.fetch_add(1, Ordering::SeqCst) + 1;
         *self.last_failure_time.write().await = Some(Instant::now());
+        if let Some(r) = reason {
+            if let Ok(mut guard) = self.last_failure_reason.write() {
+                *guard = Some(r);
+            }
+        }
 
         warn!(failure_count = failure_count, "Operation failed");
 

@@ -506,6 +506,11 @@ mod tests {
         );
         assert_eq!(check_id_for("cargo_test", ""), "cargo test");
         assert_eq!(check_id_for("cargo_check", ""), "cargo check");
+        assert_eq!(check_id_for("shell_exec", "cargo test 2>&1"), "cargo test");
+        assert_eq!(
+            check_id_for("shell_exec", "cargo test >/dev/null 2>&1"),
+            "cargo test"
+        );
     }
 
     #[test]
@@ -552,7 +557,7 @@ pub fn check_id_for(tool: &str, command: &str) -> String {
     let words: Vec<&str> = text
         .split_whitespace()
         .take_while(|w| !matches!(*w, "&&" | "||" | ";" | "|"))
-        .filter(|w| !w.starts_with('-'))
+        .filter(|w| !w.starts_with('-') && !w.contains('>') && !w.contains('<'))
         .collect();
     match words.as_slice() {
         [] => match tool {

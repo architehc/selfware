@@ -3181,18 +3181,21 @@ fn env_selected_endpoint_without_config_file_is_intentional_selection() {
 }
 
 #[test]
-fn bare_install_without_env_endpoint_still_fails_fast() {
+fn bare_install_without_env_endpoint_loads_keyless_default_successfully() {
     let _env = clear_env();
     let cwd = tempfile::tempdir().unwrap();
     let _cwd = crate::test_support::CwdGuard::enter(cwd.path());
     let home = tempfile::tempdir().unwrap();
     let _home = HomeGuard::set(home.path());
 
-    // Untouched built-in default, no config file, no key: the 031c7b30
-    // fast-fail must still trigger.
-    let err = Config::load(None).unwrap_err().to_string();
+    // Untouched built-in default endpoint (https://llm.selfware.design/v1) is keyless.
+    // A bare install with no config file and no API key must load successfully
+    // rather than bailing with a false 401 warning.
+    let config = Config::load(None).expect("bare install with keyless default endpoint must load");
     assert!(
-        err.contains("no config file found") && err.contains("built-in default endpoint"),
-        "a bare install must fail fast with the first-run message, got: {err}"
+        crate::config::is_keyless_endpoint(&config.endpoint),
+        "default endpoint must be recognized as keyless"
     );
+    assert_eq!(config.endpoint, "https://llm.selfware.design/v1");
+    assert!(config.api_key.is_none());
 }

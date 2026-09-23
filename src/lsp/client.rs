@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -122,6 +122,7 @@ struct LspServerConnection {
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>,
     /// Published diagnostics keyed by file URI.
     diagnostics: Arc<Mutex<HashMap<String, Vec<Diagnostic>>>>,
+    is_indexing: Arc<AtomicBool>,
     next_id: AtomicU64,
     child: Arc<Mutex<Child>>,
     reader_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -181,9 +182,11 @@ impl LspServerConnection {
             Arc::new(Mutex::new(HashMap::new()));
         let diagnostics: Arc<Mutex<HashMap<String, Vec<Diagnostic>>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let is_indexing = Arc::new(AtomicBool::new(false));
 
         let pending_clone = Arc::clone(&pending);
         let diag_clone = Arc::clone(&diagnostics);
+        let indexing_clone = Arc::clone(&is_indexing);
 
         // Background task: read Content-Length framed messages from stdout.
         let reader_handle = tokio::spawn(async move {
@@ -191,7 +194,8 @@ impl LspServerConnection {
             loop {
                 match read_lsp_message(&mut reader).await {
                     Ok(Some(msg)) => {
-                        Self::dispatch_message(msg, &pending_clone, &diag_clone).await;
+                        Self::dispatch_message(msg, &pending_clone, &diag_clone, &indexing_clone)
+                            .await;
                     }
                     Ok(None) => {
                         debug!("LSP stdout closed");
@@ -211,6 +215,7 @@ impl LspServerConnection {
             stdin: Arc::new(Mutex::new(stdin)),
             pending,
             diagnostics,
+            is_indexing,
             next_id: AtomicU64::new(1),
             child: Arc::new(Mutex::new(child)),
             reader_handle: Mutex::new(Some(reader_handle)),
@@ -224,6 +229,7 @@ impl LspServerConnection {
         msg: Value,
         pending: &Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>,
         diagnostics: &Arc<Mutex<HashMap<String, Vec<Diagnostic>>>>,
+        indexing: &Arc<AtomicBool>,
     ) {
         // Is it a response (has "id" + either "result" or "error")?
         if let Some(id) = msg.get("id").and_then(|v| v.as_u64()) {
@@ -243,9 +249,31 @@ impl LspServerConnection {
                 if let Some(params) = msg.get("params") {
                     Self::handle_diagnostics(params, diagnostics).await;
                 }
+            } else if method == "$/progress" {
+                if let Some(params) = msg.get("params") {
+                    if let Some(val) = params.get("value") {
+                        if let Some(kind) = val.get("kind").and_then(|k| k.as_str()) {
+                            match kind {
+                                "begin" => indexing.store(true, Ordering::Relaxed),
+                                "end" => indexing.store(false, Ordering::Relaxed),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            } else if method == "experimental/serverStatus" {
+                if let Some(params) = msg.get("params") {
+                    if let Some(quiescent) = params.get("quiescent").and_then(|q| q.as_bool()) {
+                        indexing.store(!quiescent, Ordering::Relaxed);
+                    }
+                }
             }
-            // Other notifications are silently ignored.
         }
+    }
+
+    /// Check if this server is currently indexing.
+    pub fn is_indexing(&self) -> bool {
+        self.is_indexing.load(Ordering::Relaxed)
     }
 
     /// Parse and store diagnostics from `textDocument/publishDiagnostics`.
@@ -312,9 +340,12 @@ impl LspServerConnection {
         self.send_message(&msg).await?;
         debug!("Sent LSP request: {} (id={})", method, id);
 
-        let response = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
+        let timeout_secs = if method == "initialize" { 5 } else { 30 };
+        let response = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx)
             .await
-            .map_err(|_| anyhow::anyhow!("LSP request '{}' timed out after 30s", method))?
+            .map_err(|_| {
+                anyhow::anyhow!("LSP request '{}' timed out after {}s", method, timeout_secs)
+            })?
             .map_err(|_| anyhow::anyhow!("LSP response channel closed for '{}'", method))?;
 
         if let Some(error) = response.get("error") {
@@ -498,6 +529,12 @@ impl LspClient {
         // Just stores the root; actual servers start lazily.
         info!("LspClient initialized for {}", project_root.display());
         Ok(())
+    }
+
+    /// Check if the language server for `lang` is currently indexing.
+    pub async fn is_indexing(&self, lang: Language) -> bool {
+        let conns = self.connections.lock().await;
+        conns.get(&lang).map(|c| c.is_indexing()).unwrap_or(false)
     }
 
     /// Get or start the connection for a language.
@@ -718,7 +755,11 @@ impl LspClient {
         // Close the document so the server doesn't leak it.
         let _ = self.did_close(file).await;
 
-        Self::parse_locations(&result)
+        let locations = Self::parse_locations(&result)?;
+        if locations.is_empty() && conn.is_indexing() {
+            debug!("LSP goto_definition returned empty results while server is still indexing");
+        }
+        Ok(locations)
     }
 
     /// Find all references to the symbol at the given position.
@@ -738,7 +779,11 @@ impl LspClient {
             )
             .await?;
 
-        Self::parse_locations(&result)
+        let locations = Self::parse_locations(&result)?;
+        if locations.is_empty() && conn.is_indexing() {
+            debug!("LSP find_references returned empty results while server is still indexing");
+        }
+        Ok(locations)
     }
 
     /// List all symbols in a document.

@@ -404,9 +404,13 @@ impl Agent {
 
     /// Show detailed session statistics (Qwen Code /stats style)
     pub(super) async fn show_session_stats(&self) {
-        let tokens = self.memory.total_tokens();
-        let window = self.memory.context_window();
-        let used_pct = (tokens as f64 / window as f64 * 100.0).min(100.0);
+        let tokens = self.estimate_messages_tokens();
+        let window = self.max_context_tokens;
+        let used_pct = if window > 0 {
+            (tokens as f64 / window as f64 * 100.0).min(100.0)
+        } else {
+            0.0
+        };
         let messages = self.messages.len();
         let user_msgs = self.messages.iter().filter(|m| m.role == "user").count();
         let assistant_msgs = self

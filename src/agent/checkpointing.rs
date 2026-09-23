@@ -451,6 +451,11 @@ impl Agent {
         // Set cognitive state to Do phase since we're resuming execution
         agent.cognitive_state.set_phase(CyclePhase::Do);
 
+        // Restore task context and re-classify task policy so guards and gates
+        // have consistent read-only / mutation awareness across resume.
+        agent.current_task_context = checkpoint.task_description.clone();
+        agent.classify_task_policy();
+
         info!("Agent resumed from checkpoint with cognitive state in Do phase");
 
         Ok(agent)
@@ -595,7 +600,7 @@ impl Agent {
     /// caller cannot silently no-op. The caller (maybe_auto_continue) treats
     /// the error as "the chain must not fire — there is no resume point to
     /// hand off to".
-    pub(super) fn save_checkpoint_forced(&mut self, task_description: &str) -> Result<()> {
+    pub(crate) fn save_checkpoint_forced(&mut self, task_description: &str) -> Result<()> {
         if self.checkpoint_manager.is_none() {
             anyhow::bail!(
                 "cannot persist a forced checkpoint: no checkpoint manager is configured"

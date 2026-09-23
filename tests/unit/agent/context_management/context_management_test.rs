@@ -2046,8 +2046,8 @@ async fn test_parallel_bulk_read_loads_after_compression() {
 fn test_per_message_cap_scales_with_budget() {
     assert_eq!(Agent::per_message_cap(100_000), 75_000);
     assert_eq!(Agent::per_message_cap(1_000_000), 750_000);
-    // Small budgets keep the 50K floor so normal tasks are untouched.
-    assert_eq!(Agent::per_message_cap(10_000), 50_000);
+    // Small budgets scale down to stay within the window (3/4 of 10k is 7.5k).
+    assert_eq!(Agent::per_message_cap(10_000), 7_500);
 }
 
 #[tokio::test]

@@ -37,8 +37,8 @@ const TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
 use std::path::PathBuf;
 
 use super::api_key::{
-    endpoint_has_userinfo, is_insecure_remote_endpoint, is_local_endpoint, is_openrouter_endpoint,
-    load_api_key_from_keyring, plaintext_remote_allowed, ApiKeySource,
+    endpoint_has_userinfo, is_insecure_remote_endpoint, is_keyless_endpoint, is_local_endpoint,
+    is_openrouter_endpoint, load_api_key_from_keyring, plaintext_remote_allowed, ApiKeySource,
 };
 use super::model::{default_modalities, ModelProfile, RedactedString};
 use super::model_profiles::{apply_profile, match_profile, UserExplicitFields};
@@ -692,7 +692,10 @@ impl Config {
         // Missing key against a REMOTE endpoint: the run will fail with an
         // upstream `401 No cookie auth credentials found` — say so now, with
         // the concrete fix, instead of after a wasted round-trip.
-        if config.api_key.is_none() && !is_local_endpoint(&config.endpoint) {
+        if config.api_key.is_none()
+            && !is_local_endpoint(&config.endpoint)
+            && !is_keyless_endpoint(&config.endpoint)
+        {
             let key_hint = if is_openrouter_endpoint(&config.endpoint) {
                 " (or OPENROUTER_API_KEY)"
             } else {

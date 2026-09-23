@@ -185,6 +185,17 @@ pub fn is_openrouter_endpoint(endpoint: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Check whether an endpoint URL is a known keyless endpoint (e.g. selfware's default public endpoint).
+pub fn is_keyless_endpoint(endpoint: &str) -> bool {
+    let Ok(url) = url::Url::parse(endpoint) else {
+        return false;
+    };
+    match url.host_str() {
+        Some(h) => h.eq_ignore_ascii_case("llm.selfware.design") || h.ends_with(".selfware.design"),
+        None => false,
+    }
+}
+
 /// Store an API key in the OS keyring for the endpoint of the active
 /// (already-loaded) configuration.
 ///

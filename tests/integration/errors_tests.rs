@@ -1,7 +1,7 @@
 use selfware::errors::{
     get_exit_code, is_confirmation_error, AgentError, ApiError, ResourceError, SafetyError,
     SelfwareError, SessionError, ToolError, EXIT_API_ERROR, EXIT_CONFIG_ERROR,
-    EXIT_CONFIRMATION_REQUIRED, EXIT_ERROR, EXIT_SAFETY_ERROR, EXIT_SUCCESS,
+    EXIT_CONFIRMATION_REQUIRED, EXIT_ERROR, EXIT_INTERRUPTED, EXIT_SAFETY_ERROR, EXIT_SUCCESS,
 };
 
 #[test]
@@ -311,7 +311,10 @@ fn test_exit_code_for_direct_safety_error() {
 #[test]
 fn test_exit_code_for_direct_agent_error_non_confirmation() {
     let direct_agent = anyhow::Error::from(AgentError::Cancelled);
-    assert_eq!(get_exit_code(&direct_agent), EXIT_ERROR);
+    assert_eq!(get_exit_code(&direct_agent), EXIT_INTERRUPTED);
+
+    let non_cancel = anyhow::Error::from(AgentError::MissingSystemPrompt);
+    assert_eq!(get_exit_code(&non_cancel), EXIT_ERROR);
 }
 
 #[test]

@@ -2977,6 +2977,7 @@ To call a tool, use this EXACT XML structure:
         let Some((description, snapshots)) = self.redo_stack.pop() else {
             return "Nothing to redo".to_string();
         };
+        let _ = self.edit_history.redo();
         let outcomes = crate::session::edit_history::restore_checkpoint_guarded(&snapshots).await;
         render_restore_outcomes("Reapplied", &description, &outcomes)
     }

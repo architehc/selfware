@@ -34,6 +34,21 @@ pub static COMMANDS: &[CommandEntry] = &[
         category: CommandCategory::General,
     },
     CommandEntry {
+        name: "/quit",
+        description: "Exit interactive mode and save session",
+        category: CommandCategory::General,
+    },
+    CommandEntry {
+        name: "/exit",
+        description: "Exit interactive mode and save session",
+        category: CommandCategory::General,
+    },
+    CommandEntry {
+        name: "/q",
+        description: "Exit interactive mode (alias for /quit)",
+        category: CommandCategory::General,
+    },
+    CommandEntry {
         name: "/status",
         description: "Show agent status and context usage",
         category: CommandCategory::General,
@@ -301,6 +316,11 @@ pub static COMMANDS: &[CommandEntry] = &[
     CommandEntry {
         name: "/restore",
         description: "Restore from checkpoint",
+        category: CommandCategory::Session,
+    },
+    CommandEntry {
+        name: "/timeline",
+        description: "View timeline and restore checkpoints (alias for /restore)",
         category: CommandCategory::Session,
     },
     CommandEntry {

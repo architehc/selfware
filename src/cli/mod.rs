@@ -1460,7 +1460,13 @@ pub async fn run() -> Result<()> {
     // `selfware trust` records repo trust and must run BEFORE Config::load so it
     // is not blocked by the very credential-origin gate it manages.
     if let Some(Commands::Trust { path }) = &cli.command {
-        let cfg_path = std::path::Path::new(path);
+        let mut cfg_path = std::path::Path::new(path).to_path_buf();
+        if cfg_path.is_dir() {
+            let candidate = cfg_path.join("selfware.toml");
+            if candidate.exists() {
+                cfg_path = candidate;
+            }
+        }
         if !cfg_path.exists() {
             anyhow::bail!(
                 "No config to trust at '{}'. Pass a path (`selfware trust <path>`) \
@@ -1468,8 +1474,8 @@ pub async fn run() -> Result<()> {
                 path
             );
         }
-        let canon = std::fs::canonicalize(cfg_path).unwrap_or_else(|_| cfg_path.to_path_buf());
-        crate::config::trust::add_trusted_config(cfg_path)?;
+        let canon = std::fs::canonicalize(&cfg_path).unwrap_or_else(|_| cfg_path.clone());
+        crate::config::trust::add_trusted_config(&cfg_path)?;
         if !cli.quiet {
             println!("Trusted {}", canon.display());
             println!(
@@ -1478,6 +1484,84 @@ pub async fn run() -> Result<()> {
                  and use its endpoint with your API key. Untrust by removing that \
                  line from ~/.selfware/trusted_repos."
             );
+        }
+        return Ok(());
+    }
+
+    // Emergency killswitch management must run BEFORE Config::load so an operator
+    // can check, trip, or reset the killswitch even when configuration is invalid.
+    if let Some(Commands::Killswitch { command }) = &cli.command {
+        use args::KillswitchCommands;
+        match command {
+            KillswitchCommands::Status => {
+                let status = crate::safety::killswitch::get_killswitch_status(None);
+                if status.is_active {
+                    if let Some(err) = status.error {
+                        println!("🛑 Killswitch is ACTIVE: {err}");
+                    } else {
+                        println!("🛑 Killswitch is ACTIVE");
+                    }
+                } else {
+                    println!("✅ Killswitch is INACTIVE");
+                }
+            }
+            KillswitchCommands::Trip { reason, global } => {
+                let target_root = if *global {
+                    dirs::home_dir()
+                        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
+                } else {
+                    std::env::current_dir()?
+                };
+                let outcome =
+                    crate::safety::killswitch::trip_file_killswitch(&target_root, reason)?;
+                match outcome {
+                    crate::safety::killswitch::TripFileOutcome::Written { path } => {
+                        println!("🛑 Killswitch TRIPPED at {}: {reason}", path.display());
+                    }
+                    crate::safety::killswitch::TripFileOutcome::PreservedExisting {
+                        path,
+                        description,
+                    } => {
+                        println!(
+                            "🛑 Killswitch already ACTIVE via existing sentinel at {} ({}); operator reason not written to disk: {reason}",
+                            path.display(),
+                            description
+                        );
+                    }
+                }
+            }
+            KillswitchCommands::Reset { global } => {
+                let target_root = if *global {
+                    dirs::home_dir()
+                        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
+                } else {
+                    std::env::current_dir()?
+                };
+                let ks_path = target_root
+                    .join(".selfware")
+                    .join(crate::safety::killswitch::KILLSWITCH_FILE_NAME);
+                let removed = crate::safety::killswitch::remove_file_killswitch(&target_root)?;
+                if removed {
+                    println!("Killswitch file removed: {}", ks_path.display());
+                } else {
+                    println!("Killswitch file not present at {}", ks_path.display());
+                }
+
+                // Re-verify actual system status to report honestly if another gate (e.g. global file or env var) remains active
+                let check_root = if *global {
+                    None
+                } else {
+                    Some(target_root.as_path())
+                };
+                match crate::safety::killswitch::check_killswitch(check_root) {
+                    Ok(()) => {
+                        println!("✅ Killswitch verified clear: system is operational.");
+                    }
+                    Err(e) => {
+                        println!("⚠️  Note: System remains halted by killswitch: {e}");
+                    }
+                }
+            }
         }
         return Ok(());
     }
@@ -3176,6 +3260,17 @@ async fn handle_command(
                 })
                 .count();
 
+            // Fast reachability probe of configured endpoint (2s timeout)
+            // to satisfy Rule 3 (never claim Connected without verification).
+            let probe_client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(2))
+                .connect_timeout(std::time::Duration::from_secs(2))
+                .build();
+            let endpoint_reachable = match probe_client {
+                Ok(c) => c.get(&config.endpoint).send().await.is_ok(),
+                Err(_) => false,
+            };
+
             // The global --output-format flag covers this command: both JSON
             // variants emit a single machine-readable object here.
             match output_format {
@@ -3184,6 +3279,7 @@ async fn handle_command(
                         "model": ctx.model_name,
                         "endpoint": config.endpoint,
                         "is_local": ctx.is_local_model,
+                        "endpoint_reachable": endpoint_reachable,
                         "project_path": ctx.project_path,
                         "execution_mode": format!("{:?}", exec_mode),
                         "journal": {
@@ -3205,10 +3301,26 @@ async fn handle_command(
                     );
 
                     let hosting = if ctx.is_local_model {
-                        format!("{} Running on your hardware (local)", Glyphs::home())
-                            .garden_healthy()
+                        if endpoint_reachable {
+                            format!("{} Running on your hardware (local)", Glyphs::home())
+                                .garden_healthy()
+                        } else {
+                            format!(
+                                "{} Local model endpoint unreachable ({})",
+                                Glyphs::wilt(),
+                                config.endpoint
+                            )
+                            .garden_wilting()
+                        }
+                    } else if endpoint_reachable {
+                        format!("{} Connected to remote model", Glyphs::compass()).garden_healthy()
                     } else {
-                        format!("{} Connected to remote model", Glyphs::compass()).garden_wilting()
+                        format!(
+                            "{} Remote model endpoint unreachable ({})",
+                            Glyphs::wilt(),
+                            config.endpoint
+                        )
+                        .garden_wilting()
                     };
 
                     println!(
@@ -5770,79 +5882,8 @@ max_recovery_attempts = 3
             }
         }
 
-        Commands::Killswitch { command } => {
-            use args::KillswitchCommands;
-            match command {
-                KillswitchCommands::Status => {
-                    let status = crate::safety::killswitch::get_killswitch_status(None);
-                    if status.is_active {
-                        if let Some(err) = status.error {
-                            println!("🛑 Killswitch is ACTIVE: {err}");
-                        } else {
-                            println!("🛑 Killswitch is ACTIVE");
-                        }
-                    } else {
-                        println!("✅ Killswitch is INACTIVE");
-                    }
-                }
-                KillswitchCommands::Trip { reason, global } => {
-                    let target_root = if global {
-                        dirs::home_dir()
-                            .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
-                    } else {
-                        std::env::current_dir()?
-                    };
-                    let outcome =
-                        crate::safety::killswitch::trip_file_killswitch(&target_root, &reason)?;
-                    match outcome {
-                        crate::safety::killswitch::TripFileOutcome::Written { path } => {
-                            println!("🛑 Killswitch TRIPPED at {}: {reason}", path.display());
-                        }
-                        crate::safety::killswitch::TripFileOutcome::PreservedExisting {
-                            path,
-                            description,
-                        } => {
-                            println!(
-                                "🛑 Killswitch already ACTIVE via existing sentinel at {} ({}); operator reason not written to disk: {reason}",
-                                path.display(),
-                                description
-                            );
-                        }
-                    }
-                }
-                KillswitchCommands::Reset { global } => {
-                    let target_root = if global {
-                        dirs::home_dir()
-                            .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
-                    } else {
-                        std::env::current_dir()?
-                    };
-                    let ks_path = target_root
-                        .join(".selfware")
-                        .join(crate::safety::killswitch::KILLSWITCH_FILE_NAME);
-                    let removed = crate::safety::killswitch::remove_file_killswitch(&target_root)?;
-                    if removed {
-                        println!("Killswitch file removed: {}", ks_path.display());
-                    } else {
-                        println!("Killswitch file not present at {}", ks_path.display());
-                    }
-
-                    // Re-verify actual system status to report honestly if another gate (e.g. global file or env var) remains active
-                    let check_root = if global {
-                        None
-                    } else {
-                        Some(target_root.as_path())
-                    };
-                    match crate::safety::killswitch::check_killswitch(check_root) {
-                        Ok(()) => {
-                            println!("✅ Killswitch verified clear: system is operational.");
-                        }
-                        Err(e) => {
-                            println!("⚠️  Note: System remains halted by killswitch: {e}");
-                        }
-                    }
-                }
-            }
+        Commands::Killswitch { .. } => {
+            unreachable!("Killswitch command handled before Config::load");
         }
 
         Commands::Skill { command } => {

@@ -36,7 +36,13 @@ fn is_config_trusted_in(trust_file: &Path, config_path: &Path) -> bool {
     let target = canonical(config_path);
     content.lines().any(|line| {
         let line = line.trim();
-        !line.is_empty() && canonical(Path::new(line)) == target
+        if line.is_empty() {
+            return false;
+        }
+        let p = canonical(Path::new(line));
+        p == target
+            || (p.is_dir() && p.join("selfware.toml") == target)
+            || (target.is_file() && target.parent() == Some(&p))
     })
 }
 

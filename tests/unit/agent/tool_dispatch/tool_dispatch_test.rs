@@ -2253,6 +2253,33 @@ fn test_task_no_mutation_understand() {
     assert!(!task_requires_mutation("Understand how the system works"));
 }
 
+#[test]
+fn test_task_question_with_incidental_verbs_is_read_only() {
+    assert!(!task_requires_mutation(
+        "Where is the function that creates the session?"
+    ));
+    assert!(!task_requires_mutation(
+        "How does the checkpointer create deltas?"
+    ));
+    assert!(!task_requires_mutation("Where do we add new routes?"));
+    assert!(!task_requires_mutation(
+        "Can you explain how to create a file?"
+    ));
+    assert!(!task_requires_mutation("Which module writes the logs?"));
+    assert!(!task_requires_mutation("How to update the configuration?"));
+}
+
+#[test]
+fn test_task_question_with_edit_imperative_requires_mutation() {
+    assert!(task_requires_mutation("Can you fix the bug in main.rs?"));
+    assert!(task_requires_mutation(
+        "Could you please add tests for parser?"
+    ));
+    assert!(task_requires_mutation(
+        "Can you implement the missing feature?"
+    ));
+}
+
 // =========================================================================
 // shell_command_is_observational tests
 // =========================================================================

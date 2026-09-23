@@ -55,6 +55,9 @@ fn test_known_commands_present_in_registry() {
     // Spot-check a representative command from every category.
     let expected = [
         "/help",
+        "/quit",
+        "/exit",
+        "/q",
         "/status",
         "/ctx",
         "/ctx load",
@@ -94,6 +97,7 @@ fn test_known_commands_present_in_registry() {
         "/worktree list",
         "/copy",
         "/restore",
+        "/timeline",
         "/chat",
         "/chat save",
         "/chat resume",

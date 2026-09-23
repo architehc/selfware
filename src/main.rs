@@ -12,6 +12,10 @@ const SHUTDOWN_GRACE_SECS: u64 = 10;
 const MAIN_STACK_SIZE: usize = 16 * 1024 * 1024;
 
 fn main() -> ExitCode {
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     std::thread::Builder::new()
         .name("main".into())
         .stack_size(MAIN_STACK_SIZE)

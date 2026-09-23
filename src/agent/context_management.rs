@@ -234,83 +234,75 @@ impl Agent {
     }
 
     /// Per-message truncation cap for the over-budget fallback: 3/4 of the
-    /// conversation budget, floored at 50K. A flat 50K silently destroyed
-    /// deliberately injected large context — a 780K evolve-graph pack on a
-    /// 1M window was cut to 50K and the model reviewed garbage (2026-08-29).
+    /// conversation budget, bounded between 500 tokens and the budget itself.
+    /// This prevents oversized messages from exceeding small context windows
+    /// (e.g. 24k/40k) while preserving large injected context on 1M windows.
     pub(super) fn per_message_cap(max_context_tokens: usize) -> usize {
-        (max_context_tokens * 3 / 4).max(50_000)
+        let cap = max_context_tokens * 3 / 4;
+        if max_context_tokens <= 500 {
+            cap.min(max_context_tokens)
+        } else {
+            cap.clamp(500, max_context_tokens)
+        }
     }
 
-    /// Trim the message history so total estimated tokens stay within
-    /// `max_context_tokens`. Removes the oldest non-system messages first.
-    pub(super) fn trim_message_history(&mut self) {
-        // Use the same estimator as the API (includes tool_calls tokens)
-        // This ensures trim budget matches the actual API input_tokens calculation
+    /// Trim a list of messages so estimated tokens stay within `max_context_tokens`.
+    /// Removes oldest non-system messages first, while respecting tool pair invariants
+    /// and retaining the anchor prompt.
+    /// Returns (dropped_messages, dropped_tokens).
+    pub(super) fn trim_messages(
+        messages: &mut Vec<Message>,
+        max_context_tokens: usize,
+        anchor_idx: Option<usize>,
+    ) -> (usize, usize) {
         use crate::token_count::estimate_messages_tokens;
-        let total: usize = estimate_messages_tokens(&self.messages);
-        if total <= self.max_context_tokens {
-            return;
+        let total: usize = estimate_messages_tokens(messages);
+        if total <= max_context_tokens {
+            return (0, 0);
         }
-        let before_messages = self.messages.len();
 
-        // Collect per-message token counts once (O(N)) instead of recomputing
-        // every iteration. Use estimate_message_tokens for per-message breakdown.
         use super::context::estimate_message_tokens;
-        let token_counts: Vec<usize> = self.messages.iter().map(estimate_message_tokens).collect();
-        let mut pinned_critical: std::collections::HashSet<usize> = self
-            .messages
+        let token_counts: Vec<usize> = messages.iter().map(estimate_message_tokens).collect();
+        let max_pinned_critical = (max_context_tokens / 6_000).clamp(2, 6);
+        let mut pinned_critical: std::collections::HashSet<usize> = messages
             .iter()
             .enumerate()
             .rev()
             .filter(|(_, message)| Self::is_critical_context_message(message))
-            .take(20)
+            .take(max_pinned_critical)
             .map(|(idx, _)| idx)
             .collect();
 
-        // Always pin the CURRENT task's prompt — the root objective.
-        // `pinned_critical` above only keeps the 20 most-recent criticals, so
-        // on a long run the objective is neither system nor recent-critical
-        // and gets evicted oldest-first, making the model lose the plot.
-        // Interactive sessions reuse `self.messages` across turns: pinning
-        // the FIRST user message left turn 1's zombie task in context forever
-        // while the agent worked turn N — the anchor follows the active
-        // checkpoint (the current task) and old turns become trimmable.
-        if let Some(anchor_idx) = self.current_task_anchor_index() {
-            pinned_critical.insert(anchor_idx);
+        if let Some(anchor) = anchor_idx {
+            pinned_critical.insert(anchor);
         }
 
-        // Walk non-system messages oldest-first and mark them for removal until
-        // the total fits within budget. Prefer removing non-critical messages
-        // first so recent tool results and failure guidance survive trimming.
         let mut remaining = total;
-        let mut keep = vec![true; self.messages.len()];
+        let mut keep = vec![true; messages.len()];
+        // Pass 1: Drop non-critical non-system messages oldest first
         for (i, tokens) in token_counts.iter().enumerate() {
-            if remaining <= self.max_context_tokens {
+            if remaining <= max_context_tokens {
                 break;
             }
-            if self.messages[i].role != "system" && !pinned_critical.contains(&i) {
+            if messages[i].role != "system" && !pinned_critical.contains(&i) {
                 keep[i] = false;
                 remaining -= tokens;
             }
         }
 
+        // Pass 2: If still over budget, shed older critical/tool messages (except the root task prompt)
         for (i, tokens) in token_counts.iter().enumerate() {
-            if remaining <= self.max_context_tokens {
+            if remaining <= max_context_tokens {
                 break;
             }
-            // Pinned messages (original task, recent criticals) are never
-            // evicted — an oversized pinned message reaches the truncation
-            // fallback below instead of silently vanishing from context.
-            if self.messages[i].role != "system" && keep[i] && !pinned_critical.contains(&i) {
+            if messages[i].role != "system" && keep[i] && Some(i) != anchor_idx {
                 keep[i] = false;
                 remaining -= tokens;
             }
         }
 
-        Self::enforce_tool_call_pair_invariants(&self.messages, &mut keep);
+        Self::enforce_tool_call_pair_invariants(messages, &mut keep);
 
-        // Default-visible run event (A1): surface what the trim actually
-        // dropped — a headless run otherwise sheds context silently.
         let dropped_messages = keep.iter().filter(|k| !**k).count();
         let dropped_tokens: usize = token_counts
             .iter()
@@ -318,34 +310,19 @@ impl Agent {
             .filter(|(_, k)| !**k)
             .map(|(t, _)| t)
             .sum();
-        if dropped_messages > 0 {
-            self.emit_progress(super::progress::ProgressEvent::TurnDecision {
-                decision: "context_trim".to_string(),
-                detail: format!(
-                    "dropped {} message(s), ~{} tokens",
-                    dropped_messages, dropped_tokens
-                ),
-            });
-        }
 
-        // Retain only the messages we decided to keep (single O(N) pass).
         let mut idx = 0;
-        self.messages.retain(|_| {
+        messages.retain(|_| {
             let k = keep[idx];
             idx += 1;
             k
         });
 
-        // Fallback: If we're still over budget, truncate individual messages
-        // that exceed the per-message cap. This handles the edge case where a
-        // single message is too large to fit, even after removing all other
-        // messages.
-        let max_message_tokens = Self::per_message_cap(self.max_context_tokens);
-        let mut remaining = self.estimate_messages_tokens();
-        if remaining > self.max_context_tokens {
-            // Pre-compute which messages need truncation to avoid borrow issues
-            let truncate_indices: Vec<usize> = self
-                .messages
+        // Fallback: If still over budget, truncate individual oversized messages
+        let max_message_tokens = Self::per_message_cap(max_context_tokens);
+        let mut remaining = estimate_messages_tokens(messages);
+        if remaining > max_context_tokens {
+            let truncate_indices: Vec<usize> = messages
                 .iter()
                 .enumerate()
                 .filter(|(_, msg)| {
@@ -355,13 +332,12 @@ impl Agent {
                 .collect();
 
             for idx in truncate_indices {
-                if remaining <= self.max_context_tokens {
+                if remaining <= max_context_tokens {
                     break;
                 }
-                let msg_tokens = estimate_message_tokens(&self.messages[idx]);
+                let msg_tokens = estimate_message_tokens(&messages[idx]);
                 if msg_tokens > max_message_tokens {
-                    // Truncate this message to the budget-relative cap
-                    let current_text = self.messages[idx].content.text().to_string();
+                    let current_text = messages[idx].content.text().to_string();
                     let current_chars: Vec<char> = current_text.chars().collect();
                     let target_chars = (current_chars.len() as f64
                         * (max_message_tokens as f64 / msg_tokens as f64))
@@ -371,10 +347,38 @@ impl Agent {
                         .take(target_chars)
                         .collect::<String>()
                         + "\n...[truncated to fit context budget]";
-                    self.messages[idx].content = crate::api::types::MessageContent::Text(truncated);
-                    remaining = self.estimate_messages_tokens();
+                    messages[idx].content = crate::api::types::MessageContent::Text(truncated);
+                    remaining = estimate_messages_tokens(messages);
                 }
             }
+        }
+
+        (dropped_messages, dropped_tokens)
+    }
+
+    /// Trim the message history so total estimated tokens stay within
+    /// `max_context_tokens`. Removes the oldest non-system messages first.
+    pub(super) fn trim_message_history(&mut self) {
+        use crate::token_count::estimate_messages_tokens;
+        let total: usize = estimate_messages_tokens(&self.messages);
+        if total <= self.max_context_tokens {
+            return;
+        }
+        let before_messages = self.messages.len();
+
+        let anchor_idx = self.current_task_anchor_index();
+        let max_tokens = self.max_context_tokens;
+        let (dropped_messages, dropped_tokens) =
+            Self::trim_messages(&mut self.messages, max_tokens, anchor_idx);
+
+        if dropped_messages > 0 {
+            self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+                decision: "context_trim".to_string(),
+                detail: format!(
+                    "dropped {} message(s), ~{} tokens",
+                    dropped_messages, dropped_tokens
+                ),
+            });
         }
 
         let after_messages = self.messages.len();

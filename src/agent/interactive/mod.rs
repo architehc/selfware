@@ -523,10 +523,17 @@ impl Agent {
                     crate::config::ExecutionMode::Yolo => "YOLO",
                     crate::config::ExecutionMode::Daemon => "Daemon",
                 };
+                let active_tokens = self.estimate_messages_tokens();
                 println!("Messages in context: {}", self.messages.len());
                 println!("Memory entries: {}", self.memory.len());
-                println!("Estimated tokens: {}", self.memory.total_tokens());
-                println!("Near limit: {}", self.memory.is_near_limit());
+                println!(
+                    "Estimated tokens: {} / {}",
+                    active_tokens, self.max_context_tokens
+                );
+                println!(
+                    "Near limit: {}",
+                    active_tokens * 10 / 8 >= self.max_context_tokens
+                );
                 println!("Current step: {}", self.loop_control.current_step());
                 println!("Execution mode: {}", mode_str.bright_yellow());
                 continue;
@@ -1191,8 +1198,8 @@ impl Agent {
                 continue;
             }
 
-            // /restore - List/restore edit checkpoints
-            if input == "/restore" {
+            // /restore or /timeline - List/restore edit checkpoints
+            if input == "/restore" || input == "/timeline" {
                 let timeline = self.edit_history.timeline();
                 if timeline.is_empty() {
                     println!("{} No edit checkpoints available", "ℹ".bright_yellow());
@@ -1215,18 +1222,26 @@ impl Agent {
                     }
                     println!();
                     println!(
-                        "  {} Use {} to restore a checkpoint",
+                        "  {} Use {} or {} to restore a checkpoint",
                         "💡".bright_yellow(),
-                        "/restore <n>".bright_cyan()
+                        "/restore <n>".bright_cyan(),
+                        "/timeline <n>".bright_cyan()
                     );
                     println!();
                 }
                 continue;
             }
 
-            if input.starts_with("/restore ") {
-                let Some(idx_str) = input.strip_prefix("/restore ").map(str::trim) else {
-                    println!("{} Usage: /restore <number>", "ℹ".bright_yellow());
+            if input.starts_with("/restore ") || input.starts_with("/timeline ") {
+                let Some(idx_str) = input
+                    .strip_prefix("/restore ")
+                    .or_else(|| input.strip_prefix("/timeline "))
+                    .map(str::trim)
+                else {
+                    println!(
+                        "{} Usage: /restore <number> or /timeline <number>",
+                        "ℹ".bright_yellow()
+                    );
                     continue;
                 };
                 if let Ok(idx) = idx_str.parse::<usize>() {
@@ -1878,8 +1893,15 @@ impl Agent {
         }
 
         // Auto-save conversation/session on exit so history isn't lost.
-        if let Err(e) = self.save_checkpoint("interactive session exit") {
-            warn!("Failed to auto-save session on exit: {}", e);
+        if self.checkpoint_manager.is_some() {
+            if let Err(e) = self.save_checkpoint_forced("interactive session exit") {
+                warn!("Failed to auto-save session on exit: {}", e);
+            } else if let Some(checkpoint) = self.current_checkpoint.as_ref() {
+                println!(
+                    "\nSession saved. Resume later with:\n  selfware resume {}\n  selfware --continue",
+                    checkpoint.task_id
+                );
+            }
         }
 
         // Clean up any managed background processes before exiting
@@ -2763,11 +2785,140 @@ impl Agent {
             }
 
             if input == "/status" {
+                let active_tokens = self.estimate_messages_tokens();
                 println!("Messages in context: {}", self.messages.len());
                 println!("Memory entries: {}", self.memory.len());
-                println!("Estimated tokens: {}", self.memory.total_tokens());
-                println!("Near limit: {}", self.memory.is_near_limit());
+                println!(
+                    "Estimated tokens: {} / {}",
+                    active_tokens, self.max_context_tokens
+                );
+                println!(
+                    "Near limit: {}",
+                    active_tokens * 10 / 8 >= self.max_context_tokens
+                );
                 println!("Current step: {}", self.loop_control.current_step());
+                continue;
+            }
+
+            if input == "/stats" {
+                self.show_session_stats().await;
+                continue;
+            }
+
+            // /chat commands
+            if input.starts_with("/chat save ") {
+                let Some(name) = input.strip_prefix("/chat save ").map(str::trim) else {
+                    println!("{} Usage: /chat save <name>", "ℹ".bright_yellow());
+                    continue;
+                };
+                if name.is_empty() {
+                    println!("{} Usage: /chat save <name>", "ℹ".bright_yellow());
+                } else {
+                    match self
+                        .chat_store
+                        .save(name, &self.messages, &self.config.model)
+                    {
+                        Ok(()) => println!("{} Chat '{}' saved", "💾".bright_green(), name),
+                        Err(e) => println!("{} Save failed: {}", "✗".bright_red(), e),
+                    }
+                }
+                continue;
+            }
+
+            if input.starts_with("/chat resume ") {
+                let Some(name) = input.strip_prefix("/chat resume ").map(str::trim) else {
+                    println!("{} Usage: /chat resume <name>", "ℹ".bright_yellow());
+                    continue;
+                };
+                if name.is_empty() {
+                    println!("{} Usage: /chat resume <name>", "ℹ".bright_yellow());
+                } else {
+                    match self.chat_store.load(name) {
+                        Ok(mut chat) => {
+                            self.sanitize_restored_tool_messages(&mut chat.messages, &[]);
+                            self.messages = chat.messages;
+                            self.memory.clear();
+                            for msg in &self.messages {
+                                if msg.role != "system" {
+                                    self.memory.add_message(msg);
+                                }
+                            }
+                            println!(
+                                "{} Resumed chat '{}' ({} messages, model: {})",
+                                "▶".bright_green(),
+                                name,
+                                self.messages.len(),
+                                chat.model.bright_white()
+                            );
+                        }
+                        Err(e) => println!("{} Resume failed: {}", "✗".bright_red(), e),
+                    }
+                }
+                continue;
+            }
+
+            if input == "/chat list" {
+                match self.chat_store.list() {
+                    Ok(chats) => {
+                        if chats.is_empty() {
+                            println!("{} No saved chats", "ℹ".bright_yellow());
+                        } else {
+                            println!();
+                            println!("  {} Saved Chats", "💬".bright_cyan());
+                            for chat in &chats {
+                                println!(
+                                    "  {} {} ({} msgs, {}, {})",
+                                    "●".bright_cyan(),
+                                    chat.name.bright_white(),
+                                    chat.message_count,
+                                    chat.model.dimmed(),
+                                    chat.saved_at.format("%Y-%m-%d %H:%M").to_string().dimmed()
+                                );
+                            }
+                            println!();
+                        }
+                    }
+                    Err(e) => println!("{} Error listing chats: {}", "✗".bright_red(), e),
+                }
+                continue;
+            }
+
+            if input.starts_with("/chat delete ") {
+                let Some(name) = input.strip_prefix("/chat delete ").map(str::trim) else {
+                    println!("{} Usage: /chat delete <name>", "ℹ".bright_yellow());
+                    continue;
+                };
+                if name.is_empty() {
+                    println!("{} Usage: /chat delete <name>", "ℹ".bright_yellow());
+                } else {
+                    match self.chat_store.delete(name) {
+                        Ok(()) => println!("{} Chat '{}' deleted", "🗑️".bright_green(), name),
+                        Err(e) => println!("{} Delete failed: {}", "✗".bright_red(), e),
+                    }
+                }
+                continue;
+            }
+
+            if input == "/chat" {
+                println!();
+                println!("  {} Chat Commands", "💬".bright_cyan());
+                println!(
+                    "  {} /chat save <name>    Save current session",
+                    "→".bright_black()
+                );
+                println!(
+                    "  {} /chat resume <name>  Resume a saved chat",
+                    "→".bright_black()
+                );
+                println!(
+                    "  {} /chat list           List all saved chats",
+                    "→".bright_black()
+                );
+                println!(
+                    "  {} /chat delete <name>  Delete a saved chat",
+                    "→".bright_black()
+                );
+                println!();
                 continue;
             }
 
@@ -3296,8 +3447,15 @@ impl Agent {
         }
 
         // Auto-save conversation/session on exit so history isn't lost.
-        if let Err(e) = self.save_checkpoint("interactive basic session exit") {
-            warn!("Failed to auto-save session on exit: {}", e);
+        if self.checkpoint_manager.is_some() {
+            if let Err(e) = self.save_checkpoint_forced("interactive basic session exit") {
+                warn!("Failed to auto-save session on exit: {}", e);
+            } else if let Some(checkpoint) = self.current_checkpoint.as_ref() {
+                println!(
+                    "\nSession saved. Resume later with:\n  selfware resume {}\n  selfware --continue",
+                    checkpoint.task_id
+                );
+            }
         }
 
         // Clean up any managed background processes before exiting

@@ -201,3 +201,43 @@ fn test_path_completions_nonexistent() {
     let suggestions = completer.complete_paths("/nonexistent/path/here/");
     assert!(suggestions.is_empty());
 }
+
+#[test]
+fn test_q_and_slash_q_suggest_quit_before_queue() {
+    let commands = crate::input::command_registry::command_names();
+    let mut completer = SelfwareCompleter::new(vec!["file_read".into()], commands);
+
+    // /q should suggest /q or /quit before /queue
+    let slash_q_sugg = completer.complete("/q", 2);
+    assert!(!slash_q_sugg.is_empty());
+    let top_slash = &slash_q_sugg[0].value;
+    assert!(
+        top_slash == "/q" || top_slash == "/quit",
+        "Top suggestion for /q should be /q or /quit, got: {}",
+        top_slash
+    );
+    let queue_idx = slash_q_sugg.iter().position(|s| s.value == "/queue");
+    let quit_idx = slash_q_sugg.iter().position(|s| s.value == "/quit");
+    assert!(
+        quit_idx.is_some() && (queue_idx.is_none() || quit_idx < queue_idx),
+        "/quit should rank before /queue"
+    );
+
+    // Bare "q" should suggest quit, /q, or /quit before /queue
+    let bare_q_sugg = completer.complete("q", 1);
+    assert!(!bare_q_sugg.is_empty());
+    let top_bare = &bare_q_sugg[0].value;
+    assert!(
+        top_bare == "quit" || top_bare == "/q" || top_bare == "/quit",
+        "Top suggestion for bare 'q' should be quit, /q, or /quit, got: {}",
+        top_bare
+    );
+    let bare_queue_idx = bare_q_sugg.iter().position(|s| s.value == "/queue");
+    let bare_quit_idx = bare_q_sugg
+        .iter()
+        .position(|s| s.value == "quit" || s.value == "/quit");
+    assert!(
+        bare_quit_idx.is_some() && (bare_queue_idx.is_none() || bare_quit_idx < bare_queue_idx),
+        "quit or /quit should rank before /queue for 'q'"
+    );
+}

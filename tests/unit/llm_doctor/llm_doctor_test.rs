@@ -672,56 +672,56 @@ fn test_is_vision_configured_and_target_resolution() {
 
 #[test]
 fn test_map_vision_status_and_detail_all_variants() {
-    // 1. Pure text model, probe not run -> Ok "no vision modality configured"
+    // 1. Pure text model, probe not run -> Skip "no vision modality configured"
     let (status, detail, fix) = map_vision_status_and_detail(None, None, false);
-    assert_eq!(status, DoctorCheckStatus::Ok);
+    assert_eq!(status, CheckOutcome::Skip);
     assert!(detail.contains("no vision modality configured"));
     assert!(fix.is_none());
 
-    // 2. Vision expected, probe not completed -> Warning
+    // 2. Vision expected, probe not completed -> Warn
     let (status, detail, fix) =
         map_vision_status_and_detail(None, Some("primary model (qwen-vl)"), true);
-    assert_eq!(status, DoctorCheckStatus::Warning);
+    assert_eq!(status, CheckOutcome::Warn);
     assert!(detail.contains("vision suggested"));
     assert!(fix.is_some());
 
-    // 3. Unauthorized HTTP 401/403 -> Warning with auth-specific fix hint (not color tokens!)
+    // 3. Unauthorized HTTP 401/403 -> Warn with auth-specific fix hint (not color tokens!)
     let (status, detail, fix) = map_vision_status_and_detail(
         Some(VisionProbeOutcome::Unauthorized),
         Some("model profile 'vision' (qwen-vl)"),
         true,
     );
-    assert_eq!(status, DoctorCheckStatus::Warning);
+    assert_eq!(status, CheckOutcome::Warn);
     assert!(detail.contains("authentication error"));
     assert!(fix.unwrap().contains("API key"));
 
-    // 4. Conditioned -> Ok
+    // 4. Conditioned -> Pass
     let (status, detail, fix) = map_vision_status_and_detail(
         Some(VisionProbeOutcome::Conditioned),
         Some("primary model (qwen-vl)"),
         true,
     );
-    assert_eq!(status, DoctorCheckStatus::Ok);
+    assert_eq!(status, CheckOutcome::Pass);
     assert!(detail.contains("conditioned"));
     assert!(fix.is_none());
 
-    // 5. Unconditioned -> Warning
+    // 5. Unconditioned -> Warn
     let (status, detail, fix) = map_vision_status_and_detail(
         Some(VisionProbeOutcome::Unconditioned),
         Some("primary model (qwen-vl)"),
         true,
     );
-    assert_eq!(status, DoctorCheckStatus::Warning);
+    assert_eq!(status, CheckOutcome::Warn);
     assert!(detail.contains("failed image conditioning"));
     assert!(fix.is_some());
 
-    // 6. Inconclusive -> Warning
+    // 6. Inconclusive -> Warn
     let (status, detail, fix) = map_vision_status_and_detail(
         Some(VisionProbeOutcome::Inconclusive),
         Some("primary model (qwen-vl)"),
         true,
     );
-    assert_eq!(status, DoctorCheckStatus::Warning);
+    assert_eq!(status, CheckOutcome::Warn);
     assert!(detail.contains("unknown"));
     assert!(fix.is_some());
 }
