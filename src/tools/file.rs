@@ -145,10 +145,10 @@ pub(crate) async fn read_file_with_encoding(path: &Path) -> Result<(String, Vec<
 }
 
 /// The validator file tools use: the tool's resolved config anchored at the
-/// process working directory (the same anchor `validate_tool_path` uses).
+/// calling agent's workspace root (the same anchor `validate_tool_path` uses),
+/// NOT the process cwd — entering a git worktree moves only the agent's root.
 fn tool_path_validator(config: &SafetyConfig) -> PathValidator {
-    let working_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
-    PathValidator::new(config, working_dir)
+    PathValidator::new(config, super::workspace_root::current_path())
 }
 
 /// Open `path` as a regular file whose DESCRIPTOR passed path policy
