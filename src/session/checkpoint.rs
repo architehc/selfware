@@ -806,6 +806,35 @@ impl TaskCheckpoint {
 /// Manager for saving and loading task checkpoints
 pub struct CheckpointManager {
     checkpoints_dir: PathBuf,
+    /// The last state this manager persisted, with the on-disk stamp that
+    /// write left behind (W8a: checkpoint on every mutation). An incremental
+    /// save used to re-read, HMAC-verify and re-parse the whole base file and
+    /// replay the entire delta log just to learn what it had written itself a
+    /// moment earlier — O(checkpoint size) per save, which made a per-mutation
+    /// cadence expensive. When the files on disk still carry exactly the stamp
+    /// our own last write produced, that state IS the hydrated base, so the
+    /// delta is computed against it directly. Any mismatch (another process
+    /// wrote, a torn tail was healed, a file vanished) falls back to the full
+    /// load-and-replay path — the cache can only skip work, never change what
+    /// is written.
+    last_persisted: std::sync::Mutex<Option<PersistedBase>>,
+}
+
+/// On-disk identity of a task's checkpoint files: length + mtime of the base
+/// file and of the delta log (absent log = `None`). Every append changes the
+/// log length and every full write replaces the base, so a stamp match means
+/// no write happened since the one that recorded it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiskStamp {
+    base: (u64, Option<std::time::SystemTime>),
+    delta: Option<(u64, Option<std::time::SystemTime>)>,
+}
+
+/// See [`CheckpointManager::last_persisted`].
+#[derive(Debug, Clone)]
+struct PersistedBase {
+    checkpoint: TaskCheckpoint,
+    stamp: DiskStamp,
 }
 
 /// Outcome of loading a checkpoint with explicit recovery semantics (review
@@ -1124,7 +1153,68 @@ impl CheckpointManager {
             use std::os::unix::fs::PermissionsExt;
             let _ = fs::set_permissions(&checkpoints_dir, fs::Permissions::from_mode(0o700));
         }
-        Ok(Self { checkpoints_dir })
+        Ok(Self::with_dir(checkpoints_dir))
+    }
+
+    /// Construct without touching the filesystem (the directory is created
+    /// by [`Self::new`]).
+    fn with_dir(checkpoints_dir: PathBuf) -> Self {
+        Self {
+            checkpoints_dir,
+            last_persisted: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// The current on-disk stamp of a task's base file + delta log, or `None`
+    /// when the base file cannot be stat'ed.
+    fn disk_stamp(&self, task_id: &str) -> Option<DiskStamp> {
+        let base = fs::metadata(self.checkpoint_path(task_id).ok()?).ok()?;
+        let delta = match fs::metadata(self.checkpoint_delta_path(task_id).ok()?) {
+            Ok(meta) => Some((meta.len(), meta.modified().ok())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return None,
+        };
+        Some(DiskStamp {
+            base: (base.len(), base.modified().ok()),
+            delta,
+        })
+    }
+
+    /// Remember `checkpoint` as the state now on disk (called right after a
+    /// successful write, under the task lock). A stat failure forgets the
+    /// cache instead, so the next save takes the full load path.
+    fn remember_persisted(&self, checkpoint: &TaskCheckpoint) {
+        let entry = self
+            .disk_stamp(&checkpoint.task_id)
+            .map(|stamp| PersistedBase {
+                checkpoint: checkpoint.clone(),
+                stamp,
+            });
+        *self
+            .last_persisted
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = entry;
+    }
+
+    /// How many tool calls of `task_id` this manager's last successful write
+    /// put on disk, when it remembers one. Lets a caller tell "already
+    /// persisted" apart from "pending" without tracking a second watermark.
+    pub fn persisted_tool_call_count(&self, task_id: &str) -> Option<usize> {
+        let guard = self
+            .last_persisted
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard
+            .as_ref()
+            .filter(|cached| cached.checkpoint.task_id == task_id)
+            .map(|cached| cached.checkpoint.tool_calls.len())
+    }
+
+    fn forget_persisted(&self) {
+        *self
+            .last_persisted
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// Create a checkpoint manager with default directory
@@ -1222,6 +1312,21 @@ impl CheckpointManager {
         // renames and delta-log truncation must never overlap).
         let _lock = FileLock::acquire(&full_path)?;
 
+        // Fast path (W8a): the files on disk are exactly what this manager
+        // last wrote, so the in-memory copy of that state is the hydrated
+        // base — no re-read, re-verify or delta replay needed.
+        match self.try_cached_delta_save(checkpoint) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(
+                    "Incremental checkpoint append failed ({}). Falling back to the full save path.",
+                    e
+                );
+                self.forget_persisted();
+            }
+        }
+
         // Prefer a compact delta write when possible to reduce SSD wear.
         if full_path.exists() {
             if let Ok(mut base) = self.try_load_from_path(&full_path) {
@@ -1232,6 +1337,7 @@ impl CheckpointManager {
                     );
                     self.save_full_checkpoint(checkpoint)?;
                     self.clear_delta_log(&checkpoint.task_id)?;
+                    self.remember_persisted(checkpoint);
                     self.prune_old_checkpoints();
                     return Ok(());
                 }
@@ -1244,6 +1350,7 @@ impl CheckpointManager {
                                     self.save_full_checkpoint(checkpoint)?;
                                     self.clear_delta_log(&checkpoint.task_id)?;
                                 }
+                                self.remember_persisted(checkpoint);
                                 self.prune_old_checkpoints();
                                 return Ok(());
                             }
@@ -1262,8 +1369,66 @@ impl CheckpointManager {
         // Fallback to full checkpoint write when no efficient delta exists.
         self.save_full_checkpoint(checkpoint)?;
         self.clear_delta_log(&checkpoint.task_id)?;
+        self.remember_persisted(checkpoint);
         self.prune_old_checkpoints();
         Ok(())
+    }
+
+    /// The cached incremental save: when the task's files still carry the
+    /// stamp of this manager's own last write, compute the delta against the
+    /// remembered state and append it. Returns `Ok(false)` when the fast path
+    /// does not apply (no cache, foreign write, nothing efficient to append)
+    /// so the caller takes the full load-and-replay path. Caller holds the
+    /// task lock.
+    ///
+    /// Cost: one delta serialization + one appended, fsynced line — no base
+    /// read, no HMAC verification of the base, no delta-log replay, and no
+    /// checkpoint-directory prune (an append adds no checkpoint file). The
+    /// remembered state advances by `apply_delta`, which clones only the
+    /// appended records.
+    fn try_cached_delta_save(&self, checkpoint: &TaskCheckpoint) -> Result<bool> {
+        let mut guard = self
+            .last_persisted
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(cached) = guard.as_mut() else {
+            return Ok(false);
+        };
+        if cached.checkpoint.task_id != checkpoint.task_id
+            || self.disk_stamp(&checkpoint.task_id).as_ref() != Some(&cached.stamp)
+        {
+            *guard = None;
+            return Ok(false);
+        }
+        let Some(delta) = checkpoint.compute_delta(&cached.checkpoint) else {
+            return Ok(false);
+        };
+        // Same "meaningfully smaller than a full write" rule as
+        // `delta_is_efficient`, but sized against the bytes already on disk
+        // (base + log) instead of re-serializing the whole checkpoint — that
+        // serialization was the dominant cost of a per-mutation save.
+        let on_disk = cached.stamp.base.0 + cached.stamp.delta.as_ref().map_or(0, |d| d.0);
+        let delta_size = serde_json::to_vec(&delta)
+            .context("Failed to estimate checkpoint delta size")?
+            .len() as u64;
+        if delta_size + 128 >= on_disk {
+            return Ok(false);
+        }
+        self.append_delta(&checkpoint.task_id, &delta)?;
+        if self.should_compact_deltas(&checkpoint.task_id)? {
+            drop(guard);
+            self.save_full_checkpoint(checkpoint)?;
+            self.clear_delta_log(&checkpoint.task_id)?;
+            self.remember_persisted(checkpoint);
+            self.prune_old_checkpoints();
+            return Ok(true);
+        }
+        cached.checkpoint.apply_delta(&delta)?;
+        match self.disk_stamp(&checkpoint.task_id) {
+            Some(stamp) => cached.stamp = stamp,
+            None => *guard = None,
+        }
+        Ok(true)
     }
 
     /// Persist a terminal checkpoint as a FULL write (not a delta) and clear the
@@ -1274,6 +1439,7 @@ impl CheckpointManager {
         let _lock = FileLock::acquire(&self.checkpoint_path(&checkpoint.task_id)?)?;
         self.save_full_checkpoint(checkpoint)?;
         self.clear_delta_log(&checkpoint.task_id)?;
+        self.remember_persisted(checkpoint);
         self.prune_old_checkpoints();
         Ok(())
     }

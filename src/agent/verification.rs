@@ -286,6 +286,36 @@ fn configured_visual_verifier(
 struct NonCodeArtifactReadback {
     missing_paths: Vec<String>,
     artifact_only: bool,
+    /// Checkpoint index of the most recent write among `missing_paths`
+    /// (`None` when nothing is missing). Accept-with-proof only covers a
+    /// missing readback when the proving verification ran AFTER this write.
+    latest_missing_write_index: Option<usize>,
+}
+
+/// Consecutive `ArtifactReadbackRequired` rejections after which the gate
+/// stops re-demanding a model readback and performs it itself (W8b). Mirrors
+/// the audit ledger's bounded step-aside: an e2e run whose tree was already
+/// green spent its last steps in readback / stale-verification ping-pong and
+/// died at the wall cap.
+const ARTIFACT_READBACK_REJECTION_BOUND: usize = 2;
+
+/// Proof that the CURRENT code state is covered by a passing verification
+/// even though the mutation counter moved past it (W8b accept-with-proof).
+///
+/// Built only from evidence the dispatcher itself recorded: the credited
+/// pass sequence, the outstanding-failure ledger, and the checkpoint's call
+/// log. Every link must hold or there is no proof — see
+/// [`Agent::fresh_authoritative_pass`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FreshPassProof {
+    /// The passing verification command (tool name for dedicated tools).
+    pub command: String,
+    /// Mutation sequence the pass was credited at.
+    pub pass_sequence: usize,
+    /// Checkpoint index of the passing call.
+    pub pass_call_index: usize,
+    /// Mutations after the pass — every one proven doc-only.
+    pub later_doc_only_mutations: usize,
 }
 
 /// Normalize a checkpoint path without requiring it to be tracked by git.
@@ -788,6 +818,84 @@ fn verification_ecosystem(command: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// A Python `__init__.py` body that only marks a package: no definitions and
+/// no imports (docstrings, comments, `__all__`/`__version__` are fine).
+fn python_init_is_package_marker(content: &str) -> bool {
+    !content.lines().any(|line| {
+        let t = line.trim_start();
+        t.starts_with("def ")
+            || t.starts_with("async def ")
+            || t.starts_with("class ")
+            || t.starts_with("import ")
+            || t.starts_with("from ")
+    })
+}
+
+/// Entries a greenfield scan may visit before giving up. Hitting the cap
+/// answers "source exists" (fail-closed: the normal verification demand).
+const GREENFIELD_SCAN_MAX_ENTRIES: usize = 5_000;
+
+/// Whether the task root already holds an implementation source file — a
+/// supported-language file that is not a test and not a bare package marker.
+/// Dependency/build output and hidden directories are skipped. Any scan
+/// trouble (unreadable root, entry cap) answers `true`, so the bootstrap
+/// exemption only applies when greenfield is established.
+fn task_root_has_implementation_source(root: &Path) -> bool {
+    const SKIP_DIRS: &[&str] = &[
+        "target",
+        "node_modules",
+        "venv",
+        ".venv",
+        "__pycache__",
+        "dist",
+        "build",
+        "vendor",
+    ];
+    if !root.is_dir() {
+        return true;
+    }
+    let walker = walkdir::WalkDir::new(root)
+        .max_depth(6)
+        .into_iter()
+        .filter_entry(|entry| {
+            if entry.depth() == 0 || !entry.file_type().is_dir() {
+                return true;
+            }
+            let name = entry.file_name().to_string_lossy();
+            !name.starts_with('.') && !SKIP_DIRS.contains(&name.as_ref())
+        });
+    for (visited, entry) in walker.enumerate() {
+        if visited >= GREENFIELD_SCAN_MAX_ENTRIES {
+            return true;
+        }
+        let Ok(entry) = entry else {
+            return true;
+        };
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let relative = entry
+            .path()
+            .strip_prefix(root)
+            .unwrap_or(entry.path())
+            .to_string_lossy()
+            .replace('\\', "/");
+        if !Agent::gate_path_is_source(&relative) || Agent::gate_path_is_test(&relative) {
+            continue;
+        }
+        if entry.file_name() == "__init__.py" {
+            let marker = std::fs::read_to_string(entry.path())
+                .map(|content| python_init_is_package_marker(&content))
+                .unwrap_or(false);
+            if marker {
+                continue;
+            }
+        }
+        return true;
+    }
+    false
 }
 
 fn artifact_readback_guidance(paths: &[String]) -> String {
@@ -1466,6 +1574,7 @@ impl Agent {
         }
 
         let mut missing_paths = Vec::new();
+        let mut latest_missing_write_index: Option<usize> = None;
         for (normalized_write, (display_path, write_index)) in latest_writes {
             // String forms of the written path, used to recognize a shell-based
             // read of it (normalized_write is a PathBuf).
@@ -1519,12 +1628,15 @@ impl Agent {
                 });
             if !has_fresh_readback {
                 missing_paths.push(display_path);
+                latest_missing_write_index =
+                    Some(latest_missing_write_index.map_or(write_index, |i| i.max(write_index)));
             }
         }
 
         Some(NonCodeArtifactReadback {
             missing_paths,
             artifact_only,
+            latest_missing_write_index,
         })
     }
 
@@ -1752,6 +1864,7 @@ impl Agent {
         if self.mutation_sequence > 0
             && self.last_successful_verification_mutation_sequence < self.mutation_sequence
             && self.has_code_affecting_mutation()
+            && !self.accept_with_proof("StaleVerification")
         {
             if let Some(summary) = &self.last_failed_verification_summary {
                 let edits = self.describe_code_affecting_edits();
@@ -1761,6 +1874,13 @@ impl Agent {
                      Fix the issue and rerun the verification to green before completing.",
                     self.last_successful_verification_mutation_sequence, self.mutation_sequence
                 ));
+            }
+            // Bootstrap state (W8b, Rule-5 sweep of the write-refusal
+            // exemption): nothing but scaffolding exists, so demanding a
+            // verification now sends the model to test a project that does
+            // not exist yet. Still a refusal — only the demand changes.
+            if let Some(scaffolding) = self.scaffolding_only_writes() {
+                return Some(self.scaffolding_in_progress_message(&scaffolding));
             }
             // Name the unmet condition: which revision lacks a pass, which
             // edits it covers, and — when a piped run earned no credit — why
@@ -1804,6 +1924,352 @@ impl Agent {
     /// (AGENTS.md rule 3: honest status over optimistic success).
     fn has_fresh_successful_verification(&self) -> bool {
         self.last_successful_verification_mutation_sequence >= self.mutation_sequence
+            || self.accept_with_proof("verification freshness")
+    }
+
+    /// W8b accept-with-proof: the mutation counter moved past the last
+    /// credited pass, but every mutation since then is PROVEN doc-only, so
+    /// the code the pass verified is the code on disk now.
+    ///
+    /// Without this, a finished task whose tests were green spent its final
+    /// steps re-running them after writing a NOTES.md (StaleVerification ×3
+    /// in the wave-2 e2e) and died at the wall cap. Every link below must
+    /// hold, otherwise there is no proof and the gate rejects as before
+    /// (AGENTS.md rule 3 — the bound must never credit a failing or stale
+    /// tree):
+    ///
+    /// 1. a pass was credited (a nonzero
+    ///    `last_successful_verification_mutation_sequence` — the dispatcher
+    ///    credits only in-scope, exit-status-honest runs);
+    /// 2. no failure is outstanding: no failure summary, and no in-scope
+    ///    failure recorded at or after the pass's revision (so a later red
+    ///    run, or a red run of another check at that revision, kills the
+    ///    proof);
+    /// 3. the checkpoint log reproduces the counter exactly (successful
+    ///    mutating calls == `mutation_sequence`) — any disagreement between
+    ///    the log and the ledger fails closed;
+    /// 4. an AUTHORITATIVE passing call sits at the credited revision: a
+    ///    dedicated verification tool or an UNMASKED command
+    ///    (`tool_call_is_verification` excludes piped / `;`/`||`-masked runs),
+    ///    whose logged success is the exit status, in the task's scope — a
+    ///    pass credited only from masked output or by the post-edit hook is
+    ///    not proof;
+    /// 5. every mutation after it wrote only doc-only paths
+    ///    ([`Self::gate_path_is_doc_only`]); a shell/git mutation, a delete,
+    ///    or any code/config/test path breaks the proof.
+    pub(crate) fn fresh_authoritative_pass(&self) -> Option<FreshPassProof> {
+        let pass_sequence = self.last_successful_verification_mutation_sequence;
+        if pass_sequence == 0 || self.mutation_sequence == 0 {
+            return None;
+        }
+        if self.last_failed_verification_summary.is_some() {
+            return None;
+        }
+        let task_root = self.verification_task_root();
+        if self.last_failed_verification_mutation_sequence >= pass_sequence
+            && self
+                .verification_failures
+                .blocking(&task_root, pass_sequence)
+                .is_some()
+        {
+            return None;
+        }
+
+        let checkpoint = self.current_checkpoint.as_ref()?;
+        let mut sequence = 0usize;
+        let mut pass: Option<(usize, String)> = None;
+        let mut later_doc_only_mutations = 0usize;
+        let mut later_mutation_breaks_proof = false;
+        for (index, call) in checkpoint.tool_calls.iter().enumerate() {
+            if !call.success {
+                continue;
+            }
+            let args: Value = match serde_json::from_str(&call.arguments) {
+                Ok(args) => args,
+                // An unparseable successful call cannot be classified; if it
+                // mutated, the counter check below fails closed.
+                Err(_) => Value::Null,
+            };
+            // Same order as the dispatcher's lifecycle: a call that both
+            // mutates and verifies advances the sequence first.
+            if super::tool_dispatch::tool_call_is_mutating(&call.tool_name, &args) {
+                sequence += 1;
+                if sequence > pass_sequence {
+                    let paths =
+                        super::tool_dispatch::written_paths_for_tool_call(&call.tool_name, &args);
+                    let doc_only = call.tool_name != "file_delete"
+                        && !paths.is_empty()
+                        && paths
+                            .iter()
+                            .all(|p| Self::gate_path_is_doc_only(&p.to_string_lossy()));
+                    if doc_only {
+                        later_doc_only_mutations += 1;
+                    } else {
+                        later_mutation_breaks_proof = true;
+                    }
+                }
+            }
+            if sequence == pass_sequence
+                && super::tool_dispatch::tool_call_is_verification(&call.tool_name, &call.arguments)
+                && Self::logged_exit_status_is_zero(call)
+                && self.verification_call_is_in_scope(&call.tool_name, &args, &task_root)
+            {
+                let command = args
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| call.tool_name.clone());
+                pass = Some((index, command));
+            }
+        }
+        if sequence != self.mutation_sequence || later_mutation_breaks_proof {
+            return None;
+        }
+        let (pass_call_index, command) = pass?;
+        Some(FreshPassProof {
+            command,
+            pass_sequence,
+            pass_call_index,
+            later_doc_only_mutations,
+        })
+    }
+
+    /// [`Self::fresh_authoritative_pass`] as a gate decision, logged so a run
+    /// log shows WHICH verification a stale/readback rejection was waived on.
+    fn accept_with_proof(&self, gate: &str) -> bool {
+        let Some(proof) = self.fresh_authoritative_pass() else {
+            return false;
+        };
+        info!(
+            "accept-with-proof ({gate}): `{}` passed at mutation #{} and the {} later mutation(s) \
+             are doc-only — the verified code is the current code",
+            proof.command, proof.pass_sequence, proof.later_doc_only_mutations
+        );
+        true
+    }
+
+    /// A logged call's success flag is the dispatcher's exit-status verdict;
+    /// when the (possibly truncated) logged result still parses and carries
+    /// an `exit_code`, it must also say 0.
+    fn logged_exit_status_is_zero(call: &crate::checkpoint::ToolCallLog) -> bool {
+        call.success
+            && call
+                .result
+                .as_deref()
+                .and_then(|r| serde_json::from_str::<Value>(r).ok())
+                .and_then(|v| v.get("exit_code").and_then(Value::as_i64))
+                .is_none_or(|code| code == 0)
+    }
+
+    /// Scope of a logged verification call, resolved the way the dispatcher
+    /// resolves it (`cwd` argument, then a leading `cd <dir> &&`): only an
+    /// in-scope pass can prove the task's tree green.
+    fn verification_call_is_in_scope(
+        &self,
+        tool_name: &str,
+        args: &Value,
+        task_root: &Path,
+    ) -> bool {
+        let command = args
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let mut dir = match args.get("cwd").and_then(Value::as_str) {
+            Some(cwd) if Path::new(cwd).is_absolute() => PathBuf::from(cwd),
+            Some(cwd) => task_root.join(cwd),
+            None => task_root.to_path_buf(),
+        };
+        if let Some(rest) = command.trim_start().strip_prefix("cd ") {
+            let end = rest
+                .find("&&")
+                .or_else(|| rest.find(';'))
+                .unwrap_or(rest.len());
+            let cd_arg = rest[..end].trim().trim_matches(|c| c == '"' || c == '\'');
+            if !cd_arg.is_empty() {
+                let p = Path::new(cd_arg);
+                dir = if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    dir.join(p)
+                };
+            }
+        }
+        super::verification_scope::scope_for_command(tool_name, command, &dir)
+            .relevance_to(task_root)
+            == super::verification_scope::Relevance::InScope
+    }
+
+    /// How many `ArtifactReadbackRequired` rejections the model has received
+    /// since its last file write — derived from the conversation, so the
+    /// bound needs no extra agent state. Both native tool calls and XML/text
+    /// tool calls in assistant turns reset the count. Context compression can
+    /// only LOWER the count (the bound then fires later, never earlier).
+    fn consecutive_artifact_readback_rejections(&self) -> usize {
+        let mut count = 0;
+        for message in self.messages.iter().rev() {
+            match message.role.as_str() {
+                "assistant" => {
+                    let native_write = message.tool_calls.as_ref().is_some_and(|calls| {
+                        calls.iter().any(|tc| {
+                            super::tool_dispatch::tool_call_writes_file(&tc.function.name)
+                        })
+                    });
+                    let text_write = !native_write
+                        && crate::tool_parser::parse_tool_calls(&message.content.text_all())
+                            .tool_calls
+                            .iter()
+                            .any(|tc| super::tool_dispatch::tool_call_writes_file(&tc.tool_name));
+                    if native_write || text_write {
+                        break;
+                    }
+                }
+                "user"
+                    if message
+                        .content
+                        .text_all()
+                        .contains("ArtifactReadbackRequired:") =>
+                {
+                    count += 1;
+                }
+                _ => {}
+            }
+        }
+        count
+    }
+
+    /// After [`ARTIFACT_READBACK_REJECTION_BOUND`] rejections the harness
+    /// performs the readback itself: every still-unread artifact is read from
+    /// disk. `Ok(summary)` when every one exists and is readable (the gate
+    /// then steps aside, logged); `Err(message)` naming the artifacts that do
+    /// not exist or cannot be read — those keep blocking, because an absent
+    /// deliverable is not a readback problem.
+    fn harness_artifact_readback(paths: &[String]) -> std::result::Result<String, String> {
+        let mut read = Vec::new();
+        let mut unreadable = Vec::new();
+        for raw in paths {
+            let resolved = normalize_checkpoint_path(raw).unwrap_or_else(|| PathBuf::from(raw));
+            match std::fs::read(&resolved) {
+                Ok(bytes) => read.push(format!("{raw} ({} bytes)", bytes.len())),
+                Err(e) => unreadable.push(format!("{raw} ({e})")),
+            }
+        }
+        if unreadable.is_empty() {
+            Ok(read.join(", "))
+        } else {
+            Err(format!(
+                "ArtifactReadbackRequired: the harness could not read {} — the artifact(s) \
+                 must exist before completion. Write them, then complete.",
+                unreadable.join(", ")
+            ))
+        }
+    }
+
+    /// W8b bootstrap exemption for the "file written without a passing
+    /// verification" demand: every code-affecting write so far is SCAFFOLDING
+    /// — build/dependency manifests, test files, doc files, or an empty-ish
+    /// package marker (`__init__.py` with no `def`/`class`) — so there is no
+    /// implementation for a verifier to check yet (wave-2 e2e: the demand
+    /// fired 5× during normal Python scaffolding, each time sending the model
+    /// to run tests against a project that did not exist yet).
+    ///
+    /// Returns the scaffolding paths, or `None` when anything else was
+    /// mutated: an implementation source file, a delete, a shell/git
+    /// mutation, or anything unparseable (fail-closed). It also requires a
+    /// GREENFIELD task root — no implementation source file on disk at all
+    /// ([`task_root_has_implementation_source`]). In an existing project a
+    /// manifest edit or a new test IS verifiable (the build/tests run against
+    /// the code already there), so the normal demand applies.
+    ///
+    /// This only changes WHAT the rejection asks for; completion stays
+    /// refused (the gate still returns a rejection, see
+    /// [`Self::check_completion_gate`]).
+    fn scaffolding_only_writes(&self) -> Option<Vec<String>> {
+        let checkpoint = self.current_checkpoint.as_ref()?;
+        let mut scaffolding: Vec<String> = Vec::new();
+        for call in &checkpoint.tool_calls {
+            if !call.success {
+                continue;
+            }
+            let Ok(args) = serde_json::from_str::<Value>(&call.arguments) else {
+                if super::tool_dispatch::tool_call_writes_file(&call.tool_name)
+                    || matches!(call.tool_name.as_str(), "shell_exec" | "pty_shell")
+                {
+                    return None;
+                }
+                continue;
+            };
+            if !super::tool_dispatch::tool_call_is_mutating(&call.tool_name, &args) {
+                continue;
+            }
+            if call.tool_name == "file_delete" {
+                return None;
+            }
+            let paths = super::tool_dispatch::written_paths_for_tool_call(&call.tool_name, &args);
+            if paths.is_empty() {
+                return None;
+            }
+            for path in paths {
+                let text = path.to_string_lossy().to_string();
+                if Self::gate_path_is_doc_only(&text) {
+                    continue;
+                }
+                if !Self::path_is_scaffolding(&text, &call.tool_name, &args) {
+                    return None;
+                }
+                if !scaffolding.contains(&text) {
+                    scaffolding.push(text);
+                }
+            }
+        }
+        if scaffolding.is_empty()
+            || task_root_has_implementation_source(&self.verification_task_root())
+        {
+            return None;
+        }
+        Some(scaffolding)
+    }
+
+    /// A manifest, a test file, or a package marker without definitions.
+    fn path_is_scaffolding(path: &str, tool_name: &str, args: &Value) -> bool {
+        let lower = path.trim_matches('"').to_ascii_lowercase();
+        let basename = lower.rsplit('/').next().unwrap_or(lower.as_str());
+        if basename_is_build_or_dependency_file(basename) || Self::gate_path_is_test(path) {
+            return true;
+        }
+        if basename == "__init__.py" && tool_name == "file_write" {
+            let content = args
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            return python_init_is_package_marker(content);
+        }
+        false
+    }
+
+    /// The bootstrap-state rejection: completion stays refused, but the model
+    /// is sent to finish the implementation instead of verifying scaffolding.
+    fn scaffolding_in_progress_message(&self, scaffolding: &[String]) -> String {
+        let shown: Vec<&str> = scaffolding.iter().take(6).map(String::as_str).collect();
+        let more = scaffolding.len().saturating_sub(shown.len());
+        let more = if more > 0 {
+            format!(" (+{more} more)")
+        } else {
+            String::new()
+        };
+        policy_envelope(
+            PolicyKind::Gate,
+            true,
+            "only scaffolding written",
+            &format!(
+                "ScaffoldingInProgress: completion refused — so far only project scaffolding has \
+                 been written ({}{more}): manifests, tests or package markers, with no \
+                 implementation for a verifier to check yet. Do not stop to verify the scaffold. \
+                 Write the implementation next, then run this project's verification ({}) and \
+                 let it pass before completing.",
+                shown.join(", "),
+                self.suggested_verification_commands()
+            ),
+        )
     }
 
     /// Loop-12 verification deadline: once the run passes
@@ -1985,7 +2451,39 @@ impl Agent {
         // still wins.
         if let Some(readback) = self.non_code_artifact_readback() {
             if !readback.missing_paths.is_empty() {
-                return Some(artifact_readback_guidance(&readback.missing_paths));
+                // W8b accept-with-proof: on a mixed source+artifact task, a
+                // fresh authoritative pass that ran AFTER the artifact's last
+                // write already exercised the tree the artifact belongs to.
+                // Artifact-only tasks have no such run — they rely on the
+                // readback (or the bound below).
+                let proven = !readback.artifact_only
+                    && readback.latest_missing_write_index.is_some_and(|write| {
+                        self.fresh_authoritative_pass()
+                            .is_some_and(|proof| proof.pass_call_index > write)
+                    });
+                if proven {
+                    info!(
+                        "accept-with-proof (ArtifactReadbackRequired): a fresh passing \
+                         verification ran after the last write of {:?}",
+                        readback.missing_paths
+                    );
+                } else {
+                    // W8b bound: after N consecutive readback rejections the
+                    // harness reads the artifacts itself instead of asking a
+                    // (N+1)th time — the audit ledger's step-aside pattern.
+                    let rejections = self.consecutive_artifact_readback_rejections();
+                    if rejections < ARTIFACT_READBACK_REJECTION_BOUND {
+                        return Some(artifact_readback_guidance(&readback.missing_paths));
+                    }
+                    match Self::harness_artifact_readback(&readback.missing_paths) {
+                        Ok(read) => warn!(
+                            "ArtifactReadbackRequired: {rejections} consecutive rejections — the \
+                             harness read back {read} itself and steps aside (the model never \
+                             re-read them)"
+                        ),
+                        Err(message) => return Some(message),
+                    }
+                }
             }
             if readback.artifact_only {
                 return None;
@@ -2102,6 +2600,14 @@ impl Agent {
             let has_verification = self.has_successful_verification_tool_call()
                 && self.has_fresh_successful_verification();
             if !has_verification {
+                // Bootstrap exemption (W8b): with only scaffolding on disk
+                // there is nothing to verify yet — refuse completion with a
+                // "finish the implementation" demand instead of sending the
+                // model to verify a scaffold. Fail-closed: this branch still
+                // returns a rejection, so completion is never accepted here.
+                if let Some(scaffolding) = self.scaffolding_only_writes() {
+                    return Some(self.scaffolding_in_progress_message(&scaffolding));
+                }
                 let masked_note = self.uncredited_masked_run_note();
                 // The masked-run note already names the unpiped rerun; the
                 // test-command note covers the no-piped-run case.
@@ -2519,7 +3025,26 @@ impl Agent {
                 warn!("requirements audit response unparseable — advisory gate stays open");
                 None
             }
-            RequirementsAudit::Unaddressed(items) => {
+            RequirementsAudit::Unaddressed(all_items) => {
+                // Only deliverable findings block (W8b): summary-wording
+                // findings are reported, never entered in the ledger.
+                let (summary_only, items): (Vec<String>, Vec<String>) = all_items
+                    .into_iter()
+                    .partition(|item| audit_finding_is_summary_only(item));
+                if !summary_only.is_empty() {
+                    warn!(
+                        "requirements audit: {} summary-only finding(s) recorded as non-blocking: {}",
+                        summary_only.len(),
+                        summary_only.join(" | ")
+                    );
+                }
+                if items.is_empty() {
+                    info!(
+                        "requirements audit verdict: no deliverable findings ({} summary-only) — not blocking",
+                        summary_only.len()
+                    );
+                    return None;
+                }
                 info!(
                     "requirements audit verdict: UNADDRESSED ({} items) — findings recorded in the ledger",
                     items.len()
@@ -2665,6 +3190,16 @@ impl Agent {
         tool_name: &str,
         args: &Value,
     ) -> Option<String> {
+        // Checkpoint-on-mutation hook (W8a). The dispatcher calls this for
+        // every successful sequentially-dispatched tool call — every mutating
+        // tool is sequential (the parallel batch is read-only tools only) —
+        // AFTER the call is appended to the checkpoint log and its lifecycle
+        // accounting ran. Persisting here, before the post-edit check, puts
+        // the mutation on disk even when the check below is slow or the
+        // process dies during it. A no-op for read-only calls; runs before
+        // the file-writer early return so shell/git mutations count too.
+        self.persist_checkpoint_after_mutation();
+
         // Rule-5 sweep (2026-09-22): every file-writing tool arms the
         // post-edit verification, not just file_edit/file_write —
         // file_multi_edit / patch_apply / file_fim_edit edits previously got
@@ -3162,10 +3697,46 @@ impl RequirementsAudit {
     pub(crate) fn marker_label(&self) -> String {
         match self {
             RequirementsAudit::AllAddressed => "ALL ADDRESSED".to_string(),
-            RequirementsAudit::Unaddressed(items) => format!("UNADDRESSED({})", items.len()),
+            RequirementsAudit::Unaddressed(items) => {
+                let summary_only = items
+                    .iter()
+                    .filter(|item| audit_finding_is_summary_only(item))
+                    .count();
+                if summary_only == 0 {
+                    format!("UNADDRESSED({})", items.len())
+                } else {
+                    format!(
+                        "UNADDRESSED({}) + {summary_only} summary-only (non-blocking)",
+                        items.len() - summary_only
+                    )
+                }
+            }
             RequirementsAudit::Unparseable => "unparseable".to_string(),
         }
     }
+}
+
+/// Category tags the auditor must put on each finding (W8b): a finding about
+/// the DELIVERABLE (code, output files, behavior) blocks completion; one about
+/// the wording of the agent's final summary only ("file listed twice in the
+/// summary", "summary omits X") does not — the summary is not graded, and
+/// blocking on it cost the wave-2 e2e run its last steps. Untagged findings
+/// are treated as deliverable findings (fail-closed: the pre-W8b behavior).
+const AUDIT_SUMMARY_ONLY_TAGS: &[&str] = &["[SUMMARY]", "[COSMETIC]", "[WORDING]"];
+
+/// Whether an audit finding carries a summary-only category tag, either
+/// before or right after the `UNADDRESSED` colon (`- UNADDRESSED [SUMMARY]:
+/// …` or `UNADDRESSED: [SUMMARY] …`).
+pub(crate) fn audit_finding_is_summary_only(item: &str) -> bool {
+    let upper = item.trim().trim_start_matches("- ").trim().to_uppercase();
+    let rest = upper
+        .strip_prefix("UNADDRESSED")
+        .unwrap_or(upper.as_str())
+        .trim_start();
+    let rest = rest.strip_prefix(':').unwrap_or(rest).trim_start();
+    AUDIT_SUMMARY_ONLY_TAGS
+        .iter()
+        .any(|tag| rest.starts_with(tag))
 }
 
 /// Parse the audit response: bullet lines carry per-requirement verdicts and a
@@ -3213,8 +3784,11 @@ fn build_requirements_audit_prompt(
         .map(|c| {
             format!(
                 "\n\nEnvironment input census (deterministic, extracted by the harness — grade \
-             against this, not the instruction alone):\n{c}\n\nEvery census field must appear \
-             above as RESOLVED (consumed) or be explicitly WAIVED with a reason."
+             against this, not the instruction alone):\n{c}\n\nThe census is the agent's \
+             working-notes inventory of the input, not a checklist for its summary: a census \
+             field is a finding only when the DELIVERABLE (the output files or code) fails to \
+             consume a field the task depends on. A field missing from the agent's summary \
+             text is never, by itself, a finding."
             )
         })
         .unwrap_or_default();
@@ -3224,14 +3798,19 @@ fn build_requirements_audit_prompt(
              You did NOT write this code and owe it nothing — a model asked to confirm its own \
              checklist rationalizes; your job is to attack. Find the ways a hidden verifier \
              would still fail this submission. Prioritize:\n\
-             - fields/keys present in the input census but absent from the agent's output or summary\n\
+             - input census fields the deliverable (output files, code) needed but never consumed\n\
              - leaks of input-side sensitive identifiers (private/secret/internal naming) into outputs\n\
              - implicit conventions: exact filenames, rounding rules, units, sort orders, trailing details\n\
-             - edge cases the instruction implies but the summary never mentions\n\
-             For each plausible failure, one line, with the evidence that grounds it:\n\
-             - UNADDRESSED: <what fails> — <evidence from instruction/census/files>\n\
-             End with a final verdict line exactly `AUDIT: ALL ADDRESSED` (nothing a hidden test \
-             would plausibly check is unhandled) or `AUDIT: UNADDRESSED <n>`.",
+             - edge cases the instruction implies that the code does not handle\n\
+             For each plausible failure, one line, tagged with its category, with the evidence \
+             that grounds it:\n\
+             - UNADDRESSED [DELIVERABLE]: <what fails in the code/output files> — <evidence from instruction/census/files>\n\
+             - UNADDRESSED [SUMMARY]: <a problem only in the WORDING of the agent's final summary \
+             (a file listed twice, the summary omits or misstates something the files get right)> — <evidence>\n\
+             Use [DELIVERABLE] only for what a hidden verifier could observe in the files or their \
+             behavior; everything about the summary text is [SUMMARY]. Only [DELIVERABLE] findings \
+             block completion. End with a final verdict line exactly `AUDIT: ALL ADDRESSED` \
+             (nothing a hidden test would plausibly check is unhandled) or `AUDIT: UNADDRESSED <n>`.",
         ),
         Message::user(format!(
             "Task instruction:\n{instruction}\n\nAgent's final summary:\n{summary}\n\nFiles changed: {files}{census_block}"

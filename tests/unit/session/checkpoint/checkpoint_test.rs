@@ -968,9 +968,7 @@ fn test_save_with_retry_fails_on_readonly_dir() {
     // Manually construct a manager pointing to a path that can never work:
     // "blocker" is a file, so "blocker/checkpoints" can't be a directory.
     let impossible_dir = blocker_file.join("checkpoints");
-    let manager = CheckpointManager {
-        checkpoints_dir: impossible_dir,
-    };
+    let manager = CheckpointManager::with_dir(impossible_dir);
 
     let checkpoint = TaskCheckpoint::new(
         "retry_fail".to_string(),
@@ -2581,4 +2579,134 @@ fn autocontinue_skips_placeholder_and_userless_checkpoints() {
         .unwrap()
         .expect("the real task behind the placeholders must be found");
     assert_eq!(picked.task_id, "real-task");
+}
+
+// ---- W8a: checkpoint-on-every-mutation (cached incremental append) ----
+
+/// A realistically sized in-flight checkpoint: `messages` conversation turns
+/// of ~2 KB each plus `calls` logged tool calls.
+fn w8a_large_checkpoint(task_id: &str, messages: usize, calls: usize) -> TaskCheckpoint {
+    let mut cp = TaskCheckpoint::new(task_id.to_string(), "W8a cost probe".to_string());
+    let body = "x".repeat(2_000);
+    cp.set_messages(
+        (0..messages)
+            .map(|i| Message::user(format!("turn {i}: {body}")))
+            .collect(),
+    );
+    for i in 0..calls {
+        cp.log_tool_call(w8a_write_call(i));
+    }
+    cp
+}
+
+fn w8a_write_call(i: usize) -> ToolCallLog {
+    ToolCallLog {
+        timestamp: Utc::now(),
+        tool_name: "file_write".to_string(),
+        arguments: serde_json::json!({"path": format!("src/f{i}.rs"), "content": "fn main() {}"})
+            .to_string(),
+        result: Some("{\"success\":true}".to_string()),
+        success: true,
+        duration_ms: Some(3),
+    }
+}
+
+/// The cached append path must persist exactly what the full load-and-replay
+/// path would: across many saves (crossing the 24-delta compaction), a fresh
+/// manager loading from disk sees the final in-memory state.
+#[test]
+fn w8a_cached_incremental_saves_roundtrip_through_compaction() {
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+    let mut cp = w8a_large_checkpoint("w8a-roundtrip", 20, 5);
+    manager.save(&cp).unwrap();
+    for i in 0..40 {
+        cp.log_tool_call(w8a_write_call(100 + i));
+        manager.save(&cp).unwrap();
+        let loaded = CheckpointManager::new(dir.path().to_path_buf())
+            .unwrap()
+            .load("w8a-roundtrip")
+            .unwrap();
+        assert_eq!(loaded.tool_calls.len(), cp.tool_calls.len(), "save {i}");
+        assert_eq!(loaded.version, cp.version, "save {i}");
+        assert_eq!(loaded.messages.len(), cp.messages.len(), "save {i}");
+    }
+}
+
+/// The cache only skips work it can prove redundant: a write by ANOTHER
+/// manager (another process) changes the on-disk stamp, so the next save
+/// takes the full load path and still lands the caller's state intact.
+#[test]
+fn w8a_foreign_write_invalidates_the_cached_base() {
+    let dir = tempdir().unwrap();
+    let a = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+    let b = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+    let mut cp = w8a_large_checkpoint("w8a-foreign", 10, 2);
+    a.save(&cp).unwrap();
+
+    // Another writer appends its own (divergent) state.
+    let mut foreign = cp.clone();
+    foreign.log_tool_call(w8a_write_call(900));
+    b.save(&foreign).unwrap();
+
+    // A's next save must not compute its delta against its stale memory.
+    cp.log_tool_call(w8a_write_call(1));
+    cp.log_tool_call(w8a_write_call(2));
+    a.save(&cp).unwrap();
+    let loaded = CheckpointManager::new(dir.path().to_path_buf())
+        .unwrap()
+        .load("w8a-foreign")
+        .unwrap();
+    assert_eq!(loaded.tool_calls.len(), cp.tool_calls.len());
+    assert_eq!(loaded.version, cp.version);
+    assert_eq!(
+        loaded.tool_calls.last().unwrap().arguments,
+        cp.tool_calls.last().unwrap().arguments
+    );
+}
+
+/// Cost measurement for the per-mutation cadence (W8a). Reports the mean
+/// wall time of one incremental save on a ~200 KB checkpoint, for the cached
+/// path (this manager wrote last) and the uncached path (a fresh manager
+/// must re-read, verify and replay — the pre-W8a cost). Run with
+/// `--nocapture` to see the numbers. The hard assertions are correctness
+/// plus a generous ceiling that catches a regression to full rewrites.
+#[test]
+fn w8a_incremental_save_cost_is_measured() {
+    const SAVES: usize = 20;
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+    let mut cp = w8a_large_checkpoint("w8a-cost", 100, 60);
+    manager.save(&cp).unwrap();
+    let base_bytes = std::fs::metadata(manager.checkpoint_path("w8a-cost").unwrap())
+        .unwrap()
+        .len();
+
+    let started = std::time::Instant::now();
+    for i in 0..SAVES {
+        cp.log_tool_call(w8a_write_call(1_000 + i));
+        manager.save(&cp).unwrap();
+    }
+    let cached = started.elapsed() / SAVES as u32;
+
+    let started = std::time::Instant::now();
+    for i in 0..SAVES {
+        cp.log_tool_call(w8a_write_call(2_000 + i));
+        CheckpointManager::new(dir.path().to_path_buf())
+            .unwrap()
+            .save(&cp)
+            .unwrap();
+    }
+    let uncached = started.elapsed() / SAVES as u32;
+
+    eprintln!(
+        "W8a checkpoint cost: base file {base_bytes} bytes; cached delta append {cached:?}/save, \
+         uncached load+replay+append {uncached:?}/save ({SAVES} saves each)"
+    );
+    let loaded = manager.load("w8a-cost").unwrap();
+    assert_eq!(loaded.tool_calls.len(), cp.tool_calls.len());
+    assert!(
+        cached < std::time::Duration::from_millis(250),
+        "an incremental save must stay cheap, measured {cached:?}"
+    );
 }

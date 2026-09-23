@@ -111,3 +111,233 @@ async fn forced_checkpoint_without_manager_fails_typed() {
     // The regular periodic save still no-ops, unchanged.
     agent.save_checkpoint("Review files").unwrap();
 }
+
+// ---- W8a: checkpoint on every mutation + resume workspace refresh ----
+
+fn w8a_call(tool: &str, args: serde_json::Value, success: bool) -> crate::checkpoint::ToolCallLog {
+    crate::checkpoint::ToolCallLog {
+        timestamp: chrono::Utc::now(),
+        tool_name: tool.to_string(),
+        arguments: args.to_string(),
+        result: Some("{}".to_string()),
+        success,
+        duration_ms: Some(1),
+    }
+}
+
+async fn w8a_agent_with_cadence(task_id: &str) -> (crate::agent::Agent, tempfile::TempDir) {
+    let mut config = crate::test_support::mock_agent_config("http://127.0.0.1:1");
+    // The old cadence: nothing short of 1000 calls / an hour would persist.
+    config.continuous_work.enabled = true;
+    config.continuous_work.checkpoint_interval_tools = 1000;
+    config.continuous_work.checkpoint_interval_secs = 3600;
+    let mut agent = crate::agent::Agent::new(config).await.unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    agent.checkpoint_manager =
+        Some(crate::checkpoint::CheckpointManager::new(directory.path().to_path_buf()).unwrap());
+    agent.current_checkpoint = Some(TaskCheckpoint::new(task_id.into(), "Build app".into()));
+    agent.save_checkpoint("Build app").unwrap();
+    (agent, directory)
+}
+
+fn w8a_log(agent: &mut crate::agent::Agent, call: crate::checkpoint::ToolCallLog) {
+    agent
+        .current_checkpoint
+        .as_mut()
+        .expect("active checkpoint")
+        .log_tool_call(call);
+}
+
+fn w8a_loaded(agent: &crate::agent::Agent, task_id: &str) -> TaskCheckpoint {
+    agent
+        .checkpoint_manager
+        .as_ref()
+        .unwrap()
+        .load(task_id)
+        .unwrap()
+}
+
+/// A successful mutation is on disk immediately — not after 10 calls / 300 s
+/// (the e2e kill at 110 s lost 5 steps and the resumed run rewrote
+/// `src/entry.rs` blind).
+#[tokio::test]
+async fn w8a_successful_mutation_is_persisted_immediately() {
+    let (mut agent, _dir) = w8a_agent_with_cadence("w8a-mutation").await;
+    assert!(
+        !agent.should_persist_checkpoint(),
+        "cadence throttles idle saves"
+    );
+
+    w8a_log(
+        &mut agent,
+        w8a_call(
+            "file_write",
+            serde_json::json!({"path": "src/entry.rs", "content": "fn main() {}"}),
+            true,
+        ),
+    );
+    assert!(agent.has_unpersisted_mutation());
+    assert!(
+        agent.should_persist_checkpoint(),
+        "the step-end save must persist a pending mutation regardless of cadence"
+    );
+    let cadence_mark = agent.last_checkpoint_tool_calls;
+    agent.persist_checkpoint_after_mutation();
+    assert!(!agent.has_unpersisted_mutation());
+    assert_eq!(
+        agent.last_checkpoint_tool_calls, cadence_mark,
+        "a light persist must not postpone the regular (snapshot-refreshing) save"
+    );
+    let loaded = w8a_loaded(&agent, "w8a-mutation");
+    assert!(
+        loaded
+            .tool_calls
+            .iter()
+            .any(|c| c.arguments.contains("src/entry.rs")),
+        "the write must be in the persisted checkpoint"
+    );
+    assert!(
+        !agent.should_persist_checkpoint(),
+        "after persisting, the cadence throttles again"
+    );
+}
+
+/// Read-only and FAILED calls do not trigger the per-mutation persist — the
+/// cadence still throttles them.
+#[tokio::test]
+async fn w8a_read_only_and_failed_calls_do_not_persist() {
+    let (mut agent, _dir) = w8a_agent_with_cadence("w8a-readonly").await;
+    let persisted_calls = w8a_loaded(&agent, "w8a-readonly").tool_calls.len();
+    w8a_log(
+        &mut agent,
+        w8a_call("file_read", serde_json::json!({"path": "src/lib.rs"}), true),
+    );
+    w8a_log(
+        &mut agent,
+        w8a_call(
+            "file_write",
+            serde_json::json!({"path": "src/x.rs", "content": ""}),
+            false,
+        ),
+    );
+    assert!(!agent.has_unpersisted_mutation());
+    assert!(!agent.should_persist_checkpoint());
+    agent.persist_checkpoint_after_mutation();
+    assert_eq!(
+        w8a_loaded(&agent, "w8a-readonly").tool_calls.len(),
+        persisted_calls,
+        "nothing new may be written for read-only / failed calls"
+    );
+}
+
+/// Shell mutations count too (they carry no path list).
+#[tokio::test]
+async fn w8a_shell_mutation_is_persisted() {
+    let (mut agent, _dir) = w8a_agent_with_cadence("w8a-shell").await;
+    w8a_log(
+        &mut agent,
+        w8a_call(
+            "shell_exec",
+            serde_json::json!({"command": "mkdir -p src && touch src/a.py"}),
+            true,
+        ),
+    );
+    assert!(agent.has_unpersisted_mutation());
+    agent.persist_checkpoint_after_mutation();
+    assert!(w8a_loaded(&agent, "w8a-shell")
+        .tool_calls
+        .iter()
+        .any(|c| c.arguments.contains("touch src/a.py")));
+}
+
+/// Agent-level cost of the per-mutation persist (build the checkpoint +
+/// cached delta append, no git snapshot) on a ~200 KB conversation. Run with
+/// `--nocapture` for the numbers.
+#[tokio::test]
+async fn w8a_per_mutation_persist_cost_is_measured() {
+    const SAVES: u32 = 20;
+    let (mut agent, _dir) = w8a_agent_with_cadence("w8a-cost").await;
+    let body = "y".repeat(2_000);
+    for i in 0..100 {
+        agent
+            .messages
+            .push(crate::api::types::Message::user(format!(
+                "turn {i}: {body}"
+            )));
+    }
+    agent.save_checkpoint_forced("Build app").unwrap();
+    let started = std::time::Instant::now();
+    for i in 0..SAVES {
+        w8a_log(
+            &mut agent,
+            w8a_call(
+                "file_write",
+                serde_json::json!({"path": format!("src/m{i}.rs"), "content": "x"}),
+                true,
+            ),
+        );
+        agent.persist_checkpoint_after_mutation();
+    }
+    let per_save = started.elapsed() / SAVES;
+    eprintln!("W8a per-mutation persist (agent level): {per_save:?}/mutation");
+    assert_eq!(
+        w8a_loaded(&agent, "w8a-cost")
+            .tool_calls
+            .iter()
+            .filter(|c| c.arguments.contains("src/m"))
+            .count(),
+        SAVES as usize
+    );
+}
+
+#[test]
+fn w8a_prior_segment_paths_are_deduplicated_successful_writes() {
+    let calls = vec![
+        w8a_call(
+            "file_write",
+            serde_json::json!({"path": "src/entry.rs", "content": "a"}),
+            true,
+        ),
+        w8a_call("file_read", serde_json::json!({"path": "src/lib.rs"}), true),
+        w8a_call(
+            "file_edit",
+            serde_json::json!({"path": "src/entry.rs", "old_str": "a", "new_str": "b"}),
+            true,
+        ),
+        w8a_call(
+            "file_write",
+            serde_json::json!({"path": "src/failed.rs", "content": "a"}),
+            false,
+        ),
+        w8a_call(
+            "file_write",
+            serde_json::json!({"path": "tests/test_entry.py", "content": "a"}),
+            true,
+        ),
+    ];
+    assert_eq!(
+        super::prior_segment_written_paths(&calls),
+        vec![
+            "src/entry.rs".to_string(),
+            "tests/test_entry.py".to_string()
+        ]
+    );
+}
+
+#[test]
+fn w8a_workspace_refresh_note_names_files_and_demands_reread() {
+    assert!(super::workspace_refresh_note(&[]).is_none());
+    let note = super::workspace_refresh_note(&["src/entry.rs".to_string()]).unwrap();
+    assert!(note.contains("src/entry.rs"));
+    assert!(note.contains("Re-read"));
+    assert!(note.contains("selfware_system_directive"));
+
+    let many: Vec<String> = (0..45).map(|i| format!("src/f{i}.rs")).collect();
+    let note = super::workspace_refresh_note(&many).unwrap();
+    assert!(note.contains("src/f29.rs"));
+    assert!(!note.contains("src/f30.rs"), "the listing is capped");
+    assert!(
+        note.contains("15 more"),
+        "the overflow is counted, not hidden"
+    );
+}

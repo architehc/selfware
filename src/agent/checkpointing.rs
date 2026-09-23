@@ -353,18 +353,17 @@ impl Agent {
         // — `mark_written` marks the path stale, which is also the correct
         // reread-guard treatment (the file WAS written by this task chain, so
         // a re-read is not an unchanged probe).
-        for tool_call in &checkpoint.tool_calls {
-            if !tool_call.success {
-                continue;
-            }
-            let Ok(args) = serde_json::from_str::<serde_json::Value>(&tool_call.arguments) else {
-                continue;
-            };
-            for path in
-                super::tool_dispatch::written_paths_for_tool_call(&tool_call.tool_name, &args)
-            {
-                agent.file_tracker.mark_written(&path.to_string_lossy());
-            }
+        let prior_written = prior_segment_written_paths(&checkpoint.tool_calls);
+        for path in &prior_written {
+            agent.file_tracker.mark_written(path);
+        }
+        // Workspace refresh (W8a): the restored conversation may end before
+        // the last persisted edits were discussed, or have compressed them
+        // away — a resumed e2e run did not know `src/entry.rs` already
+        // existed and rewrote it blind. Name what earlier segments wrote and
+        // tell the model to re-read before rewriting.
+        if let Some(note) = workspace_refresh_note(&prior_written) {
+            agent.messages.push(Message::user(note));
         }
         agent.last_checkpoint_tool_calls = checkpoint_tool_calls;
         agent.last_checkpoint_persisted_at = Instant::now();
@@ -485,6 +484,20 @@ impl Agent {
 
     /// Convert current state to a checkpoint
     pub fn to_checkpoint(&self, task_id: &str, task_description: &str) -> TaskCheckpoint {
+        self.build_checkpoint(task_id, task_description, true)
+    }
+
+    /// [`Self::to_checkpoint`] with the git-state capture optional. The
+    /// per-mutation persist skips it: `capture_git_state` runs a full
+    /// working-tree status scan (libgit2), which would dominate the cost of
+    /// a save that exists to be cheap. The next regular (cadence) save
+    /// always captures it.
+    fn build_checkpoint(
+        &self,
+        task_id: &str,
+        task_description: &str,
+        capture_git: bool,
+    ) -> TaskCheckpoint {
         let mut checkpoint = if let Some(ref existing) = self.current_checkpoint {
             existing.clone()
         } else {
@@ -528,8 +541,10 @@ impl Agent {
             .collect();
 
         // Capture git state
-        if let Ok(cwd) = std::env::current_dir() {
-            checkpoint.git_checkpoint = capture_git_state(cwd.to_string_lossy().as_ref());
+        if capture_git {
+            if let Ok(cwd) = std::env::current_dir() {
+                checkpoint.git_checkpoint = capture_git_state(cwd.to_string_lossy().as_ref());
+            }
         }
 
         // Persist cumulative budget so a resumed run continues from where the
@@ -598,7 +613,67 @@ impl Agent {
             debug!("Checkpoint skipped by continuous-work policy");
             return Ok(());
         }
-        self.persist_checkpoint(task_description, false)
+        self.persist_checkpoint(task_description, false, false)
+    }
+
+    /// Persist the checkpoint right after a successful MUTATING tool call
+    /// (W8a). The continuous-work cadence (every N tool calls / T seconds)
+    /// let a crash lose several steps of edits: a kill at 110 s lost 5
+    /// steps, and the resumed run — not knowing `src/entry.rs` was already on
+    /// disk — rewrote it. Every successful mutation is now on disk before the
+    /// next model turn.
+    ///
+    /// Cheap by construction: an incremental delta append against the
+    /// manager's remembered last write (no base re-read / replay), no git
+    /// snapshot. No-op when no checkpoint manager or active checkpoint
+    /// exists, or when every logged call since the last persist was
+    /// read-only / failed — so it is safe to call after EVERY tool call.
+    /// Best-effort like the periodic save: a failure is logged, never fatal.
+    ///
+    /// Call site: the post-tool-call hook `maybe_verify_file_change`
+    /// (verification.rs), which the sequential dispatch path runs for every
+    /// successful call after `log_tool_call` appended it to the checkpoint
+    /// log. The step-end cadence save also
+    /// persists whenever a mutation is pending (see
+    /// [`Self::should_persist_checkpoint`]), so a missing per-call hook
+    /// degrades to per-step granularity, never to the old interval.
+    pub(crate) fn persist_checkpoint_after_mutation(&mut self) {
+        if self.checkpoint_manager.is_none() || !self.has_unpersisted_mutation() {
+            return;
+        }
+        let Some(task_description) = self
+            .current_checkpoint
+            .as_ref()
+            .map(|cp| cp.task_description.clone())
+        else {
+            return;
+        };
+        if let Err(e) = self.persist_checkpoint(&task_description, false, true) {
+            warn!("Failed to persist post-mutation checkpoint: {}", e);
+        }
+    }
+
+    /// Whether a successful mutating tool call was logged after the last
+    /// persisted checkpoint — light or regular. The light watermark lives in
+    /// the manager (what its last write put on disk), so light persists do
+    /// not disturb the regular cadence counters.
+    pub(crate) fn has_unpersisted_mutation(&self) -> bool {
+        let Some(cp) = self.current_checkpoint.as_ref() else {
+            return false;
+        };
+        let persisted = self
+            .checkpoint_manager
+            .as_ref()
+            .and_then(|m| m.persisted_tool_call_count(&cp.task_id))
+            .unwrap_or(0)
+            .max(self.last_checkpoint_tool_calls);
+        cp.tool_calls.iter().skip(persisted).any(|call| {
+            call.success && {
+                let args = serde_json::from_str::<serde_json::Value>(&call.arguments)
+                    .unwrap_or(serde_json::Value::Null);
+                super::tool_dispatch::tool_call_is_mutating(&call.tool_name, &args)
+            }
+        })
     }
 
     /// Save a checkpoint unconditionally, as a FULL write, bypassing the
@@ -627,21 +702,31 @@ impl Agent {
                 "cannot persist a forced checkpoint: no checkpoint manager is configured"
             );
         }
-        self.persist_checkpoint(task_description, true)
+        self.persist_checkpoint(task_description, true, false)
     }
 
     /// Shared persist half of [`save_checkpoint`] / [`save_checkpoint_forced`].
     /// Callers guarantee a checkpoint manager is configured. `full_write`
     /// forces a complete base-file write ([`CheckpointManager::save_final`])
-    /// instead of the differential save.
-    fn persist_checkpoint(&mut self, task_description: &str, full_write: bool) -> Result<()> {
+    /// instead of the differential save. `light` is the per-mutation form:
+    /// it skips the repository snapshot and the in-memory self-healing
+    /// snapshot (a full serialization of messages + tool calls), and it
+    /// leaves the continuous-work cadence counters alone — so the next
+    /// regular save still lands on the configured interval and refreshes
+    /// both snapshots; a light persist can never postpone it.
+    fn persist_checkpoint(
+        &mut self,
+        task_description: &str,
+        full_write: bool,
+        light: bool,
+    ) -> Result<()> {
         let task_id = self
             .current_checkpoint
             .as_ref()
             .map(|c| c.task_id.clone())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-        let checkpoint = self.to_checkpoint(&task_id, task_description);
+        let checkpoint = self.build_checkpoint(&task_id, task_description, !light);
         // The manager borrow (and its IO) completes before any of the mutable
         // bookkeeping below touches the agent.
         let manager = self
@@ -653,12 +738,16 @@ impl Agent {
         } else {
             manager.save(&checkpoint)?;
         }
-        self.last_checkpoint_tool_calls = checkpoint.tool_calls.len();
-        self.last_checkpoint_persisted_at = Instant::now();
-        self.checkpoint_persisted_once = true;
+        if !light {
+            self.last_checkpoint_tool_calls = checkpoint.tool_calls.len();
+            self.last_checkpoint_persisted_at = Instant::now();
+            self.checkpoint_persisted_once = true;
+        }
         self.current_checkpoint = Some(checkpoint);
         #[cfg(feature = "resilience")]
-        self.record_self_healing_checkpoint(task_description);
+        if !light {
+            self.record_self_healing_checkpoint(task_description);
+        }
         debug!("Checkpoint saved for task: {}", task_id);
         Ok(())
     }
@@ -674,6 +763,13 @@ impl Agent {
         }
 
         if !self.checkpoint_persisted_once {
+            return true;
+        }
+
+        // Every successful mutation is persisted (W8a): the interval cadence
+        // below only throttles saves of read-only progress. Losing an edit
+        // that is already on disk makes a resumed run rewrite it blind.
+        if self.has_unpersisted_mutation() {
             return true;
         }
 
@@ -1187,6 +1283,63 @@ impl Agent {
 /// Restore the persisted hard budget caps into `config` on resume, but only for
 /// caps the resume command did not itself supply — a re-passed CLI/env flag
 /// (already reflected in `config.agent.max_*`) wins over the persisted value.
+/// Paths written by the successful file-writing calls on record, in first-
+/// write order, deduplicated. Source of both the resumed files-changed
+/// evidence and the workspace-refresh note.
+pub(super) fn prior_segment_written_paths(
+    tool_calls: &[crate::checkpoint::ToolCallLog],
+) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    for tool_call in tool_calls {
+        if !tool_call.success {
+            continue;
+        }
+        let Ok(args) = serde_json::from_str::<serde_json::Value>(&tool_call.arguments) else {
+            continue;
+        };
+        for path in super::tool_dispatch::written_paths_for_tool_call(&tool_call.tool_name, &args) {
+            let path = path.to_string_lossy().to_string();
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+    }
+    paths
+}
+
+/// Most paths the workspace-refresh note lists by name; the rest are counted.
+const WORKSPACE_REFRESH_MAX_PATHS: usize = 30;
+
+/// The short directive injected into a resumed context listing the files
+/// earlier segments wrote, or `None` when they wrote nothing. The listing is
+/// what the checkpoint RECORDS as written — the note tells the model to
+/// re-read rather than asserting the current on-disk content.
+pub(super) fn workspace_refresh_note(written: &[String]) -> Option<String> {
+    if written.is_empty() {
+        return None;
+    }
+    let shown: Vec<String> = written
+        .iter()
+        .take(WORKSPACE_REFRESH_MAX_PATHS)
+        .map(|p| format!("- {p}"))
+        .collect();
+    let more = written.len().saturating_sub(shown.len());
+    let more_line = if more > 0 {
+        format!("\n- … and {more} more")
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "<selfware_system_directive>\n\
+         Resumed from a checkpoint. Earlier segment(s) of this task already wrote, edited or deleted \
+         these files (per the checkpoint log):\n{}{more_line}\n\
+         Re-read a file (file_read) before changing it; do NOT recreate or rewrite one of \
+         these from scratch without reading its current contents first.\n\
+         </selfware_system_directive>",
+        shown.join("\n")
+    ))
+}
+
 fn restore_budget_caps_from_checkpoint(
     config: &mut crate::config::Config,
     checkpoint: &TaskCheckpoint,
