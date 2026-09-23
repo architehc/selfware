@@ -465,6 +465,14 @@ fn test_killswitch_cwd_ambient_file_isolated_from_checker_tests() {
         .arg("--exact")
         .arg("safety::killswitch::tests::test_killswitch_cwd_ambient_worker")
         .env("SELFWARE_KILLSWITCH_SUBPROCESS_WORKER", "1")
+        // Hermetic: a concurrently running test may have the process-wide
+        // SELFWARE_KILLSWITCH (or HOME-killswitch overrides) set at spawn time;
+        // the child would inherit it and see an Environment trip unrelated to
+        // the ambient cwd file under test (CI MSRV flake: reason "1").
+        .env_remove(KILLSWITCH_ENV_VAR)
+        .env_remove("SELFWARE_KILLSWITCH_IGNORE_HOME")
+        .env_remove("SELFWARE_NO_HOME_KILLSWITCH")
+        .env_remove("SELFWARE_DISABLE_HOME_KILLSWITCH")
         .current_dir(&tmp_path)
         .output()
         .expect("failed to execute worker subprocess");
