@@ -28,6 +28,17 @@ impl Agent {
                 request_messages.insert(0, Message::system(learning_hint));
             }
         }
+        // The learning hint is merged AFTER trim_message_history, so re-measure
+        // the assembled request: trim/clamp it back under max_context_tokens, and
+        // if it still does not fit, return the typed ContextOverflow instead of
+        // dispatching an over-budget request (same guard as the execution path in
+        // assistant_response.rs; the planning retry loop routes it to bounded
+        // compress-and-retry recovery).
+        let request_messages = Self::fit_request_to_context_budget(
+            request_messages,
+            self.max_context_tokens,
+            self.current_checkpoint.as_ref(),
+        )?;
         // Capture per-call metadata so the planning step also gets a
         // turn_NNNN.json artifact under <workdir>/.selfware/turns/.
         let mut plan_meta = crate::api::types::ChatMetadata::default();
