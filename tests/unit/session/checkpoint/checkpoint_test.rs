@@ -1244,6 +1244,7 @@ fn task_checkpoint_budget_fields_roundtrip_and_default() {
         last_failed_verification_mutation_sequence: 6,
         last_failed_verification_summary: Some("pytest: 2 failed".to_string()),
         verification_failures: Default::default(),
+        verification_fingerprint: None,
     };
     let json = serde_json::to_string(&cp).unwrap();
     let back: TaskCheckpoint = serde_json::from_str(&json).unwrap();
@@ -2740,5 +2741,182 @@ fn task_start_head_persists_and_defaults_to_none_on_legacy_checkpoints() {
     assert!(
         next.compute_delta(&base).is_none(),
         "a baseline change forces a full save instead of a lossy delta"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Delta coverage of the fields the full save writes (tightened budget caps,
+// auto-continue chain count, cleared pending visual assertion).
+// ---------------------------------------------------------------------------
+
+/// A base checkpoint big enough that a small change is always written as a
+/// delta (the manager falls back to a full write when the delta is not
+/// meaningfully smaller than the checkpoint).
+fn sizeable_checkpoint(task_id: &str) -> TaskCheckpoint {
+    let mut cp = TaskCheckpoint::new(task_id.to_string(), "budgeted task".to_string());
+    cp.set_messages(
+        (0..40)
+            .map(|i| Message::user(format!("prior message {i}: {}", "x".repeat(200))))
+            .collect(),
+    );
+    cp
+}
+
+fn delta_log_len(dir: &std::path::Path, task_id: &str) -> usize {
+    std::fs::read_to_string(dir.join(format!("{task_id}.delta.jsonl")))
+        .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+        .unwrap_or(0)
+}
+
+#[test]
+fn tightened_budget_caps_survive_delta_only_saves() {
+    let dir = tempdir().unwrap();
+    let task = "caps-task";
+
+    // Segment 1: full save with the original, higher caps.
+    {
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+        let mut cp = sizeable_checkpoint(task);
+        cp.max_budget_tokens = Some(100_000);
+        cp.max_wall_secs = Some(3_600);
+        cp.max_cost_usd = Some(10.0);
+        cp.auto_continue_count = 1;
+        manager.save_final(&cp).unwrap();
+    }
+
+    // Segment 2 (a new process): resume with LOWER caps, make progress, and
+    // persist only incrementally before being interrupted.
+    {
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+        let mut cp = manager.load(task).unwrap();
+        cp.max_budget_tokens = Some(20_000);
+        cp.max_wall_secs = Some(600);
+        cp.max_cost_usd = Some(1.5);
+        cp.auto_continue_count = 2;
+        cp.set_step(cp.current_step + 1);
+        manager.save(&cp).unwrap();
+        assert_eq!(
+            delta_log_len(dir.path(), task),
+            1,
+            "the cap change must be persisted as a delta for this test to exercise the delta path"
+        );
+        // A second, cap-neutral delta on top (cached fast path).
+        cp.set_step(cp.current_step + 1);
+        manager.save(&cp).unwrap();
+        assert_eq!(delta_log_len(dir.path(), task), 2);
+    }
+
+    // Segment 3: the next resume must see the tightened caps, not the base
+    // file's older, higher ones.
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+    let loaded = manager.load(task).unwrap();
+    assert_eq!(loaded.max_budget_tokens, Some(20_000));
+    assert_eq!(loaded.max_wall_secs, Some(600));
+    assert_eq!(loaded.max_cost_usd, Some(1.5));
+    assert_eq!(
+        loaded.auto_continue_count, 2,
+        "the auto-continue chain count must survive delta-only saves too"
+    );
+}
+
+#[test]
+fn removing_a_budget_cap_forces_a_full_write() {
+    let dir = tempdir().unwrap();
+    let task = "cap-removed";
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+    let mut cp = sizeable_checkpoint(task);
+    cp.max_cost_usd = Some(5.0);
+    manager.save_final(&cp).unwrap();
+
+    let mut next = cp.clone();
+    next.max_cost_usd = None;
+    next.set_step(1);
+    assert!(
+        next.compute_delta(&cp).is_none(),
+        "the delta cannot encode Some -> None for a cap; it must force a full write"
+    );
+    manager.save(&next).unwrap();
+    assert_eq!(delta_log_len(dir.path(), task), 0);
+    let loaded = CheckpointManager::new(dir.path().to_path_buf())
+        .unwrap()
+        .load(task)
+        .unwrap();
+    assert_eq!(loaded.max_cost_usd, None);
+}
+
+#[test]
+fn clearing_pending_visual_assertion_is_not_resurrected_by_the_delta_log() {
+    let dir = tempdir().unwrap();
+    let task = "pending-clear";
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+    let mut cp = sizeable_checkpoint(task);
+    cp.set_pending_visual_assertion(VisualAssertion {
+        id: "a1".to_string(),
+        description: "window shows OK".to_string(),
+        screenshot_path: None,
+        verified: false,
+        verification_result: None,
+        created_at: Utc::now(),
+        verified_at: None,
+        step: None,
+        tool_name: None,
+        expected: None,
+        observed: None,
+        passed: None,
+        confidence: None,
+        screenshot_hash_legacy: None,
+        timestamp: None,
+    });
+    manager.save_final(&cp).unwrap();
+
+    cp.pending_visual_assertion = None;
+    cp.set_step(1);
+    manager.save(&cp).unwrap();
+    let loaded = CheckpointManager::new(dir.path().to_path_buf())
+        .unwrap()
+        .load(task)
+        .unwrap();
+    assert!(
+        loaded.pending_visual_assertion.is_none(),
+        "a cleared pending assertion must stay cleared after a reload"
+    );
+}
+
+#[test]
+fn identity_fields_changing_force_a_full_write() {
+    let base = sizeable_checkpoint("ident");
+    let mutations: [fn(&mut TaskCheckpoint); 4] = [
+        |cp| cp.task_description = "other".to_string(),
+        |cp| cp.project_root = Some("/elsewhere".to_string()),
+        |cp| cp.created_at += chrono::Duration::seconds(1),
+        |cp| cp.task_start_head = Some("abc".to_string()),
+    ];
+    for mutate in mutations {
+        let mut next = base.clone();
+        mutate(&mut next);
+        next.set_step(1);
+        assert!(next.compute_delta(&base).is_none());
+    }
+}
+
+#[test]
+fn workspace_fingerprint_tracks_written_file_contents() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("lib.rs");
+    std::fs::write(&file, "pub fn a() {}").unwrap();
+    let written = vec![
+        "lib.rs".to_string(),
+        dir.path().join("gone.rs").to_string_lossy().to_string(),
+    ];
+    let before = WorkspaceFingerprint::capture(dir.path(), &written);
+    assert_eq!(before.files[1].1, WorkspaceFingerprint::ABSENT);
+    assert_eq!(before, WorkspaceFingerprint::capture(dir.path(), &written));
+
+    std::fs::write(&file, "pub fn a() { panic!() }").unwrap();
+    let after = WorkspaceFingerprint::capture(dir.path(), &written);
+    assert_ne!(before, after);
+    assert_eq!(
+        before.differences(&after),
+        vec!["lib.rs changed".to_string()]
     );
 }

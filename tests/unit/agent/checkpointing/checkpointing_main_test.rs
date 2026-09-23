@@ -801,6 +801,10 @@ fn test_apply_delta_task_id_mismatch() {
         effective_max_iterations: None,
         extensions_granted: None,
         cumulative_iterations: None,
+        auto_continue_count: None,
+        max_budget_tokens: None,
+        max_wall_secs: None,
+        max_cost_usd: None,
         git_checkpoint: None,
     };
     let result = cp.apply_delta(&delta);
@@ -839,6 +843,10 @@ fn test_apply_delta_version_mismatch() {
         effective_max_iterations: None,
         extensions_granted: None,
         cumulative_iterations: None,
+        auto_continue_count: None,
+        max_budget_tokens: None,
+        max_wall_secs: None,
+        max_cost_usd: None,
         git_checkpoint: None,
     };
     let result = cp.apply_delta(&delta);
@@ -896,6 +904,10 @@ fn test_apply_delta_with_all_fields_set() {
         effective_max_iterations: None,
         extensions_granted: None,
         cumulative_iterations: None,
+        auto_continue_count: None,
+        max_budget_tokens: None,
+        max_wall_secs: None,
+        max_cost_usd: None,
         git_checkpoint: Some(GitCheckpointInfo {
             branch: "dev".to_string(),
             commit_hash: "xyz789".to_string(),
@@ -952,6 +964,10 @@ fn test_apply_delta_preserves_existing_data_when_fields_none() {
         effective_max_iterations: None,
         extensions_granted: None,
         cumulative_iterations: None,
+        auto_continue_count: None,
+        max_budget_tokens: None,
+        max_wall_secs: None,
+        max_cost_usd: None,
         git_checkpoint: None,
     };
 
@@ -995,6 +1011,10 @@ fn test_checkpoint_delta_serialization_roundtrip() {
         effective_max_iterations: None,
         extensions_granted: None,
         cumulative_iterations: None,
+        auto_continue_count: None,
+        max_budget_tokens: None,
+        max_wall_secs: None,
+        max_cost_usd: None,
         git_checkpoint: None,
     };
 

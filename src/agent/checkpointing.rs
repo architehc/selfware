@@ -365,6 +365,16 @@ impl Agent {
         if let Some(note) = workspace_refresh_note(&prior_written) {
             agent.messages.push(Message::user(note));
         }
+        // Verification credit is a statement about specific file contents.
+        // Another process may have changed them while the task was paused;
+        // a credit restored verbatim let the completion gate accept a tree
+        // no check ever ran against.
+        if let Some(note) = agent.revalidate_restored_verification_credit(
+            checkpoint.guard_counters.verification_fingerprint.as_ref(),
+            &prior_written,
+        ) {
+            agent.messages.push(Message::user(note));
+        }
         agent.last_checkpoint_tool_calls = checkpoint_tool_calls;
         agent.last_checkpoint_persisted_at = Instant::now();
         agent.checkpoint_persisted_once = true;
@@ -558,18 +568,7 @@ impl Agent {
             self.cumulative_cost_usd + self.client.pending_usage().cost.unwrap_or(0.0);
         // Persist anti-thrash guard counters so they survive resume — otherwise
         // an auto-resumed crash-looping task resets them to 0 every restart.
-        checkpoint.guard_counters = crate::checkpoint::GuardCounters {
-            consecutive_no_action_prompts: self.consecutive_no_action_prompts,
-            mutation_gate_rejections: self.mutation_gate_rejections,
-            prefill_400_count: self.prefill_400_count,
-            mutation_sequence: self.mutation_sequence,
-            last_successful_verification_mutation_sequence: self
-                .last_successful_verification_mutation_sequence,
-            last_failed_verification_mutation_sequence: self
-                .last_failed_verification_mutation_sequence,
-            last_failed_verification_summary: self.last_failed_verification_summary.clone(),
-            verification_failures: self.verification_failures.clone(),
-        };
+        checkpoint.guard_counters = self.guard_counters_snapshot();
 
         // Persist the hard budget caps themselves (CLI-only, `#[serde(skip)]` on
         // AgentConfig) so a resumed run keeps its limits instead of running
@@ -883,18 +882,7 @@ impl Agent {
     /// Both terminal paths call this first so what is persisted is what was
     /// true at the end.
     pub(crate) fn refresh_persisted_evidence(&mut self) {
-        let counters = crate::checkpoint::GuardCounters {
-            consecutive_no_action_prompts: self.consecutive_no_action_prompts,
-            mutation_gate_rejections: self.mutation_gate_rejections,
-            prefill_400_count: self.prefill_400_count,
-            mutation_sequence: self.mutation_sequence,
-            last_successful_verification_mutation_sequence: self
-                .last_successful_verification_mutation_sequence,
-            last_failed_verification_mutation_sequence: self
-                .last_failed_verification_mutation_sequence,
-            last_failed_verification_summary: self.last_failed_verification_summary.clone(),
-            verification_failures: self.verification_failures.clone(),
-        };
+        let counters = self.guard_counters_snapshot();
         let tokens = self
             .cumulative_token_usage
             .total
@@ -912,7 +900,116 @@ impl Agent {
             checkpoint.effective_max_iterations = Some(self.loop_control.max_iterations());
             checkpoint.extensions_granted = self.loop_control.extensions_granted();
             checkpoint.cumulative_iterations = self.loop_control.accumulated_iterations();
+            // Same sweep for the remaining fields `build_checkpoint` writes:
+            // the chain count and the hard caps must not lag the terminal
+            // record either.
+            checkpoint.auto_continue_count = self.loop_control.auto_continue_count();
+            checkpoint.max_budget_tokens = self.config.agent.max_budget_tokens;
+            checkpoint.max_wall_secs = self.config.agent.max_wall_secs;
+            checkpoint.max_cost_usd = self.config.agent.max_cost_usd;
         }
+    }
+
+    /// The persisted form of the anti-thrash guards and the verification
+    /// ledger, including the workspace fingerprint the verification credit
+    /// rests on. Single source for every checkpoint write
+    /// ([`Self::build_checkpoint`], [`Self::refresh_persisted_evidence`]).
+    fn guard_counters_snapshot(&self) -> crate::checkpoint::GuardCounters {
+        crate::checkpoint::GuardCounters {
+            consecutive_no_action_prompts: self.consecutive_no_action_prompts,
+            mutation_gate_rejections: self.mutation_gate_rejections,
+            prefill_400_count: self.prefill_400_count,
+            mutation_sequence: self.mutation_sequence,
+            last_successful_verification_mutation_sequence: self
+                .last_successful_verification_mutation_sequence,
+            last_failed_verification_mutation_sequence: self
+                .last_failed_verification_mutation_sequence,
+            last_failed_verification_summary: self.last_failed_verification_summary.clone(),
+            verification_failures: self.verification_failures.clone(),
+            verification_fingerprint: self.verification_fingerprint(),
+        }
+    }
+
+    /// Fingerprint of the workspace the current verification credit covers:
+    /// repository HEAD plus the content of every file this task wrote (per
+    /// the checkpoint log), captured at checkpoint time. `None` while no
+    /// credit exists — there is nothing to protect.
+    ///
+    /// Taken at checkpoint time rather than at the instant of the pass: with
+    /// no task mutation after the pass the two are the same tree, and with
+    /// later mutations the credit is either already stale (the gate refuses
+    /// regardless) or rests on [`Self::fresh_authoritative_pass`]'s doc-only
+    /// proof, which is again a statement about the tree at checkpoint time.
+    /// What resume must detect is the tree changing after the checkpoint.
+    fn verification_fingerprint(&self) -> Option<crate::checkpoint::WorkspaceFingerprint> {
+        if self.last_successful_verification_mutation_sequence == 0 {
+            return None;
+        }
+        let written = self
+            .current_checkpoint
+            .as_ref()
+            .map(|cp| prior_segment_written_paths(&cp.tool_calls))
+            .unwrap_or_default();
+        Some(crate::checkpoint::WorkspaceFingerprint::capture(
+            &crate::tools::workspace_root::current_path(),
+            &written,
+        ))
+    }
+
+    /// Resume-time check that the restored verification credit still
+    /// describes the files on disk. Recomputes the workspace fingerprint and
+    /// compares it with the one persisted next to the credit; on any
+    /// difference — or when the checkpoint predates the fingerprint — the
+    /// credit is revoked (`last_successful_verification_mutation_sequence`
+    /// reset to 0, so the completion gate reports StaleVerification and
+    /// [`Self::fresh_authoritative_pass`] has no pass to build on) and a
+    /// directive for the model is returned. `None` when there was no credit
+    /// or it still holds.
+    pub(super) fn revalidate_restored_verification_credit(
+        &mut self,
+        stored: Option<&crate::checkpoint::WorkspaceFingerprint>,
+        written: &[String],
+    ) -> Option<String> {
+        if self.last_successful_verification_mutation_sequence == 0 {
+            return None;
+        }
+        let current = crate::checkpoint::WorkspaceFingerprint::capture(
+            &crate::tools::workspace_root::current_path(),
+            written,
+        );
+        let reason = match stored {
+            Some(stored) if *stored == current => return None,
+            Some(stored) => {
+                let diffs = stored.differences(&current);
+                let shown: Vec<String> = diffs.iter().take(10).map(|d| format!("- {d}")).collect();
+                let more = diffs.len().saturating_sub(shown.len());
+                let more_line = if more > 0 {
+                    format!("\n- … and {more} more")
+                } else {
+                    String::new()
+                };
+                format!(
+                    "The workspace changed while the task was paused:\n{}{more_line}",
+                    shown.join("\n")
+                )
+            }
+            None => "This checkpoint does not record which workspace state the earlier \
+                     verification covered, so it cannot be trusted after the pause."
+                .to_string(),
+        };
+        warn!(
+            "Revoking restored verification credit (mutation #{}): workspace fingerprint mismatch",
+            self.last_successful_verification_mutation_sequence
+        );
+        self.last_successful_verification_mutation_sequence = 0;
+        Some(format!(
+            "<selfware_system_directive>\n\
+             Resumed from a checkpoint. A verification passed before the pause, but that result \
+             no longer counts. {reason}\n\
+             Re-read the affected files, then re-run this project's verification and let it pass \
+             before completing.\n\
+             </selfware_system_directive>"
+        ))
     }
 
     /// Reflect on the task outcome and save global lessons
@@ -1279,9 +1376,6 @@ impl Agent {
     }
 }
 
-/// Restore the persisted hard budget caps into `config` on resume, but only for
-/// caps the resume command did not itself supply — a re-passed CLI/env flag
-/// (already reflected in `config.agent.max_*`) wins over the persisted value.
 /// Paths written by the successful file-writing calls on record, in first-
 /// write order, deduplicated. Source of both the resumed files-changed
 /// evidence and the workspace-refresh note.
@@ -1339,6 +1433,9 @@ pub(super) fn workspace_refresh_note(written: &[String]) -> Option<String> {
     ))
 }
 
+/// Restore the persisted hard budget caps into `config` on resume, but only for
+/// caps the resume command did not itself supply — a re-passed CLI/env flag
+/// (already reflected in `config.agent.max_*`) wins over the persisted value.
 fn restore_budget_caps_from_checkpoint(
     config: &mut crate::config::Config,
     checkpoint: &TaskCheckpoint,
@@ -1397,6 +1494,10 @@ mod resume_budget_tests;
 #[cfg(test)]
 #[path = "../../tests/unit/agent/checkpointing/checkpointing_resume_chain_test.rs"]
 mod resume_chain_tests;
+
+#[cfg(test)]
+#[path = "../../tests/unit/agent/checkpointing/checkpointing_resume_verification_test.rs"]
+mod resume_verification_tests;
 
 #[cfg(all(test, feature = "consolidation"))]
 #[path = "../../tests/unit/agent/checkpointing/checkpointing_consolidate_utf8_test.rs"]

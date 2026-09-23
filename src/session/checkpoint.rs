@@ -294,6 +294,100 @@ pub struct GuardCounters {
     /// the records keeps the scoped gate working across a resume.
     #[serde(default)]
     pub verification_failures: crate::agent::verification_scope::VerificationLedger,
+    /// Workspace state the verification credit above was earned against:
+    /// the repository HEAD plus a content hash of every file the task wrote,
+    /// taken when the checkpoint was built. Resume recomputes it and revokes
+    /// the credit on any difference — a pass recorded before a pause says
+    /// nothing about code another process changed while the task was paused.
+    /// `None` when no credit exists, and on checkpoints written before the
+    /// field existed; resume then revokes a nonzero credit conservatively.
+    #[serde(default)]
+    pub verification_fingerprint: Option<WorkspaceFingerprint>,
+}
+
+/// Content identity of the files a task wrote, plus the repository HEAD, at
+/// the moment a checkpoint carrying verification credit was built. See
+/// [`GuardCounters::verification_fingerprint`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct WorkspaceFingerprint {
+    /// Full HEAD commit sha of the repository containing the workspace root,
+    /// `None` outside a git repository (or with an unborn HEAD).
+    #[serde(default)]
+    pub head: Option<String>,
+    /// `(path as recorded in the tool log, sha256 hex of its bytes)` in
+    /// first-write order; the digest is [`WorkspaceFingerprint::ABSENT`] for
+    /// a path that does not exist (deleted files are state too).
+    #[serde(default)]
+    pub files: Vec<(String, String)>,
+}
+
+impl WorkspaceFingerprint {
+    /// Digest recorded for a written path that no longer exists.
+    pub const ABSENT: &'static str = "absent";
+    /// Digest recorded for a path that exists but could not be read. Never
+    /// equal to a real digest; an unreadable file on both sides still
+    /// compares equal, so the fingerprint then rests on the other entries.
+    pub const UNREADABLE: &'static str = "unreadable";
+
+    /// Fingerprint `written` (paths as the tool log recorded them, relative
+    /// ones resolved against `root`) and the HEAD of the repository at
+    /// `root`. Hashing streams each file, so large outputs cost IO, not RAM.
+    pub fn capture(root: &std::path::Path, written: &[String]) -> Self {
+        use sha2::Digest;
+        let files = written
+            .iter()
+            .map(|recorded| {
+                let path = std::path::Path::new(recorded);
+                let path = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    root.join(path)
+                };
+                let digest = match fs::File::open(&path) {
+                    Ok(mut file) => {
+                        let mut hasher = Sha256::new();
+                        match std::io::copy(&mut file, &mut hasher) {
+                            Ok(_) => hex::encode(hasher.finalize()),
+                            Err(_) => Self::UNREADABLE.to_string(),
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::ABSENT.to_string(),
+                    Err(_) => Self::UNREADABLE.to_string(),
+                };
+                (recorded.clone(), digest)
+            })
+            .collect();
+        Self {
+            head: capture_head_sha(root),
+            files,
+        }
+    }
+
+    /// Human-readable list of what differs between `self` (stored) and
+    /// `current`, for the resume note. Empty when they are equal.
+    pub fn differences(&self, current: &WorkspaceFingerprint) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.head != current.head {
+            out.push(format!(
+                "git HEAD moved ({} -> {})",
+                self.head.as_deref().unwrap_or("none"),
+                current.head.as_deref().unwrap_or("none")
+            ));
+        }
+        for (path, digest) in &current.files {
+            match self.files.iter().find(|(p, _)| p == path) {
+                Some((_, stored)) if stored == digest => {}
+                Some(_) => out.push(format!("{path} changed")),
+                None => out.push(format!("{path} was not covered by the fingerprint")),
+            }
+        }
+        for (path, _) in &self.files {
+            if !current.files.iter().any(|(p, _)| p == path) {
+                out.push(format!("{path} is no longer on record"));
+            }
+        }
+        out
+    }
 }
 
 /// Represents the delta/diff between two checkpoints
@@ -345,6 +439,22 @@ pub struct CheckpointDelta {
     pub extensions_granted: Option<usize>,
     #[serde(default)]
     pub cumulative_iterations: Option<usize>,
+    /// Auto-continue chain count. The full save writes it; without it here a
+    /// chain that advanced between full saves resumed with the older count
+    /// and re-earned continuations the task had already spent.
+    #[serde(default)]
+    pub auto_continue_count: Option<usize>,
+    /// Hard budget caps. A resume that tightened a cap (`--max-cost-usd`
+    /// lower than the persisted one) followed by delta-only saves used to
+    /// reload the older, HIGHER cap from the base file on the next resume.
+    /// `None` means "unchanged"; a cap being REMOVED (Some -> None) cannot be
+    /// encoded here and forces a full write instead.
+    #[serde(default)]
+    pub max_budget_tokens: Option<usize>,
+    #[serde(default)]
+    pub max_wall_secs: Option<u64>,
+    #[serde(default)]
+    pub max_cost_usd: Option<f64>,
     pub git_checkpoint: Option<GitCheckpointInfo>,
 
     // Visual assertion state (changes are always recorded, None means no change)
@@ -506,10 +616,41 @@ impl TaskCheckpoint {
             (self.extensions_granted != base.extensions_granted).then_some(self.extensions_granted);
         let cumulative_iterations = (self.cumulative_iterations != base.cumulative_iterations)
             .then_some(self.cumulative_iterations);
-        if self.task_start_head != base.task_start_head {
-            // The baseline is write-once at task creation; the delta format
-            // does not carry it, so any transition forces a full write rather
-            // than silently dropping it on resume.
+        let auto_continue_count = (self.auto_continue_count != base.auto_continue_count)
+            .then_some(self.auto_continue_count);
+        // Budget caps: a changed cap rides in the delta; a REMOVED cap (the
+        // delta's `None` means "unchanged") forces a full write.
+        if (self.max_budget_tokens.is_none() && base.max_budget_tokens.is_some())
+            || (self.max_wall_secs.is_none() && base.max_wall_secs.is_some())
+            || (self.max_cost_usd.is_none() && base.max_cost_usd.is_some())
+        {
+            return None;
+        }
+        let max_budget_tokens = (self.max_budget_tokens != base.max_budget_tokens)
+            .then_some(self.max_budget_tokens)
+            .flatten();
+        let max_wall_secs = (self.max_wall_secs != base.max_wall_secs)
+            .then_some(self.max_wall_secs)
+            .flatten();
+        let max_cost_usd = (self.max_cost_usd != base.max_cost_usd)
+            .then_some(self.max_cost_usd)
+            .flatten();
+        if self.task_start_head != base.task_start_head
+            || self.task_description != base.task_description
+            || self.project_root != base.project_root
+            || self.created_at != base.created_at
+        {
+            // Write-once identity fields (set at task creation, never
+            // changed in-task). The delta format does not carry them, so any
+            // transition forces a full write rather than silently dropping
+            // it on resume.
+            return None;
+        }
+        if self.pending_visual_assertion.is_none() && base.pending_visual_assertion.is_some() {
+            // `Some(None)` ("cleared") serializes to JSON `null`, which
+            // deserializes back as `None` ("unchanged"): the clear would
+            // survive only in memory and the persisted delta would resurrect
+            // the old assertion on load. Force a full write instead.
             return None;
         }
         if self.git_checkpoint != base.git_checkpoint && self.git_checkpoint.is_none() {
@@ -579,6 +720,10 @@ impl TaskCheckpoint {
             || effective_max_iterations.is_some()
             || extensions_granted.is_some()
             || cumulative_iterations.is_some()
+            || auto_continue_count.is_some()
+            || max_budget_tokens.is_some()
+            || max_wall_secs.is_some()
+            || max_cost_usd.is_some()
             || git_checkpoint.is_some()
             || pending_changed;
 
@@ -608,6 +753,10 @@ impl TaskCheckpoint {
             effective_max_iterations,
             extensions_granted,
             cumulative_iterations,
+            auto_continue_count,
+            max_budget_tokens,
+            max_wall_secs,
+            max_cost_usd,
             git_checkpoint,
             pending_visual_assertion,
         })
@@ -675,6 +824,18 @@ impl TaskCheckpoint {
         }
         if let Some(iterations) = delta.cumulative_iterations {
             self.cumulative_iterations = iterations;
+        }
+        if let Some(count) = delta.auto_continue_count {
+            self.auto_continue_count = count;
+        }
+        if let Some(cap) = delta.max_budget_tokens {
+            self.max_budget_tokens = Some(cap);
+        }
+        if let Some(cap) = delta.max_wall_secs {
+            self.max_wall_secs = Some(cap);
+        }
+        if let Some(cap) = delta.max_cost_usd {
+            self.max_cost_usd = Some(cap);
         }
         if let Some(ref git) = delta.git_checkpoint {
             self.git_checkpoint = Some(git.clone());
