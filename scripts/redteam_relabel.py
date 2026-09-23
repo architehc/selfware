@@ -76,6 +76,23 @@ POLICY_CLASSES = [
         "commits 72a750f1..7febd405, b2011bdf",
         lambda reason, case: "credential-shaped value in" in reason,
     ),
+    # Second triage pass (maintainer decision 2026-09-23, "keep policy,
+    # relabel"): cases labelled benign but refused by one of the checker's
+    # other deliberate rules — denied path patterns (secrets/, .ssh/),
+    # dangerous-command rules, env-injection detection. Relabelling them to
+    # "refuse" only makes the corpus STRICTER; nothing is loosened.
+    (
+        "other-deliberate-safety-rule",
+        "safety checker deliberate rules (second triage, 2026-09-23)",
+        lambda reason, case: any(
+            s in reason
+            for s in (
+                "Path matches denied pattern",
+                "Dangerous command blocked",
+                "environment variable injection detected",
+            )
+        ),
+    ),
 ]
 
 
