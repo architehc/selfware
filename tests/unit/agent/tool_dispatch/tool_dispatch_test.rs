@@ -2459,7 +2459,17 @@ async fn shell_partial_write_remains_observed_for_later_edits_and_rollback() {
         .await
         .unwrap();
     assert!(result.0, "{result:?}");
-    agent.note_green_verification("shell_exec", r#"{"command":"python -m pytest"}"#, true);
+    agent.task_verification_root = Some(dir.path().to_path_buf());
+    let check = serde_json::json!({"command": "python -m pytest"});
+    agent.note_tool_call_lifecycle(
+        "shell_exec",
+        &check,
+        &check.to_string(),
+        true,
+        r#"{"exit_code":0,"stdout":"1 passed in 0.01s","stderr":""}"#,
+    );
+    agent.note_green_verification(true);
+    assert!(agent.best_snapshot.has_snapshot());
     let tracked = std::fs::canonicalize("solver.py").unwrap();
     assert_eq!(
         agent.snapshot_mutation_paths("cargo_fmt", &serde_json::json!({})),
@@ -6455,4 +6465,135 @@ fn shell_autofix_flags_are_not_observational() {
         "grep --fixed-strings foo src"
     ));
     assert!(shell_command_is_observational("cargo clippy --all-targets"));
+}
+
+async fn hooked_agent(dir: &std::path::Path, hook_command: &str) -> Agent {
+    let mut agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
+        .await
+        .unwrap();
+    agent.current_checkpoint = Some(crate::checkpoint::TaskCheckpoint::new(
+        "snapshot-hook".into(),
+        "Fix solver.py".into(),
+    ));
+    agent.task_verification_root = Some(dir.to_path_buf());
+    agent.hook_registry.register(crate::hooks::HookConfig {
+        event: crate::hooks::HookEvent::PostToolUse,
+        command: hook_command.to_string(),
+        match_tools: vec!["file_write".to_string()],
+        timeout_secs: 10,
+    });
+    agent
+}
+
+async fn write_solver(agent: &mut Agent, content: &str) -> anyhow::Result<(bool, String, String)> {
+    let args = serde_json::json!({"path": "solver.py", "content": content});
+    agent
+        .execute_single_tool(
+            "file_write",
+            &args.to_string(),
+            &args,
+            std::time::Instant::now(),
+        )
+        .await
+}
+
+async fn fire_post_write(agent: &mut Agent, content: &str) {
+    let args = serde_json::json!({"path": "solver.py", "content": content});
+    let post = HookContext::post_tool("file_write", &args.to_string(), true, "ok");
+    agent.fire_hooks_attributed(&post).await;
+}
+
+/// A formatter hook that rewrites the file the tool just wrote is selfware's
+/// own change: the next edit of that file, and rollback, must not refuse it
+/// as an "externally changed snapshot target".
+#[tokio::test]
+async fn formatter_post_hook_does_not_block_next_edit_or_rollback() {
+    let dir = tempfile::tempdir().unwrap();
+    let _cwd = crate::test_support::CwdGuard::enter(dir.path());
+    let mut agent = hooked_agent(dir.path(), "printf 'formatted\\n' > {path}").await;
+
+    let r = write_solver(&mut agent, "raw\n").await.unwrap();
+    assert!(r.0, "{r:?}");
+    fire_post_write(&mut agent, "raw\n").await;
+    assert_eq!(std::fs::read_to_string("solver.py").unwrap(), "formatted\n");
+
+    let r = write_solver(&mut agent, "second\n")
+        .await
+        .expect("a hook's own rewrite must not block the next edit");
+    assert!(r.0, "{r:?}");
+
+    // Promote "second" as last-green through the real accounting.
+    let check = serde_json::json!({"command": "python3 -m pytest"});
+    agent.note_tool_call_lifecycle(
+        "shell_exec",
+        &check,
+        &check.to_string(),
+        true,
+        r#"{"exit_code":0,"stdout":"1 passed in 0.01s","stderr":""}"#,
+    );
+    agent.note_green_verification(true);
+    assert!(agent.best_snapshot.has_snapshot());
+
+    // Break it; the formatter hook rewrites it again; rollback must work.
+    let r = write_solver(&mut agent, "broken\n").await.unwrap();
+    assert!(r.0, "{r:?}");
+    fire_post_write(&mut agent, "broken\n").await;
+    let paths = agent.written_paths();
+    agent
+        .best_snapshot
+        .restore_written(&paths)
+        .expect("rollback must not refuse the hook's own rewrite");
+    assert_eq!(std::fs::read_to_string("solver.py").unwrap(), "second\n");
+}
+
+/// Attribution is limited to what the hook did: a file that had ALREADY been
+/// changed externally before the hook ran stays protected.
+#[tokio::test]
+async fn external_change_before_hook_stays_protected() {
+    let dir = tempfile::tempdir().unwrap();
+    let _cwd = crate::test_support::CwdGuard::enter(dir.path());
+    let mut agent = hooked_agent(dir.path(), "true").await;
+
+    let r = write_solver(&mut agent, "mine\n").await.unwrap();
+    assert!(r.0, "{r:?}");
+    std::fs::write("solver.py", "user edit\n").unwrap();
+    fire_post_write(&mut agent, "mine\n").await;
+
+    let err = write_solver(&mut agent, "clobber\n")
+        .await
+        .expect_err("an external change must still be refused");
+    assert!(
+        err.to_string().contains("externally changed"),
+        "unexpected error: {err}"
+    );
+    assert_eq!(std::fs::read_to_string("solver.py").unwrap(), "user edit\n");
+}
+
+/// The agent's hooks follow its workspace root into an entered worktree.
+#[tokio::test]
+async fn agent_hooks_run_in_the_entered_worktree() {
+    let base = tempfile::tempdir().unwrap();
+    let worktree = tempfile::tempdir().unwrap();
+    let _cwd = crate::test_support::CwdGuard::enter(base.path());
+    let mut agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
+        .await
+        .unwrap();
+    agent.hook_registry.register(crate::hooks::HookConfig {
+        event: crate::hooks::HookEvent::Stop,
+        command: "pwd > marker".to_string(),
+        match_tools: vec![],
+        timeout_secs: 10,
+    });
+    agent.tools.workspace_root().enter(worktree.path()).unwrap();
+    // Deliberately OUTSIDE any workspace_root::scope: the agent passes its
+    // own root, it does not rely on the task-local.
+    agent.fire_hooks_attributed(&HookContext::stop()).await;
+    let written = std::fs::read_to_string(worktree.path().join("marker"))
+        .expect("Stop hook must run in the worktree");
+    assert_eq!(
+        std::fs::canonicalize(written.trim()).unwrap(),
+        std::fs::canonicalize(worktree.path()).unwrap()
+    );
+    assert!(!base.path().join("marker").exists());
+    agent.tools.workspace_root().reset_worktrees();
 }

@@ -211,21 +211,22 @@ impl HookRegistry {
     /// Fire all hooks matching the given event and context.
     /// Returns the combined action: Continue, or the first Skip. For PreToolUse,
     /// a hook that cannot complete fails closed (`Skip { kind: HookFailure }`).
+    ///
+    /// Hooks run in the [`crate::tools::workspace_root::current`] root; callers
+    /// that own an explicit root (the agent) should use [`Self::fire_in_root`]
+    /// so hooks follow an entered worktree even outside a root scope.
     pub async fn fire(&self, ctx: &HookContext) -> HookAction {
-        let matching: Vec<&HookConfig> = self
-            .hooks
-            .iter()
-            .filter(|h| h.event == ctx.event)
-            .filter(|h| {
-                if h.match_tools.is_empty() {
-                    return true;
-                }
-                ctx.tool_name
-                    .as_ref()
-                    .map(|tn| h.match_tools.iter().any(|m| m == tn))
-                    .unwrap_or(false)
-            })
-            .collect();
+        self.fire_in_root(ctx, &crate::tools::workspace_root::current())
+            .await
+    }
+
+    /// [`Self::fire`], running every hook command in `root`.
+    pub async fn fire_in_root(
+        &self,
+        ctx: &HookContext,
+        root: &crate::tools::workspace_root::WorkspaceRoot,
+    ) -> HookAction {
+        let matching = self.matching(ctx);
 
         if matching.is_empty() {
             return HookAction::Continue;
@@ -238,7 +239,7 @@ impl HookRegistry {
         );
 
         for hook in matching {
-            let result = shell_handler::execute_hook(hook, ctx).await;
+            let result = shell_handler::execute_hook_in_root(hook, ctx, root).await;
             match result {
                 HookAction::Skip {
                     ref reason,
@@ -277,6 +278,28 @@ impl HookRegistry {
         }
 
         HookAction::Continue
+    }
+
+    /// Hooks that fire for `ctx` (event matches, tool filter matches).
+    fn matching(&self, ctx: &HookContext) -> Vec<&HookConfig> {
+        self.hooks
+            .iter()
+            .filter(|h| h.event == ctx.event)
+            .filter(|h| {
+                if h.match_tools.is_empty() {
+                    return true;
+                }
+                ctx.tool_name
+                    .as_ref()
+                    .map(|tn| h.match_tools.iter().any(|m| m == tn))
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
+    /// Whether [`Self::fire`] would run at least one hook for `ctx`.
+    pub fn matches_any(&self, ctx: &HookContext) -> bool {
+        !self.matching(ctx).is_empty()
     }
 
     /// Check if any hooks are registered for the given event.

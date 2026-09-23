@@ -1425,7 +1425,7 @@ impl Agent {
 
             // Fire Stop hooks before completing
             let stop_ctx = HookContext::stop();
-            self.hook_registry.fire(&stop_ctx).await;
+            self.fire_hooks_attributed(&stop_ctx).await;
 
             // Strip think blocks from the final answer — the content accumulator
             // includes raw <think>...</think> tags from models like Qwen3.5 that

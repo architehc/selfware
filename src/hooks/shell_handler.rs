@@ -27,6 +27,18 @@ const MAX_OUTPUT_BYTES: usize = 64 * 1024; // 64 KB
 ///   must not run (fail closed), but this is not a policy decision
 /// - any failure on `PostToolUse` / `Stop` → [`HookAction::Error`] (non-fatal)
 pub async fn execute_hook(hook: &HookConfig, ctx: &HookContext) -> HookAction {
+    execute_hook_in_root(hook, ctx, &crate::tools::workspace_root::current()).await
+}
+
+/// [`execute_hook`] with an explicit workspace root: the hook command runs in
+/// `root` (the agent's workspace — an entered worktree, not the process cwd),
+/// exactly like the agent's tools do, so a formatter / test / auto-commit
+/// hook acts on the checkout the agent is actually editing.
+pub async fn execute_hook_in_root(
+    hook: &HookConfig,
+    ctx: &HookContext,
+    root: &crate::tools::workspace_root::WorkspaceRoot,
+) -> HookAction {
     let command = expand_placeholders(&hook.command, ctx);
     let is_pre_tool = ctx.event == super::HookEvent::PreToolUse;
 
@@ -37,7 +49,7 @@ pub async fn execute_hook(hook: &HookConfig, ctx: &HookContext) -> HookAction {
 
     let timeout_secs = hook.timeout_secs.max(1);
     let timeout_duration = Duration::from_secs(timeout_secs);
-    let result = run_shell_command(&command, timeout_duration).await;
+    let result = run_shell_command_in(&command, timeout_duration, root).await;
 
     match result {
         Ok(Some(output)) => {
@@ -120,7 +132,17 @@ struct ShellOutput {
 /// Returns `Ok(Some(output))` on normal completion, `Ok(None)` if the command
 /// timed out (the whole process group has been killed in that case).
 async fn run_shell_command(command: &str, timeout: Duration) -> Result<Option<ShellOutput>> {
+    run_shell_command_in(command, timeout, &crate::tools::workspace_root::current()).await
+}
+
+/// [`run_shell_command`] started in `root` (see [`execute_hook_in_root`]).
+async fn run_shell_command_in(
+    command: &str,
+    timeout: Duration,
+    root: &crate::tools::workspace_root::WorkspaceRoot,
+) -> Result<Option<ShellOutput>> {
     use crate::tools::process_guard::{run_command_bounded, CommandRunError};
+    use crate::tools::workspace_root::CommandRootExt;
 
     let mut cmd = tokio::process::Command::new("sh");
     cmd.arg("-c").arg(command);
@@ -130,6 +152,10 @@ async fn run_shell_command(command: &str, timeout: Duration) -> Result<Option<Sh
     // allowlist (matches shell_exec / ProcessManager sanitization).
     crate::safety::process_env::sanitize_command_env(&mut cmd);
     cmd.stdin(std::process::Stdio::null());
+    // Run in the agent's workspace root (an entered worktree), not the
+    // process cwd. `PWD` is not on the env allowlist, so `sh` derives it from
+    // the real directory — no stale original-checkout PWD leaks through.
+    cmd.in_root(root);
 
     match run_command_bounded(cmd, timeout, MAX_OUTPUT_BYTES).await {
         Ok(out) => {

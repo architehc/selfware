@@ -191,6 +191,24 @@ impl AgentSnapshot {
         self.entries.keys().cloned().collect()
     }
 
+    /// Tracked identities whose on-disk state still equals the agent's last
+    /// observation. Taken immediately before selfware runs its own hooks so
+    /// that, afterwards, exactly these can be re-observed with
+    /// [`Self::after_mutation`]: a change the hook makes to them is
+    /// selfware's own, while a path that had ALREADY drifted before the hook
+    /// ran keeps its stale observation and stays protected by the
+    /// external-change check.
+    pub(crate) fn unchanged_tracked_paths(&self) -> Vec<PathBuf> {
+        self.entries
+            .iter()
+            .filter(|(path, entry)| {
+                entry.observed.is_some()
+                    && Self::state(path).ok().as_ref() == entry.observed.as_ref()
+            })
+            .map(|(path, _)| path.clone())
+            .collect()
+    }
+
     pub(crate) fn clear(&mut self) {
         self.taken = false;
         self.entries.clear();

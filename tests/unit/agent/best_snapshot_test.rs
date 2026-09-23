@@ -4,6 +4,22 @@
 
 use super::*;
 
+/// Drive an authoritative, in-scope passing check at the current mutation
+/// sequence through the real lifecycle accounting, then offer it for
+/// best-snapshot promotion — the only kind of pass that may promote.
+fn pass_in_scope_check(agent: &mut crate::agent::Agent, task_root: &Path) {
+    agent.task_verification_root = Some(task_root.to_path_buf());
+    let check = serde_json::json!({"command": "python3 -m pytest"});
+    agent.note_tool_call_lifecycle(
+        "shell_exec",
+        &check,
+        &check.to_string(),
+        true,
+        r#"{"exit_code":0,"stdout":"1 passed in 0.01s","stderr":""}"#,
+    );
+    agent.note_green_verification(true);
+}
+
 fn write_as_agent(snapshot: &mut AgentSnapshot, path: &Path, content: &str) {
     let paths = [path.to_path_buf()];
     snapshot.before_mutation(&paths).unwrap();
@@ -196,7 +212,7 @@ async fn green_verification_snapshots_and_failure_restores() {
     agent.current_checkpoint = Some(cp);
 
     // A passing verification captures the snapshot.
-    agent.note_green_verification("shell_exec", r#"{"command":"python3 -m pytest"}"#, true);
+    pass_in_scope_check(&mut agent, dir.path());
     assert!(
         agent.best_snapshot.has_snapshot(),
         "green verification must snapshot the written files"
@@ -267,7 +283,7 @@ async fn patch_apply_only_run_snapshots_and_restores_completely() {
 
     // A passing verification must capture a snapshot even though no
     // file_edit/file_write call ever happened.
-    agent.note_green_verification("shell_exec", r#"{"command":"python3 -m pytest"}"#, true);
+    pass_in_scope_check(&mut agent, dir.path());
     assert!(
         agent.best_snapshot.has_snapshot(),
         "green verification must snapshot patch_apply targets"
@@ -366,7 +382,7 @@ async fn multi_edit_run_covers_every_target_file() {
     });
     agent.current_checkpoint = Some(cp);
 
-    agent.note_green_verification("shell_exec", r#"{"command":"python3 -m pytest"}"#, true);
+    pass_in_scope_check(&mut agent, dir.path());
     assert!(
         agent.best_snapshot.has_snapshot(),
         "green verification must snapshot file_multi_edit targets"
@@ -591,4 +607,166 @@ async fn canonical_snapshot_paths_survive_historical_relative_arguments() {
     assert!(paths.contains(&std::fs::canonicalize(&file).unwrap()));
     agent.best_snapshot.restore_written(&paths).unwrap();
     assert_eq!(std::fs::read_to_string(file).unwrap(), "verified");
+}
+
+// --- Promotion discipline: only a pass that proves the TASK tree green at
+// the current revision may replace the last-green snapshot. An unrelated
+// passing check used to overwrite it with currently broken files, which
+// failure recovery then "restored" as last-green. ---
+
+async fn promotion_agent() -> (
+    crate::agent::Agent,
+    tempfile::TempDir,
+    crate::testing::mock_api::MockLlmServer,
+) {
+    use crate::checkpoint::{TaskCheckpoint, ToolCallLog};
+    use crate::config::Config;
+    use crate::testing::mock_api::MockLlmServer;
+
+    let dir = tempfile::tempdir().unwrap();
+    let task_root = dir.path().join("task");
+    std::fs::create_dir_all(&task_root).unwrap();
+    let deliverable = task_root.join("deliverable.py");
+    std::fs::write(&deliverable, "# currently broken\n").unwrap();
+
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = Config {
+        endpoint: format!("{}/v1", server.url()),
+        ..Default::default()
+    };
+    let mut agent = crate::agent::Agent::new(config).await.unwrap();
+    let mut cp = TaskCheckpoint::new("t".to_string(), "implement it".to_string());
+    cp.log_tool_call(ToolCallLog {
+        timestamp: chrono::Utc::now(),
+        tool_name: "file_write".to_string(),
+        arguments: serde_json::json!({"path": deliverable.to_string_lossy(), "content": "x"})
+            .to_string(),
+        result: Some("ok".to_string()),
+        success: true,
+        duration_ms: Some(10),
+    });
+    agent.current_checkpoint = Some(cp);
+    agent.task_verification_root = Some(task_root);
+    // The deliverable was edited: the tree is at mutation sequence 1.
+    agent.note_mutating_tool_call();
+    (agent, dir, server)
+}
+
+fn run_check(agent: &mut crate::agent::Agent, command: &str, success: bool, stdout: &str) {
+    let args = serde_json::json!({ "command": command });
+    let result = serde_json::json!({
+        "exit_code": if success { 0 } else { 1 },
+        "stdout": stdout,
+        "stderr": "",
+    })
+    .to_string();
+    agent.note_tool_call_lifecycle("shell_exec", &args, &args.to_string(), success, &result);
+}
+
+#[tokio::test]
+async fn in_scope_fresh_authoritative_pass_promotes_the_snapshot() {
+    let (mut agent, _dir, server) = promotion_agent().await;
+    run_check(&mut agent, "python3 -m pytest", true, "1 passed in 0.01s");
+    agent.note_green_verification(true);
+    assert!(
+        agent.best_snapshot.has_snapshot(),
+        "an in-scope, current, exit-status pass with nothing outstanding must promote"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn out_of_scope_pass_does_not_promote_the_snapshot() {
+    let (mut agent, _dir, server) = promotion_agent().await;
+    // A passing suite in the ENCLOSING project, and one beside the task,
+    // say nothing about the task's own files.
+    run_check(
+        &mut agent,
+        "cd .. && python3 -m pytest",
+        true,
+        "1 passed in 0.01s",
+    );
+    assert!(
+        agent.last_green_verification.is_some(),
+        "the pass itself is still recorded"
+    );
+    agent.note_green_verification(true);
+    let other = tempfile::tempdir().unwrap();
+    run_check(
+        &mut agent,
+        &format!("cd {} && python3 -m pytest", other.path().display()),
+        true,
+        "1 passed in 0.01s",
+    );
+    agent.note_green_verification(true);
+    assert!(
+        !agent.best_snapshot.has_snapshot(),
+        "a pass in another project must not become the task's last-green state"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn stale_pass_does_not_promote_the_snapshot() {
+    let (mut agent, _dir, server) = promotion_agent().await;
+    // The check passed, then the tree moved before promotion: it describes
+    // an older tree.
+    run_check(&mut agent, "python3 -m pytest", true, "1 passed in 0.01s");
+    agent.note_mutating_tool_call();
+    agent.note_green_verification(true);
+    assert!(
+        !agent.best_snapshot.has_snapshot(),
+        "a pass behind the latest edit is stale"
+    );
+
+    // Same when the parallel batch reports a concurrent mutation.
+    run_check(&mut agent, "python3 -m pytest", true, "1 passed in 0.01s");
+    agent.note_green_verification(false);
+    assert!(
+        !agent.best_snapshot.has_snapshot(),
+        "a pass that ran concurrently with an edit does not cover it"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn masked_pass_does_not_promote_the_snapshot() {
+    let (mut agent, _dir, server) = promotion_agent().await;
+    run_check(
+        &mut agent,
+        "python3 -m pytest; true",
+        true,
+        "1 passed in 0.01s",
+    );
+    let green = agent
+        .last_green_verification
+        .expect("the masked run must still earn its (output-read) credit");
+    assert!(
+        !green.authoritative,
+        "credit read from output is not authoritative"
+    );
+    agent.note_green_verification(true);
+    assert!(
+        !agent.best_snapshot.has_snapshot(),
+        "a pass read from masked output must not replace the recovery snapshot"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn pass_with_outstanding_in_scope_failure_does_not_promote_the_snapshot() {
+    let (mut agent, _dir, server) = promotion_agent().await;
+    run_check(
+        &mut agent,
+        "python3 -m unittest test_deliverable.py",
+        false,
+        "FAILED (failures=1)",
+    );
+    run_check(&mut agent, "python3 -m pytest", true, "1 passed in 0.01s");
+    agent.note_green_verification(true);
+    assert!(
+        !agent.best_snapshot.has_snapshot(),
+        "an in-scope check is still red; the tree is not known-good"
+    );
+    server.stop().await;
 }

@@ -218,3 +218,47 @@ async fn hook_exiting_with_background_descendant_holding_pipes_does_not_hang() {
     assert!(started.elapsed() < Duration::from_secs(3));
     assert!(matches!(action, HookAction::Continue), "got: {action:?}");
 }
+
+/// Hooks run in the agent's workspace root (an entered worktree), not the
+/// process cwd, so a formatter/test/auto-commit hook acts on the checkout the
+/// agent is editing.
+#[tokio::test]
+async fn hook_runs_in_the_entered_worktree_root() {
+    use crate::hooks::{HookEvent, HookRegistry};
+    use crate::tools::workspace_root::{self, WorkspaceRoot};
+
+    let base = tempfile::tempdir().unwrap();
+    let worktree = tempfile::tempdir().unwrap();
+    let root = WorkspaceRoot::fixed(base.path());
+    root.enter(worktree.path()).unwrap();
+
+    let registry = HookRegistry::from_config(&[HookConfig {
+        event: HookEvent::PostToolUse,
+        command: "pwd > marker".to_string(),
+        match_tools: vec![],
+        timeout_secs: 10,
+    }]);
+    let ctx = HookContext::post_tool("file_write", r#"{"path":"a.rs"}"#, true, "ok");
+
+    // Explicit root (the agent's dispatch path).
+    registry.fire_in_root(&ctx, &root).await;
+    let marker = worktree.path().join("marker");
+    let written = std::fs::read_to_string(&marker).expect("hook must write in the worktree");
+    assert_eq!(
+        std::fs::canonicalize(written.trim()).unwrap(),
+        std::fs::canonicalize(worktree.path()).unwrap()
+    );
+    assert!(
+        !base.path().join("marker").exists(),
+        "hook ran in the base checkout"
+    );
+    std::fs::remove_file(&marker).unwrap();
+
+    // Task-local root (a caller inside the root scope using plain `fire`).
+    workspace_root::scope(root.clone(), registry.fire(&ctx)).await;
+    let written = std::fs::read_to_string(&marker).expect("scoped hook must use the worktree");
+    assert_eq!(
+        std::fs::canonicalize(written.trim()).unwrap(),
+        std::fs::canonicalize(worktree.path()).unwrap()
+    );
+}

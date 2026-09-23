@@ -845,6 +845,9 @@ pub struct Agent {
     /// the model's own verification passes, restored when the run fails so a
     /// broken end state never gets submitted over a working one.
     best_snapshot: best_snapshot::AgentSnapshot,
+    /// The pass the most recent tool call's lifecycle accounting credited
+    /// (if any), consumed by best-snapshot promotion for that same call.
+    last_green_verification: Option<tool_dispatch::GreenVerification>,
     /// Wall-clock commit-mode latches (Opus 5 deadline policy): COMMIT MODE at
     /// 65%, FINAL STRETCH at 85% of max_wall_secs, each once per task.
     commit_mode_65_fired: std::sync::atomic::AtomicBool,
@@ -1662,6 +1665,7 @@ To call a tool, use this EXACT XML structure:
             leak_check_scanned_mutation_sequence: std::sync::atomic::AtomicUsize::new(usize::MAX),
             failed_install_streak: 0,
             best_snapshot: best_snapshot::AgentSnapshot::default(),
+            last_green_verification: None,
             commit_mode_65_fired: std::sync::atomic::AtomicBool::new(false),
             commit_mode_85_fired: std::sync::atomic::AtomicBool::new(false),
             audit_findings: std::sync::Mutex::new(Vec::new()),

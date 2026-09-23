@@ -50,6 +50,19 @@ pub(super) const STAGNATION_STALL_DIRECTIVE: &str = concat!(
     "</selfware_system_directive>"
 );
 
+/// What a passing verification call established, as recorded by
+/// [`Agent::note_verification_outcome`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GreenVerification {
+    /// The check's project is the task root (or beneath it).
+    pub(crate) in_scope: bool,
+    /// Credited from the runner's own exit status — not read out of the
+    /// output of a pipeline/connector that masked it.
+    pub(crate) authoritative: bool,
+    /// Mutation sequence the pass was recorded at.
+    pub(crate) mutation_sequence: usize,
+}
+
 impl Agent {
     /// Credit (or record the failure of) a verification tool call for the
     /// completion gate's StaleVerification check. Single accounting path for
@@ -95,19 +108,23 @@ impl Agent {
                 self.terminal_guard_hits = 0;
             }
         }
-        self.note_verification_outcome(name, args_str, success, result_str);
+        self.last_green_verification =
+            self.note_verification_outcome(name, args_str, success, result_str);
     }
 
+    /// Enter a verification outcome in the ledger. Returns what a PASS
+    /// established (scope, authority, mutation sequence) so best-snapshot
+    /// promotion can decide whether it proves the current tree green; `None`
+    /// when nothing passed (a failure, or no check ran at all).
     pub(super) fn note_verification_outcome(
         &mut self,
         name: &str,
         args_str: &str,
         success: bool,
         result_str: &str,
-    ) {
+    ) -> Option<GreenVerification> {
         if !tool_call_is_verification(name, args_str) {
-            self.note_masked_verification_outcome(name, args_str, result_str);
-            return;
+            return self.note_masked_verification_outcome(name, args_str, result_str);
         }
         // A command the shell could not execute ran no check.
         //
@@ -125,7 +142,7 @@ impl Agent {
         // StaleVerification — which is what actually happened.
         if Self::shell_exit_code(result_str).is_some_and(|code| code == 126 || code == 127) {
             debug!("{name} could not be executed; no check ran, so nothing is recorded");
-            return;
+            return None;
         }
         // A test runner that executed ZERO tests (`cargo test typo_filter`
         // exits 0 with `running 0 tests`; pytest exit 5 `no tests ran`) ran
@@ -139,7 +156,7 @@ impl Agent {
             serde_json::from_str::<serde_json::Value>(args_str).unwrap_or(serde_json::Value::Null);
         if verification_call_ran_no_tests(name, &args_value, result_str) {
             debug!("{name} executed no tests; no check ran, so nothing is recorded");
-            return;
+            return None;
         }
         let command = serde_json::from_str::<serde_json::Value>(args_str)
             .ok()
@@ -198,6 +215,11 @@ impl Agent {
             }
         }
         self.note_verification_record(record);
+        success.then_some(GreenVerification {
+            in_scope: is_in_scope,
+            authoritative: true,
+            mutation_sequence: self.mutation_sequence,
+        })
     }
 
     fn resolve_verification_working_dir(
@@ -259,9 +281,14 @@ impl Agent {
     /// (a recorded failure can only block, never falsely pass), and anything
     /// else records NOTHING —
     /// ambiguous output is not evidence in either direction.
-    fn note_masked_verification_outcome(&mut self, name: &str, args_str: &str, result_str: &str) {
+    fn note_masked_verification_outcome(
+        &mut self,
+        name: &str,
+        args_str: &str,
+        result_str: &str,
+    ) -> Option<GreenVerification> {
         if !matches!(name, "shell_exec" | "pty_shell") {
-            return;
+            return None;
         }
         let command = serde_json::from_str::<serde_json::Value>(args_str)
             .ok()
@@ -272,7 +299,7 @@ impl Agent {
             })
             .unwrap_or_default();
         if command.is_empty() || !shell_command_is_masked_verification(&command) {
-            return;
+            return None;
         }
         let (passed, evidence) = if masked_run_output_proves_success(&command, result_str) {
             (true, "passed")
@@ -280,7 +307,7 @@ impl Agent {
             (false, "failed")
         } else {
             debug!("masked verification run with ambiguous output earns no credit: {command}");
-            return;
+            return None;
         };
         let working_dir = self.resolve_verification_working_dir(args_str, &command);
         let scope = super::verification_scope::scope_for_command(name, &command, &working_dir);
@@ -305,6 +332,14 @@ impl Agent {
             }
         }
         self.note_verification_record(record);
+        // Credited from output text, not the runner's exit status: good
+        // enough for the completion gate, never authoritative enough to
+        // replace the recovery snapshot.
+        passed.then_some(GreenVerification {
+            in_scope: is_in_scope,
+            authoritative: false,
+            mutation_sequence: self.mutation_sequence,
+        })
     }
 
     /// The single point where a verification outcome enters the ledger.
@@ -983,8 +1018,24 @@ impl Agent {
 
     /// Best-snapshot capture: a green verification marks the current written
     /// state as the best known (submit best state, not last state).
-    pub(super) fn note_green_verification(&mut self, name: &str, args_str: &str, success: bool) {
-        if !success || !super::tool_dispatch::tool_call_is_verification(name, args_str) {
+    ///
+    /// Consumes the pass recorded by the call's lifecycle accounting
+    /// ([`Self::note_tool_call_lifecycle`]). The snapshot is what failure
+    /// recovery later restores as "last green", so a pass promotes it ONLY
+    /// when it actually proves the current task tree green
+    /// ([`Self::green_verification_promotes_snapshot`]); `batch_covers` is
+    /// false when the check ran concurrently with a mutation in the same
+    /// parallel batch (it may have observed the tree before that edit).
+    pub(super) fn note_green_verification(&mut self, batch_covers: bool) {
+        let Some(green) = self.last_green_verification.take() else {
+            return;
+        };
+        if !batch_covers || !self.green_verification_promotes_snapshot(&green) {
+            debug!(
+                ?green,
+                batch_covers,
+                "passing check does not prove the task tree green; best snapshot kept"
+            );
             return;
         }
         let paths = self.written_paths();
@@ -998,6 +1049,67 @@ impl Agent {
             ),
             Err(e) => warn!("best snapshot capture failed: {e}"),
         }
+    }
+
+    /// Whether a passing check may replace the last-known-good snapshot.
+    ///
+    /// All of: in scope for the task root (an out-of-scope or unresolved
+    /// project proves nothing about the task's files), authoritative (the
+    /// runner's exit status, not success text read out of a masked
+    /// pipeline), recorded at the CURRENT mutation sequence (a pass that
+    /// predates the latest edit describes an older tree), and no failure
+    /// outstanding that could concern this task. The last check counts stale
+    /// failures too: a red check that has not been re-run since the edits is
+    /// not known to be fixed, so the tree is not known-good.
+    pub(super) fn green_verification_promotes_snapshot(&self, green: &GreenVerification) -> bool {
+        if !green.in_scope || !green.authoritative {
+            return false;
+        }
+        if green.mutation_sequence != self.mutation_sequence {
+            return false;
+        }
+        let task_root = self.verification_task_root();
+        !self
+            .verification_failures
+            .outstanding()
+            .iter()
+            .any(|failed| {
+                !failed.passed
+                    && !matches!(
+                        failed.relevance_to(&task_root),
+                        super::verification_scope::Relevance::OutOfScope
+                            | super::verification_scope::Relevance::NoRunner
+                    )
+            })
+    }
+
+    /// Fire hooks for `ctx` in the agent's workspace root, attributing file
+    /// changes they make to selfware itself.
+    ///
+    /// Dispatch records the state of every snapshot-tracked file around each
+    /// tool call so a later edit or rollback can refuse to clobber an
+    /// EXTERNAL change. A formatter/linter hook that rewrites a file is not
+    /// external — it is selfware's own configured hook — but without this it
+    /// looked like one, and the next edit of that file (and rollback) was
+    /// refused. Tracked files unchanged since the agent's last observation are
+    /// re-observed once the hooks finish; a file that had already drifted
+    /// before the hooks ran keeps its old observation and stays protected.
+    pub(super) async fn fire_hooks_attributed(
+        &mut self,
+        ctx: &HookContext,
+    ) -> crate::hooks::HookAction {
+        if !self.hook_registry.matches_any(ctx) {
+            return crate::hooks::HookAction::Continue;
+        }
+        let owned = self.best_snapshot.unchanged_tracked_paths();
+        let action = self
+            .hook_registry
+            .fire_in_root(ctx, self.tools.workspace_root())
+            .await;
+        if let Err(error) = self.best_snapshot.after_mutation(&owned) {
+            warn!(%error, "Could not re-observe files after hooks; rollback may refuse them");
+        }
+        action
     }
 
     /// Dependency-firewall accounting: count consecutive install failures.
@@ -1990,7 +2102,7 @@ impl Agent {
 
             // Fire PreToolUse hooks (may skip execution)
             let pre_ctx = HookContext::pre_tool(&name, &args_str);
-            if let HookAction::Skip { reason, kind } = self.hook_registry.fire(&pre_ctx).await {
+            if let HookAction::Skip { reason, kind } = self.fire_hooks_attributed(&pre_ctx).await {
                 let (skip_msg, audit_reason, failure_kind) =
                     crate::hooks::pre_tool_skip_message(&name, &reason, kind);
                 info!("{}", skip_msg);
@@ -2213,8 +2325,6 @@ impl Agent {
                     self.note_shell_outcome(cmd, success);
                 }
             }
-            // Best-snapshot capture on green verification.
-            self.note_green_verification(&vt.name, &vt.args_str, success);
             // Stagnation accounting (loop 13d).
             self.note_workspace_state(&vt.name, &vt.args_str, success)?;
 
@@ -2222,6 +2332,14 @@ impl Agent {
                 .await;
 
             self.note_tool_call_lifecycle(&vt.name, &vt.args, &vt.args_str, success, &result_str);
+            // Best-snapshot capture on green verification. A check that ran
+            // concurrently with another mutation in this batch may have seen
+            // the tree before that edit, so it never promotes the snapshot.
+            let batch_covers = !validated
+                .iter()
+                .enumerate()
+                .any(|(other, ovt)| other != idx && tool_call_is_mutating(&ovt.name, &ovt.args));
+            self.note_green_verification(batch_covers);
 
             // Track file operations for context management
             if success {
@@ -2265,7 +2383,7 @@ impl Agent {
 
             // Fire PostToolUse hooks
             let post_ctx = HookContext::post_tool(&vt.name, &vt.args_str, success, &result_str);
-            self.hook_registry.fire(&post_ctx).await;
+            self.fire_hooks_attributed(&post_ctx).await;
 
             // Shadow-mode evidence ledger. Observational only.
             self.observe_tool_call(
@@ -2494,7 +2612,7 @@ impl Agent {
 
         // Fire PreToolUse hooks (may skip execution)
         let pre_ctx = HookContext::pre_tool(&name, &args_str);
-        if let HookAction::Skip { reason, kind } = self.hook_registry.fire(&pre_ctx).await {
+        if let HookAction::Skip { reason, kind } = self.fire_hooks_attributed(&pre_ctx).await {
             let (skip_msg, audit_reason, failure_kind) =
                 crate::hooks::pre_tool_skip_message(&name, &reason, kind);
             info!("{}", skip_msg);
@@ -2584,8 +2702,9 @@ impl Agent {
             }
         }
 
-        // Best-snapshot capture on green verification.
-        self.note_green_verification(&name, &args_str, success);
+        // Best-snapshot capture on green verification (sequential: nothing
+        // else ran concurrently, so the check covers the current tree).
+        self.note_green_verification(true);
 
         // Stagnation accounting (loop 13d).
         self.note_workspace_state(&name, &args_str, success)?;
@@ -2635,7 +2754,7 @@ impl Agent {
 
         // Fire PostToolUse hooks (e.g., auto-format, lint, auto-commit)
         let post_ctx = HookContext::post_tool(&name, &args_str, success, &result);
-        self.hook_registry.fire(&post_ctx).await;
+        self.fire_hooks_attributed(&post_ctx).await;
 
         // Shadow-mode evidence ledger. Observational only.
         self.observe_tool_call(
@@ -3307,6 +3426,8 @@ impl Agent {
     ) -> Result<(bool, String, String)> {
         // Track every dispatched tool call for FailureMode classification.
         self.note_total_tool_call();
+        // A pass credited to an EARLIER call must never promote this one.
+        self.last_green_verification = None;
 
         // Emit a `ToolCallStarted` progress event before dispatch. The matching
         // `ToolCallCompleted` event is emitted at the end via the inner helper
