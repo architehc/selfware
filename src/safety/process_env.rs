@@ -33,7 +33,35 @@ pub fn sanitize_command_env(cmd: &mut tokio::process::Command) {
 /// credential-bearing names (`SELFWARE_API_KEY`, `AWS_*`, tokens) here.
 pub fn sanitize_command_env_preserve(cmd: &mut tokio::process::Command, preserve: &[&str]) {
     cmd.env_clear();
-    for (key, value) in kept_env(preserve) {
+    for (key, value) in kept_env(preserve, |key| std::env::var_os(key)) {
+        cmd.env(key, value);
+    }
+}
+
+/// [`sanitize_command_env_preserve`] resolving the keep-list (and the
+/// proxy-credential opt-in) from an EXPLICIT parent environment instead of
+/// the process env. The production wrappers are this with the live process
+/// env; tests use it to exercise the keep-list without mutating the
+/// process-global environment (setting `HTTP_PROXY`/`TMPDIR`/… in a
+/// parallel test run leaked a fake proxy and a nonexistent temp dir into
+/// every concurrently running test).
+pub fn sanitize_command_env_from<I, K, V>(
+    cmd: &mut tokio::process::Command,
+    preserve: &[&str],
+    parent_env: I,
+) where
+    I: IntoIterator<Item = (K, V)>,
+    K: Into<std::ffi::OsString>,
+    V: Into<std::ffi::OsString>,
+{
+    let parent: std::collections::HashMap<std::ffi::OsString, std::ffi::OsString> = parent_env
+        .into_iter()
+        .map(|(k, v)| (k.into(), v.into()))
+        .collect();
+    cmd.env_clear();
+    for (key, value) in kept_env(preserve, |key| {
+        parent.get(std::ffi::OsStr::new(key)).cloned()
+    }) {
         cmd.env(key, value);
     }
 }
@@ -42,7 +70,7 @@ pub fn sanitize_command_env_preserve(cmd: &mut tokio::process::Command, preserve
 /// `std::process::Command` (e.g. backend probes that cannot `.await`).
 pub fn sanitize_std_command_env_preserve(cmd: &mut std::process::Command, preserve: &[&str]) {
     cmd.env_clear();
-    for (key, value) in kept_env(preserve) {
+    for (key, value) in kept_env(preserve, |key| std::env::var_os(key)) {
         cmd.env(key, value);
     }
 }
@@ -80,15 +108,19 @@ const DEFAULT_KEEP: &[&str] = &[
 ];
 
 /// The keep-list applied after `env_clear`: [`DEFAULT_KEEP`] plus any
-/// caller-preserved names, resolved from the parent environment.
-fn kept_env<'a>(preserve: &'a [&'a str]) -> Vec<(&'a str, std::ffi::OsString)> {
-    let proxy_credentials_opt_in = proxy_credentials_opt_in();
+/// caller-preserved names, resolved from the parent environment via
+/// `lookup` (the live process env in production).
+fn kept_env<'a>(
+    preserve: &'a [&'a str],
+    lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Vec<(&'a str, std::ffi::OsString)> {
+    let proxy_credentials_opt_in = proxy_credentials_opt_in(&lookup);
     DEFAULT_KEEP
         .iter()
         .copied()
         .chain(preserve.iter().copied())
         .filter_map(|key| {
-            std::env::var_os(key).map(|value| {
+            lookup(key).map(|value| {
                 let value = sanitize_kept_value(key, &value, proxy_credentials_opt_in);
                 (key, value)
             })
@@ -131,10 +163,10 @@ fn strip_proxy_userinfo(value: &str) -> Option<String> {
 /// (`SELFWARE_FORWARD_PROXY_CREDENTIALS=1` / `=true`). Deployments whose
 /// proxy REQUIRES authentication set this; everyone else keeps the default
 /// userinfo-stripping behavior.
-fn proxy_credentials_opt_in() -> bool {
-    std::env::var("SELFWARE_FORWARD_PROXY_CREDENTIALS")
-        .map(|v| v == "1" || v == "true")
-        .unwrap_or(false)
+fn proxy_credentials_opt_in(lookup: &impl Fn(&str) -> Option<std::ffi::OsString>) -> bool {
+    lookup("SELFWARE_FORWARD_PROXY_CREDENTIALS")
+        .and_then(|v| v.into_string().ok())
+        .is_some_and(|v| v == "1" || v == "true")
 }
 
 #[cfg(test)]
