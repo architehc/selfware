@@ -2,11 +2,11 @@
 //!
 //! Uses the `xcap` crate to capture the screen, specific windows, or regions.
 //!
-//! Output (shared with `computer_screen`, see [`shape_capture_output`]): by
+//! Output (shared with `computer_screen`, see `shape_capture_output`): by
 //! default the PNG is written to a per-session directory OUTSIDE the
 //! workspace and the result is `{path, width, height, bytes}`. A 4–6 MB
 //! base64 string is only returned when explicitly requested with
-//! `inline: true`, and is capped at [`MAX_INLINE_PNG_BYTES`] — above that the
+//! `inline: true`, and is capped at `MAX_INLINE_PNG_BYTES` — above that the
 //! call fails honestly (with the capture saved to disk) instead of flooding
 //! the conversation.
 
