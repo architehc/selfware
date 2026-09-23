@@ -105,6 +105,19 @@ impl ContextCompressor {
         client: &ApiClient,
         messages: &[Message],
     ) -> Result<(Vec<Message>, Usage)> {
+        self.compress_with_task(client, messages, None).await
+    }
+
+    /// [`Self::compress`] carrying `task` (the active checkpoint's task
+    /// description — authoritative) forward verbatim instead of guessing it
+    /// from "the first user message after the system prompt", which after an
+    /// earlier compaction is a summary/boundary note, not the task.
+    pub async fn compress_with_task(
+        &self,
+        client: &ApiClient,
+        messages: &[Message],
+        task: Option<&str>,
+    ) -> Result<(Vec<Message>, Usage)> {
         let zero_usage = Usage::default;
         if messages.len() <= self.min_messages_to_keep + 1 {
             warn!("Too few messages to compress, returning as-is");
@@ -176,14 +189,13 @@ impl ContextCompressor {
         // system prompt — so summarize-based compression of an autonomous
         // long run can't erase the root objective (the anchor lives inside
         // `to_summarize` otherwise and survives only at the summarizer's whim).
-        if let Some(task) = super::Agent::original_task_anchor(messages) {
+        if let Some(task) = resolve_task_text(messages, task) {
             if !recent_msgs
                 .iter()
-                .any(|r| r.content.text() == task.content.text())
+                .any(|r| r.role == "user" && r.content.text().contains(task.as_str()))
             {
-                compressed.push(Message::user(format!(
-                    "[ORIGINAL TASK]:\n{}",
-                    task.content.text()
+                compressed.push(Message::user(super::context_management::task_anchor_text(
+                    &task,
                 )));
             }
         }
@@ -240,27 +252,68 @@ impl ContextCompressor {
     }
 
     pub fn hard_compress(&self, messages: &[Message]) -> Vec<Message> {
+        self.hard_compress_with_task(messages, None)
+    }
+
+    /// [`Self::hard_compress`] carrying `task` (the active checkpoint's task
+    /// description) forward verbatim. Without it the boundary falls back to
+    /// the first user message before the kept tail — and to a bare
+    /// "[Earlier context was compressed]" note when the history is short,
+    /// which is how the e2e c40 run lost its task.
+    pub fn hard_compress_with_task(
+        &self,
+        messages: &[Message],
+        task: Option<&str>,
+    ) -> Vec<Message> {
         let mut result = Vec::new();
         // Preserve the system message BY ROLE — a non-system bootstrap line can
         // otherwise masquerade as the "system" message and the real prompt is
         // dropped (mirrors the hardened compaction path).
-        if let Some(sys) = messages
+        let sys_idx = messages
             .iter()
-            .find(|m| m.role == "system")
-            .cloned()
-            .or_else(|| messages.first().cloned())
-        {
-            result.push(sys);
+            .position(|m| m.role == "system")
+            .or_else(|| (!messages.is_empty()).then_some(0));
+        if let Some(idx) = sys_idx {
+            result.push(messages[idx].clone());
         }
 
-        // Preserve the original task objective (the first user message) so an
-        // emergency compaction doesn't make the model forget the task on a long run.
-        let tail_start = messages.len().saturating_sub(3);
-        let task_text = messages
-            .iter()
-            .enumerate()
-            .find(|(idx, m)| *idx < tail_start && m.role == "user")
-            .map(|(_, m)| m.content.text().to_string());
+        // The kept tail never reaches back over the system prompt. On a
+        // history of <= 3 messages the old `len - 3` tail started AT the
+        // system prompt: it was pushed a second time, and the "original task"
+        // search window was empty, so the boundary became a bare
+        // "[Earlier context was compressed]" note that the next trim pinned
+        // as the "task" while the real task (now behind a duplicate system
+        // message) was dropped — the e2e c40 loss, reconstructed from its
+        // session log (7 → 4 → 3 → 5 messages).
+        let body_start = sys_idx.map_or(0, |i| i + 1);
+        let tail_start = messages.len().saturating_sub(3).max(body_start);
+
+        // Preserve the original task objective so an emergency compaction
+        // doesn't make the model forget the task on a long run: the explicit
+        // (checkpoint) task when given, else the first user message before
+        // the kept tail.
+        let task_text = match task.filter(|t| !t.trim().is_empty()) {
+            Some(t) => Some(super::Agent::task_anchor_core(t).to_string()),
+            None => messages
+                .iter()
+                .enumerate()
+                .find(|(idx, m)| *idx >= body_start && *idx < tail_start && m.role == "user")
+                .map(|(_, m)| m.content.text().to_string()),
+        };
+        // Already a carried-forward boundary: do not wrap it again.
+        let task_text = task_text.map(|t| {
+            t.strip_prefix("[Original task, preserved across compression]:\n")
+                .map(str::to_string)
+                .unwrap_or(t)
+        });
+        let tail_begin = safe_tail_start(messages, tail_start);
+        // The kept tail already carries the task verbatim: don't duplicate it.
+        let tail_carries_task = |t: &str| {
+            messages[tail_begin..]
+                .iter()
+                .any(|m| m.role == "user" && m.content.text().contains(t))
+        };
+        let task_text = task_text.filter(|t| !(task.is_some() && tail_carries_task(t)));
 
         // ONE boundary message combining the task anchor and the compression
         // note. The previous shape emitted two consecutive user-role markers
@@ -276,8 +329,12 @@ impl ContextCompressor {
         }));
 
         // Keep only last few messages (must end with user for next assistant response)
-        let start = safe_tail_start(messages, messages.len().saturating_sub(3));
-        for (i, msg) in messages[start..].iter().enumerate() {
+        let mut first_tail = true;
+        for msg in messages[tail_begin..].iter() {
+            // The system prompt is already first; never duplicate it.
+            if msg.role == "system" {
+                continue;
+            }
             // Skip if this would create consecutive assistants
             if let Some(last) = result.last() {
                 if last.role == "assistant" && msg.role == "assistant" {
@@ -289,7 +346,9 @@ impl ContextCompressor {
             // tool-result user messages and image-bearing turns are never
             // folded (the tool_use/tool_result pairing must keep its own
             // user message).
-            if i == 0 && super::Agent::is_mergeable_user_turn(msg) {
+            let fold = first_tail && super::Agent::is_mergeable_user_turn(msg);
+            first_tail = false;
+            if fold {
                 if let Some(last) = result.last_mut() {
                     let prev = last.content.text().to_string();
                     last.content = crate::api::types::MessageContent::Text(format!(
@@ -313,6 +372,16 @@ impl ContextCompressor {
         // whose assistant tool_call was skipped — drop any orphan, same
         // invariants as every other compression path.
         super::Agent::apply_tool_call_pair_invariants(result)
+    }
+}
+
+/// The task text a compressor carries forward: the explicit (checkpoint)
+/// task when given — its pinned prefix for oversized tasks — else the
+/// messages-only heuristic (first user message after the system prompt).
+fn resolve_task_text(messages: &[Message], task: Option<&str>) -> Option<String> {
+    match task.filter(|t| !t.trim().is_empty()) {
+        Some(t) => Some(super::Agent::task_anchor_core(t).to_string()),
+        None => super::Agent::original_task_anchor(messages).map(|m| m.content.text().to_string()),
     }
 }
 

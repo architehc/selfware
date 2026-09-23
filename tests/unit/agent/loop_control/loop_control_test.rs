@@ -59,6 +59,43 @@ fn test_agent_loop_max_iterations_exceeded() {
     );
 }
 
+/// e2e lowcap: max_iterations 12 + two +3 extensions = cap 18; the run
+/// executed 18 iterations and the summary printed "iterations: 19/18". The
+/// Nth iteration is the last one executed, and the stop never counts the
+/// refused slot — the reported count can never exceed the cap.
+#[test]
+fn cap_stop_never_reports_more_iterations_than_the_cap() {
+    let mut loop_ctrl = AgentLoop::new(12);
+    loop_ctrl.next_state(); // Planning
+    loop_ctrl
+        .transition_to(AgentState::Executing { step: 0 })
+        .unwrap();
+    let mut executed = 0;
+    loop {
+        match loop_ctrl.next_state() {
+            Some(AgentState::Failed { .. }) => {
+                if loop_ctrl.max_iterations() < 18 && loop_ctrl.extend_budget_once().is_some() {
+                    loop_ctrl.resume_after_extension();
+                    executed += 1; // the resumed turn runs
+                    continue;
+                }
+                break;
+            }
+            Some(_) => executed += 1,
+            None => break,
+        }
+        assert!(loop_ctrl.current_iteration() <= loop_ctrl.max_iterations());
+    }
+    // Two grants of +3 (12 → 15 → 18), then the run stops at the cap.
+    assert_eq!(loop_ctrl.max_iterations(), 18);
+    assert_eq!(executed, 18, "exactly the capped number of iterations ran");
+    assert_eq!(
+        loop_ctrl.current_iteration(),
+        18,
+        "summary must read 18/18, never 19/18"
+    );
+}
+
 #[test]
 fn test_agent_state_error_recovery() {
     let mut loop_ctrl = AgentLoop::new(100);
@@ -354,15 +391,21 @@ fn extension_lets_the_loop_run_past_the_original_cap() {
     for expected_cap in [10, 12, 14, 16] {
         assert_eq!(loop_ctrl.extend_budget_once(), Some(2));
         assert_eq!(loop_ctrl.max_iterations(), expected_cap);
-        let step = loop_ctrl.current_step();
-        let iteration = loop_ctrl.current_iteration();
-        loop_ctrl.restore_progress(step, iteration);
+        // The refused turn resumes and takes its slot (cap - 1 → cap - 1 + 1).
+        loop_ctrl.resume_after_extension();
+        assert_eq!(loop_ctrl.current_iteration(), expected_cap - 1);
         assert!(matches!(
             loop_ctrl.next_state(), // fits within the new cap
             Some(AgentState::Executing { .. })
         ));
+        assert_eq!(loop_ctrl.current_iteration(), expected_cap);
         let tripped = loop_ctrl.next_state(); // past the new cap
         assert!(matches!(tripped, Some(AgentState::Failed { .. })));
+        assert_eq!(
+            loop_ctrl.current_iteration(),
+            expected_cap,
+            "a refused slot is never counted"
+        );
     }
     assert_eq!(
         loop_ctrl.extend_budget_once(),

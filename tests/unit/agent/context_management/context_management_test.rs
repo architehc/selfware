@@ -2494,3 +2494,283 @@ fn fit_request_is_identity_under_budget() {
     assert_eq!(fitted.len(), msgs.len());
     assert_eq!(fitted[1].content.text(), "task");
 }
+
+// ---------------------------------------------------------------------------
+// e2e c40 / c24: the ORIGINAL task must survive every trim / clamp /
+// compaction pass (the model wrote "Need know task from initial?" after the
+// task message had been replaced by a re-wrapped compaction boundary).
+// ---------------------------------------------------------------------------
+
+const ANCHOR_TASK: &str = "Multi-step documentation task in this Rust repo. Do the steps in order.\n\
+    1. Read src/agent/context.rs in full.\n\
+    2. Read src/agent/compression.rs in full.\n\
+    3. Read src/agent/context_management.rs in full.\n\
+    4. Create docs/CONTEXT_NOTES.md containing one section per file.\n\
+    5. In src/agent/context.rs, add a one-line `///` doc comment above every undocumented `pub fn`.\n\
+    6. Finish with a short summary.";
+
+fn anchor_checkpoint() -> crate::checkpoint::TaskCheckpoint {
+    crate::checkpoint::TaskCheckpoint::new("anchor-task".to_string(), ANCHOR_TASK.to_string())
+}
+
+/// XML-mode tool traffic (text tool calling: assistant `<tool>` + role=user
+/// `<tool_result>`) — the shape the c40 run used — `pairs` round trips of
+/// roughly `chars` characters of file content each.
+fn tool_traffic(pairs: usize, chars: usize) -> Vec<Message> {
+    let body: String = (0..chars / 7).map(|i| format!("l{i:05} ")).collect();
+    let mut out = Vec::new();
+    for i in 0..pairs {
+        out.push(Message::assistant(format!(
+            "<tool>\n<name>file_read</name>\n<arguments>{{\"path\":\"src/agent/f{i}.rs\"}}</arguments>\n</tool>"
+        )));
+        out.push(Message::user(format!(
+            "<tool_result>{{\"content\":\"{body}\"}}</tool_result>"
+        )));
+    }
+    out
+}
+
+fn has_task_verbatim(messages: &[Message]) -> bool {
+    messages
+        .iter()
+        .any(|m| m.role == "user" && m.content.text().contains(ANCHOR_TASK))
+}
+
+#[test]
+fn task_text_survives_trimming_at_a_small_budget_with_heavy_tool_traffic() {
+    let system_pad: String = (0..1_500).map(|i| format!("s{i:04} ")).collect();
+    let mut msgs = vec![
+        Message::system(format!("SYSTEM PROMPT\n{system_pad}")),
+        Message::user(ANCHOR_TASK),
+        Message::user(
+            "<selfware_context_note kind=tool_manifest>\n- a\n- b\n</selfware_context_note>",
+        ),
+    ];
+    msgs.extend(tool_traffic(40, 8_000));
+    let budget = 8_000;
+    assert!(crate::token_count::estimate_messages_tokens(&msgs) > budget * 10);
+
+    let cp = anchor_checkpoint();
+    let anchor = Agent::find_task_anchor_index(&msgs, Some(&cp));
+    assert_eq!(anchor, Some(1), "the anchor is the original task message");
+    Agent::trim_messages(&mut msgs, budget, anchor);
+    assert!(
+        has_task_verbatim(&msgs),
+        "task must survive trim verbatim: {:?}",
+        msgs.iter()
+            .map(|m| m.content.text().chars().take(60).collect::<String>())
+            .collect::<Vec<_>>()
+    );
+    assert!(crate::token_count::estimate_messages_tokens(&msgs) <= budget);
+
+    // Repeated passes (each turn trims again as traffic arrives) keep it.
+    for _ in 0..5 {
+        msgs.extend(tool_traffic(4, 8_000));
+        let anchor = Agent::find_task_anchor_index(&msgs, Some(&cp));
+        Agent::trim_messages(&mut msgs, budget, anchor);
+        assert!(has_task_verbatim(&msgs));
+    }
+
+    // The request-assembly path (trim + clamp + refuse) keeps it too.
+    let mut request = msgs.clone();
+    request.extend(tool_traffic(10, 8_000));
+    let fitted = Agent::fit_request_to_context_budget(request, budget, Some(&cp))
+        .expect("fits after trimming");
+    assert!(has_task_verbatim(&fitted));
+    assert!(crate::token_count::estimate_messages_tokens(&fitted) <= budget);
+}
+
+/// The hard clamp may shrink the task only down to the anchor floor (a
+/// quarter of the budget), and only after every other message competed.
+#[test]
+fn hard_clamp_never_truncates_the_task_anchor_below_the_floor() {
+    let big_task: String = format!(
+        "{ANCHOR_TASK}\n{}",
+        (0..3_000)
+            .map(|i| format!("req{i:04} "))
+            .collect::<String>()
+    );
+    let system_pad: String = (0..10_000).map(|i| format!("s{i:04} ")).collect();
+    let mut msgs = vec![
+        Message::system(format!("SYSTEM\n{system_pad}")),
+        Message::user(big_task.clone()),
+        Message::assistant("ok"),
+        Message::user("continue"),
+    ];
+    let budget = 6_000;
+    Agent::trim_messages(&mut msgs, budget, Some(1));
+    let total = crate::token_count::estimate_messages_tokens(&msgs);
+    assert!(total <= budget, "clamp must fit the budget, got {total}");
+    let anchor = msgs
+        .iter()
+        .find(|m| m.role == "user" && m.content.text().starts_with("Multi-step"))
+        .expect("anchor kept");
+    let anchor_tokens = crate::token_count::estimate_content_tokens(anchor.content.text());
+    assert!(
+        anchor_tokens >= Agent::task_anchor_floor_tokens(budget),
+        "anchor shrunk to {anchor_tokens} tokens, below the {}-token floor",
+        Agent::task_anchor_floor_tokens(budget)
+    );
+    assert!(
+        anchor.content.text().contains(ANCHOR_TASK),
+        "the task's leading text is kept verbatim"
+    );
+}
+
+/// The c40 history: the "original task" slot held a re-wrapped compaction
+/// boundary, and the real task text was nowhere. The resolver must not pin
+/// the boundary, and the backstop must restore the task.
+#[test]
+fn lost_task_is_restored_and_resolved_from_the_checkpoint() {
+    let mut msgs = vec![
+        Message::system("SYSTEM"),
+        Message::user(
+            "[Original task, preserved across compression]:\n[Original task, preserved across compression]:\n\
+             [ORIGINAL TASK]:\n[Earlier context was compressed due to length limits]\n\n\
+             [CONTEXT SUMMARY - 4 earlier messages compressed]:\nWorking on context management code.",
+        ),
+    ];
+    msgs.extend(tool_traffic(3, 200));
+    let cp = anchor_checkpoint();
+    assert!(!has_task_verbatim(&msgs), "precondition: the task is lost");
+
+    assert!(Agent::ensure_task_anchor_in(&mut msgs, ANCHOR_TASK));
+    assert!(has_task_verbatim(&msgs));
+    let idx = Agent::find_task_anchor_index(&msgs, Some(&cp)).unwrap();
+    assert!(msgs[idx].content.text().contains(ANCHOR_TASK));
+    assert_eq!(msgs[0].role, "system", "the system prompt stays first");
+    assert_eq!(idx, 1, "restored right after the system prompt");
+    assert!(
+        !Agent::ensure_task_anchor_in(&mut msgs, ANCHOR_TASK),
+        "idempotent: a present task is not inserted again"
+    );
+}
+
+/// After compaction the verbatim-equal task message is gone (it is wrapped
+/// or coalesced with a summary). The anchor must resolve to the message
+/// that still CONTAINS the task — never to "the first user message", which
+/// is a boundary note.
+#[test]
+fn anchor_resolves_to_the_wrapped_task_not_the_first_user_message() {
+    let msgs = vec![
+        Message::system("SYSTEM"),
+        Message::user("[Earlier context was compressed due to length limits]"),
+        Message::user(format!(
+            "[ORIGINAL TASK]:\n{ANCHOR_TASK}\n\n[CONTEXT SUMMARY - 9 earlier messages compressed]:\n..."
+        )),
+        Message::assistant("<tool>\n<name>file_read</name>\n</tool>"),
+        Message::user("Continue"),
+    ];
+    let cp = anchor_checkpoint();
+    assert_eq!(Agent::find_task_anchor_index(&msgs, Some(&cp)), Some(2));
+}
+
+/// Hard compaction carries the checkpoint task forward verbatim — even on a
+/// short history where the old heuristic found no user message before the
+/// tail and emitted a bare "[Earlier context was compressed]" boundary — and
+/// repeated compactions do not nest the boundary prefix.
+#[test]
+fn hard_compress_with_task_carries_the_task_without_nesting() {
+    let compressor = crate::agent::context::ContextCompressor::new(10_000);
+    let mut msgs = vec![
+        Message::system("SYSTEM"),
+        Message::user("[Earlier context was compressed due to length limits]"),
+        Message::assistant("<tool>\n<name>file_read</name>\n</tool>"),
+        Message::user("<tool_result>{\"content\":\"x\"}</tool_result>"),
+    ];
+    for _ in 0..4 {
+        msgs = compressor.hard_compress_with_task(&msgs, Some(ANCHOR_TASK));
+        msgs.extend(tool_traffic(2, 100));
+    }
+    assert!(has_task_verbatim(&msgs));
+    let joined: String = msgs.iter().map(|m| m.content.text().to_string()).collect();
+    assert_eq!(
+        joined.matches(ANCHOR_TASK).count(),
+        1,
+        "the task is carried once, not duplicated: {joined}"
+    );
+    assert!(
+        joined
+            .matches("[Original task, preserved across compression]")
+            .count()
+            <= 1,
+        "no nested boundary prefixes: {joined}"
+    );
+}
+
+/// The c40 session log: hard_fallback 7 → 4 messages, trim 6 → 3, then
+/// hard_fallback 3 → 5. On a 3-message history the old tail (`len - 3` = 0)
+/// started AT the system prompt: the result carried the system prompt twice
+/// and a bare "[Earlier context was compressed]" boundary, which the next
+/// trim pinned as the "task" while the real task was dropped.
+#[test]
+fn legacy_hard_compress_of_a_three_message_history_keeps_task_and_one_system() {
+    let compressor = crate::agent::context::ContextCompressor::new(10_000);
+    let boundary = format!(
+        "[Original task, preserved across compression]:\n{ANCHOR_TASK}\n\n\
+         [Earlier context was compressed due to length limits]"
+    );
+    let msgs = vec![
+        Message::system("SYSTEM"),
+        Message::user(boundary),
+        Message::assistant("<tool>\n<name>file_read</name>\n</tool>"),
+    ];
+    let out = compressor.hard_compress(&msgs);
+    assert_eq!(
+        out.iter().filter(|m| m.role == "system").count(),
+        1,
+        "the system prompt must not be duplicated: {out:?}"
+    );
+    assert!(has_task_verbatim(&out), "{out:?}");
+    // And the anchor the next trim pins is the message carrying the task.
+    let idx = Agent::find_task_anchor_index(&out, Some(&anchor_checkpoint())).unwrap();
+    assert!(out[idx].content.text().contains(ANCHOR_TASK));
+}
+
+/// Agent-level chain: turn-start trims interleaved with a legacy (task-less)
+/// hard compaction — the path that lost the task in c40 — end with the task
+/// present verbatim, because every trim restores and pins it.
+#[tokio::test]
+async fn agent_trim_restores_task_after_legacy_compaction_chain() {
+    let server = MockLlmServer::builder().with_response("ok").build().await;
+    let mut agent = make_test_agent(&server).await;
+    agent.messages.truncate(1); // keep the system prompt
+    agent.messages.push(Message::user(ANCHOR_TASK));
+    agent.current_checkpoint = Some(anchor_checkpoint());
+    let system_tokens = crate::agent::context::estimate_message_tokens(&agent.messages[0]);
+    agent.max_context_tokens = system_tokens + 4_000;
+
+    // The exact c40 shape first: compaction down to a 3-message history,
+    // then a legacy hard compaction of it, then more traffic and a trim.
+    agent.messages.extend(tool_traffic(3, 3_000));
+    agent.messages = agent.compressor.hard_compress(&agent.messages);
+    agent.messages.truncate(3);
+    agent.messages = agent.compressor.hard_compress(&agent.messages);
+    agent.messages.extend(tool_traffic(4, 3_000));
+    agent.trim_message_history();
+    assert!(
+        has_task_verbatim(&agent.messages),
+        "c40 shape lost the task"
+    );
+
+    for round in 0..6 {
+        agent.messages.extend(tool_traffic(6, 3_000));
+        if round % 2 == 1 {
+            // Legacy compaction with no task knowledge (context_files'
+            // /compress used this form; so did every hard_compress site).
+            agent.messages = agent.compressor.hard_compress(&agent.messages);
+            agent.messages = agent.compressor.hard_compress(&agent.messages);
+        }
+        agent.trim_message_history();
+        assert!(
+            has_task_verbatim(&agent.messages),
+            "round {round}: task lost; history: {:?}",
+            agent
+                .messages
+                .iter()
+                .map(|m| m.content.text().chars().take(80).collect::<String>())
+                .collect::<Vec<_>>()
+        );
+    }
+    server.stop().await;
+}

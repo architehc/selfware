@@ -648,3 +648,112 @@ fn restored_files_are_serialized_only_when_present() {
         "{json}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// e2e c40: NO_CHANGES + exit 0 on a mutation-required task with failed
+// verification.
+// ---------------------------------------------------------------------------
+
+const C40_TASK: &str = "Multi-step documentation task in this Rust repo. Do the steps in order.\n\
+    1. Read src/agent/context.rs in full.\n\
+    4. Create docs/CONTEXT_NOTES.md containing one section per file.\n\
+    5. In src/agent/context.rs, add a one-line `///` doc comment directly above every `pub fn` that does not already have a doc comment. Do not change any code other than adding comments.\n\
+    6. Finish with a short summary saying how many functions you documented.";
+
+/// The c40 completion path: the task was (mis)classified read-only, so a
+/// natural completion with 0 mutating calls took the NoChange branch and the
+/// run exited 0. The classification now keeps it mutation-required, and a
+/// mutation-required natural completion with zero mutations is a typed
+/// failure that `failure_verdict_as_error` turns into a non-zero exit.
+#[tokio::test]
+async fn c40_mutation_task_with_zero_mutations_is_a_typed_failure() {
+    let mut agent = make_agent().await;
+    agent.current_task_context = C40_TASK.to_string();
+    agent.classify_task_policy();
+    assert!(
+        !agent.current_task_is_read_only(),
+        "c40 task is not read-only"
+    );
+    assert!(
+        agent.current_task_requires_mutation(),
+        "c40 task requires edits"
+    );
+    agent.test_set_mutating_count(0);
+    agent.test_set_total_tool_calls(23);
+    agent.test_set_last_assistant_response(
+        "**Status: complete (verification: `cargo check --lib` -> exit 0, green).**".to_string(),
+    );
+
+    let mode = FailureMode::classify(&agent, RunOutcome::NaturalCompletion);
+    assert!(
+        !mode.kind.is_nonfailure(),
+        "zero mutations on a mutation-required task must fail: {:?} {}",
+        mode.kind,
+        mode.evidence
+    );
+    assert!(!mode.cli_banner().contains("✅"), "{}", mode.cli_banner());
+    let exit = crate::agent::task_runner::failure_verdict_as_error(Ok(()), Some(&mode));
+    assert!(exit.is_err(), "a failure verdict must not exit 0");
+}
+
+fn verdict(kind: FailureKind) -> FailureMode {
+    FailureMode {
+        kind,
+        evidence: "base evidence".to_string(),
+        advice: "-".to_string(),
+        restored_files: Vec::new(),
+    }
+}
+
+#[test]
+fn failed_verification_turns_a_real_edit_into_a_failure() {
+    let mode = with_verification_verdict(verdict(FailureKind::Success), Some((false, 3)), false);
+    assert_eq!(mode.kind, FailureKind::VerificationFailed);
+    assert!(!mode.kind.is_nonfailure());
+    assert_eq!(mode.kind.tag(), "VERIFICATION_FAILED");
+    assert!(
+        mode.evidence.contains("3 verification check(s)"),
+        "{}",
+        mode.evidence
+    );
+    let banner = mode.cli_banner();
+    assert!(banner.contains("❌"), "{banner}");
+    assert!(!banner.contains("✅"), "{banner}");
+}
+
+#[test]
+fn failed_verification_on_a_non_read_only_no_change_is_a_failure() {
+    let mode = with_verification_verdict(verdict(FailureKind::NoChange), Some((false, 1)), false);
+    assert_eq!(mode.kind, FailureKind::VerificationFailed);
+    assert!(!mode.kind.is_nonfailure());
+}
+
+/// A read-only report whose own check failed keeps its non-failure label
+/// (the report is the deliverable) but never renders the ✅ "Completed"
+/// banner.
+#[test]
+fn failed_verification_on_a_read_only_no_change_is_named_not_green() {
+    let mode = with_verification_verdict(verdict(FailureKind::NoChange), Some((false, 1)), true);
+    assert_eq!(mode.kind, FailureKind::NoChange);
+    assert!(
+        mode.evidence.contains(VERIFICATION_FAILED_NOTE),
+        "{}",
+        mode.evidence
+    );
+    let banner = mode.cli_banner();
+    assert!(!banner.contains("✅"), "{banner}");
+    assert!(banner.contains("verification FAILED"), "{banner}");
+}
+
+#[test]
+fn passing_or_absent_verification_and_failure_verdicts_pass_through() {
+    for verification in [None, Some((true, 4))] {
+        let mode = with_verification_verdict(verdict(FailureKind::Success), verification, false);
+        assert_eq!(mode.kind, FailureKind::Success);
+        assert_eq!(mode.evidence, "base evidence");
+    }
+    let mode =
+        with_verification_verdict(verdict(FailureKind::FakeComplete), Some((false, 2)), false);
+    assert_eq!(mode.kind, FailureKind::FakeComplete);
+    assert_eq!(mode.evidence, "base evidence");
+}

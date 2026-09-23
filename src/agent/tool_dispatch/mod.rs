@@ -1104,13 +1104,9 @@ impl Agent {
                 "Triggering phase-2 synthesis after {} suppressed rereads",
                 read_count
             );
-            // Extract the task description from the first user message
-            let task = self
-                .messages
-                .iter()
-                .find(|m| m.role == "user")
-                .map(|m| m.content.to_string())
-                .unwrap_or_default();
+            // The CURRENT task (checkpoint / resolved anchor), not the first
+            // user message — after compaction that is a boundary note.
+            let task = self.current_task_prompt();
             self.pending_synthesis = Some(task);
         }
 

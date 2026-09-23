@@ -154,7 +154,36 @@ fn global_no_edit_prohibition(lower: &str) -> bool {
         "no files may be changed",
         "no files should be changed",
     ];
-    GLOBAL_MARKERS.iter().any(|marker| lower.contains(marker))
+    GLOBAL_MARKERS.iter().any(|marker| {
+        lower
+            .match_indices(marker)
+            .any(|(at, m)| !prohibition_has_exception(&lower[at + m.len()..]))
+    })
+}
+
+/// True when the rest of the prohibition's clause carves out an exception:
+/// "do not change any code OTHER THAN adding comments", "don't modify
+/// anything EXCEPT the docs". Such a prohibition scopes the edit (the task
+/// still mutates — the exception IS the edit), it does not forbid editing.
+/// e2e c40: "Create docs/CONTEXT_NOTES.md … add a one-line `///` doc comment
+/// … Do not change any code other than adding comments" was classified
+/// read-only via "do not change any", so a run that wrote nothing ended
+/// NO_CHANGES with exit 0.
+fn prohibition_has_exception(rest: &str) -> bool {
+    const EXCEPTIONS: &[&str] = &[
+        "other than",
+        "except",
+        "besides",
+        "apart from",
+        "aside from",
+        "beyond",
+        "save for",
+        "outside of",
+        "unless",
+    ];
+    let clause_end = rest.find(['.', '\n', ';', '!', '?']).unwrap_or(rest.len());
+    let clause = &rest[..clause_end];
+    EXCEPTIONS.iter().any(|e| clause.contains(e))
 }
 
 /// True when a task asks about *this* workspace's code, so an answer must be

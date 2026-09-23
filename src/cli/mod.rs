@@ -2095,7 +2095,10 @@ pub async fn run() -> Result<()> {
             let result =
                 build_session_result(&agent, &run_result, duration_ms, answer_capture.take());
             headless::emit_result(&result);
-        } else if !cli.quiet && run_result.is_ok() {
+        } else if !cli.quiet
+            && run_result.is_ok()
+            && !matches!(agent.run_summary().verification, Some((false, _)))
+        {
             println!("{}", render_task_complete(start.elapsed()));
         }
         if let Err(e) = &run_result {
@@ -3007,7 +3010,10 @@ async fn handle_command(
                 let result =
                     build_session_result(&agent, &run_result, duration_ms, answer_capture.take());
                 headless::emit_result(&result);
-            } else if !quiet && run_result.is_ok() {
+            } else if !quiet
+                && run_result.is_ok()
+                && !matches!(agent.run_summary().verification, Some((false, _)))
+            {
                 println!("{}", render_task_complete(start.elapsed()));
             }
             if let Err(e) = &run_result {
@@ -6529,6 +6535,9 @@ fn render_run_summary(summary: &crate::agent::RunSummary, failure: Option<&str>)
     let mut lines = vec!["── Run summary ──".to_string()];
     match failure {
         Some(reason) => lines.push(format!("outcome: failed — {reason}")),
+        // Never print a bare "completed" over failed checks (AGENTS.md rule 3).
+        None if matches!(summary.verification, Some((false, _))) => lines
+            .push("outcome: finished — verification FAILED (not a verified result)".to_string()),
         None => lines.push("outcome: completed".to_string()),
     }
     let extension_note = if summary.budget_extended {

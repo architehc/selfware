@@ -2734,6 +2734,7 @@ To call a tool, use this EXACT XML structure:
     /// Run MicroCompact - fast local compression with no API call
     pub fn compact_micro(&mut self) -> compression::CompressionMetrics {
         let metrics = self.compression_orchestrator.run_micro(&mut self.messages);
+        self.ensure_task_anchor_present();
         info!("MicroCompact: {}", metrics.summary());
         metrics
     }
@@ -2744,6 +2745,7 @@ To call a tool, use this EXACT XML structure:
             .compression_orchestrator
             .run_auto(&self.client, &mut self.messages)
             .await?;
+        self.ensure_task_anchor_present();
         self.account_compression_tokens(&metrics);
         info!("AutoCompact: {}", metrics.summary());
         Ok(metrics)
@@ -2755,6 +2757,7 @@ To call a tool, use this EXACT XML structure:
             .compression_orchestrator
             .run_full_with_safety(&self.client, &mut self.messages, &self.config.safety)
             .await?;
+        self.ensure_task_anchor_present();
         self.account_compression_tokens(&metrics);
         info!("FullCompact: {}", metrics.summary());
         Ok(metrics)

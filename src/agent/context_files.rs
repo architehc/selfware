@@ -469,9 +469,10 @@ impl Agent {
 
         let (compressed, _usage) = self
             .compressor
-            .compress(&self.client, &self.messages)
+            .compress_with_task(&self.client, &self.messages, self.current_task_text())
             .await?;
         self.messages = compressed;
+        self.ensure_task_anchor_present();
         // Account the summarizer LLM call against the budget.
         // Delta-add (never total = input + output): after a resume, `total`
         // carries the restored prior-run budget whose input/output split was

@@ -125,7 +125,11 @@ impl Agent {
         let before_compression_tokens = self.compressor.estimate_tokens(&self.messages);
         if self.compressor.should_compress(&self.messages) {
             info!("Context compression triggered");
-            match self.compressor.compress(&self.client, &self.messages).await {
+            match self
+                .compressor
+                .compress_with_task(&self.client, &self.messages, self.current_task_text())
+                .await
+            {
                 Ok((compressed, _usage)) => {
                     let after_tokens = self.compressor.estimate_tokens(&compressed);
                     let did_compress = after_tokens < before_compression_tokens
@@ -147,7 +151,9 @@ impl Agent {
                         );
                     } else {
                         warn!("Context compression summary yielded no size reduction, using hard fallback");
-                        self.messages = self.compressor.hard_compress(&self.messages);
+                        self.messages = self
+                            .compressor
+                            .hard_compress_with_task(&self.messages, self.current_task_text());
                         let final_tokens = self.compressor.estimate_tokens(&self.messages);
                         self.sync_api_usage();
                         self.log_context_compression_event(
@@ -166,7 +172,9 @@ impl Agent {
                 }
                 Err(e) => {
                     warn!("Compression failed, using hard limit: {}", e);
-                    self.messages = self.compressor.hard_compress(&self.messages);
+                    self.messages = self
+                        .compressor
+                        .hard_compress_with_task(&self.messages, self.current_task_text());
                     let error_text = e.to_string();
                     self.log_context_compression_event(
                         super::session_log::ContextCompressionLogDetails {
@@ -183,6 +191,10 @@ impl Agent {
                 }
             }
         }
+
+        // Whatever the compressors did, the task must still be in the history
+        // (fit_request_to_context_budget pins it in the request as well).
+        self.ensure_task_anchor_present();
 
         let mut request_messages = self.messages.clone();
         let mut system_hints = Vec::new();

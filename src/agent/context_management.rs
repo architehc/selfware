@@ -2,6 +2,32 @@ use serde_json::Value;
 
 use super::*;
 
+/// Marker for a task anchor re-inserted by
+/// [`Agent::ensure_task_anchor_in`] (and used by the compressors when they
+/// carry the task forward).
+pub(crate) const TASK_ANCHOR_MARKER: &str = "[ORIGINAL TASK]:";
+
+/// Longest task prefix pinned verbatim across trimming/compaction (~4k
+/// tokens). Larger task payloads keep this leading prefix; the rest is
+/// ordinary history that may be trimmed.
+pub(crate) const TASK_ANCHOR_MAX_PINNED_CHARS: usize = 16_000;
+
+/// The boundary text carrying a task forward through compaction. Idempotent:
+/// a text that already opens with a task marker is not wrapped again (the
+/// c40/c24 histories had `[Original task, preserved…]:\n[Original task,
+/// preserved…]:\n[ORIGINAL TASK]:\n…` — every pass re-wrapped the previous
+/// boundary).
+pub(crate) fn task_anchor_text(task: &str) -> String {
+    let trimmed = task.trim_start();
+    if trimmed.starts_with(TASK_ANCHOR_MARKER)
+        || trimmed.starts_with("[Original task, preserved across compression]:")
+    {
+        task.to_string()
+    } else {
+        format!("{TASK_ANCHOR_MARKER}\n{task}")
+    }
+}
+
 impl Agent {
     // =========================================================================
     // Context Management
@@ -156,6 +182,21 @@ impl Agent {
             {
                 return Some(idx);
             }
+            // Compaction wraps the task ("[ORIGINAL TASK]:\n<task>…") or
+            // coalesces it with a summary boundary, so the verbatim-equal copy
+            // is gone after the first compression. A user message that still
+            // CONTAINS the task text (or its pinned prefix, for tasks larger
+            // than the anchor floor) is the anchor — never fall through to
+            // "first user message", which after compaction is a summary or a
+            // bare "[Earlier context was compressed]" boundary (e2e c40: the
+            // pinned "anchor" was a boundary note and the task was lost).
+            let core = Self::task_anchor_core(desc);
+            if let Some(idx) = messages
+                .iter()
+                .rposition(|m| m.role == "user" && m.content.text().contains(core))
+            {
+                return Some(idx);
+            }
         }
         let system_idx = messages.iter().position(|m| m.role == "system");
         messages
@@ -174,6 +215,97 @@ impl Agent {
     pub(super) fn current_task_anchor(&self) -> Option<Message> {
         self.current_task_anchor_index()
             .map(|idx| self.messages[idx].clone())
+    }
+
+    /// The part of a task description that must survive every trim /
+    /// compaction pass VERBATIM: the whole description, or — for a task
+    /// larger than [`TASK_ANCHOR_MAX_PINNED_CHARS`] — its leading prefix
+    /// (char-boundary safe). Used both to detect whether the task is still
+    /// present in a history and as the text re-inserted when it is not.
+    pub(super) fn task_anchor_core(desc: &str) -> &str {
+        match desc.char_indices().nth(TASK_ANCHOR_MAX_PINNED_CHARS) {
+            Some((byte_idx, _)) => &desc[..byte_idx],
+            None => desc,
+        }
+    }
+
+    /// The current task's prompt text for guards that need "the task" (Rust
+    /// scaffold gate, forced synthesis): the checkpoint description, else
+    /// the resolved anchor message. Never "the first user message" — after
+    /// compaction that is a summary/boundary note, and in an interactive
+    /// session it is turn 1's finished task.
+    pub(super) fn current_task_prompt(&self) -> String {
+        self.current_task_text()
+            .map(str::to_string)
+            .or_else(|| {
+                self.current_task_anchor()
+                    .map(|m| m.content.text().to_string())
+            })
+            .unwrap_or_default()
+    }
+
+    /// The authoritative text of the current task (the active checkpoint's
+    /// description), if any.
+    pub(super) fn current_task_text(&self) -> Option<&str> {
+        self.current_checkpoint
+            .as_ref()
+            .map(|c| c.task_description.as_str())
+            .filter(|d| !d.trim().is_empty())
+    }
+
+    /// Guarantee the current task's text is present in `messages`.
+    ///
+    /// Every trim/compaction path pins the anchor it can FIND, but a chain of
+    /// compactions that re-wraps a summary as the "original task" (e2e c40:
+    /// `[ORIGINAL TASK]:\n[Earlier context was compressed…]`) leaves nothing
+    /// to find — the model then asks "Need know task from initial?" and
+    /// flails. This is the backstop: when no user message contains the task
+    /// text (or its pinned prefix), re-insert it right after the leading
+    /// system prompt(s) under a stable marker. Returns true when it had to
+    /// restore the anchor.
+    pub(super) fn ensure_task_anchor_in(messages: &mut Vec<Message>, desc: &str) -> bool {
+        let core = Self::task_anchor_core(desc);
+        if core.trim().is_empty()
+            || messages
+                .iter()
+                .any(|m| m.role == "user" && m.content.text().contains(core))
+        {
+            return false;
+        }
+        let text = if core.len() < desc.len() {
+            format!(
+                "{TASK_ANCHOR_MARKER}\n{core}\n...[task text truncated: first {} of {} chars pinned]",
+                core.chars().count(),
+                desc.chars().count()
+            )
+        } else {
+            format!("{TASK_ANCHOR_MARKER}\n{core}")
+        };
+        let insert_at = messages
+            .iter()
+            .position(|m| m.role != "system")
+            .unwrap_or(messages.len());
+        messages.insert(insert_at, Message::user(text));
+        true
+    }
+
+    /// [`Self::ensure_task_anchor_in`] against the live history for the
+    /// active checkpoint's task, with a visible turn decision when the
+    /// anchor had to be restored.
+    pub(super) fn ensure_task_anchor_present(&mut self) -> bool {
+        let Some(desc) = self.current_task_text().map(str::to_string) else {
+            return false;
+        };
+        let restored = Self::ensure_task_anchor_in(&mut self.messages, &desc);
+        if restored {
+            tracing::warn!("Task anchor was missing from the history after compaction — restored");
+            self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+                decision: "task_anchor_restored".to_string(),
+                detail: "original task text was missing after trimming/compaction; re-pinned"
+                    .to_string(),
+            });
+        }
+        restored
     }
 
     /// Filter a message list through the tool-call pairing invariants,
@@ -326,6 +458,12 @@ impl Agent {
             .map(|(t, _)| t)
             .sum();
 
+        // The anchor's index AFTER the retain below (the pinned passes never
+        // drop it, so it is always kept).
+        let anchor_after = anchor_idx
+            .filter(|&a| a < keep.len() && keep[a])
+            .map(|a| keep[..a].iter().filter(|k| **k).count());
+
         let mut idx = 0;
         messages.retain(|_| {
             let k = keep[idx];
@@ -334,6 +472,10 @@ impl Agent {
         });
 
         // Fallback: If still over budget, truncate individual oversized messages
+        // to the per-message cap (3/4 of the budget). This applies to the task
+        // anchor too — an injected multi-100K-token task payload must still
+        // fit — but the cap is far above the anchor floor and truncation keeps
+        // the leading text, so the task itself survives.
         let max_message_tokens = Self::per_message_cap(max_context_tokens);
         let mut remaining = estimate_messages_tokens(messages);
         if remaining > max_context_tokens {
@@ -372,7 +514,7 @@ impl Agent {
         // Final clamp: If still over budget (e.g. system message + anchor together exceed budget,
         // or multiple messages sum past the limit), hard-clamp the largest message(s).
         if remaining > max_context_tokens {
-            Self::hard_clamp_to_budget(messages, max_context_tokens);
+            Self::hard_clamp_to_budget_protecting(messages, max_context_tokens, anchor_after);
         }
 
         let final_tokens = estimate_messages_tokens(messages);
@@ -485,8 +627,33 @@ impl Agent {
     /// survives). The caller must still re-measure: when even this cannot fit
     /// the budget the request must not be dispatched (see
     /// [`Self::fit_request_to_context_budget`]).
+    ///
+    /// Unprotected form (no task anchor); production paths use
+    /// [`Self::hard_clamp_to_budget_protecting`].
+    #[cfg(test)]
     pub(crate) fn hard_clamp_to_budget(messages: &mut [Message], max_context_tokens: usize) {
+        Self::hard_clamp_to_budget_protecting(messages, max_context_tokens, None);
+    }
+
+    /// Token floor below which the task anchor is never truncated: a quarter
+    /// of the budget (at least 64 tokens). A task shorter than the floor is
+    /// never truncated at all.
+    pub(crate) fn task_anchor_floor_tokens(max_context_tokens: usize) -> usize {
+        (max_context_tokens / 4).max(64)
+    }
+
+    /// [`Self::hard_clamp_to_budget`] with the task anchor at `protected`
+    /// exempt from truncation below [`Self::task_anchor_floor_tokens`]: every
+    /// other message competes on its full size, the anchor only on the part
+    /// above the floor, and it is never cut below the floor (its leading
+    /// text is kept), so the model always sees the task it is working on.
+    pub(crate) fn hard_clamp_to_budget_protecting(
+        messages: &mut [Message],
+        max_context_tokens: usize,
+        protected: Option<usize>,
+    ) {
         use crate::token_count::{estimate_content_tokens, estimate_messages_tokens};
+        let anchor_floor = Self::task_anchor_floor_tokens(max_context_tokens);
 
         let mut remaining = estimate_messages_tokens(messages);
         if remaining <= max_context_tokens {
@@ -512,13 +679,20 @@ impl Agent {
             let largest_idx = messages
                 .iter()
                 .enumerate()
-                .filter(|(_, m)| m.content.text().len() > 50)
-                .max_by_key(|(_, m)| {
+                .filter(|(i, m)| {
+                    m.content.text().len() > 50
+                        && (Some(*i) != protected
+                            || estimate_content_tokens(m.content.text()) > anchor_floor)
+                })
+                .max_by_key(|(i, m)| {
                     // Rank by TEXT tokens: this pass only shrinks text, so a
                     // message whose weight is tool-call arguments must not
                     // win the slot and stall the loop.
                     let tokens = estimate_content_tokens(m.content.text());
-                    if m.role == "system" {
+                    if Some(*i) == protected {
+                        // Only the part above the floor is shrinkable.
+                        tokens.saturating_sub(anchor_floor)
+                    } else if m.role == "system" {
                         tokens.saturating_sub(100)
                     } else {
                         tokens
@@ -535,7 +709,12 @@ impl Agent {
                 break;
             }
 
-            let target_tokens = current_tokens.saturating_sub(excess + 20).max(20);
+            let min_tokens = if Some(idx) == protected {
+                anchor_floor
+            } else {
+                20
+            };
+            let target_tokens = current_tokens.saturating_sub(excess + 20).max(min_tokens);
 
             if target_tokens >= current_tokens {
                 break;
@@ -543,10 +722,22 @@ impl Agent {
 
             let current_text = messages[idx].content.text().to_string();
             let current_chars: Vec<char> = current_text.chars().collect();
-            let target_chars = ((current_chars.len() as f64
+            let mut target_chars = ((current_chars.len() as f64
                 * (target_tokens as f64 / current_tokens as f64))
                 as usize)
                 .min(current_chars.len());
+            if Some(idx) == protected {
+                // The char→token ratio is not uniform: grow the kept prefix
+                // until it measures at least the floor, so the anchor is
+                // never cut below it.
+                while target_chars < current_chars.len()
+                    && estimate_content_tokens(
+                        &current_chars[..target_chars].iter().collect::<String>(),
+                    ) < anchor_floor
+                {
+                    target_chars += (current_chars.len() - target_chars) / 8 + 1;
+                }
+            }
 
             if target_chars >= current_chars.len() {
                 break;
@@ -590,6 +781,15 @@ impl Agent {
     ) -> Result<Vec<Message>, crate::errors::ApiError> {
         use crate::token_count::estimate_messages_tokens;
 
+        // The request the model sees must carry the task, whatever happened
+        // to the history it was assembled from.
+        if let Some(desc) = checkpoint
+            .map(|c| c.task_description.as_str())
+            .filter(|d| !d.trim().is_empty())
+        {
+            Self::ensure_task_anchor_in(&mut request_messages, desc);
+        }
+
         if estimate_messages_tokens(&request_messages) > max_context_tokens {
             let anchor_idx = Self::find_task_anchor_index(&request_messages, checkpoint);
             Self::trim_messages(&mut request_messages, max_context_tokens, anchor_idx);
@@ -603,7 +803,12 @@ impl Agent {
                 measured,
                 max_context_tokens
             );
-            Self::hard_clamp_to_budget(&mut request_messages, max_context_tokens);
+            let anchor_idx = Self::find_task_anchor_index(&request_messages, checkpoint);
+            Self::hard_clamp_to_budget_protecting(
+                &mut request_messages,
+                max_context_tokens,
+                anchor_idx,
+            );
             request_messages = Self::apply_tool_call_pair_invariants(request_messages);
         }
 
@@ -621,6 +826,9 @@ impl Agent {
     /// `max_context_tokens`. Removes the oldest non-system messages first.
     pub(super) fn trim_message_history(&mut self) {
         use crate::token_count::estimate_messages_tokens;
+        // Every caller (turn start, post-compaction recovery) funnels through
+        // here: restore the task anchor first so the trim below pins it.
+        self.ensure_task_anchor_present();
         let total: usize = estimate_messages_tokens(&self.messages);
         if total <= self.max_context_tokens {
             return;
@@ -1130,7 +1338,15 @@ impl Agent {
             // active checkpoint (current task), NOT the first user message —
             // in an interactive session that would re-anchor turn 1's zombie
             // task. Skip if it's already within the recent window.
-            let original_task = self.current_task_anchor();
+            // The checkpoint's description is authoritative; the history
+            // heuristic is only the no-checkpoint fallback.
+            let original_task: Option<String> = self
+                .current_task_text()
+                .map(|d| Self::task_anchor_core(d).to_string())
+                .or_else(|| {
+                    self.current_task_anchor()
+                        .map(|m| m.content.text().to_string())
+                });
             self.messages.clear();
             if let Some(sys) = system_msg {
                 self.messages.push(sys);
@@ -1138,12 +1354,10 @@ impl Agent {
             if let Some(task) = original_task {
                 if !recent
                     .iter()
-                    .any(|r| r.content.text() == task.content.text())
+                    .any(|r| r.role == "user" && r.content.text().contains(task.as_str()))
                 {
-                    self.messages.push(crate::api::types::Message::user(format!(
-                        "[ORIGINAL TASK]:\n{}",
-                        task.content.text()
-                    )));
+                    self.messages
+                        .push(crate::api::types::Message::user(task_anchor_text(&task)));
                 }
             }
             self.messages.push(crate::api::types::Message::user(format!(

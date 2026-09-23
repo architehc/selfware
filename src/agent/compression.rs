@@ -369,9 +369,8 @@ pub fn micro_compact(messages: &mut Vec<Message>) -> CompressionMetrics {
             .iter()
             .any(|r| r.content.text() == task.content.text())
         {
-            compressed.push(Message::user(format!(
-                "[ORIGINAL TASK]:\n{}",
-                task.content.text()
+            compressed.push(Message::user(super::context_management::task_anchor_text(
+                task.content.text(),
             )));
         }
     }
@@ -539,9 +538,8 @@ pub async fn auto_compact(
             .iter()
             .any(|r| r.content.text() == task.content.text())
         {
-            compressed.push(Message::user(format!(
-                "[ORIGINAL TASK]:\n{}",
-                task.content.text()
+            compressed.push(Message::user(super::context_management::task_anchor_text(
+                task.content.text(),
             )));
         }
     }
@@ -682,9 +680,8 @@ async fn full_compact_with_safety(
             .as_ref()
             .is_some_and(|u| u.content.text() == task.content.text());
         if !already_preserved {
-            compressed.push(Message::user(format!(
-                "[ORIGINAL TASK]:\n{}",
-                task.content.text()
+            compressed.push(Message::user(super::context_management::task_anchor_text(
+                task.content.text(),
             )));
         }
     }

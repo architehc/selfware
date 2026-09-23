@@ -289,16 +289,36 @@ impl AgentLoop {
         // states increment the counter. This gives the caller
         // `max_iterations` execution turns in addition to the initial
         // Planning turn.
-        if !matches!(self.state, AgentState::Planning) {
-            self.iteration += 1;
-        }
-        if self.iteration > self.max_iterations {
+        //
+        // The cap is checked BEFORE the slot is consumed: the Nth iteration
+        // is the last one executed, and a refused slot is not counted. The
+        // old increment-then-check left the counter at cap+1 after the stop,
+        // so the run summary printed "19/18" for a run that executed 18
+        // iterations (e2e lowcap).
+        let next = if matches!(self.state, AgentState::Planning) {
+            self.iteration
+        } else {
+            self.iteration + 1
+        };
+        if next > self.max_iterations {
             self.state = AgentState::Failed {
                 reason: MAX_ITERATIONS_STOP_REASON.to_string(),
             };
             return Some(self.state.clone());
         }
+        self.iteration = next;
         Some(self.state.clone())
+    }
+
+    /// Resume after the cap tripped and an adaptive extension was granted:
+    /// the turn that was refused now runs, so it consumes its iteration slot
+    /// here (the refusal in [`Self::next_state`] did not count it).
+    pub fn resume_after_extension(&mut self) {
+        debug_assert!(self.iteration < self.max_iterations);
+        self.iteration = (self.iteration + 1).min(self.max_iterations);
+        self.state = AgentState::Executing {
+            step: self.current_step,
+        };
     }
 
     /// Returns a warning message when the loop is approaching the iteration

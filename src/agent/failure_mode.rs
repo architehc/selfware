@@ -70,9 +70,21 @@ pub enum FailureKind {
     /// documentation task spent 40/40 iterations re-reading files and
     /// rendered "✅ Completed — no file changes made", exit 0).
     RequiredEditMissing,
+    /// The run ended naturally, but the verification it credited did not
+    /// pass on the final tree (a failing check with no later covering pass).
+    /// A failure: a "completed" label over failed checks claims a verified
+    /// result that does not exist (AGENTS.md rule 3). Read-only tasks that
+    /// changed nothing keep `NoChange` (their deliverable is the report), with
+    /// the failed verification named in the evidence and banner.
+    VerificationFailed,
     /// Outcome could not be classified from available signals.
     Unknown,
 }
+
+/// Evidence suffix naming a failed verification on an otherwise honest
+/// `NoChange` completion; `cli_banner` keys its non-✅ header on it.
+pub(crate) const VERIFICATION_FAILED_NOTE: &str =
+    "verification FAILED — no check the run ran passed on the final tree";
 
 impl FailureKind {
     /// Short uppercase tag suitable for log lines and CLI output.
@@ -92,6 +104,7 @@ impl FailureKind {
             FailureKind::MaxIterations => "MAX_ITERATIONS",
             FailureKind::FakeComplete => "FAKE_COMPLETE",
             FailureKind::RequiredEditMissing => "NO_CHANGES_REQUIRED_EDIT",
+            FailureKind::VerificationFailed => "VERIFICATION_FAILED",
             FailureKind::Unknown => "UNKNOWN",
         }
     }
@@ -159,12 +172,13 @@ impl FailureMode {
 
         match outcome {
             RunOutcome::NaturalCompletion => {
-                // A "Final answer" with 0 mutating calls is only fake when the
-                // task was expected to mutate. On a read-only task (review /
-                // analysis / report) the prose answer IS the deliverable —
-                // fall through to the honest NoChange label below.
-                if mutating == 0 && has_final_answer_marker && !read_only {
-                    return FailureMode {
+                let base = (|| -> FailureMode {
+                    // A "Final answer" with 0 mutating calls is only fake when the
+                    // task was expected to mutate. On a read-only task (review /
+                    // analysis / report) the prose answer IS the deliverable —
+                    // fall through to the honest NoChange label below.
+                    if mutating == 0 && has_final_answer_marker && !read_only {
+                        return FailureMode {
                         restored_files: Vec::new(),
                         kind: FailureKind::FakeComplete,
                         evidence: format!(
@@ -173,15 +187,15 @@ impl FailureMode {
                         ),
                         advice: "the model said it was done but changed no files — restate the task with the exact file(s) and change required, or confirm whether it was meant to be read-only".to_string(),
                     };
-                }
-                // Bug fix: a natural completion that performed zero mutating
-                // calls on a task explicitly requiring mutation is also a
-                // FakeComplete — even when the model never wrote the literal
-                // "Final answer" marker. Without this, runs like
-                // `selfware -p "fix the failing test"` that exit cleanly with
-                // a chatty no-op response were wrongly tagged Success.
-                if mutating == 0 && agent.current_task_requires_mutation() {
-                    return FailureMode {
+                    }
+                    // Bug fix: a natural completion that performed zero mutating
+                    // calls on a task explicitly requiring mutation is also a
+                    // FakeComplete — even when the model never wrote the literal
+                    // "Final answer" marker. Without this, runs like
+                    // `selfware -p "fix the failing test"` that exit cleanly with
+                    // a chatty no-op response were wrongly tagged Success.
+                    if mutating == 0 && agent.current_task_requires_mutation() {
+                        return FailureMode {
                         restored_files: Vec::new(),
                         kind: FailureKind::FakeComplete,
                         evidence: format!(
@@ -190,14 +204,14 @@ impl FailureMode {
                         ),
                         advice: "the model said it was done but changed no files — restate the task with the exact file(s) and change required, or confirm whether it was meant to be read-only".to_string(),
                     };
-                }
-                // Reaching here with 0 mutating calls means: the task was
-                // read-only (final-answer marker or not) OR there was no
-                // marker on a non-mutation task — i.e. a legitimate read-only
-                // / Q&A completion. It changed
-                // nothing, so it is NOT a REAL_EDIT; label it honestly.
-                if mutating == 0 {
-                    return FailureMode {
+                    }
+                    // Reaching here with 0 mutating calls means: the task was
+                    // read-only (final-answer marker or not) OR there was no
+                    // marker on a non-mutation task — i.e. a legitimate read-only
+                    // / Q&A completion. It changed
+                    // nothing, so it is NOT a REAL_EDIT; label it honestly.
+                    if mutating == 0 {
+                        return FailureMode {
                         restored_files: Vec::new(),
                         kind: FailureKind::NoChange,
                         evidence: format!(
@@ -206,18 +220,18 @@ impl FailureMode {
                         ),
                         advice: "if this task needed edits, the model made none; if it was read-only/Q&A, this is expected".to_string(),
                     };
-                }
-                // REAL_EDIT must mean files actually changed (2026-09-22 e2e:
-                // runs whose only "mutations" were read-shaped shell probes
-                // rendered REAL_EDIT with "files changed: none"). With
-                // mutating > 0 but no file evidence — no file-tool write and
-                // no write-shaped shell command — label the run honestly as
-                // NoChange instead of crediting an edit that never landed.
-                if agent.written_paths().is_empty() && !agent.shell_write_evidence() {
-                    // On a task that REQUIRED edits, "no file reached disk"
-                    // is a failure, not an honest no-op: never render ✅.
-                    if agent.current_task_requires_mutation() {
-                        return FailureMode {
+                    }
+                    // REAL_EDIT must mean files actually changed (2026-09-22 e2e:
+                    // runs whose only "mutations" were read-shaped shell probes
+                    // rendered REAL_EDIT with "files changed: none"). With
+                    // mutating > 0 but no file evidence — no file-tool write and
+                    // no write-shaped shell command — label the run honestly as
+                    // NoChange instead of crediting an edit that never landed.
+                    if agent.written_paths().is_empty() && !agent.shell_write_evidence() {
+                        // On a task that REQUIRED edits, "no file reached disk"
+                        // is a failure, not an honest no-op: never render ✅.
+                        if agent.current_task_requires_mutation() {
+                            return FailureMode {
                             restored_files: Vec::new(),
                             kind: FailureKind::RequiredEditMissing,
                             evidence: format!(
@@ -227,8 +241,8 @@ impl FailureMode {
                             ),
                             advice: "the model investigated without editing — name the exact file(s) and change to make, or raise the context budget if it kept re-reading files it could not hold".to_string(),
                         };
-                    }
-                    return FailureMode {
+                        }
+                        return FailureMode {
                         restored_files: Vec::new(),
                         kind: FailureKind::NoChange,
                         evidence: format!(
@@ -236,21 +250,23 @@ impl FailureMode {
                         ),
                         advice: "shell probes and reads do not change files — if the task needed edits, none landed; check the run summary's files-changed line".to_string(),
                     };
-                }
-                let progress_note = if progress_guard > 0 {
-                    format!(", {} progress guards", progress_guard)
-                } else {
-                    ", 0 progress guards".to_string()
-                };
-                FailureMode {
-                    restored_files: Vec::new(),
-                    kind: FailureKind::Success,
-                    evidence: format!(
-                        "{} mutating tool calls, {} total tool calls{}, completed naturally",
-                        mutating, total_calls, progress_note
-                    ),
-                    advice: "-".to_string(),
-                }
+                    }
+                    let progress_note = if progress_guard > 0 {
+                        format!(", {} progress guards", progress_guard)
+                    } else {
+                        ", 0 progress guards".to_string()
+                    };
+                    FailureMode {
+                        restored_files: Vec::new(),
+                        kind: FailureKind::Success,
+                        evidence: format!(
+                            "{} mutating tool calls, {} total tool calls{}, completed naturally",
+                            mutating, total_calls, progress_note
+                        ),
+                        advice: "-".to_string(),
+                    }
+                })();
+                with_verification_verdict(base, agent.credited_verification_summary(), read_only)
             }
             RunOutcome::Failed { reason } => {
                 if circuit_open || prefill_400s >= 3 {
@@ -416,6 +432,14 @@ impl FailureMode {
     pub fn cli_banner(&self) -> String {
         let header = if self.kind.is_success() {
             format!("✅ Task completed successfully ({})", self.kind.tag())
+        } else if matches!(self.kind, FailureKind::NoChange)
+            && self.evidence.contains(VERIFICATION_FAILED_NOTE)
+        {
+            // Read-only deliverable, but its own checks failed: never ✅.
+            format!(
+                "⚠️ Finished — no file changes made, and verification FAILED ({})",
+                self.kind.tag()
+            )
         } else if matches!(self.kind, FailureKind::NoChange) {
             // Completed, but made no edits — honest neutral banner, not a
             // "successfully (REAL_EDIT)" claim and not an abort.
@@ -423,6 +447,11 @@ impl FailureMode {
         } else if matches!(self.kind, FailureKind::RequiredEditMissing) {
             format!(
                 "❌ Task incomplete — required file changes were not made ({})",
+                self.kind.tag()
+            )
+        } else if matches!(self.kind, FailureKind::VerificationFailed) {
+            format!(
+                "❌ Task incomplete — verification failed on the final tree ({})",
                 self.kind.tag()
             )
         } else {
@@ -464,6 +493,58 @@ fn safety_blocked_share(agent: &Agent) -> Option<(usize, usize)> {
     let window = agent.recent_failed_tool_attempts.len();
     let blocked = safety_blocked_count(agent);
     (blocked >= 2 && blocked * 2 >= window).then_some((blocked, window))
+}
+
+/// Fold the run's credited verification (`Agent::credited_verification_summary`:
+/// `(passed, checks)`, `None` = nothing ran) into a natural-completion verdict.
+///
+/// A non-failure verdict over FAILED verification must not render as a
+/// completed task (e2e c40: "verification: failed (1 checks)" printed under
+/// "✅ Completed" and exit 0):
+/// - `Success` (edits landed) → `VerificationFailed` (failure, non-zero exit).
+/// - `NoChange` on a task NOT classified read-only → `VerificationFailed`: the
+///   run's own checks failed and nothing was changed to address them.
+/// - `NoChange` on a read-only task stays `NoChange` (the report is the
+///   deliverable; a failing check is a finding about the workspace), but the
+///   evidence names the failure so the banner is not ✅.
+///
+/// Failure verdicts pass through unchanged.
+pub(crate) fn with_verification_verdict(
+    base: FailureMode,
+    verification: Option<(bool, usize)>,
+    read_only: bool,
+) -> FailureMode {
+    let Some((false, checks)) = verification else {
+        return base;
+    };
+    match base.kind {
+        FailureKind::Success => FailureMode {
+            kind: FailureKind::VerificationFailed,
+            evidence: format!(
+                "{}; but {checks} verification check(s) did not pass on the final tree",
+                base.evidence
+            ),
+            advice: "the edits landed but the run's own verification failed — fix the failing check and rerun it to green".to_string(),
+            restored_files: base.restored_files,
+        },
+        FailureKind::NoChange if !read_only => FailureMode {
+            kind: FailureKind::VerificationFailed,
+            evidence: format!(
+                "{}; {checks} verification check(s) failed and nothing was changed to address them",
+                base.evidence
+            ),
+            advice: "the run ended with failing checks and no edits — if the task needed changes, none landed".to_string(),
+            restored_files: base.restored_files,
+        },
+        FailureKind::NoChange => FailureMode {
+            evidence: format!(
+                "{}; {VERIFICATION_FAILED_NOTE} ({checks} check(s))",
+                base.evidence
+            ),
+            ..base
+        },
+        _ => base,
+    }
 }
 
 fn blocked_by_safety_failure(blocked: usize, window: usize) -> FailureMode {

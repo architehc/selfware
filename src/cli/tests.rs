@@ -1185,6 +1185,25 @@ fn render_run_summary_completed_run() {
     assert!(!rendered.contains("budget extended"), "{rendered}");
 }
 
+/// e2e c40: "outcome: completed" printed above "verification: failed (1
+/// checks)". A run that did not fail but whose credited verification failed
+/// must never be summarized as a plain completion (AGENTS.md rule 3).
+#[test]
+fn render_run_summary_never_says_completed_over_failed_verification() {
+    let mut summary = sample_summary();
+    summary.verification = Some((false, 1));
+    let rendered = render_run_summary(&summary, None);
+    assert!(!rendered.contains("outcome: completed"), "{rendered}");
+    assert!(
+        rendered.contains("outcome: finished — verification FAILED"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("verification: failed (1 checks)"),
+        "{rendered}"
+    );
+}
+
 #[test]
 fn render_run_summary_shows_measured_model_latency_when_present() {
     let mut summary = sample_summary();

@@ -1787,12 +1787,7 @@ impl Agent {
                 // `cargo test` for a deliverable it cannot test that way. Only
                 // scaffold on POSITIVE Rust evidence: Cargo.toml in the
                 // workdir, or (manifest-free dir) the task naming a .rs target.
-                let task = self
-                    .messages
-                    .iter()
-                    .find(|m| m.role == "user")
-                    .map(|m| m.content.to_string())
-                    .unwrap_or_default();
+                let task = self.current_task_prompt();
                 if !rust_scaffold_allowed(&task).await {
                     info!(
                         "ESCALATED progress guard: {} read-only steps, but no positive Rust evidence (no Cargo.toml, matching manifest, or .rs/cargo in the task) — skipping the Rust scaffold; nudging targeted work",
@@ -1865,13 +1860,9 @@ impl Agent {
                 "TERMINAL progress guard: {} read-only steps — forcing synthesis+write",
                 self.consecutive_read_only_steps
             );
-            // Force immediate synthesis: extract task from first user message
-            let task = self
-                .messages
-                .iter()
-                .find(|m| m.role == "user")
-                .map(|m| m.content.to_string())
-                .unwrap_or_default();
+            // Force immediate synthesis for the CURRENT task (not the first
+            // user message, which after compaction is a boundary note).
+            let task = self.current_task_prompt();
             self.pending_synthesis = Some(task);
             self.consecutive_read_only_steps = 0;
             // The synthesis will fire at the top of the next step in task_runner

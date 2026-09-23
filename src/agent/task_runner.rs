@@ -477,6 +477,30 @@ impl Agent {
         )
     }
 
+    /// True when the iteration cap tripped on a run whose edits are covered
+    /// by a GREEN verification: at least one mutation, the most recent
+    /// verification-shaped tool call passed, no mutation happened after the
+    /// last credited pass, and the run summary's credited verification is a
+    /// pass. Only then may the cap stop hand over to the completion gate
+    /// instead of hard-failing (see the `Failed` arm of the execution loop).
+    pub(super) fn cap_hit_with_fresh_green_verification(&self) -> bool {
+        if self.mutation_sequence == 0
+            || self.last_successful_verification_mutation_sequence < self.mutation_sequence
+        {
+            return false;
+        }
+        let last_verification_passed = self
+            .current_checkpoint
+            .as_ref()
+            .and_then(|cp| {
+                cp.tool_calls.iter().rev().find(|tc| {
+                    super::tool_dispatch::tool_call_is_verification(&tc.tool_name, &tc.arguments)
+                })
+            })
+            .is_some_and(|tc| tc.success);
+        last_verification_passed && matches!(self.credited_verification_summary(), Some((true, _)))
+    }
+
     /// Restore the best (last-green) snapshot after a failed run, VISIBLY.
     ///
     /// The restore used to log at `info!` only, while the run summary kept
@@ -1314,11 +1338,10 @@ impl Agent {
                 added, new_cap
             ),
         });
-        // next_state() already parked the loop in Failed; resume Executing
-        // with the counters as they stand (iteration now fits the new cap).
+        // next_state() already parked the loop in Failed WITHOUT consuming
+        // the refused slot; the resumed turn runs now, so it takes its slot.
         let step = self.loop_control.current_step();
-        let iteration = self.loop_control.current_iteration();
-        self.loop_control.restore_progress(step, iteration);
+        self.loop_control.resume_after_extension();
         Some(AgentState::Executing { step })
     }
 
@@ -1716,8 +1739,10 @@ impl Agent {
                                             "Planning hit a context-window overflow (attempt {}/{}) — hard-compressing before retry",
                                             planning_attempt, MAX_PLANNING_RETRIES
                                         );
-                                        self.messages =
-                                            self.compressor.hard_compress(&self.messages);
+                                        self.messages = self.compressor.hard_compress_with_task(
+                                            &self.messages,
+                                            self.current_task_text(),
+                                        );
                                         self.trim_message_history();
                                         continue;
                                     }
@@ -2320,7 +2345,9 @@ impl Agent {
                     // only make things worse.
                     if is_context_overflow_text(&error) {
                         warn!("Context overflow detected — hard-compressing before retry");
-                        self.messages = self.compressor.hard_compress(&self.messages);
+                        self.messages = self
+                            .compressor
+                            .hard_compress_with_task(&self.messages, self.current_task_text());
                         self.trim_message_history();
                     } else if error.contains("Visual assertion failed") {
                         // Visual assertion failure: provide specific recovery guidance
@@ -2454,6 +2481,34 @@ impl Agent {
                     // with the typed AUTO_CONTINUE_LIMIT reason rather than
                     // looping forever. Unproductive runs keep the existing
                     // typed MaxIterations failure unchanged.
+                    // The cap tripped right after a green verification that
+                    // covers every edit (e2e lowcap: cargo_test passed on the
+                    // last permitted iteration, then the run hard-failed and
+                    // rolled the files back). The work is done and verified —
+                    // run the SAME completion gate a completion claim runs,
+                    // and finish naturally if it accepts. The cap itself is
+                    // not loosened: no further model turn is granted.
+                    if reason == super::loop_control::MAX_ITERATIONS_STOP_REASON
+                        && self.cap_hit_with_fresh_green_verification()
+                        && self.check_completion_gate().await.is_none()
+                    {
+                        self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+                            decision: "cap_completion_gate".to_string(),
+                            detail: format!(
+                                "iteration cap {} reached right after a green verification covering every edit; completion gate accepted",
+                                self.loop_control.max_iterations()
+                            ),
+                        });
+                        record_state_transition("Failed", "Completed");
+                        if mode == LoopMode::NewTask {
+                            progress.finish_all();
+                        }
+                        self.finalize_natural_completion(task_description).await;
+                        if let Err(e) = self.complete_checkpoint() {
+                            warn!("Failed to save completed checkpoint: {}", e);
+                        }
+                        return Ok(());
+                    }
                     if reason == "Max iterations exceeded" {
                         if self.loop_control.auto_continue_count()
                             >= super::loop_control::MAX_AUTO_CONTINUES

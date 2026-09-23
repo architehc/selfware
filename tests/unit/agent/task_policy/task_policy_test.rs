@@ -28,6 +28,40 @@ fn fix_the_bug_classifies_mutation() {
     ));
 }
 
+/// e2e c40: the documentation task below was classified READ-ONLY because
+/// "Do not change any code other than adding comments" matched the global
+/// "do not change any" marker — so the run wrote nothing and ended
+/// NO_CHANGES with exit 0. A prohibition with an exception clause scopes the
+/// edit; it does not forbid editing.
+#[test]
+fn prohibition_with_exception_clause_does_not_make_a_task_read_only() {
+    let c40 = "Multi-step documentation task in this Rust repo. Do the steps in order.\n\
+        1. Read src/agent/context.rs in full.\n\
+        2. Read src/agent/compression.rs in full.\n\
+        3. Read src/agent/context_management.rs in full.\n\
+        4. Create docs/CONTEXT_NOTES.md containing one section per file (context.rs, compression.rs, context_management.rs). In each section list every `pub fn` / `pub async fn` defined in that file as a bullet: `name` (line N) - one-sentence description.\n\
+        5. In src/agent/context.rs, add a one-line `///` doc comment directly above every `pub fn` / `pub async fn` that does not already have a doc comment. Do not change any code other than adding comments.\n\
+        6. Finish with a short summary saying how many functions you documented in step 5 and how many bullets are in docs/CONTEXT_NOTES.md.\n\
+        Do not re-read a file you have already read unless you need to verify an edit.";
+    assert!(crate::agent::tool_dispatch::task_requires_mutation(c40));
+    assert!(
+        !task_is_read_only(c40),
+        "an exception-scoped prohibition must not flip an edit task read-only"
+    );
+    for scoped in [
+        "Update the README and summarize the result. Do not modify anything except README.md.",
+        "Fix the typo, then report back. Don't change anything besides the docs.",
+        "Add the tests and explain them. Do not edit any files apart from tests/.",
+    ] {
+        assert!(!task_is_read_only(scoped), "{scoped}");
+    }
+    // A genuine global prohibition still wins: the exception must sit in the
+    // SAME clause as the prohibition to scope it.
+    assert!(task_is_read_only(
+        "Review the parser and write a summary. Do not change any files. Report anything except style nits."
+    ));
+}
+
 #[test]
 fn retry_suppressed_envelope_kind_renders() {
     let msg = policy_envelope(
