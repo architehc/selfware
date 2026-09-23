@@ -22,6 +22,34 @@ pub(crate) use helpers::*;
 pub(crate) use spill::*;
 pub(crate) use trust_gate::*;
 
+/// What the workspace-stagnation guard tells a stalled model to do. It must
+/// never demand the deliverable outright: in c24 (24k context) trimming had
+/// dropped the file contents, and "change the deliverable" produced a
+/// CONTEXT_NOTES.md listing functions that do not exist. Progress means
+/// recording VERIFIED findings incrementally and reading narrowly.
+macro_rules! stagnation_recovery_guidance {
+    () => {
+        "Make progress that survives context trimming: record what you have verified so far \
+         in the deliverable (or a notes file) now, then append to it after each further file \
+         you read, instead of holding everything in context. Keep reads targeted -- use line \
+         ranges or grep for the exact symbols you need, not whole-file reads. Never write \
+         content you have not verified from the files: if information is missing, read that \
+         specific part first."
+    };
+}
+
+/// Guidance appended to the 20-call WORKSPACE_STAGNATION abort.
+pub(super) const STAGNATION_RECOVERY_GUIDANCE: &str = stagnation_recovery_guidance!();
+
+/// The one-time 10-call stall directive.
+pub(super) const STAGNATION_STALL_DIRECTIVE: &str = concat!(
+    "<selfware_system_directive>\n",
+    "STALL: 10 consecutive tool calls produced no workspace change and no passing verification. ",
+    stagnation_recovery_guidance!(),
+    " If the change is already complete, run the verification command.\n",
+    "</selfware_system_directive>"
+);
+
 impl Agent {
     /// Credit (or record the failure of) a verification tool call for the
     /// completion gate's StaleVerification check. Single accounting path for
@@ -830,7 +858,14 @@ impl Agent {
         let fingerprint = workspace_fingerprint(root);
         let green_verification =
             success && super::tool_dispatch::tool_call_is_verification(tool_name, args_str);
+        // A re-read of a file whose previous read result has left the
+        // context is recovery, not a read loop: it neither advances nor
+        // resets the streak (bounded per path). A re-read while the content
+        // is still in context counts as before.
+        let evicted_reread =
+            self.spend_evicted_reread_exemption(tool_name, args_str, |b| &mut b.stagnation);
         match (fingerprint, self.last_workspace_fingerprint) {
+            (Some(now), Some(prev)) if now == prev && evicted_reread => {}
             (Some(now), Some(prev)) if now == prev && !green_verification => {
                 self.stagnation_streak += 1;
             }
@@ -852,20 +887,87 @@ impl Agent {
                     PolicyKind::Stagnation,
                     true,
                     "10 consecutive tool calls with no workspace change",
-                    "<selfware_system_directive>\n\
-                 STALL: 10 consecutive tool calls produced no workspace change and no passing \
-                 verification. Your next action must change the deliverable or run the \
-                 verification command.\n\
-                 </selfware_system_directive>",
+                    STAGNATION_STALL_DIRECTIVE,
                 )));
         }
         if self.stagnation_streak >= 20 {
             anyhow::bail!(
                 "WORKSPACE_STAGNATION: 20 consecutive tool calls with no workspace change and no \
-                 passing verification — the run is not converging"
+                 passing verification — the run is not converging. {STAGNATION_RECOVERY_GUIDANCE}"
             );
         }
         Ok(())
+    }
+
+    /// The `path` of a `file_read` call, or `None` for any other tool.
+    fn file_read_path(tool_name: &str, args_str: &str) -> Option<String> {
+        if tool_name != "file_read" {
+            return None;
+        }
+        serde_json::from_str::<Value>(args_str)
+            .ok()?
+            .get("path")?
+            .as_str()
+            .map(str::to_string)
+    }
+
+    fn message_fingerprint(message: &crate::api::types::Message) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        message.role.hash(&mut hasher);
+        message.content.text_all().hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Record which message carries the latest successful `file_read`
+    /// result for its path. Call right after that message is pushed.
+    pub(super) fn record_file_read_result_message(&mut self, tool_name: &str, args_str: &str) {
+        let Some(path) = Self::file_read_path(tool_name, args_str) else {
+            return;
+        };
+        let Some(message) = self.messages.last() else {
+            return;
+        };
+        let fingerprint = Self::message_fingerprint(message);
+        self.read_result_fingerprints.insert(path, fingerprint);
+    }
+
+    /// True when `path` was read successfully earlier in this task but that
+    /// result is no longer in the message history unchanged: dropped by
+    /// trimming, cut by the per-message truncation, or folded into a
+    /// compaction summary. A path never read before is NOT evicted (a first
+    /// read is ordinary exploration and counts as usual).
+    pub(super) fn prior_read_evicted_from_context(&self, path: &str) -> bool {
+        let Some(&fingerprint) = self.read_result_fingerprints.get(path) else {
+            return false;
+        };
+        !self
+            .messages
+            .iter()
+            .any(|message| Self::message_fingerprint(message) == fingerprint)
+    }
+
+    /// Whether this call is a `file_read` re-read of a path whose previous
+    /// result left the context AND the selected guard still has exemption
+    /// budget for that path; when it does, one unit of that budget is spent.
+    pub(super) fn spend_evicted_reread_exemption(
+        &mut self,
+        tool_name: &str,
+        args_str: &str,
+        counter: impl Fn(&mut super::EvictedRereadBudget) -> &mut u32,
+    ) -> bool {
+        let Some(path) = Self::file_read_path(tool_name, args_str) else {
+            return false;
+        };
+        if !self.prior_read_evicted_from_context(&path) {
+            return false;
+        }
+        let budget = self.evicted_reread_budget.entry(path).or_default();
+        let spent = counter(budget);
+        if *spent >= super::EVICTED_REREAD_EXEMPTION_CAP {
+            return false;
+        }
+        *spent += 1;
+        true
     }
 
     /// Stagnation accounting at the agent's project root.
@@ -1179,8 +1281,16 @@ impl Agent {
                     .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|duration| duration.as_secs());
 
+                // The previous read's result left the context (trimmed or
+                // compacted): this re-read restores lost content and is not
+                // an "unchanged reread" -- neither counted nor nudged.
+                let args_str = args.to_string();
+                let evicted_reread = self
+                    .spend_evicted_reread_exemption(name, &args_str, |b| &mut b.unchanged_reread);
                 let mut unchanged_count = 0;
-                if let Some(state) = self.file_tracker.read_state.get_mut(&path_str) {
+                if evicted_reread {
+                    // Leave the tracked state as is (content unchanged).
+                } else if let Some(state) = self.file_tracker.read_state.get_mut(&path_str) {
                     if state.content_hash == content_hash
                         && state.last_modified == last_modified
                         && !self.file_tracker.stale_files.contains(&path_str)
@@ -3769,6 +3879,9 @@ impl Agent {
             // break out of the envelope or synthesize tool markup of its own.
             let formatted = Self::format_xml_tool_result(&result_to_store, success);
             self.messages.push(Message::user(formatted));
+        }
+        if success {
+            self.record_file_read_result_message(tool_name, args_str);
         }
     }
 

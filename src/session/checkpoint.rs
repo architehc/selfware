@@ -456,6 +456,17 @@ pub struct TaskCheckpoint {
     /// explicit `resume <id>`.
     #[serde(default)]
     pub project_root: Option<String>,
+    /// The repository HEAD commit (full sha) when this task STARTED. The
+    /// completion gate attributes committed work to the task only for
+    /// commits reachable from HEAD but not from this baseline
+    /// (`git log <baseline>..HEAD`) -- never by a commit-time window, which
+    /// credited a fixture the user committed seconds before starting
+    /// selfware as the agent's work (c24/c40 false VerifierTainted).
+    /// Set once at task creation and never changed; persisted so a resumed
+    /// task keeps the original baseline. `None` on legacy checkpoints and
+    /// outside a git repository -- the gate then counts no committed paths.
+    #[serde(default)]
+    pub task_start_head: Option<String>,
 }
 
 impl TaskCheckpoint {
@@ -495,6 +506,12 @@ impl TaskCheckpoint {
             (self.extensions_granted != base.extensions_granted).then_some(self.extensions_granted);
         let cumulative_iterations = (self.cumulative_iterations != base.cumulative_iterations)
             .then_some(self.cumulative_iterations);
+        if self.task_start_head != base.task_start_head {
+            // The baseline is write-once at task creation; the delta format
+            // does not carry it, so any transition forces a full write rather
+            // than silently dropping it on resume.
+            return None;
+        }
         if self.git_checkpoint != base.git_checkpoint && self.git_checkpoint.is_none() {
             // Delta format cannot encode "explicitly clear git checkpoint".
             // Force a full checkpoint write for this transition.
@@ -725,6 +742,7 @@ impl TaskCheckpoint {
                 .ok()
                 .and_then(|cwd| cwd.canonicalize().ok())
                 .map(|cwd| cwd.to_string_lossy().into_owned()),
+            task_start_head: None,
         }
     }
 
@@ -2329,6 +2347,16 @@ fn dirs_home() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// Full sha of the HEAD commit of the repository containing `path`
+/// (discovered upward, like `git` itself). `None` outside a repository or on
+/// an unborn HEAD. libgit2 -- no process spawn.
+pub fn capture_head_sha(path: &std::path::Path) -> Option<String> {
+    let repo = git2::Repository::discover(path).ok()?;
+    let head = repo.head().ok()?;
+    let commit = head.peel_to_commit().ok()?;
+    Some(commit.id().to_string())
 }
 
 /// Capture current git state for checkpoint

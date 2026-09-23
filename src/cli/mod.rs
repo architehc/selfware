@@ -814,9 +814,14 @@ async fn rollback_improve_tree(
     // 3. Commits the agent left on the branch (reported, not dropped: doing
     //    so would rewrite history the operator may have touched).
     if let Some(head) = &snapshot.pre_run_head {
+        // `<head>..HEAD`: commits made during the run. The bare
+        // `rev-list --count <head> HEAD` form counted the UNION of both
+        // histories (the whole repository), so a run that committed nothing
+        // still reported "the agent left N commit(s)".
+        let range = format!("{head}..HEAD");
         if let Ok(o) = run_gate_command(
             "git",
-            &["rev-list", "--count", head, "HEAD"],
+            &["rev-list", "--count", &range],
             project_root,
             Duration::from_secs(30),
         )

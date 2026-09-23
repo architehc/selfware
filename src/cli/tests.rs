@@ -2181,5 +2181,14 @@ fn improve_rollback_restores_pre_run_tree_in_a_real_repo() {
             porcelain, "M  a.txt\n?? user_untracked.md\n",
             "got: {porcelain}"
         );
+        // The agent made no commit: pre-existing history is never reported
+        // as commits the agent left behind (`rev-list --count <head> HEAD`
+        // counted the whole repository).
+        assert_eq!(
+            rollback.committed_since_head,
+            0,
+            "no commits since the pre-run HEAD: {}",
+            rollback.render()
+        );
     });
 }

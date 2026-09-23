@@ -2710,3 +2710,35 @@ fn w8a_incremental_save_cost_is_measured() {
         "an incremental save must stay cheap, measured {cached:?}"
     );
 }
+
+// The task's baseline HEAD (completion-gate commit attribution) survives a
+// save/resume round trip, is absent on legacy checkpoints, and is never
+// silently dropped by an incremental (delta) save.
+#[test]
+fn task_start_head_persists_and_defaults_to_none_on_legacy_checkpoints() {
+    let mut checkpoint = TaskCheckpoint::new("t_head".to_string(), "task".to_string());
+    assert_eq!(checkpoint.task_start_head, None);
+    checkpoint.task_start_head = Some("0123456789abcdef0123456789abcdef01234567".to_string());
+
+    let json = serde_json::to_value(&checkpoint).unwrap();
+    let restored: TaskCheckpoint = serde_json::from_value(json.clone()).unwrap();
+    assert_eq!(restored.task_start_head, checkpoint.task_start_head);
+
+    let mut legacy = json;
+    legacy.as_object_mut().unwrap().remove("task_start_head");
+    let legacy: TaskCheckpoint = serde_json::from_value(legacy).unwrap();
+    assert_eq!(legacy.task_start_head, None, "legacy: no baseline known");
+
+    let base = TaskCheckpoint::new("t_head".to_string(), "task".to_string());
+    let mut next = base.clone();
+    next.set_iteration(1);
+    assert!(
+        next.compute_delta(&base).is_some(),
+        "control: the same change without a baseline edit is a delta"
+    );
+    next.task_start_head = Some("abc1234".to_string());
+    assert!(
+        next.compute_delta(&base).is_none(),
+        "a baseline change forces a full save instead of a lossy delta"
+    );
+}

@@ -4253,6 +4253,246 @@ async fn stagnation_resets_on_workspace_change_and_verification() {
     server.stop().await;
 }
 
+// --- c24: evicted re-reads are recovery, not read loops. At 24k context,
+// trimming dropped the file contents; the model re-read them, the stagnation
+// guard counted every re-read, aborted 10x, and its "change the deliverable"
+// nudge produced a CONTEXT_NOTES.md listing functions that do not exist. ---
+
+/// Push a successful file_read result for `path` as the tool-result message
+/// and record it, exactly as `push_tool_result_message` does.
+fn push_read_result(agent: &mut Agent, path: &str, call_id: &str) -> String {
+    let args = serde_json::json!({ "path": path }).to_string();
+    agent.messages.push(crate::api::types::Message::tool(
+        serde_json::json!({ "path": path, "content": "pub fn a() {}\n", "total_lines": 1 })
+            .to_string(),
+        call_id,
+    ));
+    agent.record_file_read_result_message("file_read", &args);
+    args
+}
+
+async fn stagnation_agent(server: &MockLlmServer) -> Agent {
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.current_task_context =
+        "Create docs/NOTES.md listing every pub fn in src/agent/context.rs".to_string();
+    agent
+}
+
+#[tokio::test]
+async fn stagnation_does_not_count_reread_of_file_trimmed_out_of_context() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = stagnation_agent(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    let probe = r#"{"command":"python3 -c 'print(1)'"}"#;
+
+    let args = push_read_result(&mut agent, "src/agent/context.rs", "c1");
+    agent
+        .note_workspace_state_with_root(dir.path(), "shell_exec", probe, false)
+        .unwrap();
+    for _ in 0..5 {
+        agent
+            .note_workspace_state_with_root(dir.path(), "shell_exec", probe, false)
+            .unwrap();
+    }
+    assert_eq!(agent.stagnation_streak, 5);
+
+    // Context trimming drops the read result.
+    agent.messages.retain(|m| m.role != "tool");
+    assert!(agent.prior_read_evicted_from_context("src/agent/context.rs"));
+
+    // The re-read neither advances nor resets the streak.
+    agent
+        .note_workspace_state_with_root(dir.path(), "file_read", &args, true)
+        .unwrap();
+    assert_eq!(
+        agent.stagnation_streak, 5,
+        "a re-read of evicted content must not count toward stagnation"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn stagnation_counts_reread_while_content_is_still_in_context() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = stagnation_agent(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+
+    let args = push_read_result(&mut agent, "src/agent/context.rs", "c1");
+    assert!(!agent.prior_read_evicted_from_context("src/agent/context.rs"));
+    agent
+        .note_workspace_state_with_root(dir.path(), "file_read", &args, true)
+        .unwrap();
+    for _ in 0..3 {
+        agent
+            .note_workspace_state_with_root(dir.path(), "file_read", &args, true)
+            .unwrap();
+    }
+    assert_eq!(
+        agent.stagnation_streak, 3,
+        "re-reading content that is still in context is a genuine read loop"
+    );
+
+    // A genuine read loop still aborts at 20.
+    let mut aborted = None;
+    for _ in 0..20 {
+        if let Err(e) = agent.note_workspace_state_with_root(dir.path(), "file_read", &args, true) {
+            aborted = Some(e.to_string());
+            break;
+        }
+    }
+    let message = aborted.expect("an in-context re-read loop must still abort");
+    assert!(message.starts_with("WORKSPACE_STAGNATION"), "{message}");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn truncated_read_result_counts_as_evicted_and_exemption_is_bounded() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = stagnation_agent(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+
+    let args = push_read_result(&mut agent, "src/agent/compression.rs", "c1");
+    // Per-message truncation rewrites the result in place.
+    let last = agent.messages.last_mut().unwrap();
+    let cut: String = last.content.text_all().chars().take(10).collect();
+    last.content =
+        crate::api::types::MessageContent::Text(cut + "\n...[truncated to fit context budget]");
+    assert!(agent.prior_read_evicted_from_context("src/agent/compression.rs"));
+
+    agent
+        .note_workspace_state_with_root(dir.path(), "file_read", &args, true)
+        .unwrap();
+    // Each exempt re-read is immediately trimmed again: forgiven only up to
+    // the per-path cap, then counted — an evict/re-read cycle is a loop too.
+    // The call above spent one exemption; spend the rest of the cap.
+    for _ in 1..crate::agent::EVICTED_REREAD_EXEMPTION_CAP {
+        agent
+            .note_workspace_state_with_root(dir.path(), "file_read", &args, true)
+            .unwrap();
+    }
+    assert_eq!(agent.stagnation_streak, 0, "within the cap: not counted");
+    agent
+        .note_workspace_state_with_root(dir.path(), "file_read", &args, true)
+        .unwrap();
+    assert_eq!(agent.stagnation_streak, 1, "past the cap: counted again");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn stagnation_nudges_never_demand_an_unsupported_deliverable() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = stagnation_agent(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    let probe = r#"{"command":"python3 -c 'print(1)'"}"#;
+
+    let mut abort = None;
+    for _ in 0..25 {
+        if let Err(e) = agent.note_workspace_state_with_root(dir.path(), "shell_exec", probe, false)
+        {
+            abort = Some(e.to_string());
+            break;
+        }
+    }
+    let stall: String = agent
+        .messages
+        .iter()
+        .map(|m| m.content.text_all())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let abort = abort.expect("streak 20 aborts");
+    for text in [&stall, &abort] {
+        assert!(
+            !text.contains("must change the deliverable"),
+            "the nudge must not force a deliverable: {text}"
+        );
+        assert!(text.contains("line ranges"), "targeted reads: {text}");
+        assert!(
+            text.contains("append to it after each further file"),
+            "incremental notes: {text}"
+        );
+        assert!(
+            text.contains("Never write content you have not verified"),
+            "no fabrication: {text}"
+        );
+    }
+    assert!(stall.contains("STALL"));
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn progress_guard_does_not_count_reread_of_evicted_file() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = stagnation_agent(&server).await;
+    let read = |path: &str| {
+        vec![(
+            "file_read".to_string(),
+            serde_json::json!({ "path": path }).to_string(),
+            None,
+        )]
+    };
+
+    // First read: novel target.
+    agent.consecutive_read_only_steps = 5;
+    agent.update_read_only_step_tracking(&read("src/a.rs"), false);
+    push_read_result(&mut agent, "src/a.rs", "c1");
+    assert_eq!(agent.consecutive_read_only_steps, 4);
+
+    // Re-read while the content is still in context: redundant, counts.
+    agent.update_read_only_step_tracking(&read("src/a.rs"), false);
+    assert_eq!(agent.consecutive_read_only_steps, 5);
+
+    // Trimmed away, then re-read: not counted.
+    agent.messages.retain(|m| m.role != "tool");
+    agent.update_read_only_step_tracking(&read("src/a.rs"), false);
+    assert_eq!(
+        agent.consecutive_read_only_steps, 5,
+        "re-reading evicted content is not a redundant read"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn unchanged_reread_counter_ignores_reread_of_evicted_file() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = stagnation_agent(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("context.rs");
+    std::fs::write(&file, "pub fn a() {}\n").unwrap();
+    let path = file.to_string_lossy().into_owned();
+    let args = serde_json::json!({ "path": path });
+    let result =
+        serde_json::json!({ "path": path, "content": "pub fn a() {}\n", "total_lines": 1 })
+            .to_string();
+
+    // First read, recorded.
+    agent
+        .track_task_state_after_tool("file_read", &args, &result, true)
+        .await;
+    push_read_result(&mut agent, &path, "c1");
+    // Re-read in context: counted as an unchanged reread.
+    agent
+        .track_task_state_after_tool("file_read", &args, &result, true)
+        .await;
+    assert_eq!(agent.file_tracker.read_state[&path].unchanged_read_count, 1);
+
+    // Evicted, then re-read: not an unchanged reread.
+    agent.messages.retain(|m| m.role != "tool");
+    agent.pending_failure_hint = None;
+    agent
+        .track_task_state_after_tool("file_read", &args, &result, true)
+        .await;
+    assert_eq!(
+        agent.file_tracker.read_state[&path].unchanged_read_count, 1,
+        "a re-read restoring evicted content must not count as redundant"
+    );
+    assert!(
+        agent.pending_failure_hint.is_none(),
+        "no 'use the content already in context' hint when it is not in context"
+    );
+    server.stop().await;
+}
+
 // =========================================================================
 // Honest success accounting for tool results (error-key detection)
 // =========================================================================

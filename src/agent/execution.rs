@@ -621,9 +621,22 @@ impl Agent {
             }
         }
 
+        // A re-read of a file whose earlier result was trimmed/compacted out
+        // of the context restores lost content: it is not a redundant read,
+        // so the step neither advances nor relieves the streak (bounded per
+        // path by EVICTED_REREAD_EXEMPTION_CAP).
+        let mut has_evicted_reread = false;
+        if !has_novel_target {
+            for (name, args_str, _) in tool_calls {
+                if self.spend_evicted_reread_exemption(name, args_str, |b| &mut b.read_only_steps) {
+                    has_evicted_reread = true;
+                }
+            }
+        }
+
         if has_novel_target {
             self.consecutive_read_only_steps = self.consecutive_read_only_steps.saturating_sub(1);
-        } else {
+        } else if !has_evicted_reread {
             self.consecutive_read_only_steps += 1;
         }
     }

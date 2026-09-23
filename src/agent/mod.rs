@@ -466,6 +466,26 @@ struct FailedToolAttempt {
     error_preview: String,
 }
 
+/// Per-path budget of re-reads forgiven because the previous read's result
+/// had left the context (trimmed, truncated or compacted away). Each guard
+/// spends its own counter so no guard's accounting depends on call order.
+/// Capped at [`EVICTED_REREAD_EXEMPTION_CAP`] per guard per path: a model
+/// that keeps evicting and re-reading the same file is looping, not
+/// recovering, and the guards count it again once the budget is spent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct EvictedRereadBudget {
+    /// Spent by the workspace-stagnation streak.
+    stagnation: u32,
+    /// Spent by the unchanged-reread counter (redundant-reread block).
+    unchanged_reread: u32,
+    /// Spent by the read-only-step counter (progress guard).
+    read_only_steps: u32,
+}
+
+/// Re-reads of one path forgiven per guard after its content left the
+/// context. Matches the redundant-reread guard's own allowance of 3.
+pub(super) const EVICTED_REREAD_EXEMPTION_CAP: u32 = 3;
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct FileReadState {
     content_hash: u64,
@@ -844,6 +864,16 @@ pub struct Agent {
     stagnation_streak: usize,
     /// The 10-call stall directive fires once per task.
     stagnation_warned: std::sync::atomic::AtomicBool,
+    /// Fingerprint (hash of role + text) of the message that carries the
+    /// latest successful `file_read` result per path. A re-read whose
+    /// fingerprint no longer matches any message in `self.messages` is a
+    /// recovery from context trimming/compaction, not a read loop (c24:
+    /// trimming dropped file contents, the model re-read them, and the
+    /// stagnation guard forced a fabricated deliverable).
+    read_result_fingerprints: std::collections::HashMap<String, u64>,
+    /// Per-path exemption budget for evicted re-reads (see
+    /// [`EvictedRereadBudget`]).
+    evicted_reread_budget: std::collections::HashMap<String, EvictedRereadBudget>,
     /// Verification-deadline directive latch (loop 12): fires at most once
     /// per task, when 60% of the iteration budget is gone with no passing
     /// verification. Atomic to match the other per-task directive latches.
@@ -1640,6 +1670,8 @@ To call a tool, use this EXACT XML structure:
             last_workspace_fingerprint: None,
             stagnation_streak: 0,
             stagnation_warned: std::sync::atomic::AtomicBool::new(false),
+            read_result_fingerprints: std::collections::HashMap::new(),
+            evicted_reread_budget: std::collections::HashMap::new(),
             verification_deadline_directive_done: std::sync::atomic::AtomicBool::new(false),
             probe_pivot_done: std::sync::atomic::AtomicBool::new(false),
             probe_command_counts: std::collections::HashMap::new(),

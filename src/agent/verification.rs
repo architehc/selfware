@@ -1659,39 +1659,23 @@ impl Agent {
         }
     }
 
-    /// Paths changed by commits created during this run. A task whose final
+    /// Paths changed by commits created during this task. A task whose final
     /// step is `git commit` leaves a clean working tree, so `git diff HEAD`
     /// is empty even though the change landed; without this evidence the
-    /// EmptyDiff gate refuses the run forever. Only commits with a committer
-    /// date at or after the checkpoint's creation time count, so pre-existing
-    /// history is never mistaken for the agent's work. The `--since` bound
-    /// (with slack) is purely a performance guard; the per-commit timestamp
-    /// filter is authoritative.
+    /// EmptyDiff gate refuses the run forever.
+    ///
+    /// Attribution is by ancestry, never by time: only commits reachable
+    /// from HEAD but not from the task's recorded start HEAD
+    /// (`TaskCheckpoint::task_start_head`) count. The previous 60-second
+    /// commit-time window credited a fixture committed seconds before
+    /// selfware started as the agent's work (c24/c40: the whole tree,
+    /// `.github/*` included, tripped VerifierTainted x3 instead of the
+    /// honest EmptyDiff). No recorded baseline (legacy checkpoint, not a
+    /// repository at task start) means no committed paths.
     async fn committed_paths_for_completion_gate(&self) -> Option<Vec<String>> {
         let checkpoint = self.current_checkpoint.as_ref()?;
-        let run_start = checkpoint.created_at.timestamp();
-        let since = checkpoint.created_at - chrono::Duration::seconds(60);
         let root = super::current_project_root();
-        // Async process spawn — see diff_paths_for_completion_gate.
-        let output = tokio::process::Command::new("git")
-            .sanitized_env()
-            .args([
-                "log",
-                "-z",
-                "--pretty=format:%x01%ct",
-                "--name-only",
-                &format!("--since={}", since.to_rfc3339()),
-                "--",
-            ])
-            .current_dir(root)
-            .output()
-            .await
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Some(parse_git_log_z_output(&stdout, run_start))
+        committed_paths_since_baseline(&root, checkpoint.task_start_head.as_deref()).await
     }
 
     async fn mutation_completion_gate(&self) -> Option<String> {
@@ -3822,6 +3806,47 @@ fn build_requirements_audit_prompt(
             "Task instruction:\n{instruction}\n\nAgent's final summary:\n{summary}\n\nFiles changed: {files}{census_block}"
         )),
     ]
+}
+
+/// Paths touched by commits in `<baseline>..HEAD` under `root`: the commits
+/// made since the task started, whatever their timestamps. `Some(vec![])`
+/// when there is no baseline (conservative: nothing is attributed to the
+/// task) or the baseline is still HEAD; `None` when git cannot answer (the
+/// caller treats that as no committed paths as well).
+pub(crate) async fn committed_paths_since_baseline(
+    root: &Path,
+    baseline: Option<&str>,
+) -> Option<Vec<String>> {
+    let Some(baseline) = baseline else {
+        return Some(Vec::new());
+    };
+    // The baseline comes from libgit2, but it is persisted in a checkpoint
+    // file: accept only a hex object id so it can never become an option.
+    if baseline.len() < 7 || !baseline.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Some(Vec::new());
+    }
+    // Async process spawn -- see diff_paths_for_completion_gate.
+    let output = tokio::process::Command::new("git")
+        .sanitized_env()
+        .args([
+            "log",
+            "-z",
+            "--pretty=format:%x01%ct",
+            "--name-only",
+            &format!("{baseline}..HEAD"),
+            "--",
+        ])
+        .current_dir(root)
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Every listed commit is in range by construction; the parser's
+    // timestamp floor is disabled.
+    Some(parse_git_log_z_output(&stdout, i64::MIN))
 }
 
 pub(crate) fn parse_git_log_z_output(stdout: &str, run_start: i64) -> Vec<String> {

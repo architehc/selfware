@@ -331,10 +331,11 @@ mod completion_gate_tests {
     async fn mutation_task_agent(task: &str) -> Agent {
         let mut agent = Agent::new(test_config()).await.expect("agent should build");
         agent.current_task_context = task.to_string();
-        agent.current_checkpoint = Some(TaskCheckpoint::new(
-            "mutation_task".to_string(),
-            task.to_string(),
-        ));
+        let mut checkpoint = TaskCheckpoint::new("mutation_task".to_string(), task.to_string());
+        // Mirror `run_task`: the task's baseline HEAD is recorded at start.
+        checkpoint.task_start_head =
+            crate::checkpoint::capture_head_sha(&crate::tools::workspace_root::current_path());
+        agent.current_checkpoint = Some(checkpoint);
         agent
     }
 
@@ -942,6 +943,106 @@ mod completion_gate_tests {
             agent.mutation_completion_gate().await.is_none(),
             "work committed during the run must satisfy the EmptyDiff gate"
         );
+    }
+
+    // c24/c40 regression: the driver committed the fixture seconds before
+    // starting selfware; the 60 s commit-time window credited the whole tree
+    // (`.github/*`, src, tests) as the agent's committed work and the gate
+    // refused VerifierTainted x3 instead of the honest EmptyDiff. Commits
+    // made BEFORE the task started are never task work, however recent.
+    #[tokio::test]
+    async fn fixture_committed_just_before_task_start_is_not_task_work() {
+        let (_dir, _cwd) = git_repo(&[("README.md", "base\n")]);
+        // Committed "now" (seconds before the task starts), like the driver.
+        std::fs::create_dir_all(".github/workflows").unwrap();
+        std::fs::create_dir_all("src").unwrap();
+        std::fs::create_dir_all("tests").unwrap();
+        std::fs::write(".github/workflows/ci.yml", "on: push\n").unwrap();
+        std::fs::write("src/lib.rs", "pub fn f() {}\n").unwrap();
+        std::fs::write("tests/it.rs", "#[test] fn t() {}\n").unwrap();
+        git(Path::new("."), &["add", "-A"]);
+        git(Path::new("."), &["commit", "-q", "-m", "fixture"]);
+
+        let agent = mutation_task_agent("Fix the divide-by-zero bug in src/lib.rs").await;
+        let root = crate::agent::current_project_root();
+        let baseline = agent
+            .current_checkpoint
+            .as_ref()
+            .and_then(|cp| cp.task_start_head.clone());
+        assert!(baseline.is_some(), "task start must record the baseline");
+        assert_eq!(
+            committed_paths_since_baseline(&root, baseline.as_deref()).await,
+            Some(Vec::new()),
+            "a commit made before the task started is not the task's work"
+        );
+        let message = agent
+            .mutation_completion_gate()
+            .await
+            .expect("no task work: the gate must refuse");
+        assert!(
+            message.contains("EmptyDiff"),
+            "expected EmptyDiff (not VerifierTainted over the fixture), got: {message}"
+        );
+    }
+
+    // The ancestry range counts exactly the commits made during the task,
+    // even when a fixture was committed seconds before it started.
+    #[tokio::test]
+    async fn only_commits_made_during_the_task_are_counted() {
+        let (_dir, _cwd) = git_repo(&[("README.md", "base\n")]);
+        std::fs::write("fixture.py", "x = 1\n").unwrap();
+        git(Path::new("."), &["add", "-A"]);
+        git(Path::new("."), &["commit", "-q", "-m", "fixture"]);
+
+        let agent = mutation_task_agent("Fix the divide-by-zero bug in calc.py").await;
+        std::fs::write("calc.py", "def div(a, b):\n    return a / b\n").unwrap();
+        git(Path::new("."), &["add", "calc.py"]);
+        git(Path::new("."), &["commit", "-q", "-m", "fix"]);
+
+        let root = crate::agent::current_project_root();
+        let baseline = agent
+            .current_checkpoint
+            .as_ref()
+            .and_then(|cp| cp.task_start_head.clone());
+        assert_eq!(
+            committed_paths_since_baseline(&root, baseline.as_deref()).await,
+            Some(vec!["calc.py".to_string()]),
+            "only the agent's commit is attributed to the task"
+        );
+        assert!(
+            agent.mutation_completion_gate().await.is_none(),
+            "the agent's committed fix satisfies the EmptyDiff gate"
+        );
+    }
+
+    // A legacy checkpoint (no recorded baseline) must fall back
+    // conservatively: no committed paths, never a time window.
+    #[tokio::test]
+    async fn no_recorded_baseline_counts_no_committed_paths() {
+        let (_dir, _cwd) = git_repo(&[("README.md", "base\n")]);
+        let mut agent = mutation_task_agent("Fix the divide-by-zero bug in calc.py").await;
+        if let Some(cp) = agent.current_checkpoint.as_mut() {
+            cp.task_start_head = None;
+        }
+        std::fs::write("calc.py", "def div(a, b):\n    return a / b\n").unwrap();
+        git(Path::new("."), &["add", "calc.py"]);
+        git(Path::new("."), &["commit", "-q", "-m", "fix"]);
+
+        let root = crate::agent::current_project_root();
+        assert_eq!(
+            committed_paths_since_baseline(&root, None).await,
+            Some(Vec::new())
+        );
+        // A non-hex baseline (tampered checkpoint) is never passed to git.
+        assert_eq!(
+            committed_paths_since_baseline(&root, Some("--all")).await,
+            Some(Vec::new())
+        );
+        let message = agent
+            .mutation_completion_gate()
+            .await
+            .expect("without a baseline, committed work cannot be attributed");
+        assert!(message.contains("EmptyDiff"), "got: {message}");
     }
 
     #[tokio::test]

@@ -655,6 +655,8 @@ impl Agent {
         self.stagnation_streak = 0;
         self.stagnation_warned
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.read_result_fingerprints.clear();
+        self.evicted_reread_budget.clear();
         self.best_snapshot.clear();
         self.commit_mode_65_fired
             .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -732,7 +734,13 @@ impl Agent {
         self.current_checkpoint = None;
         if self.current_checkpoint.is_none() {
             let task_id = uuid::Uuid::new_v4().to_string();
-            self.current_checkpoint = Some(TaskCheckpoint::new(task_id, task.to_string()));
+            let mut checkpoint = TaskCheckpoint::new(task_id, task.to_string());
+            // Baseline for the completion gate's committed-work fallback:
+            // only commits made AFTER this point (`<baseline>..HEAD`) are
+            // the task's. Captured before any tool runs.
+            checkpoint.task_start_head =
+                crate::checkpoint::capture_head_sha(&crate::tools::workspace_root::current_path());
+            self.current_checkpoint = Some(checkpoint);
         }
         self.log_task_start_event(task);
         let learning_session_id = self
