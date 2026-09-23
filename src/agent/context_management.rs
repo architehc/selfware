@@ -381,17 +381,120 @@ impl Agent {
         (dropped_messages, actual_dropped_tokens)
     }
 
+    /// Index of the LATEST assistant turn that carries tool calls — the
+    /// pending/most recent call set whose arguments the model is most likely
+    /// to still reason about. Historical compaction never touches it.
+    fn latest_tool_call_turn(messages: &[Message]) -> Option<usize> {
+        messages.iter().rposition(|m| {
+            m.role == "assistant" && m.tool_calls.as_ref().is_some_and(|c| !c.is_empty())
+        })
+    }
+
+    /// Shrink the `function.arguments` of already-executed tool calls so the
+    /// request can fit `max_context_tokens`.
+    ///
+    /// `estimate_messages_tokens` counts every `tool_calls[].function.arguments`
+    /// string, but the text-only clamp never shrank them: one historical
+    /// `file_write` carrying a whole file kept the request over budget forever.
+    /// Calls are compacted largest-first until the request fits. Only the
+    /// argument string changes — `id`, `type` and `function.name` are kept,
+    /// so `tool_call` ↔ `tool_result` pairing is untouched — and the
+    /// replacement is always VALID JSON (see [`compact_tool_call_arguments`]).
+    ///
+    /// When `include_latest` is false, the latest tool-call turn
+    /// ([`Self::latest_tool_call_turn`]) is left verbatim. Historical
+    /// `reasoning_content` (never the latest turn's) is dropped first since
+    /// it is counted but not needed to continue the task.
+    ///
+    /// Returns the measured token total after compaction.
+    pub(crate) fn compact_tool_call_arguments_to_budget(
+        messages: &mut [Message],
+        max_context_tokens: usize,
+        include_latest: bool,
+    ) -> usize {
+        use crate::token_count::{estimate_content_tokens, estimate_messages_tokens};
+
+        let mut remaining = estimate_messages_tokens(messages);
+        if remaining <= max_context_tokens {
+            return remaining;
+        }
+        let latest = Self::latest_tool_call_turn(messages);
+        let last_idx = messages.len().saturating_sub(1);
+
+        if !include_latest {
+            for idx in 0..messages.len() {
+                if remaining <= max_context_tokens {
+                    break;
+                }
+                if Some(idx) == latest || idx == last_idx {
+                    continue;
+                }
+                if messages[idx].reasoning_content.take().is_some() {
+                    remaining = estimate_messages_tokens(messages);
+                }
+            }
+        }
+
+        // (message index, call index, argument tokens), largest first.
+        let mut candidates: Vec<(usize, usize, usize)> = messages
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| include_latest || Some(*idx) != latest)
+            .flat_map(|(idx, m)| {
+                m.tool_calls
+                    .iter()
+                    .flatten()
+                    .enumerate()
+                    .map(move |(call_idx, call)| {
+                        (
+                            idx,
+                            call_idx,
+                            estimate_content_tokens(&call.function.arguments),
+                        )
+                    })
+            })
+            .collect();
+        candidates.sort_by_key(|c| std::cmp::Reverse(c.2));
+
+        for (idx, call_idx, _) in candidates {
+            if remaining <= max_context_tokens {
+                break;
+            }
+            let Some(call) = messages[idx]
+                .tool_calls
+                .as_mut()
+                .and_then(|calls| calls.get_mut(call_idx))
+            else {
+                continue;
+            };
+            if let Some(compacted) = compact_tool_call_arguments(&call.function.arguments) {
+                call.function.arguments = compacted;
+                remaining = estimate_messages_tokens(messages);
+            }
+        }
+        remaining
+    }
+
     /// Hard clamp all messages to fit within `max_context_tokens`.
     /// Iteratively shrinks the largest message until the total estimated tokens
     /// is within `max_context_tokens` or cannot be shrunk further.
+    ///
+    /// Order: (1) compact historical tool-call arguments and reasoning,
+    /// (2) truncate the largest text contents, (3) as a last resort compact
+    /// the latest tool-call turn's arguments too (ids are kept, so pairing
+    /// survives). The caller must still re-measure: when even this cannot fit
+    /// the budget the request must not be dispatched (see
+    /// [`Self::fit_request_to_context_budget`]).
     pub(crate) fn hard_clamp_to_budget(messages: &mut [Message], max_context_tokens: usize) {
-        use super::context::estimate_message_tokens;
-        use crate::token_count::estimate_messages_tokens;
+        use crate::token_count::{estimate_content_tokens, estimate_messages_tokens};
 
         let mut remaining = estimate_messages_tokens(messages);
         if remaining <= max_context_tokens {
             return;
         }
+
+        remaining =
+            Self::compact_tool_call_arguments_to_budget(messages, max_context_tokens, false);
 
         // Run up to 10 iterations to prevent any possibility of infinite looping.
         for _ in 0..10 {
@@ -411,7 +514,10 @@ impl Agent {
                 .enumerate()
                 .filter(|(_, m)| m.content.text().len() > 50)
                 .max_by_key(|(_, m)| {
-                    let tokens = estimate_message_tokens(m);
+                    // Rank by TEXT tokens: this pass only shrinks text, so a
+                    // message whose weight is tool-call arguments must not
+                    // win the slot and stall the loop.
+                    let tokens = estimate_content_tokens(m.content.text());
                     if m.role == "system" {
                         tokens.saturating_sub(100)
                     } else {
@@ -424,7 +530,7 @@ impl Agent {
                 break;
             };
 
-            let current_tokens = estimate_message_tokens(&messages[idx]);
+            let current_tokens = estimate_content_tokens(messages[idx].content.text());
             if current_tokens <= 20 {
                 break;
             }
@@ -459,6 +565,56 @@ impl Agent {
             }
             remaining = new_remaining;
         }
+
+        // Last resort: the latest tool-call turn's arguments. Its ids are
+        // kept, so the pairing with its results survives; the placeholder is
+        // valid JSON naming what was elided.
+        if remaining > max_context_tokens {
+            Self::compact_tool_call_arguments_to_budget(messages, max_context_tokens, true);
+        }
+    }
+
+    /// Bring an assembled request within `max_context_tokens`, or refuse it.
+    ///
+    /// Runs the normal trim, then the hard clamp, re-applying the tool-call
+    /// pairing invariants after each. If the MEASURED total is still over
+    /// budget afterwards, returns the typed
+    /// [`crate::errors::ApiError::ContextOverflow`] instead of dispatching a
+    /// request the provider would reject: the execution loop routes that
+    /// error to its bounded compress-and-retry recovery
+    /// (`MAX_CONSECUTIVE_CONTEXT_OVERFLOW_RECOVERIES`).
+    pub(super) fn fit_request_to_context_budget(
+        mut request_messages: Vec<Message>,
+        max_context_tokens: usize,
+        checkpoint: Option<&crate::checkpoint::TaskCheckpoint>,
+    ) -> Result<Vec<Message>, crate::errors::ApiError> {
+        use crate::token_count::estimate_messages_tokens;
+
+        if estimate_messages_tokens(&request_messages) > max_context_tokens {
+            let anchor_idx = Self::find_task_anchor_index(&request_messages, checkpoint);
+            Self::trim_messages(&mut request_messages, max_context_tokens, anchor_idx);
+            request_messages = Self::apply_tool_call_pair_invariants(request_messages);
+        }
+
+        let measured = estimate_messages_tokens(&request_messages);
+        if measured > max_context_tokens {
+            tracing::warn!(
+                "Request messages ({} tokens) exceed context budget ({}); hard-clamping to budget",
+                measured,
+                max_context_tokens
+            );
+            Self::hard_clamp_to_budget(&mut request_messages, max_context_tokens);
+            request_messages = Self::apply_tool_call_pair_invariants(request_messages);
+        }
+
+        let measured = estimate_messages_tokens(&request_messages);
+        if measured > max_context_tokens {
+            return Err(crate::errors::ApiError::ContextOverflow(format!(
+                "assembled request is {measured} tokens after trimming and clamping, over the \
+                 {max_context_tokens}-token context budget; not dispatched"
+            )));
+        }
+        Ok(request_messages)
     }
 
     /// Trim the message history so total estimated tokens stay within
@@ -1094,6 +1250,78 @@ impl Agent {
 // =========================================================================
 // Tests
 // =========================================================================
+
+/// String values longer than this (in chars) are elided from compacted
+/// tool-call arguments; shorter ones (paths, names, flags) are kept verbatim.
+const COMPACT_ARG_MAX_STRING_CHARS: usize = 160;
+/// Chars of an elided string value kept as a hint of what it was.
+const COMPACT_ARG_PREFIX_CHARS: usize = 60;
+/// Array elements kept in compacted tool-call arguments.
+const COMPACT_ARG_MAX_ARRAY_ITEMS: usize = 16;
+/// Marker every elision carries (also makes compaction idempotent).
+const COMPACT_ARG_MARKER: &str = "[selfware: elided";
+
+fn compact_json_value(value: &mut Value) {
+    match value {
+        Value::String(s) => {
+            if s.contains(COMPACT_ARG_MARKER) {
+                return;
+            }
+            let chars = s.chars().count();
+            if chars > COMPACT_ARG_MAX_STRING_CHARS {
+                let prefix: String = s.chars().take(COMPACT_ARG_PREFIX_CHARS).collect();
+                *s = format!(
+                    "{prefix}... {COMPACT_ARG_MARKER} {chars} chars of an already-executed \
+                     tool call to fit the context budget]"
+                );
+            }
+        }
+        Value::Array(items) => {
+            let total = items.len();
+            if total > COMPACT_ARG_MAX_ARRAY_ITEMS {
+                items.truncate(COMPACT_ARG_MAX_ARRAY_ITEMS);
+                items.push(Value::String(format!(
+                    "{COMPACT_ARG_MARKER} {} more item(s) to fit the context budget]",
+                    total - COMPACT_ARG_MAX_ARRAY_ITEMS
+                )));
+            }
+            for item in items.iter_mut() {
+                compact_json_value(item);
+            }
+        }
+        Value::Object(map) => {
+            for (_, v) in map.iter_mut() {
+                compact_json_value(v);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Compact the JSON `arguments` string of an ALREADY-EXECUTED tool call.
+///
+/// Always yields valid JSON: large string values are replaced by a short
+/// prefix plus an elision marker, long arrays are cut, and small fields (a
+/// `path`, a `command` name, flags) are kept so the history still says what
+/// the call did. Unparseable arguments become a JSON object describing the
+/// elision. Returns `None` when compaction would not make the string shorter
+/// (already compact, or already compacted).
+pub(crate) fn compact_tool_call_arguments(arguments: &str) -> Option<String> {
+    let original_chars = arguments.chars().count();
+    let compacted = match serde_json::from_str::<Value>(arguments) {
+        Ok(mut value) => {
+            compact_json_value(&mut value);
+            serde_json::to_string(&value).ok()?
+        }
+        Err(_) => serde_json::json!({
+            "_selfware_elided": format!(
+                "{original_chars} chars of unparseable arguments of an already-executed tool call elided to fit the context budget"
+            )
+        })
+        .to_string(),
+    };
+    (compacted.chars().count() < original_chars).then_some(compacted)
+}
 
 #[cfg(test)]
 #[path = "../../tests/unit/agent/context_management/context_management_test.rs"]

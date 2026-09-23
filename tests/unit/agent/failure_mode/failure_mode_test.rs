@@ -334,6 +334,7 @@ async fn classify_max_iterations_when_no_clear_signal() {
 #[tokio::test]
 async fn write_artifact_emits_failure_mode_json() {
     let mode = FailureMode {
+        restored_files: Vec::new(),
         kind: FailureKind::ReadLoop,
         evidence: "ev".to_string(),
         advice: "ad".to_string(),
@@ -349,6 +350,7 @@ async fn write_artifact_emits_failure_mode_json() {
 #[test]
 fn cli_banner_uses_tag_and_evidence() {
     let mode = FailureMode {
+        restored_files: Vec::new(),
         kind: FailureKind::NontermProse,
         evidence: "30 consecutive prose-only turns".to_string(),
         advice: "try a smaller context budget".to_string(),
@@ -359,6 +361,7 @@ fn cli_banner_uses_tag_and_evidence() {
     assert!(banner.contains("smaller context"));
 
     let success = FailureMode {
+        restored_files: Vec::new(),
         kind: FailureKind::Success,
         evidence: "all good".to_string(),
         advice: "-".to_string(),
@@ -370,6 +373,7 @@ fn cli_banner_uses_tag_and_evidence() {
 #[test]
 fn failure_kind_serializes_to_json() {
     let mode = FailureMode {
+        restored_files: Vec::new(),
         kind: FailureKind::PrefillBreaker,
         evidence: "x".to_string(),
         advice: "y".to_string(),
@@ -499,6 +503,7 @@ async fn scattered_safety_blocks_do_not_relabel_a_real_timeout() {
 #[test]
 fn cli_banner_no_change_is_neither_success_nor_abort() {
     let m = FailureMode {
+        restored_files: Vec::new(),
         kind: FailureKind::NoChange,
         evidence: "e".to_string(),
         advice: "a".to_string(),
@@ -555,6 +560,7 @@ fn nonfailure_covers_success_and_no_change_only() {
     }
     // A NoChange banner must read as completed, never aborted.
     let m = FailureMode {
+        restored_files: Vec::new(),
         kind: FailureKind::NoChange,
         evidence: "e".to_string(),
         advice: "a".to_string(),
@@ -574,4 +580,71 @@ fn truncate_splits_at_char_boundaries() {
     // ASCII fallback.
     assert_eq!(truncate("hello", 10), "hello");
     assert_eq!(truncate("hello", 3), "hel…");
+}
+
+/// 24k-context e2e: a documentation task that REQUIRED edits spent 40/40
+/// iterations re-reading files (its only "mutating" calls were probes) and
+/// ended "✅ Completed — no file changes made (NO_CHANGES)", exit 0. On a
+/// mutation-required task that is a failure, not an honest no-op.
+#[tokio::test]
+async fn classify_mutation_task_with_probe_only_calls_is_required_edit_missing() {
+    let mut agent = make_agent().await;
+    agent.current_task_context =
+        "Update README.md to document every CLI flag with an example".to_string();
+    assert!(agent.current_task_requires_mutation(), "precondition");
+    agent.test_set_mutating_count(2);
+    agent.test_set_total_tool_calls(40);
+    agent.test_set_last_assistant_response("Task complete.".to_string());
+    seed_tool_call(&mut agent, "shell_exec", r#"{"command":"cargo doc"}"#);
+
+    let mode = FailureMode::classify(&agent, RunOutcome::NaturalCompletion);
+    assert_eq!(
+        mode.kind,
+        FailureKind::RequiredEditMissing,
+        "{}",
+        mode.evidence
+    );
+    assert!(!mode.kind.is_nonfailure(), "must not render as success");
+    assert_eq!(mode.kind.tag(), "NO_CHANGES_REQUIRED_EDIT");
+    assert!(
+        mode.evidence.contains("iterations used"),
+        "{}",
+        mode.evidence
+    );
+    let banner = mode.cli_banner();
+    assert!(banner.contains("❌"), "{banner}");
+    assert!(!banner.contains("✅"), "{banner}");
+}
+
+/// The same probe-only run on a task that does NOT require edits keeps the
+/// honest NoChange label (non-failure).
+#[tokio::test]
+async fn classify_probe_only_on_non_mutation_task_stays_no_change() {
+    let mut agent = make_agent().await;
+    agent.current_task_context = "What is the purpose of the scheduler module?".to_string();
+    assert!(!agent.current_task_requires_mutation(), "precondition");
+    agent.test_set_mutating_count(2);
+    agent.test_set_total_tool_calls(5);
+    seed_tool_call(&mut agent, "shell_exec", r#"{"command":"cargo doc"}"#);
+
+    let mode = FailureMode::classify(&agent, RunOutcome::NaturalCompletion);
+    assert_eq!(mode.kind, FailureKind::NoChange, "{}", mode.evidence);
+}
+
+#[test]
+fn restored_files_are_serialized_only_when_present() {
+    let mut mode = FailureMode {
+        restored_files: Vec::new(),
+        kind: FailureKind::MaxIterations,
+        evidence: "e".to_string(),
+        advice: "a".to_string(),
+    };
+    let json = serde_json::to_string(&mode).unwrap();
+    assert!(!json.contains("restored_files"), "{json}");
+    mode.restored_files = vec!["Cargo.toml".to_string()];
+    let json = serde_json::to_string(&mode).unwrap();
+    assert!(
+        json.contains(r#""restored_files":["Cargo.toml"]"#),
+        "{json}"
+    );
 }

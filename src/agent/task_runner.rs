@@ -277,6 +277,71 @@ pub(super) fn recovery_error_text(error: &anyhow::Error) -> String {
     error.to_string()
 }
 
+/// Suffix the run summary puts on a file the failed run rolled back.
+pub(super) const RESTORED_FILE_NOTE: &str = "(restored to best snapshot)";
+
+/// Sorted "files changed" list with every file the best-snapshot restore
+/// rolled back marked as such. A restored file is not silently listed as a
+/// change: its edits since the last green verification were undone. A
+/// restored path the tracker did not list is still named.
+pub(super) fn annotate_restored_files(mut files: Vec<String>, restored: &[String]) -> Vec<String> {
+    let same = |a: &str, b: &str| {
+        let (a, b) = (std::path::Path::new(a), std::path::Path::new(b));
+        a == b || a.ends_with(b) || b.ends_with(a)
+    };
+    for r in restored {
+        match files.iter_mut().find(|f| same(f, r)) {
+            Some(f) => *f = format!("{f} {RESTORED_FILE_NOTE}"),
+            None => files.push(format!("{r} {RESTORED_FILE_NOTE}")),
+        }
+    }
+    files.sort();
+    files
+}
+
+/// Combine the verification evidence into the run summary's
+/// `(overall passed, check count)` — see
+/// [`Agent::credited_verification_summary`]. `None` only when nothing ran.
+pub(super) fn credited_verification_verdict(
+    gate: Option<(bool, usize)>,
+    tool_passes: usize,
+    tool_failures: usize,
+    pass_covers_current_tree: bool,
+    blocking_failure: bool,
+) -> Option<(bool, usize)> {
+    let tool_checks = tool_passes + tool_failures;
+    if gate.is_none() && tool_checks == 0 {
+        return None;
+    }
+    let gate_passed = gate.is_none_or(|(passed, _)| passed);
+    let tools_passed = tool_checks == 0 || (tool_passes > 0 && pass_covers_current_tree);
+    let checks = gate.map_or(0, |(_, n)| n) + tool_checks;
+    Some((gate_passed && tools_passed && !blocking_failure, checks))
+}
+
+/// Turn a loop that returned `Ok` under a FAILURE verdict into a typed error.
+///
+/// Natural-completion and partial exits return `Ok(())` after classifying the
+/// run. When that classification is a failure (FakeComplete,
+/// RequiredEditMissing, MaxIterations, ...), reporting `Ok` rendered
+/// "outcome: completed" and exit 0 for a task that did not get done
+/// (AGENTS.md rule 3). Non-failure verdicts (`Success`, `NoChange`) and
+/// existing errors pass through unchanged.
+pub(super) fn failure_verdict_as_error(
+    result: Result<()>,
+    verdict: Option<&FailureMode>,
+) -> Result<()> {
+    match (result, verdict) {
+        (Ok(()), Some(fm)) if !fm.kind.is_nonfailure() => {
+            Err(crate::errors::AgentError::TaskFailed {
+                message: format!("task incomplete ({}): {}", fm.kind.tag(), fm.evidence),
+            }
+            .into())
+        }
+        (result, _) => result,
+    }
+}
+
 /// True when an `ErrorRecovery` error string is a context-window overflow
 /// (the typed `ApiError::ContextOverflow` display, or the client's
 /// pre-flight `CONTEXT OVERFLOW` log wording).
@@ -320,18 +385,19 @@ pub struct RunSummary {
 impl Agent {
     /// Snapshot the run state for the end-of-run summary.
     pub fn run_summary(&self) -> RunSummary {
-        let mut files_changed: Vec<String> =
-            self.file_tracker.stale_files.iter().cloned().collect();
-        files_changed.sort();
+        let files: Vec<String> = self.file_tracker.stale_files.iter().cloned().collect();
+        let restored: &[String] = self
+            .last_run_failure_mode
+            .as_ref()
+            .map(|fm| fm.restored_files.as_slice())
+            .unwrap_or(&[]);
+        let files_changed = annotate_restored_files(files, restored);
         RunSummary {
             iterations: self.loop_control.current_iteration(),
             max_iterations: self.loop_control.max_iterations(),
             budget_extended: self.loop_control.extension_was_used(),
             files_changed,
-            verification: self
-                .verification_gate
-                .last_results()
-                .map(|report| (report.overall_passed, report.checks.len())),
+            verification: self.credited_verification_summary(),
             total_tokens: self
                 .cumulative_token_usage
                 .total
@@ -350,6 +416,139 @@ impl Agent {
                 let stats = self.client.call_latency_stats();
                 (stats.call_count > 0).then_some(stats)
             },
+        }
+    }
+
+    /// The run summary's `verification:` value, built from the SAME evidence
+    /// the completion gate credits — not only the dedicated gate report.
+    ///
+    /// Previously this read `verification_gate.last_results()` alone, so a
+    /// run whose gate credited a shell `cargo test` said "verification: not
+    /// performed". Sources:
+    /// - the verification gate's last report (when one ran),
+    /// - every verification-shaped tool call in the checkpoint
+    ///   (`tool_call_is_verification`: `cargo_test`, shell `cargo test`,
+    ///   `pytest`, ...), passing or failing,
+    /// - the gate's freshness ledger: a pass only counts when it covers the
+    ///   current mutation sequence, and an outstanding in-scope failure
+    ///   (`verification_failures.blocking`) makes the result failed.
+    ///
+    /// Returns `None` ("not performed") only when no check ran at all. A pass
+    /// that edits have since outdated is reported as NOT passed: rendering
+    /// green for a check that does not cover the final tree would claim a
+    /// verification that was not performed on it (AGENTS.md rule 3).
+    pub(super) fn credited_verification_summary(&self) -> Option<(bool, usize)> {
+        let (tool_passes, tool_failures) = self
+            .current_checkpoint
+            .as_ref()
+            .map(|cp| {
+                cp.tool_calls
+                    .iter()
+                    .filter(|tc| {
+                        super::tool_dispatch::tool_call_is_verification(
+                            &tc.tool_name,
+                            &tc.arguments,
+                        )
+                    })
+                    .fold((0usize, 0usize), |(pass, fail), tc| {
+                        if tc.success {
+                            (pass + 1, fail)
+                        } else {
+                            (pass, fail + 1)
+                        }
+                    })
+            })
+            .unwrap_or((0, 0));
+        let gate = self
+            .verification_gate
+            .last_results()
+            .map(|report| (report.overall_passed, report.checks.len()));
+        credited_verification_verdict(
+            gate,
+            tool_passes,
+            tool_failures,
+            self.last_successful_verification_mutation_sequence >= self.mutation_sequence,
+            self.verification_failures
+                .blocking(&self.verification_task_root(), self.mutation_sequence)
+                .is_some(),
+        )
+    }
+
+    /// Restore the best (last-green) snapshot after a failed run, VISIBLY.
+    ///
+    /// The restore used to log at `info!` only, while the run summary kept
+    /// listing the rolled-back file under "files changed". Now it emits a
+    /// `TurnDecision { decision: "best_snapshot_restore" }` progress event,
+    /// prints a line, and records the restored files on the run's verdict so
+    /// the summary names them as restored.
+    async fn restore_best_snapshot_after_failure(&mut self) {
+        let paths = self.written_paths();
+        // Resolve identities BEFORE restoring: a restore can delete a file
+        // the run created, and only tracked identities are ever restored.
+        let tracked: std::collections::HashSet<std::path::PathBuf> =
+            self.best_snapshot.tracked_paths().into_iter().collect();
+        let candidates: Vec<(std::path::PathBuf, Option<std::path::PathBuf>)> = paths
+            .iter()
+            .filter_map(|p| {
+                let identity = super::best_snapshot::AgentSnapshot::identity(p).ok();
+                identity
+                    .as_ref()
+                    .is_some_and(|id| tracked.contains(id))
+                    .then(|| (p.clone(), identity))
+            })
+            .collect();
+        let outcome = self.best_snapshot.restore_written(&paths);
+        let error_text = outcome.as_ref().err().map(ToString::to_string);
+        let mut restored: Vec<String> = Vec::new();
+        for (path, identity) in candidates {
+            let failed = error_text.as_deref().is_some_and(|text| {
+                text.contains(&path.display().to_string())
+                    || identity
+                        .as_ref()
+                        .is_some_and(|id| text.contains(&id.display().to_string()))
+            });
+            let shown = path.display().to_string();
+            if !failed && !restored.contains(&shown) {
+                restored.push(shown);
+            }
+        }
+        restored.sort();
+
+        if !restored.is_empty() {
+            let detail = format!(
+                "restored {} file(s) to the best (last-green) snapshot after the failed run: {}",
+                restored.len(),
+                restored.join(", ")
+            );
+            warn!("{detail}");
+            cli_println!("↩ {detail}");
+            self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+                decision: "best_snapshot_restore".to_string(),
+                detail,
+            });
+        }
+        if let Some(text) = &error_text {
+            let detail = format!("best snapshot restore incomplete: {text}");
+            warn!("{detail}");
+            cli_println!("⚠ {detail}");
+            self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+                decision: "best_snapshot_restore_failed".to_string(),
+                detail,
+            });
+        }
+        if restored.is_empty() {
+            return;
+        }
+        if let Some(fm) = self.last_run_failure_mode.as_mut() {
+            fm.restored_files = restored;
+            // The verdict artifact was written before the restore; rewrite it
+            // so failure_mode.json also names what was rolled back.
+            let fm = fm.clone();
+            if let Some(dir) = self.failure_mode_artifact_dir() {
+                if let Err(e) = fm.write_artifact(&dir).await {
+                    warn!("Failed to rewrite failure_mode.json after restore: {e}");
+                }
+            }
         }
     }
 
@@ -1207,7 +1406,11 @@ impl Agent {
     }
 
     async fn run_execution_loop(&mut self, task_description: &str, mode: LoopMode) -> Result<()> {
+        // Each segment classifies its own outcome; a stale verdict from a
+        // previous segment must not decide this one's exit status.
+        self.last_run_failure_mode = None;
         let result = self.run_execution_loop_inner(task_description, mode).await;
+        let result = failure_verdict_as_error(result, self.last_run_failure_mode.as_ref());
         match &result {
             Ok(()) => {
                 // Carry the final answer (may be empty if it already streamed
@@ -1230,14 +1433,7 @@ impl Agent {
                     // Submit the best state, not the last state (six-model
                     // consult, Opus 5: a task 80% green at minute 30 submits
                     // a broken edit at minute 60 without this).
-                    let paths = self.written_paths();
-                    match self.best_snapshot.restore_written(&paths) {
-                        Ok(()) => info!(
-                            "restored best snapshot ({} files) after failed run",
-                            paths.len()
-                        ),
-                        Err(e2) => warn!("best snapshot restore failed: {e2}"),
-                    }
+                    self.restore_best_snapshot_after_failure().await;
                 }
                 self.publish_phi_failure_if_unfinished();
                 self.emit_terminal_event_once(AgentEvent::Error {
@@ -1602,8 +1798,11 @@ impl Agent {
                         Ok(PlannedToolExecution::Completed) => {
                             record_state_transition("Executing", "Completed");
                             let fm = self.finalize_natural_completion(task_description).await;
-                            {
-                                let _ = &fm;
+                            // A failure-classified completion (e.g. a required
+                            // edit never landed) must not emit `Completed`:
+                            // the wrapper turns it into a typed error and
+                            // emits the single terminal `Error` event.
+                            if fm.kind.is_nonfailure() {
                                 let message = self.last_assistant_response.trim().to_string();
                                 self.emit_terminal_event_once(AgentEvent::Completed { message });
                             }
@@ -2350,12 +2549,19 @@ impl Agent {
             .await;
         let (outcome, detail) = if fm.kind == FailureKind::Success {
             (Outcome::Success, format!("[green] [{}]", fm.kind.tag()))
-        } else {
-            // NoChange and other non-failure completions: completed cleanly but
-            // changed nothing — don't claim a full success.
+        } else if fm.kind.is_nonfailure() {
+            // NoChange: completed cleanly but changed nothing — don't claim a
+            // full success.
             (
                 Outcome::Partial,
                 format!("no file changes [{}]", fm.kind.tag()),
+            )
+        } else {
+            // A failure verdict on a natural completion (FakeComplete,
+            // RequiredEditMissing): the loop ended, the task did not.
+            (
+                Outcome::Failure,
+                format!("{} [{}]", fm.evidence, fm.kind.tag()),
             )
         };
         self.record_task_outcome(task_description, outcome, Some(&detail));

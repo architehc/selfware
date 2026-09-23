@@ -62,6 +62,14 @@ pub enum FailureKind {
     MaxIterations,
     /// Model emitted "Final answer:" without ever mutating a tool.
     FakeComplete,
+    /// The run ended (naturally, often on its last permitted iteration) on a
+    /// task that REQUIRED file changes, but no file change reached disk —
+    /// mutating-classified calls were only probes/builds/tests. This is the
+    /// failure twin of `NoChange`: a read-only task that changes nothing is
+    /// done; an edit task that changes nothing is not (24k-context e2e: a
+    /// documentation task spent 40/40 iterations re-reading files and
+    /// rendered "✅ Completed — no file changes made", exit 0).
+    RequiredEditMissing,
     /// Outcome could not be classified from available signals.
     Unknown,
 }
@@ -83,6 +91,7 @@ impl FailureKind {
             FailureKind::PermissionRequired => "PERMISSION_REQUIRED",
             FailureKind::MaxIterations => "MAX_ITERATIONS",
             FailureKind::FakeComplete => "FAKE_COMPLETE",
+            FailureKind::RequiredEditMissing => "NO_CHANGES_REQUIRED_EDIT",
             FailureKind::Unknown => "UNKNOWN",
         }
     }
@@ -111,6 +120,12 @@ pub struct FailureMode {
     pub kind: FailureKind,
     pub evidence: String,
     pub advice: String,
+    /// Files the failed run restored to the best (last-green) snapshot
+    /// after classification. Empty unless a restore actually happened; the
+    /// run summary names them so "files changed" never silently lists a
+    /// file whose edits were rolled back.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub restored_files: Vec<String>,
 }
 
 impl FailureMode {
@@ -150,6 +165,7 @@ impl FailureMode {
                 // fall through to the honest NoChange label below.
                 if mutating == 0 && has_final_answer_marker && !read_only {
                     return FailureMode {
+                        restored_files: Vec::new(),
                         kind: FailureKind::FakeComplete,
                         evidence: format!(
                             "model emitted 'Final answer' but performed 0 mutating tool calls across {} total calls",
@@ -166,6 +182,7 @@ impl FailureMode {
                 // a chatty no-op response were wrongly tagged Success.
                 if mutating == 0 && agent.current_task_requires_mutation() {
                     return FailureMode {
+                        restored_files: Vec::new(),
                         kind: FailureKind::FakeComplete,
                         evidence: format!(
                             "task required mutation but agent completed naturally with 0 mutating tool calls (total={})",
@@ -181,6 +198,7 @@ impl FailureMode {
                 // nothing, so it is NOT a REAL_EDIT; label it honestly.
                 if mutating == 0 {
                     return FailureMode {
+                        restored_files: Vec::new(),
                         kind: FailureKind::NoChange,
                         evidence: format!(
                             "completed naturally with 0 mutating tool calls ({} total) — no files changed",
@@ -196,7 +214,22 @@ impl FailureMode {
                 // no write-shaped shell command — label the run honestly as
                 // NoChange instead of crediting an edit that never landed.
                 if agent.written_paths().is_empty() && !agent.shell_write_evidence() {
+                    // On a task that REQUIRED edits, "no file reached disk"
+                    // is a failure, not an honest no-op: never render ✅.
+                    if agent.current_task_requires_mutation() {
+                        return FailureMode {
+                            restored_files: Vec::new(),
+                            kind: FailureKind::RequiredEditMissing,
+                            evidence: format!(
+                                "task required file changes but none reached disk: {mutating} mutating-classified call(s) were probes/builds, {total_calls} total, {}/{} iterations used",
+                                agent.current_iteration(),
+                                agent.loop_control.max_iterations()
+                            ),
+                            advice: "the model investigated without editing — name the exact file(s) and change to make, or raise the context budget if it kept re-reading files it could not hold".to_string(),
+                        };
+                    }
                     return FailureMode {
+                        restored_files: Vec::new(),
                         kind: FailureKind::NoChange,
                         evidence: format!(
                             "completed naturally; {mutating} mutating tool call(s) but no file reached disk ({total_calls} total)"
@@ -210,6 +243,7 @@ impl FailureMode {
                     ", 0 progress guards".to_string()
                 };
                 FailureMode {
+                    restored_files: Vec::new(),
                     kind: FailureKind::Success,
                     evidence: format!(
                         "{} mutating tool calls, {} total tool calls{}, completed naturally",
@@ -221,6 +255,7 @@ impl FailureMode {
             RunOutcome::Failed { reason } => {
                 if circuit_open || prefill_400s >= 3 {
                     return FailureMode {
+                        restored_files: Vec::new(),
                         kind: FailureKind::PrefillBreaker,
                         evidence: format!(
                             "{} prefill-incompatible 400s tripped the circuit breaker (open={})",
@@ -235,6 +270,7 @@ impl FailureMode {
                 // even though the ceiling was never approached — FAIL-MISLABEL-MAXITER).
                 if reason.contains("FAKE_COMPLETE_LOOP") {
                     return FailureMode {
+                        restored_files: Vec::new(),
                         kind: FailureKind::FakeComplete,
                         evidence: format!(
                             "aborted early: repeated final answers with 0 mutating tool calls ({} total)",
@@ -245,6 +281,7 @@ impl FailureMode {
                 }
                 if reason.contains("NONTERM_PROSE_NO_TOOL") {
                     return FailureMode {
+                        restored_files: Vec::new(),
                         kind: FailureKind::NontermProse,
                         evidence: "aborted early: repeated prose-only turns with no tool call".to_string(),
                         advice: "the model narrated instead of acting — ensure native tool-calling works and give a concrete single-goal task; do NOT raise max_iterations".to_string(),
@@ -252,6 +289,7 @@ impl FailureMode {
                 }
                 if reason.contains("READ_LOOP_NO_EDIT") {
                     return FailureMode {
+                        restored_files: Vec::new(),
                         kind: FailureKind::ReadLoop,
                         evidence: "aborted early: read-only tool loop on a mutation task with 0 edits".to_string(),
                         advice: "the model kept reading without editing — point it at the file to change; do NOT raise max_iterations".to_string(),
@@ -269,6 +307,7 @@ impl FailureMode {
                 // other explicit loop-abort markers above.
                 if reason.contains("requires confirmation but running in non-interactive mode") {
                     return FailureMode {
+                        restored_files: Vec::new(),
                         kind: FailureKind::PermissionRequired,
                         evidence: format!(
                             "run stopped: a tool call required interactive approval unavailable in this mode ({} total tool calls, {} mutating)",
@@ -302,6 +341,7 @@ impl FailureMode {
                     || reason.to_lowercase().contains("token budget")
                 {
                     return FailureMode {
+                        restored_files: Vec::new(),
                         kind: FailureKind::BudgetExhausted,
                         evidence: format!(
                             "token budget exhausted with {} mutating tool calls completed",
@@ -312,6 +352,7 @@ impl FailureMode {
                 }
                 if reason.to_lowercase().contains("timeout") || reason.contains("wall-clock") {
                     return FailureMode {
+                        restored_files: Vec::new(),
                         kind: FailureKind::Timeout,
                         evidence: format!(
                             "wall-clock time budget exhausted with {} mutating tool calls completed",
@@ -325,6 +366,7 @@ impl FailureMode {
                     || reason.starts_with("internal:")
                 {
                     return FailureMode {
+                        restored_files: Vec::new(),
                         kind: FailureKind::SelfwareError,
                         evidence: format!("selfware-side error: {}", truncate(&reason, 160)),
                         advice: "file a bug with the trace attached; this is not a model failure"
@@ -378,6 +420,11 @@ impl FailureMode {
             // Completed, but made no edits — honest neutral banner, not a
             // "successfully (REAL_EDIT)" claim and not an abort.
             format!("✅ Completed — no file changes made ({})", self.kind.tag())
+        } else if matches!(self.kind, FailureKind::RequiredEditMissing) {
+            format!(
+                "❌ Task incomplete — required file changes were not made ({})",
+                self.kind.tag()
+            )
         } else {
             format!("❌ Task aborted ({})", self.kind.tag())
         };
@@ -421,6 +468,7 @@ fn safety_blocked_share(agent: &Agent) -> Option<(usize, usize)> {
 
 fn blocked_by_safety_failure(blocked: usize, window: usize) -> FailureMode {
     FailureMode {
+        restored_files: Vec::new(),
         kind: FailureKind::BlockedBySafety,
         evidence: format!(
             "safety policy refused {} of the last {} failed tool call(s); the run burned its budget with no way forward",
@@ -451,6 +499,7 @@ fn classify_max_iter_failure(
     // 1) Prose-only termination.
     if no_action_consecutive >= super::recovery::MAX_NO_ACTION_PROMPTS && mutating == 0 {
         return FailureMode {
+            restored_files: Vec::new(),
             kind: FailureKind::NontermProse,
             evidence: format!(
                 "{} consecutive prose-only turns; model emitted {}KB of text without tool calls",
@@ -464,6 +513,7 @@ fn classify_max_iter_failure(
     // 2) Read-loop: progress guard fired and no edits ever landed.
     if progress_guard > 0 && mutating == 0 {
         return FailureMode {
+            restored_files: Vec::new(),
             kind: FailureKind::ReadLoop,
             evidence: format!(
                 "progress guard fired {} time(s); {} read/verify calls but 0 mutating calls",
@@ -477,6 +527,7 @@ fn classify_max_iter_failure(
     // 3) Retry-loop: tools were permanently blocked after repeated failures.
     if permanently_blocked >= 1 {
         return FailureMode {
+            restored_files: Vec::new(),
             kind: FailureKind::RetryLoop,
             evidence: format!(
                 "{} tool call(s) hard-blocked after repeated failures (mutating={}, total={})",
@@ -491,6 +542,7 @@ fn classify_max_iter_failure(
     // expected, so fall through to the honest MaxIterations label.
     if !read_only && mutating == 0 && final_answer_len > 0 {
         return FailureMode {
+            restored_files: Vec::new(),
             kind: FailureKind::FakeComplete,
             evidence: format!(
                 "model produced {}B of final answer text but executed 0 mutating calls",
@@ -502,6 +554,7 @@ fn classify_max_iter_failure(
 
     // 5) Otherwise: max iterations with no clear discriminator.
     FailureMode {
+        restored_files: Vec::new(),
         kind: FailureKind::MaxIterations,
         evidence: format!(
             "max_iterations reached with {} mutating, {} total tool calls",

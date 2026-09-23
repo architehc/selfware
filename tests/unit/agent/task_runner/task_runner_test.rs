@@ -2602,6 +2602,243 @@ async fn adaptive_budget_aborts_without_progress_signals() {
     server.stop().await;
 }
 
+// =========================================================================
+// Honest terminal outcome (24k e2e: NO_CHANGES rendered as success, exit 0)
+// =========================================================================
+
+fn verdict(kind: FailureKind) -> FailureMode {
+    FailureMode {
+        restored_files: Vec::new(),
+        kind,
+        evidence: "ev".to_string(),
+        advice: "ad".to_string(),
+    }
+}
+
+#[test]
+fn failure_verdict_turns_ok_into_typed_error() {
+    let fm = verdict(FailureKind::RequiredEditMissing);
+    let err = failure_verdict_as_error(Ok(()), Some(&fm)).expect_err("failure verdict");
+    let text = err.to_string();
+    assert!(text.contains("NO_CHANGES_REQUIRED_EDIT"), "{text}");
+    assert!(
+        matches!(
+            err.downcast_ref::<crate::errors::AgentError>(),
+            Some(crate::errors::AgentError::TaskFailed { .. })
+        ),
+        "typed AgentError::TaskFailed: {err:?}"
+    );
+    for kind in [
+        FailureKind::FakeComplete,
+        FailureKind::MaxIterations,
+        FailureKind::ReadLoop,
+    ] {
+        assert!(failure_verdict_as_error(Ok(()), Some(&verdict(kind))).is_err());
+    }
+}
+
+#[test]
+fn nonfailure_verdicts_and_errors_pass_through() {
+    assert!(failure_verdict_as_error(Ok(()), None).is_ok());
+    assert!(failure_verdict_as_error(Ok(()), Some(&verdict(FailureKind::Success))).is_ok());
+    assert!(failure_verdict_as_error(Ok(()), Some(&verdict(FailureKind::NoChange))).is_ok());
+    let original = failure_verdict_as_error(
+        Err(anyhow::anyhow!("Agent failed: boom")),
+        Some(&verdict(FailureKind::Success)),
+    )
+    .unwrap_err();
+    assert_eq!(original.to_string(), "Agent failed: boom");
+}
+
+/// End to end: a task that requires edits and ends without one must not
+/// return Ok (which the CLI renders as "outcome: completed", exit 0).
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn run_task_without_required_edit_is_not_reported_as_success() {
+    let mut builder = MockLlmServer::builder().with_response(
+        r#"<tool>
+<name>file_read</name>
+<arguments>{"path":"./Cargo.toml"}</arguments>
+</tool>"#,
+    );
+    for _ in 0..12 {
+        builder = builder.with_response("Task complete. The documentation is fine as is.");
+    }
+    let server = builder.build().await;
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.agent.max_iterations = 4;
+    let mut agent = Agent::new(config).await.unwrap();
+    let result = agent
+        .run_task("Update README.md to document every CLI flag with an example")
+        .await;
+    let fm = agent
+        .last_run_failure_mode()
+        .expect("every run end is classified")
+        .clone();
+    assert!(
+        !fm.kind.is_nonfailure(),
+        "a required edit that never landed is a failure verdict: {:?} {}",
+        fm.kind,
+        fm.evidence
+    );
+    assert!(
+        result.is_err(),
+        "a failure verdict must not return Ok (exit 0): verdict {:?}",
+        fm.kind
+    );
+    server.stop().await;
+}
+
+#[test]
+fn restored_files_are_named_in_files_changed() {
+    let files = vec!["src/lib.rs".to_string(), "Cargo.toml".to_string()];
+    let annotated = annotate_restored_files(
+        files,
+        &["Cargo.toml".to_string(), "new_file.rs".to_string()],
+    );
+    assert_eq!(
+        annotated,
+        vec![
+            format!("Cargo.toml {RESTORED_FILE_NOTE}"),
+            format!("new_file.rs {RESTORED_FILE_NOTE}"),
+            "src/lib.rs".to_string(),
+        ]
+    );
+    // Relative/absolute aliases of the same file match.
+    let annotated = annotate_restored_files(
+        vec!["Cargo.toml".to_string()],
+        &["/w/proj/Cargo.toml".into()],
+    );
+    assert_eq!(annotated, vec![format!("Cargo.toml {RESTORED_FILE_NOTE}")]);
+    // No restore: unchanged, sorted.
+    assert_eq!(
+        annotate_restored_files(vec!["b".into(), "a".into()], &[]),
+        vec!["a".to_string(), "b".to_string()]
+    );
+}
+
+/// A failed run's best-snapshot restore is visible: the verdict names the
+/// restored file and the run summary marks it instead of listing it as a
+/// plain change.
+#[tokio::test]
+async fn best_snapshot_restore_is_named_in_run_summary() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = Agent::new(mock_agent_config(format!("{}/v1", server.url()), false))
+        .await
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("Cargo.toml");
+    std::fs::write(&file, "green = true\n").unwrap();
+    let path_str = file.display().to_string();
+
+    // A file_write the agent made, a green snapshot, then a broken edit.
+    let mut cp = TaskCheckpoint::new("t-restore".to_string(), "task".to_string());
+    cp.log_tool_call(ToolCallLog {
+        timestamp: Utc::now(),
+        tool_name: "file_write".to_string(),
+        arguments: serde_json::json!({ "path": path_str }).to_string(),
+        result: Some("ok".to_string()),
+        success: true,
+        duration_ms: Some(1),
+    });
+    agent.current_checkpoint = Some(cp);
+    agent
+        .best_snapshot
+        .snapshot_written(std::slice::from_ref(&file))
+        .unwrap();
+    let paths = [file.clone()];
+    agent.best_snapshot.before_mutation(&paths).unwrap();
+    std::fs::write(&file, "broken = true\n").unwrap();
+    agent.best_snapshot.after_mutation(&paths).unwrap();
+    agent.file_tracker.mark_written(&path_str);
+    agent.last_run_failure_mode = Some(verdict(FailureKind::MaxIterations));
+
+    agent.restore_best_snapshot_after_failure().await;
+
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "green = true\n");
+    assert_eq!(
+        agent.last_run_failure_mode.as_ref().unwrap().restored_files,
+        vec![path_str.clone()]
+    );
+    let summary = agent.run_summary();
+    assert_eq!(
+        summary.files_changed,
+        vec![format!("{path_str} {RESTORED_FILE_NOTE}")],
+        "the restored file is named as restored, not as a plain change"
+    );
+    server.stop().await;
+}
+
+#[test]
+fn credited_verification_verdict_combines_gate_and_tool_evidence() {
+    // Nothing ran at all: honest "not performed".
+    assert_eq!(credited_verification_verdict(None, 0, 0, true, false), None);
+    // A shell `cargo test` the gate credited: passed, 1 check.
+    assert_eq!(
+        credited_verification_verdict(None, 1, 0, true, false),
+        Some((true, 1))
+    );
+    // Pass outdated by later edits: not green.
+    assert_eq!(
+        credited_verification_verdict(None, 1, 0, false, false),
+        Some((false, 1))
+    );
+    // Outstanding in-scope failure blocks green.
+    assert_eq!(
+        credited_verification_verdict(None, 1, 1, true, true),
+        Some((false, 2))
+    );
+    // Only failures ran.
+    assert_eq!(
+        credited_verification_verdict(None, 0, 1, true, true),
+        Some((false, 1))
+    );
+    // Gate report combines with tool evidence.
+    assert_eq!(
+        credited_verification_verdict(Some((true, 3)), 1, 0, true, false),
+        Some((true, 4))
+    );
+    assert_eq!(
+        credited_verification_verdict(Some((false, 3)), 1, 0, true, false),
+        Some((false, 4))
+    );
+    assert_eq!(
+        credited_verification_verdict(Some((true, 2)), 0, 0, true, false),
+        Some((true, 2)),
+        "gate-only runs keep their previous rendering"
+    );
+}
+
+/// A run whose completion evidence was a shell `cargo test` no longer says
+/// "verification: not performed".
+#[tokio::test]
+async fn run_summary_verification_credits_shell_cargo_test() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = Agent::new(mock_agent_config(format!("{}/v1", server.url()), false))
+        .await
+        .unwrap();
+    let mut cp = TaskCheckpoint::new("t-verify".to_string(), "task".to_string());
+    cp.log_tool_call(ToolCallLog {
+        timestamp: Utc::now(),
+        tool_name: "shell_exec".to_string(),
+        arguments: r#"{"command":"cargo test --lib"}"#.to_string(),
+        result: Some("test result: ok. 12 passed".to_string()),
+        success: true,
+        duration_ms: Some(10),
+    });
+    agent.current_checkpoint = Some(cp);
+    assert_eq!(agent.run_summary().verification, Some((true, 1)));
+
+    // An edit after the pass outdates it: not rendered green.
+    agent.mutation_sequence = 3;
+    agent.last_successful_verification_mutation_sequence = 2;
+    assert_eq!(agent.run_summary().verification, Some((false, 1)));
+    server.stop().await;
+}
+
 #[tokio::test]
 async fn run_summary_reflects_tracked_state_honestly() {
     let server = MockLlmServer::builder().with_response("done").build().await;

@@ -297,28 +297,15 @@ impl Agent {
         request_messages = Agent::apply_tool_call_pair_invariants(request_messages);
 
         // Ensure the fully-assembled request (including injected hints, project tree, and RAG)
-        // stays strictly within the context budget so small context windows (24k/40k) never overflow.
-        if crate::token_count::estimate_messages_tokens(&request_messages) > self.max_context_tokens
-        {
-            let anchor_idx =
-                Self::find_task_anchor_index(&request_messages, self.current_checkpoint.as_ref());
-            Self::trim_messages(&mut request_messages, self.max_context_tokens, anchor_idx);
-            request_messages = Agent::apply_tool_call_pair_invariants(request_messages);
-        }
-
-        // Final size check: guarantee the assembled payload never exceeds max_context_tokens.
-        // If an oversized system message or injected context still exceeds the budget,
-        // hard-clamp it before dispatching to the provider.
-        if crate::token_count::estimate_messages_tokens(&request_messages) > self.max_context_tokens
-        {
-            tracing::warn!(
-                "Request messages ({} tokens) exceed context budget ({}); hard-clamping to budget",
-                crate::token_count::estimate_messages_tokens(&request_messages),
-                self.max_context_tokens
-            );
-            Self::hard_clamp_to_budget(&mut request_messages, self.max_context_tokens);
-            request_messages = Agent::apply_tool_call_pair_invariants(request_messages);
-        }
+        // stays strictly within the context budget so small context windows (24k/40k) never
+        // overflow: trim, then hard-clamp (text AND historical tool-call arguments). If the
+        // measured payload is STILL over budget, do not dispatch — return the typed
+        // ContextOverflow so the loop's bounded compress-and-retry recovery handles it.
+        request_messages = Self::fit_request_to_context_budget(
+            request_messages,
+            self.max_context_tokens,
+            self.current_checkpoint.as_ref(),
+        )?;
 
         // Captured per-call metadata (request body, finish_reason, tokens,
         // elapsed_ms) — populated by whichever branch makes the actual call.

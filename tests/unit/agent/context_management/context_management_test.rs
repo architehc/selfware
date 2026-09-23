@@ -2327,3 +2327,170 @@ async fn test_hard_clamp_to_budget_ensures_strict_context_bound() {
 
     server.stop().await;
 }
+
+// ---------------------------------------------------------------------------
+// Tool-call arguments participate in the context clamp
+// ---------------------------------------------------------------------------
+
+fn assistant_call_with_args(id: &str, name: &str, arguments: String) -> Message {
+    let mut message = assistant_tool_call(id, name);
+    message.tool_calls.as_mut().unwrap()[0].function.arguments = arguments;
+    message
+}
+
+fn huge_file_write_args(path: &str, chars: usize) -> String {
+    let body: String = (0..chars / 6).map(|i| format!("w{i:04} ")).collect();
+    serde_json::json!({ "path": path, "content": body }).to_string()
+}
+
+#[test]
+fn compact_tool_call_arguments_keeps_small_fields_and_yields_valid_json() {
+    let args = huge_file_write_args("docs/GUIDE.md", 60_000);
+    let compacted = super::compact_tool_call_arguments(&args).expect("must shrink");
+    assert!(
+        compacted.len() < 1_000,
+        "compacted to {} chars",
+        compacted.len()
+    );
+    let value: serde_json::Value =
+        serde_json::from_str(&compacted).expect("compacted arguments must be valid JSON");
+    assert_eq!(value["path"], "docs/GUIDE.md", "small fields are kept");
+    let content = value["content"].as_str().unwrap();
+    assert!(
+        content.contains("[selfware: elided"),
+        "marker present: {content}"
+    );
+    assert!(content.contains("chars"), "elided size is named: {content}");
+    // Idempotent: an already-compacted argument string does not shrink again.
+    assert_eq!(super::compact_tool_call_arguments(&compacted), None);
+    // Already-small arguments are left alone.
+    assert_eq!(
+        super::compact_tool_call_arguments(r#"{"path":"a.rs"}"#),
+        None
+    );
+}
+
+#[test]
+fn compact_tool_call_arguments_handles_unparseable_and_arrays() {
+    let garbage = format!("{{\"path\": \"x\", \"content\": \"{}", "z".repeat(5_000));
+    let compacted = super::compact_tool_call_arguments(&garbage).expect("must shrink");
+    let value: serde_json::Value =
+        serde_json::from_str(&compacted).expect("placeholder must be valid JSON");
+    assert!(value["_selfware_elided"]
+        .as_str()
+        .unwrap()
+        .contains("unparseable"));
+
+    let many: Vec<String> = (0..200).map(|i| format!("file_{i}.rs")).collect();
+    let args = serde_json::json!({ "paths": many }).to_string();
+    let compacted = super::compact_tool_call_arguments(&args).expect("must shrink");
+    let value: serde_json::Value = serde_json::from_str(&compacted).unwrap();
+    let paths = value["paths"].as_array().unwrap();
+    assert_eq!(paths.len(), 17, "16 kept + one elision marker");
+    assert!(paths[16].as_str().unwrap().contains("184 more item(s)"));
+}
+
+/// The e2e failure: a historical assistant turn with a huge `file_write`
+/// argument kept the request over budget because the clamp only shrank
+/// message text. The clamp must now compact that argument (valid JSON,
+/// path kept) and leave the pairing and the latest turn intact.
+#[test]
+fn hard_clamp_compacts_historical_tool_call_arguments() {
+    let latest_args = r#"{"path":"src/lib.rs"}"#.to_string();
+    let mut msgs = vec![
+        Message::system("system prompt"),
+        Message::user("Document the crate"),
+        assistant_call_with_args(
+            "call_old",
+            "file_write",
+            huge_file_write_args("docs/GUIDE.md", 80_000),
+        ),
+        Message::tool("wrote docs/GUIDE.md", "call_old"),
+        assistant_call_with_args("call_new", "file_read", latest_args.clone()),
+        Message::tool("fn main() {}", "call_new"),
+    ];
+    let budget = 2_000;
+    assert!(crate::token_count::estimate_messages_tokens(&msgs) > budget);
+
+    Agent::hard_clamp_to_budget(&mut msgs, budget);
+
+    let total = crate::token_count::estimate_messages_tokens(&msgs);
+    assert!(total <= budget, "clamp must fit the budget, got {total}");
+    assert_eq!(msgs.len(), 6, "no message is dropped by the clamp");
+    let old = &msgs[2].tool_calls.as_ref().unwrap()[0];
+    assert_eq!(old.id, "call_old", "tool-call id preserved for pairing");
+    assert_eq!(old.function.name, "file_write");
+    let value: serde_json::Value = serde_json::from_str(&old.function.arguments)
+        .expect("compacted historical arguments must be valid JSON");
+    assert_eq!(value["path"], "docs/GUIDE.md");
+    assert_eq!(
+        msgs[4].tool_calls.as_ref().unwrap()[0].function.arguments,
+        latest_args,
+        "the latest tool-call turn is not touched when history suffices"
+    );
+    assert_valid_tool_pairing(&msgs);
+    let kept = Agent::apply_tool_call_pair_invariants(msgs.clone());
+    assert_eq!(
+        kept.len(),
+        msgs.len(),
+        "pairing invariants keep every message"
+    );
+}
+
+/// Even when the only oversized payload is the LATEST turn's arguments (the
+/// trim pins it), the fit succeeds by compacting it as a last resort, with
+/// ids and pairing intact.
+#[test]
+fn fit_request_compacts_latest_arguments_as_last_resort() {
+    let msgs = vec![
+        Message::system("system prompt"),
+        Message::user("Document the crate"),
+        assistant_call_with_args(
+            "call_big",
+            "file_write",
+            huge_file_write_args("README.md", 60_000),
+        ),
+        Message::tool("wrote README.md", "call_big"),
+    ];
+    let budget = 1_500;
+    let fitted = Agent::fit_request_to_context_budget(msgs, budget, None)
+        .expect("compaction must bring the request under budget");
+    assert!(crate::token_count::estimate_messages_tokens(&fitted) <= budget);
+    assert_valid_tool_pairing(&fitted);
+    let call = &fitted[2].tool_calls.as_ref().unwrap()[0];
+    assert_eq!(call.id, "call_big");
+    let value: serde_json::Value = serde_json::from_str(&call.function.arguments).unwrap();
+    assert_eq!(value["path"], "README.md");
+}
+
+/// When nothing can bring the request under budget, it must NOT be
+/// dispatched: the fit returns the typed ContextOverflow that the execution
+/// loop routes to its bounded compress-and-retry recovery.
+#[test]
+fn fit_request_returns_typed_context_overflow_when_still_over_budget() {
+    let msgs = vec![
+        Message::system("S".repeat(4_000)),
+        Message::user("T".repeat(4_000)),
+    ];
+    let err = Agent::fit_request_to_context_budget(msgs, 10, None)
+        .expect_err("an unfittable request must not be returned for dispatch");
+    assert!(
+        matches!(err, crate::errors::ApiError::ContextOverflow(_)),
+        "must be the typed overflow, got {err:?}"
+    );
+    let err: anyhow::Error = err.into();
+    assert!(crate::errors::is_context_overflow_error(&err));
+    let text = crate::agent::task_runner::recovery_error_text(&err);
+    assert!(
+        crate::agent::task_runner::is_context_overflow_text(&text),
+        "recovery routing must see an overflow: {text}"
+    );
+}
+
+#[test]
+fn fit_request_is_identity_under_budget() {
+    let msgs = vec![Message::system("sys"), Message::user("task")];
+    let fitted = Agent::fit_request_to_context_budget(msgs.clone(), 10_000, None).unwrap();
+    assert_eq!(fitted.len(), msgs.len());
+    assert_eq!(fitted[1].content.text(), "task");
+}
