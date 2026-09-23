@@ -542,9 +542,8 @@ impl Agent {
 
         // Capture git state
         if capture_git {
-            if let Ok(cwd) = std::env::current_dir() {
-                checkpoint.git_checkpoint = capture_git_state(cwd.to_string_lossy().as_ref());
-            }
+            let cwd = crate::tools::workspace_root::current_path();
+            checkpoint.git_checkpoint = capture_git_state(cwd.to_string_lossy().as_ref());
         }
 
         // Persist cumulative budget so a resumed run continues from where the

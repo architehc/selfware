@@ -334,7 +334,7 @@ fn normalize_checkpoint_path(raw: &str) -> Option<PathBuf> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        std::env::current_dir().ok()?.join(path)
+        crate::tools::workspace_root::current_path().join(path)
     };
     let lexical = crate::safety::path_validator::lexical_normalize_path(&absolute);
     Some(crate::safety::checker::normalize_path(&lexical))
@@ -918,9 +918,10 @@ impl Agent {
     /// project the user pointed it at — not whatever ancestor a language
     /// toolchain happens to discover.
     pub(super) fn verification_task_root(&self) -> std::path::PathBuf {
-        self.task_verification_root.clone().unwrap_or_else(|| {
-            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-        })
+        // Agent workspace root, not the process cwd (worktrees move only the root).
+        self.task_verification_root
+            .clone()
+            .unwrap_or_else(crate::tools::workspace_root::current_path)
     }
 
     /// Tool categories that inherently bypass the Rust/cargo verification gate.
@@ -3268,7 +3269,7 @@ impl Agent {
             Err(e) => {
                 spinner.stop_error("Verification failed to run");
                 warn!("Verification failed to run: {}", e);
-                let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let cwd = crate::tools::workspace_root::current_path();
                 self.note_verification_record(super::verification_scope::VerificationRecord {
                     check_id: format!("verification:{}", tool_name),
                     command: format!("{}:{}", tool_name, path),

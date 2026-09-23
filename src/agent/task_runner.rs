@@ -467,7 +467,10 @@ impl Agent {
             gate,
             tool_passes,
             tool_failures,
-            self.last_successful_verification_mutation_sequence >= self.mutation_sequence,
+            // Same freshness the completion gate uses: a counter-fresh pass, or an
+            // accepted-with-proof authoritative pass followed only by doc writes.
+            self.last_successful_verification_mutation_sequence >= self.mutation_sequence
+                || self.fresh_authoritative_pass().is_some(),
             self.verification_failures
                 .blocking(&self.verification_task_root(), self.mutation_sequence)
                 .is_some(),
