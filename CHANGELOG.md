@@ -5,7 +5,75 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.7.6] - 2026-09-20
+## [0.8.0] - 2026-09-23
+
+Long-task reliability, honest status, and safety hardening, driven by end-to-end
+runs against the llm.selfware.design endpoint. 0.7.6 was never published; its
+notes are folded in below.
+
+### Changed (behaviour changes — read before upgrading)
+- **Failed runs exit non-zero.** A run whose verdict is a failure (max iterations,
+  fake completion, verification failed, required edit missing) now exits with a
+  non-zero code. A timeout/`SIGTERM` reports `Terminated` (exit 143); a user
+  interrupt exits 130.
+- **Default endpoint** is `https://llm.selfware.design/v1` (`qwen38-flash-next`),
+  which works without an API key; a zero-config install runs out of the box.
+- **Trust is per file.** `selfware trust <dir>` records `<dir>/selfware.toml`;
+  legacy directory entries in `~/.selfware/trusted_repos` no longer match.
+- **Window placement is unrestricted unless configured.** The desktop geometry
+  that used to be hard-coded is now an optional `[computer.window_policy]` block
+  (see `docs/configuration.md`).
+- **Screenshots go to a file.** `screen_capture` / `computer_screen` write the PNG
+  outside the workspace and return its path; pass `inline: true` for base64.
+- **Container env is sanitised.** docker/podman no longer inherit host
+  credentials; compose `${VAR}` comes from the project's `.env`, not the host.
+- **Stricter verification credit.** Test runs that execute zero tests, and piped
+  or redirected test output, no longer count as passing verification.
+- **`file_write` no longer creates `.bak` files** (undo uses edit history).
+- **PreToolUse hooks fail closed** when they time out or cannot start.
+
+### Added
+- Per-agent workspace root: entering a git worktree no longer changes the process
+  working directory; tools, hooks and subprocesses follow the agent's root.
+- Checkpoint on every mutation (cheap delta append) with a resume note listing
+  files already written; `--autocontinue` resumes iteration-cap stops.
+- Adaptive iteration extensions and auto-continue now work for edit→test loops.
+- Per-call latency ledger and optional `agent.max_call_secs` cap.
+- `scripts/check_ci_parity.sh` (docs, no-default-features, python suite) and a
+  redteam known-gap list (`tests/redteam/known_gaps.txt`) that can only shrink.
+- Kimi tool-call dialect; send-time role alternation for strict chat templates.
+
+### Fixed
+- Context management on small windows: task text survives compaction, tool-call
+  arguments are compacted, over-budget requests are never dispatched, provider
+  context-length errors go to bounded compression recovery.
+- Honest outcomes: no false "completed" on unchanged edit tasks or failed
+  verification; iteration cap never shown as N+1/N; visible best-snapshot restore.
+- Gate churn: accept-with-proof, bounded readback rejections, clearer messages
+  when a piped test run earned no credit; recognises unittest/pytest/go/jest output.
+- Dead MCP, LSP and Playwright children fail fast with the real cause.
+- File tools read/write through validated descriptors (TOCTOU), FIFO-safe.
+- Closed stdout exits cleanly (141) without killing selfware on dead child pipes.
+- Stale `git_status`/search caches after edits; clippy `--fix`/package installs
+  counted as mutations; zero-test runs never credited.
+- Prompt tournament can no longer replace the system prompt.
+- Zed extension binary lookup; VS Code webview script injection (CSP + JSON block).
+- Resume revokes verification credit when files the task wrote changed while
+  paused; budget caps and auto-continue counts survive incremental checkpoints.
+- Hooks run in the agent's workspace root; formatter-hook rewrites no longer
+  block later edits; only an in-scope fresh pass promotes the recovery snapshot.
+- Commit attribution by git ancestry (no false VerifierTainted); re-reads of
+  trimmed files no longer trip the stagnation guard.
+- Many flaky tests made hermetic (process env, cwd, killswitch state).
+
+### Security
+- rustls 0.23.45 (RUSTSEC-2026-0285).
+- Subprocess environment sanitisation swept across 60+ secondary spawns, with a
+  guard test against new unsanitised spawns.
+- MCP `resources/*` obey `denied_paths`; workspace guidance files are delimited
+  as untrusted data.
+
+## [0.7.6] - 2026-09-20 (never published; included in 0.8.0)
 
 ### Added
 - **Isolated staging worktree for commit preparation & verification**: `commit_scoped_paths_isolated` creates an isolated detached worktree under `.worktrees/` to stage and commit candidate files. The developer checkout's `HEAD` is never redirected or changed throughout commit and verification. Destination branch HEAD is only updated via atomic `git update-ref` compare-and-swap after tree verification confirms `HEAD^{tree} == promoted_tree` and `HEAD^ == head_before`.
