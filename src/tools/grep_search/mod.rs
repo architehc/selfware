@@ -297,7 +297,7 @@ fn run_ripgrep(
 pub struct GrepSearch {
     /// Per-instance safety config for path-policy enforcement. When `Some`,
     /// overrides the process-global `SAFETY_CONFIG`; when `None`, the global or
-    /// the default config is used (see [`resolve_safety_config`]).
+    /// the default config is used (see `resolve_safety_config`).
     pub safety_config: Option<SafetyConfig>,
 }
 

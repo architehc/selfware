@@ -183,6 +183,7 @@ async fn existing_web_dir_is_served_from_disk_dev_override() {
     assert_eq!(body, "disk only\n");
 }
 
+#[cfg(feature = "self-improvement")]
 #[test]
 fn test_commit_error_killswitch_maps_to_typed_conflict() {
     let err = super::super::apply::CommitError::Killswitch("Killswitch active".to_string());

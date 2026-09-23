@@ -1891,7 +1891,9 @@ fn setup_winner_repo() -> tempfile::TempDir {
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("src/lib.rs"), "pub fn f() -> usize { 1 }\n").unwrap();
     std::fs::write(root.join("notes.txt"), "clean notes\n").unwrap();
-    git_ok(root, &["init"]);
+    // Explicit branch: CI runners default to `master`, and the isolation
+    // tests below assert the checkout stays on `refs/heads/main`.
+    git_ok(root, &["init", "-b", "main"]);
     git_ok(root, &["config", "user.email", "evo@test"]);
     git_ok(root, &["config", "user.name", "Evo Test"]);
     git_ok(root, &["add", "."]);

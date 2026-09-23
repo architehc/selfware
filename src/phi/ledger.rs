@@ -560,7 +560,7 @@ impl Ledger {
 
     /// Why this evidence does or does not discharge this obligation.
     ///
-    /// Split out from [`Self::apply`] so the reasoning can be shown to a human
+    /// Split out from `Self::apply` so the reasoning can be shown to a human
     /// and tested directly, rather than inferred from a count.
     pub fn assess(&self, evidence: &Evidence, obligation: &Obligation) -> Result<(), Unsatisfied> {
         let answerable = match evidence.kind {

@@ -10,7 +10,7 @@
 //! for. No model call involved — pure extraction.
 //!
 //! Since 2026-09-22 the census is OPT-IN: only data-processing/inventory task
-//! shapes get it (see [`task_requests_data_inventory`]), package-manifest
+//! shapes get it (see `task_requests_data_inventory`), package-manifest
 //! metadata (name/version/edition-class fields) is never enumerated, and the
 //! injected directive names selfware as its source. Firing on every small task
 //! taxed ordinary code/review runs with manifest-accounting prose.

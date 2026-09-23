@@ -638,7 +638,7 @@ pub(crate) fn is_candidate_better(
 /// Token-reduction threshold for the promotion token term.
 ///
 /// The gate promotes a within-noise candidate on token grounds only when this
-/// reduction is exceeded on BOTH replicated arms (see [`evaluate_token_term`]).
+/// reduction is exceeded on BOTH replicated arms (see `evaluate_token_term`).
 pub const TOKEN_REDUCTION_THRESHOLD: f64 = 0.05;
 
 /// Evaluate the >5% token-reduction term under the replicated-arm policy.

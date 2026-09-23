@@ -131,7 +131,7 @@ pub fn is_valid_memory(spec: &str) -> bool {
         && matches!(unit, "" | "b" | "k" | "m" | "g" | "B" | "K" | "M" | "G")
 }
 
-/// A user spec for `--user`: a uid, uid:gid, or name[:group]. Conservative
+/// A user spec for `--user`: a `uid`, `uid:gid`, or `name[:group]`. Conservative
 /// charset, and never begins with '-' so it cannot be read as a flag.
 pub fn is_valid_user(spec: &str) -> bool {
     !spec.is_empty()

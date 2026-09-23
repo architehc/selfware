@@ -167,7 +167,7 @@ pub struct AppliedMutation {
 }
 
 /// Cooldown applied to a category that recently failed, measured on the wall
-/// clock. See [`SelfEditOrchestrator::recently_failed_categories`].
+/// clock. See `SelfEditOrchestrator::recently_failed_categories`.
 pub const FAILURE_COOLDOWN_SECS: u64 = 1800;
 
 /// Orchestrates the self-improvement loop

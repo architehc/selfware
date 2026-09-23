@@ -100,7 +100,7 @@ impl ConcurrencyGovernor {
     ///
     /// Every caller in this process asking for the same limits shares one
     /// governor, so `max_streams` bounds the whole process rather than each
-    /// agent — see [`SHARED_GOVERNORS`]. Use [`Self::new`] for an isolated
+    /// agent — see `SHARED_GOVERNORS`. Use [`Self::new`] for an isolated
     /// governor (tests, tooling that wants its own budget).
     pub fn shared(max_streams: usize, max_tools: usize, max_global: usize) -> Arc<Self> {
         let key = (max_streams.max(1), max_tools.max(1), max_global.max(1));

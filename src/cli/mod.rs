@@ -1226,6 +1226,9 @@ fn apply_cli_limit_overrides(cli: &Cli, config: &mut Config) {
 /// real terminal on both stdin (keys) and stdout (raw-mode drawing). On a
 /// pipe/CI run the previous behavior was to silently exit 0 having done
 /// nothing — indistinguishable from success in automation.
+// Only the TUI launch path calls this; the unit tests exercise it in every
+// feature configuration.
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
 fn tui_launch_block_reason(stdin_is_tty: bool, stdout_is_tty: bool) -> Option<&'static str> {
     if stdin_is_tty && stdout_is_tty {
         None
@@ -6219,6 +6222,7 @@ pub(crate) fn slash_help_text() -> String {
 
 /// One-line session status for /status (model, endpoint, conversation size,
 /// loop position) — the classic-chat form of the status panel.
+#[cfg(feature = "tui")]
 pub(crate) fn session_status_text(agent: &crate::agent::Agent) -> String {
     format!(
         "model: {} · endpoint: {} · messages: {} · iteration: {}/{}",
@@ -6408,6 +6412,7 @@ pub(crate) fn journal_entries_text(limit: usize) -> String {
 }
 
 /// /tools — registered tools, compact (activated marked).
+#[cfg(feature = "tui")]
 pub(crate) fn tools_text(agent: &crate::agent::Agent) -> String {
     let registry = agent.registry();
     let mut names: Vec<(String, bool)> = registry

@@ -282,7 +282,7 @@ pub fn estimate_tool_definitions_tokens(tools: &[crate::api::types::ToolDefiniti
 /// Estimate tokens for raw content.
 ///
 /// Results are cached by content hash to avoid redundant tokenization.
-/// Code-shaped content is calibrated up by [`CODE_CALIBRATION_FACTOR`]
+/// Code-shaped content is calibrated up by `CODE_CALIBRATION_FACTOR`
 /// (measured 2026-09-21: the generic tokenizers ran ~9% low on code, so a
 /// 350k context cap admitted ~385k actual server tokens).
 #[inline]

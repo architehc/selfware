@@ -8,6 +8,7 @@ pub(crate) const DEFAULT_MULTI_CHAT_CONCURRENCY: usize = 4;
 
 /// Clap value parser rejecting zero — for counts that must be >= 1
 /// (e.g. `evolve --generations`, where 0 used to mean "infinite").
+#[cfg(feature = "self-improvement")]
 fn parse_nonzero_usize(s: &str) -> Result<usize, String> {
     let value: usize = s.parse().map_err(|_| format!("invalid number: {}", s))?;
     if value == 0 {

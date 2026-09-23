@@ -12,7 +12,7 @@
 //! allowlist and none silently drifts back to inheriting the full env.
 
 /// Clear a command's inherited environment and re-populate the shared
-/// non-sensitive allowlist ([`DEFAULT_KEEP`]: toolchain basics, git
+/// non-sensitive allowlist (`DEFAULT_KEEP`: toolchain basics, git
 /// identity, proxy/TLS trust, temp locations, terminal type, Rust
 /// toolchain homes). Credential-bearing variables (`SELFWARE_API_KEY`,
 /// `AWS_*`, tokens) are deliberately absent and never forwarded.

@@ -9,7 +9,10 @@ import types
 import unittest
 import wave
 
-import numpy as np
+try:
+    import numpy as np
+except ModuleNotFoundError as exc:  # optional runtime dependency, absent on CI lint
+    raise unittest.SkipTest("numpy is required for these VibeVoice tests") from exc
 
 SPEC = importlib.util.spec_from_file_location(
     "phi_vibevoice_runtime", pathlib.Path(__file__).parents[1] / "phi_vibevoice_runtime.py")

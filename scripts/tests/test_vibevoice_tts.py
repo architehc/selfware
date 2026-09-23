@@ -25,7 +25,10 @@ import urllib.request
 import urllib.error
 from unittest import mock
 
-import numpy as np
+try:
+    import numpy as np
+except ModuleNotFoundError as exc:  # optional runtime dependency, absent on CI lint
+    raise unittest.SkipTest("numpy is required for these VibeVoice tests") from exc
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 if str(SCRIPTS_DIR) not in sys.path:

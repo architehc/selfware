@@ -289,7 +289,7 @@ impl Sandbox {
     /// Destroy the sandbox container.
     ///
     /// Idempotent with the `Drop` guard: both route through
-    /// [`Sandbox::destroy_container`], so an explicit destroy followed by a
+    /// `Sandbox::destroy_container`, so an explicit destroy followed by a
     /// drop (or a double destroy) runs `docker rm -f` exactly once.
     pub fn destroy(mut self) -> Result<(), SandboxError> {
         self.destroy_container();

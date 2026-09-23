@@ -9,11 +9,18 @@ from pathlib import Path
 import sys
 import threading
 import time
+import importlib.util
 import unittest
 import wave
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from phi_speech_worker import ApiFailure, SpeechService, SpeechHTTPServer, make_handler, encode_wav
+
+# numpy is an optional runtime dependency of the speech worker (WAV encoding);
+# CI's lint runner does not install it. Tests that encode audio skip cleanly
+# without it and run with full assertions wherever numpy is present.
+HAVE_NUMPY = importlib.util.find_spec("numpy") is not None
+requires_numpy = unittest.skipUnless(HAVE_NUMPY, "numpy is required for WAV encoding")
 
 
 def eventually(predicate, timeout=3):
@@ -65,6 +72,7 @@ class ServiceTests(unittest.TestCase):
         return eventually(lambda: (j if (j := service.status(identifier))["status"] in
                                    {"done", "failed", "cancelled"} else None))
 
+    @requires_numpy
     def test_completed_wav_receipt_matches_actual_samples_and_hash(self):
         service, runtime = self.service()
         job = service.create({"text": "Actual fixture.", "voice": "Emma"})
@@ -98,6 +106,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual((failure.exception.status, failure.exception.code), (429, "speech_cache_full"))
         self.assertEqual(len(service.jobs), 64)
 
+    @requires_numpy
     def test_duplicate_post_does_not_repeat_inference_and_conflict_is_rejected(self):
         service, runtime = self.service()
         body = {"text": "Once.", "request_id": "b" * 32}
@@ -175,13 +184,16 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(failure.exception.status, 404)
         self.assertEqual(len(service.jobs), 0)
 
-    def test_rejects_invalid_bodies_and_nonfinite_audio(self):
+    def test_rejects_invalid_bodies(self):
         service, _ = self.service()
         for body in ([], {}, {"text": " "}, {"text": "x" * 5001}, {"text": "x", "voice": "Unknown"},
                      {"text": "x", "extra": 1}, {"text": "x", "request_id": "../job"}):
             with self.subTest(body=str(body)[:80]), self.assertRaises(ApiFailure) as failure:
                 service.create(body)
             self.assertEqual(failure.exception.status, 400)
+
+    @requires_numpy
+    def test_encode_wav_rejects_nonfinite_empty_nested_and_wrong_rate_audio(self):
         for audio, rate in (([float("nan")], 24000), ([], 24000), ([[0]], 24000), ([0], 16000)):
             with self.subTest(audio=audio), self.assertRaises(ValueError):
                 encode_wav(audio, rate)
@@ -231,6 +243,7 @@ class HTTPTests(unittest.TestCase):
             self.assertNotIn("Access-Control-Allow-Origin", headers)
             self.assertEqual(headers["Cache-Control"], "no-store")
 
+    @requires_numpy
     def test_authenticated_job_and_wav_roundtrip(self):
         status, _, body = self.request("POST", "/api/speech/jobs", {"text": "Fixture."})
         self.assertEqual(status, 202)
