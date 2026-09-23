@@ -388,11 +388,12 @@ impl Tool for LocalizeIssue {
             .and_then(|v| v.as_str())
             .context("Missing required parameter: issue")?
             .to_string();
-        let repo_path = args
-            .get("repo_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or(".")
-            .to_string();
+        // A relative repo path resolves against the agent's workspace root.
+        let repo_path = crate::tools::workspace_root::anchor(
+            args.get("repo_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("."),
+        );
 
         // Enforce the workspace path policy before walking the repo: the tool
         // reads every source file under `repo_path`, so the root must pass the
@@ -401,7 +402,7 @@ impl Tool for LocalizeIssue {
         let safety = resolve_safety_config(self.safety_config.as_ref());
         validate_tool_path(&repo_path, &safety)?;
 
-        let candidates = tokio::task::spawn_blocking(move || {
+        let candidates = crate::tools::workspace_root::spawn_blocking(move || {
             localize_issue_sync(&issue, &repo_path, Some(&safety))
         })
         .await

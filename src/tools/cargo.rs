@@ -1,4 +1,5 @@
 use super::analyzer::ErrorAnalyzer;
+use super::workspace_root::CommandRootExt;
 use super::Tool;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -198,6 +199,7 @@ impl Tool for CargoTest {
     async fn execute(&self, args: Value) -> Result<Value> {
         let mut cmd = tokio::process::Command::new(cargo_program());
         crate::safety::process_env::sanitize_command_env(&mut cmd);
+        cmd.in_workspace_root();
         cmd.arg("test");
 
         if let Some(pkg) = args.get("package").and_then(|v| v.as_str()) {
@@ -304,6 +306,7 @@ impl Tool for CargoCheck {
     async fn execute(&self, args: Value) -> Result<Value> {
         let mut cmd = tokio::process::Command::new(cargo_program());
         crate::safety::process_env::sanitize_command_env(&mut cmd);
+        cmd.in_workspace_root();
         cmd.arg("check");
         cmd.arg("--message-format=json");
 
@@ -423,6 +426,7 @@ impl Tool for CargoClippy {
     async fn execute(&self, args: Value) -> Result<Value> {
         let mut cmd = tokio::process::Command::new(cargo_program());
         crate::safety::process_env::sanitize_command_env(&mut cmd);
+        cmd.in_workspace_root();
         cmd.arg("clippy");
         cmd.arg("--message-format=json");
         cmd.kill_on_drop(true);
@@ -535,6 +539,7 @@ impl Tool for CargoFmt {
     async fn execute(&self, args: Value) -> Result<Value> {
         let mut cmd = tokio::process::Command::new(cargo_program());
         crate::safety::process_env::sanitize_command_env(&mut cmd);
+        cmd.in_workspace_root();
         cmd.arg("fmt");
         cmd.kill_on_drop(true);
 

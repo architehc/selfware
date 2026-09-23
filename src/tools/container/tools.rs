@@ -192,6 +192,7 @@ impl Tool for ContainerRun {
 
         let runtime = get_runtime(args.get("runtime").and_then(|v| v.as_str())).await?;
         let mut cmd = Command::new(runtime.command());
+        crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         cmd.arg("run");
 
         // Isolation profile (default: hardened). A bare `docker run` is root,
@@ -367,6 +368,7 @@ impl Tool for ContainerStop {
         let timeout = args.get("timeout").and_then(|v| v.as_u64()).unwrap_or(10);
 
         let mut cmd = Command::new(runtime.command());
+        crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         cmd.args(["stop", "-t", &timeout.to_string(), container]);
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -441,6 +443,7 @@ impl Tool for ContainerList {
         let all = args.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
 
         let mut cmd = Command::new(runtime.command());
+        crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         cmd.args(["ps", "--format", "{{.ID}}\t{{.Image}}\t{{.Command}}\t{{.CreatedAt}}\t{{.Status}}\t{{.Ports}}\t{{.Names}}"]);
 
         if all {
@@ -561,6 +564,7 @@ impl Tool for ContainerLogs {
         let tail = args.get("tail").and_then(|v| v.as_u64()).unwrap_or(100);
 
         let mut cmd = Command::new(runtime.command());
+        crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         cmd.args(["logs", "--tail", &tail.to_string()]);
 
         if let Some(since) = args.get("since").and_then(|v| v.as_str()) {
@@ -684,6 +688,7 @@ impl Tool for ContainerExec {
         let runtime = get_runtime(args.get("runtime").and_then(|v| v.as_str())).await?;
 
         let mut cmd = Command::new(runtime.command());
+        crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         cmd.arg("exec");
 
         // Working directory
@@ -793,6 +798,7 @@ impl Tool for ContainerBuild {
         let runtime = get_runtime(args.get("runtime").and_then(|v| v.as_str())).await?;
 
         let mut cmd = Command::new(runtime.command());
+        crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         cmd.args(["build", "-t", tag]);
 
         // Dockerfile path
@@ -905,6 +911,7 @@ impl Tool for ContainerImages {
         let all = args.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
 
         let mut cmd = Command::new(runtime.command());
+        crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         cmd.args([
             "images",
             "--format",
@@ -1000,6 +1007,7 @@ impl Tool for ContainerPull {
         let runtime = get_runtime(args.get("runtime").and_then(|v| v.as_str())).await?;
 
         let mut cmd = Command::new(runtime.command());
+        crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         cmd.args(["pull", image]);
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -1078,6 +1086,7 @@ impl Tool for ContainerRemove {
         let runtime = get_runtime(args.get("runtime").and_then(|v| v.as_str())).await?;
 
         let mut cmd = Command::new(runtime.command());
+        crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         cmd.args(["rm"]);
 
         if args.get("force").and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -1176,6 +1185,7 @@ impl Tool for ComposeUp {
         };
 
         let mut cmd = Command::new(cmd_name);
+        crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         cmd.args(&compose_args);
 
         // Compose file
@@ -1204,7 +1214,7 @@ impl Tool for ComposeUp {
             }
         }
 
-        cmd.current_dir(path);
+        cmd.current_dir(crate::tools::workspace_root::anchor(path));
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
@@ -1281,6 +1291,7 @@ impl Tool for ComposeDown {
         };
 
         let mut cmd = Command::new(cmd_name);
+        crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         cmd.args(&compose_args);
 
         if let Some(file) = args.get("file").and_then(|v| v.as_str()) {
@@ -1301,7 +1312,7 @@ impl Tool for ComposeDown {
             cmd.args(["--rmi", rmi]);
         }
 
-        cmd.current_dir(path);
+        cmd.current_dir(crate::tools::workspace_root::anchor(path));
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 

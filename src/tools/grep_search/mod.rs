@@ -95,6 +95,7 @@ fn run_ripgrep(
     safety: Option<&SafetyConfig>,
 ) -> Result<GrepSearchResult> {
     let mut cmd = std::process::Command::new("rg");
+    crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
     cmd.arg("--json")
         .arg("--line-number")
         .arg("--column")
@@ -393,11 +394,13 @@ impl Tool for GrepSearch {
 
     #[instrument(level = "info", skip(self, args), fields(tool_name = self.name()))]
     async fn execute(&self, args: Value) -> Result<Value> {
+        // A relative search root resolves against the agent's workspace root.
+        let args = crate::tools::workspace_root::anchor_json(args, &["path"]);
         // Resolve the safety config before moving into the blocking task.
         let safety = resolve_safety_config(self.safety_config.as_ref());
         let result = tokio::time::timeout(
             GREP_TIMEOUT,
-            tokio::task::spawn_blocking(move || -> Result<Value> {
+            crate::tools::workspace_root::spawn_blocking(move || -> Result<Value> {
                 let pattern_str = args
                     .get("pattern")
                     .and_then(|v| v.as_str())

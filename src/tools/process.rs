@@ -13,7 +13,6 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -137,7 +136,13 @@ impl Tool for ProcessStart {
             }
         }
 
-        let cwd = args.get("cwd").and_then(|v| v.as_str()).map(PathBuf::from);
+        // A relative `cwd` (and the default) resolve against the agent's
+        // workspace root, not the process cwd.
+        let cwd = args
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .map(|s| crate::tools::workspace_root::anchor_path(std::path::Path::new(s)))
+            .or_else(|| crate::tools::workspace_root::current().command_dir());
 
         let env: HashMap<String, String> = args
             .get("env")

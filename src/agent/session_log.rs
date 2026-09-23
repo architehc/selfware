@@ -302,10 +302,9 @@ impl Agent {
             return;
         };
 
-        let cwd = std::env::current_dir()
-            .ok()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| ".".to_string());
+        let cwd = crate::tools::workspace_root::current_path()
+            .display()
+            .to_string();
 
         logger.log(SessionLogEvent {
             timestamp: Utc::now(),

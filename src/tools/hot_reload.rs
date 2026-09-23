@@ -31,8 +31,9 @@ impl DynamicTool {
             .map_err(|e| anyhow!("Cannot resolve plugin path {:?}: {}", lib_path, e))?;
 
         // Reject paths outside the current working directory unless explicitly allowed
-        let cwd = std::env::current_dir()
-            .map_err(|e| anyhow!("Cannot determine current directory: {}", e))?;
+        // The workspace root of the calling agent (its entered worktree, if
+        // any) — never the process-global cwd.
+        let cwd = crate::tools::workspace_root::current_path();
         let plugin_dir = cwd.join(".selfware").join("plugins");
         if !canonical.starts_with(&plugin_dir) {
             anyhow::bail!(
@@ -260,6 +261,8 @@ impl Tool for HotReloadTool {
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
+        // Relative paths resolve against the agent's workspace root.
+        let args = crate::tools::workspace_root::anchor_json(args, &["path"]);
         let action = args
             .get("action")
             .and_then(|v| v.as_str())

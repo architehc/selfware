@@ -47,7 +47,7 @@ impl AgentSnapshot {
         let absolute = if path.is_absolute() {
             path.to_path_buf()
         } else {
-            std::env::current_dir()?.join(path)
+            crate::tools::workspace_root::current_path().join(path)
         };
         match std::fs::canonicalize(&absolute) {
             Ok(path) => Ok(path),

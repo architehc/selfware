@@ -59,6 +59,7 @@ pub mod shell_exec;
 pub mod task_focus;
 pub mod tool_search;
 pub mod vision;
+pub mod workspace_root;
 
 use browser::{BrowserEval, BrowserFetch, BrowserLinks, BrowserPdf, BrowserScreenshot};
 use cargo::{CargoCheck, CargoClippy, CargoFmt, CargoTest};
@@ -347,6 +348,12 @@ pub struct ToolRegistry {
     /// Uses a std::sync::RwLock because the index is updated from sync
     /// registry methods that may be called inside an async runtime.
     tool_search_index: Arc<std::sync::RwLock<Vec<tool_search::ToolSearchResult>>>,
+    /// This registry's (i.e. this agent's) workspace root. Every tool call
+    /// dispatched through the registry runs inside [`workspace_root::scope`]
+    /// with this handle, so path validation, relative-path resolution and
+    /// subprocess cwd follow it — and entering a worktree moves only this
+    /// root, never the process cwd.
+    workspace_root: workspace_root::WorkspaceRoot,
 }
 
 /// List of critical tools that are always available.
@@ -399,6 +406,7 @@ impl ToolRegistry {
             all_tools: HashMap::new(),
             activated_tools: HashSet::new(),
             tool_search_index: Arc::clone(&tool_search_index),
+            workspace_root: workspace_root::WorkspaceRoot::follow_process_cwd(),
         };
 
         // Register critical tools first (File operations)
@@ -786,7 +794,18 @@ impl ToolRegistry {
         let tool = self
             .get_activated(name)
             .ok_or_else(|| anyhow::anyhow!("Unknown or inactive tool: {}", name))?;
-        tool.execute(args).await
+        workspace_root::scope(self.workspace_root.clone(), tool.execute(args)).await
+    }
+
+    /// This registry's workspace root (see [`workspace_root`]).
+    pub fn workspace_root(&self) -> &workspace_root::WorkspaceRoot {
+        &self.workspace_root
+    }
+
+    /// Replace this registry's workspace root (e.g. to pin a sub-agent to its
+    /// own directory, or to share one root between cooperating agents).
+    pub fn set_workspace_root(&mut self, root: workspace_root::WorkspaceRoot) {
+        self.workspace_root = root;
     }
 
     /// Execute any tool (including deferred ones) - for internal use.
@@ -798,7 +817,7 @@ impl ToolRegistry {
         let tool = self
             .get(name)
             .ok_or_else(|| anyhow::anyhow!("Unknown tool: {}", name))?;
-        tool.execute(args).await
+        workspace_root::scope(self.workspace_root.clone(), tool.execute(args)).await
     }
 
     /// Build API-compatible tool definitions for all activated tools.

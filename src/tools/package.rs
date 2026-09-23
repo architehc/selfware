@@ -111,6 +111,7 @@ impl Tool for NpmInstall {
 
         let mut cmd = Command::new("npm");
         crate::safety::process_env::sanitize_command_env(&mut cmd);
+        crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         cmd.arg("install");
 
         if !packages.is_empty() {
@@ -125,7 +126,7 @@ impl Tool for NpmInstall {
             cmd.arg("-g");
         }
 
-        cmd.current_dir(path);
+        cmd.current_dir(crate::tools::workspace_root::anchor(path));
 
         let timeout_secs = args
             .get("timeout_secs")
@@ -246,6 +247,7 @@ impl Tool for NpmRun {
 
         let mut cmd = Command::new("npm");
         crate::safety::process_env::sanitize_command_env(&mut cmd);
+        crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         cmd.arg("run");
         cmd.arg(script);
 
@@ -254,7 +256,7 @@ impl Tool for NpmRun {
             cmd.args(&extra_args);
         }
 
-        cmd.current_dir(path);
+        cmd.current_dir(crate::tools::workspace_root::anchor(path));
 
         let output = crate::tools::process_guard::run_command_bounded(
             cmd,
@@ -331,7 +333,8 @@ impl Tool for NpmScripts {
         let safety = resolve_safety_config(self.safety_config.as_ref());
         validate_tool_path(path, &safety)?;
 
-        let package_json_path = Path::new(path).join("package.json");
+        let package_json_path =
+            Path::new(&crate::tools::workspace_root::anchor(path)).join("package.json");
 
         if !package_json_path.exists() {
             anyhow::bail!("package.json not found: {}", package_json_path.display());
@@ -468,6 +471,7 @@ impl Tool for PipInstall {
 
         let mut cmd = Command::new(&python);
         crate::safety::process_env::sanitize_command_env(&mut cmd);
+        crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         cmd.args(["-m", "pip", "install"]);
 
         if let Some(req_file) = requirements {
@@ -562,6 +566,7 @@ impl Tool for PipList {
 
         let mut cmd = Command::new(&python);
         crate::safety::process_env::sanitize_command_env(&mut cmd);
+        crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         cmd.args(["-m", "pip", "list", "--format=json"]);
 
         if outdated {
@@ -640,6 +645,7 @@ impl Tool for PipFreeze {
 
         let mut cmd = Command::new(&python);
         crate::safety::process_env::sanitize_command_env(&mut cmd);
+        crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         cmd.args(["-m", "pip", "freeze"]);
         let output = crate::tools::process_guard::run_command_bounded(
             cmd,
@@ -763,6 +769,7 @@ impl Tool for YarnInstall {
 
         let mut cmd = Command::new("yarn");
         crate::safety::process_env::sanitize_command_env(&mut cmd);
+        crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
 
         if packages.is_empty() {
             cmd.arg("install");
@@ -774,7 +781,7 @@ impl Tool for YarnInstall {
             }
         }
 
-        cmd.current_dir(path);
+        cmd.current_dir(crate::tools::workspace_root::anchor(path));
 
         let output = crate::tools::process_guard::run_command_bounded(
             cmd,

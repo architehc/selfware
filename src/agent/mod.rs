@@ -173,7 +173,7 @@ fn find_project_root_with_markers(
 }
 
 pub(super) fn current_project_root() -> std::path::PathBuf {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let cwd = crate::tools::workspace_root::current_path();
     find_project_root_with_markers(
         &cwd,
         &[
@@ -239,7 +239,7 @@ async fn read_bounded_file(
 
 /// Detect the project type from marker files in the working directory or its ancestors.
 async fn detect_project_type() -> ProjectType {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let cwd = crate::tools::workspace_root::current_path();
     detect_project_type_at(&cwd).await
 }
 
@@ -1279,7 +1279,7 @@ To call a tool, use this EXACT XML structure:
 
         // === DYNAMIC SECTIONS (computed fresh per request) ===
         // Memory files - changes based on working directory
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let cwd = crate::tools::workspace_root::current_path();
         let memory_files = MemorySystem::discover(&cwd);
         let memory_section = if !memory_files.is_empty() {
             let section = MemorySystem::format_for_prompt(&memory_files);
@@ -1367,7 +1367,7 @@ To call a tool, use this EXACT XML structure:
 
         // Initialize verification gate with project root and active working dir
         let project_root = current_project_root();
-        let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let workdir = crate::tools::workspace_root::current_path();
         let mut verification_gate =
             VerificationGate::new(&project_root, VerificationConfig::fast())
                 .with_working_dir(workdir);
@@ -1661,7 +1661,7 @@ To call a tool, use this EXACT XML structure:
             verification_failures: Default::default(),
             // Pinned at construction: reading the process cwd live made verification
             // relevance depend on whatever else the process had chdir'd to.
-            task_verification_root: std::env::current_dir().ok(),
+            task_verification_root: Some(crate::tools::workspace_root::current_path()),
             last_failed_verification_mutation_sequence: 0,
             compression_orchestrator: CompressionOrchestrator::new(),
             mutating_tool_call_count: 0,
@@ -2917,6 +2917,7 @@ To call a tool, use this EXACT XML structure:
         let (shell, flag) = crate::tools::shell_exec::default_shell();
         let output = tokio::process::Command::new(shell)
             .args([flag, cmd])
+            .current_dir(self.tools.workspace_root().path())
             .output()
             .await;
         let out = match output {

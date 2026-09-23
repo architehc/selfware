@@ -114,13 +114,17 @@ impl Tool for GlobFind {
     async fn execute(&self, args: Value) -> Result<Value> {
         // Resolve the safety config before moving into the blocking task.
         let safety = resolve_safety_config(self.safety_config.as_ref());
-        let result = tokio::task::spawn_blocking(move || -> Result<Value> {
+        let result = crate::tools::workspace_root::spawn_blocking(move || -> Result<Value> {
             let pattern_str = args
                 .get("pattern")
                 .and_then(|v| v.as_str())
                 .context("Missing required parameter: pattern")?;
 
             let base_path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            // Resolve against the agent's workspace root (no-op when it
+            // follows the process cwd).
+            let base_path_anchored = crate::tools::workspace_root::anchor(base_path);
+            let base_path = base_path_anchored.as_str();
 
             // Enforce the workspace path policy before walking: the base
             // directory is user-controlled and the walk + metadata reads would
@@ -269,13 +273,17 @@ impl Tool for SymbolSearch {
     async fn execute(&self, args: Value) -> Result<Value> {
         // Resolve the safety config before moving into the blocking task.
         let safety = resolve_safety_config(self.safety_config.as_ref());
-        let result = tokio::task::spawn_blocking(move || -> Result<Value> {
+        let result = crate::tools::workspace_root::spawn_blocking(move || -> Result<Value> {
             let name_pattern = args
                 .get("name")
                 .and_then(|v| v.as_str())
                 .context("Missing required parameter: name")?;
 
             let base_path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            // Resolve against the agent's workspace root (no-op when it
+            // follows the process cwd).
+            let base_path_anchored = crate::tools::workspace_root::anchor(base_path);
+            let base_path = base_path_anchored.as_str();
 
             // Enforce the workspace path policy before walking and reading:
             // the base directory is user-controlled.

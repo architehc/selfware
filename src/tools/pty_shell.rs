@@ -122,6 +122,8 @@ impl PtySession {
         // adding our own vars, matching shell_exec — an interactive shell must
         // not hand the agent's secrets to whatever the operator types.
         crate::safety::process_env::sanitize_command_env(&mut cmd);
+        // Start the session in the calling agent's workspace root.
+        crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
 
         // Disable history and prompts to keep output clean.
         cmd.env("HISTFILE", "/dev/null")

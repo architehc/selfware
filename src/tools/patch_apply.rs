@@ -1,3 +1,4 @@
+use super::workspace_root::CommandRootExt;
 use super::Tool;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -90,6 +91,7 @@ fn parse_diff_stats(diff: &str) -> (usize, usize, usize, Vec<String>) {
 fn git_apply_command(args: &[&str]) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("git");
     crate::safety::process_env::sanitize_command_env(&mut cmd);
+    cmd.in_workspace_root();
     cmd.kill_on_drop(true);
     cmd.args(args);
     cmd

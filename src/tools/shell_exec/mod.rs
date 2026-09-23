@@ -144,7 +144,8 @@ fn resolve_sed_path(file: &str, cwd: Option<&str>) -> String {
     }
     match cwd {
         Some(dir) => Path::new(dir).join(file).to_string_lossy().into_owned(),
-        None => file.to_string(),
+        // No explicit cwd: the command runs in the workspace root.
+        None => crate::tools::workspace_root::anchor(file),
     }
 }
 
@@ -443,6 +444,8 @@ impl Tool for ShellExec {
         cmd.kill_on_drop(true);
         cmd.arg(flag).arg(&args.command);
 
+        // Run in the agent's workspace root (an explicit `cwd` overrides it).
+        crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         if let Some(cwd) = &args.cwd {
             cmd.current_dir(cwd);
         }

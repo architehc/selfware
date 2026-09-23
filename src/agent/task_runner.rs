@@ -591,12 +591,21 @@ impl Agent {
     /// graceful cancellation with checkpoint persistence. The task string is
     /// added as a user message and drives all subsequent LLM turns.
     pub async fn run_task(&mut self, task: &str) -> Result<()> {
+        // Run the whole task with this agent's workspace root installed as
+        // the task-local root, so project-root detection, verification and
+        // every other workspace-relative resolution follows the agent's root
+        // (e.g. an entered worktree) instead of the process-global cwd.
+        let root = self.tools.workspace_root().clone();
+        crate::tools::workspace_root::scope(root, self.run_task_in_root(task)).await
+    }
+
+    async fn run_task_in_root(&mut self, task: &str) -> Result<()> {
         // Reset loop state so queued tasks don't inherit the previous
         // task's iteration counter and hit the max-iterations limit.
         self.loop_control.reset_for_task();
         // A new task starts with no outstanding obligations. Debt is per-task:
         // carrying it across would attribute one task's unread code to another.
-        self.task_verification_root = std::env::current_dir().ok();
+        self.task_verification_root = Some(self.tools.workspace_root().path());
         self.evidence_ledger = crate::phi::ledger::Ledger::new();
         // Reset with it: journal entries from a previous task would otherwise
         // be attributed to this one, and the ledger reset would look like a
@@ -1169,6 +1178,12 @@ impl Agent {
 
     /// Continue execution from current state (for resuming tasks)
     pub async fn continue_execution(&mut self) -> Result<()> {
+        // See `run_task`: resolve against this agent's workspace root.
+        let root = self.tools.workspace_root().clone();
+        crate::tools::workspace_root::scope(root, self.continue_execution_in_root()).await
+    }
+
+    async fn continue_execution_in_root(&mut self) -> Result<()> {
         // Reset the wall-clock budget baseline to the resume point. Without this,
         // the loop's max-seconds timeout is measured from the ORIGINAL run_task
         // start (or agent creation if resumed in a fresh process), so a task
@@ -2832,7 +2847,7 @@ where
         // cargo_check (finding 1a). The swarm executor is generic over the
         // agent type, so the probe uses the process cwd like the rest of the
         // project-type detection does.
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let cwd = crate::tools::workspace_root::current_path();
         let verify_ask = if super::verification_scope::cargo_applies_to_task(&cwd) {
             "After completing your work, verify with cargo_check if you made code changes."
         } else {

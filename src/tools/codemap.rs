@@ -607,7 +607,7 @@ impl Tool for CodeMapTool {
 
         // The first shared_graph_index call may parse the graph YAML — keep
         // it off the async hot path (subsequent calls are stat-only).
-        let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let root = crate::tools::workspace_root::current_path();
         let focus_for_closure = focus.clone();
         let nodes = tokio::task::spawn_blocking(move || {
             build_code_map(&root, focus_for_closure.as_deref(), depth)
@@ -794,7 +794,7 @@ impl Tool for ContextActionTool {
         };
 
         // Resolve target path: if it looks like a module path, convert to file path
-        let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let root = crate::tools::workspace_root::current_path();
         let target_path = if target_str.contains("::") {
             let file_rel = target_str.replace("::", "/");
             let candidate = root.join("src").join(&file_rel).with_extension("rs");

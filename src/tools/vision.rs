@@ -95,6 +95,8 @@ impl Tool for VisionAnalyze {
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
+        // Relative paths resolve against the agent's workspace root.
+        let args = crate::tools::workspace_root::anchor_json(args, &["image_path"]);
         let prompt = args
             .get("prompt")
             .and_then(|v| v.as_str())
@@ -239,6 +241,8 @@ impl Tool for VisionCompare {
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
+        // Relative paths resolve against the agent's workspace root.
+        let args = crate::tools::workspace_root::anchor_json(args, &["image_a", "image_b"]);
         let path_a = args
             .get("image_a")
             .and_then(|v| v.as_str())

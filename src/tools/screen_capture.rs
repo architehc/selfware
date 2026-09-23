@@ -58,6 +58,8 @@ impl Tool for ScreenCapture {
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
+        // Relative paths resolve against the agent's workspace root.
+        let args = crate::tools::workspace_root::anchor_json(args, &["output_path"]);
         let target = args
             .get("target")
             .and_then(|v| v.as_str())

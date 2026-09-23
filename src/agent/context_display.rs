@@ -143,9 +143,9 @@ impl Agent {
         let window = self.memory.context_window();
         let used_pct = (tokens as f64 / window as f64 * 100.0).min(100.0);
         let tool_count = self.tools.list().len();
-        let cwd = std::env::current_dir()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| ".".to_string());
+        let cwd = crate::tools::workspace_root::current_path()
+            .display()
+            .to_string();
         let short_cwd = if cwd.chars().count() > 40 {
             format!(
                 "...{}",

@@ -165,6 +165,8 @@ impl Tool for FileFimEdit {
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
+        // Relative paths resolve against the agent's workspace root.
+        let args = crate::tools::workspace_root::anchor_json(args, &["path"]);
         let path = args["path"]
             .as_str()
             .ok_or_else(|| anyhow!("Missing path"))?;
@@ -263,6 +265,8 @@ impl Tool for FileFimEdit {
         if path.ends_with(".rs") {
             use tokio::process::Command;
             let check = Command::new("rustfmt")
+                // rustfmt discovers rustfmt.toml from its cwd: the workspace root.
+                .current_dir(crate::tools::workspace_root::current_path())
                 .args(["--edition", "2021", "--check"])
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::null())

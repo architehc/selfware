@@ -788,7 +788,7 @@ impl Tool for KnowledgeExport {
         });
 
         let json_str = serde_json::to_string_pretty(&export_data)?;
-        tokio::fs::write(output_path, &json_str)
+        tokio::fs::write(crate::tools::workspace_root::anchor(output_path), &json_str)
             .await
             .context("Failed to write export file")?;
 
@@ -941,6 +941,8 @@ impl Tool for KnowledgeAutoExtract {
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
+        // Relative paths resolve against the agent's workspace root.
+        let args = crate::tools::workspace_root::anchor_json(args, &["file_path"]);
         let file_path = args
             .get("file_path")
             .and_then(|v| v.as_str())

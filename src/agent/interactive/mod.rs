@@ -1,8 +1,9 @@
 use anyhow::Result;
 use colored::*;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
+
+use crate::tools::workspace_root::CommandRootExt;
 
 use super::*;
 
@@ -17,6 +18,13 @@ impl Agent {
     /// Falls back to a basic `stdin` reader when the terminal is not interactive
     /// or reedline initialisation fails.
     pub async fn interactive(&mut self) -> Result<()> {
+        // Run the session with this agent's workspace root installed as the
+        // task-local root (see `run_task`).
+        let root = self.tools.workspace_root().clone();
+        crate::tools::workspace_root::scope(root, self.interactive_in_root()).await
+    }
+
+    async fn interactive_in_root(&mut self) -> Result<()> {
         use std::io::IsTerminal;
         if !std::io::stdin().is_terminal() {
             eprintln!("Terminal input unavailable, falling back to basic mode...");
@@ -242,6 +250,7 @@ impl Agent {
                 } else {
                     let (shell, flag) = crate::tools::shell_exec::default_shell();
                     let status = tokio::process::Command::new(shell)
+                        .in_root(self.tools.workspace_root())
                         .args([flag, cmd])
                         .stdout(std::process::Stdio::inherit())
                         .stderr(std::process::Stdio::inherit())
@@ -663,6 +672,7 @@ impl Agent {
 
             if input == "/diff" {
                 match tokio::process::Command::new("git")
+                    .in_root(self.tools.workspace_root())
                     .args(["diff", "--stat"])
                     .output()
                     .await
@@ -682,6 +692,7 @@ impl Agent {
 
             if input == "/git" {
                 match tokio::process::Command::new("git")
+                    .in_root(self.tools.workspace_root())
                     .args(["status", "--short", "--branch"])
                     .output()
                     .await
@@ -1687,7 +1698,7 @@ impl Agent {
                     "🌙".bright_cyan()
                 );
 
-                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let cwd = crate::tools::workspace_root::current_path();
                 let dream_system = DreamIntegratedMemorySystem::new(&cwd);
 
                 match dream_system.force_dream(&cwd).await {
@@ -2275,6 +2286,7 @@ impl Agent {
         if args.is_empty() || args == "list" {
             // List worktrees
             match tokio::process::Command::new("git")
+                .in_root(self.tools.workspace_root())
                 .args(["worktree", "list", "--porcelain"])
                 .output()
                 .await
@@ -2360,6 +2372,7 @@ impl Agent {
 
             // Get git root
             let git_root = match tokio::process::Command::new("git")
+                .in_root(self.tools.workspace_root())
                 .args(["rev-parse", "--show-toplevel"])
                 .output()
                 .await
@@ -2404,20 +2417,20 @@ impl Agent {
             );
 
             match tokio::process::Command::new("git")
+                .in_root(self.tools.workspace_root())
                 .args(&cmd_args)
                 .output()
                 .await
             {
                 Ok(out) if out.status.success() => {
-                    // Change to the worktree directory. The cwd change goes
-                    // through the shared worktree state — the same bookkeeping
-                    // the enter_worktree/exit_worktree tools use — so the
-                    // process cwd can never be stranded inconsistently with it:
-                    // the underlying guard restores the previous cwd on every
-                    // exit path, including /worktree exit.
-                    match crate::tools::git_worktree::enter_worktree_dir(std::path::PathBuf::from(
-                        &worktree_path,
-                    )) {
+                    // Move this agent's workspace root into the worktree —
+                    // the same root the enter_worktree/exit_worktree tools
+                    // move. The process cwd is never changed, so no other
+                    // agent, background job or subprocess is retargeted.
+                    match crate::tools::git_worktree::enter_worktree_dir(
+                        self.tools.workspace_root(),
+                        std::path::PathBuf::from(&worktree_path),
+                    ) {
                         Ok(_) => {
                             let branch_display = if branch_arg.is_empty() {
                                 "(detached)".dimmed()
@@ -2432,7 +2445,7 @@ impl Agent {
                             println!("  Branch: {}", branch_display);
                             println!();
                             println!(
-                                "{} Working directory changed. Use '/worktree exit' to return.",
+                                "{} Workspace root moved to the worktree. Use '/worktree exit' to return.",
                                 "💡".bright_yellow()
                             );
                         }
@@ -2444,7 +2457,7 @@ impl Agent {
                             );
                             println!("  You can manually cd to: {}", worktree_path);
                             println!(
-                                "  (no cwd change was made — the previous directory was kept: {})",
+                                "  (the workspace root was not changed — the previous directory was kept: {})",
                                 e
                             );
                         }
@@ -2464,14 +2477,11 @@ impl Agent {
         }
 
         if args == "exit" {
-            // Leave the worktree through the shared worktree state — the same
-            // RAII cwd guard the exit_worktree tool uses. It restores the
-            // previous working directory on every exit path, so the process
-            // cwd can never be stranded inside the worktree while the worktree
-            // state claims we are back at the root (a directory-comparison
-            // check cannot detect the TUI's own worktree, because a linked
-            // worktree is itself a git top-level).
-            match crate::tools::git_worktree::exit_worktree_dir() {
+            // Leave the worktree on this agent's workspace root — the same
+            // root the exit_worktree tool pops (a directory-comparison check
+            // cannot detect the TUI's own worktree, because a linked worktree
+            // is itself a git top-level). The process cwd is never touched.
+            match crate::tools::git_worktree::exit_worktree_dir(self.tools.workspace_root()) {
                 Ok((restored_dir, previous_worktree)) => {
                     println!("{} Exited worktree", "✓".bright_green());
                     if let Some(prev) = &previous_worktree {
@@ -2497,14 +2507,15 @@ impl Agent {
                 }
                 Err(e) => {
                     println!("{} Not currently in a worktree", "ℹ".bright_yellow());
-                    if let Ok(current_dir) = std::env::current_dir() {
+                    {
+                        let current_dir = self.tools.workspace_root().path();
                         println!(
                             "  Current: {}",
                             current_dir.to_string_lossy().bright_white()
                         );
                     }
-                    // No cwd change was attempted, so nothing was left stranded.
-                    println!("  (no cwd change was made: {})", e);
+                    // Nothing was changed.
+                    println!("  (workspace root unchanged: {})", e);
                 }
             }
             return;
@@ -3498,7 +3509,7 @@ impl Agent {
 
         let scan_path = std::path::Path::new(path_arg);
         let scan_path = if scan_path.is_relative() {
-            std::env::current_dir().unwrap_or_default().join(scan_path)
+            crate::tools::workspace_root::current_path().join(scan_path)
         } else {
             scan_path.to_path_buf()
         };

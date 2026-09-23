@@ -388,6 +388,8 @@ impl Tool for FileRead {
             line_range: Option<(usize, usize)>,
         }
 
+        // Relative paths resolve against the agent's workspace root.
+        let args = crate::tools::workspace_root::anchor_json(args, &["path"]);
         let args: Args = serde_json::from_value(args)?;
         let safety = resolve_safety_config(self.safety_config.as_ref());
         validate_tool_path(&args.path, &safety)?;
@@ -491,6 +493,8 @@ impl Tool for FileWrite {
             backup: Option<bool>,
         }
 
+        // Relative paths resolve against the agent's workspace root.
+        let args = crate::tools::workspace_root::anchor_json(args, &["path"]);
         let args: Args = serde_json::from_value(args)?;
         let safety = resolve_safety_config(self.safety_config.as_ref());
         validate_tool_path(&args.path, &safety)?;
@@ -595,6 +599,8 @@ impl Tool for FileEdit {
             new_str: String,
         }
 
+        // Relative paths resolve against the agent's workspace root.
+        let args = crate::tools::workspace_root::anchor_json(args, &["path"]);
         let args: Args = serde_json::from_value(args)?;
         let safety = resolve_safety_config(self.safety_config.as_ref());
         validate_tool_path(&args.path, &safety)?;
@@ -693,6 +699,8 @@ impl Tool for FileDelete {
             path: String,
         }
 
+        // Relative paths resolve against the agent's workspace root.
+        let args = crate::tools::workspace_root::anchor_json(args, &["path"]);
         let args: Args = serde_json::from_value(args)?;
         let safety = resolve_safety_config(self.safety_config.as_ref());
         validate_tool_path(&args.path, &safety)?;
@@ -787,6 +795,8 @@ impl Tool for FileMultiEdit {
             edits: Vec<EditItem>,
         }
 
+        // Relative paths resolve against the agent's workspace root.
+        let args = crate::tools::workspace_root::anchor_json(args, &["path", "edits"]);
         let args: Args = serde_json::from_value(args)?;
         let safety = resolve_safety_config(self.safety_config.as_ref());
 
@@ -1073,6 +1083,8 @@ impl Tool for DirectoryTree {
             include_hidden: bool,
         }
 
+        // Relative paths resolve against the agent's workspace root.
+        let args = crate::tools::workspace_root::anchor_json(args, &["path"]);
         let args: Args = serde_json::from_value(args)?;
         let safety = resolve_safety_config(self.safety_config.as_ref());
         validate_tool_path(&args.path, &safety)?;
@@ -1214,7 +1226,10 @@ pub(crate) fn validate_tool_path(path: &str, config: &SafetyConfig) -> Result<()
             return Ok(());
         }
     }
-    let working_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    // Validate against the calling agent's explicit workspace root (the
+    // task-local installed by tool dispatch), not the process cwd: entering
+    // a worktree moves that root, never the process-global cwd.
+    let working_dir = crate::tools::workspace_root::current_path();
     PathValidator::new(config, working_dir)
         .validate(path)
         .map_err(|e| anyhow::anyhow!(e))

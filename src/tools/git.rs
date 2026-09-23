@@ -1,4 +1,5 @@
 use super::file::{resolve_safety_config, validate_tool_path};
+use super::workspace_root::CommandRootExt;
 use super::Tool;
 use crate::config::SafetyConfig;
 use anyhow::{Context, Result};
@@ -190,6 +191,7 @@ impl Tool for GitCheckpoint {
         // Check current branch
         let mut cmd = tokio::process::Command::new("git");
         crate::safety::process_env::sanitize_command_env(&mut cmd);
+        cmd.in_workspace_root();
         let branch_output = cmd
             .args(["rev-parse", "--abbrev-ref", "HEAD"])
             .output()
@@ -206,6 +208,7 @@ impl Tool for GitCheckpoint {
 
                 let mut cmd = tokio::process::Command::new("git");
                 crate::safety::process_env::sanitize_command_env(&mut cmd);
+                cmd.in_workspace_root();
                 cmd.args(["checkout", "-b", &agent_branch]).output().await?;
 
                 info!("Created agent branch: {}", agent_branch);
@@ -217,6 +220,7 @@ impl Tool for GitCheckpoint {
         // Stage all changes
         let mut cmd = tokio::process::Command::new("git");
         crate::safety::process_env::sanitize_command_env(&mut cmd);
+        cmd.in_workspace_root();
         cmd.args(["add", "-A"])
             .output()
             .await
@@ -227,6 +231,7 @@ impl Tool for GitCheckpoint {
         let msg_file = write_commit_message_file(&full_msg);
         let mut cmd = tokio::process::Command::new("git");
         crate::safety::process_env::sanitize_command_env(&mut cmd);
+        cmd.in_workspace_root();
         let commit_output = if let Some(ref path) = msg_file {
             cmd.arg("commit")
                 .arg("--file")
@@ -248,6 +253,7 @@ impl Tool for GitCheckpoint {
         // Get hash
         let mut cmd = tokio::process::Command::new("git");
         crate::safety::process_env::sanitize_command_env(&mut cmd);
+        cmd.in_workspace_root();
         let hash_output = cmd.args(["rev-parse", "HEAD"]).output().await?;
         let hash = String::from_utf8_lossy(&hash_output.stdout)
             .trim()
@@ -258,12 +264,14 @@ impl Tool for GitCheckpoint {
             validate_tag_name(tag_name)?;
             let mut cmd = tokio::process::Command::new("git");
             crate::safety::process_env::sanitize_command_env(&mut cmd);
+            cmd.in_workspace_root();
             cmd.args(["tag", "-f", tag_name, &hash]).output().await?;
         }
 
         // Get status summary
         let mut cmd = tokio::process::Command::new("git");
         crate::safety::process_env::sanitize_command_env(&mut cmd);
+        cmd.in_workspace_root();
         let status_output = cmd.args(["status", "--short"]).output().await?;
         let status = String::from_utf8_lossy(&status_output.stdout);
 
@@ -302,6 +310,7 @@ impl Tool for GitStatus {
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
+        let args = super::workspace_root::anchor_json(args, &["repo_path"]);
         let repo_path = args
             .get("repo_path")
             .and_then(|v| v.as_str())
@@ -373,6 +382,7 @@ impl Tool for GitDiff {
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
+        let args = super::workspace_root::anchor_json(args, &["path"]);
         let repo_path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
         let staged = args
             .get("staged")
@@ -392,6 +402,7 @@ impl Tool for GitDiff {
 
         let mut cmd = tokio::process::Command::new("git");
         crate::safety::process_env::sanitize_command_env(&mut cmd);
+        cmd.in_workspace_root();
 
         let path_obj = std::path::Path::new(repo_path);
         if path_obj.is_dir() {
@@ -493,6 +504,7 @@ impl Tool for GitCommit {
             // To commit a NEW file, pass it explicitly in `files`.
             let mut cmd = tokio::process::Command::new("git");
             crate::safety::process_env::sanitize_command_env(&mut cmd);
+            cmd.in_workspace_root();
             let add_output = cmd
                 .arg("-C")
                 .arg(repo_path)
@@ -513,6 +525,7 @@ impl Tool for GitCommit {
                     }
                     let mut cmd = tokio::process::Command::new("git");
                     crate::safety::process_env::sanitize_command_env(&mut cmd);
+                    cmd.in_workspace_root();
                     let add_output = cmd
                         .arg("-C")
                         .arg(repo_path)
@@ -537,6 +550,7 @@ impl Tool for GitCommit {
         let msg_file = write_commit_message_file(message);
         let mut cmd = tokio::process::Command::new("git");
         crate::safety::process_env::sanitize_command_env(&mut cmd);
+        cmd.in_workspace_root();
         let output = if let Some(ref path) = msg_file {
             cmd.arg("-C")
                 .arg(repo_path)
@@ -639,6 +653,7 @@ impl Tool for GitPush {
         } else {
             let mut cmd = tokio::process::Command::new("git");
             crate::safety::process_env::sanitize_command_env(&mut cmd);
+            cmd.in_workspace_root();
             let output = cmd
                 .args(["rev-parse", "--abbrev-ref", "HEAD"])
                 .output()
@@ -668,6 +683,7 @@ impl Tool for GitPush {
 
         let mut cmd = tokio::process::Command::new("git");
         crate::safety::process_env::sanitize_command_env(&mut cmd);
+        cmd.in_workspace_root();
         // Push goes over the network and may need the user's SSH agent;
         // re-add it explicitly after the env clear.
         if let Ok(v) = std::env::var("SSH_AUTH_SOCK") {

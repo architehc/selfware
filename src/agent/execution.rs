@@ -128,10 +128,7 @@ pub(super) async fn count_source_files_in_workdir(cap: usize) -> usize {
         "site-packages",
     ];
 
-    let workdir = match std::env::current_dir() {
-        Ok(d) => d,
-        Err(_) => return 0,
-    };
+    let workdir = crate::tools::workspace_root::current_path();
 
     tokio::task::spawn_blocking(move || {
         let mut count = 0usize;
@@ -230,9 +227,7 @@ const NON_RUST_WORKDIR_MANIFESTS: &[&str] = &[
 /// "write a bash deploy script") must never receive a foreign-language stub
 /// and a `cargo test` directive.
 pub(super) async fn rust_scaffold_allowed(task_context: &str) -> bool {
-    let Ok(workdir) = std::env::current_dir() else {
-        return false;
-    };
+    let workdir = crate::tools::workspace_root::current_path();
     if workdir.join("Cargo.toml").is_file() {
         return true;
     }
@@ -548,7 +543,7 @@ impl Agent {
             },
         });
 
-        let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let workdir = crate::tools::workspace_root::current_path();
         let evidence = Some(self.evidence_snapshot());
         let artifact = super::turn_artifacts::TurnArtifact {
             step,

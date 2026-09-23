@@ -1948,6 +1948,7 @@ impl Agent {
                 let tool_args = vt.args.clone();
                 let tool_ref = self.tools.get(&tool_name);
                 let cancel = batch_cancel.clone();
+                let root = self.tools.workspace_root().clone();
 
                 futures.push(async move {
                     let Some(tool) = tool_ref else {
@@ -1957,7 +1958,10 @@ impl Agent {
                     let start = std::time::Instant::now();
                     let execution = run_tool_bounded(
                         crate::observability::telemetry::track_tool_execution(&tool_name, || {
-                            tool.execute(tool_args.clone())
+                            crate::tools::workspace_root::scope(
+                                root,
+                                tool.execute(tool_args.clone()),
+                            )
                         }),
                         std::time::Duration::from_secs(timeout_secs),
                         cancel,
@@ -3148,6 +3152,11 @@ impl Agent {
         mut paths: Vec<std::path::PathBuf>,
         tool: &str,
     ) {
+        // Relative targets resolve against the caller's workspace root (the
+        // task-local installed for the agent's run), like the tool itself.
+        for p in paths.iter_mut() {
+            *p = crate::tools::workspace_root::anchor_path(p);
+        }
         paths.sort();
         paths.dedup();
         if paths.is_empty() {
@@ -3312,6 +3321,11 @@ impl Agent {
         let pre_edit_content: Option<(String, String)> =
             if matches!(name, "file_edit" | "file_write" | "file_delete") {
                 if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                    // Snapshot the file the tool will actually touch: a
+                    // relative path resolves against this agent's workspace
+                    // root (no-op unless a worktree was entered).
+                    let path_anchored = self.tools.workspace_root().anchor_str(path);
+                    let path = path_anchored.as_str();
                     if let Ok(content) = tokio::fs::read_to_string(path).await {
                         use crate::session::edit_history::{EditAction, FileSnapshot};
                         let snapshot =
@@ -3391,7 +3405,10 @@ impl Agent {
 
         let execution = run_tool_bounded(
             crate::observability::telemetry::track_tool_execution(name, || {
-                tool.execute(args.clone())
+                crate::tools::workspace_root::scope(
+                    self.tools.workspace_root().clone(),
+                    tool.execute(args.clone()),
+                )
             }),
             std::time::Duration::from_secs(timeout_secs),
             self.cancel_token(),

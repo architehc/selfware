@@ -204,7 +204,7 @@ impl Agent {
         if self.config.agent.disable_turn_artifacts {
             return;
         }
-        let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let workdir = crate::tools::workspace_root::current_path();
         let dir = super::turn_artifacts::artifact_dir(&workdir);
         if tokio::fs::create_dir_all(&dir).await.is_err() {
             return;

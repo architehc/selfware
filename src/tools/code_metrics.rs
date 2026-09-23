@@ -183,6 +183,8 @@ impl Tool for CodeMetricsTool {
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
+        // Relative paths resolve against the agent's workspace root.
+        let args = crate::tools::workspace_root::anchor_json(args, &["file_path"]);
         let file_path = args
             .get("file_path")
             .and_then(|v| v.as_str())
