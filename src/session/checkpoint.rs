@@ -1935,6 +1935,9 @@ impl CheckpointManager {
     ///   see [`terminal_stop_allows_autochain`]. `Paused` tasks and every
     ///   other failure class stay explicit-`resume` territory: a crashed or
     ///   safety-stopped checkpoint must not auto-chain.
+    /// - **User task**: the same gate `--continue` applies — session-exit
+    ///   placeholders and checkpoints with no user message are never
+    ///   auto-resumed (see [`TaskCheckpoint::implicit_resume_blocker`]).
     ///
     /// Ordering and hydration match [`Self::list_tasks`]: delta logs are
     /// replayed (so a delta that flips a task to Completed is visible even
@@ -1950,10 +1953,30 @@ impl CheckpointManager {
             if summary.project_root.as_deref() != Some(workspace) {
                 continue;
             }
+            // Same user-task gate as `--continue`: a session-exit placeholder
+            // or a checkpoint with no user message has nothing to resume.
+            if is_placeholder_task_description(&summary.task_description) {
+                continue;
+            }
             match summary.status {
-                TaskStatus::InProgress => return Ok(Some(summary)),
+                TaskStatus::InProgress => match self.load(&summary.task_id) {
+                    Ok(checkpoint) if checkpoint.implicit_resume_blocker().is_none() => {
+                        return Ok(Some(summary));
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            "auto-resume: skipping unrecoverable checkpoint '{}': {}",
+                            summary.task_id,
+                            e
+                        );
+                    }
+                },
                 TaskStatus::Failed => match self.load(&summary.task_id) {
-                    Ok(checkpoint) if terminal_stop_allows_autochain(&checkpoint) => {
+                    Ok(checkpoint)
+                        if terminal_stop_allows_autochain(&checkpoint)
+                            && checkpoint.implicit_resume_blocker().is_none() =>
+                    {
                         return Ok(Some(summary));
                     }
                     Ok(_) => {}
@@ -2031,6 +2054,108 @@ fn terminal_stop_allows_autochain(checkpoint: &TaskCheckpoint) -> bool {
         !entry.recovered
             && entry.error.trim() == crate::agent::loop_control::MAX_ITERATIONS_STOP_REASON
     })
+}
+
+/// Task descriptions written by session-exit auto-saves rather than by a
+/// user task — by this build or earlier ones. A journal entry carrying one
+/// of these has no instruction to resume: continuing it runs an agent turn
+/// with nothing to do, which in testing went on to mutate files.
+pub const SESSION_EXIT_PLACEHOLDER_DESCRIPTIONS: &[&str] = &[
+    "interactive session exit",
+    "interactive basic session exit",
+    "TUI session exit",
+    "interactive session",
+];
+
+/// True when `description` is empty or a session-exit placeholder.
+pub fn is_placeholder_task_description(description: &str) -> bool {
+    let d = description.trim();
+    d.is_empty() || SESSION_EXIT_PLACEHOLDER_DESCRIPTIONS.contains(&d)
+}
+
+/// Why a journal entry cannot be implicitly resumed (`--continue`,
+/// `--autocontinue`). Explicit `selfware resume <id>` is unaffected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotResumableReason {
+    /// Empty description or a session-exit placeholder.
+    PlaceholderDescription,
+    /// The saved conversation holds no non-empty user message (e.g. a
+    /// step-0 save), so there is no instruction to continue.
+    NoUserMessage,
+}
+
+impl NotResumableReason {
+    /// Short human-readable reason for CLI output.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::PlaceholderDescription => "session-exit placeholder, no user task",
+            Self::NoUserMessage => "no user message in the saved conversation",
+        }
+    }
+}
+
+impl TaskCheckpoint {
+    /// `None` when this checkpoint carries a real user task an implicit
+    /// resume can continue; otherwise why it cannot.
+    pub fn implicit_resume_blocker(&self) -> Option<NotResumableReason> {
+        if is_placeholder_task_description(&self.task_description) {
+            return Some(NotResumableReason::PlaceholderDescription);
+        }
+        let has_user_message = self
+            .messages
+            .iter()
+            .any(|m| m.role == "user" && !m.content.text_all().trim().is_empty());
+        if !has_user_message {
+            return Some(NotResumableReason::NoUserMessage);
+        }
+        None
+    }
+}
+
+/// Result of picking the session `--continue` resumes.
+#[derive(Debug, Default)]
+pub struct ContinueSelection {
+    /// Newest journal entry with a real user task, if any.
+    pub selected: Option<TaskSummary>,
+    /// Newer entries passed over on the way, with the reason, newest first.
+    pub skipped: Vec<(TaskSummary, NotResumableReason)>,
+}
+
+impl CheckpointManager {
+    /// Pick the newest journal entry `--continue` may resume: the most
+    /// recent checkpoint that carries a real user task (see
+    /// [`TaskCheckpoint::implicit_resume_blocker`]). Placeholder / step-0
+    /// entries in front of it are reported in `skipped` so the caller can
+    /// say what it passed over. Unreadable checkpoints are skipped with a
+    /// warning (they remain visible to `selfware journal`).
+    pub fn latest_continuable_task(&self) -> Result<ContinueSelection> {
+        let mut selection = ContinueSelection::default();
+        for summary in self.list_tasks()? {
+            if is_placeholder_task_description(&summary.task_description) {
+                selection
+                    .skipped
+                    .push((summary, NotResumableReason::PlaceholderDescription));
+                continue;
+            }
+            match self.load(&summary.task_id) {
+                Ok(checkpoint) => match checkpoint.implicit_resume_blocker() {
+                    None => {
+                        selection.selected = Some(summary);
+                        break;
+                    }
+                    Some(reason) => selection.skipped.push((summary, reason)),
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        "--continue: skipping unreadable checkpoint '{}': {}",
+                        summary.task_id,
+                        e
+                    );
+                }
+            }
+        }
+        Ok(selection)
+    }
 }
 
 /// Get home directory

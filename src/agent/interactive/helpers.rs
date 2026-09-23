@@ -5,10 +5,9 @@ use std::time::{Duration, Instant};
 
 use crate::agent::{PendingMessage, PendingMessageOrigin};
 
-/// Check if input is an exit command.
-pub(crate) fn is_exit_command(input: &str) -> bool {
-    matches!(input, "exit" | "quit" | "/exit" | "/quit" | "/q")
-}
+/// Check if input is an exit command (shared with the TUI and multi-chat
+/// loops — see [`crate::input::command_registry::is_exit_command`]).
+pub(crate) use crate::input::command_registry::is_exit_command;
 
 /// True when REPL input looks like a slash command (`/word` optionally
 /// followed by arguments) rather than plain chat or an absolute path.

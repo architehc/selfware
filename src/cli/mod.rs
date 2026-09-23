@@ -1461,11 +1461,21 @@ pub async fn run() -> Result<()> {
     // is not blocked by the very credential-origin gate it manages.
     if let Some(Commands::Trust { path }) = &cli.command {
         let mut cfg_path = std::path::Path::new(path).to_path_buf();
+        // Trust is per config FILE (config::trust matches exact canonical
+        // paths only). A directory argument means that directory's
+        // selfware.toml; a directory without one has nothing to trust, and
+        // recording the bare directory would be a line that never matches.
         if cfg_path.is_dir() {
             let candidate = cfg_path.join("selfware.toml");
-            if candidate.exists() {
-                cfg_path = candidate;
+            if !candidate.is_file() {
+                anyhow::bail!(
+                    "No selfware.toml in '{}' to trust. Create it first, then run \
+                     `selfware trust {}`.",
+                    path,
+                    path
+                );
             }
+            cfg_path = candidate;
         }
         if !cfg_path.exists() {
             anyhow::bail!(
@@ -1826,9 +1836,44 @@ pub async fn run() -> Result<()> {
                 "--continue cannot be combined with a subcommand or -p (it resumes the latest session)"
             );
         }
-        let tasks = Agent::list_tasks()?;
-        let Some(latest) = tasks.first() else {
-            anyhow::bail!("--continue: no sessions to continue (journal is empty)");
+        // Only entries that carry a real user task are eligible: session-exit
+        // placeholders ("interactive session exit" from earlier builds) and
+        // step-0 saves with no user message have no instruction, and resuming
+        // one ran an instruction-less agent turn that mutated files.
+        let manager = anyhow::Context::context(
+            crate::checkpoint::CheckpointManager::default_path(),
+            "Failed to initialize checkpoint manager",
+        )?;
+        let selection = manager.latest_continuable_task()?;
+        if !selection.skipped.is_empty() && !cli.quiet {
+            eprintln!(
+                "--continue: skipping {} newer journal entr{} with no user task to resume:",
+                selection.skipped.len(),
+                if selection.skipped.len() == 1 {
+                    "y"
+                } else {
+                    "ies"
+                }
+            );
+            for (summary, reason) in &selection.skipped {
+                eprintln!("  {} ({})", summary.task_id, reason.describe());
+            }
+        }
+        let Some(latest) = selection.selected.as_ref() else {
+            if selection.skipped.is_empty() {
+                anyhow::bail!("--continue: no sessions to continue (journal is empty)");
+            }
+            anyhow::bail!(
+                "--continue: no session with a user task to continue ({} placeholder/empty \
+                 entr{} skipped). Start a new task, or `selfware resume <task-id>` to \
+                 resume a specific entry explicitly.",
+                selection.skipped.len(),
+                if selection.skipped.len() == 1 {
+                    "y"
+                } else {
+                    "ies"
+                }
+            );
         };
         if !cli.quiet {
             println!(
@@ -2234,7 +2279,7 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
         let input = tokio::task::block_in_place(|| user_input_rx.recv());
 
         match input {
-            Ok(ref input) if matches!(input.as_str(), "exit" | "quit" | "/exit" | "/quit") => break,
+            Ok(ref input) if crate::input::command_registry::is_exit_command(input.trim()) => break,
             Ok(mut input) => {
                 // Log helper for the slash handlers below (TUI log panel).
                 let log_line = |message: String| {
@@ -2514,9 +2559,13 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
     // summary — outcome, iterations, files changed, verification, tokens.
     println!("{}", render_run_summary(&agent.run_summary(), None));
 
-    // Auto-save conversation/session on exit so history isn't lost.
-    if let Err(e) = agent.save_checkpoint("TUI session exit") {
-        warn!("Failed to auto-save session on TUI exit: {}", e);
+    // Auto-save conversation/session on exit so history isn't lost — only
+    // when the session carried a user task (a "TUI session exit" placeholder
+    // entry would be picked up by `--continue` with nothing to do).
+    if let Some(task_desc) = agent.session_exit_task_description() {
+        if let Err(e) = agent.save_checkpoint(&task_desc) {
+            warn!("Failed to auto-save session on TUI exit: {}", e);
+        }
     }
 
     // Cleanup: await the TUI task with a bounded timeout so a stuck

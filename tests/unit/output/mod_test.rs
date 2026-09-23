@@ -789,3 +789,40 @@ fn audit_verdict_line_formats_each_verdict() {
         "[audit] verdict: unparseable"
     );
 }
+
+// ── Closed-pipe handling ─────────────────────────────────────────────────
+
+#[test]
+fn closed_stdout_pipe_panic_is_recognized() {
+    // Exact std messages from `print!`/`eprint!` when the reader went away.
+    assert!(is_closed_output_pipe_panic(
+        "failed printing to stdout: Broken pipe (os error 32)"
+    ));
+    assert!(is_closed_output_pipe_panic(
+        "failed printing to stderr: Broken pipe (os error 32)"
+    ));
+    // Windows spelling of the same condition.
+    assert!(is_closed_output_pipe_panic(
+        "failed printing to stdout: The pipe is being closed. (os error 232)"
+    ));
+}
+
+#[test]
+fn unrelated_panics_are_not_swallowed_as_closed_pipe() {
+    // A different stdout failure (disk full on a redirect) must still panic
+    // loudly — only a closed reader is a quiet exit.
+    assert!(!is_closed_output_pipe_panic(
+        "failed printing to stdout: No space left on device (os error 28)"
+    ));
+    // A panic that merely mentions a broken pipe (e.g. an MCP child pipe)
+    // is NOT our own stdout closing and must report normally.
+    assert!(!is_closed_output_pipe_panic(
+        "MCP transport write failed: Broken pipe (os error 32)"
+    ));
+    assert!(!is_closed_output_pipe_panic(""));
+}
+
+#[test]
+fn closed_pipe_exit_code_is_128_plus_sigpipe() {
+    assert_eq!(BROKEN_PIPE_EXIT_CODE, 128 + 13);
+}

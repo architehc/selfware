@@ -1481,6 +1481,9 @@ fn cp_in(
 ) -> TaskCheckpoint {
     let mut cp = TaskCheckpoint::new(task_id.to_string(), desc.to_string());
     cp.project_root = Some(project_root.to_string());
+    // A real task checkpoint always carries the user's instruction; implicit
+    // resume refuses entries without one (see implicit_resume_blocker).
+    cp.messages = vec![Message::system("sys"), Message::user(desc)];
     // set_status() bumps updated_at to now; override AFTER so the fabricated
     // time ordering is deterministic.
     cp.set_status(status);
@@ -1682,6 +1685,8 @@ fn autocontinue_skips_legacy_checkpoint_without_workspace_identity() {
 
     let mut legacy = TaskCheckpoint::new("legacy".to_string(), "pre-feature task".to_string());
     legacy.project_root = None;
+    // Carry a real user task so ONLY the missing workspace identity excludes it.
+    legacy.messages = vec![Message::user("pre-feature task")];
     legacy.set_status(TaskStatus::InProgress);
     manager.save(&legacy).unwrap();
 
@@ -1759,6 +1764,7 @@ fn autocontinue_sees_completed_status_carried_by_delta() {
     // Matching workspace, so ONLY the Completed status can exclude it.
     let mut cp = TaskCheckpoint::new("delta-done".to_string(), "done via delta".to_string());
     cp.project_root = Some(WORKSPACE_A.to_string());
+    cp.messages = vec![Message::user("done via delta")];
     manager.save(&cp).unwrap(); // base: InProgress
     cp.set_status(TaskStatus::Completed); // touch() bumps version → delta
     manager.save(&cp).unwrap();
@@ -2429,4 +2435,150 @@ fn test_crashed_compaction_recovers_and_cleans_obsolete_deltas() {
         !delta_path.exists(),
         "obsolete delta log should be cleaned after successful recovery"
     );
+}
+
+// ── --continue selection (latest_continuable_task) ───────────────────
+//
+// Regression: `--continue` resumed `list_tasks().first()` unfiltered, so a
+// session-exit placeholder ("interactive session exit", from earlier builds)
+// or a step-0 entry with no user message was resumed and ran an
+// instruction-less agent turn that mutated files.
+
+#[test]
+fn placeholder_descriptions_are_recognized() {
+    for d in [
+        "",
+        "   ",
+        "interactive session exit",
+        "interactive basic session exit",
+        "TUI session exit",
+        "interactive session",
+    ] {
+        assert!(is_placeholder_task_description(d), "{d:?} is a placeholder");
+    }
+    for d in ["fix the build", "interactive session exit handling bug"] {
+        assert!(!is_placeholder_task_description(d), "{d:?} is a real task");
+    }
+}
+
+#[test]
+fn continue_skips_placeholder_and_userless_entries_and_reports_them() {
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+    // Oldest: a real task → the one --continue must pick.
+    let real = cp_in(
+        "real-task",
+        "refactor the parser",
+        TaskStatus::InProgress,
+        WORKSPACE_A,
+        "2024-01-01T00:00:00Z",
+    );
+    manager.save_final(&real).unwrap();
+
+    // Newer: step-0 save with a real-looking description but no user message.
+    let mut step0 = cp_in(
+        "step0-task",
+        "something",
+        TaskStatus::InProgress,
+        WORKSPACE_A,
+        "2024-01-02T00:00:00Z",
+    );
+    step0.messages = vec![Message::system("sys")];
+    manager.save_final(&step0).unwrap();
+
+    // Newest: legacy session-exit placeholder.
+    let mut exit = cp_in(
+        "exit-task",
+        "interactive session exit",
+        TaskStatus::InProgress,
+        WORKSPACE_A,
+        "2024-01-03T00:00:00Z",
+    );
+    exit.messages = vec![Message::system("sys")];
+    manager.save_final(&exit).unwrap();
+
+    let selection = manager.latest_continuable_task().unwrap();
+    assert_eq!(
+        selection.selected.as_ref().map(|s| s.task_id.as_str()),
+        Some("real-task")
+    );
+    let skipped: Vec<(&str, NotResumableReason)> = selection
+        .skipped
+        .iter()
+        .map(|(s, r)| (s.task_id.as_str(), *r))
+        .collect();
+    assert_eq!(
+        skipped,
+        vec![
+            ("exit-task", NotResumableReason::PlaceholderDescription),
+            ("step0-task", NotResumableReason::NoUserMessage),
+        ]
+    );
+}
+
+#[test]
+fn continue_with_only_placeholders_selects_nothing() {
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+    let mut exit = cp_in(
+        "exit-only",
+        "TUI session exit",
+        TaskStatus::InProgress,
+        WORKSPACE_A,
+        "2024-01-03T00:00:00Z",
+    );
+    exit.messages.clear();
+    manager.save_final(&exit).unwrap();
+
+    let selection = manager.latest_continuable_task().unwrap();
+    assert!(selection.selected.is_none());
+    assert_eq!(selection.skipped.len(), 1);
+}
+
+#[test]
+fn autocontinue_skips_placeholder_and_userless_checkpoints() {
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+    let mut exit = cp_in(
+        "exit-task",
+        "interactive basic session exit",
+        TaskStatus::InProgress,
+        WORKSPACE_A,
+        "2024-01-03T00:00:00Z",
+    );
+    exit.messages = vec![Message::system("sys")];
+    manager.save_final(&exit).unwrap();
+    let mut step0 = cp_in(
+        "step0-task",
+        "real description",
+        TaskStatus::InProgress,
+        WORKSPACE_A,
+        "2024-01-02T00:00:00Z",
+    );
+    step0.messages = vec![Message::system("sys")];
+    manager.save_final(&step0).unwrap();
+
+    assert!(
+        manager
+            .latest_autoresumable_task(WORKSPACE_A)
+            .unwrap()
+            .is_none(),
+        "entries without a user task must never be auto-resumed"
+    );
+
+    let real = cp_in(
+        "real-task",
+        "finish the migration",
+        TaskStatus::InProgress,
+        WORKSPACE_A,
+        "2024-01-01T00:00:00Z",
+    );
+    manager.save_final(&real).unwrap();
+    let picked = manager
+        .latest_autoresumable_task(WORKSPACE_A)
+        .unwrap()
+        .expect("the real task behind the placeholders must be found");
+    assert_eq!(picked.task_id, "real-task");
 }

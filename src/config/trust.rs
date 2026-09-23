@@ -29,20 +29,32 @@ pub fn is_config_trusted(config_path: &Path) -> bool {
 }
 
 /// Testable core: whether `config_path` is listed in `trust_file`.
+///
+/// Trust is an EXACT canonical file match. A trust line names the one config
+/// file the user reviewed; it never extends to other files in the same
+/// directory, and a directory line trusts nothing. Otherwise a
+/// `selfware.toml` that appears in that directory later (a pulled commit, a
+/// branch switch, an unpacked archive) would inherit trust the user never
+/// granted and could route their API key to its endpoint. Legacy directory
+/// lines written by older `selfware trust <dir>` builds therefore stop
+/// matching; the credential-origin gate's refusal names the exact file to
+/// trust, and `selfware trust <dir>` now records `<dir>/selfware.toml`, so
+/// re-trusting is one command.
 fn is_config_trusted_in(trust_file: &Path, config_path: &Path) -> bool {
     let Ok(content) = std::fs::read_to_string(trust_file) else {
         return false;
     };
     let target = canonical(config_path);
+    // A directory is never a trusted config, even when listed verbatim.
+    if target.is_dir() {
+        return false;
+    }
     content.lines().any(|line| {
         let line = line.trim();
         if line.is_empty() {
             return false;
         }
-        let p = canonical(Path::new(line));
-        p == target
-            || (p.is_dir() && p.join("selfware.toml") == target)
-            || (target.is_file() && target.parent() == Some(&p))
+        canonical(Path::new(line)) == target
     })
 }
 
@@ -57,6 +69,15 @@ pub fn add_trusted_config(config_path: &Path) -> Result<()> {
 /// it 0600 / its parent 0700 on Unix). Idempotent — a path already trusted is a
 /// no-op.
 fn add_trusted_config_to(trust_file: &Path, config_path: &Path) -> Result<()> {
+    // Directory trust does not exist (see `is_config_trusted_in`): refuse to
+    // write a line that can never match rather than report "Trusted".
+    if config_path.is_dir() {
+        anyhow::bail!(
+            "refusing to trust directory '{}': trust names one config file (e.g. {})",
+            config_path.display(),
+            config_path.join("selfware.toml").display()
+        );
+    }
     if is_config_trusted_in(trust_file, config_path) {
         return Ok(());
     }

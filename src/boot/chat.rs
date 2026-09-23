@@ -187,7 +187,7 @@ pub async fn run_boot_chat() -> Result<()> {
         if question.is_empty() {
             continue;
         }
-        if matches!(question, "exit" | "quit" | ":q") {
+        if crate::input::command_registry::is_exit_command(question) || question == ":q" {
             break;
         }
         let snippet = retrieve_bundled_snippet(question);

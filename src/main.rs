@@ -12,10 +12,13 @@ const SHUTDOWN_GRACE_SECS: u64 = 10;
 const MAIN_STACK_SIZE: usize = 16 * 1024 * 1024;
 
 fn main() -> ExitCode {
-    #[cfg(unix)]
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-    }
+    // SIGPIPE is deliberately left at Rust's default (ignored). Resetting it
+    // to SIG_DFL made ANY write to a closed pipe fatal — including pipes to
+    // child processes (MCP stdio servers, LSP servers, the PTY shell, the
+    // Playwright bridge), killing selfware with no checkpoint. Only a closed
+    // stdout/stderr should end the process; the hook below makes that a quiet
+    // exit 141 instead of a panic.
+    selfware::output::install_closed_pipe_exit_hook();
     std::thread::Builder::new()
         .name("main".into())
         .stack_size(MAIN_STACK_SIZE)

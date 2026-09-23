@@ -1901,25 +1901,12 @@ impl Agent {
 
         // Auto-save conversation/session on exit only if the session had actual activity.
         // Avoid creating a dummy checkpoint for an empty session that --continue would pick up.
-        let has_activity = self
-            .messages
-            .iter()
-            .any(|m| m.role == "user" && !m.content.text().trim().is_empty())
-            || self.current_checkpoint.is_some();
-
-        if self.checkpoint_manager.is_some() && has_activity {
-            let task_desc = self
-                .current_checkpoint
-                .as_ref()
-                .map(|c| c.task_description.clone())
-                .unwrap_or_else(|| {
-                    self.messages
-                        .iter()
-                        .find(|m| m.role == "user")
-                        .map(|m| m.content.text().to_string())
-                        .unwrap_or_else(|| "interactive session".to_string())
-                });
-
+        let exit_task_desc = if self.checkpoint_manager.is_some() {
+            self.session_exit_task_description()
+        } else {
+            None
+        };
+        if let Some(task_desc) = exit_task_desc {
             if let Err(e) = self.save_checkpoint_forced(&task_desc) {
                 warn!("Failed to auto-save session on exit: {}", e);
             } else if let Some(checkpoint) = self.current_checkpoint.as_ref() {
@@ -3478,9 +3465,17 @@ impl Agent {
             }
         }
 
-        // Auto-save conversation/session on exit so history isn't lost.
-        if self.checkpoint_manager.is_some() {
-            if let Err(e) = self.save_checkpoint_forced("interactive basic session exit") {
+        // Auto-save conversation/session on exit so history isn't lost — but
+        // only when the session carried a user task. An empty session used to
+        // write an "interactive basic session exit" placeholder entry that
+        // `--continue` then resumed as an instruction-less agent turn.
+        let exit_task_desc = if self.checkpoint_manager.is_some() {
+            self.session_exit_task_description()
+        } else {
+            None
+        };
+        if let Some(task_desc) = exit_task_desc {
+            if let Err(e) = self.save_checkpoint_forced(&task_desc) {
                 warn!("Failed to auto-save session on exit: {}", e);
             } else if let Some(checkpoint) = self.current_checkpoint.as_ref() {
                 println!(

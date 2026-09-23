@@ -44,10 +44,13 @@ fn classify_stdin_read(result: &io::Result<usize>) -> StdinRead {
 
 /// Exit words end the session. Matched case-insensitively so `Exit`/`EXIT`
 /// don't fall through and get dispatched to every agent as a paid task.
+///
+/// The canonical set comes from the shared
+/// [`crate::input::command_registry::is_exit_command`]; multi-chat
+/// additionally keeps its historical bare `q` and case-insensitivity.
 fn is_exit_word(input: &str) -> bool {
-    ["exit", "quit", "/exit", "/quit", "q", "/q"]
-        .iter()
-        .any(|word| input.eq_ignore_ascii_case(word))
+    let lower = input.to_ascii_lowercase();
+    crate::input::command_registry::is_exit_command(&lower) || lower == "q"
 }
 
 /// Build a swarm with one agent per configured role, named like the chat

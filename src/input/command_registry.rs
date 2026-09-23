@@ -380,6 +380,19 @@ pub static COMMANDS: &[CommandEntry] = &[
 /// Exit commands (not slash commands but valid input to exit)
 pub static EXIT_COMMANDS: &[&str] = &["exit", "quit"];
 
+/// Slash commands that end a session. `/q` is registered above as the
+/// `/quit` alias, so every loop that honours `/quit` must honour `/q` too.
+pub static EXIT_SLASH_COMMANDS: &[&str] = &["/exit", "/quit", "/q"];
+
+/// THE exit-command predicate shared by every session loop (interactive
+/// REPL, basic REPL, TUI dashboard + its agent bridge, multi-agent chat).
+/// Exact match on the already-trimmed input: `exit`, `quit`, `/exit`,
+/// `/quit`, `/q`. Loops previously kept private copies that drifted (the TUI
+/// bridge had no `/q`, so `/q` there was dispatched to the agent as a task).
+pub fn is_exit_command(input: &str) -> bool {
+    EXIT_COMMANDS.contains(&input) || EXIT_SLASH_COMMANDS.contains(&input)
+}
+
 /// Get all command names (for completions and highlighting)
 pub fn command_names() -> Vec<String> {
     let mut names: Vec<String> = COMMANDS.iter().map(|c| c.name.to_string()).collect();

@@ -896,7 +896,7 @@ pub fn run_tui_dashboard_with_events(
                                         state.log(LogLevel::Info, "Chat cleared");
                                     });
                                 }
-                                "/quit" | "/exit" => {
+                                c if crate::input::command_registry::is_exit_command(c) => {
                                     // Same as the q-key quit: cancel the
                                     // in-flight agent task before leaving so
                                     // it cannot keep billing after exit.
@@ -913,7 +913,7 @@ pub fn run_tui_dashboard_with_events(
                                              \n\
                                              Session:\n  \
                                                /help           -- Show this help\n  \
-                                               /quit, /exit    -- Quit the TUI\n  \
+                                               /quit, /exit, /q -- Quit the TUI\n  \
                                                /clear          -- Clear chat history\n  \
                                                /status         -- Show agent status\n  \
                                                /stats          -- Show session statistics\n  \

@@ -1506,6 +1506,63 @@ pub(crate) fn phase_transition(from: &str, to: &str) {
     }
 }
 
+// ── Closed-pipe handling ────────────────────────────────────────────────
+//
+// SIGPIPE stays at Rust's default (ignored) so a write to a *child* pipe that
+// closed early (MCP stdio server, LSP server, PTY shell, Playwright bridge)
+// surfaces as an `io::Error` the caller can handle and checkpoint around,
+// instead of killing selfware outright. The one pipe whose closure SHOULD end
+// the process is our own stdout/stderr (`selfware doctor | head -2`): the
+// `print!`/`println!` family panics with "failed printing to stdout: Broken
+// pipe", which the hook below turns into a quiet exit with the conventional
+// 128+SIGPIPE status instead of a panic backtrace and exit 101.
+
+/// Exit status used when our own stdout/stderr pipe is closed by the reader
+/// (128 + SIGPIPE, what a shell reports for a SIGPIPE-killed process).
+pub const BROKEN_PIPE_EXIT_CODE: i32 = 141;
+
+/// True when a panic message is the std `print!`/`eprint!` failure for a
+/// closed stdout/stderr pipe. Deliberately narrow: only the std-emitted
+/// "failed printing to stdout/stderr" prefix combined with a broken-pipe
+/// error qualifies, so an unrelated panic that merely mentions a pipe still
+/// reports normally.
+pub fn is_closed_output_pipe_panic(message: &str) -> bool {
+    let from_std_print = message.starts_with("failed printing to stdout")
+        || message.starts_with("failed printing to stderr");
+    let broken_pipe = message.contains("Broken pipe")
+        || message.contains("(os error 32)")
+        // Windows: ERROR_BROKEN_PIPE (109) / ERROR_NO_DATA (232).
+        || message.contains("(os error 109)")
+        || message.contains("(os error 232)");
+    from_std_print && broken_pipe
+}
+
+/// Install a process-wide panic hook that exits quietly with
+/// [`BROKEN_PIPE_EXIT_CODE`] when stdout/stderr is a closed pipe, and
+/// delegates every other panic to the previously installed hook. Call once,
+/// early in `main`, before any output.
+pub fn install_closed_pipe_exit_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| info.payload().downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        if is_closed_output_pipe_panic(message) {
+            exit_on_closed_output();
+        }
+        previous(info);
+    }));
+}
+
+/// Exit the process because our stdout/stderr reader went away. Nothing is
+/// printed: there is nobody left to read it.
+pub fn exit_on_closed_output() -> ! {
+    std::process::exit(BROKEN_PIPE_EXIT_CODE)
+}
+
 #[cfg(test)]
 #[path = "../../tests/unit/output/mod_test.rs"]
 mod tests;

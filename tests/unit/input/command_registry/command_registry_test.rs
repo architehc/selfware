@@ -616,3 +616,29 @@ fn test_tools_commands_are_in_tools_category() {
         );
     }
 }
+
+#[test]
+fn shared_exit_predicate_accepts_every_registered_exit_alias() {
+    // Every loop (REPL, TUI + bridge, multi-chat, boot) routes through this
+    // one predicate; the TUI bridge used to miss `/q`.
+    for cmd in ["exit", "quit", "/exit", "/quit", "/q"] {
+        assert!(is_exit_command(cmd), "{cmd} must be an exit command");
+    }
+    // Each slash exit alias must also be a registered command so completion
+    // and help advertise exactly what the loops accept.
+    for cmd in EXIT_SLASH_COMMANDS {
+        assert!(
+            COMMANDS.iter().any(|c| c.name == *cmd),
+            "{cmd} must be registered in COMMANDS"
+        );
+    }
+}
+
+#[test]
+fn shared_exit_predicate_rejects_lookalikes() {
+    for cmd in [
+        "", "q", "Exit", " exit", "exit now", "/qq", "/queue", "quite",
+    ] {
+        assert!(!is_exit_command(cmd), "{cmd} must NOT be an exit command");
+    }
+}

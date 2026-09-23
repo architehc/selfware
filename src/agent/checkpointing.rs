@@ -567,6 +567,27 @@ impl Agent {
         checkpoint
     }
 
+    /// Task description for a session-exit auto-save, or `None` when the
+    /// session carried no user task and must NOT be saved.
+    ///
+    /// Every session-exit path (rich REPL, basic REPL, TUI) routes through
+    /// this so none of them writes a placeholder journal entry ("interactive
+    /// basic session exit", "TUI session exit") that `--continue` would later
+    /// pick up and run as an instruction-less agent turn. Prefers the active
+    /// checkpoint's real description, else the first non-empty user message.
+    pub(crate) fn session_exit_task_description(&self) -> Option<String> {
+        if let Some(cp) = self.current_checkpoint.as_ref() {
+            if !crate::checkpoint::is_placeholder_task_description(&cp.task_description) {
+                return Some(cp.task_description.clone());
+            }
+        }
+        self.messages
+            .iter()
+            .filter(|m| m.role == "user")
+            .map(|m| m.content.text_all())
+            .find(|text| !text.trim().is_empty())
+    }
+
     /// Save current state to checkpoint (subject to the continuous-work
     /// cadence policy — see [`should_persist_checkpoint`]).
     pub(crate) fn save_checkpoint(&mut self, task_description: &str) -> Result<()> {
