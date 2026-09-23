@@ -303,9 +303,12 @@ impl PlaywrightBridge {
                 cmd.env(key, val);
             }
         }
-        if let Ok(workspace_root) = std::env::current_dir() {
-            cmd.env("SELFWARE_WORKSPACE_ROOT", workspace_root);
-        }
+        // The agent's workspace root (not the process cwd: entering a git
+        // worktree moves only the agent's root).
+        cmd.env(
+            "SELFWARE_WORKSPACE_ROOT",
+            crate::tools::workspace_root::current_path(),
+        );
 
         let mut child = cmd
             .spawn()
@@ -806,8 +809,7 @@ fn validate_file_url(parsed: &url::Url) -> Result<()> {
         .to_file_path()
         .map_err(|_| anyhow::anyhow!("file:// URL must point to a local absolute path"))?;
 
-    let workspace_root = std::env::current_dir()
-        .context("Failed to determine current workspace directory")?
+    let workspace_root = crate::tools::workspace_root::current_path()
         .canonicalize()
         .context("Failed to canonicalize current workspace directory")?;
 
