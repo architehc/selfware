@@ -3266,9 +3266,33 @@ async fn handle_command(
                 .timeout(std::time::Duration::from_secs(2))
                 .connect_timeout(std::time::Duration::from_secs(2))
                 .build();
-            let endpoint_reachable = match probe_client {
-                Ok(c) => c.get(&config.endpoint).send().await.is_ok(),
-                Err(_) => false,
+            let probe_res = match probe_client {
+                Ok(c) => {
+                    let mut req = c.get(&config.endpoint);
+                    if let Some(ref key) = config.api_key {
+                        req = req.bearer_auth(key);
+                    }
+                    req.send().await
+                }
+                Err(e) => Err(e),
+            };
+
+            let (endpoint_reachable, endpoint_status_detail) = match probe_res {
+                Ok(resp) => {
+                    let code = resp.status();
+                    if code.is_success() || code == reqwest::StatusCode::METHOD_NOT_ALLOWED {
+                        (true, "Connected".to_string())
+                    } else if code == reqwest::StatusCode::UNAUTHORIZED
+                        || code == reqwest::StatusCode::FORBIDDEN
+                    {
+                        (false, format!("Authentication failed ({})", code))
+                    } else if code == reqwest::StatusCode::NOT_FOUND {
+                        (false, format!("Endpoint not found ({})", code))
+                    } else {
+                        (false, format!("Endpoint returned error ({})", code))
+                    }
+                }
+                Err(e) => (false, format!("Endpoint unreachable: {}", e)),
             };
 
             // The global --output-format flag covers this command: both JSON
@@ -3280,6 +3304,7 @@ async fn handle_command(
                         "endpoint": config.endpoint,
                         "is_local": ctx.is_local_model,
                         "endpoint_reachable": endpoint_reachable,
+                        "endpoint_status": endpoint_status_detail,
                         "project_path": ctx.project_path,
                         "execution_mode": format!("{:?}", exec_mode),
                         "journal": {
@@ -3306,8 +3331,9 @@ async fn handle_command(
                                 .garden_healthy()
                         } else {
                             format!(
-                                "{} Local model endpoint unreachable ({})",
+                                "{} Local model endpoint issue: {} ({})",
                                 Glyphs::wilt(),
+                                endpoint_status_detail,
                                 config.endpoint
                             )
                             .garden_wilting()
@@ -3316,8 +3342,9 @@ async fn handle_command(
                         format!("{} Connected to remote model", Glyphs::compass()).garden_healthy()
                     } else {
                         format!(
-                            "{} Remote model endpoint unreachable ({})",
+                            "{} Remote model endpoint issue: {} ({})",
                             Glyphs::wilt(),
+                            endpoint_status_detail,
                             config.endpoint
                         )
                         .garden_wilting()

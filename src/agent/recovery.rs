@@ -446,14 +446,43 @@ impl Agent {
     pub(super) fn build_error_recovery_hint(&self, tool_name: &str, error: &str) -> String {
         let error_lower = error.to_lowercase();
 
+        // Command / subprocess timeouts — tool-specific, NOT LLM infrastructure issues
+        if matches!(
+            tool_name,
+            "shell_exec"
+                | "pty_shell"
+                | "cargo_test"
+                | "cargo_check"
+                | "cargo_clippy"
+                | "cargo_fmt"
+                | "npm_run"
+                | "npm_install"
+                | "pip_install"
+                | "pip_list"
+                | "pip_freeze"
+                | "yarn_install"
+        ) && error_lower.contains("timed out")
+        {
+            return format!(
+                "Command in '{}' timed out. \
+                 For long-running builds, tests, or installations, retry with a larger timeout \
+                 (e.g., add '\"timeout_secs\": 600' to the arguments) or optimize the command.",
+                tool_name
+            );
+        }
+
         // Endpoint / connection errors — self-healing
         if error_lower.contains("connection refused")
             || error_lower.contains("connection reset")
-            || error_lower.contains("timed out")
             || error_lower.contains("502 bad gateway")
             || error_lower.contains("503 service unavailable")
-            || error_lower.contains("endpoint")
             || error_lower.contains("network unreachable")
+            || (error_lower.contains("timed out")
+                && (error_lower.contains("llm")
+                    || error_lower.contains("endpoint")
+                    || error_lower.contains("api")
+                    || error_lower.contains("client")))
+            || (error_lower.contains("endpoint") && !error_lower.contains("exit"))
         {
             warn!(
                 "Endpoint error detected for tool '{}': {}",

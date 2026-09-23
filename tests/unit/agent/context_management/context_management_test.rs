@@ -2258,3 +2258,72 @@ async fn test_structured_compression_anchors_current_task_not_turn_one() {
 
     server.stop().await;
 }
+
+#[tokio::test]
+async fn test_trim_oversized_system_message_truncated_not_evicted() {
+    let server = MockLlmServer::builder().with_response("ok").build().await;
+    let mut agent = make_test_agent(&server).await;
+
+    // Small context window (24k) where per-message cap is 18k.
+    agent.max_context_tokens = 24_000;
+
+    // Simulate an oversized system message (e.g. injected tree, hints, RAG).
+    let big_system: String = (0..20_000).map(|i| format!("sysword{i:05} ")).collect();
+    agent.messages.clear();
+    agent.messages.push(Message::system(format!(
+        "BASE SYSTEM INSTRUCTIONS\n\n{big_system}"
+    )));
+    agent.messages.push(Message::user("user task prompt"));
+
+    agent.trim_message_history();
+
+    let sys = agent
+        .messages
+        .iter()
+        .find(|m| m.role == "system")
+        .expect("system message must survive trimming");
+    assert!(
+        sys.content.text().starts_with("BASE SYSTEM INSTRUCTIONS"),
+        "base instructions should be preserved"
+    );
+    assert!(
+        sys.content
+            .text()
+            .contains("truncated to fit context budget"),
+        "oversized system message should be truncated to fit context budget"
+    );
+    let total_tokens = agent.estimate_messages_tokens();
+    assert!(
+        total_tokens <= 24_000,
+        "trimmed messages should stay within context budget, got {total_tokens}"
+    );
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn test_hard_clamp_to_budget_ensures_strict_context_bound() {
+    let server = MockLlmServer::builder().with_response("ok").build().await;
+    let _agent = make_test_agent(&server).await;
+
+    // Sized so that neither message individually exceeds the 18k cap,
+    // but together they exceed 24k.
+    let sys_pad: String = (0..10_000).map(|i| format!("s{i:04} ")).collect();
+    let user_pad: String = (0..10_000).map(|i| format!("u{i:04} ")).collect();
+
+    let mut msgs = vec![
+        Message::system(format!("BASE PROMPT\n{sys_pad}")),
+        Message::user(format!("TASK\n{user_pad}")),
+    ];
+
+    let (_dropped_msgs, dropped_toks) = Agent::trim_messages(&mut msgs, 24_000, Some(1));
+    let total = crate::token_count::estimate_messages_tokens(&msgs);
+    assert!(
+        total <= 24_000,
+        "hard clamp must guarantee total tokens <= budget, got {total}"
+    );
+    assert_eq!(msgs.len(), 2, "both messages should survive");
+    assert!(dropped_toks > 0, "dropped tokens should be recorded");
+
+    server.stop().await;
+}

@@ -221,16 +221,29 @@ impl Agent {
                 let engine = rag_engine.read().await;
                 match engine.retrieve(&query).await {
                     Ok(ctx) if !ctx.context.is_empty() && ctx.token_count > 0 => {
+                        // Cap RAG context chunks dynamically based on max_context_tokens
+                        // so small context windows (24k/40k) are not overwhelmed by retrieved code.
+                        let max_rag_tokens = (self.max_context_tokens / 16).clamp(500, 4000);
+                        let context_str = if ctx.token_count > max_rag_tokens {
+                            let chars: Vec<char> = ctx.context.chars().collect();
+                            let target_chars = (chars.len() as f64
+                                * (max_rag_tokens as f64 / ctx.token_count as f64))
+                                as usize;
+                            chars.into_iter().take(target_chars).collect::<String>()
+                                + "\n...[RAG context truncated to fit budget]"
+                        } else {
+                            ctx.context
+                        };
                         let rag_hint = format!(
                             "## Relevant Code Context (RAG)\n\
                              The following code chunks were retrieved from the indexed codebase \
                              based on semantic similarity to the current query. Use them as \
                              reference when answering.\n\n{}",
-                            ctx.context
+                            context_str
                         );
                         debug!(
                             "RAG injected {} tokens from {} sources ({}ms)",
-                            ctx.token_count,
+                            ctx.token_count.min(max_rag_tokens),
                             ctx.sources.len(),
                             ctx.retrieval_time_ms
                         );
@@ -287,11 +300,23 @@ impl Agent {
         // stays strictly within the context budget so small context windows (24k/40k) never overflow.
         if crate::token_count::estimate_messages_tokens(&request_messages) > self.max_context_tokens
         {
-            Self::trim_messages(
-                &mut request_messages,
-                self.max_context_tokens,
-                self.current_task_anchor_index(),
+            let anchor_idx =
+                Self::find_task_anchor_index(&request_messages, self.current_checkpoint.as_ref());
+            Self::trim_messages(&mut request_messages, self.max_context_tokens, anchor_idx);
+            request_messages = Agent::apply_tool_call_pair_invariants(request_messages);
+        }
+
+        // Final size check: guarantee the assembled payload never exceeds max_context_tokens.
+        // If an oversized system message or injected context still exceeds the budget,
+        // hard-clamp it before dispatching to the provider.
+        if crate::token_count::estimate_messages_tokens(&request_messages) > self.max_context_tokens
+        {
+            tracing::warn!(
+                "Request messages ({} tokens) exceed context budget ({}); hard-clamping to budget",
+                crate::token_count::estimate_messages_tokens(&request_messages),
+                self.max_context_tokens
             );
+            Self::hard_clamp_to_budget(&mut request_messages, self.max_context_tokens);
             request_messages = Agent::apply_tool_call_pair_invariants(request_messages);
         }
 

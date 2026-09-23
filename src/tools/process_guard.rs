@@ -91,6 +91,24 @@ pub struct BoundedCommandOutput {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub status: std::process::ExitStatus,
+    /// Whether lingering descendant processes had to be killed after the parent process exited.
+    pub killed_descendants: bool,
+}
+
+impl BoundedCommandOutput {
+    /// Return true if the process exited with code 0 AND no descendant processes had to be killed.
+    pub fn success(&self) -> bool {
+        !self.killed_descendants && self.status.success()
+    }
+
+    /// Return the exit code. If descendants were forcibly killed, return Some(-1).
+    pub fn exit_code(&self) -> Option<i32> {
+        if self.killed_descendants {
+            Some(-1)
+        } else {
+            self.status.code()
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -172,21 +190,102 @@ pub async fn run_command_bounded(
     })
     .await;
 
-    let (stdout_bytes, stderr_bytes) = match drain_res {
-        Ok((out, err)) => (out.unwrap_or_default(), err.unwrap_or_default()),
+    let (stdout_bytes, mut stderr_bytes, killed_descendants) = match drain_res {
+        Ok((out, err)) => (out.unwrap_or_default(), err.unwrap_or_default(), false),
         Err(_) => {
+            // Descendants are still running and holding the pipes open.
+            // Kill the process group to terminate lingering descendants.
             pg_guard.kill();
-            stdout_task.abort();
-            stderr_task.abort();
-            (Vec::new(), Vec::new())
+            // With the process group killed, the pipe write ends are closed.
+            // Await the drains with a 500ms timeout to collect the captured output.
+            let drain_after_kill = tokio::time::timeout(Duration::from_millis(500), async {
+                tokio::join!(&mut stdout_task, &mut stderr_task)
+            })
+            .await;
+            let (out, err) = match drain_after_kill {
+                Ok((o, e)) => (o.unwrap_or_default(), e.unwrap_or_default()),
+                Err(_) => {
+                    stdout_task.abort();
+                    stderr_task.abort();
+                    (Vec::new(), Vec::new())
+                }
+            };
+            (out, err, true)
         }
     };
 
     pg_guard.disarm();
 
+    if killed_descendants {
+        if !stderr_bytes.is_empty() && !stderr_bytes.ends_with(b"\n") {
+            stderr_bytes.push(b'\n');
+        }
+        stderr_bytes.extend_from_slice(b"[process_guard] Process group had lingering descendant processes that were killed after 1s grace period.\n");
+    }
+
     Ok(BoundedCommandOutput {
         stdout: stdout_bytes,
         stderr: stderr_bytes,
         status,
+        killed_descendants,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_run_command_bounded_success() {
+        let mut cmd = tokio::process::Command::new("echo");
+        cmd.arg("hello world");
+
+        let output = run_command_bounded(cmd, Duration::from_secs(5), 10_000)
+            .await
+            .expect("echo should succeed");
+
+        assert!(output.success());
+        assert_eq!(output.exit_code(), Some(0));
+        assert!(!output.killed_descendants);
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "hello world"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_command_bounded_kills_lingering_descendants_and_reports_failure() {
+        // Parent prints output and exits immediately, but backgrounds a sleep 30 descendant
+        // that holds stdout/stderr pipes open.
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg("(sleep 30 &); echo 'parent output'");
+
+        let output = run_command_bounded(cmd, Duration::from_secs(5), 10_000)
+            .await
+            .expect("command should run and terminate descendants");
+
+        // The 1s grace period should elapse, descendants killed, output collected.
+        assert!(
+            output.killed_descendants,
+            "lingering sleep 30 must be marked as killed descendants"
+        );
+        assert!(
+            !output.success(),
+            "killed descendants must not report success: true"
+        );
+        assert_eq!(
+            output.exit_code(),
+            Some(-1),
+            "killed descendants must report exit code -1"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("parent output"),
+            "stdout output produced by parent before exit must be preserved"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("[process_guard] Process group had lingering descendant"),
+            "stderr must contain diagnostic message"
+        );
+    }
 }

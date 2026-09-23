@@ -151,12 +151,12 @@ impl Tool for NpmInstall {
         let installed = parse_npm_install_output(&stdout, &stderr);
 
         Ok(json!({
-            "success": output.status.success(),
+            "success": output.success(),
             "packages": if packages.is_empty() { "all from package.json".to_string() } else { packages.join(", ") },
             "installed": installed,
             "stdout": truncate_output(&stdout, 2000),
             "stderr": truncate_output(&stderr, 1000),
-            "exit_code": output.status.code()
+            "exit_code": output.exit_code()
         }))
     }
 }
@@ -273,11 +273,11 @@ impl Tool for NpmRun {
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
         Ok(json!({
-            "success": output.status.success(),
+            "success": output.success(),
             "script": script,
             "stdout": truncate_output(&stdout, 3000),
             "stderr": truncate_output(&stderr, 1000),
-            "exit_code": output.status.code()
+            "exit_code": output.exit_code()
         }))
     }
 }
@@ -507,7 +507,7 @@ impl Tool for PipInstall {
         let installed = parse_pip_install_output(&stdout);
 
         Ok(json!({
-            "success": output.status.success(),
+            "success": output.success(),
             "python": python,
             "packages": if let Some(req) = requirements {
                 format!("from {}", req)
@@ -517,7 +517,7 @@ impl Tool for PipInstall {
             "installed": installed,
             "stdout": truncate_output(&stdout, 2000),
             "stderr": truncate_output(&stderr, 1000),
-            "exit_code": output.status.code()
+            "exit_code": output.exit_code()
         }))
     }
 }
@@ -582,7 +582,7 @@ impl Tool for PipList {
         let packages: Vec<PipPackage> = serde_json::from_str(&stdout).unwrap_or_default();
 
         Ok(json!({
-            "success": output.status.success(),
+            "success": output.success(),
             "python": python,
             "packages": packages,
             "count": packages.len(),
@@ -667,7 +667,7 @@ impl Tool for PipFreeze {
         }
 
         Ok(json!({
-            "success": output.status.success(),
+            "success": output.success(),
             "python": python,
             "requirements": stdout.trim(),
             "count": packages.len(),
@@ -793,11 +793,11 @@ impl Tool for YarnInstall {
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
         Ok(json!({
-            "success": output.status.success(),
+            "success": output.success(),
             "packages": if packages.is_empty() { "all from package.json".to_string() } else { packages.join(", ") },
             "stdout": truncate_output(&stdout, 2000),
             "stderr": truncate_output(&stderr, 1000),
-            "exit_code": output.status.code()
+            "exit_code": output.exit_code()
         }))
     }
 }

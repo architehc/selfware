@@ -41,6 +41,9 @@ async fn async_main() -> ExitCode {
         match reason {
             selfware::ShutdownReason::SignalTerminate => {
                 eprintln!("\nReceived SIGTERM, winding down...");
+                if selfware::is_repl_waiting_for_input() {
+                    std::process::exit(143);
+                }
             }
             _ => {
                 eprintln!(
@@ -65,7 +68,11 @@ async fn async_main() -> ExitCode {
             }
             _ = tokio::time::sleep(std::time::Duration::from_secs(SHUTDOWN_GRACE_SECS)) => {
                 eprintln!("Shutdown grace period expired, forcing exit.");
-                std::process::exit(1);
+                let code = match reason {
+                    selfware::ShutdownReason::SignalTerminate => 143,
+                    _ => 1,
+                };
+                std::process::exit(code);
             }
         }
     });
@@ -82,7 +89,19 @@ async fn async_main() -> ExitCode {
     selfware::shutdown_tracing();
 
     match result {
-        Ok(_) => ExitCode::SUCCESS,
+        Ok(_) => {
+            if let Some(reason) = selfware::shutdown_reason() {
+                let code = match reason {
+                    selfware::ShutdownReason::SignalTerminate => 143,
+                    selfware::ShutdownReason::UserInterrupt | selfware::ShutdownReason::Timeout => {
+                        130
+                    }
+                };
+                ExitCode::from(code)
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
         Err(e) => {
             eprintln!("Error: {:?}", e);
             ExitCode::from(selfware::errors::get_exit_code(&e))

@@ -16,3 +16,13 @@ fn test_request_shutdown_sets_flag() {
     assert!(is_shutdown_requested());
     reset_shutdown_for_test();
 }
+
+#[test]
+fn test_repl_waiting_for_input_and_guard() {
+    assert!(!is_repl_waiting_for_input());
+    {
+        let _guard = ReplInputWaitGuard::enter();
+        assert!(is_repl_waiting_for_input());
+    }
+    assert!(!is_repl_waiting_for_input());
+}

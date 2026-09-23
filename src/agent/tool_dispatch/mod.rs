@@ -3280,6 +3280,8 @@ impl Agent {
             // git_status/git_diff/grep results don't contain the edited path
             // in their key anyway. Clear all read caches so the agent never
             // sees pre-edit output and concludes its edit vanished.
+            let is_clippy_fix = name == "cargo_clippy"
+                && args.get("fix").and_then(|v| v.as_bool()).unwrap_or(false);
             if matches!(
                 name,
                 "shell_exec"
@@ -3287,10 +3289,12 @@ impl Agent {
                     | "git_commit"
                     | "git_checkout"
                     | "git_reset"
+                    | "git_checkpoint"
                     | "file_multi_edit"
                     | "patch_apply"
                     | "cargo_fmt"
-            ) {
+            ) || is_clippy_fix
+            {
                 self.cache_manager.tool_cache.clear().await;
             }
         }

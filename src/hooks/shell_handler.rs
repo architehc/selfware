@@ -61,20 +61,12 @@ pub async fn execute_hook(hook: &HookConfig, ctx: &HookContext) -> HookAction {
         Ok(None) => {
             let msg = format!("Hook '{}' timed out after {}s", command, hook.timeout_secs);
             warn!("{}", msg);
-            if ctx.event == super::HookEvent::PreToolUse {
-                HookAction::Skip { reason: msg }
-            } else {
-                HookAction::Error { message: msg }
-            }
+            HookAction::Error { message: msg }
         }
         Err(e) => {
             let msg = format!("Hook '{}' failed to run: {}", command, e);
             warn!("{}", msg);
-            if ctx.event == super::HookEvent::PreToolUse {
-                HookAction::Skip { reason: msg }
-            } else {
-                HookAction::Error { message: msg }
-            }
+            HookAction::Error { message: msg }
         }
     }
 }

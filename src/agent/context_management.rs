@@ -139,29 +139,34 @@ impl Agent {
     /// the system prompt, identical to `original_task_anchor`) when there is
     /// no checkpoint or its description no longer appears verbatim in the
     /// history — exactly the pre-fix behavior on single-task runs.
-    pub(super) fn current_task_anchor_index(&self) -> Option<usize> {
-        if let Some(desc) = self
-            .current_checkpoint
-            .as_ref()
+    /// Find the current task's anchor index within an arbitrary message list.
+    pub(super) fn find_task_anchor_index(
+        messages: &[Message],
+        checkpoint: Option<&crate::checkpoint::TaskCheckpoint>,
+    ) -> Option<usize> {
+        if let Some(desc) = checkpoint
             .map(|c| c.task_description.as_str())
             .filter(|d| !d.trim().is_empty())
         {
             // rposition: pick the most recent copy when a user repeats the
             // same prompt across turns.
-            if let Some(idx) = self
-                .messages
+            if let Some(idx) = messages
                 .iter()
                 .rposition(|m| m.role == "user" && m.content.text() == desc)
             {
                 return Some(idx);
             }
         }
-        let system_idx = self.messages.iter().position(|m| m.role == "system");
-        self.messages
+        let system_idx = messages.iter().position(|m| m.role == "system");
+        messages
             .iter()
             .enumerate()
             .find(|(i, m)| m.role == "user" && system_idx.is_none_or(|s| *i > s))
             .map(|(i, _)| i)
+    }
+
+    pub(super) fn current_task_anchor_index(&self) -> Option<usize> {
+        Self::find_task_anchor_index(&self.messages, self.current_checkpoint.as_ref())
     }
 
     /// The CURRENT task's prompt message (see
@@ -290,12 +295,22 @@ impl Agent {
             }
         }
 
-        // Pass 2: If still over budget, shed older critical/tool messages (except the root task prompt)
+        // Pass 2: If still over budget, shed older critical/tool messages (except the root task prompt
+        // and the active turn at the tail so newest tool results are not dropped)
+        let tail_protect_start = messages
+            .iter()
+            .rposition(|m| m.role == "user" || m.role == "assistant")
+            .unwrap_or(messages.len());
+
         for (i, tokens) in token_counts.iter().enumerate() {
             if remaining <= max_context_tokens {
                 break;
             }
-            if messages[i].role != "system" && keep[i] && Some(i) != anchor_idx {
+            if messages[i].role != "system"
+                && keep[i]
+                && Some(i) != anchor_idx
+                && i < tail_protect_start
+            {
                 keep[i] = false;
                 remaining -= tokens;
             }
@@ -322,14 +337,15 @@ impl Agent {
         let max_message_tokens = Self::per_message_cap(max_context_tokens);
         let mut remaining = estimate_messages_tokens(messages);
         if remaining > max_context_tokens {
-            let truncate_indices: Vec<usize> = messages
+            let mut truncate_indices: Vec<usize> = messages
                 .iter()
                 .enumerate()
-                .filter(|(_, msg)| {
-                    msg.role != "system" && estimate_message_tokens(msg) > max_message_tokens
-                })
+                .filter(|(_, msg)| estimate_message_tokens(msg) > max_message_tokens)
                 .map(|(i, _)| i)
                 .collect();
+
+            // Truncate non-system messages first, system messages second
+            truncate_indices.sort_by_key(|&i| if messages[i].role == "system" { 1 } else { 0 });
 
             for idx in truncate_indices {
                 if remaining <= max_context_tokens {
@@ -353,7 +369,96 @@ impl Agent {
             }
         }
 
-        (dropped_messages, dropped_tokens)
+        // Final clamp: If still over budget (e.g. system message + anchor together exceed budget,
+        // or multiple messages sum past the limit), hard-clamp the largest message(s).
+        if remaining > max_context_tokens {
+            Self::hard_clamp_to_budget(messages, max_context_tokens);
+        }
+
+        let final_tokens = estimate_messages_tokens(messages);
+        let actual_dropped_tokens = dropped_tokens.max(total.saturating_sub(final_tokens));
+
+        (dropped_messages, actual_dropped_tokens)
+    }
+
+    /// Hard clamp all messages to fit within `max_context_tokens`.
+    /// Iteratively shrinks the largest message until the total estimated tokens
+    /// is within `max_context_tokens` or cannot be shrunk further.
+    pub(crate) fn hard_clamp_to_budget(messages: &mut [Message], max_context_tokens: usize) {
+        use super::context::estimate_message_tokens;
+        use crate::token_count::estimate_messages_tokens;
+
+        let mut remaining = estimate_messages_tokens(messages);
+        if remaining <= max_context_tokens {
+            return;
+        }
+
+        // Run up to 10 iterations to prevent any possibility of infinite looping.
+        for _ in 0..10 {
+            if remaining <= max_context_tokens {
+                break;
+            }
+            let excess = remaining.saturating_sub(max_context_tokens);
+            if excess == 0 {
+                break;
+            }
+
+            // Find the candidate message with the highest token count.
+            // Prioritize non-system messages over system messages if they are of comparable size,
+            // but allow system messages to be shrunk if they are the largest.
+            let largest_idx = messages
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| m.content.text().len() > 50)
+                .max_by_key(|(_, m)| {
+                    let tokens = estimate_message_tokens(m);
+                    if m.role == "system" {
+                        tokens.saturating_sub(100)
+                    } else {
+                        tokens
+                    }
+                })
+                .map(|(i, _)| i);
+
+            let Some(idx) = largest_idx else {
+                break;
+            };
+
+            let current_tokens = estimate_message_tokens(&messages[idx]);
+            if current_tokens <= 20 {
+                break;
+            }
+
+            let target_tokens = current_tokens.saturating_sub(excess + 20).max(20);
+
+            if target_tokens >= current_tokens {
+                break;
+            }
+
+            let current_text = messages[idx].content.text().to_string();
+            let current_chars: Vec<char> = current_text.chars().collect();
+            let target_chars = ((current_chars.len() as f64
+                * (target_tokens as f64 / current_tokens as f64))
+                as usize)
+                .min(current_chars.len());
+
+            if target_chars >= current_chars.len() {
+                break;
+            }
+
+            let truncated: String = current_chars
+                .into_iter()
+                .take(target_chars)
+                .collect::<String>()
+                + "\n...[truncated to fit context budget]";
+            messages[idx].content = crate::api::types::MessageContent::Text(truncated);
+            let new_remaining = estimate_messages_tokens(messages);
+            if new_remaining >= remaining {
+                // Not making progress; stop
+                break;
+            }
+            remaining = new_remaining;
+        }
     }
 
     /// Trim the message history so total estimated tokens stay within

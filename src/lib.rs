@@ -162,6 +162,7 @@ pub enum ShutdownReason {
 
 static SHUTDOWN_FLAG: AtomicBool = AtomicBool::new(false);
 static SHUTDOWN_REASON: AtomicU8 = AtomicU8::new(0);
+static REPL_WAITING_FOR_INPUT: AtomicBool = AtomicBool::new(false);
 
 #[allow(dead_code)]
 const SHUTDOWN_NONE: u8 = 0;
@@ -206,6 +207,32 @@ pub fn is_shutdown_requested() -> bool {
     SHUTDOWN_FLAG.load(Ordering::SeqCst)
 }
 
+/// Set whether the REPL or interactive prompt is currently waiting for input.
+pub fn set_repl_waiting_for_input(waiting: bool) {
+    REPL_WAITING_FOR_INPUT.store(waiting, Ordering::SeqCst);
+}
+
+/// Check whether the REPL or interactive prompt is currently waiting for input.
+pub fn is_repl_waiting_for_input() -> bool {
+    REPL_WAITING_FOR_INPUT.load(Ordering::SeqCst)
+}
+
+/// RAII guard that marks the REPL or interactive prompt as waiting for user input while held.
+pub struct ReplInputWaitGuard;
+
+impl ReplInputWaitGuard {
+    pub fn enter() -> Self {
+        set_repl_waiting_for_input(true);
+        Self
+    }
+}
+
+impl Drop for ReplInputWaitGuard {
+    fn drop(&mut self) {
+        set_repl_waiting_for_input(false);
+    }
+}
+
 /// Test-only: clear the process-global shutdown latch. In production the latch
 /// is a one-way switch owned by `main`'s signal handler, but a test that
 /// exercises `request_shutdown` must clear it — otherwise the flag stays set for
@@ -215,6 +242,7 @@ pub fn is_shutdown_requested() -> bool {
 pub(crate) fn reset_shutdown_for_test() {
     SHUTDOWN_REASON.store(SHUTDOWN_NONE, Ordering::SeqCst);
     SHUTDOWN_FLAG.store(false, Ordering::SeqCst);
+    REPL_WAITING_FOR_INPUT.store(false, Ordering::SeqCst);
 }
 
 /// Await until a graceful shutdown has been requested.

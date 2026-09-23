@@ -1039,12 +1039,19 @@ impl Tool for KnowledgeAutoExtract {
             }
         }
 
+        let count = added_nodes.len();
+        let success = count > 0;
         Ok(json!({
-            "success": true,
+            "success": success,
             "file_path": file_path,
-            "entities_extracted": added_nodes.len(),
+            "entities_extracted": count,
             "relations_added": added_edges.len(),
             "dry_run": dry_run,
+            "message": if success {
+                format!("Successfully indexed {} entities from {}", count, file_path)
+            } else {
+                format!("No symbols found or extracted by LSP from {}", file_path)
+            },
             "entities": added_nodes
                 .iter()
                 .map(|n| json!({"name": n.name, "type": format!("{:?}", n.node_type), "line": n.line_number}))

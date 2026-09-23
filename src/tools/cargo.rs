@@ -261,7 +261,7 @@ impl Tool for CargoTest {
             .count();
 
         let result = CargoTestOutput {
-            success: output.status.success() && failed == 0,
+            success: output.success() && failed == 0,
             summary: TestSummary {
                 passed,
                 failed,
@@ -272,7 +272,7 @@ impl Tool for CargoTest {
             failures,
             stdout: stdout.chars().take(8000).collect(),
             stderr: stderr.chars().take(4000).collect(),
-            exit_code: output.status.code(),
+            exit_code: output.exit_code(),
         };
 
         Ok(serde_json::to_value(result)?)
@@ -371,7 +371,7 @@ impl Tool for CargoCheck {
         let first_error = errors.first().cloned();
 
         let result = CargoCheckOutput {
-            success: output.status.success(),
+            success: output.success() && errors.is_empty(),
             error_count: errors.len(),
             warning_count: warnings.len(),
             errors,
@@ -379,7 +379,7 @@ impl Tool for CargoCheck {
             by_file,
             first_error,
             output: stderr.chars().take(6000).collect(),
-            exit_code: output.status.code(),
+            exit_code: output.exit_code(),
         };
 
         // Add error analysis summary to the output
@@ -498,7 +498,7 @@ impl Tool for CargoClippy {
             .count();
 
         let result = CargoClippyOutput {
-            success: output.status.success(),
+            success: output.success() && error_count == 0,
             lints,
             by_category,
             fixable,
@@ -562,9 +562,9 @@ impl Tool for CargoFmt {
         };
 
         Ok(serde_json::json!({
-            "success": output.status.success(),
+            "success": output.success(),
             "diff": String::from_utf8_lossy(&output.stderr).into_owned(),
-            "exit_code": output.status.code()
+            "exit_code": output.exit_code()
         }))
     }
 }

@@ -114,7 +114,11 @@ impl Agent {
 
             // Use block_in_place to prevent blocking the async runtime
             // while waiting for blocking I/O (stdin read from reedline)
-            let input = match tokio::task::block_in_place(|| editor.read_line()) {
+            let readline_res = {
+                let _wait_guard = crate::ReplInputWaitGuard::enter();
+                tokio::task::block_in_place(|| editor.read_line())
+            };
+            let input = match readline_res {
                 Ok(ReadlineResult::Line(line)) => {
                     consecutive_errors = 0;
                     last_ctrl_c = None;
@@ -1878,7 +1882,10 @@ impl Agent {
                 std::io::Write::flush(&mut std::io::stdout())?;
                 let mut confirm = String::new();
                 // Use block_in_place to prevent blocking the async runtime
-                tokio::task::block_in_place(|| std::io::stdin().read_line(&mut confirm))?;
+                {
+                    let _wait_guard = crate::ReplInputWaitGuard::enter();
+                    tokio::task::block_in_place(|| std::io::stdin().read_line(&mut confirm))?;
+                }
                 let confirm = confirm.trim().to_lowercase();
                 if confirm == "n" || confirm == "no" {
                     println!("Input cancelled.");
@@ -1892,9 +1899,28 @@ impl Agent {
             }
         }
 
-        // Auto-save conversation/session on exit so history isn't lost.
-        if self.checkpoint_manager.is_some() {
-            if let Err(e) = self.save_checkpoint_forced("interactive session exit") {
+        // Auto-save conversation/session on exit only if the session had actual activity.
+        // Avoid creating a dummy checkpoint for an empty session that --continue would pick up.
+        let has_activity = self
+            .messages
+            .iter()
+            .any(|m| m.role == "user" && !m.content.text().trim().is_empty())
+            || self.current_checkpoint.is_some();
+
+        if self.checkpoint_manager.is_some() && has_activity {
+            let task_desc = self
+                .current_checkpoint
+                .as_ref()
+                .map(|c| c.task_description.clone())
+                .unwrap_or_else(|| {
+                    self.messages
+                        .iter()
+                        .find(|m| m.role == "user")
+                        .map(|m| m.content.text().to_string())
+                        .unwrap_or_else(|| "interactive session".to_string())
+                });
+
+            if let Err(e) = self.save_checkpoint_forced(&task_desc) {
                 warn!("Failed to auto-save session on exit: {}", e);
             } else if let Some(checkpoint) = self.current_checkpoint.as_ref() {
                 println!(
@@ -2732,7 +2758,10 @@ impl Agent {
 
             let mut input = String::new();
             // Use block_in_place to prevent blocking the async runtime
-            let bytes_read = tokio::task::block_in_place(|| io::stdin().read_line(&mut input))?;
+            let bytes_read = {
+                let _wait_guard = crate::ReplInputWaitGuard::enter();
+                tokio::task::block_in_place(|| io::stdin().read_line(&mut input))?
+            };
 
             // EOF detection: read_line returns Ok(0) on EOF
             if bytes_read == 0 {
@@ -3412,7 +3441,10 @@ impl Agent {
                 io::stdout().flush()?;
                 let mut confirm = String::new();
                 // Use block_in_place to prevent blocking the async runtime
-                tokio::task::block_in_place(|| io::stdin().read_line(&mut confirm))?;
+                {
+                    let _wait_guard = crate::ReplInputWaitGuard::enter();
+                    tokio::task::block_in_place(|| io::stdin().read_line(&mut confirm))?;
+                }
                 let confirm = confirm.trim().to_lowercase();
                 if confirm == "n" || confirm == "no" {
                     println!("Input cancelled.");
