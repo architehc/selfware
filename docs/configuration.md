@@ -59,7 +59,7 @@ with the source (default / TOML / env / CLI) of every value.
 ### Model-defaults profiles and the unknown-model fallback
 
 Layer 2 matches the configured `model` against built-in glob patterns
-(`*nemotron-3-ultra*`, `qwen3.6-*`, `*glm-5.2*`, `claude-*`, `gpt-*`, ...). Matching is
+(`qwen38-flash-*`, `*nemotron-3-ultra*`, `qwen3.6-*`, `*glm-5.2*`, `claude-*`, `gpt-*`, ...). Matching is
 case-insensitive and tries the full model id **and** its last `/`-separated
 segment, so provider-prefixed ids (`qwen/qwen3.6-27b`) and path-qualified
 local ids (`/home/rig/models/qwen3.6-27b`, as served by sglang/vLLM) match
@@ -90,11 +90,11 @@ over the fallback.
 
 ```toml
 # API endpoint URL (must start with http:// or https://)
-# Default: "https://openrouter.ai/api/v1"
+# Default: "https://llm.selfware.design/v1" (works without an API key)
 endpoint = "http://localhost:8000/v1"
 
 # Model identifier sent to the API
-# Default: "nvidia/nemotron-3-ultra-550b-a55b:free"
+# Default: "qwen38-flash-next"
 model = "Qwen/Qwen3-Coder-Next-FP8"
 
 # Maximum tokens in the model response
@@ -176,9 +176,17 @@ streaming = true
 min_completion_steps = 3
 
 # Require at least one verification (cargo_check/cargo_test/cargo_clippy)
-# before accepting task completion
+# before accepting task completion. A test run that executes zero tests, or
+# whose output is piped/redirected, does not count.
 # Default: true
 require_verification_before_completion = true
+
+# Fail any single LLM call that runs longer than this many wall-clock seconds
+# with a typed error (terminal for that call, not retried). Unset or 0 means
+# uncapped, so slow local endpoints keep working. ~600 is a good value for
+# llm.selfware.design (see README, "Running against llm.selfware.design").
+# Default: unset
+max_call_secs = 600
 ```
 
 ## `[safety]` -- Safety Guardrails

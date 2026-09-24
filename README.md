@@ -16,7 +16,7 @@
       \|     |/
 ```
 
-An **agentic coding harness** for LLMs that's **local-first, cloud-compatible** — run it entirely on your own hardware, or point it at a hosted endpoint (e.g. OpenRouter + Nemotron 3 Ultra, free tier) when you don't have the GPU. 70+ tools, multi-agent swarm, evolution engine, hooks, MCP integration, LSP intelligence, ZED extension, TUI dashboard, and a fox mascot.
+An **agentic coding harness** for LLMs that's **local-first, cloud-compatible** — run it entirely on your own hardware, or use a hosted endpoint when you don't have the GPU: out of the box it talks to `https://llm.selfware.design/v1` (`qwen38-flash-next`, no API key needed), and OpenRouter (e.g. Nemotron 3 Ultra, free tier) is one config file away. 70+ tools, multi-agent swarm, evolution engine, hooks, MCP integration, LSP intelligence, ZED extension, TUI dashboard, and a fox mascot.
 
 > **TL;DR** — Point it at any OpenAI-compatible endpoint (vLLM, Ollama, llama.cpp, LM Studio), give it a task, and watch it work a tool-use (ReAct) loop — reading, editing, running tests, and committing. A lightweight Plan→Execute phase structures each run; it is not a full task decomposer, so scope large goals into concrete tasks. Then let the evolution engine iterate.
 
@@ -101,9 +101,28 @@ An **agentic coding harness** for LLMs that's **local-first, cloud-compatible** 
 
 ## Quick Start
 
-> ### ⚡ Fastest path — hosted, no GPU, free: OpenRouter + Nemotron 3 Ultra
+> ### ⚡ Fastest path — zero config: the built-in endpoint
 >
-> Want to try Selfware in two minutes with a frontier model and **no local server**?
+> Since 0.8.0 the built-in default endpoint is `https://llm.selfware.design/v1`
+> with model `qwen38-flash-next`, and it works **without an API key**. With no
+> config file at all, [install Selfware](#1-install-selfware) and run:
+>
+> ```bash
+> cd ~/my-project
+> selfware -m auto-edit run "add a docstring to main.py"
+> ```
+>
+> `-m auto-edit` lets the agent apply edits without prompting; drop it (or use
+> `selfware chat`) to confirm each change yourself. Non-interactive runs (stdin
+> not a terminal, e.g. CI) in the default `normal` mode are refused up front,
+> because nobody could answer the prompts.
+> `selfware llm-doctor` checks the endpoint if something looks wrong, and
+> [Running against llm.selfware.design / SGLang](#running-against-llmselfwaredesign--sglang)
+> lists the settings we measured for long tasks on this model.
+
+> ### ☁️ Hosted alternative — OpenRouter + Nemotron 3 Ultra (free tier)
+>
+> Want a different frontier model with **no local server**?
 > Point it at [OpenRouter](https://openrouter.ai) and run Nemotron 3 Ultra on the
 > **free tier** — all you provide is an API key, no credits needed.
 >
@@ -183,7 +202,7 @@ An **agentic coding harness** for LLMs that's **local-first, cloud-compatible** 
 
 > ### 🌱 Boot assistant — a tiny local model that helps you set Selfware up
 >
-> No API key at all? Run
+> Want help configuring your own backend, fully offline? Run
 > [`google/gemma-4-E2B-it-qat-q4_0-unquantized-assistant`](https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-unquantized-assistant)
 > — a 0.16 GB instruction-tuned model whose job is to be your **setup buddy**:
 > it explains Selfware's settings, helps you write `config.toml` for your
@@ -335,7 +354,9 @@ Selfware needs an **OpenAI-compatible API endpoint**. Pick any backend:
 
 ### 5. Configure
 
-Create `selfware.toml` in your project directory:
+Without any config file, Selfware uses the built-in endpoint
+(`https://llm.selfware.design/v1`, model `qwen38-flash-next`, no key). To use
+your own backend, create `selfware.toml` in your project directory:
 
 ```toml
 # Your local workshop
@@ -396,40 +417,110 @@ selfware --tui
 
 ---
 
-## What's New
+## What's New in 0.8
 
-Recent improvements landing in 0.3.0-beta:
+0.8 is about long-task reliability, honest status, and safety hardening. The
+full list is in [CHANGELOG.md](CHANGELOG.md); the highlights:
 
-- **Config provenance.** `selfware config show` reports the *source* of every
-  setting (default / TOML / env / CLI) so you can answer
-  "where is this temperature coming from?" in one command. See
-  [docs/configuration.md](docs/configuration.md).
-- **Model profiles.** Define a `vision` (or other named) profile in
-  `[models.<name>]` alongside your top-level `endpoint`/`model`. Vision-capable
-  profiles are picked up automatically by the screenshot/vision tools.
-- **Per-turn artifacts.** Every agent turn is dumped to
-  `~/.selfware/artifacts/turns/<session>/<turn>.json` with secrets
-  redacted, so you can replay or diff a session after the fact.
-- **`--debug` flag.** One flag turns on every diagnostic channel
-  (events, turns, prompts, raw I/O, failure-mode classifier). Pick
-  individual channels with `SELFWARE_DEBUG_CHANNELS=...`.
-- **Failure-mode classifier.** Failed turns are tagged
-  (`endpoint_unreachable`, `model_timeout`, `tool_error`,
-  `parse_error`, `policy_denial`) and streamed to
-  `~/.selfware/logs/failures.jsonl`.
-- **Native function-call unification.** Native FC and textual fallback
-  paths now produce byte-identical `ToolCall` objects, so streaming and
-  non-streaming responses are interchangeable.
-- **Tool-call dedupe.** The harness drops duplicate tool calls within a
-  turn (same name + same args) before dispatching, eliminating a common
-  source of agent loops.
-- **Benchmark suite, ported to Rust.** `selfware bench` is now native
-  Rust (no Python wrapper), supports `--trials N` for stability sweeps,
-  and writes a single `aggregate.json` covering all trials.
-- **Event channel.** A typed broadcast channel exposes lifecycle events
-  to in-process subscribers (TUI, MCP server, custom harnesses) without
-  scraping logs.
+- **Zero-config default endpoint** — `https://llm.selfware.design/v1`
+  (`qwen38-flash-next`), no API key required.
+- **Checkpoint on every mutation**, with a resume note listing the files already
+  written; `--autocontinue` also resumes runs that stopped at the iteration cap.
+- **Per-agent workspace root** — entering a git worktree no longer changes the
+  process working directory; tools, hooks and subprocesses follow the agent's
+  root.
+- **Per-call latency ledger** and an optional `agent.max_call_secs` cap on any
+  single LLM call.
+- **Better context management on small windows** — the task text survives
+  compaction, over-budget requests are never sent, and provider context-length
+  errors go to bounded compression recovery.
+- **Security** — subprocess environments are sanitised across secondary spawns,
+  MCP `resources/*` obey `denied_paths`, and file tools read/write through
+  validated descriptors.
 
+### Behaviour changes to know when upgrading
+
+- **Failed runs exit non-zero.** A run whose verdict is a failure (max
+  iterations, fake completion, failed verification, a required edit never made)
+  now exits with a non-zero code instead of 0. See [Exit codes](#exit-codes).
+- **Trust is per file.** `selfware trust <dir>` records `<dir>/selfware.toml` in
+  `~/.selfware/trusted_repos`. Directory entries written by older versions no
+  longer match — re-run `selfware trust` once in each repo you had trusted.
+- **Window placement is unrestricted unless configured.** The desktop geometry
+  that used to be hard-coded is now an optional `[computer.window_policy]` block
+  (see [docs/configuration.md](docs/configuration.md#computerwindow_policy----window-placement-and-ownership)).
+- **Screenshots go to a file.** `screen_capture` / `computer_screen` save the PNG
+  outside the workspace and return its path; pass `inline: true` to also get
+  base64.
+- **PreToolUse hooks fail closed.** A hook that times out or cannot start blocks
+  the tool call (see [docs/hooks.md](docs/hooks.md)).
+- **No `.bak` files.** `file_write` no longer leaves `<file>.bak` siblings; undo
+  uses the edit history (`/undo`).
+- **Container env is sanitised.** docker/podman commands no longer inherit host
+  credentials; compose `${VAR}` values come from the project's `.env`, not your
+  shell.
+- **Stricter verification credit.** A test run that executes zero tests, or whose
+  output is piped or redirected (`cargo test | tail`, `pytest > log`), does not
+  count as passing verification. Re-run the tests unpiped to earn credit.
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success |
+| `1` | Failure, including a failed run verdict |
+| `2` | Configuration error |
+| `4` | API / network error |
+| `5` | Safety block |
+| `6` | A tool needed confirmation that a headless run cannot give (use `-m auto-edit` or `-m yolo`) |
+| `130` | User interrupt (Ctrl-C / Esc) |
+| `141` | stdout closed (e.g. piped into `head`) |
+| `143` | `SIGTERM` / terminated |
+
+For scripts and CI, `--output-format json` prints one result object at the end
+of a headless run, and `--output-format stream-json` prints JSON lines as it
+goes (`step_started`, `tool_call_started`, `tool_call_completed`,
+`task_completed`, `task_failed`, ...). The result object carries the outcome:
+`exit_status` (`0` or `1`), `stop_reason`, `failure_mode`, `num_turns`,
+`usage`, `patch_bytes`, and the final `answer` when there is one. Logs stay on
+stderr, so stdout is pure JSON.
+
+---
+
+## Running against llm.selfware.design / SGLang
+
+The zero-config defaults work, but for long autonomous tasks on
+`qwen38-flash-next` we recommend these settings, measured against the endpoint
+on 2026-09-24:
+
+```toml
+endpoint       = "https://llm.selfware.design/v1"
+model          = "qwen38-flash-next"
+max_tokens     = 24576    # bounds a runaway reasoning stream
+context_length = 131072   # 128k–160k; the largest real prompt we saw was 127k
+
+[agent]
+max_call_secs = 600               # the longest real call took 358 s
+native_function_calling = false   # see below
+```
+
+- **`max_tokens` ≈ 24576.** Only `max_tokens` bounds this model's reasoning: at
+  65536, a runaway reasoning stream can run ~27 minutes at ~40 tok/s.
+  `reasoning_effort` has no measurable effect on this model.
+- **`agent.max_call_secs` ≈ 600.** Fails a stuck call with a typed error instead
+  of hanging. Keep streaming on (the default): an ngrok-style gateway cuts
+  non-streaming requests at 300 s.
+- **`context_length` 128k–160k.** Bigger windows cost more than they give: time
+  to first token was 13 s at 99k tokens vs 40 s at 257k, and decode dropped to
+  17 tok/s. The built-in profile for this model allows 350k, so set it lower
+  explicitly.
+- **`native_function_calling = false`** unless the server's tool parser is
+  `qwen3_coder`; with that parser, native tool calling works.
+
+Serving this model yourself with SGLang? See
+**[docs/serving-sglang.md](docs/serving-sglang.md)** for the launch flags we
+measured (tool parser, concurrency, chunked prefill, and prefix caching for
+hybrid Mamba/GDN models).
 
 ---
 
@@ -534,6 +625,8 @@ ollama run qwen3.5:0.8b
 ### SGLang
 
 SGLang provides native tool calling support with `--tool-call-parser qwen` and `--reasoning-parser qwen3`, which is the recommended way to run Qwen models with selfware. This gives you proper OpenAI-compatible function calling instead of XML-based parsing.
+
+> Serving `qwen38-flash-next`? Use `--tool-call-parser qwen3_coder` instead — the `qwen` parser silently drops streamed tool calls for that model. See [docs/serving-sglang.md](docs/serving-sglang.md) for measured concurrency, chunked-prefill and prefix-caching flags.
 
 **Single RTX 4090 / 3090 (24 GB) — Qwen3.5-4B:**
 
@@ -1081,6 +1174,9 @@ bash system_tests/projecte2e/run_full_sab.sh
 | `--ascii` | ASCII-only output (no emoji) |
 | `--plan` | Plan mode (read-only, no edits) |
 | `--resume-session <name>` | Resume a named session |
+| `--continue` | Resume the most recent task from the journal |
+| `--autocontinue` | At startup, resume the most recent incomplete task (including one stopped at the iteration cap) |
+| `--output-format <FMT>` | Headless output: `text`, `json`, or `stream-json` (see [Exit codes](#exit-codes)) |
 | `--no-color` | Disable colored output |
 
 ### Environment Variables
@@ -1221,6 +1317,7 @@ Full guides are available in the [`docs/`](docs/) directory:
 | [Hooks](docs/hooks.md) | Event-driven automation setup |
 | [MCP](docs/mcp.md) | MCP client and server configuration |
 | [Doctor](docs/doctor.md) | System and LLM diagnostics |
+| [Serving with SGLang](docs/serving-sglang.md) | Measured SGLang launch flags for `qwen38-flash-next`-class models |
 | [ZED Extension](docs/zed-extension.md) | IDE integration via ZED |
 
 ---
