@@ -27,14 +27,15 @@ jobs:
         os: [ubuntu-24.04, macos-14]
         rust: [stable]
         include:
-          # 60m: on 287a6e47 both legs passed every test step but were
-          # cancelled at 45m (Linux during "Build release", macOS during the
-          # all-features pass) — two full test passes plus the multi-minute
-          # redteam corpus gate no longer fit.
+          # 90m. Measured on dcb196b5: build 4-5m, `cargo test` 24m (linux) /
+          # 28m (macos), `cargo test --features extras` 21m / >27m, release
+          # build >11m cold. Both legs passed every test step that finished but
+          # were cancelled at 60m (and at 45m on 287a6e47). Two full test
+          # passes + the release build need ~75-85m.
           - os: ubuntu-24.04
-            timeout: 60
+            timeout: 90
           - os: macos-14
-            timeout: 60
+            timeout: 90
         exclude:
           # Only test beta on Linux to save CI time
           - os: macos-14
