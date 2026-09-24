@@ -210,7 +210,7 @@ fn word_internal_hidden_name(c: char) -> Option<&'static str> {
 /// beyond \n (handled by `str::lines`), U+0085 (NEL), U+2028 and U+2029 break
 /// lines visually, so a payload hidden behind them must start a new scanned
 /// line (with the correct line number) instead of slipping past per-line rules.
-fn is_line_separator(c: char) -> bool {
+pub(crate) fn is_line_separator(c: char) -> bool {
     matches!(c, '\n' | '\u{0085}' | '\u{2028}' | '\u{2029}')
 }
 
@@ -221,7 +221,7 @@ fn is_line_separator(c: char) -> bool {
 /// Note: when C1/unicode separators are present, these line numbers can
 /// diverge from `str::lines` numbering — detection is the security property;
 /// the divergence only affects which physical line a sanitizer rewrites.
-fn logical_lines(content: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn logical_lines(content: &str) -> impl Iterator<Item = &str> {
     content.split_inclusive(is_line_separator)
 }
 

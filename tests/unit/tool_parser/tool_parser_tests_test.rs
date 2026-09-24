@@ -1090,3 +1090,107 @@ fn test_qwen_hybrid_arguments_payload_name_does_not_rename() {
         "<name>shell_exec</name>"
     );
 }
+
+// ---- `<parameter name="key">` dialect (validation run 2026-09-24, turn_0026) ----
+
+#[test]
+fn test_qwen_tool_call_parameter_name_attribute_dialect() {
+    // Verbatim shape from the validation run: parsed to {} before the fix and
+    // was rejected by schema validation (missing pattern/path).
+    let content = "<tool_call>\n<function=grep_search>\n<parameter name=\"pattern\">fn trust_gate</parameter>\n<parameter name=\"path\">src/safety\n</parameter>\n<parameter name=\"max_matches\">20</parameter>\n</function>\n</tool_call>";
+    let result = parse_tool_calls(content);
+    assert_eq!(
+        result.tool_calls.len(),
+        1,
+        "errors: {:?}",
+        result.parse_errors
+    );
+    let call = &result.tool_calls[0];
+    assert_eq!(call.tool_name, "grep_search");
+    assert_eq!(call.arguments["pattern"], "fn trust_gate");
+    assert_eq!(call.arguments["path"], "src/safety");
+    assert_eq!(call.arguments["max_matches"], 20);
+}
+
+#[test]
+fn test_qwen_parameter_dialect_variants_all_parse() {
+    for open in [
+        "<parameter=path>",
+        "<parameter = path>",
+        "<parameter=\"path\">",
+        "<parameter name=\"path\">",
+        "<parameter name='path'>",
+        "<parameter name=path>",
+        "<parameter  name = \"path\" >",
+        "<parameter\n  name=\"path\"\n>",
+    ] {
+        let content = format!(
+            "<tool_call>\n<function=file_read>\n{open}src/lib.rs</parameter>\n</function>\n</tool_call>"
+        );
+        let result = parse_tool_calls(&content);
+        assert_eq!(
+            result.tool_calls.len(),
+            1,
+            "{open}: {:?}",
+            result.parse_errors
+        );
+        assert_eq!(
+            result.tool_calls[0].arguments["path"], "src/lib.rs",
+            "{open}: {}",
+            result.tool_calls[0].arguments
+        );
+    }
+}
+
+#[test]
+fn test_qwen_bare_function_parameter_name_attribute_dialect() {
+    // Bare path (no <tool_call> wrapper) goes through the same parameter
+    // parser; mixed dialects in one call both land.
+    let content = "<function=file_read>\n<parameter name=\"path\">src/main.rs</parameter>\n<parameter=line_range>[1, 40]</parameter>\n</function>";
+    let result = parse_tool_calls(content);
+    assert_eq!(
+        result.tool_calls.len(),
+        1,
+        "errors: {:?}",
+        result.parse_errors
+    );
+    assert_eq!(result.tool_calls[0].tool_name, "file_read");
+    assert_eq!(result.tool_calls[0].arguments["path"], "src/main.rs");
+    assert_eq!(
+        result.tool_calls[0].arguments["line_range"],
+        serde_json::json!([1, 40])
+    );
+}
+
+#[test]
+fn test_qwen_parameter_name_attribute_value_keeps_newlines_and_angle_brackets() {
+    let content = "<tool_call>\n<function=file_write>\n<parameter name=\"path\">a.rs</parameter>\n<parameter name='content'>fn f() -> Vec<u8> {\n    if a < b { vec![] } else { vec![1] }\n}</parameter>\n</function>\n</tool_call>";
+    let result = parse_tool_calls(content);
+    assert_eq!(
+        result.tool_calls.len(),
+        1,
+        "errors: {:?}",
+        result.parse_errors
+    );
+    assert_eq!(
+        result.tool_calls[0].arguments["content"],
+        "fn f() -> Vec<u8> {\n    if a < b { vec![] } else { vec![1] }\n}"
+    );
+}
+
+#[test]
+fn test_qwen_hybrid_guard_sees_parameter_name_dialect() {
+    // The hybrid `<arguments>` override must not fire for a real tool whose
+    // body carries `<parameter name=…>` tags: text inside a parameter value
+    // is payload, never structure (same guard as the `<parameter=` form).
+    let content = "<function=file_write>\n<arguments>{\"path\": \"evil.sh\"}</arguments>\n<parameter name=\"path\">a.md</parameter>\n<parameter name=\"content\">x</parameter>\n</function>";
+    let result = parse_tool_calls(content);
+    assert_eq!(
+        result.tool_calls.len(),
+        1,
+        "errors: {:?}",
+        result.parse_errors
+    );
+    assert_eq!(result.tool_calls[0].arguments["path"], "a.md");
+    assert_eq!(result.tool_calls[0].arguments["content"], "x");
+}

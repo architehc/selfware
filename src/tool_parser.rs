@@ -57,6 +57,7 @@ static XML_TOOL_FUNCTION_TAG_REGEX: OnceLock<Regex> = OnceLock::new();
 static XML_TOOL_MISSING_ARGS_CLOSE_REGEX: OnceLock<Regex> = OnceLock::new();
 static QWEN3_TOOL_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static QWEN3_PARAMETER_REGEX: OnceLock<Regex> = OnceLock::new();
+static QWEN3_PARAMETER_OPEN_REGEX: OnceLock<Regex> = OnceLock::new();
 static BARE_FUNCTION_REGEX: OnceLock<Regex> = OnceLock::new();
 static OPENAI_FUNCTION_REGEX: OnceLock<Regex> = OnceLock::new();
 static MALFORMED_CLOSE_TAG_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -148,13 +149,40 @@ fn qwen3_tool_call_regex() -> &'static Regex {
     })
 }
 
+/// Opening tag of a Qwen3 parameter, in every dialect models emit:
+/// `<parameter=key>`, `<parameter = key>`, `<parameter="key">`,
+/// `<parameter name="key">`, `<parameter name='key'>`, `<parameter name=key>`
+/// (whitespace-tolerant). The key lands in exactly one of groups 1-3.
+const QWEN3_PARAMETER_OPEN: &str = r#"<parameter(?:\s*=\s*|\s+name\s*=\s*)(?:"([a-zA-Z_][a-zA-Z0-9_]*)"|'([a-zA-Z_][a-zA-Z0-9_]*)'|([a-zA-Z_][a-zA-Z0-9_]*))\s*>"#;
+
 /// Qwen3 parameter format
-/// Format: <parameter=key>value</parameter>
+/// Format: `<parameter=key>value</parameter>` (or any dialect of
+/// [`QWEN3_PARAMETER_OPEN`]); the value is group 4.
 fn qwen3_parameter_regex() -> &'static Regex {
     QWEN3_PARAMETER_REGEX.get_or_init(|| {
-        Regex::new(r"<parameter=([a-zA-Z_][a-zA-Z0-9_]*)>\s*([\s\S]*?)\s*</parameter>")
-            .expect("Invalid Qwen3 parameter regex")
+        Regex::new(&format!(
+            r"{QWEN3_PARAMETER_OPEN}\s*([\s\S]*?)\s*</parameter>"
+        ))
+        .expect("Invalid Qwen3 parameter regex")
     })
+}
+
+/// Whether a call body carries any Qwen3 parameter tag (any dialect).
+fn has_qwen3_parameter_tag(params_str: &str) -> bool {
+    QWEN3_PARAMETER_OPEN_REGEX
+        .get_or_init(|| {
+            Regex::new(QWEN3_PARAMETER_OPEN).expect("Invalid Qwen3 parameter open regex")
+        })
+        .is_match(params_str)
+}
+
+/// Key of a [`qwen3_parameter_regex`] capture, whichever dialect matched.
+fn qwen3_parameter_key<'a>(cap: &regex::Captures<'a>) -> &'a str {
+    cap.get(1)
+        .or_else(|| cap.get(2))
+        .or_else(|| cap.get(3))
+        .map(|m| m.as_str())
+        .unwrap_or_default()
 }
 
 /// Bare function format (without tool_call wrapper)
@@ -764,7 +792,7 @@ fn qwen_hybrid_header(params_str: &str) -> QwenHybridHeader<'_> {
 /// `<function=file_write><parameter=content>…` must never have its arguments
 /// replaced by `<arguments>` text appearing inside a parameter value.
 fn qwen_hybrid_form_allowed(captured_name: &str, params_str: &str) -> bool {
-    captured_name.trim() == "tool" || !params_str.contains("<parameter=")
+    captured_name.trim() == "tool" || !has_qwen3_parameter_tag(params_str)
 }
 
 /// Resolve the actual tool name for Qwen tool calls. If the outer function name
@@ -796,8 +824,8 @@ fn parse_qwen3_parameters(captured_name: &str, params_str: &str) -> Result<serde
     let mut args = serde_json::Map::new();
 
     for cap in param_regex.captures_iter(params_str) {
-        let key = cap[1].trim().to_string();
-        let raw_value = cap[2].trim();
+        let key = qwen3_parameter_key(&cap).to_string();
+        let raw_value = cap[4].trim();
         let value = decode_xml_entities(raw_value);
 
         // Try to parse value as JSON (for booleans, numbers, arrays, objects)
