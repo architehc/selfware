@@ -2681,3 +2681,221 @@ async fn run_reaped_drain_timeout_keeps_captured_stdout() {
         "stderr should note the timeout"
     );
 }
+
+/// Temp crate `<tmp>/Cargo.toml` + `src/lib.rs` for the edition-aware
+/// syntax-check tests. Returns the tempdir guard.
+fn rust_crate_fixture(edition_line: &str, lib_rs: &str) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("Cargo.toml"),
+        format!("[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n{edition_line}\n"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+    std::fs::write(tmp.path().join("src/lib.rs"), lib_rs).unwrap();
+    tmp
+}
+
+#[tokio::test]
+async fn cheap_syntax_check_rust_async_fn_passes_under_crate_edition() {
+    // Regression (expert_async_race): rustfmt run without --edition parsed
+    // as Rust 2015 and rejected `async fn` (E0670) — a false syntax failure
+    // that failed verification although cargo test and clippy passed.
+    for edition in ["2018", "2021", "2024"] {
+        let tmp = rust_crate_fixture(
+            &format!("edition = \"{edition}\""),
+            "pub async fn race() -> u32 {\n    1\n}\n",
+        );
+        let gate = VerificationGate::new(tmp.path(), VerificationConfig::default());
+        let result = gate
+            .run_cheap_syntax_check(RepoLanguage::Rust, &["src/lib.rs".to_string()])
+            .await
+            .unwrap();
+        if rustfmt_absent_path_asserted(&result) {
+            return;
+        }
+        assert!(
+            result.passed,
+            "async fn in an edition {edition} crate must pass: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains(&format!("edition {edition}")),
+            "the output must name the edition parsed as: {}",
+            result.output
+        );
+        assert!(
+            result.warnings.iter().all(|w| !w.contains("fallback")),
+            "a manifest edition is not a fallback: {:?}",
+            result.warnings
+        );
+    }
+}
+
+#[tokio::test]
+async fn cheap_syntax_check_rust_explicit_2015_crate_still_rejects_async_fn() {
+    // The edition is really passed through: a crate that declares 2015 gets
+    // the 2015 parser, which rejects `async fn`.
+    let tmp = rust_crate_fixture("edition = \"2015\"", "pub async fn f() {}\n");
+    let gate = VerificationGate::new(tmp.path(), VerificationConfig::default());
+    let result = gate
+        .run_cheap_syntax_check(RepoLanguage::Rust, &["src/lib.rs".to_string()])
+        .await
+        .unwrap();
+    if rustfmt_absent_path_asserted(&result) {
+        return;
+    }
+    assert!(
+        !result.passed,
+        "2015 must reject async fn: {}",
+        result.output
+    );
+}
+
+#[tokio::test]
+async fn cheap_syntax_check_rust_parse_error_fails_in_2021_crate() {
+    let tmp = rust_crate_fixture(
+        "edition = \"2021\"",
+        "pub async fn f() {\n    let x = ;\n}\n",
+    );
+    let gate = VerificationGate::new(tmp.path(), VerificationConfig::default());
+    let result = gate
+        .run_cheap_syntax_check(RepoLanguage::Rust, &["src/lib.rs".to_string()])
+        .await
+        .unwrap();
+    if rustfmt_absent_path_asserted(&result) {
+        return;
+    }
+    assert!(
+        !result.passed,
+        "a real parse error must fail: {}",
+        result.output
+    );
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("syntax check failed")),
+        "{:?}",
+        result.errors
+    );
+}
+
+#[tokio::test]
+async fn cheap_syntax_check_rust_workspace_inherited_edition() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("Cargo.toml"),
+        "[workspace]\nmembers = [\"m\"]\n[workspace.package]\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(tmp.path().join("m/src")).unwrap();
+    std::fs::write(
+        tmp.path().join("m/Cargo.toml"),
+        "[package]\nname = \"m\"\nversion = \"0.1.0\"\nedition.workspace = true\n",
+    )
+    .unwrap();
+    std::fs::write(tmp.path().join("m/src/lib.rs"), "pub async fn f() {}\n").unwrap();
+    let gate = VerificationGate::new(tmp.path(), VerificationConfig::default());
+    let result = gate
+        .run_cheap_syntax_check(RepoLanguage::Rust, &["m/src/lib.rs".to_string()])
+        .await
+        .unwrap();
+    if rustfmt_absent_path_asserted(&result) {
+        return;
+    }
+    assert!(result.passed, "{}", result.output);
+    assert!(
+        result.output.contains("workspace.package.edition"),
+        "{}",
+        result.output
+    );
+}
+
+#[tokio::test]
+async fn cheap_syntax_check_rust_no_manifest_uses_reported_fallback() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("loose.rs"), "async fn f() {}\n").unwrap();
+    let gate = VerificationGate::new(tmp.path(), VerificationConfig::default());
+    let result = gate
+        .run_cheap_syntax_check(RepoLanguage::Rust, &["loose.rs".to_string()])
+        .await
+        .unwrap();
+    if rustfmt_absent_path_asserted(&result) {
+        return;
+    }
+    assert!(result.passed, "{}", result.output);
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| w.contains("fallback") && w.contains("2021")),
+        "a guessed edition must be surfaced: {:?}",
+        result.warnings
+    );
+}
+
+#[tokio::test]
+async fn cheap_syntax_check_rust_checks_edited_file_alone() {
+    // `mod child;` pointing at a broken (or not-yet-created) module must not
+    // fail the edited parent file: each touched file is checked on its own.
+    let tmp = rust_crate_fixture(
+        "edition = \"2021\"",
+        "mod child;\nmod not_created_yet;\npub async fn f() {}\n",
+    );
+    std::fs::write(tmp.path().join("src/child.rs"), "fn g() { let x = ; }\n").unwrap();
+    let gate = VerificationGate::new(tmp.path(), VerificationConfig::default());
+    let result = gate
+        .run_cheap_syntax_check(RepoLanguage::Rust, &["src/lib.rs".to_string()])
+        .await
+        .unwrap();
+    if rustfmt_absent_path_asserted(&result) {
+        return;
+    }
+    assert!(result.passed, "{}", result.output);
+
+    // The broken child still fails when it is itself a touched file.
+    let result = gate
+        .run_cheap_syntax_check(RepoLanguage::Rust, &["src/child.rs".to_string()])
+        .await
+        .unwrap();
+    assert!(!result.passed, "{}", result.output);
+}
+
+#[tokio::test]
+async fn cheap_syntax_check_rust_mixed_edition_files() {
+    // Two crates with different editions in one edit: one rustfmt run per
+    // edition; a 2015 crate's `async` identifier and a 2021 crate's
+    // `async fn` both parse.
+    let root = tempfile::tempdir().unwrap();
+    for (name, edition, src) in [
+        (
+            "old",
+            "2015",
+            "pub fn f() { let async = 1; let _ = async; }\n",
+        ),
+        ("new", "2021", "pub async fn f() {}\n"),
+    ] {
+        std::fs::create_dir_all(root.path().join(name).join("src")).unwrap();
+        std::fs::write(
+            root.path().join(name).join("Cargo.toml"),
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"{edition}\"\n"),
+        )
+        .unwrap();
+        std::fs::write(root.path().join(name).join("src/lib.rs"), src).unwrap();
+    }
+    let gate = VerificationGate::new(root.path(), VerificationConfig::default());
+    let result = gate
+        .run_cheap_syntax_check(
+            RepoLanguage::Rust,
+            &["old/src/lib.rs".to_string(), "new/src/lib.rs".to_string()],
+        )
+        .await
+        .unwrap();
+    if rustfmt_absent_path_asserted(&result) {
+        return;
+    }
+    assert!(result.passed, "{}", result.output);
+    assert!(result.output.contains("edition 2015"), "{}", result.output);
+    assert!(result.output.contains("edition 2021"), "{}", result.output);
+}

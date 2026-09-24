@@ -496,7 +496,7 @@ pub struct VerificationGate {
 /// valid Rust failed the syntax gate ("Fix Rust syntax errors") and marked
 /// verification FAILED even though every test passed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RustfmtFailureKind {
+pub(crate) enum RustfmtFailureKind {
     /// rustfmt reported formatting differences only (`Diff in ...` hunks)
     /// with no error-shaped lines: the code is syntactically valid. The
     /// result is an advisory format note, not a blocking syntax failure.
@@ -525,7 +525,7 @@ enum RustfmtFailureKind {
 /// [`RustfmtFailureKind::FormattingDiff`]. Any error-shaped line (a mixed run
 /// with a parse error in one file and diffs in another counts as an error) or
 /// any unclassifiable failure stays a blocking `SyntaxFailure`.
-fn classify_rustfmt_failure(combined: &str) -> RustfmtFailureKind {
+pub(crate) fn classify_rustfmt_failure(combined: &str) -> RustfmtFailureKind {
     if rustfmt_output_is_tool_unavailable(combined) {
         return RustfmtFailureKind::ToolUnavailable;
     }
@@ -1466,6 +1466,10 @@ impl VerificationGate {
     ) -> Result<CheckResult> {
         let start = Instant::now();
         let full_paths: Vec<_> = files.iter().map(|f| self.resolve_file_path(f)).collect();
+        // Rust only: one rustfmt invocation per resolved edition (a direct
+        // rustfmt run does not read Cargo.toml and would otherwise parse as
+        // Rust 2015, rejecting valid `async fn` as a syntax error).
+        let mut rust_groups: Vec<(super::rust_edition::ResolvedEdition, Vec<PathBuf>)> = Vec::new();
 
         let (program, args): (&str, Vec<String>) = match lang {
             RepoLanguage::Python => {
@@ -1621,11 +1625,20 @@ impl VerificationGate {
                 }
             }
             RepoLanguage::Rust => {
-                let mut a = vec!["--check".to_string()];
-                for p in &full_paths {
-                    a.push(p.to_string_lossy().to_string());
+                if full_paths.is_empty() {
+                    return Ok(CheckResult {
+                        check_type: CheckType::TypeCheck,
+                        passed: true,
+                        duration_ms: 0,
+                        output: "No Rust files to check".to_string(),
+                        errors: vec![],
+                        warnings: vec![],
+                        suggestions: vec![],
+                    });
                 }
-                ("rustfmt", a)
+                // Args are built per edition group below.
+                rust_groups = super::rust_edition::group_by_edition(&full_paths);
+                ("rustfmt", Vec::new())
             }
             RepoLanguage::Unknown => {
                 return Ok(CheckResult {
@@ -1679,26 +1692,68 @@ impl VerificationGate {
             .or_else(|| self.working_dir.clone())
             .unwrap_or_else(|| self.project_root.clone());
 
-        let mut check_cmd = Command::new(program);
-        // The syntax checker consumes project-controlled files; sanitize its
-        // environment so it never inherits host credentials.
-        crate::safety::process_env::sanitize_command_env(&mut check_cmd);
-        check_cmd.kill_on_drop(true);
-        let output = check_cmd
-            .args(&args)
-            .current_dir(&check_dir)
-            .output()
-            .await
-            .context(format!("Failed to run {} syntax check", lang))?;
-
-        let duration = start.elapsed().as_millis() as u64;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let combined = if stderr.is_empty() {
-            stdout.to_string()
+        let invocations: Vec<Vec<String>> = if program == "rustfmt" {
+            rust_groups
+                .iter()
+                .map(|(edition, paths)| {
+                    let mut a = super::rust_edition::rustfmt_check_args(&edition.edition);
+                    a.extend(paths.iter().map(|p| p.to_string_lossy().to_string()));
+                    a
+                })
+                .collect()
         } else {
-            format!("{}\n{}", stdout, stderr)
+            vec![args]
         };
+
+        let mut all_success = true;
+        let mut combined = String::new();
+        for args in &invocations {
+            let mut check_cmd = Command::new(program);
+            // The syntax checker consumes project-controlled files; sanitize its
+            // environment so it never inherits host credentials.
+            crate::safety::process_env::sanitize_command_env(&mut check_cmd);
+            check_cmd.kill_on_drop(true);
+            let output = check_cmd
+                .args(args)
+                .current_dir(&check_dir)
+                .output()
+                .await
+                .context(format!("Failed to run {} syntax check", lang))?;
+            all_success &= output.status.success();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let part = if stderr.is_empty() {
+                stdout.to_string()
+            } else {
+                format!("{}\n{}", stdout, stderr)
+            };
+            if !part.is_empty() {
+                if !combined.is_empty() {
+                    combined.push('\n');
+                }
+                combined.push_str(&part);
+            }
+        }
+        let duration = start.elapsed().as_millis() as u64;
+        // Rule 3: name the edition each Rust file was parsed as, and flag a
+        // guessed (fallback) edition, so a pass/fail says what was checked.
+        let edition_notes: Vec<String> = rust_groups
+            .iter()
+            .map(|(edition, paths)| {
+                format!("{} file(s) parsed as {}", paths.len(), edition.describe())
+            })
+            .collect();
+        let edition_warnings: Vec<String> = rust_groups
+            .iter()
+            .filter(|(edition, _)| edition.is_fallback())
+            .map(|(edition, _)| {
+                format!(
+                    "{} syntax check used a fallback edition: {}",
+                    lang,
+                    edition.describe()
+                )
+            })
+            .collect();
 
         // rustfmt shares exit code 1 between parse failures and formatting
         // differences, so a non-zero `rustfmt --check` over valid-but-
@@ -1714,7 +1769,7 @@ impl VerificationGate {
         // A rustup shim without the rustfmt component is neither: the tool
         // never ran, so the result is check-not-run (advisory), never a
         // syntax failure (W7b finding 4).
-        if !output.status.success() && program == "rustfmt" {
+        if !all_success && program == "rustfmt" {
             match classify_rustfmt_failure(&combined) {
                 RustfmtFailureKind::ToolUnavailable => {
                     return Ok(rustfmt_unavailable_result(lang, duration, &combined));
@@ -1724,7 +1779,11 @@ impl VerificationGate {
                         check_type: CheckType::TypeCheck,
                         passed: true,
                         duration_ms: duration,
-                        output: combined,
+                        output: if edition_notes.is_empty() {
+                            combined
+                        } else {
+                            format!("{}\n[{}]", combined, edition_notes.join("; "))
+                        },
                         errors: vec![VerificationError {
                             file: files.first().cloned().unwrap_or_default(),
                             line: None,
@@ -1740,10 +1799,13 @@ impl VerificationGate {
                                     .to_string(),
                             ),
                         }],
-                        warnings: vec![format!(
-                            "{} syntax is valid; rustfmt --check only reports formatting differences",
-                            lang
-                        )],
+                        warnings: std::iter::once(format!(
+                            "{} syntax is valid; rustfmt --check only reports formatting differences ({})",
+                            lang,
+                            edition_notes.join("; ")
+                        ))
+                        .chain(edition_warnings)
+                        .collect(),
                         suggestions: vec![
                             "Run `cargo fmt` to fix formatting before committing".to_string()
                         ],
@@ -1755,14 +1817,24 @@ impl VerificationGate {
 
         Ok(CheckResult {
             check_type: CheckType::TypeCheck,
-            passed: output.status.success(),
+            passed: all_success,
             duration_ms: duration,
-            output: if output.status.success() {
-                format!("{} syntax check passed", lang)
-            } else {
+            output: if all_success {
+                if edition_notes.is_empty() {
+                    format!("{} syntax check passed", lang)
+                } else {
+                    format!(
+                        "{} syntax check passed ({})",
+                        lang,
+                        edition_notes.join("; ")
+                    )
+                }
+            } else if edition_notes.is_empty() {
                 combined.clone()
+            } else {
+                format!("{}\n[{}]", combined, edition_notes.join("; "))
             },
-            errors: if output.status.success() {
+            errors: if all_success {
                 vec![]
             } else {
                 let first_error = combined
@@ -1781,8 +1853,8 @@ impl VerificationGate {
                     suggestion: Some(format!("Check {} syntax and fix errors", lang)),
                 }]
             },
-            warnings: vec![],
-            suggestions: if output.status.success() {
+            warnings: edition_warnings,
+            suggestions: if all_success {
                 vec![]
             } else {
                 vec![format!("Fix {} syntax errors before running tests", lang)]

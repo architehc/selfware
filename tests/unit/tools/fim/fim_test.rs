@@ -460,3 +460,23 @@ fn fim_context_preserves_code_but_refuses_secret_and_control_sources() {
         assert!(validate_fim_context("src/main.rs", "", poisoned, &safety).is_err());
     }
 }
+
+#[test]
+fn fim_rustfmt_blocks_only_on_parse_errors() {
+    // The old `exit >= 2` gate never fired: rustfmt exits 1 on parse errors.
+    assert!(fim_rustfmt_blocks(
+        false,
+        "\nerror: expected expression, found `;`\n --> <stdin>:1:21"
+    ));
+    // A formatting diff (exit 1 on some rustfmt versions) does not block.
+    assert!(!fim_rustfmt_blocks(
+        false,
+        "Diff in <stdin>:1:\n-fn main(){}\n+fn main() {}\n"
+    ));
+    // A shim without the rustfmt component never ran: do not block.
+    assert!(!fim_rustfmt_blocks(
+        false,
+        "error: toolchain 'x' does not have component 'rustfmt'"
+    ));
+    assert!(!fim_rustfmt_blocks(true, ""));
+}

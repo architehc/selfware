@@ -265,12 +265,25 @@ impl Tool for FileFimEdit {
         // For Rust files, run a quick syntax check before writing
         if path.ends_with(".rs") {
             use tokio::process::Command;
+            let workspace = crate::tools::workspace_root::current_path();
+            // stdin input carries no path, so rustfmt cannot infer the crate's
+            // edition; resolve it from the file's own Cargo.toml/rustfmt.toml
+            // (a hard-coded 2021 misparsed 2015/2024 crates).
+            let file_path = std::path::Path::new(path);
+            let file_path = if file_path.is_absolute() {
+                file_path.to_path_buf()
+            } else {
+                workspace.join(file_path)
+            };
+            let edition = crate::testing::rust_edition::resolve_rust_edition(&file_path);
             let check = Command::new("rustfmt").sanitized_env()
                 // rustfmt discovers rustfmt.toml from its cwd: the workspace root.
-                .current_dir(crate::tools::workspace_root::current_path())
-                .args(["--edition", "2021", "--check"])
+                .current_dir(&workspace)
+                .args(["--edition", edition.edition.as_str(), "--check"])
                 .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::null())
+                // Both streams: diffs go to stdout, parse errors to stderr, and
+                // the classifier needs both to tell them apart.
+                .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .spawn();
 
@@ -279,16 +292,29 @@ impl Tool for FileFimEdit {
                     use tokio::io::AsyncWriteExt;
                     let _ = stdin.write_all(new_content.as_bytes()).await;
                 }
-                // rustfmt exits 1 on parse errors (not just format diffs).
-                // Only block on actual parse failures, not formatting diffs.
-                // We use --check so it doesn't modify stdin; exit code 0 or 1
-                // both mean "parseable". Exit code 2+ means parse error.
-                if let Ok(status) = child.wait().await {
-                    if status.code().unwrap_or(0) >= 2 {
+                // rustfmt exits 1 for parse errors AND (on some versions) for
+                // formatting diffs; the old `exit >= 2` test never fired, so
+                // parse errors were written anyway. Classify by output instead,
+                // the same way the verification syntax gate does.
+                if let Ok(out) = child.wait_with_output().await {
+                    let combined = format!(
+                        "{}\n{}",
+                        String::from_utf8_lossy(&out.stdout),
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                    if fim_rustfmt_blocks(out.status.success(), &combined) {
+                        let first: String = String::from_utf8_lossy(&out.stderr)
+                            .lines()
+                            .map(str::trim)
+                            .find(|l| !l.is_empty())
+                            .unwrap_or("parse error")
+                            .chars()
+                            .take(150)
+                            .collect();
                         return Err(anyhow!(
-                            "FIM-generated code has Rust syntax errors (rustfmt \
-                             exit code {}). Refusing to write to prevent corruption.",
-                            status.code().unwrap_or(-1)
+                            "FIM-generated code has Rust syntax errors ({first}; rustfmt, {}). \
+                             Refusing to write to prevent corruption.",
+                            edition.describe()
                         ));
                     }
                 }
@@ -313,6 +339,14 @@ impl Tool for FileFimEdit {
             "backup": backup_path
         }))
     }
+}
+
+/// Whether a `rustfmt --check` run over FIM output must block the write:
+/// only a genuine parse failure blocks. Formatting diffs and a rustup shim
+/// without the rustfmt component (check not run) do not.
+fn fim_rustfmt_blocks(success: bool, combined_output: &str) -> bool {
+    use crate::testing::verification::{classify_rustfmt_failure, RustfmtFailureKind};
+    !success && classify_rustfmt_failure(combined_output) == RustfmtFailureKind::SyntaxFailure
 }
 
 #[cfg(test)]
