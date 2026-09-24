@@ -198,6 +198,23 @@ pub enum ApiError {
 
     #[error("Invalid token usage from API: {0}")]
     InvalidUsage(String),
+
+    /// A reverse proxy / tunnel between the client and the model server cut
+    /// the request at its own timeout and answered 502/503/504 itself (ngrok
+    /// `ERR_NGROK_3004` at exactly 300 s, measured 2026-09-24). The backend
+    /// never learned the client gave up: every cut request kept generating
+    /// server-side for 20–34 min. Distinct from a transient 503 so the retry
+    /// loop does not re-send the identical long request into the same cut
+    /// (kvstore_nat lost 1200 s to four such 503s on one audit call).
+    #[error(
+        "gateway timeout: HTTP {status} after {elapsed_secs}s — a proxy/tunnel cut the request \
+         (the backend may still be generating it): {detail}"
+    )]
+    GatewayTimeout {
+        status: u16,
+        elapsed_secs: u64,
+        detail: String,
+    },
 }
 
 #[derive(Error, Debug)]

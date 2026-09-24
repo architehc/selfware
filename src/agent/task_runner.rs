@@ -349,6 +349,42 @@ pub(super) fn is_context_overflow_text(error: &str) -> bool {
     error.contains("CONTEXT OVERFLOW") || error.contains("Context overflow")
 }
 
+/// Outcome of the completion-time requirements audit for this run — the
+/// one completion gate that depends on a model call. `None` on the agent
+/// means the audit did not apply (read-only task, short instruction, or it
+/// never reached completion).
+///
+/// Honest status (AGENTS.md rule 3): an audit that could not run — gateway
+/// timeout, side-call cap, unparseable answer — used to fail open silently,
+/// and the run summary then read "completed, verification passed" as if the
+/// audit had looked at the work (kvstore_nat, 2026-09-24). Completion is
+/// still allowed when the audit INFRASTRUCTURE fails (the audit is advisory
+/// on infra failure), but the failure is named on stdout, in stream-json
+/// and in the run summary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequirementsAuditStatus {
+    /// The auditor answered; the verdict label (`ALL ADDRESSED`, …).
+    Performed(String),
+    /// The audit applied but produced no verdict; the reason.
+    NotPerformed(String),
+}
+
+impl RequirementsAuditStatus {
+    /// One-line label for the run summary / structured result.
+    pub fn label(&self) -> String {
+        match self {
+            RequirementsAuditStatus::Performed(verdict) => verdict.clone(),
+            RequirementsAuditStatus::NotPerformed(reason) => {
+                format!("NOT PERFORMED — {reason}")
+            }
+        }
+    }
+
+    pub fn is_not_performed(&self) -> bool {
+        matches!(self, RequirementsAuditStatus::NotPerformed(_))
+    }
+}
+
 /// Human-facing end-of-run summary (headless text mode). Every field comes
 /// from tracked run state — no invented numbers (AGENTS.md rule 3): token
 /// and cost totals are the API-usage accumulators, files changed is the
@@ -380,6 +416,9 @@ pub struct RunSummary {
     /// visible instead of implied (2026-09-22 e2e: ~99% of long-task wall
     /// time was model latency, with multi-minute zero-content calls).
     pub call_latency: Option<crate::api::usage::CallLatencyStats>,
+    /// Completion-time requirements audit outcome; `None` when the audit did
+    /// not apply to this run.
+    pub requirements_audit: Option<RequirementsAuditStatus>,
 }
 
 impl Agent {
@@ -416,7 +455,16 @@ impl Agent {
                 let stats = self.client.call_latency_stats();
                 (stats.call_count > 0).then_some(stats)
             },
+            requirements_audit: self.requirements_audit_status(),
         }
+    }
+
+    /// The completion-time requirements audit's outcome for this task.
+    pub fn requirements_audit_status(&self) -> Option<RequirementsAuditStatus> {
+        self.requirements_audit_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// The run summary's `verification:` value, built from the SAME evidence
@@ -646,6 +694,10 @@ impl Agent {
         self.total_no_action_prompts = 0;
         self.requirements_audit_done
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        *self
+            .requirements_audit_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         self.leak_check_scanned_mutation_sequence
             .store(usize::MAX, std::sync::atomic::Ordering::Relaxed);
         self.input_census_note = None;

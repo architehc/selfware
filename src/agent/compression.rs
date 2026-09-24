@@ -6,11 +6,15 @@
 //! 2. **AutoCompact** (automatic trigger): Uses LLM to generate summaries at threshold
 //! 3. **FullCompact** (nuclear option): Compresses entire conversation with file re-injection
 
+use crate::api::client::SideCall;
 use crate::api::types::{Message, MessageContent};
-use crate::api::{ApiClient, ThinkingMode};
+use crate::api::ApiClient;
 use anyhow::Result;
 use std::collections::VecDeque;
 use tracing::{debug, info, warn};
+
+/// Output budget for the compaction summary side calls.
+const COMPACT_SUMMARY_MAX_TOKENS: usize = 4096;
 
 /// Compression method used
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -510,13 +514,16 @@ pub async fn auto_compact(
         Message::user(summary_content),
     ];
 
-    // Call LLM for summary
-    let response = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
-        client.chat(summary_request, None, ThinkingMode::Disabled),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("AutoCompact API call timed out after 60s"))??;
+    // Call LLM for summary: a bounded side call (streamed, capped output,
+    // lowered reasoning effort, 60 s wall cap — typed SideCallTimeout).
+    let response = client
+        .side_chat(
+            summary_request,
+            SideCall::new("auto_compact_summary")
+                .max_tokens(COMPACT_SUMMARY_MAX_TOKENS)
+                .time_cap_secs(60),
+        )
+        .await?;
 
     let summary = response
         .choices
@@ -650,13 +657,16 @@ async fn full_compact_with_safety(
         )),
     ];
 
-    // Get summary from LLM
-    let response = tokio::time::timeout(
-        std::time::Duration::from_secs(90),
-        client.chat(summary_request, None, ThinkingMode::Disabled),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("FullCompact API call timed out after 90s"))??;
+    // Get summary from LLM: a bounded side call (streamed, capped output,
+    // lowered reasoning effort, 90 s wall cap — typed SideCallTimeout).
+    let response = client
+        .side_chat(
+            summary_request,
+            SideCall::new("full_compact_summary")
+                .max_tokens(COMPACT_SUMMARY_MAX_TOKENS)
+                .time_cap_secs(90),
+        )
+        .await?;
 
     let summary = response
         .choices

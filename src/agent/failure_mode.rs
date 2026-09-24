@@ -86,6 +86,10 @@ pub enum FailureKind {
 pub(crate) const VERIFICATION_FAILED_NOTE: &str =
     "verification FAILED — no check the run ran passed on the final tree";
 
+/// Evidence note for a completed run whose requirements audit could not run;
+/// `cli_banner` keys its non-clean header on it.
+pub(crate) const AUDIT_NOT_PERFORMED_NOTE: &str = "requirements audit NOT PERFORMED";
+
 impl FailureKind {
     /// Short uppercase tag suitable for log lines and CLI output.
     pub fn tag(&self) -> &'static str {
@@ -266,7 +270,14 @@ impl FailureMode {
                         advice: "-".to_string(),
                     }
                 })();
-                with_verification_verdict(base, agent.credited_verification_summary(), read_only)
+                with_audit_status(
+                    with_verification_verdict(
+                        base,
+                        agent.credited_verification_summary(),
+                        read_only,
+                    ),
+                    agent.requirements_audit_status().as_ref(),
+                )
             }
             RunOutcome::Failed { reason } => {
                 if circuit_open || prefill_400s >= 3 {
@@ -430,7 +441,14 @@ impl FailureMode {
 
     /// Render a multi-line CLI banner suitable for the end of a non-TUI run.
     pub fn cli_banner(&self) -> String {
-        let header = if self.kind.is_success() {
+        let header = if self.kind.is_success() && self.evidence.contains(AUDIT_NOT_PERFORMED_NOTE) {
+            // Allowed with an explicit warning: the audit infrastructure
+            // failed, so the result was never audited — no clean ✅ claim.
+            format!(
+                "⚠️ Task completed ({}) — {AUDIT_NOT_PERFORMED_NOTE}; the result was not audited",
+                self.kind.tag()
+            )
+        } else if self.kind.is_success() {
             format!("✅ Task completed successfully ({})", self.kind.tag())
         } else if matches!(self.kind, FailureKind::NoChange)
             && self.evidence.contains(VERIFICATION_FAILED_NOTE)
@@ -543,6 +561,30 @@ pub(crate) fn with_verification_verdict(
             ),
             ..base
         },
+        _ => base,
+    }
+}
+
+/// Fold a requirements audit that could NOT run into a non-failure verdict's
+/// evidence (AGENTS.md rule 3). The kind — and so the exit status — is
+/// unchanged: the audit is advisory when its infrastructure fails
+/// (gateway timeout, side-call cap, unparseable answer). But the banner and
+/// every consumer of the evidence must see that it did not run, instead of
+/// the clean "completed successfully" of an audited run. Failure verdicts and
+/// performed audits pass through unchanged.
+pub(crate) fn with_audit_status(
+    base: FailureMode,
+    audit: Option<&crate::agent::RequirementsAuditStatus>,
+) -> FailureMode {
+    match audit {
+        Some(crate::agent::RequirementsAuditStatus::NotPerformed(reason))
+            if base.kind.is_nonfailure() =>
+        {
+            FailureMode {
+                evidence: format!("{}; {AUDIT_NOT_PERFORMED_NOTE} ({reason})", base.evidence),
+                ..base
+            }
+        }
         _ => base,
     }
 }

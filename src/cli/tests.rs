@@ -1162,6 +1162,7 @@ fn sample_summary() -> crate::agent::RunSummary {
         cost_complete: true,
         unmetered_attempts: 0,
         call_latency: None,
+        requirements_audit: None,
     }
 }
 
@@ -1202,6 +1203,53 @@ fn render_run_summary_never_says_completed_over_failed_verification() {
         rendered.contains("verification: failed (1 checks)"),
         "{rendered}"
     );
+}
+
+/// kvstore_nat (2026-09-24): the audit call failed on gateway 503s and the
+/// summary still read "outcome: completed / verification: passed". The
+/// summary must name the audit that did not run.
+#[test]
+fn render_run_summary_names_a_requirements_audit_that_did_not_run() {
+    let mut summary = sample_summary();
+    summary.requirements_audit = Some(crate::agent::RequirementsAuditStatus::NotPerformed(
+        "gateway timeout (HTTP 503 after 300s)".to_string(),
+    ));
+    let rendered = render_run_summary(&summary, None);
+    assert!(
+        !rendered.lines().any(|l| l == "outcome: completed"),
+        "no bare completion over an unaudited result: {rendered}"
+    );
+    assert!(
+        rendered.contains("outcome: completed — requirements audit NOT PERFORMED"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("verification: passed (4 checks)"),
+        "{rendered}"
+    );
+    assert!(
+        rendered
+            .contains("requirements audit: NOT PERFORMED — gateway timeout (HTTP 503 after 300s)"),
+        "{rendered}"
+    );
+
+    // A performed audit is shown with its verdict; the outcome stays clean.
+    summary.requirements_audit = Some(crate::agent::RequirementsAuditStatus::Performed(
+        "ALL ADDRESSED".to_string(),
+    ));
+    let rendered = render_run_summary(&summary, None);
+    assert!(
+        rendered.lines().any(|l| l == "outcome: completed"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("requirements audit: ALL ADDRESSED"),
+        "{rendered}"
+    );
+
+    // No audit applied: no audit line at all (unchanged shape).
+    let rendered = render_run_summary(&sample_summary(), None);
+    assert!(!rendered.contains("requirements audit"), "{rendered}");
 }
 
 #[test]
@@ -1331,6 +1379,7 @@ fn render_cost_line_honest_about_missing_billing() {
         cost_complete: false,
         unmetered_attempts: 1,
         call_latency: None,
+        requirements_audit: None,
     };
     let rendered = render_cost_line(&summary);
     assert!(rendered.contains("tokens: 12345 total"), "{rendered}");

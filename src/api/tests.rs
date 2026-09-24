@@ -5532,3 +5532,355 @@ async fn test_non_streaming_derive_total_when_zero() {
     );
     server.stop().await;
 }
+
+// ============================================
+// Side calls and gateway timeouts (2026-09-24 ngrok ERR_NGROK_3004 runs)
+// ============================================
+
+/// The body ngrok answers with when it cuts a request at its 300 s timer
+/// (abridged from the kvstore_nat run log).
+const NGROK_3004_BODY: &str = "<!DOCTYPE html><html><head><meta name=\"author\" content=\"ngrok\">\
+<noscript>ngrok gateway error\nThe server returned an invalid or incomplete HTTP response. \
+(ERR_NGROK_3004)</noscript></head><body id=\"ngrok\"></body></html>";
+
+fn fast_retry_config(max_retries: u32) -> RetryConfig {
+    RetryConfig {
+        max_retries,
+        initial_delay_ms: 1,
+        max_delay_ms: 1,
+        retryable_status_codes: vec![429, 500, 502, 503, 504],
+    }
+}
+
+fn is_gateway_timeout(err: &anyhow::Error) -> bool {
+    err.chain().any(|c| {
+        matches!(
+            c.downcast_ref::<crate::errors::ApiError>(),
+            Some(crate::errors::ApiError::GatewayTimeout { .. })
+        )
+    })
+}
+
+#[test]
+fn classify_gateway_timeout_needs_a_marker_or_a_long_wait() {
+    use super::client::classify_gateway_timeout;
+    let fast = Duration::from_millis(200);
+    let slow = Duration::from_secs(300);
+    // ngrok's cut page, even when it arrives fast.
+    assert!(classify_gateway_timeout(503, NGROK_3004_BODY, fast).is_some());
+    // A plain 5xx that arrived at a gateway's cut-off.
+    assert!(classify_gateway_timeout(502, "Bad Gateway", slow).is_some());
+    assert!(classify_gateway_timeout(504, "", slow).is_some());
+    assert!(classify_gateway_timeout(504, "504 Gateway Time-out", fast).is_some());
+    // A fast plain 503 stays an ordinary retryable error (kvstore_ext
+    // recovered from exactly this on its first retry).
+    assert!(classify_gateway_timeout(503, "Service Unavailable", fast).is_none());
+    // Other statuses never qualify.
+    assert!(classify_gateway_timeout(500, NGROK_3004_BODY, slow).is_none());
+    assert!(classify_gateway_timeout(429, NGROK_3004_BODY, slow).is_none());
+    // The typed error names the status and the marker, not the HTML page.
+    let msg = classify_gateway_timeout(503, NGROK_3004_BODY, slow)
+        .unwrap()
+        .to_string();
+    assert!(
+        msg.contains("503") && msg.contains("ERR_NGROK_3004"),
+        "{msg}"
+    );
+    assert!(!msg.contains("<html"), "{msg}");
+}
+
+#[test]
+fn apply_side_call_bounds_lowers_pinned_effort_and_clamps_budget() {
+    use super::client::apply_side_call_bounds;
+    let mut body = serde_json::json!({
+        "max_tokens": 65536,
+        "chat_template_kwargs": {"enable_thinking": true, "reasoning_effort": "xhigh"},
+        "reasoning": {"effort": "high", "max_tokens": 32000},
+        "reasoning_effort": "medium",
+        "thinking": {"type": "enabled", "budget_tokens": 20000},
+    });
+    apply_side_call_bounds(&mut body, 8192);
+    assert_eq!(body["max_tokens"], 8192);
+    assert_eq!(body["chat_template_kwargs"]["reasoning_effort"], "low");
+    assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
+    assert_eq!(body["reasoning"]["effort"], "low");
+    assert_eq!(body["reasoning"]["max_tokens"], 4096);
+    assert_eq!(body["reasoning_effort"], "low");
+    assert_eq!(body["thinking"]["budget_tokens"], 4096);
+
+    // Keys the session never set are not invented; a smaller session
+    // budget is kept.
+    let mut plain = serde_json::json!({"max_tokens": 2048});
+    apply_side_call_bounds(&mut plain, 8192);
+    assert_eq!(plain, serde_json::json!({"max_tokens": 2048}));
+}
+
+#[tokio::test]
+async fn side_chat_is_streamed_and_bounded_on_the_wire() {
+    use crate::testing::mock_api::MockLlmServer;
+    let server = MockLlmServer::builder()
+        .with_response("AUDIT: ALL ADDRESSED")
+        .build()
+        .await;
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "chat_template_kwargs".into(),
+        serde_json::json!({"enable_thinking": true, "reasoning_effort": "xhigh"}),
+    );
+    let config = crate::config::Config {
+        endpoint: format!("{}/v1", server.url()),
+        max_tokens: 65536,
+        extra_body: Some(extra),
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config).unwrap();
+    let resp = client
+        .side_chat(
+            vec![Message::user("audit this")],
+            client::SideCall::new("requirements_audit").max_tokens(8192),
+        )
+        .await
+        .expect("side call should succeed");
+    assert_eq!(
+        resp.choices[0].message.content.text(),
+        "AUDIT: ALL ADDRESSED"
+    );
+    let bodies = server.captured_request_bodies().await;
+    assert_eq!(bodies.len(), 1);
+    let sent: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+    assert_eq!(sent["stream"], true, "side calls must stream: {sent}");
+    assert_eq!(sent["max_tokens"], 8192, "{sent}");
+    assert_eq!(sent["chat_template_kwargs"]["reasoning_effort"], "low");
+    assert!(sent.get("tools").is_none());
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn side_chat_silent_server_is_cut_at_the_cap_and_typed() {
+    use crate::testing::mock_api::MockLlmServer;
+    // No response headers for 10 s: the shape a non-streaming xhigh call
+    // has behind a gateway. The side call must give up at its 1 s cap.
+    let server = MockLlmServer::builder()
+        .with_response("late")
+        .with_latency(10_000)
+        .build()
+        .await;
+    let config = crate::config::Config {
+        endpoint: format!("{}/v1", server.url()),
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config)
+        .unwrap()
+        .with_retry_config(fast_retry_config(3));
+    let started = std::time::Instant::now();
+    let err = client
+        .side_chat(
+            vec![Message::user("audit this")],
+            client::SideCall::new("requirements_audit").time_cap_secs(1),
+        )
+        .await
+        .expect_err("a side call over its cap must fail");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "cut must happen at the cap, took {:?}",
+        started.elapsed()
+    );
+    let typed = err
+        .chain()
+        .find_map(|c| c.downcast_ref::<client::SideCallTimeout>())
+        .unwrap_or_else(|| panic!("expected SideCallTimeout, got {err:?}"));
+    assert_eq!(typed.purpose, "requirements_audit");
+    assert_eq!(typed.limit_secs, 1);
+    // Never the run-terminal per-call budget stop.
+    assert!(err
+        .chain()
+        .all(|c| c.downcast_ref::<client::CallTimeBudgetExceeded>().is_none()));
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn side_chat_dripping_stream_is_cut_at_the_cap_and_typed() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    // Headers and one chunk arrive at once, then the body drips forever:
+    // bytes keep a gateway alive, so only the side-call cap can stop it.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0u8; 65536];
+        let mut got = Vec::new();
+        loop {
+            let n = socket.read(&mut buf).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            got.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&got).to_lowercase();
+            if let Some(end) = text.find("\r\n\r\n") {
+                let len: usize = text[..end]
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0);
+                if got.len() >= end + 4 + len {
+                    break;
+                }
+            }
+        }
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n";
+        let _ = socket.write_all(head.as_bytes()).await;
+        for _ in 0..40 {
+            let chunk = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}]}\n\n";
+            if socket.write_all(chunk.as_bytes()).await.is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    });
+    let config = crate::config::Config {
+        endpoint: format!("http://{addr}/v1"),
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config)
+        .unwrap()
+        .with_retry_config(fast_retry_config(3));
+    let started = std::time::Instant::now();
+    let err = client
+        .side_chat(
+            vec![Message::user("summarize")],
+            client::SideCall::new("auto_compact_summary").time_cap_secs(1),
+        )
+        .await
+        .expect_err("a dripping side call must be cut at its cap");
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(
+        err.chain()
+            .any(|c| c.downcast_ref::<client::SideCallTimeout>().is_some()),
+        "expected SideCallTimeout, got {err:?}"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn side_chat_ngrok_503_is_retried_once_with_reduced_budget_then_typed() {
+    use crate::testing::mock_api::MockLlmServer;
+    let server = MockLlmServer::builder()
+        .with_error(503, NGROK_3004_BODY)
+        .with_error(503, NGROK_3004_BODY)
+        .with_error(503, NGROK_3004_BODY)
+        .with_error(503, NGROK_3004_BODY)
+        .build()
+        .await;
+    let config = crate::config::Config {
+        endpoint: format!("{}/v1", server.url()),
+        max_tokens: 65536,
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config)
+        .unwrap()
+        .with_retry_config(fast_retry_config(3));
+    let err = client
+        .side_chat(
+            vec![Message::user("audit this")],
+            client::SideCall::new("requirements_audit").max_tokens(8192),
+        )
+        .await
+        .expect_err("two gateway timeouts must fail the side call");
+    assert!(is_gateway_timeout(&err), "expected GatewayTimeout: {err:?}");
+    let bodies = server.captured_request_bodies().await;
+    assert_eq!(
+        bodies.len(),
+        2,
+        "one attempt plus ONE reduced-budget retry, not max_retries identical re-sends"
+    );
+    let first: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+    let second: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
+    assert_eq!(first["max_tokens"], 8192);
+    assert_eq!(
+        second["max_tokens"], 4096,
+        "the retry must carry a reduced budget"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn non_streaming_ngrok_503_is_not_retried_identically() {
+    use crate::testing::mock_api::MockLlmServer;
+    let server = MockLlmServer::builder()
+        .with_error(503, NGROK_3004_BODY)
+        .with_error(503, NGROK_3004_BODY)
+        .with_error(503, NGROK_3004_BODY)
+        .with_error(503, NGROK_3004_BODY)
+        .build()
+        .await;
+    let config = crate::config::Config {
+        endpoint: format!("{}/v1", server.url()),
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config)
+        .unwrap()
+        .with_retry_config(fast_retry_config(3));
+    let err = client
+        .chat(vec![Message::user("hi")], None, ThinkingMode::Disabled)
+        .await
+        .expect_err("gateway timeouts must surface typed");
+    assert!(is_gateway_timeout(&err), "expected GatewayTimeout: {err:?}");
+    // Previously 4 identical requests (1 + max_retries=3); a fast ngrok cut
+    // now gets at most one retry.
+    assert_eq!(server.captured_request_bodies().await.len(), 2);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn streaming_ngrok_503_is_not_retried_identically() {
+    use crate::testing::mock_api::MockLlmServer;
+    let server = MockLlmServer::builder()
+        .with_error(503, NGROK_3004_BODY)
+        .with_error(503, NGROK_3004_BODY)
+        .with_error(503, NGROK_3004_BODY)
+        .with_error(503, NGROK_3004_BODY)
+        .build()
+        .await;
+    let config = crate::config::Config {
+        endpoint: format!("{}/v1", server.url()),
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config)
+        .unwrap()
+        .with_retry_config(fast_retry_config(3));
+    let err = client
+        .chat_stream(vec![Message::user("hi")], None, ThinkingMode::Disabled)
+        .await
+        .expect_err("gateway timeouts must surface typed");
+    assert!(is_gateway_timeout(&err), "expected GatewayTimeout: {err:?}");
+    assert_eq!(server.captured_request_bodies().await.len(), 2);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn fast_plain_503_keeps_the_ordinary_retry_policy() {
+    use crate::testing::mock_api::MockLlmServer;
+    // Not a gateway cut: a fast 503 without a proxy-timeout marker is still
+    // retried up to max_retries (the main streamed path recovered from one).
+    let server = MockLlmServer::builder()
+        .with_error(503, "Service Unavailable")
+        .with_error(503, "Service Unavailable")
+        .with_response("ok")
+        .build()
+        .await;
+    let config = crate::config::Config {
+        endpoint: format!("{}/v1", server.url()),
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config)
+        .unwrap()
+        .with_retry_config(fast_retry_config(3));
+    let resp = client
+        .chat(vec![Message::user("hi")], None, ThinkingMode::Disabled)
+        .await
+        .expect("fast plain 503s are transient");
+    assert_eq!(resp.choices[0].message.content.text(), "ok");
+    assert_eq!(server.captured_request_bodies().await.len(), 3);
+    server.stop().await;
+}

@@ -51,6 +51,7 @@ fn test_session_result_round_trip() {
         failure_mode: None,
         artifact_dir: Some(PathBuf::from("/tmp/artifacts")),
         answer: None,
+        requirements_audit: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     let de: SessionResult = serde_json::from_str(&json).unwrap();
@@ -84,6 +85,7 @@ fn test_session_result_with_failure_mode() {
         failure_mode: Some("timeout".to_string()),
         artifact_dir: None,
         answer: None,
+        requirements_audit: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     let de: SessionResult = serde_json::from_str(&json).unwrap();
@@ -108,6 +110,7 @@ fn test_session_result_json_fields() {
         failure_mode: Some("loop_guard".to_string()),
         artifact_dir: Some(PathBuf::from("/out")),
         answer: None,
+        requirements_audit: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     let v: Value = serde_json::from_str(&json).unwrap();
@@ -340,6 +343,7 @@ fn test_emit_result_does_not_panic() {
         failure_mode: None,
         artifact_dir: None,
         answer: None,
+        requirements_audit: None,
     };
     emit_result(&result);
 }
@@ -363,6 +367,7 @@ fn test_session_result_serializes_final_answer() {
         failure_mode: None,
         artifact_dir: None,
         answer: Some("Fixed the lint and verified with cargo test.".to_string()),
+        requirements_audit: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     let v: Value = serde_json::from_str(&json).unwrap();
@@ -394,6 +399,7 @@ fn test_session_result_omits_answer_when_none() {
         failure_mode: None,
         artifact_dir: None,
         answer: None,
+        requirements_audit: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     assert!(
@@ -995,6 +1001,7 @@ fn cost_field_is_omitted_when_provider_reported_no_pricing() {
         failure_mode: None,
         artifact_dir: None,
         answer: None,
+        requirements_audit: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     assert!(
@@ -1023,6 +1030,7 @@ fn cost_field_is_present_when_provider_priced_usage() {
         failure_mode: None,
         artifact_dir: None,
         answer: None,
+        requirements_audit: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     let v: Value = serde_json::from_str(&json).unwrap();

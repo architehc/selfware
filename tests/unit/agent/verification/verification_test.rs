@@ -2314,6 +2314,84 @@ mod requirements_audit_tests {
         server.stop().await;
     }
 
+    /// kvstore_nat (2026-09-24): the audit went out non-streaming with the
+    /// session's xhigh/64k settings, ngrok cut it at 300 s four times (the
+    /// client re-sent the identical request), and the run then reported
+    /// "completed, verification passed" with no [audit] line. Now: a bounded
+    /// streamed side call, one reduced-budget retry on a gateway timeout,
+    /// completion allowed, and the audit named NOT PERFORMED everywhere.
+    #[tokio::test]
+    async fn audit_gateway_timeout_is_reported_not_performed() {
+        const NGROK_3004: &str = "<html><head><meta name=\"author\" content=\"ngrok\">\
+            <noscript>ngrok gateway error The server returned an invalid or incomplete HTTP \
+            response. (ERR_NGROK_3004)</noscript></head></html>";
+        let server = MockLlmServer::builder()
+            .with_error(503, NGROK_3004)
+            .with_error(503, NGROK_3004)
+            .with_error(503, NGROK_3004)
+            .with_error(503, NGROK_3004)
+            .build()
+            .await;
+        let agent = build_agent(&server, LONG_MUTATION_INSTRUCTION).await;
+        assert_eq!(agent.requirements_audit_status(), None);
+
+        // Advisory on infra failure: completion is not blocked.
+        assert!(agent.maybe_requirements_audit(false).await.is_none());
+
+        // One attempt + one reduced-budget retry, both streamed and bounded
+        // — not 1 + max_retries identical 64k non-streaming re-sends.
+        let bodies = server.captured_request_bodies().await;
+        assert_eq!(bodies.len(), 2, "{bodies:?}");
+        let first: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+        let second: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
+        assert_eq!(first["stream"], true);
+        assert!(first["max_tokens"].as_u64().unwrap() <= 8192, "{first}");
+        assert!(
+            second["max_tokens"].as_u64().unwrap() < first["max_tokens"].as_u64().unwrap(),
+            "the retry must carry a reduced budget"
+        );
+
+        // Honest status: recorded, and carried into the run summary.
+        let status = agent
+            .requirements_audit_status()
+            .expect("the audit applied, so its outcome must be recorded");
+        assert!(status.is_not_performed(), "{status:?}");
+        assert!(status.label().contains("gateway timeout"), "{status:?}");
+        assert_eq!(agent.run_summary().requirements_audit, Some(status));
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn audit_unparseable_answer_is_reported_not_performed() {
+        let server = MockLlmServer::builder()
+            .with_response("I looked at it and it seems fine.")
+            .build()
+            .await;
+        let agent = build_agent(&server, LONG_MUTATION_INSTRUCTION).await;
+        assert!(agent.maybe_requirements_audit(false).await.is_none());
+        let status = agent.requirements_audit_status().expect("recorded");
+        assert!(status.is_not_performed(), "{status:?}");
+        assert!(status.label().contains("unparseable"), "{status:?}");
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn audit_verdict_is_reported_performed() {
+        let server = MockLlmServer::builder()
+            .with_response("AUDIT: ALL ADDRESSED")
+            .build()
+            .await;
+        let agent = build_agent(&server, LONG_MUTATION_INSTRUCTION).await;
+        assert!(agent.maybe_requirements_audit(false).await.is_none());
+        assert_eq!(
+            agent.requirements_audit_status(),
+            Some(crate::agent::RequirementsAuditStatus::Performed(
+                "ALL ADDRESSED".to_string()
+            ))
+        );
+        server.stop().await;
+    }
+
     #[tokio::test]
     async fn audit_does_not_start_after_an_existing_hard_budget() {
         let server = MockLlmServer::builder()

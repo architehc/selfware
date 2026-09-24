@@ -245,9 +245,16 @@ impl Agent {
             let mut messages = self.messages.clone();
             messages.push(crate::api::types::Message::user(reflection_prompt));
 
+            // Bounded side call: a one-paragraph reflection needs neither
+            // the session's reasoning effort nor its 64k output budget.
             if let Ok(response) = self
                 .client
-                .chat(messages, None, crate::api::ThinkingMode::Disabled)
+                .side_chat(
+                    messages,
+                    crate::api::client::SideCall::new("reflection")
+                        .max_tokens(1024)
+                        .time_cap_secs(60),
+                )
                 .await
             {
                 // Account the reflection call's token usage against the budget.

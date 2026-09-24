@@ -370,6 +370,60 @@ fn cli_banner_uses_tag_and_evidence() {
     assert!(success.cli_banner().contains("✅"));
 }
 
+/// kvstore_nat (2026-09-24): the requirements audit died on 4 gateway 503s
+/// and the banner still read "✅ Task completed successfully". Completion is
+/// allowed (advisory on infra failure) but never as a clean, audited success.
+#[test]
+fn audit_not_performed_downgrades_the_success_banner_but_not_the_kind() {
+    let base = FailureMode {
+        restored_files: Vec::new(),
+        kind: FailureKind::Success,
+        evidence: "21 mutating tool calls".to_string(),
+        advice: "-".to_string(),
+    };
+    let not_performed = crate::agent::RequirementsAuditStatus::NotPerformed(
+        "gateway timeout (HTTP 503 after 300s)".to_string(),
+    );
+    let mode = with_audit_status(base.clone(), Some(&not_performed));
+    assert_eq!(mode.kind, FailureKind::Success, "exit status unchanged");
+    assert!(
+        mode.evidence.contains(AUDIT_NOT_PERFORMED_NOTE),
+        "{}",
+        mode.evidence
+    );
+    assert!(
+        mode.evidence.contains("gateway timeout"),
+        "{}",
+        mode.evidence
+    );
+    let banner = mode.cli_banner();
+    assert!(!banner.contains("completed successfully"), "{banner}");
+    assert!(!banner.contains('✅'), "{banner}");
+    assert!(banner.contains("NOT PERFORMED"), "{banner}");
+
+    // A performed audit, or no audit at all, leaves the verdict untouched.
+    let performed = crate::agent::RequirementsAuditStatus::Performed("ALL ADDRESSED".to_string());
+    let clean = with_audit_status(base.clone(), Some(&performed));
+    assert!(clean
+        .cli_banner()
+        .contains("✅ Task completed successfully"));
+    assert_eq!(
+        with_audit_status(base.clone(), None).evidence,
+        base.evidence
+    );
+
+    // Failure verdicts pass through unchanged.
+    let failed = FailureMode {
+        kind: FailureKind::VerificationFailed,
+        ..base
+    };
+    let failed_evidence = failed.evidence.clone();
+    assert_eq!(
+        with_audit_status(failed, Some(&not_performed)).evidence,
+        failed_evidence
+    );
+}
+
 #[test]
 fn failure_kind_serializes_to_json() {
     let mode = FailureMode {

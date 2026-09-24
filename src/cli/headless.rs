@@ -60,6 +60,12 @@ pub struct SessionResult {
     /// byte-identical shape for runs without an answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<String>,
+    /// Completion-time requirements audit outcome: the verdict label, or
+    /// `NOT PERFORMED — <reason>` when the audit could not run (gateway
+    /// timeout, side-call cap, unparseable answer). Omitted when the audit
+    /// did not apply, so runs without one keep the pre-existing shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requirements_audit: Option<String>,
 }
 
 /// Individual event emitted in `--output-format stream-json` mode.

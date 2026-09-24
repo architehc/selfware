@@ -2230,6 +2230,7 @@ fn build_session_result(
         failure_mode,
         artifact_dir,
         answer,
+        requirements_audit: agent.requirements_audit_status().map(|a| a.label()),
     }
 }
 
@@ -6543,6 +6544,18 @@ fn render_run_summary(summary: &crate::agent::RunSummary, failure: Option<&str>)
         // Never print a bare "completed" over failed checks (AGENTS.md rule 3).
         None if matches!(summary.verification, Some((false, _))) => lines
             .push("outcome: finished — verification FAILED (not a verified result)".to_string()),
+        // Allowed with a warning: the audit infrastructure failed, so the
+        // result was not audited — never a bare "completed" over it.
+        None if summary
+            .requirements_audit
+            .as_ref()
+            .is_some_and(|a| a.is_not_performed()) =>
+        {
+            lines.push(
+                "outcome: completed — requirements audit NOT PERFORMED (result not audited)"
+                    .to_string(),
+            )
+        }
         None => lines.push("outcome: completed".to_string()),
     }
     let extension_note = if summary.budget_extended {
@@ -6582,6 +6595,9 @@ fn render_run_summary(summary: &crate::agent::RunSummary, failure: Option<&str>)
         None => "not performed".to_string(),
     };
     lines.push(format!("verification: {verification}"));
+    if let Some(audit) = &summary.requirements_audit {
+        lines.push(format!("requirements audit: {}", audit.label()));
+    }
     let cost = summary
         .cost_usd
         .map(|c| {

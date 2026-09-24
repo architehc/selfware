@@ -126,7 +126,7 @@ pub mod tui_events;
 pub mod turn_artifacts;
 pub(crate) mod verification_scope;
 
-pub use task_runner::RunSummary;
+pub use task_runner::{RequirementsAuditStatus, RunSummary};
 mod verification;
 
 use crate::errors::{is_confirmation_error, is_no_action_error};
@@ -660,6 +660,11 @@ impl FileTracker {
 }
 
 const TASK_STATE_NOTE_LIMIT: usize = 16;
+/// Output budget for the phase-2 synthesis side call: it may emit full-file
+/// replacements, so it gets more than the classifier-sized default.
+const SYNTHESIS_SIDE_CALL_MAX_TOKENS: usize = 16_384;
+/// Wall-time cap for the synthesis side call (well under a 300 s gateway).
+const SYNTHESIS_SIDE_CALL_CAP_SECS: u64 = 180;
 /// Bound on the escalation cache (FIFO window) so a model varying
 /// old_str/new_str on each retry cannot grow it without bound — mirrors the
 /// FAILED_TOOL_ATTEMPT_WINDOW_SIZE pattern for recent failed attempts.
@@ -817,6 +822,9 @@ pub struct Agent {
     /// Completion-time requirements audit latch: the audit fires at most once
     /// per task. Atomic because the completion gate holds `&self`.
     requirements_audit_done: std::sync::atomic::AtomicBool,
+    /// Outcome of that audit (performed with a verdict, or NOT performed and
+    /// why) for the run summary, stream-json and the completion banner.
+    requirements_audit_status: std::sync::Mutex<Option<RequirementsAuditStatus>>,
     /// Whether the initial system prompt already embeds XML tool schemas.
     tool_schema_in_prompt: bool,
     /// The endpoint authorized to use the session-wide SELFWARE_API_KEY source.
@@ -1657,6 +1665,7 @@ To call a tool, use this EXACT XML structure:
             total_no_action_prompts: 0,
             last_no_action_prompt_hash: None,
             requirements_audit_done: std::sync::atomic::AtomicBool::new(false),
+            requirements_audit_status: std::sync::Mutex::new(None),
             tool_schema_in_prompt,
             #[cfg(feature = "resilience")]
             credential_origin_endpoint,
@@ -2296,10 +2305,19 @@ To call a tool, use this EXACT XML structure:
             )),
         ];
 
-        // No tools, no streaming — just a direct completion
+        // No tools; a bounded side call (streamed, capped output and wall
+        // time, lowered reasoning effort) — a synthesis sent non-streaming
+        // with the session's xhigh/64k settings could sit silent past a
+        // gateway's 300 s cut-off. The budget stays large enough for the
+        // full-file replacements the mutation prompt asks for.
         let response = self
             .client
-            .chat(messages, None, crate::api::ThinkingMode::Disabled)
+            .side_chat(
+                messages,
+                crate::api::client::SideCall::new("synthesis")
+                    .max_tokens(SYNTHESIS_SIDE_CALL_MAX_TOKENS)
+                    .time_cap_secs(SYNTHESIS_SIDE_CALL_CAP_SECS),
+            )
             .await?;
 
         // Account the synthesis LLM call against the budget — this billable

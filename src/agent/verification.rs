@@ -2942,6 +2942,23 @@ impl Agent {
     /// once with a directive naming them. Advisory fail-open: call errors and
     /// unparseable responses are logged and completion proceeds (the audit
     /// must never livelock a run).
+    /// Record the requirements audit's outcome and make it visible: the
+    /// stdout `[audit] verdict:` marker, a `turn_decision` progress event
+    /// (stderr trace + stream-json), and the state the run summary and the
+    /// completion banner read.
+    pub(super) fn record_requirements_audit(&self, status: RequirementsAuditStatus) {
+        let label = status.label();
+        crate::output::audit_verdict(&label);
+        self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+            decision: "requirements_audit".to_string(),
+            detail: label,
+        });
+        *self
+            .requirements_audit_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(status);
+    }
+
     async fn requirements_audit(&self, instruction: &str) -> Option<String> {
         let summary = self
             .messages
@@ -2973,14 +2990,21 @@ impl Agent {
             &files_changed,
             self.input_census_note.as_deref(),
         );
-        let response = match self
-            .client
-            .chat(messages, None, crate::api::ThinkingMode::Disabled)
-            .await
-        {
+        // Bounded side call (streamed, small output budget, lowered
+        // reasoning effort, hard wall cap): sent non-streaming with the
+        // session's xhigh/64k settings it sat silent past ngrok's 300 s
+        // cut-off and was re-sent identically three times (kvstore_nat).
+        let spec = crate::api::client::SideCall::new("requirements_audit")
+            .max_tokens(REQUIREMENTS_AUDIT_MAX_TOKENS)
+            .time_cap_secs(REQUIREMENTS_AUDIT_CAP_SECS);
+        let response = match self.client.side_chat(messages, spec).await {
             Ok(resp) => resp,
             Err(e) => {
+                // Advisory on infra failure: completion is allowed, but the
+                // run must say the audit did NOT run (AGENTS.md rule 3).
+                let reason = requirements_audit_failure_reason(&e);
                 warn!("requirements audit call failed ({e}) — advisory gate stays open");
+                self.record_requirements_audit(RequirementsAuditStatus::NotPerformed(reason));
                 return None;
             }
         };
@@ -3005,7 +3029,13 @@ impl Agent {
         let audit = parse_requirements_audit(&text);
         // Visible one-line verdict: the info!/warn! logs below never reach a
         // `run`-mode user, so without this marker the audit is unverifiable.
-        crate::output::audit_verdict(&audit.marker_label());
+        // An unparseable answer is no verdict: recorded as NOT performed.
+        self.record_requirements_audit(match &audit {
+            RequirementsAudit::Unparseable => RequirementsAuditStatus::NotPerformed(
+                "auditor answer unparseable (no AUDIT: verdict line)".to_string(),
+            ),
+            other => RequirementsAuditStatus::Performed(other.marker_label()),
+        });
         match audit {
             RequirementsAudit::AllAddressed => {
                 info!("requirements audit verdict: ALL ADDRESSED");
@@ -3616,6 +3646,38 @@ impl Agent {
 /// Minimum instruction length (chars) for the completion-time requirements
 /// audit. Shorter tasks are trivial enough that a model call adds nothing.
 const REQUIREMENTS_AUDIT_MIN_INSTRUCTION_CHARS: usize = 200;
+
+/// Output budget for the audit side call: a findings list plus one verdict
+/// line (the prompt already truncates its inputs to 12k chars).
+const REQUIREMENTS_AUDIT_MAX_TOKENS: usize = 8192;
+
+/// Wall-time cap for the audit side call — well under the 300 s gateway
+/// cut-off that turned one audit into 4 x 300 s of 503s.
+const REQUIREMENTS_AUDIT_CAP_SECS: u64 = 180;
+
+/// Short, typed reason the audit call produced no verdict, for the run
+/// summary and stream-json (`requirements audit: NOT PERFORMED — <reason>`).
+pub(crate) fn requirements_audit_failure_reason(e: &anyhow::Error) -> String {
+    for cause in e.chain() {
+        if let Some(t) = cause.downcast_ref::<crate::api::client::SideCallTimeout>() {
+            return format!("audit call exceeded its {}s time cap", t.limit_secs);
+        }
+        if let Some(crate::errors::ApiError::GatewayTimeout {
+            status,
+            elapsed_secs,
+            ..
+        }) = cause.downcast_ref::<crate::errors::ApiError>()
+        {
+            return format!("gateway timeout (HTTP {status} after {elapsed_secs}s)");
+        }
+    }
+    let text = crate::observability::telemetry::redact_secrets(&e.to_string());
+    let first = text.lines().next().unwrap_or("").trim();
+    format!(
+        "audit call failed: {}",
+        crate::agent::tool_dispatch::truncate_chars(first, 160)
+    )
+}
 
 /// Status of a recorded audit finding (loop 13a).
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -121,6 +121,216 @@ impl std::fmt::Display for CallTimeBudgetExceeded {
 
 impl std::error::Error for CallTimeBudgetExceeded {}
 
+/// A bounded auxiliary ("side") model call: anything the harness asks the
+/// model outside the main agent turn — the completion-time requirements
+/// audit, context summarisation, phase-2 synthesis, step reflection.
+///
+/// Measured failure (2026-09-24, four long runs behind an ngrok gateway):
+/// the requirements audit went out NON-streaming with the session's
+/// `reasoning_effort=xhigh` and `max_tokens=65536`; past 300 s the gateway
+/// answered 503 (`ERR_NGROK_3004`), the client re-sent the identical request
+/// three more times, and each cut request kept generating server-side for
+/// 20–34 min. 7 such 503s were 14% of all wall time. A side call is
+/// therefore always streamed (bytes keep the gateway connection alive), its
+/// output budget is small, its reasoning effort is lowered, and it has a
+/// hard wall-time cap well under any gateway cut-off.
+#[derive(Debug, Clone)]
+pub struct SideCall {
+    /// Short label for logs and typed errors (`requirements_audit`, …).
+    pub purpose: &'static str,
+    /// Upper bound on `max_tokens` (the session value is used when smaller).
+    pub max_tokens: usize,
+    /// Wall-time cap for the whole side call (headers, body, one retry).
+    /// A configured `agent.max_call_secs` tightens it, never loosens it.
+    pub time_cap_secs: u64,
+}
+
+impl SideCall {
+    /// Default output budget: enough for a classifier-style verdict or a
+    /// summary, far below the 64k main-turn budget.
+    pub const DEFAULT_MAX_TOKENS: usize = 8192;
+    /// Default wall-time cap. ngrok cuts at 300 s; a side call must finish
+    /// (or fail typed) well inside that.
+    pub const DEFAULT_TIME_CAP_SECS: u64 = 120;
+    /// Reasoning effort a side call is sent with when the session pins one.
+    pub const REASONING_EFFORT: &'static str = "low";
+
+    pub fn new(purpose: &'static str) -> Self {
+        Self {
+            purpose,
+            max_tokens: Self::DEFAULT_MAX_TOKENS,
+            time_cap_secs: Self::DEFAULT_TIME_CAP_SECS,
+        }
+    }
+
+    pub fn max_tokens(mut self, max_tokens: usize) -> Self {
+        self.max_tokens = max_tokens.max(1);
+        self
+    }
+
+    pub fn time_cap_secs(mut self, secs: u64) -> Self {
+        self.time_cap_secs = secs.max(1);
+        self
+    }
+
+    /// The binding cap: the side-call cap, tightened by `agent.max_call_secs`.
+    pub(crate) fn effective_cap_secs(&self, max_call_secs: Option<u64>) -> u64 {
+        match max_call_secs.filter(|s| *s > 0) {
+            Some(cap) => self.time_cap_secs.min(cap),
+            None => self.time_cap_secs,
+        }
+        .max(1)
+    }
+}
+
+/// A side call ([`SideCall`]) hit its wall-time cap and was aborted.
+///
+/// Deliberately NOT [`CallTimeBudgetExceeded`]: that type is a run-terminal
+/// budget stop for the main turn, while a side call timing out only means
+/// the auxiliary result is unavailable — callers report it (e.g. "requirements
+/// audit: NOT PERFORMED") and carry on.
+#[derive(Debug, Clone)]
+pub struct SideCallTimeout {
+    pub purpose: &'static str,
+    pub elapsed_secs: u64,
+    pub limit_secs: u64,
+}
+
+impl std::fmt::Display for SideCallTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "side call '{}' exceeded its time cap: {}s >= {}s",
+            self.purpose, self.elapsed_secs, self.limit_secs
+        )
+    }
+}
+
+impl std::error::Error for SideCallTimeout {}
+
+/// A 502/503/504 that arrived after at least this long is treated as a
+/// gateway cut, whatever its body says: a genuinely overloaded backend
+/// answers 503 immediately, a proxy answers it when its own timer fires.
+pub(crate) const GATEWAY_TIMEOUT_MIN_ELAPSED_SECS: u64 = 60;
+
+/// Lower-case body markers that name a proxy/tunnel timeout.
+const GATEWAY_TIMEOUT_BODY_MARKERS: &[&str] = &[
+    "err_ngrok_3004",
+    "gateway timeout",
+    "gateway time-out",
+    "upstream request timeout",
+    "upstream timed out",
+];
+
+/// Classify a retryable HTTP error as a gateway timeout
+/// ([`ApiError::GatewayTimeout`]): status 502/503/504 AND either a body that
+/// names a proxy timeout (`ERR_NGROK_3004`, "gateway timeout", …) or an
+/// arrival at least [`GATEWAY_TIMEOUT_MIN_ELAPSED_SECS`] after the request was
+/// sent. `None` for everything else (a fast plain 503 stays an ordinary
+/// retryable error — the kvstore_ext run recovered from one on retry).
+pub(crate) fn classify_gateway_timeout(
+    status: u16,
+    body: &str,
+    elapsed: Duration,
+) -> Option<ApiError> {
+    if !matches!(status, 502..=504) {
+        return None;
+    }
+    let lower = body.to_lowercase();
+    let marker = GATEWAY_TIMEOUT_BODY_MARKERS
+        .iter()
+        .find(|m| lower.contains(*m))
+        .copied();
+    let long_wait = elapsed >= Duration::from_secs(GATEWAY_TIMEOUT_MIN_ELAPSED_SECS);
+    if marker.is_none() && !long_wait {
+        return None;
+    }
+    // The ngrok body is a ~2 KB HTML page; name the marker, not the page.
+    let detail = match marker {
+        Some(m) if m.starts_with("err_ngrok") => {
+            "ngrok gateway error ERR_NGROK_3004 (invalid or incomplete upstream response)"
+                .to_string()
+        }
+        Some(m) => format!("body names a proxy timeout ({m:?})"),
+        None => format!(
+            "5xx arrived after {}s — the wait itself marks a proxy cut-off",
+            elapsed.as_secs()
+        ),
+    };
+    Some(ApiError::GatewayTimeout {
+        status,
+        elapsed_secs: elapsed.as_secs(),
+        detail,
+    })
+}
+
+/// Bound a side-call request body: clamp `max_tokens` (and any provider
+/// reasoning budget) and lower every reasoning-effort pin the session's
+/// `extra_body` set, in all the placements `merge_extra_body` accepts
+/// (top-level `reasoning_effort`, `chat_template_kwargs.reasoning_effort`,
+/// OpenRouter `reasoning.effort`). Keys the session did not set are not
+/// added — an endpoint that never saw them may reject them.
+pub(crate) fn apply_side_call_bounds(body: &mut serde_json::Value, max_tokens: usize) {
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    let current = obj
+        .get("max_tokens")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .unwrap_or(max_tokens);
+    obj.insert(
+        "max_tokens".into(),
+        serde_json::json!(current.min(max_tokens)),
+    );
+    if let Some(v) = obj.get("max_completion_tokens").and_then(|v| v.as_u64()) {
+        obj.insert(
+            "max_completion_tokens".into(),
+            serde_json::json!((v as usize).min(max_tokens)),
+        );
+    }
+    let effort = serde_json::json!(SideCall::REASONING_EFFORT);
+    if obj.contains_key("reasoning_effort") {
+        obj.insert("reasoning_effort".into(), effort.clone());
+    }
+    if let Some(serde_json::Value::Object(kwargs)) = obj.get_mut("chat_template_kwargs") {
+        if kwargs.contains_key("reasoning_effort") {
+            kwargs.insert("reasoning_effort".into(), effort.clone());
+        }
+    }
+    let reasoning_cap = (max_tokens / 2).max(1);
+    if let Some(serde_json::Value::Object(reasoning)) = obj.get_mut("reasoning") {
+        if reasoning.contains_key("effort") {
+            reasoning.insert("effort".into(), effort.clone());
+        }
+        if let Some(v) = reasoning.get("max_tokens").and_then(|v| v.as_u64()) {
+            reasoning.insert(
+                "max_tokens".into(),
+                serde_json::json!((v as usize).min(reasoning_cap)),
+            );
+        }
+    }
+    if let Some(serde_json::Value::Object(thinking)) = obj.get_mut("thinking") {
+        if let Some(v) = thinking.get("budget_tokens").and_then(|v| v.as_u64()) {
+            thinking.insert(
+                "budget_tokens".into(),
+                serde_json::json!((v as usize).min(reasoning_cap)),
+            );
+        }
+    }
+}
+
+/// Per-request knobs for the streaming send loop. The main turn uses the
+/// session retry count and `agent.max_call_secs`; a side call uses its own
+/// short cap, at most one retry, and returns a gateway timeout immediately
+/// (the side-call wrapper retries it once with a reduced budget).
+#[derive(Debug, Clone, Copy)]
+struct StreamSendOpts {
+    call_cap_secs: Option<u64>,
+    max_attempts: u32,
+    side_call: bool,
+}
+
 /// Typed cap error when a per-call timeout was actually the configured
 /// `agent.max_call_secs` firing. Call sites fold the cap into their deadline
 /// alongside the adaptive/wall bounds; the elapsed check discriminates which
@@ -1149,7 +1359,7 @@ impl ApiClient {
         let (stream, body_for_meta) = self
             .circuit_breaker
             .call_with_classifier(
-                || self.chat_stream_send(body.clone()),
+                || self.chat_stream_send(body.clone(), self.main_stream_send_opts()),
                 counts_toward_circuit_breaker,
             )
             .await
@@ -1175,18 +1385,142 @@ impl ApiClient {
         Ok((stream, meta))
     }
 
+    /// Send a bounded auxiliary model call ([`SideCall`]) and collect it.
+    ///
+    /// Always streamed (the SSE bytes keep a proxy/tunnel connection alive,
+    /// where a non-streaming call sits silent until the gateway cuts it),
+    /// no tools, thinking disabled, `max_tokens` clamped to the spec and any
+    /// session reasoning-effort pin lowered to [`SideCall::REASONING_EFFORT`]
+    /// (see [`apply_side_call_bounds`]). The whole call — header wait, body,
+    /// and at most one retry — is bounded by the spec's wall-time cap; an
+    /// overrun fails as the typed [`SideCallTimeout`], never as the
+    /// run-terminal [`CallTimeBudgetExceeded`]. A gateway timeout
+    /// ([`ApiError::GatewayTimeout`]) is retried at most once, with half the
+    /// output budget, then returned typed.
+    pub async fn side_chat(&self, messages: Vec<Message>, spec: SideCall) -> Result<ChatResponse> {
+        crate::safety::killswitch::check_killswitch(None)?;
+        let cap_secs = spec.effective_cap_secs(self.config.agent.max_call_secs);
+        let cap = Duration::from_secs(cap_secs);
+        let started = Instant::now();
+        let estimated_tokens = estimate_messages_tokens(&messages);
+        let mut body = self.build_chat_body(messages, None, ThinkingMode::Disabled, true)?;
+        let mut max_tokens = spec.max_tokens;
+        apply_side_call_bounds(&mut body, max_tokens);
+        maybe_log_request_body(&self.config.debug, &body, spec.purpose);
+        let timeout_err = |started: Instant| -> anyhow::Error {
+            SideCallTimeout {
+                purpose: spec.purpose,
+                elapsed_secs: started.elapsed().as_secs(),
+                limit_secs: cap_secs,
+            }
+            .into()
+        };
+
+        let mut gateway_retry_used = false;
+        loop {
+            let remaining = cap.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Err(timeout_err(started));
+            }
+            self.progress_emitter
+                .emit(crate::agent::progress::ProgressEvent::LlmRequestSent {
+                    tokens: estimated_tokens,
+                });
+            let opts = StreamSendOpts {
+                call_cap_secs: Some(remaining.as_secs().max(1)),
+                max_attempts: 2,
+                side_call: true,
+            };
+            let attempt_body = body.clone();
+            let call = async {
+                let (stream, _) = self
+                    .circuit_breaker
+                    .call_with_classifier(
+                        || self.chat_stream_send(attempt_body.clone(), opts),
+                        counts_toward_circuit_breaker,
+                    )
+                    .await
+                    .map_err(|e| -> anyhow::Error {
+                        match e {
+                            CircuitBreakerError::CircuitOpen => self.circuit_open_error().into(),
+                            CircuitBreakerError::OperationFailed(err) => err,
+                        }
+                    })?;
+                stream.collect().await
+            };
+            let err = match tokio::time::timeout(remaining, call).await {
+                Err(_elapsed) => return Err(timeout_err(started)),
+                Ok(Ok(response)) => {
+                    let finish_reason = response
+                        .choices
+                        .first()
+                        .and_then(|c| c.finish_reason.clone())
+                        .unwrap_or_else(|| "unknown".into());
+                    self.progress_emitter.emit(
+                        crate::agent::progress::ProgressEvent::LlmResponseReceived {
+                            finish_reason,
+                            completion_tokens: response.usage.completion_tokens as u32,
+                            elapsed_ms: started.elapsed().as_millis() as u64,
+                        },
+                    );
+                    return Ok(response);
+                }
+                Ok(Err(err)) => err,
+            };
+            // The stream's own cap fired (header wait or body deadline):
+            // report it as the side call's timeout, not a run budget stop.
+            if err
+                .chain()
+                .any(|c| c.downcast_ref::<CallTimeBudgetExceeded>().is_some())
+                && self.budget_stop().is_none()
+            {
+                return Err(timeout_err(started));
+            }
+            let is_gateway = err.chain().any(|c| {
+                matches!(
+                    c.downcast_ref::<ApiError>(),
+                    Some(ApiError::GatewayTimeout { .. })
+                )
+            });
+            if is_gateway && !gateway_retry_used {
+                gateway_retry_used = true;
+                max_tokens = (max_tokens / 2).max(1024).min(max_tokens);
+                apply_side_call_bounds(&mut body, max_tokens);
+                warn!(
+                    "side call '{}': {err} — retrying once with max_tokens={max_tokens}",
+                    spec.purpose
+                );
+                continue;
+            }
+            return Err(err);
+        }
+    }
+
+    /// Streaming-send knobs for the main agent turn.
+    fn main_stream_send_opts(&self) -> StreamSendOpts {
+        StreamSendOpts {
+            call_cap_secs: self.config.agent.max_call_secs.filter(|s| *s > 0),
+            // Per-profile retry-count override ([models.default] max_retries)
+            // wins over the global retry config — previously only consumed by
+            // chat_with_profile, leaving the knob inert on the streaming path.
+            max_attempts: self.effective_max_retries() + 1,
+            side_call: false,
+        }
+    }
+
     async fn chat_stream_send(
         &self,
         mut body: serde_json::Value,
+        opts: StreamSendOpts,
     ) -> Result<(StreamingResponse, serde_json::Value)> {
         let url = format!("{}/chat/completions", self.base_url);
         debug!("Starting streaming request to {}", url);
 
         let mut delay_ms = self.retry_config.initial_delay_ms;
-        // Per-profile retry-count override ([models.default] max_retries)
-        // wins over the global retry config — previously only consumed by
-        // chat_with_profile, leaving the knob inert on the streaming path.
-        let max_attempts = self.effective_max_retries() + 1;
+        let max_attempts = opts.max_attempts.max(1);
+        // Gateway timeouts retried so far (see classify_gateway_timeout):
+        // at most one, and never after a long wait.
+        let mut gateway_retries = 0u32;
 
         // One absolute deadline for the WHOLE run (all calls + retries + body
         // streaming), latched at the first billable request — previously each
@@ -1229,9 +1563,10 @@ impl ApiClient {
             // unaffected.  The body is then streamed as before (per-chunk
             // timeout only — NO total timeout on the body).
             let mut hdr_timeout_secs = self.stream_header_timeout_secs();
-            // agent.max_call_secs tightens the header wait too; the timeout
-            // branch below names it with a typed CallTimeBudgetExceeded.
-            let call_cap_secs = self.config.agent.max_call_secs.filter(|s| *s > 0);
+            // agent.max_call_secs (or a side call's own cap) tightens the
+            // header wait too; the timeout branch below names it with a
+            // typed CallTimeBudgetExceeded.
+            let call_cap_secs = opts.call_cap_secs;
             if let Some(cap) = call_cap_secs {
                 hdr_timeout_secs = hdr_timeout_secs.min(cap);
             }
@@ -1308,10 +1643,15 @@ impl ApiClient {
                                     StreamingResponse::new(
                                         response,
                                         Duration::from_secs(stream_chunk_timeout_secs),
-                                        Some(self.per_call_stream_deadline_from(
-                                            attempt_started,
-                                            deadline,
-                                        )),
+                                        Some({
+                                            let d = self.per_call_stream_deadline_from(
+                                                attempt_started,
+                                                deadline,
+                                            );
+                                            call_cap_secs.map_or(d, |cap| {
+                                                d.min(attempt_started + Duration::from_secs(cap))
+                                            })
+                                        }),
                                     )
                                     .with_attempt(attempt_usage, prior_receipts)
                                     .with_call_started(attempt_started)
@@ -1342,6 +1682,29 @@ impl ApiClient {
                                 convert_body_to_xml(&mut body, &None, self.config.context_length)?;
                                 tool_mode_retry = true;
                                 continue;
+                            }
+                            if let Some(gateway) = classify_gateway_timeout(
+                                status.as_u16(),
+                                &text,
+                                attempt_started.elapsed(),
+                            ) {
+                                // A proxy cut the request. Re-sending the
+                                // identical request after a long wait walks
+                                // into the same cut while the orphaned one
+                                // keeps loading the backend: fail typed. A
+                                // side call returns at once (its wrapper
+                                // retries once with a reduced budget).
+                                let long_wait = attempt_started.elapsed()
+                                    >= Duration::from_secs(GATEWAY_TIMEOUT_MIN_ELAPSED_SECS);
+                                if opts.side_call
+                                    || long_wait
+                                    || gateway_retries >= 1
+                                    || attempt >= max_attempts
+                                {
+                                    warn!("Streaming request: {gateway} — not retrying the identical request");
+                                    return Err(gateway.into());
+                                }
+                                gateway_retries += 1;
                             }
                             if Self::is_retryable_status(status) && attempt < max_attempts {
                                 let sleep_ms = self.retry_sleep_ms(delay_ms, retry_after);
@@ -1735,6 +2098,9 @@ impl ApiClient {
         let mut saw_connect_error = false;
         let mut delay_ms = self.retry_config.initial_delay_ms;
         let mut honored_retry_after = false;
+        // Gateway timeouts retried so far (see classify_gateway_timeout):
+        // at most one, and never after a long wait.
+        let mut gateway_retries = 0u32;
 
         // Absolute deadline for the WHOLE run (all calls + the whole retry
         // sequence), latched at the first billable request — retries must not
@@ -2044,6 +2410,25 @@ impl ApiClient {
                             }
                             _ => error_text,
                         };
+                        if let Some(gateway) = classify_gateway_timeout(
+                            status.as_u16(),
+                            &error_text,
+                            call_started.elapsed(),
+                        ) {
+                            // A proxy cut the request (ngrok ERR_NGROK_3004
+                            // at 300 s). Blindly re-sending the identical
+                            // long request walks into the same cut while the
+                            // orphaned one keeps generating server-side
+                            // (kvstore_nat: 4 x 300 s). Fail typed after a
+                            // long wait; a fast one gets one retry at most.
+                            let long_wait = call_started.elapsed()
+                                >= Duration::from_secs(GATEWAY_TIMEOUT_MIN_ELAPSED_SECS);
+                            if long_wait || gateway_retries >= 1 || attempt >= max_retries {
+                                warn!("{gateway} — not retrying the identical request");
+                                return Err(gateway.into());
+                            }
+                            gateway_retries += 1;
+                        }
                         warn!("Retryable error ({}): {}", status, error_text);
                         last_error = Some(
                             ApiError::HttpStatus {
@@ -2306,9 +2691,10 @@ fn reasoning_budget_exhausted(resp: &ChatResponse) -> Option<usize> {
 /// masked as "API unavailable".
 fn counts_toward_circuit_breaker(err: &anyhow::Error) -> bool {
     match err.downcast_ref::<ApiError>() {
-        Some(ApiError::Network(_)) | Some(ApiError::Timeout) | Some(ApiError::RateLimit { .. }) => {
-            true
-        }
+        Some(ApiError::Network(_))
+        | Some(ApiError::Timeout)
+        | Some(ApiError::RateLimit { .. })
+        | Some(ApiError::GatewayTimeout { .. }) => true,
         Some(ApiError::HttpStatus { status, .. }) => *status == 429 || (500..600).contains(status),
         Some(_) => false,
         // Untyped errors (e.g. reqwest body-read failures) keep the previous
@@ -2318,6 +2704,7 @@ fn counts_toward_circuit_breaker(err: &anyhow::Error) -> bool {
             err.downcast_ref::<WallClockBudgetExceeded>().is_none()
                 && err.downcast_ref::<UsageBudgetExceeded>().is_none()
                 && err.downcast_ref::<CallTimeBudgetExceeded>().is_none()
+                && err.downcast_ref::<SideCallTimeout>().is_none()
         }
     }
 }
