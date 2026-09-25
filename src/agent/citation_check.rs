@@ -1198,8 +1198,9 @@ pub(crate) fn correction_directive(report: &CitationReport, round: usize) -> Str
         "CITATION CHECK — completion blocked (correction round {round} of \
          {CITATION_GATE_REJECTION_BOUND}). {} of {} citations do not match the files in the \
          workspace:\n{}{more_note}\n\
-         Fix each citation (re-read the file if you are unsure of the line: file_read shows \
-         each line's number before a tab — cite that number, do not count lines) or remove it, and \
+         Fix each citation (re-read the file if you are unsure of the line: ranged reads \
+         return numbered lines (N<TAB>code; the number is metadata, not file content) — take \
+         the number from a ranged read, or pass line_numbers: true; do not count lines) or remove it, and \
          remove any claim that rested only on it; then give your final answer again. \
          Do not add citations you have not checked.",
         report.problem_count(),

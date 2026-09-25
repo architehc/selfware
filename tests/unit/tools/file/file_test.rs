@@ -658,19 +658,20 @@ async fn test_file_read_single_line_file() {
 
     let result = tool.execute(args).await.unwrap();
     assert_eq!(result["total_lines"], 1);
-    assert_eq!(result["content"], "1\tonly one line");
-
-    // line_numbers: false opts out and returns the raw text.
-    let args = serde_json::json!({"path": file_path.to_str().unwrap(), "line_numbers": false});
-    let result = tool.execute(args).await.unwrap();
     assert_eq!(result["content"], "only one line");
     assert_eq!(result["line_numbers"], false);
+
+    // line_numbers: true opts a whole-file read into numbering.
+    let args = serde_json::json!({"path": file_path.to_str().unwrap(), "line_numbers": true});
+    let result = tool.execute(args).await.unwrap();
+    assert_eq!(result["content"], "1\tonly one line");
+    assert_eq!(result["line_numbers"], true);
 }
 
 // ---- line-number prefixes: file_read output and the edit tools ----------
 
 #[tokio::test]
-async fn file_read_numbers_whole_and_ranged_reads_absolutely() {
+async fn file_read_numbers_ranged_reads_by_default_and_whole_reads_on_request() {
     let temp_dir = TempDir::new().unwrap();
     let file_path = temp_dir.path().join("n.rs");
     let body: String = (1..=120).map(|i| format!("l{i}\n")).collect();
@@ -678,7 +679,16 @@ async fn file_read_numbers_whole_and_ranged_reads_absolutely() {
     let tool = FileRead::with_safety_config(permissive_safety_config());
     let p = file_path.to_str().unwrap();
 
-    let whole = tool.execute(serde_json::json!({"path": p})).await.unwrap();
+    // Whole-file read: raw by default.
+    let whole_raw = tool.execute(serde_json::json!({"path": p})).await.unwrap();
+    assert_eq!(whole_raw["line_numbers"], false);
+    assert_eq!(whole_raw["content"].as_str().unwrap(), body);
+
+    // Explicit line_numbers: true wins for a whole-file read.
+    let whole = tool
+        .execute(serde_json::json!({"path": p, "line_numbers": true}))
+        .await
+        .unwrap();
     assert_eq!(whole["line_numbers"], true);
     assert_eq!(whole["total_lines"], 120);
     let content = whole["content"].as_str().unwrap();
@@ -2039,7 +2049,7 @@ mod fd_checked {
             .execute(serde_json::json!({"path": p_s}))
             .await
             .unwrap();
-        assert_eq!(r["content"], "1\tinside\n");
+        assert_eq!(r["content"], "inside\n");
 
         FileEdit::with_safety_config(cfg.clone())
             .execute(serde_json::json!({"path": p_s, "old_str": "side", "new_str": "SIDE"}))

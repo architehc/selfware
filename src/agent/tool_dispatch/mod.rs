@@ -998,13 +998,15 @@ impl Agent {
             None | Some(Value::Null) => "whole".to_string(),
             Some(range) => range.to_string(),
         };
-        // A raw read (line_numbers: false) shows other text than a numbered
-        // read of the same range: never answer one with "see the other".
-        let mode = if args.get("line_numbers").and_then(Value::as_bool) == Some(false) {
-            "\u{1f}raw"
-        } else {
-            ""
-        };
+        // A raw read shows other text than a numbered read of the same
+        // range: never answer one with "see the other". Effective mode, as
+        // file_read decides it: explicit line_numbers, else numbered only
+        // for a line_range read.
+        let numbered = args
+            .get("line_numbers")
+            .and_then(Value::as_bool)
+            .unwrap_or(range != "whole");
+        let mode = if !numbered { "\u{1f}raw" } else { "" };
         Some(format!("{path}\u{1f}{range}{mode}"))
     }
 

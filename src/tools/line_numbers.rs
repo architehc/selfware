@@ -1,6 +1,7 @@
 //! Line-number prefixes for `file_read` output.
 //!
-//! `file_read` returns every line prefixed with its 1-based ABSOLUTE line
+//! `file_read` (by default for a `line_range` read, on request with
+//! `line_numbers: true` for a whole file) prefixes every line with its 1-based ABSOLUTE line
 //! number, right-aligned to the widest number shown, then a tab (` 42\tcode`,
 //! `cat -n` style; see [`number_lines`] for why the pad is tight), so the
 //! model never has to count lines to cite `path:line` (live validation: most

@@ -369,11 +369,11 @@ impl Tool for FileRead {
     }
 
     fn description(&self) -> &str {
-        "Read file contents. Use for examining code, configs, or any text file. By default each \
-         line is prefixed with its 1-based line number and a tab (` 42\tcode`, right-aligned); \
-         numbering stays absolute for a line_range. The number and tab are metadata, NOT file \
-         content: cite them as path:line, and never copy them into file_edit / file_write text. \
-         Pass line_numbers: false for raw content."
+        "Read file contents. Use for examining code, configs, or any text file. Ranged reads \
+         return numbered lines (N<TAB>code; the number is metadata, not file content). When you \
+         cite path:line, take the number from a ranged read, or pass line_numbers: true. \
+         Whole-file reads return raw content by default. Never copy the N<TAB> prefix into \
+         file_edit / file_write text."
     }
 
     fn schema(&self) -> Value {
@@ -393,8 +393,7 @@ impl Tool for FileRead {
                 },
                 "line_numbers": {
                     "type": "boolean",
-                    "default": true,
-                    "description": "Prefix each line with its absolute line number and a tab (default true). false returns raw content."
+                    "description": "Prefix each line with its absolute line number and a tab. Default: true when line_range is given, false for a whole-file read."
                 }
             },
             "required": ["path"]
@@ -409,18 +408,17 @@ impl Tool for FileRead {
             #[serde(alias = "file_path", alias = "file", alias = "filepath")]
             path: String,
             line_range: Option<(usize, usize)>,
-            /// Line-number prefixes on `content` (default on). See
-            /// `crate::tools::line_numbers`.
-            #[serde(default = "default_true")]
-            line_numbers: bool,
-        }
-        fn default_true() -> bool {
-            true
+            /// Line-number prefixes on `content`. Default: on for a
+            /// `line_range` read, off for a whole-file read (measured cost
+            /// of numbering whole files: +22-32% tokens). An explicit value
+            /// always wins. See `crate::tools::line_numbers`.
+            line_numbers: Option<bool>,
         }
 
         // Relative paths resolve against the agent's workspace root.
         let args = crate::tools::workspace_root::anchor_json(args, &["path"]);
         let args: Args = serde_json::from_value(args)?;
+        let numbered = args.line_numbers.unwrap_or(args.line_range.is_some());
         let safety = resolve_safety_config(self.safety_config.as_ref());
         validate_tool_path(&args.path, &safety)?;
 
@@ -438,7 +436,7 @@ impl Tool for FileRead {
             let lines_returned = selected_content.lines().count();
             // Absolute numbering: the first returned line is `start` (the
             // slice begins there; an empty slice has nothing to number).
-            let selected_content = if args.line_numbers {
+            let selected_content = if numbered {
                 number_lines(&selected_content, start.max(1))
             } else {
                 selected_content
@@ -448,7 +446,7 @@ impl Tool for FileRead {
                 // true total line count — safe to report honestly.
                 return Ok(serde_json::json!({
                     "content": selected_content,
-                    LINE_NUMBERS_KEY: args.line_numbers,
+                    LINE_NUMBERS_KEY: numbered,
                     "lines_returned": lines_returned,
                     "total_lines": lines_scanned,
                     "truncated": false,
@@ -460,7 +458,7 @@ impl Tool for FileRead {
                 // Report has_more instead of a misleading total_lines.
                 return Ok(serde_json::json!({
                     "content": selected_content,
-                    LINE_NUMBERS_KEY: args.line_numbers,
+                    LINE_NUMBERS_KEY: numbered,
                     "lines_returned": lines_returned,
                     "total_lines": null,
                     "has_more": true,
@@ -480,7 +478,7 @@ impl Tool for FileRead {
         record_file_snapshot(&args.path, &content);
 
         let total_lines = content.lines().count();
-        let content = if args.line_numbers {
+        let content = if numbered {
             number_lines(&content, 1)
         } else {
             content
@@ -488,7 +486,7 @@ impl Tool for FileRead {
 
         Ok(serde_json::json!({
             "content": content,
-            LINE_NUMBERS_KEY: args.line_numbers,
+            LINE_NUMBERS_KEY: numbered,
             "total_lines": total_lines,
             "truncated": false,
             "encoding": if valid_utf8 { "utf-8" } else { "utf-8-lossy" },

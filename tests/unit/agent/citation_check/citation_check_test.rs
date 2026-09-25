@@ -327,7 +327,7 @@ fn evidence_review_answer_is_flagged_with_the_actual_lines() {
     ));
     // And points at file_read's line-number prefixes instead of counting.
     assert!(
-        directive.contains("file_read shows each line's number before a tab"),
+        directive.contains("take the number from a ranged read, or pass line_numbers: true"),
         "{directive}"
     );
     assert!(report.problem_count() > 0);

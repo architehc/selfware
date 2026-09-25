@@ -7294,7 +7294,7 @@ fn numbered_read_result_json(content: &str) -> String {
 async fn numbered_file_read_flows_through_xml_note_and_raw_mode_key() {
     // XML (non-native) rendering keeps the prefixes visible to the model.
     let mut agent = reread_agent().await;
-    let args = r#"{"path":"src/lexer.rs"}"#;
+    let args = r#"{"path":"src/lexer.rs","line_numbers":true}"#;
     agent
         .push_tool_result_message(
             false,
@@ -7325,9 +7325,9 @@ async fn numbered_file_read_flows_through_xml_note_and_raw_mode_key() {
         .await;
     assert!(last_text(&agent).contains("Unchanged since turn"));
 
-    // A raw read (line_numbers: false) shows different text: it is never
-    // answered with "see the numbered copy above", and vice versa.
-    let raw_args = r#"{"path":"src/lexer.rs","line_numbers":false}"#;
+    // A raw read (here the whole-file default) shows different text: it is
+    // never answered with "see the numbered copy above", and vice versa.
+    let raw_args = r#"{"path":"src/lexer.rs"}"#;
     agent
         .push_tool_result_message(
             false,
@@ -7344,6 +7344,28 @@ async fn numbered_file_read_flows_through_xml_note_and_raw_mode_key() {
         "raw mode is its own key: {raw_text}"
     );
     assert!(raw_text.contains("tokenize(input)"), "{raw_text}");
+}
+
+#[test]
+fn file_read_range_key_follows_the_effective_numbering_default() {
+    let key = |a: &str| Agent::file_read_range_key(a).unwrap();
+    // Whole-file reads default to raw; ranged reads default to numbered.
+    assert_eq!(
+        key(r#"{"path":"a.rs"}"#),
+        key(r#"{"path":"a.rs","line_numbers":false}"#)
+    );
+    assert_ne!(
+        key(r#"{"path":"a.rs"}"#),
+        key(r#"{"path":"a.rs","line_numbers":true}"#)
+    );
+    assert_eq!(
+        key(r#"{"path":"a.rs","line_range":[1,5]}"#),
+        key(r#"{"path":"a.rs","line_range":[1,5],"line_numbers":true}"#)
+    );
+    assert_ne!(
+        key(r#"{"path":"a.rs","line_range":[1,5]}"#),
+        key(r#"{"path":"a.rs","line_range":[1,5],"line_numbers":false}"#)
+    );
 }
 
 #[tokio::test]
