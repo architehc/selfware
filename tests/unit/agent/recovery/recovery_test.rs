@@ -54,8 +54,10 @@ fn strip_think_blocks_extracts_after_paired_end_tag() {
 
 #[test]
 fn strip_think_blocks_preserves_content_after_unclosed_open_tag() {
+    // D10: an unclosed marker after the answer has begun is literal text —
+    // kept verbatim (it used to lose the marker), never a truncation point.
     let content = "prefix <think> actual answer";
-    assert_eq!(strip_think_blocks(content), "prefix  actual answer");
+    assert_eq!(strip_think_blocks(content), "prefix <think> actual answer");
 }
 
 #[test]
@@ -75,8 +77,55 @@ fn strip_think_blocks_removes_multiple_blocks() {
 
 #[test]
 fn strip_think_blocks_handles_unclosed_trailing_block() {
+    // D10: unclosed mid-text marker is literal text, kept verbatim.
     let content = "answer <think> still answer";
-    assert_eq!(strip_think_blocks(content), "answer  still answer");
+    assert_eq!(strip_think_blocks(content), "answer <think> still answer");
+}
+
+/// Verbatim final answer of runs/long_review turn_0117 (0.8.2 validation,
+/// qwen38-flash-next): 9,284 chars, 12 path:line citations, and literal
+/// `<|channel>` / `<|channel>thought<channel|>` quoted in backticks.
+const LONG_REVIEW_TURN_0117: &str = include_str!("fixtures/long_review_turn_0117_answer.md");
+
+#[test]
+fn d10_turn_0117_final_answer_round_trips_to_full_length() {
+    let answer = LONG_REVIEW_TURN_0117.trim();
+    assert_eq!(answer.chars().count(), 9284);
+    let stripped = strip_think_blocks(LONG_REVIEW_TURN_0117);
+    // 0.8.2 delivered 731 chars, cut at the first quoted `<|channel>`.
+    assert_eq!(stripped.chars().count(), 9284);
+    assert_eq!(stripped, answer);
+    assert!(stripped.contains("`<|channel>thought<channel|>`"));
+    assert!(stripped.contains("Final Audit Report"));
+}
+
+#[test]
+fn d10_genuine_leading_reasoning_block_is_still_removed() {
+    let answer = LONG_REVIEW_TURN_0117.trim();
+    let think = format!("<think>\nplan the report\n</think>\n\n{answer}");
+    assert_eq!(strip_think_blocks(&think), answer);
+    let gemma = format!("<|channel>thought\nplan the report<channel|>{answer}");
+    assert_eq!(strip_think_blocks(&gemma), answer);
+    let both = format!("  <|channel>thought\nx<channel|>\n<think>y</think>\n{answer}");
+    assert_eq!(strip_think_blocks(&both), answer);
+}
+
+#[test]
+fn d10_leading_unclosed_gemma_block_is_all_reasoning() {
+    // The model opened reasoning and never closed it: no answer was produced.
+    assert_eq!(strip_think_blocks("<|channel>thought\nstill thinking"), "");
+}
+
+#[test]
+fn d10_quoted_markers_survive_in_code_spans_and_fences() {
+    let content = "Bug: an unclosed `<think>` or `<|channel>` drops the rest.\n\n```text\n<|channel>thought<channel|>\n<think>x</think>\n```\nTrailing text survives.";
+    assert_eq!(strip_think_blocks(content), content);
+}
+
+#[test]
+fn d10_unclosed_gemma_marker_mid_text_never_truncates() {
+    let content = "The answer starts here. <|channel> is quoted without backticks, and everything after it stays.";
+    assert_eq!(strip_think_blocks(content), content);
 }
 
 #[test]

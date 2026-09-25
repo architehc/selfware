@@ -176,52 +176,96 @@ pub(super) fn detect_oscillating_batch_pair(
     }
 }
 
-/// Strip `<think>...</think>` blocks, Qwen3.5 thinking, and gemma
-/// `<|channel>thought...<channel|>` blocks from content.
-pub(super) fn strip_think_blocks(content: &str) -> String {
-    // Handle gemma-4 format: <|channel>thought...<channel|> blocks
-    let content = strip_gemma_thinking(content);
+/// Reasoning block delimiters a model may emit inline in `content`:
+/// Qwen/DeepSeek `<think>…</think>` and gemma `<|channel>thought…<channel|>`.
+const REASONING_BLOCKS: &[(&str, &str)] = &[("<think>", "</think>"), ("<|channel>", "<channel|>")];
 
-    // Remove every paired <think>...</think> block while preserving ALL
-    // non-think text in order — both before the first block and after it.
-    // An unmatched </think> with no opening tag (Qwen3.5-style: thinking as
-    // plain text, then </think>, then the answer) is left untouched so the
-    // answer is not erased.
-    let mut result = String::with_capacity(content.len());
-    let mut rest = content.as_str();
-    while let Some(start) = rest.find("<think>") {
-        result.push_str(&rest[..start]);
-        match rest[start..].find("</think>") {
-            Some(end) => rest = &rest[start + end + 8..],
-            None => {
-                // Unclosed opening tag — preserve the content after it rather
-                // than discarding the rest of the response.
-                rest = &rest[start + 7..];
-                break;
-            }
-        }
-    }
-    result.push_str(rest);
-    result.trim().to_string()
+/// The reasoning block whose opening marker starts exactly at `text`.
+fn reasoning_block_at(text: &str) -> Option<(&'static str, &'static str)> {
+    REASONING_BLOCKS
+        .iter()
+        .copied()
+        .find(|(open, _)| text.starts_with(open))
 }
 
-/// Strip gemma `<|channel>thought...<channel|>` blocks from content.
-fn strip_gemma_thinking(content: &str) -> String {
-    let mut result = String::with_capacity(content.len());
+/// Strip reasoning blocks (`<think>…</think>`, gemma
+/// `<|channel>thought…<channel|>`) from content, removing only blocks the
+/// model actually opened as reasoning:
+///
+/// - **Leading blocks** (at the start of the content, after whitespace) are
+///   removed. A leading gemma block that never closes is all reasoning (the
+///   answer never started), so nothing is left; a leading unclosed `<think>`
+///   loses only its marker (Qwen3.5 emits the answer after it).
+/// - **After the answer has begun**, only a properly closed pair outside
+///   markdown code is removed. Markers inside backticks, code spans or fenced
+///   code are quoted text, and an unclosed marker is literal text: neither is
+///   ever stripped, and nothing after them is ever dropped. (D10: a review
+///   that quoted `` `<|channel>` `` was cut from 9,284 to 731 chars.)
+/// - An unmatched closing tag with no opener (Qwen3.5 thinking as plain text,
+///   then `</think>`, then the answer) is left untouched.
+pub(super) fn strip_think_blocks(content: &str) -> String {
+    // Leading reasoning blocks.
     let mut rest = content;
-    while let Some(start) = rest.find("<|channel>") {
-        result.push_str(&rest[..start]);
-        match rest[start..].find("<channel|>") {
-            Some(end) => rest = &rest[start + end + 10..], // 10 = len("<channel|>")
+    loop {
+        let trimmed = rest.trim_start();
+        let Some((open, close)) = reasoning_block_at(trimmed) else {
+            break;
+        };
+        let body = &trimmed[open.len()..];
+        match body.find(close) {
+            Some(end) => rest = &body[end + close.len()..],
+            None if open == "<|channel>" => return String::new(),
             None => {
-                // Unclosed thinking block — strip everything after the marker
-                rest = "";
+                rest = body;
                 break;
             }
         }
     }
-    result.push_str(rest);
-    result
+
+    // Answer text: closed pairs outside markdown code only.
+    let code = crate::tool_parser::markdown_code_spans(rest);
+    let in_code = |pos: usize| code.iter().any(|span| span.contains(&pos));
+    let mut result = String::with_capacity(rest.len());
+    let mut cursor = 0;
+    let mut search = 0;
+    while let Some((pos, open, close)) = REASONING_BLOCKS
+        .iter()
+        .filter_map(|&(open, close)| {
+            let mut from = search;
+            while let Some(i) = rest[from..].find(open) {
+                let pos = from + i;
+                if !in_code(pos) {
+                    return Some((pos, open, close));
+                }
+                from = pos + open.len();
+            }
+            None
+        })
+        .min_by_key(|(pos, _, _)| *pos)
+    {
+        let body_start = pos + open.len();
+        let mut from = body_start;
+        let mut close_end = None;
+        while let Some(i) = rest[from..].find(close) {
+            let at = from + i;
+            if !in_code(at) {
+                close_end = Some(at + close.len());
+                break;
+            }
+            from = at + close.len();
+        }
+        match close_end {
+            Some(end) => {
+                result.push_str(&rest[cursor..pos]);
+                cursor = end;
+                search = end;
+            }
+            // Unclosed marker inside the answer: literal text, keep it all.
+            None => search = body_start,
+        }
+    }
+    result.push_str(&rest[cursor..]);
+    result.trim().to_string()
 }
 
 impl Agent {
