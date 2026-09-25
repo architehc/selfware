@@ -1525,6 +1525,11 @@ const FAMILY_EXAMPLES: &[(&str, &str, &str)] = &[
         "<function=tool>\n<name>file_read</name>\n<arguments>{\"path\": \"a.rs\"}</arguments>\n</tool>",
     ),
     (
+        "generic wrapper + mismatched slot closers",
+        "<function=tool><parameter=name>x</name><parameter=arguments>{...}",
+        "<function=tool>\n<parameter=name>\nfile_read</name>\n<parameter=arguments>{\"path\": \"a.rs\"}</arguments>\n</tool>",
+    ),
+    (
         "openai <function=>{json}",
         "<function=x>{\"a\": 1}",
         "<function=file_read>{\"path\": \"a.rs\"}</function>",
@@ -1723,4 +1728,196 @@ fn d3v_only_generic_wrappers_with_object_arguments_unwrap() {
         );
         assert_only_real_file_read(&parse_tool_calls(&content), wrapper);
     }
+}
+
+// ---------------------------------------------------------------------------
+// M1: generic wrapper with MISMATCHED slot closers. The opener names the slot
+// (`<name>` / `<parameter=name>`, `<arguments>` / `<parameter=arguments>`);
+// the model closes it with whichever of `</name>`, `</parameter>`,
+// `</arguments>` comes to mind. 0.8.4 validation runs/review rejected 38 of
+// 53 turns from turn 26 on and never wrote REVIEW.md. Fixtures are the
+// verbatim `content` of the turn artifacts (val084/repro).
+// ---------------------------------------------------------------------------
+
+const REVIEW_084_TURN_0005: &str = "\n\n<tool_call>\n<function=tool>\n<name>file_read</name>\n<parameter=arguments>{\"path\": \"src/agent/task_runner.rs\", \"line_range\": [1050, 1400], \"line_numbers\": true}</arguments>\n</tool>\n</tool_call>\n<tool_call>\n<function=tool>\n<name>file_read</name>\n<parameter=arguments>{\"path\": \"src/agent/execution.rs\", \"line_range\": [420, 780], \"line_numbers\": true}</arguments>\n</tool>\n</tool_call>";
+const REVIEW_084_TURN_0007: &str = "\n\n<tool_call>\n<function=tool>\n<name>file_read</name>\n<arguments>{\"path\": \"src/agent/task_runner.rs\", \"line_range\": [1400, 1750], \"line_numbers\": true}</arguments>\n</tool>\n</tool_call>";
+const REVIEW_084_TURN_0016: &str = "\n\n<tool_call>\n<function=tool>\n<parameter=name>\nfile_read</name>\n<parameter=arguments>{\"path\": \"src/agent/execution.rs\", \"line_range\": [760, 1120], \"line_numbers\": true}</arguments>\n</tool>\n</tool_call>";
+const REVIEW_084_TURN_0021: &str = "\n\n<tool_call>\n<function=tool>\n<parameter=name>\nfile_read\n</parameter>\n<parameter=arguments>{\"path\": \"src/agent/execution.rs\", \"line_range\": [1480, 1840], \"line_numbers\": true}</arguments>\n</tool>\n</tool_call>";
+const REVIEW_084_TURN_0042: &str = "\n\n<tool_call>\n<function=tool>\n<parameter=name>\nfile_read</name>\n<parameterarguments>{\"path\": \"src/agent/task_runner.rs\", \"line_range\": [2760, 2900], \"line_numbers\": true}</arguments>\n</tool>";
+/// runs/review turn_0049: the Qwen3 `<tool_call>` family used to claim this
+/// and dispatch the non-tool `tool` with name `grep_search</name>…`.
+const REVIEW_084_TURN_0049: &str = "\n\n<tool_call>\n<function=tool>\n<parameter=name>\ngrep_search</name>\n<parameter=arguments>{\"path\": \"src\", \"pattern\": \"AgentState::Completed\", \"include\": \"*.rs\", \"context_lines\": 3, \"max_matches\": 20}\n</parameter>\n</function>\n</tool_call>";
+const REVIEW_084_V_PARAMCLOSE: &str = "<tool_call>\n<function=tool>\n<name>file_read</name>\n<parameter=arguments>{\"path\": \"src/lib.rs\"}</parameter>\n</tool>\n</tool_call>";
+/// Control: the well-formed Qwen generic wrapper, parsed before this fix.
+const REVIEW_084_V_QWENWRAPPER: &str = "<tool_call>\n<function=tool>\n<parameter=name>file_read</parameter>\n<parameter=arguments>{\"path\": \"src/lib.rs\"}</parameter>\n</function>\n</tool_call>";
+
+fn file_read_range(path: &str, from: u64, to: u64) -> serde_json::Value {
+    serde_json::json!({"path": path, "line_range": [from, to], "line_numbers": true})
+}
+
+fn assert_exact_calls(content: &str, expected: &[(&str, serde_json::Value)]) {
+    let result = parse_tool_calls(content);
+    let got: Vec<(String, serde_json::Value)> = result
+        .tool_calls
+        .iter()
+        .map(|c| (c.tool_name.clone(), c.arguments.clone()))
+        .collect();
+    let want: Vec<(String, serde_json::Value)> = expected
+        .iter()
+        .map(|(n, a)| (n.to_string(), a.clone()))
+        .collect();
+    assert_eq!(got, want);
+    assert!(result.rejections.is_empty(), "{:?}", result.rejections);
+}
+
+#[test]
+fn m1_turn_0005_name_element_with_parameter_arguments_closed_by_arguments() {
+    assert_exact_calls(
+        REVIEW_084_TURN_0005,
+        &[
+            (
+                "file_read",
+                file_read_range("src/agent/task_runner.rs", 1050, 1400),
+            ),
+            (
+                "file_read",
+                file_read_range("src/agent/execution.rs", 420, 780),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn m1_turn_0007_matched_closers_still_parse() {
+    assert_exact_calls(
+        REVIEW_084_TURN_0007,
+        &[(
+            "file_read",
+            file_read_range("src/agent/task_runner.rs", 1400, 1750),
+        )],
+    );
+}
+
+#[test]
+fn m1_turn_0016_parameter_name_closed_by_name() {
+    assert_exact_calls(
+        REVIEW_084_TURN_0016,
+        &[(
+            "file_read",
+            file_read_range("src/agent/execution.rs", 760, 1120),
+        )],
+    );
+}
+
+#[test]
+fn m1_turn_0021_parameter_name_on_its_own_lines() {
+    assert_exact_calls(
+        REVIEW_084_TURN_0021,
+        &[(
+            "file_read",
+            file_read_range("src/agent/execution.rs", 1480, 1840),
+        )],
+    );
+}
+
+#[test]
+fn m1_turn_0042_separator_less_arguments_opener() {
+    assert_exact_calls(
+        REVIEW_084_TURN_0042,
+        &[(
+            "file_read",
+            file_read_range("src/agent/task_runner.rs", 2760, 2900),
+        )],
+    );
+}
+
+#[test]
+fn m1_turn_0049_wrapper_outranks_the_qwen3_family() {
+    assert_exact_calls(
+        REVIEW_084_TURN_0049,
+        &[(
+            "grep_search",
+            serde_json::json!({"path": "src", "pattern": "AgentState::Completed", "include": "*.rs", "context_lines": 3, "max_matches": 20}),
+        )],
+    );
+}
+
+#[test]
+fn m1_param_close_and_qwen_wrapper_control() {
+    for content in [REVIEW_084_V_PARAMCLOSE, REVIEW_084_V_QWENWRAPPER] {
+        assert_exact_calls(
+            content,
+            &[("file_read", serde_json::json!({"path": "src/lib.rs"}))],
+        );
+    }
+}
+
+#[test]
+fn m1_mismatched_closers_keep_the_d3_safety_conditions() {
+    // A real tool name in the function slot is not a wrapper.
+    let content = "<tool_call>\n<function=file_read>\n<parameter=name>\nfile_read</name>\n<parameter=arguments>{\"path\": \"a.rs\"}</arguments>\n</tool>";
+    let result = parse_tool_calls(content);
+    assert!(
+        result
+            .tool_calls
+            .iter()
+            .all(|c| c.arguments != serde_json::json!({"path": "a.rs"})),
+        "{:?}",
+        names(&result)
+    );
+    // Arguments that are not a JSON object do not unwrap.
+    let content = "<tool_call>\n<function=tool>\n<parameter=name>\nfile_read</name>\n<parameter=arguments>a.rs</arguments>\n</tool>";
+    let result = parse_tool_calls(content);
+    assert!(
+        !names(&result).contains(&"file_read"),
+        "{:?}",
+        names(&result)
+    );
+    // A non-identifier inner name does not unwrap.
+    let content = "<tool_call>\n<function=tool>\n<parameter=name>\nfile read</name>\n<parameter=arguments>{\"path\": \"a.rs\"}</arguments>\n</tool>";
+    let result = parse_tool_calls(content);
+    assert!(result.tool_calls.is_empty(), "{:?}", names(&result));
+    // Anything else in the body (a third slot) does not unwrap.
+    let content = "<tool_call>\n<function=tool>\n<parameter=name>\nfile_read</name>\n<parameter=arguments>{\"path\": \"a.rs\"}</arguments>\n<parameter=extra>1</parameter>\n</tool>";
+    let result = parse_tool_calls(content);
+    assert!(
+        !names(&result).contains(&"file_read"),
+        "{:?}",
+        names(&result)
+    );
+    // The opener must identify the slot: an unknown opener is not a slot.
+    let content = "<tool_call>\n<function=tool>\n<parameter=title>\nfile_read</name>\n<parameter=arguments>{\"path\": \"a.rs\"}</arguments>\n</tool>";
+    let result = parse_tool_calls(content);
+    assert!(
+        !names(&result).contains(&"file_read"),
+        "{:?}",
+        names(&result)
+    );
+}
+
+#[test]
+fn m1_prose_example_of_the_mismatched_shape_is_not_a_call() {
+    let example =
+        "<function=tool><parameter=name>x</name><parameter=arguments>{\"a\": 1}</arguments></tool>";
+    // Quoted inline and in a fence: an example, never a call.
+    for content in [
+        format!("Models sometimes write `{example}` instead."),
+        format!("Models sometimes write:\n\n```xml\n{example}\n```\n"),
+    ] {
+        let result = parse_tool_calls(&content);
+        assert!(result.tool_calls.is_empty(), "{:?}", names(&result));
+        assert!(result.rejections.is_empty(), "{:?}", result.rejections);
+    }
+    // An unterminated example before a real call does not swallow it.
+    let content = format!(
+        "The model may emit `<function=tool><parameter=name>x</name>` here.\n\n{}",
+        REVIEW_084_TURN_0016
+    );
+    assert_exact_calls(
+        &content,
+        &[(
+            "file_read",
+            file_read_range("src/agent/execution.rs", 760, 1120),
+        )],
+    );
 }

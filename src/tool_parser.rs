@@ -208,25 +208,49 @@ fn openai_function_regex() -> &'static Regex {
     })
 }
 
-/// Generic wrapper written with an `<arguments>` ELEMENT (runs/long_review,
-/// 0.8.3 validation): `<function=tool>` + a `<name>X</name>` or
-/// `<parameter name="name">X</parameter>` header (any parameter dialect) +
-/// `<arguments>{…}</arguments>`, closed by `</tool>` or `</function>`, and
-/// nothing else in the body. Groups: 1 wrapper, 2|3 inner name, 4 arguments.
+/// Opening tag of one slot of a generic wrapper, for slot key `key` (`name`
+/// or `arguments`): the `<key>` element, or a parameter opener in any
+/// `QWEN3_PARAMETER_OPEN` dialect naming `key`, including the
+/// separator-less `<parameterkey>` slip (0.8.4 validation, runs/review
+/// turn_0042). The opener alone identifies the slot.
+fn generic_wrapper_slot_open(key: &str) -> String {
+    format!(
+        r#"(?:<{key}>|<parameter(?:(?:\s*=\s*|\s+name\s*=\s*)(?:"{key}"|'{key}'|{key})|{key})\s*>)"#
+    )
+}
+
+/// Closer of a generic-wrapper slot. Models close a slot with whichever of
+/// these tags comes to mind, independent of the opener
+/// (`<parameter=name>X</name>`, `<parameter=arguments>{…}</arguments>`,
+/// `<name>X</parameter>`, 0.8.4 validation runs/review): the OPENER
+/// identifies the slot, so any of them ends it.
+const GENERIC_WRAPPER_SLOT_CLOSE: &str = r"(?:</name>|</parameter>|</arguments>)";
+
+/// Generic wrapper whose body is exactly a name slot and an arguments slot
+/// (0.8.3/0.8.4 validation, runs/long_review and runs/review):
+/// `<function=tool>` + a name slot (`<name>X`, `<parameter=name>X`, any
+/// parameter dialect) + an arguments slot (`<arguments>{…}` or
+/// `<parameter=arguments>{…}`), each ended by any
+/// `GENERIC_WRAPPER_SLOT_CLOSE`, then `</tool>` or `</function>`, and
+/// nothing else in the body. Groups: 1 wrapper, 2 inner name, 3 arguments.
 fn generic_wrapper_element_regex() -> &'static Regex {
     static GENERIC_WRAPPER_ELEMENT_REGEX: OnceLock<Regex> = OnceLock::new();
     GENERIC_WRAPPER_ELEMENT_REGEX.get_or_init(|| {
-        Regex::new(
-            r#"(?s)<function=([a-zA-Z_][a-zA-Z0-9_]*)>\s*(?:<name>\s*([^<]*?)\s*</name>|<parameter(?:\s*=\s*|\s+name\s*=\s*)(?:"name"|'name'|name)\s*>\s*([^<]*?)\s*</parameter>)\s*<arguments>([\s\S]*?)</arguments>\s*(?:</tool>|</function>)"#,
-        )
+        Regex::new(&format!(
+            r"(?s)<function=([a-zA-Z_][a-zA-Z0-9_]*)>\s*{name_open}\s*([^<]*?)\s*{close}\s*{args_open}([\s\S]*?){close}\s*(?:</tool>|</function>)",
+            name_open = generic_wrapper_slot_open("name"),
+            args_open = generic_wrapper_slot_open("arguments"),
+            close = GENERIC_WRAPPER_SLOT_CLOSE,
+        ))
         .expect("Invalid generic wrapper element regex")
     })
 }
 
 /// A [`generic_wrapper_element_regex`] match is a call only when the
 /// generic-wrapper conditions of [`unwrap_generic_wrapper`] hold (a generic
-/// wrapper name, a non-empty inner name, arguments that are a JSON object);
-/// anything else is left to the other families / the rejection report.
+/// wrapper name, an identifier-style inner name, arguments that are a JSON
+/// object); anything else is left to the other families / the rejection
+/// report.
 fn generic_wrapper_element_call(
     cap: &regex::Captures<'_>,
     raw: String,
@@ -235,7 +259,7 @@ fn generic_wrapper_element_call(
     if !GENERIC_WRAPPER_NAMES.contains(&wrapper) {
         return None;
     }
-    let inner_name = cap.get(2).or_else(|| cap.get(3))?.as_str().trim();
+    let inner_name = cap[2].trim();
     let identifier = inner_name
         .chars()
         .next()
@@ -246,7 +270,7 @@ fn generic_wrapper_element_call(
     if !identifier {
         return None;
     }
-    let arguments = serde_json::from_str::<serde_json::Value>(cap[4].trim()).ok()?;
+    let arguments = serde_json::from_str::<serde_json::Value>(cap[3].trim()).ok()?;
     let call = unwrap_generic_wrapper(ParsedToolCall {
         tool_name: wrapper.to_string(),
         arguments: serde_json::json!({"name": inner_name, "arguments": arguments}),
@@ -547,7 +571,7 @@ fn collect_candidates(content: &str) -> Vec<Candidate> {
     all.extend(regex_family(
         content,
         generic_wrapper_element_regex(),
-        8,
+        GENERIC_WRAPPER_FAMILY,
         &code,
         generic_wrapper_element_call,
     ));
@@ -600,11 +624,21 @@ fn collect_candidates(content: &str) -> Vec<Candidate> {
     all
 }
 
+/// Family number of the generic-wrapper family (`generic_wrapper_element_regex`).
+const GENERIC_WRAPPER_FAMILY: usize = 8;
+
 /// Resolve overlapping candidates: every piece of text is claimed by at most
 /// one call. Higher-priority families claim first (on overlap the family that
 /// used to be tried first wins); the survivors are returned in text order.
+///
+/// Exception: a generic-wrapper candidate claims before every other family.
+/// It exists only when its strict conditions hold (generic wrapper, exactly an
+/// identifier name slot plus a JSON-object arguments slot), so it is always
+/// the intended call; the Qwen3 `<tool_call>` family would otherwise claim the
+/// same text and read `<parameter=name>X</name>…</parameter>` as one `name`
+/// value, dispatching the non-tool `tool` (0.8.4 runs/review turn_0049).
 fn resolve_overlaps(mut candidates: Vec<Candidate>) -> Vec<Candidate> {
-    candidates.sort_by_key(|c| (c.family, c.span.start));
+    candidates.sort_by_key(|c| (c.family != GENERIC_WRAPPER_FAMILY, c.family, c.span.start));
     let mut kept: Vec<Candidate> = Vec::new();
     for candidate in candidates {
         let overlaps = kept

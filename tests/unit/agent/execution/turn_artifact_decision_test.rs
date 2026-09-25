@@ -294,8 +294,10 @@ async fn d6_unparseable_call_in_mixed_batch_is_rejected_and_reported() {
     assert!(told, "the rejection must reach the model as a tool result");
 }
 
-/// D6: b3_resume turn_0002 (verbatim): the response's only call is
-/// malformed. The turn is a rejected tool call, not a final answer.
+/// D6: the response's only call is malformed. The turn is a rejected tool
+/// call, not a final answer. Adapted from b3_resume turn_0002: that verbatim
+/// turn (mismatched `</name>` closer) now parses since the M1 generic-wrapper
+/// fix, so its arguments here lack the closing brace to stay unparseable.
 #[tokio::test]
 #[cfg_attr(
     target_os = "windows",
@@ -306,7 +308,7 @@ async fn d6_all_calls_unparseable_is_rejected_not_final_answer() {
     let dir = tempfile::tempdir().unwrap();
     cwd.switch_to(dir.path());
 
-    let content = "\n\nI'll start with stages 4 and 5. Let me read the checkpoint, replay, and recovery implementation bodies.\n\n<tool_call>\n<function=tool>\n<parameter=name>\nfile_read</name>\n<parameter=arguments>{\"path\": \"src/evolve/replay.rs\", \"line_range\": [1, 200]}\n</parameter>\n</tool>\n</tool_call>";
+    let content = "\n\nI'll start with stages 4 and 5. Let me read the checkpoint, replay, and recovery implementation bodies.\n\n<tool_call>\n<function=tool>\n<parameter=name>\nfile_read</name>\n<parameter=arguments>{\"path\": \"src/evolve/replay.rs\", \"line_range\": [1, 200]\n</parameter>\n</tool>\n</tool_call>";
     let (agent, result) = run_one_step(content, dir.path()).await;
     assert!(
         matches!(result, Ok(false)),
