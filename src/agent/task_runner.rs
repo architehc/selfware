@@ -419,6 +419,9 @@ pub struct RunSummary {
     /// Completion-time requirements audit outcome; `None` when the audit did
     /// not apply to this run.
     pub requirements_audit: Option<RequirementsAuditStatus>,
+    /// Deterministic citation check of the final answer (and written
+    /// deliverables); `None` when nothing was checked.
+    pub grounding: Option<super::citation_check::GroundingStatus>,
 }
 
 impl Agent {
@@ -456,6 +459,7 @@ impl Agent {
                 (stats.call_count > 0).then_some(stats)
             },
             requirements_audit: self.requirements_audit_status(),
+            grounding: self.grounding_status(),
         }
     }
 
@@ -698,6 +702,7 @@ impl Agent {
             .requirements_audit_status
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
+        self.reset_citation_gate();
         self.leak_check_scanned_mutation_sequence
             .store(usize::MAX, std::sync::atomic::Ordering::Relaxed);
         self.input_census_note = None;

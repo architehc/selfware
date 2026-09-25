@@ -2099,10 +2099,13 @@ pub async fn run() -> Result<()> {
         if is_structured {
             let result =
                 build_session_result(&agent, &run_result, duration_ms, answer_capture.take());
-            headless::emit_result(&result);
+            headless::emit_result(&result, agent.grounding_status().as_ref());
         } else if !cli.quiet
             && run_result.is_ok()
             && !matches!(agent.run_summary().verification, Some((false, _)))
+            && agent
+                .grounding_status()
+                .is_none_or(|g| g.problem_count() == 0)
         {
             println!("{}", render_task_complete(start.elapsed()));
         }
@@ -3020,10 +3023,13 @@ async fn handle_command(
             if is_structured {
                 let result =
                     build_session_result(&agent, &run_result, duration_ms, answer_capture.take());
-                headless::emit_result(&result);
+                headless::emit_result(&result, agent.grounding_status().as_ref());
             } else if !quiet
                 && run_result.is_ok()
                 && !matches!(agent.run_summary().verification, Some((false, _)))
+                && agent
+                    .grounding_status()
+                    .is_none_or(|g| g.problem_count() == 0)
             {
                 println!("{}", render_task_complete(start.elapsed()));
             }
@@ -6561,6 +6567,22 @@ fn render_run_summary(summary: &crate::agent::RunSummary, failure: Option<&str>)
                     .to_string(),
             )
         }
+        // Allowed with a warning: the citation gate stepped aside with
+        // citations that still do not match the files.
+        None if summary
+            .grounding
+            .as_ref()
+            .is_some_and(|g| g.problem_count() > 0) =>
+        {
+            let note = summary
+                .grounding
+                .as_ref()
+                .map(|g| g.unverified_note())
+                .unwrap_or_default();
+            lines.push(format!(
+                "outcome: completed — {note} (answer not fully grounded)"
+            ))
+        }
         None => lines.push("outcome: completed".to_string()),
     }
     let extension_note = if summary.budget_extended {
@@ -6602,6 +6624,15 @@ fn render_run_summary(summary: &crate::agent::RunSummary, failure: Option<&str>)
     lines.push(format!("verification: {verification}"));
     if let Some(audit) = &summary.requirements_audit {
         lines.push(format!("requirements audit: {}", audit.label()));
+    }
+    if let Some(grounding) = &summary.grounding {
+        lines.push(grounding.grounding_line());
+        if grounding.problem_count() > 0 {
+            lines.push(grounding.unverified_note());
+            for problem in grounding.problems.iter().take(5) {
+                lines.push(format!("  - {problem}"));
+            }
+        }
     }
     let cost = summary
         .cost_usd

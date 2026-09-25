@@ -2476,7 +2476,10 @@ impl Agent {
                 }
             }
             if readback.artifact_only {
-                return None;
+                // Written deliverables (REVIEW.md, ...) still get their
+                // citations checked before the artifact-only acceptance.
+                let read_only = self.current_task_is_read_only();
+                return self.citation_gate(read_only);
             }
         }
 
@@ -2764,6 +2767,15 @@ impl Agent {
             if let Some(msg) = self.check_audit_ledger() {
                 return Some(msg);
             }
+        }
+
+        // Citation check (deterministic, no model call): `path:line`
+        // citations in the final answer and in written deliverables must
+        // match the files. Wrong ones are fed back for a bounded number of
+        // correction rounds, then the run completes with the unverified count
+        // reported instead of a clean pass (AGENTS.md rule 3).
+        if let Some(directive) = self.citation_gate(is_read_only) {
+            return Some(directive);
         }
 
         // Requirements audit (once per task, substantial mutation tasks only):

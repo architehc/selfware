@@ -94,6 +94,7 @@ macro_rules! cli_prompt {
 mod assistant_response;
 pub mod best_snapshot;
 mod checkpointing;
+pub mod citation_check;
 pub mod compression;
 pub mod context;
 mod context_display;
@@ -847,6 +848,9 @@ pub struct Agent {
     /// Outcome of that audit (performed with a verdict, or NOT performed and
     /// why) for the run summary, stream-json and the completion banner.
     requirements_audit_status: std::sync::Mutex<Option<RequirementsAuditStatus>>,
+    /// Deterministic citation gate state: bounded correction rounds and the
+    /// grounding outcome for the run summary, banner and JSON result.
+    citation_gate: std::sync::Mutex<citation_check::CitationGateState>,
     /// Whether the initial system prompt already embeds XML tool schemas.
     tool_schema_in_prompt: bool,
     /// The endpoint authorized to use the session-wide SELFWARE_API_KEY source.
@@ -1706,6 +1710,7 @@ To call a tool, use this EXACT XML structure:
             last_no_action_prompt_hash: None,
             requirements_audit_done: std::sync::atomic::AtomicBool::new(false),
             requirements_audit_status: std::sync::Mutex::new(None),
+            citation_gate: std::sync::Mutex::new(Default::default()),
             tool_schema_in_prompt,
             #[cfg(feature = "resilience")]
             credential_origin_endpoint,

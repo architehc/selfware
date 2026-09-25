@@ -362,7 +362,7 @@ fn test_emit_result_does_not_panic() {
         answer: None,
         requirements_audit: None,
     };
-    emit_result(&result);
+    emit_result(&result, None);
 }
 
 // ── SessionResult answer (final assistant response) ─────────────────
@@ -1254,4 +1254,85 @@ fn stream_json_stdout_carries_only_json_lines() {
         non_json_lines, 0,
         "stdout under stream-json must be pure JSON lines, got:\n{captured}"
     );
+}
+
+// ── SessionResult grounding (deterministic citation check) ──────────
+
+fn grounding_result() -> SessionResult {
+    SessionResult {
+        session_id: "grounding".to_string(),
+        exit_status: 0,
+        stop_reason: "NO_CHANGES".to_string(),
+        num_turns: 3,
+        patch_bytes: 0,
+        patch_lines: 0,
+        usage: TokenUsage::default(),
+        model: "test".to_string(),
+        duration_ms: 1,
+        failure_mode: None,
+        artifact_dir: None,
+        answer: Some("review".to_string()),
+        requirements_audit: None,
+    }
+}
+
+/// Exit 0 must not imply a grounded answer (context-validation 2026-09-24):
+/// the JSON result carries the citation check, naming the unverified count
+/// and the actual location of each wrong citation.
+#[test]
+fn session_result_json_carries_grounding_with_unverified_count() {
+    let status = crate::agent::citation_check::GroundingStatus {
+        total: 50,
+        verified: 40,
+        unverifiable: 7,
+        wrong_line: 3,
+        correction_rounds: 2,
+        problems: vec![
+            "`check_id_preserves_test_selectors_and_drops_flags` cited at \
+             verification_scope.rs:1046-1078 but found at src/agent/verification_scope.rs:493"
+                .to_string(),
+        ],
+        ..Default::default()
+    };
+    let json = session_result_json(&grounding_result(), Some(&status)).expect("serializes");
+    // Existing fields keep their order; `grounding` is appended last.
+    let base = serde_json::to_string(&grounding_result()).unwrap();
+    assert!(json.starts_with(base.strip_suffix('}').unwrap()), "{json}");
+    let v: Value = serde_json::from_str(&json).unwrap();
+    let g = &v["grounding"];
+    assert_eq!(g["total"], 50);
+    assert_eq!(g["verified"], 40);
+    assert_eq!(g["unverified"], 10);
+    assert_eq!(g["wrong_line"], 3);
+    assert_eq!(g["correction_rounds"], 2);
+    assert_eq!(g["note"], "citations: 3 of 50 could not be verified");
+    assert_eq!(
+        g["summary"],
+        "Grounding: 40 verified citations, 10 unverified (3 wrong, 7 without a checkable symbol)"
+    );
+    assert!(g["problems"][0]
+        .as_str()
+        .unwrap()
+        .contains("found at src/agent/verification_scope.rs:493"));
+    // The rest of the result is unchanged.
+    assert_eq!(v["exit_status"], 0);
+    assert_eq!(v["answer"], "review");
+}
+
+#[test]
+fn session_result_json_without_grounding_keeps_the_existing_shape() {
+    let result = grounding_result();
+    let json = session_result_json(&result, None).expect("serializes");
+    assert_eq!(json, serde_json::to_string(&result).unwrap());
+
+    // A clean check has no `note`.
+    let clean = crate::agent::citation_check::GroundingStatus {
+        total: 2,
+        verified: 2,
+        ..Default::default()
+    };
+    let v: Value =
+        serde_json::from_str(&session_result_json(&result, Some(&clean)).unwrap()).unwrap();
+    assert!(v["grounding"].get("note").is_none());
+    assert_eq!(v["grounding"]["unverified"], 0);
 }

@@ -1,0 +1,959 @@
+//! Deterministic citation verification for final answers (no model call).
+//!
+//! Evidence (context-validation run, 2026-09-24): a read-only review finished
+//! with exit 0 and a "no P1/P2 defects" sign-off, yet it cited
+//! `check_id_preserves_test_selectors_and_drops_flags` at
+//! `verification_scope.rs:1046-1078` when the test starts at line 493 (and two
+//! more tests hundreds of lines off). Exit 0 must not imply a grounded answer
+//! (AGENTS.md rule 3).
+//!
+//! This module parses `path:line`, `path:line-line` (also `–`/`—`),
+//! `path#Lnn[-Lmm]` citations, associates a code-span symbol written right
+//! before a citation ("`sym` (`path:l`)", "`sym` at path:l"), and checks each
+//! against the workspace: the file exists, the range is inside it, and the
+//! named symbol appears within the cited range (± [`LINE_TOLERANCE`]). When it
+//! does not, the file is searched and the actual line is recorded as the
+//! suggested correction.
+//!
+//! The completion gate (`Agent::citation_gate`) feeds wrong citations back to
+//! the model for at most [`CITATION_GATE_REJECTION_BOUND`] correction rounds
+//! (the audit ledger's bounded step-aside pattern), then lets the run complete
+//! with an explicit "citations: N of M could not be verified" in the run
+//! summary, the banner, stream-json and the JSON result.
+
+use regex::Regex;
+use serde::Serialize;
+use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+/// A named symbol counts as "in the cited range" within this many lines of it.
+pub(crate) const LINE_TOLERANCE: usize = 3;
+
+/// Correction rounds fed back to the model before the gate steps aside and
+/// the run completes with an explicit unverified-citations warning.
+pub(crate) const CITATION_GATE_REJECTION_BOUND: usize = 2;
+
+/// Cap on distinct citations checked per source (answer or written file).
+const MAX_CITATIONS_PER_SOURCE: usize = 400;
+/// Files larger than this are not read (reported as unverifiable).
+const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+/// Bound on the workspace walk used to resolve bare file names.
+const MAX_INDEX_ENTRIES: usize = 50_000;
+/// Problem lines listed in a correction directive / structured result.
+const MAX_LISTED_PROBLEMS: usize = 12;
+
+/// Extensions a citation path may carry. A closed list keeps host:port
+/// (`example.com:8080`) and prose (`e.g.:`) from parsing as citations.
+const CITABLE_EXTENSIONS: &str = "rs|py|pyi|js|mjs|cjs|ts|tsx|jsx|go|java|kt|kts|c|h|cc|cpp|cxx|hpp|hh|cs|rb|php|swift|scala|sh|bash|zsh|sql|html|css|scss|vue|svelte|md|markdown|rst|txt|toml|yaml|yml|json|lua|ex|exs|erl|zig|dart|proto|gradle|cmake|mk|adoc";
+
+/// Doc-like deliverables whose citations are verified when the agent wrote
+/// them this task (REVIEW.md, report.txt, ...).
+const DELIVERABLE_EXTENSIONS: &[&str] = &["md", "markdown", "txt", "rst", "adoc"];
+
+/// One citation parsed from text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Citation {
+    /// The path exactly as written.
+    pub path: String,
+    /// First cited line (1-based).
+    pub start: usize,
+    /// Last cited line (== `start` for a single line).
+    pub end: usize,
+    /// Identifier named right before the citation, if any.
+    pub symbol: Option<String>,
+}
+
+impl Citation {
+    fn display(&self) -> String {
+        if self.start == self.end {
+            format!("{}:{}", self.path, self.start)
+        } else {
+            format!("{}:{}-{}", self.path, self.start, self.end)
+        }
+    }
+}
+
+/// Outcome of checking one citation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "verdict", rename_all = "snake_case")]
+pub enum CitationVerdict {
+    /// The named symbol appears within the cited range (± tolerance).
+    Verified { file: String },
+    /// The symbol is elsewhere in the file; `actual_line` is where.
+    WrongLine { file: String, actual_line: usize },
+    /// The symbol does not occur anywhere in the resolved file.
+    SymbolNotFound { file: String },
+    /// No file matches the cited path in the workspace.
+    MissingFile,
+    /// The cited range lies outside the file (or is malformed).
+    OutOfRange { file: String, line_count: usize },
+    /// The file and range exist but nothing names a checkable symbol (or the
+    /// path is ambiguous / unreadable): neither confirmed nor refuted.
+    Unverifiable { reason: String },
+}
+
+impl CitationVerdict {
+    /// Whether the citation was shown to be wrong.
+    pub fn is_problem(&self) -> bool {
+        matches!(
+            self,
+            CitationVerdict::WrongLine { .. }
+                | CitationVerdict::SymbolNotFound { .. }
+                | CitationVerdict::MissingFile
+                | CitationVerdict::OutOfRange { .. }
+        )
+    }
+}
+
+/// A citation and its verdict.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CheckedCitation {
+    pub citation: Citation,
+    pub verdict: CitationVerdict,
+    /// Where the citation was found: `final answer` or a written file path.
+    pub source: String,
+}
+
+impl CheckedCitation {
+    /// One-line human description of a problem (for directives/summary).
+    pub fn describe(&self) -> String {
+        let c = &self.citation;
+        let what = match &c.symbol {
+            Some(sym) => format!("`{sym}` cited at {}", c.display()),
+            None => format!("`{}`", c.display()),
+        };
+        let body = match &self.verdict {
+            CitationVerdict::WrongLine { file, actual_line } => {
+                format!("{what} but found at {file}:{actual_line}")
+            }
+            CitationVerdict::SymbolNotFound { file } => {
+                format!("{what} but the name does not occur anywhere in {file}")
+            }
+            CitationVerdict::MissingFile => format!("{what} — no such file in the workspace"),
+            CitationVerdict::OutOfRange { file, line_count } => {
+                format!("{what} — outside {file}, which has {line_count} lines")
+            }
+            CitationVerdict::Verified { file } => format!("{what} — verified in {file}"),
+            CitationVerdict::Unverifiable { reason } => format!("{what} — unverifiable ({reason})"),
+        };
+        if self.source == ANSWER_SOURCE {
+            body
+        } else {
+            format!("{body} [in {}]", self.source)
+        }
+    }
+}
+
+/// Source label for citations taken from the final answer text.
+pub(crate) const ANSWER_SOURCE: &str = "final answer";
+
+/// Aggregate of every checked citation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct CitationReport {
+    pub total: usize,
+    pub verified: usize,
+    pub wrong_line: Vec<CheckedCitation>,
+    pub symbol_not_found: Vec<CheckedCitation>,
+    pub missing_file: Vec<CheckedCitation>,
+    pub out_of_range: Vec<CheckedCitation>,
+    /// File and range exist but no symbol was named (or path ambiguous).
+    pub unverifiable: usize,
+}
+
+impl CitationReport {
+    fn push(&mut self, checked: CheckedCitation) {
+        self.total += 1;
+        match &checked.verdict {
+            CitationVerdict::Verified { .. } => self.verified += 1,
+            CitationVerdict::Unverifiable { .. } => self.unverifiable += 1,
+            CitationVerdict::WrongLine { .. } => self.wrong_line.push(checked),
+            CitationVerdict::SymbolNotFound { .. } => self.symbol_not_found.push(checked),
+            CitationVerdict::MissingFile => self.missing_file.push(checked),
+            CitationVerdict::OutOfRange { .. } => self.out_of_range.push(checked),
+        }
+    }
+
+    /// Fold another report (e.g. a written deliverable's) into this one.
+    pub fn merge(&mut self, other: CitationReport) {
+        self.total += other.total;
+        self.verified += other.verified;
+        self.unverifiable += other.unverifiable;
+        self.wrong_line.extend(other.wrong_line);
+        self.symbol_not_found.extend(other.symbol_not_found);
+        self.missing_file.extend(other.missing_file);
+        self.out_of_range.extend(other.out_of_range);
+    }
+
+    /// Citations shown to be wrong (wrong line, missing name/file, bad range).
+    pub fn problem_count(&self) -> usize {
+        self.wrong_line.len()
+            + self.symbol_not_found.len()
+            + self.missing_file.len()
+            + self.out_of_range.len()
+    }
+
+    /// Every problem, in a stable order.
+    pub fn problems(&self) -> impl Iterator<Item = &CheckedCitation> {
+        self.wrong_line
+            .iter()
+            .chain(self.symbol_not_found.iter())
+            .chain(self.missing_file.iter())
+            .chain(self.out_of_range.iter())
+    }
+}
+
+/// Run-level grounding outcome for the summary, banner and JSON result.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct GroundingStatus {
+    /// Distinct citations checked (final answer + written deliverables).
+    pub total: usize,
+    /// Symbol confirmed inside the cited range.
+    pub verified: usize,
+    /// File and range exist, but no named symbol could be checked.
+    pub unverifiable: usize,
+    pub wrong_line: usize,
+    pub symbol_not_found: usize,
+    pub missing_file: usize,
+    pub out_of_range: usize,
+    /// Correction rounds the gate fed back to the model.
+    pub correction_rounds: usize,
+    /// Written deliverables whose citations were checked too.
+    pub checked_files: Vec<String>,
+    /// Up to a dozen problem descriptions (wrong-line entries name the
+    /// actual location).
+    pub problems: Vec<String>,
+}
+
+impl GroundingStatus {
+    pub fn from_report(
+        report: &CitationReport,
+        correction_rounds: usize,
+        checked_files: Vec<String>,
+    ) -> Self {
+        GroundingStatus {
+            total: report.total,
+            verified: report.verified,
+            unverifiable: report.unverifiable,
+            wrong_line: report.wrong_line.len(),
+            symbol_not_found: report.symbol_not_found.len(),
+            missing_file: report.missing_file.len(),
+            out_of_range: report.out_of_range.len(),
+            correction_rounds,
+            checked_files,
+            problems: report
+                .problems()
+                .take(MAX_LISTED_PROBLEMS)
+                .map(CheckedCitation::describe)
+                .collect(),
+        }
+    }
+
+    /// Citations shown to be wrong.
+    pub fn problem_count(&self) -> usize {
+        self.wrong_line + self.symbol_not_found + self.missing_file + self.out_of_range
+    }
+
+    /// Everything not positively verified (wrong + unverifiable).
+    pub fn unverified_count(&self) -> usize {
+        self.total.saturating_sub(self.verified)
+    }
+
+    /// `citations: N of M could not be verified` — the note the banner,
+    /// run summary and failure-mode evidence carry when problems remain.
+    pub fn unverified_note(&self) -> String {
+        format!(
+            "citations: {} of {} could not be verified",
+            self.problem_count(),
+            self.total
+        )
+    }
+
+    /// The summary's "Grounding:" line. Names what was actually checked:
+    /// `verified` means the named symbol was found inside the cited range,
+    /// never more (AGENTS.md rule 3).
+    pub fn grounding_line(&self) -> String {
+        if self.total == 0 {
+            return "Grounding: no path:line citations in the answer (nothing checked against files)"
+                .to_string();
+        }
+        let mut parts = Vec::new();
+        if self.problem_count() > 0 {
+            parts.push(format!("{} wrong", self.problem_count()));
+        }
+        if self.unverifiable > 0 {
+            parts.push(format!("{} without a checkable symbol", self.unverifiable));
+        }
+        let detail = if parts.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", parts.join(", "))
+        };
+        format!(
+            "Grounding: {} verified citations, {} unverified{detail}",
+            self.verified,
+            self.unverified_count()
+        )
+    }
+}
+
+fn citation_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        let pattern = format!(
+            r"(?P<path>[A-Za-z0-9_./\-]*[A-Za-z0-9_\-]\.(?:{CITABLE_EXTENSIONS}))(?:#L(?P<hs>\d{{1,7}})(?:-L?(?P<he>\d{{1,7}}))?|:(?P<s>\d{{1,7}})(?:\s?[-–—]\s?L?(?P<e>\d{{1,7}}))?)"
+        );
+        Regex::new(&pattern).expect("citation regex compiles")
+    })
+}
+
+fn is_path_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '-')
+}
+
+fn is_ident_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// Parse every citation in `text`, in order, de-duplicated.
+pub fn parse_citations(text: &str) -> Vec<Citation> {
+    let mut out: Vec<Citation> = Vec::new();
+    let mut seen = BTreeSet::new();
+    for caps in citation_regex().captures_iter(text) {
+        let m = caps.name("path").expect("path group");
+        let whole = caps.get(0).expect("whole match");
+        // Not a citation when glued to a longer token (`x.com/a.rs` inside a
+        // URL, `v1.2.rs` noise) or followed by more digits/identifier.
+        let before = &text[..m.start()];
+        if before.ends_with("//") || before.ends_with(':') {
+            continue;
+        }
+        if before.chars().next_back().is_some_and(is_path_char) {
+            continue;
+        }
+        if text[whole.end()..]
+            .chars()
+            .next()
+            .is_some_and(|c| is_ident_char(c) && !c.is_ascii_digit())
+        {
+            continue;
+        }
+        let num = |name: &str| {
+            caps.name(name)
+                .and_then(|g| g.as_str().parse::<usize>().ok())
+        };
+        let Some(start) = num("s").or_else(|| num("hs")) else {
+            continue;
+        };
+        let end = num("e").or_else(|| num("he")).unwrap_or(start);
+        let path = m.as_str().trim_start_matches("./").to_string();
+        let symbol = symbol_before(before);
+        let key = (path.clone(), start, end, symbol.clone());
+        if !seen.insert(key) {
+            continue;
+        }
+        out.push(Citation {
+            path,
+            start,
+            end,
+            symbol,
+        });
+        if out.len() >= MAX_CITATIONS_PER_SOURCE {
+            break;
+        }
+    }
+    out
+}
+
+/// Words allowed between a code-span symbol and its citation:
+/// "`X` (`p:1`)", "`X` at p:1", "`X` enum (`p:1`)", "`X` defined at p:1".
+const CONNECTOR_WORDS: &[&str] = &[
+    "at", "in", "see", "defined", "line", "lines", "enum", "struct", "fn", "function", "method",
+    "test", "trait", "const", "constant", "static", "type", "macro", "module", "impl", "field",
+    "variant", "class", "def",
+];
+
+/// The identifier in the code span immediately preceding a citation, if the
+/// text between them is only punctuation/connector words on the same line.
+fn symbol_before(before: &str) -> Option<String> {
+    let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let mut rest = &before[line_start..];
+    // The citation itself may sit in a code span: "`X` (`p:1`)".
+    rest = rest.trim_end().strip_suffix('`').unwrap_or(rest);
+    for _ in 0..4 {
+        let trimmed = rest.trim_end();
+        let trimmed = trimmed
+            .strip_suffix('(')
+            .or_else(|| trimmed.strip_suffix(':'))
+            .or_else(|| trimmed.strip_suffix(','))
+            .or_else(|| trimmed.strip_suffix('—'))
+            .or_else(|| trimmed.strip_suffix('-'))
+            .unwrap_or(trimmed)
+            .trim_end();
+        let word_start = trimmed
+            .char_indices()
+            .rev()
+            .find(|(_, c)| !c.is_ascii_alphabetic())
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+        let word = &trimmed[word_start..];
+        if !word.is_empty()
+            && CONNECTOR_WORDS.iter().any(|w| w.eq_ignore_ascii_case(word))
+            && (word_start == 0 || trimmed[..word_start].ends_with(char::is_whitespace))
+        {
+            rest = &trimmed[..word_start];
+            continue;
+        }
+        rest = trimmed;
+        break;
+    }
+    let rest = rest.trim_end();
+    let inner_end = rest.strip_suffix('`')?;
+    let open = inner_end.rfind('`')?;
+    // "`render_kv`/`_no_detail`" — a suffix shorthand of the previous span,
+    // not a name that occurs in the file.
+    if inner_end[..open].ends_with('/') {
+        return None;
+    }
+    normalize_symbol(&inner_end[open + 1..])
+}
+
+/// Reduce a code span to one checkable identifier: `Type::name()` → `name`,
+/// `MAX_LEN = 16_384` → `MAX_LEN`, `render()` → `render`. Spans that do not
+/// start with an identifier (or whose identifier is < 3 chars) yield `None`.
+fn normalize_symbol(span: &str) -> Option<String> {
+    let span = span.trim();
+    let lead: String = span
+        .chars()
+        .take_while(|c| is_ident_char(*c) || *c == ':' || *c == '.')
+        .collect();
+    // Only identifier-shaped spans: `name`, `name()`, `NAME = 1`, `Type<T>`.
+    // A phrase (`cargo test --lib`), expression (`a>=2`) or format string
+    // (`turn_{step:04}.json`) names no symbol.
+    let rem = span[lead.len()..].trim_start();
+    if !(rem.is_empty() || rem.starts_with(['(', '=', '<', '!', '[', ';', ','])) {
+        return None;
+    }
+    let last = lead.rsplit([':', '.']).find(|s| !s.is_empty())?.to_string();
+    let first = last.chars().next()?;
+    if last.len() < 3 || !(first.is_ascii_alphabetic() || first == '_') {
+        return None;
+    }
+    Some(last)
+}
+
+/// Resolves cited paths against the workspace and caches file lines.
+pub struct CitationResolver {
+    root: PathBuf,
+    /// Full paths mentioned anywhere in the checked text (disambiguation).
+    mentioned: Vec<String>,
+    index: Option<Vec<PathBuf>>,
+    files: HashMap<PathBuf, Option<Vec<String>>>,
+}
+
+enum Resolution {
+    Found(PathBuf),
+    Ambiguous(Vec<PathBuf>),
+    Missing,
+}
+
+impl CitationResolver {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        CitationResolver {
+            root: root.into(),
+            mentioned: Vec::new(),
+            index: None,
+            files: HashMap::new(),
+        }
+    }
+
+    fn relative_display(&self, path: &Path) -> String {
+        path.strip_prefix(&self.root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn index(&mut self) -> &[PathBuf] {
+        if self.index.is_none() {
+            let mut entries = Vec::new();
+            let walker = walkdir::WalkDir::new(&self.root)
+                .follow_links(false)
+                .into_iter()
+                .filter_entry(|e| {
+                    let name = e.file_name().to_string_lossy();
+                    e.depth() == 0
+                        || !(name.starts_with('.')
+                            || name == "target"
+                            || name == "node_modules"
+                            || name == "__pycache__")
+                });
+            for entry in walker.flatten() {
+                if entry.file_type().is_file() {
+                    entries.push(entry.into_path());
+                    if entries.len() >= MAX_INDEX_ENTRIES {
+                        break;
+                    }
+                }
+            }
+            self.index = Some(entries);
+        }
+        self.index.as_deref().unwrap_or(&[])
+    }
+
+    fn resolve(&mut self, cited: &str) -> Resolution {
+        let direct = if Path::new(cited).is_absolute() {
+            PathBuf::from(cited)
+        } else {
+            self.root.join(cited)
+        };
+        if direct.is_file() {
+            return Resolution::Found(direct);
+        }
+        // Bare or partial path (`verification_scope.rs`): match by suffix.
+        let suffix: Vec<&str> = cited.split('/').filter(|s| !s.is_empty()).collect();
+        if suffix.is_empty() {
+            return Resolution::Missing;
+        }
+        let root = self.root.clone();
+        let candidates: Vec<PathBuf> = self
+            .index()
+            .iter()
+            .filter(|p| {
+                let rel = p.strip_prefix(&root).unwrap_or(p);
+                let comps: Vec<String> = rel
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect();
+                comps.len() >= suffix.len()
+                    && comps[comps.len() - suffix.len()..]
+                        .iter()
+                        .zip(suffix.iter())
+                        .all(|(a, b)| a == b)
+            })
+            .cloned()
+            .collect();
+        match candidates.len() {
+            0 => Resolution::Missing,
+            1 => Resolution::Found(candidates.into_iter().next().expect("one candidate")),
+            _ => {
+                // Prefer a candidate whose full relative path the text names.
+                let named: Vec<&PathBuf> = candidates
+                    .iter()
+                    .filter(|p| {
+                        let rel = self.relative_display(p);
+                        self.mentioned.iter().any(|m| m == &rel)
+                    })
+                    .collect();
+                if named.len() == 1 {
+                    Resolution::Found(named[0].clone())
+                } else {
+                    Resolution::Ambiguous(candidates)
+                }
+            }
+        }
+    }
+
+    fn lines(&mut self, path: &Path) -> Option<&Vec<String>> {
+        if !self.files.contains_key(path) {
+            let loaded = std::fs::metadata(path)
+                .ok()
+                .filter(|m| m.len() <= MAX_FILE_BYTES)
+                .and_then(|_| std::fs::read(path).ok())
+                .map(|bytes| {
+                    String::from_utf8_lossy(&bytes)
+                        .lines()
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                });
+            self.files.insert(path.to_path_buf(), loaded);
+        }
+        self.files.get(path).and_then(Option::as_ref)
+    }
+
+    fn check_in_file(&mut self, path: &Path, c: &Citation) -> CitationVerdict {
+        let file = self.relative_display(path);
+        let Some(lines) = self.lines(path) else {
+            return CitationVerdict::Unverifiable {
+                reason: format!("{file} could not be read"),
+            };
+        };
+        let line_count = lines.len();
+        if c.start == 0 || c.end < c.start || c.end > line_count {
+            return CitationVerdict::OutOfRange { file, line_count };
+        }
+        let Some(sym) = &c.symbol else {
+            return CitationVerdict::Unverifiable {
+                reason: "no symbol named next to the citation".to_string(),
+            };
+        };
+        let lo = c.start.saturating_sub(LINE_TOLERANCE).max(1);
+        let hi = (c.end + LINE_TOLERANCE).min(line_count);
+        if (lo..=hi).any(|n| contains_word(&lines[n - 1], sym)) {
+            return CitationVerdict::Verified { file };
+        }
+        match locate_symbol(lines, sym) {
+            Some(actual_line) => CitationVerdict::WrongLine { file, actual_line },
+            None => CitationVerdict::SymbolNotFound { file },
+        }
+    }
+
+    /// Check one citation.
+    pub fn check(&mut self, c: &Citation) -> CitationVerdict {
+        match self.resolve(&c.path) {
+            Resolution::Missing => CitationVerdict::MissingFile,
+            Resolution::Found(path) => self.check_in_file(&path, c),
+            Resolution::Ambiguous(candidates) => {
+                // Verified when exactly one same-named file confirms it;
+                // otherwise we cannot tell which file was meant.
+                let verified: Vec<CitationVerdict> = candidates
+                    .iter()
+                    .map(|p| self.check_in_file(p, c))
+                    .filter(|v| matches!(v, CitationVerdict::Verified { .. }))
+                    .collect();
+                if verified.len() == 1 {
+                    verified.into_iter().next().expect("one verdict")
+                } else {
+                    CitationVerdict::Unverifiable {
+                        reason: format!(
+                            "ambiguous path: {} files named {}",
+                            candidates.len(),
+                            c.path
+                        ),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Verify every citation in `text`, attributing them to `source`.
+    pub fn verify_text(&mut self, text: &str, source: &str) -> CitationReport {
+        self.mentioned = mentioned_paths(text);
+        let mut report = CitationReport::default();
+        for citation in parse_citations(text) {
+            let verdict = self.check(&citation);
+            report.push(CheckedCitation {
+                citation,
+                verdict,
+                source: source.to_string(),
+            });
+        }
+        report
+    }
+}
+
+/// Full relative paths (with a `/`) mentioned anywhere in the text.
+fn mentioned_paths(text: &str) -> Vec<String> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(&format!(
+            r"[A-Za-z0-9_\-.]+(?:/[A-Za-z0-9_\-.]+)+\.(?:{CITABLE_EXTENSIONS})\b"
+        ))
+        .expect("mentioned-path regex compiles")
+    });
+    re.find_iter(text)
+        .map(|m| m.as_str().trim_start_matches("./").to_string())
+        .collect()
+}
+
+/// Whole-word occurrence of `word` in `line`.
+fn contains_word(line: &str, word: &str) -> bool {
+    let mut from = 0;
+    while let Some(pos) = line[from..].find(word) {
+        let at = from + pos;
+        let before_ok = line[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !is_ident_char(c));
+        let after_ok = line[at + word.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !is_ident_char(c));
+        if before_ok && after_ok {
+            return true;
+        }
+        from = at + word.len();
+    }
+    false
+}
+
+/// Where `sym` actually lives: its definition line when one is recognisable
+/// (`fn sym`, `struct sym`, `def sym`, `const sym`, ...), else its first
+/// whole-word occurrence. 1-based.
+pub(crate) fn locate_symbol(lines: &[String], sym: &str) -> Option<usize> {
+    const DEF_KEYWORDS: &[&str] = &[
+        "fn",
+        "struct",
+        "enum",
+        "trait",
+        "type",
+        "const",
+        "static",
+        "mod",
+        "class",
+        "def",
+        "func",
+        "function",
+        "interface",
+        "let",
+        "var",
+        "macro_rules!",
+    ];
+    let is_definition = |line: &str| {
+        let tokens: Vec<&str> = line
+            .split(|c: char| c.is_whitespace() || c == '(' || c == '<' || c == ':' || c == '{')
+            .filter(|t| !t.is_empty())
+            .collect();
+        tokens
+            .windows(2)
+            .any(|w| DEF_KEYWORDS.contains(&w[0]) && w[1] == sym)
+    };
+    lines
+        .iter()
+        .position(|l| contains_word(l, sym) && is_definition(l))
+        .or_else(|| lines.iter().position(|l| contains_word(l, sym)))
+        .map(|i| i + 1)
+}
+
+/// Whether a written path is a doc-like deliverable whose citations are
+/// checked (REVIEW.md, notes.txt, ...).
+pub(crate) fn is_deliverable_path(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| {
+            DELIVERABLE_EXTENSIONS
+                .iter()
+                .any(|d| d.eq_ignore_ascii_case(ext))
+        })
+}
+
+/// The directive fed back to the model for one correction round.
+pub(crate) fn correction_directive(report: &CitationReport, round: usize) -> String {
+    let listed: Vec<String> = report
+        .problems()
+        .take(MAX_LISTED_PROBLEMS)
+        .map(|p| format!("- {}", p.describe()))
+        .collect();
+    let more = report.problem_count().saturating_sub(listed.len());
+    let more_note = if more > 0 {
+        format!("\n- ... and {more} more")
+    } else {
+        String::new()
+    };
+    format!(
+        "CITATION CHECK — completion blocked (correction round {round} of \
+         {CITATION_GATE_REJECTION_BOUND}). {} of {} citations do not match the files in the \
+         workspace:\n{}{more_note}\n\
+         Fix each citation (re-read the file if you are unsure of the line) or remove it, and \
+         remove any claim that rested only on it; then give your final answer again. \
+         Do not add citations you have not checked.",
+        report.problem_count(),
+        report.total,
+        listed.join("\n")
+    )
+}
+
+/// Per-task state of the citation completion gate.
+#[derive(Debug, Default)]
+pub(crate) struct CitationGateState {
+    /// Correction rounds already fed back (bounded).
+    pub rejections: usize,
+    /// Loop step of the latest rejection: repeat gate calls within one turn
+    /// return the same directive without spending another round.
+    pub last_rejected_step: Option<usize>,
+    /// (step, content hash) of the last evaluation and its result — gate
+    /// probes run several times per turn; the files are read once.
+    pub last_eval: Option<((usize, u64), Option<String>)>,
+    /// Outcome of the latest evaluation, read by the summary/banner/JSON.
+    pub status: Option<GroundingStatus>,
+}
+
+impl super::Agent {
+    /// The answer text the completion gate is judging: the latest assistant
+    /// message (pushed to history before any gate probe runs), falling back
+    /// to `last_assistant_response`.
+    fn citation_candidate_answer(&self) -> String {
+        let latest = self
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "assistant")
+            .map(|m| super::recovery::strip_think_blocks(&m.content.text_all()))
+            .unwrap_or_default();
+        if latest.trim().is_empty() {
+            self.last_assistant_response.clone()
+        } else {
+            latest
+        }
+    }
+
+    /// Doc-like files this task wrote (REVIEW.md, ...), deduplicated, in
+    /// write order.
+    fn written_deliverables(&self) -> Vec<String> {
+        let Some(cp) = self.current_checkpoint.as_ref() else {
+            return Vec::new();
+        };
+        let mut out: Vec<String> = Vec::new();
+        for call in cp.tool_calls.iter().filter(|c| c.success) {
+            if !matches!(
+                call.tool_name.as_str(),
+                "file_write" | "file_edit" | "file_fim_edit" | "file_multi_edit"
+            ) {
+                continue;
+            }
+            let Ok(args) = serde_json::from_str::<serde_json::Value>(&call.arguments) else {
+                continue;
+            };
+            let mut paths: Vec<String> = args
+                .get("path")
+                .and_then(|p| p.as_str())
+                .map(|p| vec![p.to_string()])
+                .unwrap_or_default();
+            if let Some(edits) = args.get("edits").and_then(|e| e.as_array()) {
+                paths.extend(
+                    edits
+                        .iter()
+                        .filter_map(|e| e.get("path").and_then(|p| p.as_str()))
+                        .map(str::to_string),
+                );
+            }
+            for p in paths {
+                if is_deliverable_path(&p) && !out.contains(&p) {
+                    out.push(p);
+                }
+            }
+        }
+        out
+    }
+
+    /// Deterministic citation gate (no model call). Runs for read-only /
+    /// review / report tasks and for any final answer or written deliverable
+    /// that contains citations. Wrong citations are fed back for at most
+    /// [`CITATION_GATE_REJECTION_BOUND`] correction rounds; after that the
+    /// gate steps aside and the run completes with the unverified count
+    /// recorded (summary, banner, stream-json, JSON result).
+    pub(super) fn citation_gate(&self, is_read_only: bool) -> Option<String> {
+        let root = self.tools.workspace_root().path();
+        let answer = self.citation_candidate_answer();
+        let deliverables: Vec<(String, String)> = self
+            .written_deliverables()
+            .into_iter()
+            .filter_map(|p| {
+                let full = if Path::new(&p).is_absolute() {
+                    PathBuf::from(&p)
+                } else {
+                    root.join(&p)
+                };
+                let meta = std::fs::metadata(&full).ok()?;
+                if meta.len() > MAX_FILE_BYTES {
+                    return None;
+                }
+                std::fs::read_to_string(&full).ok().map(|text| (p, text))
+            })
+            .collect();
+
+        let step = self.loop_control.current_step();
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            answer.hash(&mut h);
+            deliverables.hash(&mut h);
+            (step, h.finish())
+        };
+        let mut state = self.citation_gate.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((prev, result)) = &state.last_eval {
+            if *prev == key {
+                return result.clone();
+            }
+        }
+
+        let mut resolver = CitationResolver::new(root);
+        let mut report = resolver.verify_text(&answer, ANSWER_SOURCE);
+        let mut checked_files = Vec::new();
+        for (path, text) in &deliverables {
+            let file_report = resolver.verify_text(text, path);
+            if file_report.total > 0 {
+                checked_files.push(path.clone());
+            }
+            report.merge(file_report);
+        }
+
+        if report.total == 0 && !is_read_only {
+            // Nothing cited and not a review/report task: nothing to say.
+            state.status = None;
+            state.last_eval = Some((key, None));
+            return None;
+        }
+
+        let problems = report.problem_count();
+        let (result, marker) = if problems == 0 {
+            (None, None)
+        } else if state.last_rejected_step == Some(step) {
+            // Same turn, re-evaluated content: same round, no new spend.
+            let round = state.rejections;
+            (Some(correction_directive(&report, round)), None)
+        } else if state.rejections < CITATION_GATE_REJECTION_BOUND {
+            state.rejections += 1;
+            state.last_rejected_step = Some(step);
+            let round = state.rejections;
+            (
+                Some(correction_directive(&report, round)),
+                Some(format!(
+                    "{problems} of {} could not be verified — correction round {round}/{CITATION_GATE_REJECTION_BOUND}",
+                    report.total
+                )),
+            )
+        } else {
+            tracing::warn!(
+                "citation check: {problems} of {} citations still wrong after {} correction \
+                 round(s) — stepping aside; the run completes with the count reported",
+                report.total,
+                state.rejections
+            );
+            (
+                None,
+                Some(format!(
+                    "{problems} of {} could not be verified after {} correction round(s) — completing with this warning",
+                    report.total, state.rejections
+                )),
+            )
+        };
+        let status = GroundingStatus::from_report(&report, state.rejections, checked_files);
+        let marker = marker.unwrap_or_else(|| {
+            format!(
+                "{} checked: {} verified, {} without a checkable symbol, 0 wrong",
+                status.total, status.verified, status.unverifiable
+            )
+        });
+        state.status = Some(status.clone());
+        state.last_eval = Some((key, result.clone()));
+        drop(state);
+
+        crate::output::citation_check(&marker);
+        self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+            decision: "citation_check".to_string(),
+            detail: format!("{} — {}", status.grounding_line(), marker),
+        });
+        result
+    }
+
+    /// Grounding outcome of the latest citation check this task, if any.
+    pub fn grounding_status(&self) -> Option<GroundingStatus> {
+        self.citation_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .status
+            .clone()
+    }
+
+    /// Reset the citation gate for a new task.
+    pub(super) fn reset_citation_gate(&self) {
+        *self.citation_gate.lock().unwrap_or_else(|e| e.into_inner()) =
+            CitationGateState::default();
+    }
+}
+
+#[cfg(test)]
+#[path = "../../tests/unit/agent/citation_check/citation_check_test.rs"]
+mod tests;

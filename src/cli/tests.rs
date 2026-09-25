@@ -1163,6 +1163,7 @@ fn sample_summary() -> crate::agent::RunSummary {
         unmetered_attempts: 0,
         call_latency: None,
         requirements_audit: None,
+        grounding: None,
     }
 }
 
@@ -1203,6 +1204,61 @@ fn render_run_summary_never_says_completed_over_failed_verification() {
         rendered.contains("verification: failed (1 checks)"),
         "{rendered}"
     );
+}
+
+/// Context-validation run (2026-09-24): a review with wrong citations exited 0
+/// and the summary read a bare "completed". Once the citation gate steps
+/// aside, the summary names the unverified count and the Grounding line.
+#[test]
+fn render_run_summary_names_unverified_citations() {
+    let mut summary = sample_summary();
+    summary.grounding = Some(crate::agent::citation_check::GroundingStatus {
+        total: 50,
+        verified: 40,
+        unverifiable: 7,
+        wrong_line: 3,
+        correction_rounds: 2,
+        problems: vec!["`x` cited at a.rs:9 but found at src/a.rs:40".to_string()],
+        ..Default::default()
+    });
+    let rendered = render_run_summary(&summary, None);
+    assert!(
+        !rendered.lines().any(|l| l == "outcome: completed"),
+        "no bare completion over unverified citations: {rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "outcome: completed — citations: 3 of 50 could not be verified (answer not fully grounded)"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "Grounding: 40 verified citations, 10 unverified (3 wrong, 7 without a checkable symbol)"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("  - `x` cited at a.rs:9 but found at src/a.rs:40"),
+        "{rendered}"
+    );
+
+    // Every citation verified: clean outcome, Grounding line still shown.
+    summary.grounding = Some(crate::agent::citation_check::GroundingStatus {
+        total: 5,
+        verified: 5,
+        ..Default::default()
+    });
+    let rendered = render_run_summary(&summary, None);
+    assert!(
+        rendered.lines().any(|l| l == "outcome: completed"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Grounding: 5 verified citations, 0 unverified"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("could not be verified"), "{rendered}");
 }
 
 /// kvstore_nat (2026-09-24): the audit call failed on gateway 503s and the
@@ -1380,6 +1436,7 @@ fn render_cost_line_honest_about_missing_billing() {
         unmetered_attempts: 1,
         call_latency: None,
         requirements_audit: None,
+        grounding: None,
     };
     let rendered = render_cost_line(&summary);
     assert!(rendered.contains("tokens: 12345 total"), "{rendered}");

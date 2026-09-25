@@ -202,17 +202,50 @@ pub fn emit_event(event: &HeadlessEvent) {
     }
 }
 
-/// Emit the final session result as JSON to stdout.
-pub fn emit_result(result: &SessionResult) {
-    if let Some(json) = serde_json::to_string(result)
-        .ok()
-        .and_then(validated_jsonl_line)
-    {
-        use std::io::Write;
+/// Emit the final session result as JSON to stdout, with the citation
+/// check attached as `grounding` when one ran (see [`session_result_json`]).
+pub fn emit_result(
+    result: &SessionResult,
+    grounding: Option<&crate::agent::citation_check::GroundingStatus>,
+) {
+    if let Some(json) = session_result_json(result, grounding).and_then(validated_jsonl_line) {
         let stdout = std::io::stdout();
         let mut lock = stdout.lock();
         let _ = writeln!(lock, "{}", json);
     }
+}
+
+/// Serialize a [`SessionResult`] with the run's deterministic citation check
+/// attached as a top-level `grounding` object (`total`, `verified`,
+/// `unverified`, per-kind counts, `problems` naming actual locations, and the
+/// summary's `Grounding:` line). Omitted when nothing was checked, so runs
+/// without citations keep the pre-existing shape. When citations remain
+/// wrong, `grounding.note` reads `citations: N of M could not be verified`.
+pub fn session_result_json(
+    result: &SessionResult,
+    grounding: Option<&crate::agent::citation_check::GroundingStatus>,
+) -> Option<String> {
+    // Serialize the struct directly (field order preserved) and append the
+    // grounding object as the last key, so consumers see the existing
+    // result byte-for-byte up to the new field.
+    let base = serde_json::to_string(result).ok()?;
+    let Some(g) = grounding else {
+        return Some(base);
+    };
+    let mut gv = serde_json::to_value(g).ok()?;
+    if let Some(gobj) = gv.as_object_mut() {
+        gobj.insert("unverified".into(), g.unverified_count().into());
+        gobj.insert("summary".into(), g.grounding_line().into());
+        if g.problem_count() > 0 {
+            gobj.insert("note".into(), g.unverified_note().into());
+        }
+    }
+    let head = base.strip_suffix('}')?;
+    let sep = if head.ends_with('{') { "" } else { "," };
+    Some(format!(
+        "{head}{sep}\"grounding\":{}}}",
+        serde_json::to_string(&gv).ok()?
+    ))
 }
 
 /// Captures the agent's final answer for the structured [`SessionResult`].

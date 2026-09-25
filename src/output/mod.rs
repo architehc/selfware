@@ -912,6 +912,22 @@ pub(crate) fn audit_verdict(verdict: &str) {
     io::stdout().flush().ok();
 }
 
+/// Format the one-line marker for the deterministic citation check.
+pub(crate) fn citation_check_line(detail: &str) -> String {
+    format!("[citations] {detail}")
+}
+
+/// Print the citation-check outcome as a single visible line (same channel
+/// and suppression rules as the requirements-audit verdict).
+pub(crate) fn citation_check(detail: &str) {
+    if is_tui_active() || is_compact() || is_quiet() || is_json_mode() {
+        return;
+    }
+    let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    println!("{}", citation_check_line(detail).bright_yellow());
+    io::stdout().flush().ok();
+}
+
 /// Print final answer
 pub(crate) fn final_answer(content: &str) {
     if should_suppress_output() {
