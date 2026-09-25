@@ -7611,6 +7611,64 @@ async fn unchanged_reread_note_survives_an_edit_of_another_file() {
 }
 
 #[tokio::test]
+async fn c24_whole_read_too_large_for_the_window_arrives_as_a_first_chunk() {
+    // c24 shape: 11,008-token history budget, ~5.3k system prompt, a
+    // whole-file read of ~6k tokens.
+    let mut agent = reread_agent().await;
+    agent.max_context_tokens = 11_008;
+    agent.messages[0] = crate::api::types::Message::system(
+        "You are selfware, a careful coding agent. Follow the tool protocol.\n".repeat(380),
+    );
+    let mut source = String::new();
+    for i in 0..400 {
+        source.push_str(&format!(
+            "/// Doc {i}.\npub fn item_{i}(x: usize) -> usize {{\n    x + {i}\n}}\n\n"
+        ));
+    }
+    let total = source.lines().count();
+    let result = serde_json::json!({
+        "path": "src/agent/context.rs", "content": source, "total_lines": total
+    })
+    .to_string();
+    let args = r#"{"path":"src/agent/context.rs"}"#;
+    let history = crate::token_count::estimate_messages_tokens(&agent.messages);
+    let room = (11_008 - history) / 2;
+    assert!(
+        crate::token_count::estimate_content_tokens(&result) > room,
+        "precondition"
+    );
+    agent.messages.push(native_read_call("r1", args));
+    agent
+        .push_tool_result_message(true, "r1", "file_read", args, true, &result)
+        .await;
+    let v: serde_json::Value = serde_json::from_str(&last_text(&agent)).unwrap();
+    assert_eq!(v["whole_file_chunked"], true, "{v}");
+    assert_eq!(v["total_lines"], total);
+    let keep = v["shown_line_range"][1].as_u64().unwrap() as usize;
+    assert!(keep > 0 && keep < total);
+    assert!(crate::token_count::estimate_content_tokens(&last_text(&agent)) <= room);
+
+    // The ledger records the lines shown, not the whole file.
+    agent.compressor.observe_work(&agent.messages);
+    let ledger = agent.compressor.work_ledger();
+    let entry = ledger
+        .files()
+        .iter()
+        .find(|f| f.path.ends_with("src/agent/context.rs"))
+        .expect("recorded");
+    assert!(!entry.whole_file, "a chunk is not whole-file coverage");
+    assert_eq!(entry.ranges, vec![(1, keep)]);
+
+    // A second identical whole read is not answered "unchanged": what the
+    // model saw was a chunk, not the whole file.
+    agent.messages.push(native_read_call("r2", args));
+    agent
+        .push_tool_result_message(true, "r2", "file_read", args, true, &result)
+        .await;
+    assert!(!last_text(&agent).contains("Unchanged since turn"));
+}
+
+#[tokio::test]
 async fn path_aliases_share_one_key_in_the_reread_tracker_and_the_note() {
     // External review 2026-09-25 (Rule 5 sweep of the ledger alias bug):
     // every path-keyed map agrees that `./a/../src/lexer.rs`,

@@ -378,7 +378,7 @@ pub(crate) fn build_stub(
             .and_then(|c| c.as_str())
         {
             let path = arg_path(&args_v).unwrap_or_else(|| "?".to_string());
-            let range = arg_range(&args_v);
+            let range = shown_range(&args_v, parsed.as_ref());
             let total_lines = parsed
                 .as_ref()
                 .and_then(|v| v.get("total_lines"))
@@ -495,7 +495,7 @@ pub(crate) fn truncate_result(name: &str, args: &str, payload: &str, max_tokens:
             .and_then(|c| c.as_str())
         {
             let path = arg_path(&args_v).unwrap_or_else(|| "?".to_string());
-            let first_line = arg_range(&args_v).map_or(1, |r| r.0.max(1));
+            let first_line = shown_range(&args_v, parsed.as_ref()).map_or(1, |r| r.0.max(1));
             let lines: Vec<&str> = content.lines().collect();
             let last_line = first_line + lines.len().saturating_sub(1);
             let total_lines = parsed
@@ -554,6 +554,144 @@ pub(crate) fn truncate_result(name: &str, args: &str, payload: &str, max_tokens:
     let base = estimate_content_tokens(&out.to_string());
     out["head"] = Value::String(head_within(payload, max_tokens.saturating_sub(base)));
     out.to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Whole-file reads larger than the window
+// ---------------------------------------------------------------------------
+
+/// Result key of a whole-file read delivered as its first chunk.
+pub(crate) const CHUNKED_WHOLE_READ_KEY: &str = "whole_file_chunked";
+
+/// Smallest chunk a whole-file read is cut to, however little room is
+/// left: ~60 lines of Rust. Below that a chunk buys less than the re-read
+/// it forces.
+pub(crate) const MIN_WHOLE_READ_CHUNK_TOKENS: usize = 1_024;
+
+/// Share of a chunk's budget its whole-file symbol index may use.
+const CHUNK_SYMBOLS_SHARE_DIV: usize = 4;
+
+/// A whole-file `file_read` result (`payload`) larger than `room` tokens,
+/// delivered instead as its first lines that fit `room` (never below
+/// [`MIN_WHOLE_READ_CHUNK_TOKENS`]): numbered like a ranged read, with
+/// `total_lines`, `shown_line_range`, a symbol index of the WHOLE file with
+/// line numbers (bounded to a quarter of the chunk), and a note to continue
+/// with `line_range`. `None` when the payload fits, is not a successful
+/// read, or a chunk would not be smaller.
+///
+/// The caller passes half the history budget still free (room for the
+/// next result too). Measured on val083: c24's first request was 5,880
+/// tokens of an 11,008 budget, so a whole read of context.rs (~5.5k
+/// tokens) gets a ~2.5k chunk instead of arriving whole and being cut or
+/// stubbed at once (10 of 11 c24 reads were); at 65,536 (44,237 budget,
+/// first request 23,760) the room is ~10.2k — the 5-9k reads arrive whole,
+/// verification.rs (~35k) as a chunk.
+pub(crate) fn chunk_whole_read(payload: &str, room: usize) -> Option<String> {
+    let room = room.max(MIN_WHOLE_READ_CHUNK_TOKENS);
+    if estimate_content_tokens(payload) <= room {
+        return None;
+    }
+    let parsed: Value = serde_json::from_str(payload).ok()?;
+    let raw = crate::tools::line_numbers::raw_file_read_content(&parsed)?;
+    let lines: Vec<&str> = raw.split_inclusive('\n').collect();
+    if lines.len() < 2 {
+        return None;
+    }
+    let total_lines = parsed
+        .get("total_lines")
+        .and_then(Value::as_u64)
+        .map_or(lines.len(), |t| t as usize);
+    let all_symbols = symbol_digest(&raw, 1);
+    let build = |keep: usize, symbols: &[(usize, String)], symbols_kept: usize| -> Value {
+        let content = crate::tools::line_numbers::number_lines(&lines[..keep].concat(), 1);
+        let mut v = json!({
+            "content": content,
+            crate::tools::line_numbers::LINE_NUMBERS_KEY: true,
+            CHUNKED_WHOLE_READ_KEY: true,
+            "total_lines": total_lines,
+            "shown_line_range": [1, keep],
+            "lines_returned": keep,
+            "truncated": true,
+            "has_more": true,
+            "note": format!(
+                "Whole file too large for the room left in your context: lines 1-{keep} of \
+                 {total_lines} shown (numbered). `symbols` indexes the rest of the file with \
+                 line numbers. Continue with file_read line_range [{}, ...] for the part you \
+                 need; do not re-read the whole file.",
+                keep + 1
+            ),
+        });
+        let rendered: Vec<String> = symbols
+            .iter()
+            .take(symbols_kept)
+            .map(|(n, s)| format!("{n}: {s}"))
+            .collect();
+        v["symbols"] = json!(rendered);
+        if symbols.len() > symbols_kept {
+            v["symbols_omitted"] = json!(symbols.len() - symbols_kept);
+        }
+        v
+    };
+    // How many of `symbols` fit their share of the room (measured).
+    let symbol_cap = room / CHUNK_SYMBOLS_SHARE_DIV;
+    let fit_symbols = |symbols: &[(usize, String)]| -> usize {
+        let mut kept = symbols.len().min(MAX_DIGEST_SYMBOLS);
+        while kept > 0 {
+            let rendered: Vec<String> = symbols
+                .iter()
+                .take(kept)
+                .map(|(n, s)| format!("{n}: {s}"))
+                .collect();
+            if estimate_content_tokens(&json!(rendered).to_string()) <= symbol_cap {
+                break;
+            }
+            kept = kept.saturating_sub((kept / 4).max(1));
+        }
+        kept
+    };
+    // The largest whole-line prefix that fits next to a full-share index
+    // (binary search, measured) ...
+    let reserve = fit_symbols(&all_symbols);
+    let (mut lo, mut hi) = (0usize, lines.len() - 1);
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if estimate_content_tokens(&build(mid, &all_symbols, reserve).to_string()) <= room {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    if lo == 0 {
+        return None;
+    }
+    // ... then the index names only what the chunk does not show (the
+    // prefix shrinks if those later names measure a few tokens more).
+    let mut keep = lo;
+    while keep > 0 {
+        let rest: Vec<(usize, String)> = all_symbols
+            .iter()
+            .filter(|(n, _)| *n > keep)
+            .cloned()
+            .collect();
+        let out = build(keep, &rest, fit_symbols(&rest)).to_string();
+        let tokens = estimate_content_tokens(&out);
+        if tokens <= room {
+            return (tokens < estimate_content_tokens(payload)).then_some(out);
+        }
+        keep -= 1;
+    }
+    None
+}
+
+/// The lines a `file_read` result shows: the call's `line_range`, else a
+/// chunked whole read's `shown_line_range`, else `None` (the whole file).
+fn shown_range(args: &Value, payload: Option<&Value>) -> Option<(usize, usize)> {
+    arg_range(args).or_else(|| {
+        let v = payload?;
+        v.get(CHUNKED_WHOLE_READ_KEY)?;
+        let r = v.get("shown_line_range")?.as_array()?;
+        Some((r.first()?.as_u64()? as usize, r.get(1)?.as_u64()? as usize))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -669,14 +807,23 @@ pub(crate) fn compact_tool_results_to_budget(
 
 /// Key of a `file_read` call for supersession: normalized path and the
 /// line range (`None` = whole file).
-fn read_key(r: &PairedResult) -> Option<(String, Option<(usize, usize)>)> {
+/// A chunked whole read (or its stub) counts as the lines it showed.
+fn read_key(r: &PairedResult, messages: &[Message]) -> Option<(String, Option<(usize, usize)>)> {
     if r.name != "file_read" {
         return None;
     }
     let args_v: Value = serde_json::from_str(&r.args).unwrap_or_default();
     let root = super::current_project_root();
     let path = super::context::canonical_workspace_path(&arg_path(&args_v)?, Some(&root));
-    Some((path, arg_range(&args_v)))
+    let payload = open_envelope(messages[r.idx].content.text(), r.xml)
+        .and_then(|env| serde_json::from_str::<Value>(&env.payload).ok());
+    let range = shown_range(&args_v, payload.as_ref()).or_else(|| {
+        let v = payload.as_ref()?;
+        v.get(COMPACTED_RESULT_KEY)?;
+        let r = v.get("line_range")?.as_array()?;
+        Some((r.first()?.as_u64()? as usize, r.get(1)?.as_u64()? as usize))
+    });
+    Some((path, range))
 }
 
 /// Whether a later read `later` shows at least the lines of `earlier`.
@@ -806,7 +953,7 @@ pub(crate) fn compact_tool_results_to_budget_opts(
     let touchable = |pos: usize| -> bool {
         !protect_unseen || last_assistant.is_some_and(|a| results[pos].idx < a)
     };
-    let keys: Vec<_> = results.iter().map(read_key).collect();
+    let keys: Vec<_> = results.iter().map(|r| read_key(r, messages)).collect();
     let covered_later = |pos: usize| -> bool {
         let Some((path, range)) = &keys[pos] else {
             return false;
@@ -1005,7 +1152,7 @@ impl ContextPresence {
                     if v.get("content").and_then(|c| c.as_str()).is_none() {
                         continue;
                     }
-                    match arg_range(&args_v) {
+                    match shown_range(&args_v, Some(&v)) {
                         Some(range) => out.ranges.entry(key).or_default().push(range),
                         None => {
                             out.whole.insert(key);

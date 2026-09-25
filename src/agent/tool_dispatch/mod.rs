@@ -1175,6 +1175,20 @@ impl Agent {
         Some(note.to_string())
     }
 
+    /// The first chunk of a whole-file `file_read` result that fits HALF the
+    /// history budget still free — room for the next result too (see
+    /// [`super::result_compaction::chunk_whole_read`]), or `None` when the
+    /// result is a ranged read or fits as it is.
+    fn chunk_whole_read_for_context(&self, args_str: &str, result: &str) -> Option<String> {
+        let args = serde_json::from_str::<Value>(args_str).ok()?;
+        if args.get("line_range").is_some_and(|r| !r.is_null()) {
+            return None;
+        }
+        let history = crate::token_count::estimate_messages_tokens(&self.messages);
+        let room = self.max_context_tokens.saturating_sub(history) / 2;
+        super::result_compaction::chunk_whole_read(result, room)
+    }
+
     /// Whether this call is a `file_read` re-read of a path whose previous
     /// result left the context AND the selected guard still has exemption
     /// budget for that path; when it does, one unit of that budget is spent.
@@ -4195,6 +4209,19 @@ impl Agent {
             }
         }
 
+        // A whole-file read larger than the room left before compaction is
+        // delivered as its first chunk that fits (numbered, as a ranged read,
+        // with the whole file's symbol index), not as content that the next
+        // compaction is guaranteed to stub (val083 c24: 10 of 11 file reads
+        // reached the model already stubbed or cut).
+        let chunked = if success && tool_name == "file_read" {
+            self.chunk_whole_read_for_context(args_str, result)
+        } else {
+            None
+        };
+        let full_result = result;
+        let result: &str = chunked.as_deref().unwrap_or(result);
+
         // Budget check: if the result exceeds the per-result token budget,
         // spill the raw data to disk and store a structured summary + reference.
         // Applies to BOTH success AND error results — an oversized error was
@@ -4270,12 +4297,14 @@ impl Agent {
         if success {
             self.record_file_read_result_message(tool_name, args_str);
             if tool_name == "file_read" {
-                if spilled {
+                // A spilled or chunked result is not the content the call
+                // asked for: never an "unchanged" reference for a re-read.
+                if spilled || chunked.is_some() {
                     if let Some(key) = Self::file_read_range_key(args_str) {
                         self.delivered_read_results.remove(&key);
                     }
                 } else {
-                    self.record_delivered_read_result(args_str, result);
+                    self.record_delivered_read_result(args_str, full_result);
                 }
             }
         }

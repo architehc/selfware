@@ -1142,6 +1142,14 @@ impl WorkLedger {
                     .and_then(|r| Some((r.first()?.as_u64()?, r.get(1)?.as_u64()?)))
                     .map(|(a, b)| (a as usize, b as usize));
                 let parsed = serde_json::from_str::<serde_json::Value>(payload).ok();
+                // A whole read delivered as its first chunk covers only the
+                // lines it showed.
+                let range = range.or_else(|| {
+                    let v = parsed.as_ref()?;
+                    v.get(super::result_compaction::CHUNKED_WHOLE_READ_KEY)?;
+                    let r = v.get("shown_line_range")?.as_array()?;
+                    Some((r.first()?.as_u64()? as usize, r.get(1)?.as_u64()? as usize))
+                });
                 // An "unchanged re-read" note (tool_dispatch) carries no
                 // content: the earlier full read is already recorded, and the
                 // note must not turn it into a partial read.

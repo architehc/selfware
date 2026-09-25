@@ -810,3 +810,82 @@ fn a_wider_later_read_supersedes_a_narrow_one_but_not_the_reverse() {
     assert!(!read_covers(Some((120, 400)), None));
     assert!(read_covers(None, None));
 }
+
+// ---------------------------------------------------------------------------
+// Whole-file reads larger than the window (c24 shape): first chunk, numbered
+// ---------------------------------------------------------------------------
+
+#[test]
+fn c24_whole_read_is_delivered_as_a_numbered_first_chunk_with_an_index_of_the_rest() {
+    // c24: first request 5,880 of 11,008 tokens -> room (11,008-5,880)/2.
+    let room = (11_008 - 5_880) / 2;
+    let source = rust_source("ctx", 5_500);
+    let total = source.lines().count();
+    let payload = read_payload(&source);
+    let chunk = chunk_whole_read(&payload, room).expect("chunked");
+    assert!(estimate_content_tokens(&chunk) <= room, "fits the room");
+    let v: serde_json::Value = serde_json::from_str(&chunk).unwrap();
+    assert_eq!(v[CHUNKED_WHOLE_READ_KEY], true);
+    assert_eq!(v["line_numbers"], true);
+    assert_eq!(v["total_lines"], total);
+    let shown = v["shown_line_range"].as_array().unwrap();
+    let keep = shown[1].as_u64().unwrap() as usize;
+    assert_eq!(shown[0], 1);
+    assert!(keep > 20 && keep < total, "{keep} of {total}");
+    let content = v["content"].as_str().unwrap();
+    assert!(
+        content.starts_with("  1\t") || content.starts_with("1\t"),
+        "numbered"
+    );
+    assert_eq!(content.lines().count(), keep);
+    // The index covers the WHOLE file, past the chunk.
+    let last_symbol = v["symbols"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .as_str()
+        .unwrap();
+    let n: usize = last_symbol.split(':').next().unwrap().parse().unwrap();
+    assert!(n > keep, "index reaches past the chunk: {last_symbol}");
+    assert!(v["note"]
+        .as_str()
+        .unwrap()
+        .contains(&format!("line_range [{}, ...]", keep + 1)));
+    // The ledger's presence view: only the shown lines are in context.
+    let messages = vec![
+        system_prompt(),
+        Message::user(TASK),
+        xml_call("src/agent/context.rs"),
+        xml_result(&chunk),
+    ];
+    let presence = ContextPresence::from_messages(&messages, &|p| p.to_string());
+    assert!(!presence.whole("src/agent/context.rs"));
+    assert_eq!(presence.ranges("src/agent/context.rs"), vec![(1, keep)]);
+    // Stubbed later, it still names its lines, not the whole file.
+    let stub: serde_json::Value = serde_json::from_str(&build_stub(
+        "file_read",
+        r#"{"path":"src/agent/context.rs"}"#,
+        &chunk,
+        300,
+        None,
+    ))
+    .unwrap();
+    assert_eq!(stub["line_range"], serde_json::json!([1, keep]));
+}
+
+#[test]
+fn a_whole_read_that_fits_is_left_alone_and_tiny_rooms_get_the_floor() {
+    let small = read_payload(&rust_source("s", 800));
+    assert!(chunk_whole_read(&small, 5_000).is_none(), "fits");
+    // No room left at all: the chunk is the floor size, not empty.
+    let big = read_payload(&rust_source("b", 6_000));
+    let chunk = chunk_whole_read(&big, 0).expect("chunked");
+    let tokens = estimate_content_tokens(&chunk);
+    assert!(
+        tokens <= MIN_WHOLE_READ_CHUNK_TOKENS && tokens > MIN_WHOLE_READ_CHUNK_TOKENS / 2,
+        "{tokens}"
+    );
+    // Not a successful read (no content): untouched.
+    assert!(chunk_whole_read(&"x".repeat(20_000), 100).is_none());
+}
