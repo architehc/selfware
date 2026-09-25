@@ -532,3 +532,59 @@ fn trim_compacts_before_dropping_on_the_c24_shape() {
         "latest read intact"
     );
 }
+
+/// Live 65,536 rerun: the auto-loaded review overview (skeletons of 30
+/// files, ~17.7k tokens, coalesced with the task into one 56k-char user
+/// message) stayed pinned while every read the model asked for was stubbed,
+/// and the model thrashed re-reading. The overview goes first; the task and
+/// the directives in the same message stay verbatim.
+#[test]
+fn the_auto_loaded_overview_goes_before_any_read_and_the_task_stays() {
+    let mut overview = format!(
+        "{REFERENCE_OVERVIEW_MARKER}\n\n\n## Codebase Overview (30 Rust files, function/struct \
+         signatures)\nYou already have the full project structure below. Use `file_read` only \
+         for files you need to see in full detail.\n\n"
+    );
+    for f in 0..30 {
+        overview.push_str(&format!(
+            "// tests/unit/mod_{f}_test.rs\nL1: use super::*\n"
+        ));
+        for i in 0..40 {
+            overview.push_str(&format!("L{}: fn test_case_{f}_{i}()\n", 4 + i * 9));
+        }
+        overview.push('\n');
+    }
+    let directive =
+        "<selfware_system_directive>\nSELFWARE INPUT CENSUS\n</selfware_system_directive>";
+    let first = format!("{overview}\n\n{TASK}\n\n{directive}");
+    let mut messages = vec![system_prompt(), Message::user(first)];
+    messages.extend(native_history(&[("src/a.rs", 3_000), ("src/b.rs", 3_000)]).split_off(2));
+    let before = estimate_messages_tokens(&messages);
+    let reads: Vec<String> = messages[2..]
+        .iter()
+        .map(|m| m.content.text().to_string())
+        .collect();
+    let report = compact_tool_results_to_budget(
+        &mut messages,
+        before - 2_000,
+        RECENT_RESULTS_KEPT_INTACT,
+        300,
+        &|_| None,
+    )
+    .expect("compacted");
+    assert_eq!(report.overviews_removed, 1);
+    assert!(report.stubbed.is_empty(), "no read stubbed: {report:?}");
+    let first = messages[1].content.text();
+    assert!(!first.contains("fn test_case_3_7()"), "overview gone");
+    assert!(first.contains("NOT in your context any more"));
+    assert!(first.contains(TASK), "task verbatim");
+    assert!(first.contains(directive), "directive verbatim");
+    let after: Vec<String> = messages[2..]
+        .iter()
+        .map(|m| m.content.text().to_string())
+        .collect();
+    assert_eq!(after, reads, "reads untouched");
+    assert!(report
+        .describe()
+        .contains("1 auto-loaded codebase overview(s) removed"));
+}
