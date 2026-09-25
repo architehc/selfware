@@ -367,3 +367,85 @@ fn no_tests_collected_is_not_run_for_python_and_go() {
             .is_none()
     );
 }
+
+/// Rule-5 sweep, JS runners: "no tests" is not-run for vitest, jest, mocha,
+/// node --test and ava exactly as for pytest / unittest / go / the npm
+/// placeholder script. Verbatim runner messages.
+#[test]
+fn no_tests_found_is_not_run_for_node_runners() {
+    let ran = |passed: bool, output: &str| QaStageResult {
+        stage: QaStage::Test,
+        passed,
+        duration_ms: 1,
+        output: output.into(),
+        error_count: if passed { 0 } else { 1 },
+        warning_count: 0,
+        not_run: None,
+    };
+    for (runner, passed, output) in [
+        (
+            "vitest",
+            false,
+            "\n RUN  v1.6.0 /ws\n\ninclude: **/*.{test,spec}.?(c|m)[jt]s?(x)\nexclude:  **/node_modules/**, **/dist/**\n\nNo test files found, exiting with code 1\n",
+        ),
+        (
+            "vitest --passWithNoTests",
+            true,
+            "No test files found, exiting with code 0\n",
+        ),
+        (
+            "jest",
+            false,
+            "No tests found, exiting with code 1\nRun with `--passWithNoTests` to exit with code 0\nIn /ws\n  3 files checked.\n  testMatch: **/__tests__/**/*.[jt]s?(x) - 0 matches\n",
+        ),
+        (
+            "mocha (no spec files)",
+            false,
+            "Error: No test files found: \"test\"\nnpm ERR! Test failed.  See above for more details.\n",
+        ),
+        ("mocha (empty suite)", true, "\n\n  0 passing (1ms)\n\n"),
+        (
+            "node --test",
+            true,
+            "# tests 0\n# suites 0\n# pass 0\n# fail 0\n",
+        ),
+        (
+            "ava",
+            false,
+            "\n  ✖ Couldn't find any files to test\n",
+        ),
+    ] {
+        let r = classify_node_test(ran(passed, output));
+        assert!(r.not_run.is_some(), "{runner}: {}", r.output);
+        assert!(!r.passed, "{runner}: a not-run stage is never green");
+    }
+    // Real verdicts stay verdicts.
+    assert!(classify_node_test(ran(false, " Tests  1 failed | 2 passed (3)\n")).failed());
+    let pass = classify_node_test(ran(true, " Tests  3 passed (3)\n"));
+    assert!(pass.passed && pass.not_run.is_none());
+    assert!(classify_node_test(ran(true, "  4 passing (12ms)\n"))
+        .not_run
+        .is_none());
+}
+
+/// End to end through the vitest stage: a project-local vitest that finds no
+/// test files is not-run, not a blocking failure.
+#[cfg(unix)]
+#[tokio::test]
+async fn vitest_with_no_test_files_is_not_run_end_to_end() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("package.json"), r#"{"name":"x"}"#).unwrap();
+    let bin = dir.path().join("node_modules/.bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let vitest = bin.join("vitest");
+    std::fs::write(
+        &vitest,
+        "#!/bin/sh\necho ' RUN  v1.6.0'\necho 'No test files found, exiting with code 1'\nexit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&vitest, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let r = node_test_stage(dir.path(), 30).await;
+    assert!(r.not_run.is_some(), "{}", r.output);
+    assert!(!r.failed(), "no tests must not block: {}", r.output);
+}

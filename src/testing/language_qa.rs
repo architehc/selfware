@@ -893,22 +893,41 @@ pub(crate) async fn node_lint_stage(
 /// Test: vitest when installed, else the package.json `test` script via npm.
 pub(crate) async fn node_test_stage(project_root: &Path, timeout_secs: u64) -> QaStageResult {
     if let Some(vitest) = resolve_node_tool(project_root, "vitest").await {
-        return run_stage(
-            QaStage::Test,
-            &vitest,
-            &["run", "--reporter=verbose"],
-            project_root,
-            timeout_secs,
-        )
-        .await;
+        return classify_node_test(
+            run_stage(
+                QaStage::Test,
+                &vitest,
+                &["run", "--reporter=verbose"],
+                project_root,
+                timeout_secs,
+            )
+            .await,
+        );
     }
     if let Err(reason) = npm_test_script(project_root) {
         return QaStageResult::not_run(QaStage::Test, reason);
     }
     // `npm test` (not `npm test -- --if-present`: arguments after `--` go to
     // the test SCRIPT, where `--if-present` is an unknown flag). A missing
-    // npm is a not-run stage via the spawn error.
-    run_stage(QaStage::Test, "npm", &["test"], project_root, timeout_secs).await
+    // npm is a not-run stage via the spawn error. The script's runner (jest,
+    // mocha, node --test, ava, …) finding no tests is not-run too.
+    classify_node_test(run_stage(QaStage::Test, "npm", &["test"], project_root, timeout_secs).await)
+}
+
+/// JS test stage verdict: a runner that found no tests is not-run, not a
+/// pass or a (blocking) failure — vitest / jest `No test(s) found`, mocha
+/// `No test files found` / `0 passing`, node `--test` `# tests 0`, ava
+/// `Couldn't find any files to test`. The markers are the shared
+/// zero-execution detector (`runner_output_proves_no_tests_ran`), so a
+/// failure marker or an executed test vetoes the demotion.
+pub(crate) fn classify_node_test(r: QaStageResult) -> QaStageResult {
+    if r.not_run.is_some() {
+        return r;
+    }
+    if crate::agent::tool_dispatch::helpers::runner_output_proves_no_tests_ran(&r.output) {
+        return demote_to_not_run(r, "the test runner found no tests".into());
+    }
+    r
 }
 
 /// Security: npm audit, which needs a lockfile and the registry.

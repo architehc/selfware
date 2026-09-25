@@ -2712,6 +2712,12 @@ pub(crate) fn targeted_test_found_nothing(
         {
             Some("no Go test files")
         }
+        // Every other runner (vitest / jest / mocha / node --test / ava,
+        // libtest `0 passed`): the shared zero-execution detector, which a
+        // failure marker or an executed test vetoes.
+        _ if crate::agent::tool_dispatch::helpers::runner_output_proves_no_tests_ran(output) => {
+            Some("the test runner found no tests")
+        }
         _ => None,
     }
 }

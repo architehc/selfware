@@ -3502,3 +3502,57 @@ async fn targeted_test_unconfigured_or_unrunnable_is_not_run() {
     assert!(r.not_run && r.warnings[0].contains("`mvn` is not installed"));
     assert!(not_run_if_spawn_failed(CheckType::Test, &anyhow::anyhow!("other")).is_none());
 }
+
+/// Rule-5 sweep of the targeted-test path: JS/TS runners that found no
+/// tests (vitest, jest, mocha, node --test) and a libtest run of 0 tests are
+/// not-run, like pytest exit 5 and go `[no test files]`.
+#[test]
+fn targeted_test_found_nothing_covers_js_runners_and_libtest() {
+    for (lang, code, out) in [
+        (
+            RepoLanguage::JavaScript,
+            Some(1),
+            "No test files found, exiting with code 1",
+        ),
+        (
+            RepoLanguage::TypeScript,
+            Some(1),
+            "No tests found, exiting with code 1\nRun with `--passWithNoTests` to exit with code 0",
+        ),
+        (
+            RepoLanguage::JavaScript,
+            Some(1),
+            "Error: No test files found: \"test\"",
+        ),
+        (RepoLanguage::JavaScript, Some(0), "  0 passing (1ms)"),
+        (RepoLanguage::JavaScript, Some(0), "# tests 0\n# pass 0\n# fail 0"),
+        (
+            RepoLanguage::Rust,
+            Some(0),
+            "running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out",
+        ),
+    ] {
+        assert!(
+            targeted_test_found_nothing(lang, code, out).is_some(),
+            "{lang:?}: {out}"
+        );
+    }
+    for (lang, code, out) in [
+        (
+            RepoLanguage::JavaScript,
+            Some(1),
+            " Tests  1 failed | 2 passed (3)",
+        ),
+        (RepoLanguage::JavaScript, Some(0), " Tests  3 passed (3)"),
+        (
+            RepoLanguage::Rust,
+            Some(0),
+            "running 2 tests\ntest a ... ok\ntest b ... ok\n\ntest result: ok. 2 passed; 0 failed",
+        ),
+    ] {
+        assert!(
+            targeted_test_found_nothing(lang, code, out).is_none(),
+            "{lang:?}: {out}"
+        );
+    }
+}

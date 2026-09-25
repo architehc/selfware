@@ -1929,7 +1929,8 @@ fn go_ok_line_ran_nothing(line: &str) -> bool {
 /// - go `[no test files]` / `[no tests to run]` / `testing: warning: no
 ///   tests to run` with no package that actually ran tests;
 /// - jest `No tests found`, vitest `No test files found`;
-/// - mocha `0 passing`, node TAP `# tests 0`.
+/// - mocha `0 passing` / `No test files found`, node TAP `# tests 0`;
+/// - ava `Couldn't find any files to test`.
 ///
 /// Any failure marker or any evidence of an executed test (a positive
 /// `passed`/`passing` tally, `Ran N` with N > 0, a go `ok` line that ran
@@ -1980,6 +1981,7 @@ pub(crate) fn runner_output_proves_no_tests_ran(output: &str) -> bool {
         || lower.contains("no tests to run")
         || lower.contains("no tests found")
         || lower.contains("no test files found")
+        || lower.contains("couldn't find any files to test")
         || zero_tally("passing")
         || lines.iter().any(|line| tap_count(line, "tests") == Some(0))
 }
