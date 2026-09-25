@@ -1,0 +1,77 @@
+name: Live endpoint
+
+# Real-model checks against llm.selfware.design. Scheduled and manual only:
+# the per-commit gate stays hermetic (mock servers exercise the failure paths
+# a real endpoint cannot produce on demand), and this job proves the agent
+# against the real model. An unreachable endpoint FAILS this job; it is never
+# reported as a skip (AGENTS.md rule 3).
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+    inputs:
+      endpoint:
+        description: "OpenAI-compatible endpoint"
+        default: "https://llm.selfware.design/v1"
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-endpoint
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  SELFWARE_ENDPOINT: ${{ github.event.inputs.endpoint || 'https://llm.selfware.design/v1' }}
+
+jobs:
+  live:
+    name: Live endpoint (qwen38-flash-next)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-composite0-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: live-endpoint
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Endpoint reachable
+        run: curl -fsS -m 20 "$SELFWARE_ENDPOINT/models"
+
+      - name: System tests against the endpoint
+        env:
+          SELFWARE_TEST_ENDPOINT: ${{ env.SELFWARE_ENDPOINT }}
+          SELFWARE_TEST_MODEL: qwen38-flash-next
+          SELFWARE_API_KEY: EMPTY
+          SELFWARE_REQUIRE_TEST_ENDPOINT: "1"
+        run: cargo test --features system-tests --test e2e_system_test -- --nocapture
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Headless review task with citation check
+        env:
+          OUT_DIR: live-endpoint-out
+        run: scripts/live_endpoint_check.sh target/release/selfware
+
+      - name: Upload run output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-endpoint-out
+          path: live-endpoint-out
+          if-no-files-found: ignore

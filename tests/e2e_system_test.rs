@@ -104,6 +104,15 @@ async fn require_test_endpoint() -> bool {
     match client.get(format!("{}/models", endpoint)).send().await {
         Ok(r) if r.status().is_success() => true,
         _ => {
+            // The scheduled live-endpoint job sets this: there a skip would
+            // render green for checks that were never performed (AGENTS.md
+            // rule 3), so an unreachable endpoint fails the test instead.
+            if std::env::var("SELFWARE_REQUIRE_TEST_ENDPOINT").as_deref() == Ok("1") {
+                panic!(
+                    "LLM endpoint not reachable at {} and SELFWARE_REQUIRE_TEST_ENDPOINT=1",
+                    endpoint
+                );
+            }
             println!(
                 "SKIPPED: LLM endpoint not reachable at {} — set SELFWARE_TEST_ENDPOINT",
                 endpoint
