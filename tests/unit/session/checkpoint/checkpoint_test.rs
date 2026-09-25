@@ -1245,6 +1245,7 @@ fn task_checkpoint_budget_fields_roundtrip_and_default() {
         last_failed_verification_summary: Some("pytest: 2 failed".to_string()),
         verification_failures: Default::default(),
         verification_fingerprint: None,
+        ..GuardCounters::default()
     };
     let json = serde_json::to_string(&cp).unwrap();
     let back: TaskCheckpoint = serde_json::from_str(&json).unwrap();

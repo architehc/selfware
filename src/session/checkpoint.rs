@@ -319,6 +319,101 @@ pub struct GuardCounters {
     /// field existed; resume then revokes a nonzero credit conservatively.
     #[serde(default)]
     pub verification_fingerprint: Option<WorkspaceFingerprint>,
+    /// Mutation sequence at which every post-edit check was NOT-RUN (no
+    /// verifier this host can run; 0.8.2 validation D9b). Without it a
+    /// resumed run on a host without the toolchain lost the waiver and the
+    /// completion gate refused with a StaleVerification demand for a check
+    /// that cannot run. `0` on older checkpoints (no waiver — conservative).
+    #[serde(default)]
+    pub last_not_run_verification_mutation_sequence: usize,
+    /// Lifetime count of successful mutating tool calls. Restarting it at 0
+    /// on resume made a task that had already edited look untouched: the
+    /// completion gate refused outside git with EmptyDiff, and the
+    /// zero-edit stall guard and failure classification misfired. `None`
+    /// on older checkpoints — resume then counts the persisted tool log.
+    #[serde(default)]
+    pub mutating_tool_call_count: Option<usize>,
+    /// Lifetime count of all attempted tool calls (failure classification).
+    /// `None` on older checkpoints — resume then counts the tool log.
+    #[serde(default)]
+    pub total_tool_call_count: Option<usize>,
+    /// Consecutive StaleVerification refusals (drives the harness's own
+    /// verification rescue).
+    #[serde(default)]
+    pub consecutive_stale_verification: usize,
+    /// Lifetime progress-guard fires (abort threshold and classification).
+    #[serde(default)]
+    pub progress_guard_fire_count: usize,
+    /// Careful mode: a failure auto-recovery could not fix makes completion
+    /// require an explicit verification. A resume must not drop that demand.
+    #[serde(default)]
+    pub rigor_mode: bool,
+    /// Citation-gate correction rounds already spent (bounded per task).
+    #[serde(default)]
+    pub citation_correction_rounds: usize,
+    /// This run's measured call shapes and largest draft, the inputs of the
+    /// wrap-up forecast (`agent::call_forecast`). Without them a resumed run
+    /// re-forecast from the fallbacks.
+    #[serde(default)]
+    pub forecast: ForecastMeasurements,
+}
+
+/// Upper bound on the call shapes a checkpoint carries (see
+/// [`ForecastMeasurements::bounded`]).
+pub const FORECAST_CALL_SHAPES_MAX: usize = 128;
+
+/// The measured inputs of the wrap-up forecast, persisted across resume.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct ForecastMeasurements {
+    /// Completed model calls, oldest first, at most
+    /// [`FORECAST_CALL_SHAPES_MAX`].
+    #[serde(default)]
+    pub call_shapes: Vec<crate::api::usage::CallShape>,
+    /// Largest completion size of a call that produced a draft.
+    #[serde(default)]
+    pub draft_completion_tokens: Option<u64>,
+}
+
+impl ForecastMeasurements {
+    /// Keep at most [`FORECAST_CALL_SHAPES_MAX`] shapes: the newest ones,
+    /// plus the slowest decode sample however old — the forecast's decode
+    /// rate is the SLOWEST long call measured, and dropping it would make a
+    /// resumed forecast optimistic. Order is preserved (the newest shape
+    /// sets the prompt size).
+    pub fn bounded(
+        mut call_shapes: Vec<crate::api::usage::CallShape>,
+        draft_completion_tokens: Option<u64>,
+    ) -> Self {
+        if call_shapes.len() > FORECAST_CALL_SHAPES_MAX {
+            let min_completion = crate::agent::call_forecast::DECODE_SAMPLE_MIN_COMPLETION;
+            let slowest = call_shapes
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.completion_tokens >= min_completion && c.elapsed_ms > 0)
+                .min_by(|(_, a), (_, b)| {
+                    let rate = |c: &crate::api::usage::CallShape| {
+                        c.completion_tokens as f64 / c.elapsed_ms as f64
+                    };
+                    rate(a).total_cmp(&rate(b))
+                })
+                .map(|(i, _)| i);
+            let cut = call_shapes.len() - FORECAST_CALL_SHAPES_MAX;
+            match slowest {
+                Some(i) if i < cut => {
+                    let keep = call_shapes[i];
+                    call_shapes.drain(..=cut);
+                    call_shapes.insert(0, keep);
+                }
+                _ => {
+                    call_shapes.drain(..cut);
+                }
+            }
+        }
+        Self {
+            call_shapes,
+            draft_completion_tokens,
+        }
+    }
 }
 
 /// Content identity of the files a task wrote, plus the repository HEAD, at

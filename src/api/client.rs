@@ -1922,6 +1922,13 @@ impl ApiClient {
             });
     }
 
+    /// Put call shapes persisted by an earlier segment of this task back in
+    /// front of this segment's (resume), so the wrap-up forecast keeps
+    /// measuring the whole run.
+    pub(crate) fn restore_call_shapes(&self, shapes: &[super::usage::CallShape]) {
+        self.usage_ledger.restore_call_shapes(shapes);
+    }
+
     /// Every completed chat call's measured shape this run, oldest first.
     pub fn call_shapes(&self) -> Vec<super::usage::CallShape> {
         self.usage_ledger.call_shapes()

@@ -346,6 +346,8 @@ impl Agent {
             checkpoint.guard_counters.consecutive_no_action_prompts;
         agent.mutation_gate_rejections = checkpoint.guard_counters.mutation_gate_rejections;
         agent.prefill_400_count = checkpoint.guard_counters.prefill_400_count;
+        // Derived state: the breaker opens at the third prefill 400.
+        agent.prefill_breaker_open = agent.prefill_400_count >= 3;
         // Restore the verification ledger so UNVERIFIED pre-checkpoint edits
         // stay unverified across resume — resetting the counters to 0 made
         // `last_successful >= mutation_sequence` trivially true and the
@@ -362,6 +364,50 @@ impl Agent {
             .last_failed_verification_summary
             .clone();
         agent.verification_failures = checkpoint.guard_counters.verification_failures.clone();
+        // The rest of the per-run guard state (review finding: the D9
+        // not-run waiver was lost, so a resume on a host without the
+        // toolchain was refused with a bogus StaleVerification; Rule-5
+        // sweep: the lifetime call counts, the stale-verification and
+        // progress guards, careful mode and the citation correction rounds).
+        let guards = &checkpoint.guard_counters;
+        agent.last_not_run_verification_mutation_sequence =
+            guards.last_not_run_verification_mutation_sequence;
+        agent.mutating_tool_call_count = guards.mutating_tool_call_count.unwrap_or_else(|| {
+            // Older checkpoint: count the persisted tool log.
+            checkpoint
+                .tool_calls
+                .iter()
+                .filter(|call| {
+                    call.success && {
+                        let args = serde_json::from_str::<serde_json::Value>(&call.arguments)
+                            .unwrap_or(serde_json::Value::Null);
+                        super::tool_dispatch::tool_call_is_mutating(&call.tool_name, &args)
+                    }
+                })
+                .count()
+        });
+        agent.total_tool_call_count = guards
+            .total_tool_call_count
+            .unwrap_or(checkpoint.tool_calls.len());
+        agent.consecutive_stale_verification = guards.consecutive_stale_verification;
+        agent.progress_guard_fire_count = guards.progress_guard_fire_count;
+        agent.rigor_mode = guards.rigor_mode;
+        agent
+            .citation_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .rejections = guards.citation_correction_rounds;
+        // The wrap-up forecast's measurements (review finding: a resumed run
+        // re-forecast from the fallbacks). The restored calls count as
+        // already attributed to drafts.
+        agent
+            .client
+            .restore_call_shapes(&guards.forecast.call_shapes);
+        {
+            let mut wrap_up = agent.wrap_up.lock().unwrap_or_else(|e| e.into_inner());
+            wrap_up.draft_completion_tokens = guards.forecast.draft_completion_tokens;
+            wrap_up.seen_calls = agent.client.call_shapes().len();
+        }
         // Restore the files-changed evidence from earlier segments: without
         // it the end-of-run summary's file list covered only the resumed
         // segment. This mirrors exactly what a single-process run accumulates
@@ -953,6 +999,25 @@ impl Agent {
             last_failed_verification_summary: self.last_failed_verification_summary.clone(),
             verification_failures: self.verification_failures.clone(),
             verification_fingerprint: self.verification_fingerprint(),
+            last_not_run_verification_mutation_sequence: self
+                .last_not_run_verification_mutation_sequence,
+            mutating_tool_call_count: Some(self.mutating_tool_call_count),
+            total_tool_call_count: Some(self.total_tool_call_count),
+            consecutive_stale_verification: self.consecutive_stale_verification,
+            progress_guard_fire_count: self.progress_guard_fire_count,
+            rigor_mode: self.rigor_mode,
+            citation_correction_rounds: self
+                .citation_gate
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .rejections,
+            forecast: crate::checkpoint::ForecastMeasurements::bounded(
+                self.client.call_shapes(),
+                self.wrap_up
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .draft_completion_tokens,
+            ),
         }
     }
 

@@ -265,6 +265,13 @@ impl UsageLedger {
             .push(shape);
     }
 
+    /// Prepend call shapes an earlier segment of this run measured (resume).
+    pub(crate) fn restore_call_shapes(&self, shapes: &[CallShape]) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let current = std::mem::take(&mut state.call_shapes);
+        state.call_shapes = shapes.iter().copied().chain(current).collect();
+    }
+
     /// Every completed call's shape this run, oldest first.
     pub fn call_shapes(&self) -> Vec<CallShape> {
         self.0
