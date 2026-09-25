@@ -1391,7 +1391,7 @@ impl ApiClient {
     /// where a non-streaming call sits silent until the gateway cuts it),
     /// no tools, thinking disabled, `max_tokens` clamped to the spec and any
     /// session reasoning-effort pin lowered to [`SideCall::REASONING_EFFORT`]
-    /// (see [`apply_side_call_bounds`]). The whole call — header wait, body,
+    /// (see `apply_side_call_bounds`). The whole call — header wait, body,
     /// and at most one retry — is bounded by the spec's wall-time cap; an
     /// overrun fails as the typed [`SideCallTimeout`], never as the
     /// run-terminal [`CallTimeBudgetExceeded`]. A gateway timeout
