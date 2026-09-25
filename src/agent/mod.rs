@@ -500,10 +500,11 @@ struct DeliveredReadResult {
     message_fingerprint: u64,
     /// Work-ledger turn in which it was delivered.
     turn: usize,
-    /// `Agent::mutation_sequence` when it was delivered. Any successful
-    /// state-changing tool since (an edit elsewhere in the file, an edit
-    /// later reverted, a mutating shell command) makes the earlier result a
-    /// different version's, even when the bytes happen to match.
+    /// `Agent::mutation_sequence` when it was delivered. A successful
+    /// mutation of THIS path since (an edit elsewhere in the file, an edit
+    /// later reverted), or one whose paths are unknown (a mutating shell
+    /// command), makes the earlier result a different version's, even when
+    /// the bytes happen to match.
     mutation_sequence: usize,
 }
 
@@ -665,22 +666,56 @@ impl FileTracker {
         }
     }
 
+    /// The read state is keyed by the canonical workspace path, and the
+    /// stale set is matched by it, so a write through an alias
+    /// (`sub/../a.rs`, `<root>/a.rs`) invalidates what was recorded for
+    /// `a.rs` (external review 2026-09-25). The stale set keeps the paths as
+    /// written (the run summary and the context-file refresh show them).
+    fn key(path: &str) -> String {
+        let root = current_project_root();
+        context::canonical_absolute_path(path, Some(root.as_path()))
+    }
+
     fn mark_stale(&mut self, path: &str) {
-        if self.stale_files.len() < 500 {
+        if self.stale_files.len() < 500 && !self.is_stale(path) {
             self.stale_files.insert(path.to_string());
         }
     }
 
     fn mark_written(&mut self, path: &str) {
         // Remove read state so next read gets a fresh baseline
-        self.read_state.remove(path);
+        self.read_state.remove(&Self::key(path));
         self.mark_stale(path);
     }
 
     fn remove_deleted(&mut self, path: &str) {
-        self.read_state.remove(path);
-        self.stale_files.remove(path);
-        self.context_files.retain(|p| p != path);
+        let key = Self::key(path);
+        self.read_state.remove(&key);
+        self.clear_stale(path);
+        self.context_files.retain(|p| Self::key(p) != key);
+    }
+
+    /// Whether any path in the stale set names the same file as `path`.
+    fn is_stale(&self, path: &str) -> bool {
+        if self.stale_files.contains(path) {
+            return true;
+        }
+        let key = Self::key(path);
+        self.stale_files.iter().any(|p| Self::key(p) == key)
+    }
+
+    /// Drop every stale-set entry naming the same file as `path`.
+    fn clear_stale(&mut self, path: &str) {
+        let key = Self::key(path);
+        self.stale_files.retain(|p| Self::key(p) != key);
+    }
+
+    fn read_state_of(&self, path: &str) -> Option<&FileReadState> {
+        self.read_state.get(&Self::key(path))
+    }
+
+    fn read_state_of_mut(&mut self, path: &str) -> Option<&mut FileReadState> {
+        self.read_state.get_mut(&Self::key(path))
     }
 }
 
@@ -924,6 +959,16 @@ pub struct Agent {
     /// Last full `file_read` result per exact path + line range (key from
     /// `Agent::file_read_range_key`), for the unchanged re-read note.
     delivered_read_results: std::collections::HashMap<String, DeliveredReadResult>,
+    /// `mutation_sequence` of the last successful mutation that named each
+    /// path (ledger-normalized), for the unchanged re-read note: an edit of
+    /// ANOTHER file does not make this file's earlier result a different
+    /// version (val083 ts: the note was withheld on a re-read of an
+    /// untouched file because an unrelated file had been edited).
+    path_mutation_sequences: std::collections::HashMap<String, usize>,
+    /// `mutation_sequence` of the last successful mutation whose written
+    /// paths are unknown (shell and VCS commands, formatters, package
+    /// tools): it may have changed any file.
+    last_opaque_mutation_sequence: usize,
     /// Per-path exemption budget for evicted re-reads (see
     /// [`EvictedRereadBudget`]).
     evicted_reread_budget: std::collections::HashMap<String, EvictedRereadBudget>,
@@ -1751,6 +1796,8 @@ To call a tool, use this EXACT XML structure:
             stagnation_warned: std::sync::atomic::AtomicBool::new(false),
             read_result_fingerprints: std::collections::HashMap::new(),
             delivered_read_results: std::collections::HashMap::new(),
+            path_mutation_sequences: std::collections::HashMap::new(),
+            last_opaque_mutation_sequence: 0,
             evicted_reread_budget: std::collections::HashMap::new(),
             verification_deadline_directive_done: std::sync::atomic::AtomicBool::new(false),
             probe_pivot_done: std::sync::atomic::AtomicBool::new(false),
@@ -3263,6 +3310,8 @@ To call a tool, use this EXACT XML structure:
         // Delivered-read records carry the mutation sequence they were
         // delivered at; a restarted sequence would let a stale record match.
         self.delivered_read_results.clear();
+        self.path_mutation_sequences.clear();
+        self.last_opaque_mutation_sequence = 0;
         self.last_successful_verification_mutation_sequence = 0;
         self.last_failed_verification_summary = None;
         self.verification_failures.clear();

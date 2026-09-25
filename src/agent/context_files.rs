@@ -17,7 +17,7 @@ impl Agent {
             .file_tracker
             .context_files
             .iter()
-            .filter(|f| self.file_tracker.stale_files.contains(f.as_str()))
+            .filter(|f| self.file_tracker.is_stale(f))
             .cloned()
             .collect();
 
@@ -55,7 +55,7 @@ impl Agent {
 
         // Clear the stale set for refreshed files
         for path_str in &stale_in_context {
-            self.file_tracker.stale_files.remove(path_str);
+            self.file_tracker.clear_stale(path_str);
         }
 
         refreshed

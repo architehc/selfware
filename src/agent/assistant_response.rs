@@ -147,9 +147,14 @@ impl Agent {
             // val082 windows were full because of a few huge reads, so the
             // message-count summary below could not act (c24: "too few
             // messages" on 10 of 12 compactions).
+            // Soft pass: the results of the last step are not touched
+            // before the model has seen them (val083: 9 of 107 file_read
+            // results in long_review, 10 of 11 in c24, reached the model
+            // already stubbed or cut).
             self.compact_tool_results_logged(
                 compression_threshold,
                 "history over the compression threshold",
+                true,
             );
         }
         let before_compression_messages = self.messages.len();
@@ -160,23 +165,56 @@ impl Agent {
             // one, and a summary that cannot help is not a reason to drop
             // anything: `trim_message_history` above already holds the
             // history within the hard budget.
-            let kept_reason: Option<String> =
-                if self.compressor.too_few_to_summarize(&self.messages) {
-                    Some(format!(
-                    "too few messages to summarize ({before_compression_messages}); no summary \
-                     call made; no older tool result left to compact"
-                ))
-                } else {
+            //
+            // A summary call is made only when it can bring the history
+            // UNDER the threshold (val083 c24: 16 calls, 470 s — 32% of the
+            // run — and 7 of them left the history above the threshold, so
+            // the next turn summarized again). The prediction is measured:
+            // kept tail + system + task anchor + a p90-sized summary.
+            let task_text = self.current_task_text().map(str::to_string);
+            let kept_reason: Option<String> = match self
+                .compressor
+                .summary_skip_reason(&self.messages, task_text.as_deref())
+            {
+                Some(skip) => Some(skip),
+                None => {
+                    let summarizable = self
+                        .compressor
+                        .summary_split(&self.messages, task_text.as_deref())
+                        .map_or(0, |s| s.summarizable_tokens);
                     match self
                         .compressor
-                        .compress_with_task(&self.client, &self.messages, self.current_task_text())
+                        .compress_with_task(&self.client, &self.messages, task_text.as_deref())
                         .await
                     {
-                        Ok((compressed, _usage)) => {
+                        Ok((mut compressed, _usage)) => {
+                            self.sync_api_usage();
+                            let summary_tokens = self.compressor.estimate_tokens(&compressed);
+                            // Combined with result compaction: the kept
+                            // tail's seen results may still be stubbed to
+                            // reach the threshold (never an unseen one).
+                            let mut combined = false;
+                            if summary_tokens > compression_threshold {
+                                let compressor = &self.compressor;
+                                combined =
+                                    super::result_compaction::compact_tool_results_to_budget_opts(
+                                        &mut compressed,
+                                        compression_threshold,
+                                        super::result_compaction::RECENT_RESULTS_KEPT_INTACT,
+                                        super::result_compaction::stub_token_budget(
+                                            self.max_context_tokens,
+                                        ),
+                                        &|path| compressor.file_finding(path),
+                                        true,
+                                    )
+                                    .is_some();
+                            }
                             let after_tokens = self.compressor.estimate_tokens(&compressed);
-                            if after_tokens < before_compression_tokens {
+                            if after_tokens <= compression_threshold
+                                && after_tokens < before_compression_tokens
+                            {
                                 self.messages = compressed;
-                                self.sync_api_usage();
+                                self.compressor.note_summary_accepted();
                                 self.log_context_compression_event(
                                     super::session_log::ContextCompressionLogDetails {
                                         strategy: "summary",
@@ -186,15 +224,17 @@ impl Agent {
                                         before_tokens: before_compression_tokens,
                                         after_tokens,
                                         threshold: compression_threshold,
-                                        error: None,
+                                        error: combined
+                                            .then_some("combined with result compaction"),
                                     },
                                 );
                                 None
                             } else {
-                                self.sync_api_usage();
+                                self.compressor.note_summary_rejected(summarizable);
                                 Some(format!(
-                                    "summary did not reduce size (~{before_compression_tokens} -> \
-                                 ~{after_tokens} tokens); original kept"
+                                    "summary would leave the history above the threshold \
+                                     (~{before_compression_tokens} -> ~{after_tokens} tokens, \
+                                     threshold {compression_threshold}); original kept"
                                 ))
                             }
                         }
@@ -205,7 +245,8 @@ impl Agent {
                             Some(format!("summary failed: {e}; original kept"))
                         }
                     }
-                };
+                }
+            };
             if let Some(reason) = kept_reason {
                 let tokens = self.compressor.estimate_tokens(&self.messages);
                 if tokens > self.max_context_tokens

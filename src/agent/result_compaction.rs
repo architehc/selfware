@@ -17,9 +17,15 @@
 //!   content hash, a symbol index with line numbers, the ledger's findings —
 //!   that says plainly the full content is no longer in context and how to
 //!   get exact lines back (`file_read` with `line_range`);
+//! * a read whose lines a later read shows again becomes a one-line
+//!   "superseded" stub, and old stubs are slimmed (their symbol index and
+//!   findings live on in the work ledger) before any recent read is touched
+//!   — val083 long_review: ~30 stubs outweighed the intact reads 12.9k to
+//!   1.1k tokens and the model re-read what they had pushed out;
 //! * the most recent results stay intact; the very latest one is only ever
 //!   cut to a head that fits (a `file_read` keeps whole lines and says which
-//!   lines are and are not shown), never stubbed;
+//!   lines are and are not shown), never stubbed; a soft (threshold) pass
+//!   never touches results the model has not seen yet;
 //! * only message CONTENT changes: roles, `tool_call_id`s and the assistant
 //!   `tool_calls` are untouched, so every call/result pair stays valid.
 //!
@@ -385,11 +391,12 @@ pub(crate) fn build_stub(
                 Some((a, b)) => format!("lines {a}-{b} of `{path}`"),
                 None => format!("`{path}`"),
             };
+            // Short on purpose: val083 long_review carried ~30 stubs per
+            // request and the old 330-char note was 28% of their text; the
+            // work ledger's header states the rule once for every file.
             let note = format!(
-                "The full content of this read of {what} is NO LONGER in your context (compacted \
-                 to save space). `symbols` is an index of definitions with their line numbers, \
-                 not the code. Before quoting code or citing exact lines from it, re-read just \
-                 the range you need with file_read and line_range."
+                "Content of {what} NO LONGER in your context. `symbols` = definitions with line \
+                 numbers, not code. To quote or cite, re-read only the line_range you need."
             );
             let mut stub = json!({
                 COMPACTED_RESULT_KEY: "stub",
@@ -562,13 +569,22 @@ pub(crate) struct ResultCompactionReport {
     pub stubbed: Vec<String>,
     /// Labels of results cut to a head (only ever the latest).
     pub truncated: Vec<String>,
+    /// Labels of reads replaced because a later read shows the same lines.
+    pub superseded: Vec<String>,
+    /// Labels of stubs slimmed to their identity (symbols and findings are
+    /// in the work ledger).
+    pub slimmed: Vec<String>,
     /// Auto-loaded codebase overviews removed (stage 0).
     pub overviews_removed: usize,
 }
 
 impl ResultCompactionReport {
     pub(crate) fn changed(&self) -> bool {
-        !self.stubbed.is_empty() || !self.truncated.is_empty() || self.overviews_removed > 0
+        !self.stubbed.is_empty()
+            || !self.truncated.is_empty()
+            || !self.superseded.is_empty()
+            || !self.slimmed.is_empty()
+            || self.overviews_removed > 0
     }
 
     /// One-line description for the `context_compression` event.
@@ -596,6 +612,20 @@ impl ResultCompactionReport {
                 list(&self.stubbed)
             ));
         }
+        if !self.superseded.is_empty() {
+            parts.push(format!(
+                "{} read(s) superseded by a later read of the same lines: {}",
+                self.superseded.len(),
+                list(&self.superseded)
+            ));
+        }
+        if !self.slimmed.is_empty() {
+            parts.push(format!(
+                "{} stub(s) slimmed (symbols/findings kept in the work ledger): {}",
+                self.slimmed.len(),
+                list(&self.slimmed)
+            ));
+        }
         if !self.truncated.is_empty() {
             parts.push(format!(
                 "latest result cut to fit: {}",
@@ -618,22 +648,138 @@ fn label(name: &str, args: &str) -> String {
 }
 
 /// Shrink tool results in place until `messages` measure at most
-/// `max_tokens`, oldest first:
-///
-/// 1. results older than the `keep_recent` most recent become stubs;
-/// 2. then the recent ones too, except the very latest result;
-/// 3. then the latest result is cut to a head that fits (never below
-///    [`MIN_TRUNCATED_RESULT_TOKENS`]).
-///
-/// `finding(path)` supplies the ledger's per-file finding for a stub.
-/// Roles, ids and tool calls are never touched. Returns `None` when the
-/// history already fits or nothing could be compacted.
+/// `max_tokens`, oldest first (see [`compact_tool_results_to_budget_opts`];
+/// every result may be touched, the latest only ever cut to a head).
 pub(crate) fn compact_tool_results_to_budget(
     messages: &mut [Message],
     max_tokens: usize,
     keep_recent: usize,
     stub_tokens: usize,
     finding: &dyn Fn(&str) -> Option<String>,
+) -> Option<ResultCompactionReport> {
+    compact_tool_results_to_budget_opts(
+        messages,
+        max_tokens,
+        keep_recent,
+        stub_tokens,
+        finding,
+        false,
+    )
+}
+
+/// Key of a `file_read` call for supersession: normalized path and the
+/// line range (`None` = whole file).
+fn read_key(r: &PairedResult) -> Option<(String, Option<(usize, usize)>)> {
+    if r.name != "file_read" {
+        return None;
+    }
+    let args_v: Value = serde_json::from_str(&r.args).unwrap_or_default();
+    let root = super::current_project_root();
+    let path = super::context::canonical_workspace_path(&arg_path(&args_v)?, Some(&root));
+    Some((path, arg_range(&args_v)))
+}
+
+/// Whether a later read `later` shows at least the lines of `earlier`.
+fn read_covers(later: Option<(usize, usize)>, earlier: Option<(usize, usize)>) -> bool {
+    match (later, earlier) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some((a, b)), Some((c, d))) => a <= c && d <= b,
+    }
+}
+
+/// The compacted kind of a result message's payload: `None` when intact.
+fn compacted_state(message: &Message, xml: bool) -> Option<Value> {
+    let env = open_envelope(message.content.text(), xml)?;
+    let v: Value = serde_json::from_str(&env.payload).ok()?;
+    v.get(COMPACTED_RESULT_KEY)?;
+    Some(v)
+}
+
+/// A stub reduced to what identifies the read: its symbol index and
+/// findings are dropped (the work ledger keeps both per file). `superseded`
+/// says a later read shows the same lines.
+pub(crate) fn slim_stub(name: &str, args: &str, superseded: bool) -> String {
+    let args_v: Value = serde_json::from_str(args).unwrap_or_default();
+    let mut stub = json!({
+        COMPACTED_RESULT_KEY: "stub",
+        "tool": name,
+        "content_in_context": false,
+    });
+    if name == "file_read" {
+        stub["path"] = json!(arg_path(&args_v).unwrap_or_else(|| "?".to_string()));
+        stub["line_range"] = arg_range(&args_v)
+            .map(|(a, b)| json!([a, b]))
+            .unwrap_or(Value::Null);
+    } else {
+        let args_short: String = args.chars().take(120).collect();
+        stub["args"] = json!(args_short);
+    }
+    if superseded {
+        stub["superseded"] = json!(true);
+        stub["note"] = json!(
+            "NO LONGER in your context here; you read these lines again later — use that later \
+             result."
+        );
+    } else {
+        stub["slim"] = json!(true);
+        stub["note"] = json!(
+            "NO LONGER in your context; its symbol index and findings are in the work ledger. \
+             Re-read only the line_range you need before quoting."
+        );
+    }
+    stub.to_string()
+}
+
+/// Replace result `r` with `new_payload` when that saves at least
+/// [`MIN_SAVING_TOKENS`]; returns whether it did.
+fn replace_payload(messages: &mut [Message], r: &PairedResult, new_payload: &str) -> bool {
+    let text = messages[r.idx].content.text().to_string();
+    let Some(env) = open_envelope(&text, r.xml) else {
+        return false;
+    };
+    let new_text = close_envelope(&env, new_payload, r.xml);
+    if estimate_content_tokens(&new_text) + MIN_SAVING_TOKENS > estimate_content_tokens(&text) {
+        return false;
+    }
+    messages[r.idx].content = MessageContent::Text(new_text);
+    true
+}
+
+/// Shrink tool results in place until `messages` measure at most
+/// `max_tokens`, cheapest loss first:
+///
+/// 1. a `file_read` result whose lines a LATER read in the history shows
+///    again (the same range, a wider one, or the whole file) becomes a
+///    one-line "superseded" stub — nothing is lost;
+/// 2. stubs left by earlier passes are slimmed (symbol index and findings
+///    dropped — the work ledger keeps both per file), duplicate-path stubs
+///    first, then oldest first;
+/// 3. results older than the `keep_recent` most recent become stubs (the
+///    ledger's finding goes only into the stub of a path's last result);
+/// 4. those new stubs are slimmed too;
+/// 5. then the recent results, except the very latest, become stubs;
+/// 6. then the latest result is cut to a head that fits (never below
+///    [`MIN_TRUNCATED_RESULT_TOKENS`]).
+///
+/// val083 long_review measured why the order matters: ~30 stubs of 1.1k
+/// chars each (12.9k tokens) outweighed the intact reads (1.1k tokens), so
+/// every new read pushed the latest reads out and the model read the same
+/// ranges again (checkpointing.rs 700-1000 four times).
+///
+/// With `protect_unseen`, results after the last assistant message — the
+/// ones the model has not seen yet — are never touched (stages 5 and 6 are
+/// skipped for them): a soft (compression-threshold) pass must not stub a
+/// read before the model reads it. Roles, ids and tool calls are never
+/// touched. Returns `None` when the history already fits or nothing could
+/// be compacted.
+pub(crate) fn compact_tool_results_to_budget_opts(
+    messages: &mut [Message],
+    max_tokens: usize,
+    keep_recent: usize,
+    stub_tokens: usize,
+    finding: &dyn Fn(&str) -> Option<String>,
+    protect_unseen: bool,
 ) -> Option<ResultCompactionReport> {
     let before = estimate_messages_tokens(messages);
     if before <= max_tokens {
@@ -656,40 +802,120 @@ pub(crate) fn compact_tool_results_to_budget(
     }
     let latest_pos = results.len() - 1;
     let recent_from = results.len().saturating_sub(keep_recent.max(1));
+    let last_assistant = messages.iter().rposition(|m| m.role == "assistant");
+    let touchable = |pos: usize| -> bool {
+        !protect_unseen || last_assistant.is_some_and(|a| results[pos].idx < a)
+    };
+    let keys: Vec<_> = results.iter().map(read_key).collect();
+    let covered_later = |pos: usize| -> bool {
+        let Some((path, range)) = &keys[pos] else {
+            return false;
+        };
+        keys[pos + 1..]
+            .iter()
+            .flatten()
+            .any(|(p, r)| p == path && read_covers(*r, *range))
+    };
+    let has_later_same_path = |pos: usize| -> bool {
+        let Some((path, _)) = &keys[pos] else {
+            return false;
+        };
+        keys[pos + 1..].iter().flatten().any(|(p, _)| p == path)
+    };
+    let usable = |messages: &[Message], pos: usize| -> bool {
+        messages[results[pos].idx].content.image_count() == 0
+    };
 
-    // Stages 1 and 2: stubs, oldest first.
-    let order: Vec<usize> = (0..recent_from).chain(recent_from..latest_pos).collect();
-    for pos in order {
+    // Stage 1: superseded reads (never the latest, never an unseen one).
+    for (pos, r) in results.iter().enumerate().take(latest_pos) {
         if total <= max_tokens {
             break;
         }
-        let r = &results[pos];
-        let message = &messages[r.idx];
-        if message.content.image_count() > 0 {
+        if !touchable(pos) || !usable(messages, pos) || !covered_later(pos) {
             continue;
         }
-        let text = message.content.text().to_string();
-        let Some(env) = open_envelope(&text, r.xml) else {
-            continue;
-        };
-        if is_compacted_payload(&env.payload) {
+        if compacted_state(&messages[r.idx], r.xml).is_some_and(|v| v.get("superseded").is_some()) {
             continue;
         }
-        let old_tokens = estimate_content_tokens(&text);
-        let args_v: Value = serde_json::from_str(&r.args).unwrap_or_default();
-        let note = arg_path(&args_v).and_then(|p| finding(&p));
-        let stub = build_stub(&r.name, &r.args, &env.payload, stub_tokens, note.as_deref());
-        let new_text = close_envelope(&env, &stub, r.xml);
-        if estimate_content_tokens(&new_text) + MIN_SAVING_TOKENS > old_tokens {
-            continue;
+        if replace_payload(messages, r, &slim_stub(&r.name, &r.args, true)) {
+            total = estimate_messages_tokens(messages);
+            report.superseded.push(label(&r.name, &r.args));
         }
-        messages[r.idx].content = MessageContent::Text(new_text);
-        total = estimate_messages_tokens(messages);
-        report.stubbed.push(label(&r.name, &r.args));
     }
 
-    // Stage 3: the latest result keeps a head that fits.
-    if total > max_tokens {
+    // Stages 2 and 4: slim full stubs, duplicate-path stubs first.
+    let slim_pass =
+        |messages: &mut [Message], total: &mut usize, report: &mut ResultCompactionReport| {
+            for dup_first in [true, false] {
+                for (pos, r) in results.iter().enumerate().take(latest_pos) {
+                    if *total <= max_tokens {
+                        return;
+                    }
+                    if !touchable(pos) || !usable(messages, pos) {
+                        continue;
+                    }
+                    if dup_first && !has_later_same_path(pos) {
+                        continue;
+                    }
+                    let Some(v) = compacted_state(&messages[r.idx], r.xml) else {
+                        continue;
+                    };
+                    if v.get(COMPACTED_RESULT_KEY).and_then(Value::as_str) != Some("stub")
+                        || v.get("slim").is_some()
+                        || v.get("superseded").is_some()
+                    {
+                        continue;
+                    }
+                    if replace_payload(messages, r, &slim_stub(&r.name, &r.args, false)) {
+                        *total = estimate_messages_tokens(messages);
+                        report.slimmed.push(label(&r.name, &r.args));
+                    }
+                }
+            }
+        };
+    slim_pass(messages, &mut total, &mut report);
+
+    // Stages 3 and 5: stubs, oldest first.
+    let stub_range = |messages: &mut [Message],
+                      total: &mut usize,
+                      report: &mut ResultCompactionReport,
+                      positions: std::ops::Range<usize>| {
+        for pos in positions {
+            if *total <= max_tokens {
+                break;
+            }
+            if !touchable(pos) || !usable(messages, pos) {
+                continue;
+            }
+            let r = &results[pos];
+            let text = messages[r.idx].content.text().to_string();
+            let Some(env) = open_envelope(&text, r.xml) else {
+                continue;
+            };
+            if is_compacted_payload(&env.payload) {
+                continue;
+            }
+            let args_v: Value = serde_json::from_str(&r.args).unwrap_or_default();
+            // The finding is per file: only the stub of the path's last
+            // result carries it (the ledger has it for every file).
+            let note = if has_later_same_path(pos) {
+                None
+            } else {
+                arg_path(&args_v).and_then(|p| finding(&p))
+            };
+            let stub = build_stub(&r.name, &r.args, &env.payload, stub_tokens, note.as_deref());
+            if replace_payload(messages, r, &stub) {
+                *total = estimate_messages_tokens(messages);
+                report.stubbed.push(label(&r.name, &r.args));
+            }
+        }
+    };
+    stub_range(messages, &mut total, &mut report, 0..recent_from);
+    slim_pass(messages, &mut total, &mut report);
+    stub_range(messages, &mut total, &mut report, recent_from..latest_pos);
+
+    // Stage 6: the latest result keeps a head that fits.
+    if total > max_tokens && touchable(latest_pos) {
         let r = &results[latest_pos];
         let text = messages[r.idx].content.text().to_string();
         if messages[r.idx].content.image_count() == 0 {

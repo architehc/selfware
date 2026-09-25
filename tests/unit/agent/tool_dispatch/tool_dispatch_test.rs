@@ -7518,6 +7518,151 @@ async fn unchanged_reread_note_never_answers_a_read_after_an_edit() {
 }
 
 #[tokio::test]
+async fn unchanged_reread_note_survives_an_edit_of_another_file() {
+    // val083 ts, turns 2 -> 7: format.ts was re-read unchanged, its earlier
+    // result still in context, but the note was withheld because
+    // inventory.ts had been edited in between. Only a mutation of THIS path
+    // (or one with unknown paths) makes the earlier result stale.
+    let mut agent = reread_agent().await;
+    let whole = r#"{"path":"src/lexer.rs"}"#;
+    agent
+        .push_tool_result_message(
+            true,
+            "r1",
+            "file_read",
+            whole,
+            true,
+            &read_result_json(LEXER_SRC),
+        )
+        .await;
+
+    let other = serde_json::json!({
+        "edits": [{"path": "src/parser.rs", "old_str": "a", "new_str": "b"}]
+    });
+    agent.note_tool_call_lifecycle(
+        "file_multi_edit",
+        &other,
+        &other.to_string(),
+        true,
+        r#"{"success":true}"#,
+    );
+    assert_eq!(agent.mutation_sequence, 1);
+    agent
+        .push_tool_result_message(
+            true,
+            "r2",
+            "file_read",
+            whole,
+            true,
+            &read_result_json(LEXER_SRC),
+        )
+        .await;
+    let text = last_text(&agent);
+    assert!(
+        text.contains("Unchanged since turn"),
+        "an edit of another file must not withhold the note: {text}"
+    );
+
+    // A mutating shell command may have changed any file: full content.
+    let shell = serde_json::json!({"command": "sed -i s/a/b/ src/lexer.rs"});
+    agent.note_tool_call_lifecycle(
+        "shell_exec",
+        &shell,
+        &shell.to_string(),
+        true,
+        r#"{"success":true,"exit_code":0}"#,
+    );
+    agent
+        .push_tool_result_message(
+            true,
+            "r3",
+            "file_read",
+            whole,
+            true,
+            &read_result_json(LEXER_SRC),
+        )
+        .await;
+    let text = last_text(&agent);
+    assert!(!text.contains("Unchanged since turn"), "{text}");
+    assert!(text.contains("pub fn lex"), "{text}");
+
+    // An edit naming this file by its absolute path counts as this path.
+    let root = crate::agent::current_project_root();
+    let abs = serde_json::json!({
+        "path": root.join("src/lexer.rs").to_string_lossy(),
+        "old_str": "x", "new_str": "x"
+    });
+    agent.note_tool_call_lifecycle("file_edit", &abs, &abs.to_string(), true, "{}");
+    agent
+        .push_tool_result_message(
+            true,
+            "r4",
+            "file_read",
+            whole,
+            true,
+            &read_result_json(LEXER_SRC),
+        )
+        .await;
+    let text = last_text(&agent);
+    assert!(
+        !text.contains("Unchanged since turn"),
+        "an edit of this file by its absolute path withholds the note: {text}"
+    );
+}
+
+#[tokio::test]
+async fn path_aliases_share_one_key_in_the_reread_tracker_and_the_note() {
+    // External review 2026-09-25 (Rule 5 sweep of the ledger alias bug):
+    // every path-keyed map agrees that `./a/../src/lexer.rs`,
+    // `src/lexer.rs` and `<root>/src/lexer.rs` are one file.
+    let mut agent = reread_agent().await;
+    let root = crate::agent::current_project_root();
+    let abs = root.join("src/lexer.rs").to_string_lossy().into_owned();
+
+    // Unchanged note: an identical re-read through an alias.
+    agent
+        .push_tool_result_message(
+            true,
+            "r1",
+            "file_read",
+            r#"{"path":"src/lexer.rs"}"#,
+            true,
+            &read_result_json(LEXER_SRC),
+        )
+        .await;
+    agent
+        .push_tool_result_message(
+            true,
+            "r2",
+            "file_read",
+            r#"{"path":"./a/../src/lexer.rs"}"#,
+            true,
+            &read_result_json(LEXER_SRC),
+        )
+        .await;
+    assert!(last_text(&agent).contains("Unchanged since turn"));
+
+    // Re-read tracker: state recorded under one path, a write through an
+    // alias clears it and marks the file stale.
+    agent.file_tracker.read_state.insert(
+        crate::agent::FileTracker::key("src/lexer.rs"),
+        FileReadState {
+            content_hash: 1,
+            total_lines: 3,
+            last_modified: None,
+            unchanged_read_count: 3,
+        },
+    );
+    assert!(agent.file_tracker.read_state_of(&abs).is_some());
+    agent.file_tracker.mark_written("sub/../src/lexer.rs");
+    assert!(agent.file_tracker.read_state_of("src/lexer.rs").is_none());
+    assert!(agent.file_tracker.is_stale("src/lexer.rs"));
+    assert!(agent.file_tracker.is_stale(&abs));
+    agent.file_tracker.remove_deleted(&abs);
+    assert!(!agent.file_tracker.is_stale("./src/lexer.rs"));
+}
+
+#[tokio::test]
 async fn file_read_retry_probe_never_reveals_outside_paths() {
     // The retry probe runs on model output BEFORE the safety check. A path the
     // file-tool policy refuses must stay suppressed whether or not it exists,

@@ -1017,6 +1017,110 @@ fn work_ledger_render_stays_bounded_and_drops_oldest_first() {
     assert!(rendered.contains("older ledger entries omitted"));
 }
 
+// --- One canonical path per file (external review 2026-09-25): reading
+// `example.rs` and then writing `sub/../example.rs` made two ledger
+// identities, and the stale whole-file coverage and summary finding
+// survived the edit with no modification warning. ---
+
+#[test]
+#[cfg(unix)]
+fn canonical_workspace_path_resolves_aliases_lexically() {
+    let root = std::path::Path::new("/work");
+    let c = |p: &str| crate::agent::context::canonical_workspace_path(p, Some(root));
+    assert_eq!(c("example.rs"), "example.rs");
+    assert_eq!(c("./example.rs"), "example.rs");
+    assert_eq!(c("sub/../example.rs"), "example.rs");
+    assert_eq!(c("/work/example.rs"), "example.rs");
+    assert_eq!(c("/work/sub/../example.rs"), "example.rs");
+    assert_eq!(c("./a/../b.rs"), "b.rs");
+    assert_eq!(c("src/./agent/../lib.rs"), "src/lib.rs");
+    assert_eq!(c("."), ".");
+    assert_eq!(c("/work"), ".");
+    // Outside the workspace stays absolute (and is never confused with a
+    // workspace file of the same name).
+    assert_eq!(c("../other/x.rs"), "/other/x.rs");
+    assert_eq!(c("/etc/passwd"), "/etc/passwd");
+    // Without a root: lexical only.
+    let n = |p: &str| crate::agent::context::canonical_workspace_path(p, None);
+    assert_eq!(n("./a/../b.rs"), "b.rs");
+    assert_eq!(n("../x.rs"), "../x.rs");
+}
+
+#[cfg(unix)]
+fn alias_probe_ledger(write_path: &str, read_path: &str) -> WorkLedger {
+    let root = std::path::Path::new("/work");
+    let mut ledger = WorkLedger::new();
+    ledger.begin_turn(Some("review"));
+    ledger.observe(
+        &[
+            call("r1", "file_read", serde_json::json!({"path": read_path})),
+            read_result("r1", "// old header\npub const ALLOW_ALL: bool = true;\n"),
+        ],
+        Some(root),
+    );
+    ledger.absorb_summary("- example.rs: old policy permits every operation");
+    ledger.begin_turn(Some("review"));
+    ledger.observe(
+        &[
+            call(
+                "w1",
+                "file_write",
+                serde_json::json!({"path": write_path, "content": "// new header\n"}),
+            ),
+            Message::tool(serde_json::json!({"success": true}).to_string(), "w1"),
+        ],
+        Some(root),
+    );
+    ledger.begin_turn(Some("review"));
+    ledger.observe(
+        &[
+            call(
+                "r2",
+                "file_read",
+                serde_json::json!({"path": read_path, "line_range": [1, 1]}),
+            ),
+            Message::tool(
+                serde_json::json!({"content": "1\t// new header", "total_lines": 2}).to_string(),
+                "r2",
+            ),
+        ],
+        Some(root),
+    );
+    ledger
+}
+
+#[test]
+#[cfg(unix)]
+fn an_edit_through_a_path_alias_invalidates_the_earlier_read() {
+    for (write_path, read_path) in [
+        ("example.rs", "example.rs"),
+        ("sub/../example.rs", "example.rs"),
+        ("/work/example.rs", "example.rs"),
+        ("example.rs", "/work/example.rs"),
+        ("./a/../example.rs", "./example.rs"),
+    ] {
+        let ledger = alias_probe_ledger(write_path, read_path);
+        assert_eq!(
+            ledger.files().len(),
+            1,
+            "{write_path} / {read_path}: one identity"
+        );
+        let rendered = ledger.render(2_000).unwrap();
+        assert!(
+            rendered.contains("- example.rs — lines 1-1 of 2;"),
+            "{write_path} / {read_path}: old whole-file coverage invalidated:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("you modified it at turn 2; only lines 1-1 re-read since"),
+            "{write_path} / {read_path}: modification warning kept:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("- example.rs — file_write x1"),
+            "{write_path} / {read_path}: the deliverable is the same file:\n{rendered}"
+        );
+    }
+}
+
 #[test]
 fn work_ledger_takes_per_file_findings_from_a_summary_but_never_adds_files() {
     let mut ledger = WorkLedger::new();
@@ -1649,4 +1753,146 @@ async fn compressor_with_too_few_messages_makes_no_call() {
     assert_eq!(usage.total_tokens, 0);
     assert!(server.captured_request_bodies().await.is_empty());
     server.stop().await;
+}
+
+// --- N5: a summary call only when it can bring the history under the
+// threshold. val083 c24 (24k window: history budget 11,008, threshold
+// 8,256, system prompt ~5.3k): 16 summary calls took 470 s, and 7 left the
+// history above the threshold (e.g. ~10,984 -> ~10,824), so the next turn
+// summarized again. ---
+
+/// Varied text of about `chars` characters (repeated single letters
+/// tokenize far below their length).
+fn prose(chars: usize) -> String {
+    let words = [
+        "ledger",
+        "compaction",
+        "summary",
+        "threshold",
+        "stub",
+        "range",
+        "turn",
+    ];
+    let mut out = String::new();
+    let mut i = 0usize;
+    while out.len() < chars {
+        out.push_str(words[i % words.len()]);
+        out.push_str(&format!(" {i} "));
+        i += 1;
+    }
+    out
+}
+
+/// The c24 request shape: system prompt, task, older small turns, and a
+/// kept tail whose latest read alone is ~3.5k tokens.
+fn c24_history(older_turns: usize, older_chars: usize) -> Vec<Message> {
+    let mut history = vec![
+        Message::system("You are selfware, a careful coding agent.\n".repeat(520)),
+        Message::user("Document every pub fn in src/agent/context.rs."),
+    ];
+    for i in 0..older_turns {
+        history.push(Message::assistant(format!(
+            "step {i}: {}",
+            prose(older_chars)
+        )));
+        history.push(Message::user(format!(
+            "<tool_result>{}</tool_result>",
+            prose(older_chars)
+        )));
+    }
+    history.push(Message::assistant("reading context.rs 113-284"));
+    history.push(Message::user(format!(
+        "<tool_result>{}</tool_result>",
+        "pub fn ledger_entry(x: usize) -> usize { x + 1 }\n".repeat(280)
+    )));
+    history.push(Message::assistant("reading context.rs 285-390"));
+    history.push(Message::user(format!(
+        "<tool_result>{}</tool_result>",
+        "pub fn render(y: &str) -> String { y.to_string() }\n".repeat(60)
+    )));
+    history.push(Message::assistant("now editing"));
+    history.push(Message::user("continue"));
+    history
+}
+
+#[test]
+fn summary_is_skipped_when_the_kept_tail_alone_is_over_the_threshold() {
+    let compressor = ContextCompressor::new(11_008);
+    let history = c24_history(3, 1_200);
+    let split = compressor.summary_split(&history, None).expect("a split");
+    assert!(
+        split.kept_tokens + crate::agent::context::SUMMARY_TOKENS_ESTIMATE
+            > compressor.compression_threshold(),
+        "precondition: {split:?}"
+    );
+    let reason = compressor
+        .summary_skip_reason(&history, None)
+        .expect("no call can help");
+    assert!(
+        reason.contains("cannot bring the history under the threshold"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn summary_is_skipped_below_the_summarizable_floor() {
+    let compressor = ContextCompressor::new(11_008);
+    let mut history = c24_history(1, 200);
+    // Shrink the tail so only the floor decides.
+    history.truncate(history.len() - 6);
+    for i in 0..3 {
+        history.push(Message::assistant(format!("short {i}")));
+        history.push(Message::user(format!("ok {i}")));
+    }
+    let split = compressor.summary_split(&history, None).expect("a split");
+    assert!(
+        split.summarizable_tokens < crate::agent::context::MIN_SUMMARIZABLE_TOKENS,
+        "precondition: {split:?}"
+    );
+    let reason = compressor.summary_skip_reason(&history, None).unwrap();
+    assert!(reason.contains("below the 1500-token floor"), "{reason}");
+}
+
+#[test]
+fn a_summary_that_can_fit_is_allowed_and_a_rejected_one_is_not_repeated() {
+    // long_review shape: many older turns, a small kept tail.
+    let compressor = ContextCompressor::new(44_237);
+    let mut history = vec![
+        Message::system("You are selfware.\n".repeat(900)),
+        Message::user("Review the agent loop."),
+    ];
+    for i in 0..40 {
+        history.push(Message::assistant(format!(
+            "stage {i} notes {}",
+            prose(900)
+        )));
+        history.push(Message::user(format!(
+            "<tool_result>{}</tool_result>",
+            prose(1_800)
+        )));
+    }
+    for i in 0..3 {
+        history.push(Message::assistant(format!("tail {i}")));
+        history.push(Message::user(format!("tail result {i}")));
+    }
+    assert!(compressor.summary_skip_reason(&history, None).is_none());
+    let mut compressor = compressor;
+    let s = compressor
+        .summary_split(&history, None)
+        .unwrap()
+        .summarizable_tokens;
+    compressor.note_summary_rejected(s);
+    let reason = compressor.summary_skip_reason(&history, None).unwrap();
+    assert!(
+        reason.contains("left the history above the threshold"),
+        "{reason}"
+    );
+    // Enough new material re-enables a call; an accepted summary clears it.
+    for i in 0..4 {
+        history.insert(3, Message::assistant(format!("more {i} {}", prose(4_000))));
+        history.insert(4, Message::user(format!("more result {i}")));
+    }
+    assert!(compressor.summary_skip_reason(&history, None).is_none());
+    compressor.note_summary_accepted();
+    assert!(compressor.summary_skip_reason(&history, None).is_none());
 }

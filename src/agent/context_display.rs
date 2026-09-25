@@ -369,7 +369,7 @@ impl Agent {
                     .map(|m| crate::token_count::estimate_tokens_with_overhead(m.content.text(), 4))
                     .unwrap_or(0);
                 total_file_tokens += file_tokens;
-                let is_stale = self.file_tracker.stale_files.contains(path_str);
+                let is_stale = self.file_tracker.is_stale(path_str);
                 let stale_marker = if is_stale {
                     format!("  {}⟳ modified{}", coral, reset)
                 } else {

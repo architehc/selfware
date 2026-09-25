@@ -776,6 +776,8 @@ impl Agent {
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.read_result_fingerprints.clear();
         self.delivered_read_results.clear();
+        self.path_mutation_sequences.clear();
+        self.last_opaque_mutation_sequence = 0;
         self.evicted_reread_budget.clear();
         self.best_snapshot.clear();
         self.commit_mode_65_fired

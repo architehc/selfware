@@ -1119,6 +1119,7 @@ impl Agent {
         self.compact_tool_results_logged(
             self.max_context_tokens,
             "history over the context budget",
+            false,
         );
         let total: usize = estimate_messages_tokens(&self.messages);
         if total <= self.max_context_tokens {
@@ -1160,22 +1161,27 @@ impl Agent {
     /// recording progress into the work ledger first and emitting a
     /// `context_compression` event with method `result_compaction` and the
     /// measured numbers when anything changed. Returns the report.
+    /// `protect_unseen` leaves the results the model has not seen yet (after
+    /// the last assistant message) intact — the soft, compression-threshold
+    /// pass; the hard-budget pass may cut them.
     pub(super) fn compact_tool_results_logged(
         &mut self,
         target_tokens: usize,
         why: &str,
+        protect_unseen: bool,
     ) -> Option<super::result_compaction::ResultCompactionReport> {
         use super::result_compaction as rc;
         // The full results are recorded (with their symbol digests) before
         // any of them is replaced by a stub.
         self.compressor.observe_work(&self.messages);
         let compressor = &self.compressor;
-        let report = rc::compact_tool_results_to_budget(
+        let report = rc::compact_tool_results_to_budget_opts(
             &mut self.messages,
             target_tokens,
             rc::RECENT_RESULTS_KEPT_INTACT,
             rc::stub_token_budget(self.max_context_tokens),
             &|path| compressor.file_finding(path),
+            protect_unseen,
         )?;
         let messages = self.messages.len();
         let reason = format!("{why}; {}", report.describe());
@@ -1401,6 +1407,12 @@ impl Agent {
             return;
         }
         let content = self.sanitize_context_data(p, content);
+        // One entry per file: the map's tree entries are root-relative, and
+        // `./a/../b.rs` or `<root>/b.rs` must land on `b.rs`'s entry, not a
+        // second one.
+        let root = super::current_project_root();
+        let key = super::context::canonical_workspace_path(path, Some(root.as_path()));
+        let p = Path::new(&key);
         // Estimate before loading.
         let estimate = self
             .context_map

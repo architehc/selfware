@@ -84,9 +84,36 @@ pub(crate) fn summarizer_tool_call_suffix(m: &Message) -> String {
 /// conversation is always bounded.
 const MAX_MESSAGE_COUNT: usize = 512;
 
+/// Tokens a context summary is assumed to cost when predicting whether one
+/// can help: the p90 of the 23 real summaries in the val083 runs, measured
+/// with `estimate_content_tokens` (c24: 160–623, median ~300; long_review:
+/// 522–1,028).
+pub(crate) const SUMMARY_TOKENS_ESTIMATE: usize = 720;
+
+/// Smallest summarizable portion (history minus system prompt and kept
+/// tail) worth a summary call. A call took 9–68 s (c24: 16 calls, 470 s,
+/// 32% of the run) and returns up to ~720 tokens (p90), so below ~2x that
+/// the expected saving is under one small read; the c24 calls that saved
+/// 160–256 tokens were of this kind.
+pub(crate) const MIN_SUMMARIZABLE_TOKENS: usize = 1_500;
+
+/// How a history splits for a summary: what would be summarized and what
+/// is kept verbatim (system prompt + recent tail), both measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SummarySplit {
+    pub summarizable_tokens: usize,
+    pub kept_tokens: usize,
+}
+
 pub struct ContextCompressor {
     compression_threshold: usize,
     min_messages_to_keep: usize,
+    /// Summarizable size at the last summary that was rejected for leaving
+    /// the history above the threshold; no new call until the summarizable
+    /// portion has grown by `MIN_SUMMARIZABLE_TOKENS` (val083 c24: 7 of 16
+    /// summaries left the history above the threshold and ran again the
+    /// next turn).
+    summary_backoff: Option<usize>,
     /// Progress that must outlive every trim/compaction (see [`WorkLedger`]).
     /// Behind a mutex so the `&self` compression paths can record what they
     /// are about to drop before dropping it.
@@ -104,6 +131,7 @@ impl ContextCompressor {
         Self {
             compression_threshold: (token_budget as f32 * content_ratio) as usize,
             min_messages_to_keep: 6,
+            summary_backoff: None,
             ledger: Mutex::new(WorkLedger::new()),
         }
     }
@@ -208,6 +236,95 @@ impl ContextCompressor {
     /// reason a summary compaction fell back to the hard limit.
     pub fn too_few_to_summarize(&self, messages: &[Message]) -> bool {
         messages.len() <= self.min_messages_to_keep + 1
+    }
+
+    /// The split [`Self::compress_with_task`] would make: the messages
+    /// between the first one and the kept tail are summarized. `None` when
+    /// it would make no summarizer call.
+    /// `kept_tokens` includes the task anchor the summary re-adds when the
+    /// kept tail does not carry the task.
+    pub fn summary_split(&self, messages: &[Message], task: Option<&str>) -> Option<SummarySplit> {
+        if self.too_few_to_summarize(messages) {
+            return None;
+        }
+        let recent_start = safe_tail_start(
+            messages,
+            messages.len().saturating_sub(self.min_messages_to_keep),
+        );
+        if recent_start <= 1 {
+            return None;
+        }
+        let summarizable_tokens = self.estimate_tokens(&messages[1..recent_start]);
+        let anchor_tokens = resolve_task_text(messages, task)
+            .filter(|t| {
+                !messages[recent_start..]
+                    .iter()
+                    .any(|r| r.role == "user" && r.content.text().contains(t.as_str()))
+            })
+            .map_or(0, |t| {
+                estimate_message_tokens(&Message::user(
+                    super::context_management::task_anchor_text(&t),
+                ))
+            });
+        let kept_tokens = self
+            .estimate_tokens(messages)
+            .saturating_sub(summarizable_tokens)
+            + anchor_tokens;
+        Some(SummarySplit {
+            summarizable_tokens,
+            kept_tokens,
+        })
+    }
+
+    /// Why a summary call should NOT be made for `messages` (a reason for
+    /// the `kept` event), or `None` when one can bring the history under
+    /// the compression threshold: the summarizable part is at least
+    /// `MIN_SUMMARIZABLE_TOKENS`, the kept part plus a
+    /// `SUMMARY_TOKENS_ESTIMATE` summary fits the threshold, and a
+    /// rejected summary is not simply being repeated.
+    pub fn summary_skip_reason(&self, messages: &[Message], task: Option<&str>) -> Option<String> {
+        let Some(split) = self.summary_split(messages, task) else {
+            return Some(format!(
+                "too few messages to summarize ({}); no summary call made",
+                messages.len()
+            ));
+        };
+        let s = split.summarizable_tokens;
+        if s < MIN_SUMMARIZABLE_TOKENS {
+            return Some(format!(
+                "summarizable part ~{s} tokens is below the {MIN_SUMMARIZABLE_TOKENS}-token \
+                 floor worth a summary call; no summary call made"
+            ));
+        }
+        let predicted = split.kept_tokens + SUMMARY_TOKENS_ESTIMATE;
+        if predicted > self.compression_threshold {
+            return Some(format!(
+                "a summary cannot bring the history under the threshold: kept part ~{} + \
+                 summary ~{SUMMARY_TOKENS_ESTIMATE} > {} tokens; no summary call made",
+                split.kept_tokens, self.compression_threshold
+            ));
+        }
+        if let Some(rejected_at) = self.summary_backoff {
+            if s < rejected_at + MIN_SUMMARIZABLE_TOKENS {
+                return Some(format!(
+                    "the last summary (of ~{rejected_at} tokens) left the history above the \
+                     threshold and the summarizable part has grown only to ~{s}; no summary \
+                     call made"
+                ));
+            }
+        }
+        None
+    }
+
+    /// Remember a summary that was rejected for leaving the history above
+    /// the threshold (see [`Self::summary_skip_reason`]).
+    pub fn note_summary_rejected(&mut self, summarizable_tokens: usize) {
+        self.summary_backoff = Some(summarizable_tokens);
+    }
+
+    /// A summary was accepted: the backoff no longer applies.
+    pub fn note_summary_accepted(&mut self) {
+        self.summary_backoff = None;
     }
 
     /// Returns the (possibly) compressed messages and the token usage the
@@ -512,6 +629,91 @@ impl ContextCompressor {
 /// The task text a compressor carries forward: the explicit (checkpoint)
 /// task when given — its pinned prefix for oversized tasks — else the
 /// messages-only heuristic (first user message after the system prompt).
+/// `path` with `.` and `..` resolved lexically (no filesystem access): `..`
+/// pops a normal component, is dropped at the filesystem root, and is kept
+/// at the start of a relative path.
+fn lexical_normalize(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out: Vec<Component<'_>> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => match out.last() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                Some(Component::RootDir) | Some(Component::Prefix(_)) => {}
+                _ => out.push(component),
+            },
+            other => out.push(other),
+        }
+    }
+    out.iter().map(|c| c.as_os_str()).collect()
+}
+
+/// ONE canonical key per file for every path-keyed record of the agent (the
+/// work ledger's reads, writes, modification tracking and summary findings,
+/// compaction stubs, the unchanged re-read note, the re-read tracker, the
+/// context map): `.` and `..` resolved lexically and anchored at `root`, so
+/// `example.rs`, `./example.rs`, `sub/../example.rs` and `<root>/example.rs`
+/// are the same key. A path inside `root` becomes root-relative with `/`
+/// separators (`.` for the root itself); a path outside stays absolute.
+/// No filesystem access (symlinks are not resolved). External review
+/// 2026-09-25: reading `example.rs` and then writing `sub/../example.rs`
+/// made two ledger identities, and the stale coverage survived the edit.
+pub(crate) fn canonical_workspace_path(path: &str, root: Option<&std::path::Path>) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let raw = std::path::Path::new(trimmed);
+    let root = root.map(lexical_normalize);
+    let resolved = match (&root, raw.is_absolute()) {
+        (Some(root), false) => lexical_normalize(&root.join(raw)),
+        _ => lexical_normalize(raw),
+    };
+    let render = |p: &std::path::Path| -> String {
+        p.components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/")
+    };
+    if let Some(root) = &root {
+        if let Ok(rel) = resolved.strip_prefix(root) {
+            let rel = render(rel);
+            return if rel.is_empty() { ".".to_string() } else { rel };
+        }
+        return resolved.to_string_lossy().into_owned();
+    }
+    if resolved.is_absolute() {
+        return resolved.to_string_lossy().into_owned();
+    }
+    let rel = render(&resolved);
+    if rel.is_empty() {
+        ".".to_string()
+    } else {
+        rel
+    }
+}
+
+/// `canonical_workspace_path` as an absolute path (`root` joined to a
+/// relative path, `.`/`..` resolved lexically): the key for internal maps
+/// that are never shown to the model. An absolute path's key does not
+/// depend on the root, so a record made under one root still matches after
+/// the root changes (worktree switch, tests sharing one process).
+pub(crate) fn canonical_absolute_path(path: &str, root: Option<&std::path::Path>) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let raw = std::path::Path::new(trimmed);
+    let joined = match root {
+        Some(root) if !raw.is_absolute() => root.join(raw),
+        _ => raw.to_path_buf(),
+    };
+    lexical_normalize(&joined).to_string_lossy().into_owned()
+}
+
 fn resolve_task_text(messages: &[Message], task: Option<&str>) -> Option<String> {
     match task.filter(|t| !t.trim().is_empty()) {
         Some(t) => Some(super::Agent::task_anchor_core(t).to_string()),
@@ -832,17 +1034,9 @@ impl WorkLedger {
         self.seq
     }
 
+    /// The ledger key of a path: `canonical_workspace_path`.
     pub(crate) fn normalize_path(path: &str, root: Option<&std::path::Path>) -> String {
-        let trimmed = path.trim();
-        if let Some(root) = root {
-            if let Ok(rel) = std::path::Path::new(trimmed).strip_prefix(root) {
-                let rel = rel.to_string_lossy();
-                if !rel.is_empty() {
-                    return rel.to_string();
-                }
-            }
-        }
-        trimmed.strip_prefix("./").unwrap_or(trimmed).to_string()
+        canonical_workspace_path(path, root)
     }
 
     /// Record every not-yet-seen successful tool result in `messages` and
@@ -1219,7 +1413,8 @@ impl WorkLedger {
                 continue;
             };
             let candidate = raw_path.trim().trim_matches(['`', '*']).trim();
-            let candidate = candidate.strip_prefix("./").unwrap_or(candidate);
+            let candidate = canonical_workspace_path(candidate, None);
+            let candidate = candidate.as_str();
             let finding = finding.trim();
             if candidate.is_empty() || finding.chars().count() < 8 {
                 continue;

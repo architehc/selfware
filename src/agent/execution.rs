@@ -395,12 +395,13 @@ impl Agent {
             saw_write = true;
             // Every target the call writes — file_multi_edit's `edits[].path`
             // and patch_apply's diff headers included, not just a top-level
-            // `path` (N1 Rule-5 sweep). No parseable target → blind.
+            // `path` (N1 Rule-5 sweep). No parseable target → blind. Looked
+            // up by the tracker's canonical key.
             let targets = write_targets(name, args_str);
             let target_read = !targets.is_empty()
                 && targets
                     .iter()
-                    .all(|p| self.file_tracker.read_state.contains_key(p));
+                    .all(|p| self.file_tracker.read_state_of(p).is_some());
             if !target_read {
                 return false;
             }

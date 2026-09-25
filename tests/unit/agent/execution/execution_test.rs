@@ -661,7 +661,7 @@ async fn test_edit_to_already_read_file_satisfies_files_guard() {
     // After the file has been read, the same edit is exempt (regression: the
     // guard used to discard this write on the doable parse_port task).
     agent.file_tracker.read_state.insert(
-        "src/main.rs".to_string(),
+        super::super::FileTracker::key("src/main.rs"),
         super::super::FileReadState::default(),
     );
     assert!(
@@ -686,7 +686,7 @@ async fn test_files_guard_sees_every_multi_edit_and_patch_target() {
     let config = test_config(format!("{}/v1", server.url()));
     let mut agent = Agent::new(config).await.unwrap();
     agent.file_tracker.read_state.insert(
-        "src/a.rs".to_string(),
+        super::super::FileTracker::key("src/a.rs"),
         super::super::FileReadState::default(),
     );
 
@@ -875,7 +875,7 @@ async fn test_writes_target_only_read_files_ignores_non_file_shell() {
     let mut agent = Agent::new(config).await.unwrap();
 
     agent.file_tracker.read_state.insert(
-        "src/main.rs".to_string(),
+        super::super::FileTracker::key("src/main.rs"),
         super::super::FileReadState::default(),
     );
 
@@ -3703,10 +3703,10 @@ async fn test_redundant_unchanged_file_reads_update_task_state_memory() {
 
     agent.execute_tool_batch(batch).await.unwrap();
 
+    // Keyed by the canonical workspace path; looked up through it.
     let state = agent
         .file_tracker
-        .read_state
-        .get(&cargo_toml_path)
+        .read_state_of(&cargo_toml_path)
         .expect("expected Cargo.toml file state");
     assert_eq!(state.unchanged_read_count, 1);
     assert!(agent

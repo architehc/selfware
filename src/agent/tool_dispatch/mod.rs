@@ -103,6 +103,7 @@ impl Agent {
     ) {
         if success && tool_call_is_mutating(name, args) {
             self.note_mutating_tool_call();
+            self.note_mutated_paths(name, args);
             if tool_call_writes_file(name) {
                 self.has_written_any_file = true;
                 self.terminal_guard_hits = 0;
@@ -934,6 +935,48 @@ impl Agent {
         Ok(())
     }
 
+    /// Ledger-normalized key of a path, for per-path mutation tracking.
+    fn mutation_path_key(path: &str) -> String {
+        Self::canonical_path_key(path)
+    }
+
+    /// The one canonical key for a path in the internal path-keyed records
+    /// here (`context::canonical_absolute_path`): the re-read tracker, the
+    /// read-result fingerprints, the unchanged-note records and the
+    /// mutation tracking all agree that `./a/../b.rs`, `b.rs` and
+    /// `<root>/b.rs` are one file.
+    pub(super) fn canonical_path_key(path: &str) -> String {
+        let root = super::current_project_root();
+        super::context::canonical_absolute_path(path, Some(root.as_path()))
+    }
+
+    /// Record which paths the mutation just counted touched: named paths
+    /// get the current `mutation_sequence`; a mutation without a path list
+    /// (shell, VCS, formatter, package tools) may have touched any file.
+    fn note_mutated_paths(&mut self, name: &str, args: &serde_json::Value) {
+        let paths = written_paths_for_tool_call(name, args);
+        if paths.is_empty() || tool_call_is_opaque_mutation(name, args) {
+            self.last_opaque_mutation_sequence = self.mutation_sequence;
+            return;
+        }
+        for path in paths {
+            let key = Self::mutation_path_key(&path.to_string_lossy());
+            self.path_mutation_sequences
+                .insert(key, self.mutation_sequence);
+        }
+    }
+
+    /// Whether `path` may have changed since `mutation_sequence`: a later
+    /// mutation named it, or a later mutation's paths are unknown.
+    fn path_mutated_since(&self, path: &str, mutation_sequence: usize) -> bool {
+        if self.last_opaque_mutation_sequence > mutation_sequence {
+            return true;
+        }
+        self.path_mutation_sequences
+            .get(&Self::mutation_path_key(path))
+            .is_some_and(|&seq| seq > mutation_sequence)
+    }
+
     /// The `path` of a `file_read` call, or `None` for any other tool.
     fn file_read_path(tool_name: &str, args_str: &str) -> Option<String> {
         if tool_name != "file_read" {
@@ -943,7 +986,7 @@ impl Agent {
             .ok()?
             .get("path")?
             .as_str()
-            .map(str::to_string)
+            .map(Self::canonical_path_key)
     }
 
     fn message_fingerprint(message: &crate::api::types::Message) -> u64 {
@@ -972,7 +1015,10 @@ impl Agent {
     /// compaction summary. A path never read before is NOT evicted (a first
     /// read is ordinary exploration and counts as usual).
     pub(super) fn prior_read_evicted_from_context(&self, path: &str) -> bool {
-        let Some(&fingerprint) = self.read_result_fingerprints.get(path) else {
+        let Some(&fingerprint) = self
+            .read_result_fingerprints
+            .get(&Self::canonical_path_key(path))
+        else {
             return false;
         };
         !self
@@ -990,10 +1036,10 @@ impl Agent {
             .iter()
             .find_map(|k| args.get(*k).and_then(Value::as_str))?
             .trim();
-        let path = path.strip_prefix("./").unwrap_or(path);
         if path.is_empty() {
             return None;
         }
+        let path = Self::canonical_path_key(path);
         let range = match args.get("line_range") {
             None | Some(Value::Null) => "whole".to_string(),
             Some(range) => range.to_string(),
@@ -1056,15 +1102,18 @@ impl Agent {
     /// result: its message is in the history unchanged (not trimmed,
     /// truncated or compacted away), and the history fits the request budget
     /// left after the per-turn tail, so request assembly will not trim it
-    /// out of the copy that is sent. It is also never used once any
-    /// state-changing tool has succeeded since that result was delivered:
-    /// the earlier result then belongs to another version of the file (an
-    /// edit outside the range, an edit later reverted), so "unchanged since
-    /// turn N" would be false. Anything else returns the full content.
+    /// out of the copy that is sent. It is also never used once a mutation
+    /// of THIS path — or a mutation whose paths are unknown, such as a
+    /// mutating shell command — has succeeded since that result was
+    /// delivered: the earlier result then belongs to another version of the
+    /// file (an edit outside the range, an edit later reverted), so
+    /// "unchanged since turn N" would be false. An edit of another file
+    /// does not withhold it. Anything else returns the full content.
     pub(super) fn unchanged_reread_note(&self, args_str: &str, raw_result: &str) -> Option<String> {
         let key = Self::file_read_range_key(args_str)?;
         let record = self.delivered_read_results.get(&key)?;
-        if record.mutation_sequence != self.mutation_sequence {
+        let path_part = key.split('\u{1f}').next().unwrap_or(key.as_str());
+        if self.path_mutated_since(path_part, record.mutation_sequence) {
             return None;
         }
         let content = Self::file_read_result_content(raw_result)?;
@@ -1088,8 +1137,15 @@ impl Agent {
 
         let args = serde_json::from_str::<Value>(args_str).unwrap_or_default();
         let mut key_parts = key.split('\u{1f}');
-        let path = key_parts.next().unwrap_or(key.as_str());
+        let _ = key_parts.next();
         let range = key_parts.next().unwrap_or("whole");
+        // Shown as the model wrote it (the key is an internal absolute path).
+        let shown_path = ["path", "file_path", "file", "filepath"]
+            .iter()
+            .find_map(|k| args.get(*k).and_then(Value::as_str))
+            .unwrap_or_default()
+            .trim();
+        let path = shown_path.strip_prefix("./").unwrap_or(shown_path);
         let total_lines = serde_json::from_str::<Value>(raw_result)
             .ok()
             .and_then(|v| v.get("total_lines").cloned());
@@ -1412,13 +1468,13 @@ impl Agent {
         let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
             return false;
         };
-        let Some(state) = self.file_tracker.read_state.get(path) else {
+        let Some(state) = self.file_tracker.read_state_of(path) else {
             return false;
         };
         // Allow up to 3 unchanged rereads before blocking — in long sessions
         // the model may need to re-read files after context compression evicts
         // earlier content. Only block truly excessive rereads.
-        if state.unchanged_read_count < 3 || self.file_tracker.stale_files.contains(path) {
+        if state.unchanged_read_count < 3 || self.file_tracker.is_stale(path) {
             return false;
         }
 
@@ -1438,7 +1494,7 @@ impl Agent {
         let read_count = state.unchanged_read_count + 1;
         // Increment the counter so repeated suppressions eventually trigger
         // the forced text response (at count >= 3).
-        if let Some(state_mut) = self.file_tracker.read_state.get_mut(path) {
+        if let Some(state_mut) = self.file_tracker.read_state_of_mut(path) {
             state_mut.unchanged_read_count = read_count;
         }
         let err = format!(
@@ -1542,10 +1598,14 @@ impl Agent {
                 let mut unchanged_count = 0;
                 if evicted_reread {
                     // Leave the tracked state as is (content unchanged).
-                } else if let Some(state) = self.file_tracker.read_state.get_mut(&path_str) {
+                } else if self.file_tracker.read_state_of(&path_str).is_some() {
+                    let stale = self.file_tracker.is_stale(&path_str);
+                    let Some(state) = self.file_tracker.read_state_of_mut(&path_str) else {
+                        return;
+                    };
                     if state.content_hash == content_hash
                         && state.last_modified == last_modified
-                        && !self.file_tracker.stale_files.contains(&path_str)
+                        && !stale
                     {
                         state.unchanged_read_count += 1;
                         unchanged_count = state.unchanged_read_count;
@@ -1557,7 +1617,7 @@ impl Agent {
                     }
                 } else {
                     self.file_tracker.read_state.insert(
-                        path_str.clone(),
+                        FileTracker::key(&path_str),
                         FileReadState {
                             content_hash,
                             total_lines,

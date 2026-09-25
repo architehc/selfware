@@ -372,10 +372,20 @@ fn compaction_is_idempotent_and_never_restubs() {
         compact_tool_results_to_budget(&mut messages, budget, 2, 300, &|_| None).is_none(),
         "fits already: nothing to do"
     );
-    // Even when asked for less, stubs are not re-stubbed.
+    // Asked for less, a stub is never rebuilt from its own text: its one
+    // further step is the slim form (identity only — symbols and findings
+    // live in the work ledger), which is terminal.
+    let stub_before: serde_json::Value = serde_json::from_str(&snapshot[3]).unwrap();
+    assert_eq!(stub_before[COMPACTED_RESULT_KEY], "stub");
     let _ = compact_tool_results_to_budget(&mut messages, 1_000, 2, 300, &|_| None);
-    let stub_before = &snapshot[3];
-    assert_eq!(messages[3].content.text(), stub_before);
+    let slim = payload_of(&messages[3]);
+    assert_eq!(slim[COMPACTED_RESULT_KEY], "stub");
+    assert_eq!(slim["slim"], true, "{slim}");
+    assert_eq!(slim["path"], stub_before["path"]);
+    assert_eq!(slim["content_in_context"], false);
+    let slim_text = messages[3].content.text().to_string();
+    let _ = compact_tool_results_to_budget(&mut messages, 1_000, 2, 300, &|_| None);
+    assert_eq!(messages[3].content.text(), slim_text, "slim is terminal");
 }
 
 #[test]
@@ -591,4 +601,212 @@ fn the_auto_loaded_overview_goes_before_any_read_and_the_task_stays() {
     assert!(report
         .describe()
         .contains("1 auto-loaded codebase overview(s) removed"));
+}
+
+// ---------------------------------------------------------------------------
+// val083 shapes: stub bloat, ping-pong re-reads, unseen results
+// ---------------------------------------------------------------------------
+//
+// long_review (65,536 -> 44,237-token budget, threshold 33,177, text tool
+// calling): ranged reads of 200-300 lines (~3-4k tokens each). At turn 68
+// the request carried 30 stubs (~12.9k tokens, 26 distinct: checkpointing.rs
+// 700-1000 three times) against ~1.1k tokens of intact reads, and every new
+// read pushed the latest ones out: checkpointing.rs 120-400 and 700-1000
+// were each read 3-4 times.
+
+/// One XML assistant turn issuing ranged `file_read`s.
+fn xml_ranged_calls(reads: &[(&str, usize, usize)]) -> Message {
+    let calls: String = reads
+        .iter()
+        .map(|(p, a, b)| {
+            format!(
+                "<tool>\n<name>file_read</name>\n<arguments>{{\"path\": \"{p}\", \
+                 \"line_range\": [{a}, {b}]}}</arguments>\n</tool>\n"
+            )
+        })
+        .collect();
+    Message::assistant(calls)
+}
+
+fn ranged_payload(stem: &str, tokens: usize) -> String {
+    read_payload(&rust_source(stem, tokens))
+}
+
+/// system, task, then one assistant turn + result per ranged read.
+fn long_review_history(reads: &[(&str, usize, usize, usize)]) -> Vec<Message> {
+    let mut messages = vec![system_prompt(), Message::user(TASK)];
+    for (i, (path, a, b, tokens)) in reads.iter().enumerate() {
+        messages.push(xml_ranged_calls(&[(path, *a, *b)]));
+        messages.push(xml_result(&ranged_payload(&format!("r{i}"), *tokens)));
+    }
+    messages
+}
+
+#[test]
+fn long_review_ping_pong_read_supersedes_the_earlier_copy_before_any_recent_read_goes() {
+    let cp = "/work/src/agent/checkpointing.rs";
+    let mut messages = long_review_history(&[
+        (cp, 120, 400, 3_500),
+        (cp, 400, 700, 3_500),
+        (cp, 700, 1000, 3_500),
+        (cp, 120, 400, 3_500),
+        (cp, 700, 1000, 3_500),
+    ]);
+    let before = estimate_messages_tokens(&messages);
+    // 5k over: two reads worth.
+    let budget = before - 5_000;
+    let report = compact_tool_results_to_budget(&mut messages, budget, 2, 500, &|_| None)
+        .expect("compacted");
+    // The two earlier copies are superseded; nothing else needed to go.
+    assert_eq!(
+        report.superseded.len(),
+        2,
+        "the first 120-400 and 700-1000 copies: {report:?}"
+    );
+    assert!(report.stubbed.is_empty(), "{report:?}");
+    assert!(report.truncated.is_empty(), "{report:?}");
+    for idx in [3, 7] {
+        let v = payload_of(&messages[idx]);
+        assert_eq!(v["superseded"], true, "{v}");
+        assert_eq!(v["content_in_context"], false);
+    }
+    // 400-700 (not read again) and the two latest reads are intact.
+    for idx in [5, 9, 11] {
+        assert!(
+            payload_of(&messages[idx]).get("content").is_some(),
+            "message {idx} intact"
+        );
+    }
+    assert!(estimate_messages_tokens(&messages) <= budget);
+    // The ledger's presence view: every range still readable is in context.
+    let presence = ContextPresence::from_messages(&messages, &|p| p.to_string());
+    assert_eq!(presence.ranges(cp), vec![(120, 1000)]);
+}
+
+#[test]
+fn old_stubs_are_slimmed_before_a_recent_read_is_stubbed() {
+    // Ten older reads stubbed by earlier passes (turn-68 shape), then two
+    // fresh reads the model is working on.
+    let mut messages = long_review_history(&[
+        ("/work/src/agent/execution.rs", 956, 1150, 3_000),
+        ("/work/src/agent/execution.rs", 1150, 1400, 3_000),
+        ("/work/src/agent/execution.rs", 1400, 1650, 3_000),
+        ("/work/src/agent/execution.rs", 1650, 1900, 3_000),
+        ("/work/src/agent/execution.rs", 1900, 2100, 3_000),
+        ("/work/src/agent/verification.rs", 1, 200, 3_000),
+        ("/work/src/agent/verification.rs", 200, 400, 3_000),
+        ("/work/src/agent/verification.rs", 400, 600, 3_000),
+        ("/work/src/agent/verification.rs", 600, 800, 3_000),
+        ("/work/src/agent/verification.rs", 800, 1000, 3_000),
+    ]);
+    let finding = |p: &str| Some(format!("finding for {p}: the gate blocks on Unknown"));
+    compact_tool_results_to_budget(&mut messages, 20_000, 2, 500, &finding).expect("stubbed");
+    let stubs_before = (2..messages.len())
+        .filter(|&i| {
+            messages[i].role == "user" && payload_of(&messages[i]).get("symbols").is_some()
+        })
+        .count();
+    assert!(stubs_before >= 8, "{stubs_before}");
+    // Findings go only into the stub of a path's LAST result.
+    let with_findings: Vec<String> = (2..messages.len())
+        .filter(|&i| messages[i].role == "user")
+        .map(|i| payload_of(&messages[i]))
+        .filter(|v| v.get("findings").is_some())
+        .map(|v| v["path"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        with_findings.len() <= 2,
+        "one finding per path, not per range: {with_findings:?}"
+    );
+
+    // Two new reads arrive; the model has seen them (a later assistant turn).
+    messages.push(xml_ranged_calls(&[(
+        "/work/src/agent/checkpointing.rs",
+        120,
+        400,
+    )]));
+    messages.push(xml_result(&ranged_payload("cp1", 3_500)));
+    messages.push(xml_ranged_calls(&[(
+        "/work/src/agent/checkpointing.rs",
+        700,
+        1000,
+    )]));
+    messages.push(xml_result(&ranged_payload("cp2", 3_500)));
+    messages.push(Message::assistant("Stage 4: persist path reviewed."));
+    let n = messages.len();
+    let stub_tokens: usize = (2..n - 5)
+        .filter(|&i| messages[i].role == "user")
+        .map(|i| estimate_content_tokens(messages[i].content.text()))
+        .sum();
+    let budget = estimate_messages_tokens(&messages) - stub_tokens / 2;
+    let report = compact_tool_results_to_budget_opts(&mut messages, budget, 2, 500, &finding, true)
+        .expect("compacted");
+    // Every old stub is slimmed before any further read is stubbed, and
+    // the only read stubbed is an older one, never the two recent reads.
+    assert_eq!(report.slimmed.len(), stubs_before, "{report:?}");
+    assert!(
+        report
+            .stubbed
+            .iter()
+            .all(|l| !l.contains("checkpointing.rs")),
+        "no recent read stubbed: {report:?}"
+    );
+    assert!(report.truncated.is_empty(), "{report:?}");
+    assert!(payload_of(&messages[n - 4]).get("content").is_some());
+    assert!(payload_of(&messages[n - 2]).get("content").is_some());
+    let slim = (2..n - 5)
+        .filter(|&i| messages[i].role == "user")
+        .map(|i| payload_of(&messages[i]))
+        .find(|v| v.get("slim").is_some())
+        .expect("a slimmed stub");
+    assert!(slim.get("path").is_some() && slim.get("line_range").is_some());
+    assert!(slim.get("symbols").is_none());
+    assert!(slim["note"].as_str().unwrap().contains("work ledger"));
+    assert!(estimate_messages_tokens(&messages) <= budget);
+}
+
+#[test]
+fn a_soft_pass_never_touches_results_the_model_has_not_seen() {
+    // c24 shape: one assistant turn with three reads, all results unseen.
+    let mut messages = vec![
+        system_prompt(),
+        Message::user(TASK),
+        xml_ranged_calls(&[
+            ("src/agent/context.rs", 1, 112),
+            ("src/agent/context.rs", 113, 284),
+            ("src/agent/context.rs", 285, 390),
+        ]),
+        xml_result(&ranged_payload("a", 1_500)),
+        xml_result(&ranged_payload("b", 1_500)),
+        xml_result(&ranged_payload("c", 1_500)),
+    ];
+    let budget = estimate_messages_tokens(&messages) - 2_000;
+    let snapshot: Vec<String> = messages
+        .iter()
+        .map(|m| m.content.text().to_string())
+        .collect();
+    assert!(
+        compact_tool_results_to_budget_opts(&mut messages, budget, 2, 200, &|_| None, true)
+            .is_none(),
+        "nothing the soft pass may touch"
+    );
+    let after: Vec<String> = messages
+        .iter()
+        .map(|m| m.content.text().to_string())
+        .collect();
+    assert_eq!(after, snapshot);
+    // The hard pass (request budget) still may.
+    let report =
+        compact_tool_results_to_budget(&mut messages, budget, 2, 200, &|_| None).expect("hard");
+    assert!(!report.stubbed.is_empty() || !report.truncated.is_empty());
+    assert!(estimate_messages_tokens(&messages) <= budget);
+}
+
+#[test]
+fn a_wider_later_read_supersedes_a_narrow_one_but_not_the_reverse() {
+    assert!(read_covers(None, Some((10, 20))));
+    assert!(read_covers(Some((1, 400)), Some((120, 400))));
+    assert!(!read_covers(Some((120, 400)), Some((1, 400))));
+    assert!(!read_covers(Some((120, 400)), None));
+    assert!(read_covers(None, None));
 }
