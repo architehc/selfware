@@ -320,13 +320,20 @@ impl Agent {
         // the "waiting clears debt" failure in a different costume.
         agent.evidence_ledger = checkpoint.evidence_ledger.clone();
         agent.prior_elapsed_secs = checkpoint.elapsed_wall_secs;
-        // Only the TOTAL is persisted (the checkpoint format has no
-        // input/output split), so `.input`/`.output` restart at 0 while
-        // `.total` carries the prior run. Every recompute site therefore
-        // DELTA-ADDS each new step's tokens to `.total` instead of
-        // recomputing `total = input + output`, which would silently erase
-        // this restored budget on the first step after resume.
+        // Restore EVERY usage counter, not just the total (N7): with only
+        // `.total` restored, `.input`/`.output` restarted at 0 and the resumed
+        // result reported a total that exceeded input + output by exactly the
+        // earlier segments' usage. Legacy checkpoints carry no split — there
+        // only the total is known, so `.input`/`.output` cover the resumed
+        // segment alone. Every recompute site therefore still DELTA-ADDS each
+        // new step's tokens to `.total` instead of recomputing
+        // `total = input + output`, which would erase a legacy restored budget.
         agent.cumulative_token_usage.total = checkpoint.cumulative_tokens;
+        if let Some(split) = checkpoint.cumulative_token_split {
+            agent.cumulative_token_usage.input = split.input;
+            agent.cumulative_token_usage.output = split.output;
+            agent.cumulative_token_usage.reasoning = split.reasoning;
+        }
         agent.cumulative_cost_usd = checkpoint.cumulative_cost_usd;
         agent
             .client
@@ -580,6 +587,7 @@ impl Agent {
             .cumulative_token_usage
             .total
             .saturating_add(self.client.pending_usage().total_tokens);
+        checkpoint.cumulative_token_split = Some(self.cumulative_token_split());
         checkpoint.elapsed_wall_secs = self.budget_elapsed_secs();
         checkpoint.cumulative_cost_usd =
             self.cumulative_cost_usd + self.client.pending_usage().cost.unwrap_or(0.0);
@@ -595,6 +603,31 @@ impl Agent {
         checkpoint.max_cost_usd = self.config.agent.max_cost_usd;
 
         checkpoint
+    }
+
+    /// The input/output/reasoning split of the cumulative usage, including
+    /// provider usage not yet folded in — the same basis as the persisted
+    /// `cumulative_tokens` (N7).
+    fn cumulative_token_split(&self) -> crate::checkpoint::CumulativeTokenSplit {
+        let pending = self.client.pending_usage();
+        let reasoning = match (
+            self.cumulative_token_usage.reasoning,
+            pending.reasoning_tokens(),
+        ) {
+            (None, None) => None,
+            (a, b) => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
+        };
+        crate::checkpoint::CumulativeTokenSplit {
+            input: self
+                .cumulative_token_usage
+                .input
+                .saturating_add(pending.prompt_tokens),
+            output: self
+                .cumulative_token_usage
+                .output
+                .saturating_add(pending.completion_tokens),
+            reasoning,
+        }
     }
 
     /// Task description for a session-exit auto-save, or `None` when the
@@ -904,11 +937,13 @@ impl Agent {
             .cumulative_token_usage
             .total
             .saturating_add(self.client.pending_usage().total_tokens);
+        let split = self.cumulative_token_split();
         let wall = self.budget_elapsed_secs();
         let cost = self.cumulative_cost_usd + self.client.pending_usage().cost.unwrap_or(0.0);
         if let Some(checkpoint) = self.current_checkpoint.as_mut() {
             checkpoint.guard_counters = counters;
             checkpoint.cumulative_tokens = tokens;
+            checkpoint.cumulative_token_split = Some(split);
             checkpoint.elapsed_wall_secs = wall;
             checkpoint.cumulative_cost_usd = cost;
             // The adaptive cap/grants and the chain-wide iteration total move

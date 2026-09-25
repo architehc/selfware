@@ -257,6 +257,22 @@ pub struct GitCheckpointInfo {
     pub modified_files: Vec<String>,
 }
 
+/// Input/output/reasoning split of a checkpoint's `cumulative_tokens` (N7).
+/// Only the total used to be persisted, so a resumed run restored `total`
+/// while `input`/`output` restarted at 0 and the reported usage no longer
+/// added up (b3_resume: total 1,828,444 vs input+output 1,502,325 — the gap
+/// was exactly the first segment's 326,119).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct CumulativeTokenSplit {
+    #[serde(default)]
+    pub input: usize,
+    #[serde(default)]
+    pub output: usize,
+    /// Reasoning tokens, when the provider reported any.
+    #[serde(default)]
+    pub reasoning: Option<usize>,
+}
+
 /// Anti-thrash guard counters persisted across resume. These are in-memory on
 /// the agent and otherwise reset to 0 on every restart — so a watchdog that
 /// auto-resumes a crash-looping task would hand it fresh rope forever, turning
@@ -424,6 +440,9 @@ pub struct CheckpointDelta {
     // don't lose it (otherwise resume reconstructs a stale budget and resets it).
     #[serde(default)]
     pub cumulative_tokens: Option<usize>,
+    /// Input/output/reasoning split of `cumulative_tokens` (N7).
+    #[serde(default)]
+    pub cumulative_token_split: Option<CumulativeTokenSplit>,
     #[serde(default)]
     pub elapsed_wall_secs: Option<u64>,
     #[serde(default)]
@@ -523,6 +542,11 @@ pub struct TaskCheckpoint {
     /// Total tokens consumed so far across every segment of this task.
     #[serde(default)]
     pub cumulative_tokens: usize,
+    /// The input/output/reasoning split of `cumulative_tokens`, so a resumed
+    /// run's usage counters add up. `None` on checkpoints written before the
+    /// field existed — resume then restores only the total (N7).
+    #[serde(default)]
+    pub cumulative_token_split: Option<CumulativeTokenSplit>,
     /// Active wall-clock seconds consumed so far across every segment (excludes
     /// time the task was paused/not running).
     #[serde(default)]
@@ -612,6 +636,11 @@ impl TaskCheckpoint {
             (self.estimated_tokens != base.estimated_tokens).then_some(self.estimated_tokens);
         let cumulative_tokens =
             (self.cumulative_tokens != base.cumulative_tokens).then_some(self.cumulative_tokens);
+        // A split that changed is always a new Some value (it only grows);
+        // flatten keeps the delta field None when nothing moved.
+        let cumulative_token_split = (self.cumulative_token_split != base.cumulative_token_split)
+            .then_some(self.cumulative_token_split)
+            .flatten();
         let elapsed_wall_secs =
             (self.elapsed_wall_secs != base.elapsed_wall_secs).then_some(self.elapsed_wall_secs);
         let cumulative_cost_usd = (self.cumulative_cost_usd != base.cumulative_cost_usd)
@@ -729,6 +758,7 @@ impl TaskCheckpoint {
             || !new_visual_assertions.is_empty()
             || updated_tokens.is_some()
             || cumulative_tokens.is_some()
+            || cumulative_token_split.is_some()
             || elapsed_wall_secs.is_some()
             || cumulative_cost_usd.is_some()
             || guard_counters.is_some()
@@ -763,6 +793,7 @@ impl TaskCheckpoint {
             new_visual_assertions,
             updated_tokens,
             cumulative_tokens,
+            cumulative_token_split,
             elapsed_wall_secs,
             cumulative_cost_usd,
             guard_counters,
@@ -823,6 +854,9 @@ impl TaskCheckpoint {
         }
         if let Some(tokens) = delta.cumulative_tokens {
             self.cumulative_tokens = tokens;
+        }
+        if let Some(split) = delta.cumulative_token_split {
+            self.cumulative_token_split = Some(split);
         }
         if let Some(secs) = delta.elapsed_wall_secs {
             self.elapsed_wall_secs = secs;
@@ -908,6 +942,7 @@ impl TaskCheckpoint {
             pending_visual_assertion: None,
             git_checkpoint: None,
             cumulative_tokens: 0,
+            cumulative_token_split: None,
             elapsed_wall_secs: 0,
             cumulative_cost_usd: 0.0,
             guard_counters: GuardCounters::default(),
