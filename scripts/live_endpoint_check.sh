@@ -6,8 +6,8 @@
 #     reported as a skip — AGENTS.md rule 3)
 #   - the run ends with exactly one JSON result object whose exit_status
 #     equals the process exit code
-#   - the answer carries path:line citations and the citation gate verified at
-#     least one of them
+#   - the answer is non-empty and the citation gate verified at least three
+#     path:line citations with none left wrong (live_endpoint_validate.py)
 # Writes a one-line summary (and the raw result) to $OUT_DIR for the CI log.
 #
 # Usage: scripts/live_endpoint_check.sh [path/to/selfware]
@@ -52,36 +52,9 @@ set +e
 CODE=$?
 set -e
 
-# 3. Structured checks on the result object.
-python3 - "$OUT_DIR/result.json" "$CODE" > "$OUT_DIR/summary.txt" <<'PY' || { cat "$OUT_DIR/summary.txt"; exit 1; }
-import json, sys
-path, code = sys.argv[1], int(sys.argv[2])
-text = open(path).read().strip()
-result = None
-for candidate in ([text] + text.splitlines()[::-1]) if text else []:
-    try:
-        result = json.loads(candidate)
-        break
-    except json.JSONDecodeError:
-        continue
-if not isinstance(result, dict):
-    print("LIVE CHECK FAILED: no JSON result object on stdout"); sys.exit(1)
-problems = []
-if result.get("exit_status") != code:
-    problems.append(f"exit_status {result.get('exit_status')} != process exit {code}")
-if code != 0:
-    problems.append(f"run exited {code}")
-g = result.get("grounding") or {}
-verified = g.get("verified", 0)
-total = g.get("total", 0)
-if total == 0:
-    problems.append("no checkable citations in the answer")
-elif verified == 0:
-    problems.append(f"0 of {total} citations verified")
-line = (f"exit={code} citations: {verified}/{total} verified, "
-        f"wrong={g.get('wrong_line', 0)} correction_rounds={g.get('correction_rounds', 0)}")
-if problems:
-    print("LIVE CHECK FAILED: " + "; ".join(problems) + " | " + line); sys.exit(1)
-print("LIVE CHECK PASSED: " + line)
-PY
+# 3. Structured checks on the result object (scripts/live_endpoint_validate.py:
+#    exactly one result, non-empty answer, >=3 verified citations, none wrong).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+python3 "$SCRIPT_DIR/live_endpoint_validate.py" "$OUT_DIR/result.json" "$CODE" \
+    > "$OUT_DIR/summary.txt" || { cat "$OUT_DIR/summary.txt"; exit 1; }
 cat "$OUT_DIR/summary.txt"
