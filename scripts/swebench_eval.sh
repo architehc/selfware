@@ -17,6 +17,26 @@ CHECKPOINT=""
 QUICK=false
 KEEP_ENV=false
 
+# Endpoint under test: SELFWARE_ENDPOINT (same variable selfware itself reads),
+# defaulting to the historical local vLLM. Pattern follows
+# scripts/localhost_vllm_soak.sh.
+ENDPOINT="${SELFWARE_ENDPOINT:-http://localhost:8000/v1}"
+ENDPOINT="${ENDPOINT%/}"
+
+# Probe the OpenAI-compatible <endpoint>/models (vLLM, SGLang, llama.cpp,
+# llm.selfware.design), sending SELFWARE_API_KEY as a bearer token when set.
+# Falls back to a bare vLLM's root /health.
+probe_endpoint() {
+    local auth=()
+    if [[ -n "${SELFWARE_API_KEY:-}" ]]; then
+        auth=(-H "Authorization: Bearer ${SELFWARE_API_KEY}")
+    fi
+    if curl -fsS --max-time 20 ${auth[@]+"${auth[@]}"} "${ENDPOINT}/models" >/dev/null 2>&1; then
+        return 0
+    fi
+    curl -fsS --max-time 20 "${ENDPOINT%/v1}/health" >/dev/null 2>&1
+}
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -49,6 +69,10 @@ Options:
     --keep-env                  Keep task environments after run
     -o, --output DIR            Output directory
     -h, --help                  Show this help message
+
+Environment:
+    SELFWARE_ENDPOINT           Model endpoint to probe (default: http://localhost:8000/v1)
+    SELFWARE_API_KEY            Bearer token sent with the /models probe, if set
 
 Examples:
     # Quick evaluation (20 tasks, ~30 min)
@@ -116,12 +140,12 @@ parse_args() {
 check_prerequisites() {
     log "Checking prerequisites..."
 
-    # Check for vLLM endpoint
-    if ! curl -s http://localhost:8000/health > /dev/null 2>&1; then
-        log_warn "vLLM not accessible at localhost:8000"
+    # Check the model endpoint
+    if ! probe_endpoint; then
+        log_warn "Model endpoint not accessible: ${ENDPOINT} (set SELFWARE_ENDPOINT / SELFWARE_API_KEY)"
         log "Evaluation may fail if endpoint is not available"
     else
-        log_ok "vLLM endpoint is accessible"
+        log_ok "Model endpoint is accessible: ${ENDPOINT}"
     fi
 
     # Check for dataset

@@ -14,6 +14,26 @@ CONCURRENCY=4
 TIMEOUT=600
 TASKS=20
 
+# Endpoint under test: SELFWARE_ENDPOINT (same variable selfware itself reads),
+# defaulting to the historical local vLLM. Pattern follows
+# scripts/localhost_vllm_soak.sh.
+ENDPOINT="${SELFWARE_ENDPOINT:-http://localhost:8000/v1}"
+ENDPOINT="${ENDPOINT%/}"
+
+# Probe the OpenAI-compatible <endpoint>/models (vLLM, SGLang, llama.cpp,
+# llm.selfware.design), sending SELFWARE_API_KEY as a bearer token when set.
+# Falls back to a bare vLLM's root /health.
+probe_endpoint() {
+    local auth=()
+    if [[ -n "${SELFWARE_API_KEY:-}" ]]; then
+        auth=(-H "Authorization: Bearer ${SELFWARE_API_KEY}")
+    fi
+    if curl -fsS --max-time 20 ${auth[@]+"${auth[@]}"} "${ENDPOINT}/models" >/dev/null 2>&1; then
+        return 0
+    fi
+    curl -fsS --max-time 20 "${ENDPOINT%/v1}/health" >/dev/null 2>&1
+}
+
 # Colors
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -39,11 +59,11 @@ else
     CONCURRENCY=2
 fi
 
-# Check vLLM
-if curl -s http://localhost:8000/health > /dev/null 2>&1; then
-    echo -e "${GREEN}✓ vLLM endpoint is accessible${NC}"
+# Check the model endpoint
+if probe_endpoint; then
+    echo -e "${GREEN}✓ Model endpoint is accessible: ${ENDPOINT}${NC}"
 else
-    echo -e "${YELLOW}⚠ vLLM not accessible at localhost:8000${NC}"
+    echo -e "${YELLOW}⚠ Model endpoint not accessible: ${ENDPOINT} (set SELFWARE_ENDPOINT / SELFWARE_API_KEY)${NC}"
     echo "  Evaluation may fail if endpoint is not available"
 fi
 
