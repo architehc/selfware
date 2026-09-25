@@ -115,6 +115,12 @@ impl Agent {
             debug!("Context auto-optimized: freed {} tokens", optimized);
         }
 
+        // Work ledger: one turn per model request; record the successful
+        // tool results the last step appended before trim/compaction can
+        // drop them (trim_message_history and the compressors observe too).
+        self.compressor.begin_ledger_turn(self.current_task_text());
+        self.compressor.observe_work(&self.messages);
+
         // Hard-truncate message history to stay within context window before
         // any API call.  This prevents exceeding the model's context limit when
         // compression is skipped or fails.
@@ -197,17 +203,17 @@ impl Agent {
         self.ensure_task_anchor_present();
 
         let mut request_messages = self.messages.clone();
-        let mut system_hints = Vec::new();
+        let mut turn_hints = Vec::new();
         if let Some(learning_hint) = self.build_learning_hint(self.learning_context()) {
-            system_hints.push(learning_hint);
+            turn_hints.push(learning_hint);
         }
         if let Some(failure_hint) = self.pending_failure_hint.take() {
-            system_hints.push(failure_hint);
+            turn_hints.push(failure_hint);
         }
 
-        // Inject context map awareness: L1 tree in system prompt, boundary before recent.
+        // Inject context map awareness: L1 tree in the request tail, boundary before recent.
         if self.context_map.file_count() > 0 {
-            system_hints.push(self.context_map.render_tree());
+            turn_hints.push(self.context_map.render_tree());
         }
 
         // RAG: inject relevant code chunks from scanned index
@@ -259,7 +265,7 @@ impl Agent {
                             ctx.sources.len(),
                             ctx.retrieval_time_ms
                         );
-                        system_hints.push(rag_hint);
+                        turn_hints.push(rag_hint);
                     }
                     Ok(_) => {} // No relevant results
                     Err(e) => {
@@ -269,20 +275,11 @@ impl Agent {
             }
         }
 
-        if !system_hints.is_empty() {
-            let merged_hints = system_hints.join("\n\n");
-            // Merge into existing system message to maintain OpenAI message ordering
-            // (system messages must precede all user/assistant/tool messages)
-            if let Some(first) = request_messages.first_mut() {
-                if first.role == "system" {
-                    first.content = format!("{}\n\n{}", first.content, merged_hints).into();
-                } else {
-                    request_messages.insert(0, Message::system(merged_hints));
-                }
-            } else {
-                request_messages.insert(0, Message::system(merged_hints));
-            }
-        }
+        // The per-turn hints above are NOT merged into the system message any
+        // more: they change every turn (token counts, failure hints, RAG), so
+        // merging them made the system prompt differ on every request and
+        // defeated any provider prefix cache. They travel in the request tail
+        // (see `finish_request_with_tail`) together with the work ledger.
 
         // RoPE-aware: inject context boundary marker before recent messages.
         // This exploits the recency effect — model sees boundary and knows
@@ -313,8 +310,19 @@ impl Agent {
         // overflow: trim, then hard-clamp (text AND historical tool-call arguments). If the
         // measured payload is STILL over budget, do not dispatch — return the typed
         // ContextOverflow so the loop's bounded compress-and-retry recovery handles it.
-        request_messages = Self::fit_request_to_context_budget(
+        //
+        // The history is fitted into the budget LEFT AFTER the per-turn tail
+        // (hints + work ledger, measured), and the tail is attached at the
+        // very end of the request — never in the system message.
+        let ledger = self
+            .compressor
+            .render_work_ledger(super::context::work_ledger_token_cap(
+                self.max_context_tokens,
+            ));
+        request_messages = Self::finish_request_with_tail(
             request_messages,
+            turn_hints,
+            ledger,
             self.max_context_tokens,
             self.current_checkpoint.as_ref(),
         )?;
@@ -1058,6 +1066,10 @@ mod sanitize_tool_calls_tests;
 #[cfg(test)]
 #[path = "../../tests/unit/agent/assistant_response/assistant_response_terminal_error_test.rs"]
 mod terminal_error_tests;
+
+#[cfg(test)]
+#[path = "../../tests/unit/agent/assistant_response/assistant_response_request_tail_test.rs"]
+mod request_tail_tests;
 
 #[cfg(test)]
 mod empty_stream_contract_tests {

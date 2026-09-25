@@ -822,10 +822,212 @@ impl Agent {
         Ok(request_messages)
     }
 
+    /// Assemble the final request: fit the conversation history into the
+    /// budget left after the per-turn TAIL, then attach the tail at the very
+    /// end of the request.
+    ///
+    /// The tail carries everything that changes from turn to turn — pending
+    /// failure hint, learning hint, context-map tree (with live token counts),
+    /// RAG chunks, and the [work ledger](super::context::WorkLedger) — as a
+    /// `<selfware_context_note kind=turn_context>` block. None of it goes into
+    /// the system message, so the system prompt stays byte-identical between
+    /// turns (a provider prefix cache can then reuse it), and the progress
+    /// record sits where recency makes the model read it.
+    ///
+    /// `sections` are joined in order; `ledger` always comes last. When the
+    /// tail would exceed a third of the budget, the hint sections are
+    /// truncated (measured) — never the ledger, which is already bounded by
+    /// [`super::context::work_ledger_token_cap`].
+    pub(super) fn finish_request_with_tail(
+        request_messages: Vec<Message>,
+        sections: Vec<String>,
+        ledger: Option<String>,
+        max_context_tokens: usize,
+        checkpoint: Option<&crate::checkpoint::TaskCheckpoint>,
+    ) -> Result<Vec<Message>, crate::errors::ApiError> {
+        use crate::token_count::{estimate_content_tokens, estimate_messages_tokens};
+
+        let request_messages = Self::demote_mid_conversation_system_messages(request_messages);
+        let tail = Self::build_request_tail(sections, ledger, max_context_tokens / 3);
+        // Measured reservation: the tail as its own message (content +
+        // per-message overhead), plus slack for the join separator.
+        let reserve = tail
+            .as_ref()
+            .map(|t| super::context::estimate_message_tokens(&Message::user(t.clone())) + 8)
+            .unwrap_or(0);
+        let history_budget = max_context_tokens.saturating_sub(reserve);
+        let mut fitted =
+            Self::fit_request_to_context_budget(request_messages, history_budget, checkpoint)?;
+
+        if let Some(tail) = tail {
+            let without_tail = fitted.clone();
+            Self::attach_request_tail(&mut fitted, &tail);
+            let measured = estimate_messages_tokens(&fitted);
+            if measured > max_context_tokens {
+                tracing::warn!(
+                    "request tail ({} tokens) pushed the request to {} tokens, over the {}-token \
+                     budget; sending without it",
+                    estimate_content_tokens(&tail),
+                    measured,
+                    max_context_tokens
+                );
+                fitted = without_tail;
+            }
+        }
+        Ok(fitted)
+    }
+
+    /// Turn every system message AFTER the leading system prompt into a
+    /// user-role context note at the same chronological position.
+    ///
+    /// The run loop pushes per-step banners as `role=system` mid-conversation
+    /// (progress injections, iteration-limit warnings, careful-mode
+    /// directives), and the send path hoists every system message into the
+    /// first one (`api::canonicalize_message_order`). So the wire system
+    /// prompt changed whenever a banner was pushed — or trimmed away — which
+    /// defeats a provider prefix cache. Demoted here, the leading system
+    /// prompt is the only system message the request carries.
+    ///
+    /// Placement keeps provider shape rules: a note never lands between an
+    /// assistant `tool_calls` message and its `role=tool` results (it waits
+    /// until the results are through), and it folds into an adjacent
+    /// text-only user message instead of creating consecutive user turns.
+    pub(super) fn demote_mid_conversation_system_messages(messages: Vec<Message>) -> Vec<Message> {
+        let Some(first_system) = messages.iter().position(|m| m.role == "system") else {
+            return messages;
+        };
+        if !messages
+            .iter()
+            .skip(first_system + 1)
+            .any(|m| m.role == "system")
+        {
+            return messages;
+        }
+        let fold_into = |out: &mut Vec<Message>, notes: &mut Vec<String>| {
+            if notes.is_empty() {
+                return;
+            }
+            let body = format!(
+                "<selfware_context_note kind=system_directive>\n{}\n</selfware_context_note>",
+                notes.join("\n\n")
+            );
+            notes.clear();
+            match out.last_mut() {
+                Some(prev) if prev.role == "user" && prev.content.image_count() == 0 => {
+                    let text = prev.content.text().to_string();
+                    prev.content =
+                        crate::api::types::MessageContent::Text(format!("{text}\n\n{body}"));
+                }
+                _ => out.push(Message::user(body)),
+            }
+        };
+        let mut out: Vec<Message> = Vec::with_capacity(messages.len());
+        let mut pending: Vec<String> = Vec::new();
+        for (idx, message) in messages.into_iter().enumerate() {
+            if idx > first_system && message.role == "system" {
+                let text = message.content.text().trim().to_string();
+                if !text.is_empty() {
+                    pending.push(text);
+                }
+                continue;
+            }
+            // Never between a tool call and its results.
+            if message.role != "tool" {
+                fold_into(&mut out, &mut pending);
+            }
+            out.push(message);
+        }
+        fold_into(&mut out, &mut pending);
+        out
+    }
+
+    /// Join the tail sections (ledger last) into one context note, truncating
+    /// the hint sections — measured — so the whole stays within `cap` tokens.
+    pub(super) fn build_request_tail(
+        sections: Vec<String>,
+        ledger: Option<String>,
+        cap: usize,
+    ) -> Option<String> {
+        use crate::token_count::estimate_content_tokens;
+        const OPEN: &str = "<selfware_context_note kind=turn_context>";
+        const CLOSE: &str = "</selfware_context_note>";
+
+        let mut hints = sections
+            .into_iter()
+            .filter(|s| !s.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if hints.is_empty() && ledger.is_none() {
+            return None;
+        }
+        let fixed = estimate_content_tokens(OPEN)
+            + estimate_content_tokens(CLOSE)
+            + ledger.as_deref().map(estimate_content_tokens).unwrap_or(0)
+            + 8;
+        let hint_budget = cap.saturating_sub(fixed);
+        let hint_tokens = estimate_content_tokens(&hints);
+        if hint_tokens > hint_budget {
+            const MARK: &str = "\n...[turn context truncated to fit budget]";
+            let chars: Vec<char> = hints.chars().collect();
+            let mut keep =
+                (chars.len() as f64 * hint_budget as f64 / hint_tokens.max(1) as f64) as usize;
+            loop {
+                let candidate: String = chars[..keep.min(chars.len())].iter().collect();
+                if keep == 0 || estimate_content_tokens(&candidate) + 12 <= hint_budget {
+                    hints = if keep == 0 {
+                        String::new()
+                    } else {
+                        format!("{candidate}{MARK}")
+                    };
+                    break;
+                }
+                keep = keep.saturating_sub(keep / 8 + 1);
+            }
+        }
+        let mut body = hints;
+        if let Some(ledger) = ledger {
+            if !body.is_empty() {
+                body.push_str("\n\n");
+            }
+            body.push_str(&ledger);
+        }
+        if body.trim().is_empty() {
+            return None;
+        }
+        Some(format!("{OPEN}\n{body}\n{CLOSE}"))
+    }
+
+    /// Put `tail` at the end of the request without breaking provider
+    /// shape rules: appended to a trailing text-only user message (plain or
+    /// XML tool result — both are role=user text), or as a new user message
+    /// after trailing `role=tool` results. A trailing assistant message
+    /// (prefill) stays last: the tail goes right before it.
+    pub(super) fn attach_request_tail(messages: &mut Vec<Message>, tail: &str) {
+        let append_to = |m: &mut Message| {
+            let prev = m.content.text().to_string();
+            m.content = crate::api::types::MessageContent::Text(format!("{prev}\n\n{tail}"));
+        };
+        let ends_on_assistant = messages.last().is_some_and(|m| m.role == "assistant");
+        let anchor = if ends_on_assistant {
+            messages.len() - 1
+        } else {
+            messages.len()
+        };
+        match anchor.checked_sub(1).map(|i| &messages[i]) {
+            Some(prev) if prev.role == "user" && prev.content.image_count() == 0 => {
+                append_to(&mut messages[anchor - 1]);
+            }
+            _ => messages.insert(anchor, Message::user(tail)),
+        }
+    }
+
     /// Trim the message history so total estimated tokens stay within
     /// `max_context_tokens`. Removes the oldest non-system messages first.
     pub(super) fn trim_message_history(&mut self) {
         use crate::token_count::estimate_messages_tokens;
+        // Record progress (files read, findings, deliverables) into the work
+        // ledger BEFORE anything can be dropped.
+        self.compressor.observe_work(&self.messages);
         // Every caller (turn start, post-compaction recovery) funnels through
         // here: restore the task anchor first so the trim below pins it.
         self.ensure_task_anchor_present();
@@ -1262,6 +1464,7 @@ impl Agent {
     /// a structured summary and replacing old messages.
     /// Unlike the flat LLM-based compression, this is deterministic and fast.
     pub fn compress_to_structured_summary(&mut self, target_tokens: usize) {
+        self.compressor.observe_work(&self.messages);
         let current = self.estimate_messages_tokens();
         if current <= target_tokens {
             return;

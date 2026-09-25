@@ -792,3 +792,308 @@ fn test_safe_tail_start_skips_xml_tool_result_user_messages() {
 
     assert_eq!(super::safe_tail_start(&messages, 1), 3);
 }
+
+// ---------------------------------------------------------------------------
+// Work ledger
+// ---------------------------------------------------------------------------
+
+fn call(id: &str, name: &str, args: serde_json::Value) -> Message {
+    let mut message = Message::assistant("");
+    message.tool_calls = Some(vec![crate::api::types::ToolCall {
+        id: id.to_string(),
+        call_type: "function".to_string(),
+        function: crate::api::types::ToolFunction {
+            name: name.to_string(),
+            arguments: args.to_string(),
+        },
+    }]);
+    message
+}
+
+fn read_result(id: &str, content: &str) -> Message {
+    Message::tool(
+        serde_json::json!({
+            "content": content,
+            "total_lines": content.lines().count(),
+            "truncated": false,
+        })
+        .to_string(),
+        id,
+    )
+}
+
+/// A realistic slice of a long run: reads, a finding note, a search, a
+/// failed read, and an edit — the progress the c24 run kept losing.
+fn progress_history(task: &str) -> Vec<Message> {
+    vec![
+        Message::system("You are selfware."),
+        Message::user(task),
+        call(
+            "c1",
+            "file_read",
+            serde_json::json!({"path": "src/parser.rs"}),
+        ),
+        read_result("c1", "fn parse() {}\nfn lex() {}\nstruct Token;"),
+        Message::assistant(
+            "The parser.rs module has parse() and lex(); the bug is in lex() skipping whitespace.",
+        ),
+        call(
+            "c2",
+            "file_read",
+            serde_json::json!({"path": "./tests/parser_test.rs", "line_range": [1, 40]}),
+        ),
+        read_result("c2", "#[test] fn t() {}"),
+        call(
+            "c3",
+            "grep_search",
+            serde_json::json!({"pattern": "fn lex", "path": "src"}),
+        ),
+        Message::tool(
+            serde_json::json!({"matches": [], "count": 2, "total_matches": 2}).to_string(),
+            "c3",
+        ),
+        call(
+            "c4",
+            "file_read",
+            serde_json::json!({"path": "src/missing.rs"}),
+        ),
+        Message::tool(
+            serde_json::json!({"error": "No such file"}).to_string(),
+            "c4",
+        ),
+        call(
+            "c5",
+            "file_edit",
+            serde_json::json!({"path": "src/parser.rs", "old_str": "a", "new_str": "b"}),
+        ),
+        Message::tool(serde_json::json!({"success": true}).to_string(), "c5"),
+        Message::user("continue"),
+    ]
+}
+
+#[test]
+fn work_ledger_survives_repeated_trims_and_lists_read_files() {
+    let task = "Fix the lexer whitespace bug in src/parser.rs";
+    let compressor = ContextCompressor::new(24_000);
+    let mut messages = progress_history(task);
+
+    // Simulate the c24 shape: emergency compaction every step (3-message
+    // tail) plus hard trims — the reads themselves are long gone afterwards.
+    for _ in 0..5 {
+        compressor.begin_ledger_turn(Some(task));
+        messages = compressor.hard_compress_with_task(&messages, Some(task));
+        crate::agent::Agent::trim_messages(&mut messages, 60, None);
+    }
+    assert!(
+        !messages
+            .iter()
+            .any(|m| m.content.text().contains("fn parse() {}")),
+        "precondition: the read results were trimmed away"
+    );
+
+    let ledger = compressor.work_ledger();
+    let paths: Vec<&str> = ledger.files().iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(paths, vec!["src/parser.rs", "tests/parser_test.rs"]);
+    assert!(
+        !paths.contains(&"src/missing.rs"),
+        "a FAILED read must never be listed"
+    );
+
+    let rendered = compressor
+        .render_work_ledger(work_ledger_token_cap(24_000))
+        .expect("ledger renders");
+    assert!(rendered.contains(WORK_LEDGER_HEADER));
+    assert!(rendered.contains(
+        "Do not re-read a file listed here unless you need a specific line range you have not seen"
+    ));
+    assert!(rendered.contains("src/parser.rs — whole file (3 lines)"));
+    assert!(rendered.contains("tests/parser_test.rs — lines 1-40"));
+    assert!(rendered.contains("your note: The parser.rs module has parse() and lex()"));
+    assert!(rendered.contains("grep \"fn lex\" in src → 2 matches"));
+    assert!(rendered.contains("src/parser.rs — file_edit x1"));
+    assert!(
+        rendered.contains("you modified it at turn 1"),
+        "an edit after the read must be flagged so the model re-reads the new content"
+    );
+}
+
+#[test]
+fn work_ledger_observe_is_idempotent() {
+    let task = "task";
+    let mut ledger = WorkLedger::new();
+    ledger.begin_turn(Some(task));
+    let history = progress_history(task);
+    ledger.observe(&history, None);
+    ledger.observe(&history, None);
+    ledger.observe(&history[..6], None);
+    let parser = &ledger.files()[0];
+    assert_eq!(
+        parser.reads, 1,
+        "re-observing the same history adds nothing"
+    );
+    assert_eq!(ledger.writes()[0].count, 1);
+}
+
+#[test]
+fn work_ledger_reread_of_unchanged_file_with_new_range_is_recorded() {
+    let mut ledger = WorkLedger::new();
+    ledger.begin_turn(Some("task"));
+    let body = "line\n".repeat(50);
+    let mut history = vec![
+        Message::system("sys"),
+        Message::user("task"),
+        call(
+            "r1",
+            "file_read",
+            serde_json::json!({"path": "src/big.rs", "line_range": [1, 50]}),
+        ),
+        read_result("r1", &body),
+    ];
+    ledger.observe(&history, None);
+    let first_hash = ledger.files()[0].content_hash.clone();
+
+    // Same file, a range not seen yet: must be recorded (ranges merged), not
+    // treated as a duplicate.
+    ledger.begin_turn(Some("task"));
+    history.push(call(
+        "r2",
+        "file_read",
+        serde_json::json!({"path": "src/big.rs", "line_range": [100, 150]}),
+    ));
+    history.push(read_result("r2", &body));
+    ledger.observe(&history, None);
+
+    let entry = &ledger.files()[0];
+    assert_eq!(entry.reads, 2);
+    assert_eq!(entry.ranges, vec![(1, 50), (100, 150)]);
+    assert_eq!(entry.content_hash, first_hash, "same content, same hash");
+    assert_eq!(entry.last_read_turn, 2);
+    let rendered = ledger.render(1_500).unwrap();
+    assert!(rendered.contains("lines 1-50, 100-150"));
+    assert!(rendered.contains("Reading a new range is fine."));
+}
+
+#[test]
+fn work_ledger_render_stays_bounded_and_drops_oldest_first() {
+    use crate::token_count::estimate_content_tokens;
+    let mut ledger = WorkLedger::new();
+    let mut history = vec![Message::system("sys"), Message::user("task")];
+    for i in 0..200 {
+        ledger.begin_turn(Some("task"));
+        let id = format!("f{i}");
+        history.push(call(
+            &id,
+            "file_read",
+            serde_json::json!({"path": format!("src/module_{i:03}/file_{i:03}.rs")}),
+        ));
+        history.push(read_result(&id, &format!("contents of file {i}")));
+        history.push(Message::assistant(format!(
+            "file_{i:03}.rs defines the handler for route {i} and validates its input."
+        )));
+        ledger.observe(&history, None);
+    }
+    // Memory bound.
+    assert!(ledger.files().len() <= 128);
+
+    for cap in [150usize, 600, 1_500, 2_000] {
+        let rendered = ledger.render(cap).expect("renders at every cap");
+        let measured = estimate_content_tokens(&rendered);
+        assert!(
+            measured <= cap,
+            "rendered ledger is {measured} tokens, over the {cap}-token cap"
+        );
+    }
+    let rendered = ledger.render(1_500).unwrap();
+    let shown: Vec<usize> = (0..200)
+        .filter(|i| rendered.contains(&format!("src/module_{i:03}/file_{i:03}.rs —")))
+        .collect();
+    assert!(!shown.is_empty() && shown.len() < 128, "shown: {shown:?}");
+    // Exactly the newest entries survive: a contiguous run ending at 199.
+    let expected: Vec<usize> = (200 - shown.len()..200).collect();
+    assert_eq!(shown, expected, "oldest entries are dropped first");
+    assert!(rendered.contains("older ledger entries omitted"));
+}
+
+#[test]
+fn work_ledger_takes_per_file_findings_from_a_summary_but_never_adds_files() {
+    let mut ledger = WorkLedger::new();
+    ledger.begin_turn(Some("task"));
+    ledger.observe(
+        &[
+            Message::system("sys"),
+            Message::user("task"),
+            call("a", "file_read", serde_json::json!({"path": "src/a.rs"})),
+            read_result("a", "fn a() {}"),
+        ],
+        None,
+    );
+    ledger.begin_turn(Some("task"));
+    ledger.observe(
+        &[Message::user(
+            "[CONTEXT SUMMARY - 9 earlier messages compressed]:\nWork so far.\n\nFILES READ:\n\
+             - `src/a.rs`: a() is the retry entry point; backoff constant is 3.\n\
+             - src/invented.rs: the summarizer made this one up",
+        )],
+        None,
+    );
+    let files = ledger.files();
+    assert_eq!(files.len(), 1, "a summary line can never add a read");
+    let (source, _, note) = files[0].note.clone().expect("summary finding attached");
+    assert_eq!(source, LedgerNoteSource::Summary);
+    assert!(note.starts_with("a() is the retry entry point"));
+    assert!(ledger
+        .render(1_500)
+        .unwrap()
+        .contains("summary: a() is the retry"));
+}
+
+#[test]
+fn work_ledger_reads_xml_mode_results_and_skips_xml_errors() {
+    let mut ledger = WorkLedger::new();
+    ledger.begin_turn(Some("task"));
+    let lt = "<";
+    let open = format!("{lt}tool_result>");
+    let close = format!("{lt}/tool_result>");
+    let payload = serde_json::json!({"content": "x < y && z", "total_lines": 1}).to_string();
+    let escaped = payload
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    let calls = format!(
+        "{lt}tool>\n{lt}name>file_read{lt}/name>\n{lt}arguments>{{\"path\": \"src/x.rs\"}}{lt}/arguments>\n{lt}/tool>\n\
+         {lt}tool>\n{lt}name>file_read{lt}/name>\n{lt}arguments>{{\"path\": \"src/gone.rs\"}}{lt}/arguments>\n{lt}/tool>"
+    );
+    let history = vec![
+        Message::system("sys"),
+        Message::user("task"),
+        Message::assistant(calls),
+        Message::user(format!("{open}{escaped}{close}")),
+        Message::user(format!("{open}{lt}error>not found{lt}/error>{close}")),
+    ];
+    ledger.observe(&history, None);
+    let files = ledger.files();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].path, "src/x.rs");
+    assert_eq!(files[0].total_lines, Some(1));
+    assert!(!files[0].partial, "the unescaped payload parsed in full");
+}
+
+#[test]
+fn work_ledger_resets_when_the_task_changes() {
+    let mut ledger = WorkLedger::new();
+    ledger.begin_turn(Some("task one"));
+    ledger.observe(&progress_history("task one"), None);
+    assert!(!ledger.is_empty());
+    ledger.begin_turn(Some("task two"));
+    assert!(ledger.is_empty());
+    assert_eq!(ledger.turn(), 1);
+}
+
+#[test]
+fn summarizer_input_names_the_native_tool_calls() {
+    let m = call("c1", "file_read", serde_json::json!({"path": "src/a.rs"}));
+    let suffix = summarizer_tool_call_suffix(&m);
+    assert!(suffix.contains("[called file_read {\"path\":\"src/a.rs\"}]"));
+    assert!(summarizer_tool_call_suffix(&Message::assistant("text")).is_empty());
+    assert!(PER_FILE_FINDINGS_INSTRUCTION.contains("- <path>: <1-2 sentence key finding"));
+}

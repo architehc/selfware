@@ -2774,3 +2774,252 @@ async fn agent_trim_restores_task_after_legacy_compaction_chain() {
     }
     server.stop().await;
 }
+
+// ---------------------------------------------------------------------------
+// Request tail: per-turn hints + work ledger at the END, system prompt stable
+// ---------------------------------------------------------------------------
+
+fn ledger_fixture() -> String {
+    let mut ledger = crate::agent::context::WorkLedger::new();
+    ledger.begin_turn(Some("task"));
+    let mut call = Message::assistant("");
+    call.tool_calls = Some(vec![crate::api::types::ToolCall {
+        id: "r1".to_string(),
+        call_type: "function".to_string(),
+        function: crate::api::types::ToolFunction {
+            name: "file_read".to_string(),
+            arguments: r#"{"path":"src/lib.rs"}"#.to_string(),
+        },
+    }]);
+    ledger.observe(
+        &[
+            Message::system("sys"),
+            Message::user("task"),
+            call,
+            Message::tool(r#"{"content":"pub mod a;","total_lines":1}"#, "r1"),
+        ],
+        None,
+    );
+    ledger.render(1_500).expect("ledger renders")
+}
+
+#[test]
+fn request_tail_goes_after_the_history_not_into_the_system_message() {
+    let ledger = ledger_fixture();
+    let mut call = Message::assistant("working");
+    call.tool_calls = Some(vec![crate::api::types::ToolCall {
+        id: "x".to_string(),
+        call_type: "function".to_string(),
+        function: crate::api::types::ToolFunction {
+            name: "git_status".to_string(),
+            arguments: "{}".to_string(),
+        },
+    }]);
+    let history = vec![
+        Message::system("SYSTEM PROMPT"),
+        Message::user("task"),
+        call,
+        Message::tool(r#"{"ok":true}"#, "x"),
+    ];
+    let request = Agent::finish_request_with_tail(
+        history,
+        vec!["# Project tree (3 files, 120/24000 tokens used)".to_string()],
+        Some(ledger.clone()),
+        24_000,
+        None,
+    )
+    .expect("fits");
+
+    assert_eq!(request[0].role, "system");
+    assert_eq!(request[0].content.text(), "SYSTEM PROMPT");
+    assert_eq!(
+        request[3].role, "tool",
+        "tool result stays right after its call"
+    );
+    let last = request.last().unwrap();
+    assert_eq!(last.role, "user", "tail follows the trailing tool result");
+    let text = last.content.text();
+    assert!(text.contains("<selfware_context_note kind=turn_context>"));
+    assert!(text.contains("# Project tree"));
+    assert!(text.ends_with(&format!("{ledger}\n</selfware_context_note>")));
+    // The ledger is the very last thing in the request.
+    assert!(text.find("# Project tree").unwrap() < text.find("Work ledger").unwrap());
+}
+
+#[test]
+fn request_tail_is_appended_to_a_trailing_user_turn() {
+    let request = Agent::finish_request_with_tail(
+        vec![
+            Message::system("sys"),
+            Message::user("task"),
+            Message::assistant("a"),
+            Message::user("continue"),
+        ],
+        vec![],
+        Some(ledger_fixture()),
+        24_000,
+        None,
+    )
+    .unwrap();
+    assert_eq!(request.len(), 4, "no extra same-role message");
+    assert!(request[3].content.text().starts_with("continue\n\n"));
+    assert!(request[3].content.text().contains("Work ledger"));
+}
+
+#[test]
+fn request_tail_is_budgeted_and_hints_are_truncated_before_the_ledger() {
+    use crate::token_count::estimate_messages_tokens;
+    let ledger = ledger_fixture();
+    let huge_hint = "tree line src/some/path.rs (4K, ~900tok)\n".repeat(2_000);
+    let budget = 6_000;
+    let request = Agent::finish_request_with_tail(
+        vec![
+            Message::system("sys"),
+            Message::user("task"),
+            Message::assistant("a".repeat(400)),
+            Message::user("go"),
+        ],
+        vec![huge_hint],
+        Some(ledger.clone()),
+        budget,
+        None,
+    )
+    .unwrap();
+    assert!(estimate_messages_tokens(&request) <= budget);
+    let tail = request.last().unwrap().content.text();
+    assert!(tail.contains("[turn context truncated to fit budget]"));
+    assert!(tail.contains(&ledger), "the ledger is never truncated");
+}
+
+/// The measurement asked for: two consecutive assemblies of a GROWING
+/// conversation with CHANGING per-turn hints produce a byte-identical system
+/// message (the precondition for a provider prefix cache).
+#[test]
+fn consecutive_request_assemblies_share_a_byte_identical_system_message() {
+    let mut history = vec![
+        Message::system("You are selfware. Stable system prompt."),
+        Message::user("task"),
+    ];
+    let first = Agent::finish_request_with_tail(
+        history.clone(),
+        vec![
+            "# Project tree (10 files, 1200/24000 tokens used)".to_string(),
+            "Previous tool failed: cargo_test".to_string(),
+        ],
+        None,
+        24_000,
+        None,
+    )
+    .unwrap();
+
+    history.push(Message::assistant("reading"));
+    history.push(Message::user("continue"));
+    let second = Agent::finish_request_with_tail(
+        history,
+        vec!["# Project tree (10 files, 5400/24000 tokens used)".to_string()],
+        Some(ledger_fixture()),
+        24_000,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(first[0].role, "system");
+    assert_eq!(second[0].role, "system");
+    assert_eq!(
+        first[0].content.text().as_bytes(),
+        second[0].content.text().as_bytes()
+    );
+    assert_eq!(
+        first.iter().filter(|m| m.role == "system").count(),
+        1,
+        "no extra system message is synthesized for hints"
+    );
+}
+
+#[test]
+fn mid_conversation_system_messages_are_demoted_without_splitting_tool_pairs() {
+    let mut call = Message::assistant("");
+    call.tool_calls = Some(vec![crate::api::types::ToolCall {
+        id: "t1".to_string(),
+        call_type: "function".to_string(),
+        function: crate::api::types::ToolFunction {
+            name: "git_status".to_string(),
+            arguments: "{}".to_string(),
+        },
+    }]);
+    let history = vec![
+        Message::system("SYSTEM PROMPT"),
+        Message::user("task"),
+        call,
+        // A banner pushed between the call and its result must wait.
+        Message::system("BANNER A"),
+        Message::tool("{}", "t1"),
+        Message::system("BANNER B"),
+        Message::assistant("thinking"),
+        Message::user("continue"),
+        Message::system("BANNER C"),
+    ];
+    let out = Agent::demote_mid_conversation_system_messages(history);
+
+    assert_eq!(out.iter().filter(|m| m.role == "system").count(), 1);
+    assert_eq!(out[0].content.text(), "SYSTEM PROMPT");
+    assert_eq!(out[2].tool_calls.as_ref().unwrap()[0].id, "t1");
+    assert_eq!(
+        out[3].role, "tool",
+        "result still directly follows its call"
+    );
+    assert_eq!(out[4].role, "user");
+    assert!(out[4].content.text().contains("BANNER A\n\nBANNER B"));
+    assert!(out[4]
+        .content
+        .text()
+        .starts_with("<selfware_context_note kind=system_directive>"));
+    assert_eq!(out[5].role, "assistant");
+    let last = out.last().unwrap();
+    assert_eq!(last.role, "user");
+    assert!(
+        last.content.text().starts_with("continue\n\n") && last.content.text().contains("BANNER C"),
+        "a trailing banner folds into the adjacent user turn"
+    );
+    assert_eq!(out.len(), 7);
+}
+
+#[tokio::test]
+async fn trim_message_history_records_the_work_ledger_before_dropping_reads() {
+    let server = MockLlmServer::builder().build().await;
+    let mut agent = make_test_agent(&server).await;
+    agent.max_context_tokens = 400;
+    agent.messages = vec![Message::system("sys"), Message::user("task")];
+    let mut call = Message::assistant("");
+    call.tool_calls = Some(vec![crate::api::types::ToolCall {
+        id: "r1".to_string(),
+        call_type: "function".to_string(),
+        function: crate::api::types::ToolFunction {
+            name: "file_read".to_string(),
+            arguments: r#"{"path":"src/evicted.rs"}"#.to_string(),
+        },
+    }]);
+    agent.messages.push(call);
+    agent.messages.push(Message::tool(
+        serde_json::json!({"content": "x".repeat(4_000), "total_lines": 1}).to_string(),
+        "r1",
+    ));
+    for i in 0..6 {
+        agent
+            .messages
+            .push(Message::assistant(format!("step {i} {}", "y".repeat(300))));
+        agent.messages.push(Message::user(format!("continue {i}")));
+    }
+    agent.trim_message_history();
+    assert!(
+        !agent
+            .messages
+            .iter()
+            .any(|m| m.content.text().contains(&"x".repeat(4_000))),
+        "precondition: the read result was trimmed"
+    );
+    let ledger = agent.compressor.work_ledger();
+    assert_eq!(ledger.files().len(), 1);
+    assert_eq!(ledger.files()[0].path, "src/evicted.rs");
+    server.stop().await;
+}

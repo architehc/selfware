@@ -497,13 +497,20 @@ pub async fn auto_compact(
     let summary_content = format!(
         "Summarize the following conversation history concisely. \
          Preserve key facts, decisions, file paths, and action items. \
-         Omit routine tool outputs unless they contain errors or important results.\n\n{}",
+         Omit routine tool outputs unless they contain errors or important results.\n{}\n\n{}",
+        super::context::PER_FILE_FINDINGS_INSTRUCTION,
         to_summarize
             .iter()
             .enumerate()
             .map(|(i, m)| {
                 let content = truncate_chars(m.content.text(), 800);
-                format!("[{}] {}: {}", i, m.role, content)
+                format!(
+                    "[{}] {}: {}{}",
+                    i,
+                    m.role,
+                    content,
+                    super::context::summarizer_tool_call_suffix(m)
+                )
             })
             .collect::<Vec<_>>()
             .join("\n\n")

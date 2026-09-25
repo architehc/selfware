@@ -3,6 +3,8 @@ use crate::api::ApiClient;
 use crate::api::ThinkingMode;
 use crate::token_count::estimate_tokens_with_overhead;
 use anyhow::Result;
+use std::collections::{HashSet, VecDeque};
+use std::sync::Mutex;
 use tracing::{debug, info, warn};
 
 /// Per-message overhead tokens (role header, formatting, separators).
@@ -46,6 +48,30 @@ pub fn estimate_message_tokens(m: &Message) -> usize {
     total
 }
 
+/// Summarizer instruction for a per-file findings section, parsed back by
+/// [`WorkLedger::absorb_summary`] (shared with `compression::auto_compact`).
+pub(crate) const PER_FILE_FINDINGS_INSTRUCTION: &str = "End with a section `FILES READ:` \
+     containing one line per file whose contents were read, formatted exactly as \
+     `- <path>: <1-2 sentence key finding relevant to the task>`. Only list files that \
+     were actually read above.";
+
+/// The native tool calls an assistant message made, rendered for the
+/// summarizer (`[called file_read {"path":…}]`). Without it a native-FC
+/// history shows the summarizer empty assistant turns and bare result JSON,
+/// so it cannot tell WHICH file a result came from — no per-file findings.
+pub(crate) fn summarizer_tool_call_suffix(m: &Message) -> String {
+    let Some(calls) = m.tool_calls.as_deref().filter(|c| !c.is_empty()) else {
+        return String::new();
+    };
+    calls
+        .iter()
+        .map(|c| {
+            let args: String = c.function.arguments.chars().take(200).collect();
+            format!(" [called {} {}]", c.function.name, args)
+        })
+        .collect()
+}
+
 /// Hard upper limit on message count. If the message list exceeds this,
 /// `should_compress` returns true regardless of token estimate, so the
 /// conversation is always bounded.
@@ -54,6 +80,10 @@ const MAX_MESSAGE_COUNT: usize = 512;
 pub struct ContextCompressor {
     compression_threshold: usize,
     min_messages_to_keep: usize,
+    /// Progress that must outlive every trim/compaction (see [`WorkLedger`]).
+    /// Behind a mutex so the `&self` compression paths can record what they
+    /// are about to drop before dropping it.
+    ledger: Mutex<WorkLedger>,
 }
 
 impl ContextCompressor {
@@ -67,7 +97,41 @@ impl ContextCompressor {
         Self {
             compression_threshold: (token_budget as f32 * content_ratio) as usize,
             min_messages_to_keep: 6,
+            ledger: Mutex::new(WorkLedger::new()),
         }
+    }
+
+    fn with_ledger<R>(&self, f: impl FnOnce(&mut WorkLedger) -> R) -> R {
+        // A poisoned ledger is still valid data (every update is a plain
+        // field write); recover it rather than losing the progress record.
+        let mut guard = self
+            .ledger
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        f(&mut guard)
+    }
+
+    /// Record the successful tool results (and note sources) in `messages`
+    /// into the work ledger. Idempotent; called before every trim/compaction
+    /// so nothing is dropped unrecorded.
+    pub fn observe_work(&self, messages: &[Message]) {
+        let root = super::current_project_root();
+        self.with_ledger(|l| l.observe(messages, Some(root.as_path())));
+    }
+
+    /// Start a new model turn for the ledger (resets it on a task change).
+    pub fn begin_ledger_turn(&self, task: Option<&str>) {
+        self.with_ledger(|l| l.begin_turn(task));
+    }
+
+    /// The rendered, bounded work ledger (`None` when empty).
+    pub fn render_work_ledger(&self, max_tokens: usize) -> Option<String> {
+        self.with_ledger(|l| l.render(max_tokens))
+    }
+
+    /// A copy of the current ledger (inspection / tests).
+    pub fn work_ledger(&self) -> WorkLedger {
+        self.with_ledger(|l| l.clone())
     }
 
     pub fn should_compress(&self, messages: &[Message]) -> bool {
@@ -119,6 +183,8 @@ impl ContextCompressor {
         task: Option<&str>,
     ) -> Result<(Vec<Message>, Usage)> {
         let zero_usage = Usage::default;
+        // Record progress before anything is summarized away.
+        self.observe_work(messages);
         if messages.len() <= self.min_messages_to_keep + 1 {
             warn!("Too few messages to compress, returning as-is");
             return Ok((messages.to_vec(), zero_usage()));
@@ -146,7 +212,8 @@ impl ContextCompressor {
         }
 
         let summary_content = format!(
-            "Summarize these previous interactions concisely. Preserve key facts, decisions, and file paths. Omit routine tool outputs unless they indicate errors.\n\n{}",
+            "Summarize these previous interactions concisely. Preserve key facts, decisions, and file paths. Omit routine tool outputs unless they indicate errors.\n{}\n\n{}",
+            PER_FILE_FINDINGS_INSTRUCTION,
             to_summarize.iter().enumerate().map(|(i, m)| {
                 // Use char-based truncation to avoid UTF-8 boundary issues
                 let content = if m.content.chars().count() > 500 {
@@ -154,7 +221,7 @@ impl ContextCompressor {
                 } else {
                     m.content.text().to_string()
                 };
-                format!("[{}] {}: {}", i, m.role, content)
+                format!("[{}] {}: {}{}", i, m.role, content, summarizer_tool_call_suffix(m))
             }).collect::<Vec<_>>().join("\n\n")
         );
 
@@ -176,6 +243,9 @@ impl ContextCompressor {
             .map(|c| c.message.content.text().to_string())
             .unwrap_or_else(|| "[Context compression failed: empty API response]".to_string());
         info!("Generated summary: {} chars", summary.len());
+        // Per-file findings feed the work ledger (only for files it already
+        // knows were read — the summary cannot add a read).
+        self.with_ledger(|l| l.absorb_summary(&summary));
         // The summarizer call already spent tokens — carry them out on every
         // post-call return path (including the "compression didn't help" one).
         let usage = response.usage.clone();
@@ -265,6 +335,9 @@ impl ContextCompressor {
         messages: &[Message],
         task: Option<&str>,
     ) -> Vec<Message> {
+        // Emergency compaction keeps only a 3-message tail: record progress
+        // first so the ledger still lists what was read.
+        self.observe_work(messages);
         let mut result = Vec::new();
         // Preserve the system message BY ROLE — a non-system bootstrap line can
         // otherwise masquerade as the "system" message and the real prompt is
@@ -382,6 +455,756 @@ fn resolve_task_text(messages: &[Message], task: Option<&str>) -> Option<String>
     match task.filter(|t| !t.trim().is_empty()) {
         Some(t) => Some(super::Agent::task_anchor_core(t).to_string()),
         None => super::Agent::original_task_anchor(messages).map(|m| m.content.text().to_string()),
+    }
+}
+
+// =============================================================================
+// Work ledger
+// =============================================================================
+//
+// Small context windows lost their PROGRESS on every trim/compaction: the task
+// anchor survived, but which files had been read and what was learned did
+// not, so the model re-read the same files after each trim (agents10 c24: 23
+// trims, the same files re-read each time, wall-cap kill; external run at
+// 65,536: 4 trims, four files read 5x, one test file 10x, no report).
+//
+// The ledger is built ONLY from successful tool results the agent actually
+// received (`file_read`, `grep_search`, and the file-mutating tools for the
+// deliverable list), lives outside the message history (so no trim can drop
+// it), and is rendered — bounded, measured, oldest entries dropped first — at
+// the END of each request. It never lands in the system message, which stays
+// byte-stable between turns.
+
+/// Heading that opens the rendered ledger inside the request tail.
+pub(crate) const WORK_LEDGER_HEADER: &str = "## Work ledger (survives context trimming)";
+
+/// Stored entries (oldest evicted first). Rendering is bounded by tokens
+/// separately; these only bound memory.
+const LEDGER_MAX_FILES: usize = 128;
+const LEDGER_MAX_SEARCHES: usize = 32;
+const LEDGER_MAX_WRITES: usize = 64;
+/// Longest per-file note kept (chars): 1–3 lines of findings.
+const LEDGER_NOTE_MAX_CHARS: usize = 240;
+/// Remembered processed-result fingerprints (bounded FIFO).
+const LEDGER_SEEN_CAP: usize = 4096;
+
+/// Token cap for the rendered ledger at a given context budget: 1/16 of the
+/// window, between 150 and 2,000 tokens (24k window -> 1,500).
+pub(crate) fn work_ledger_token_cap(max_context_tokens: usize) -> usize {
+    (max_context_tokens / 16).clamp(150, 2_000)
+}
+
+/// Where a per-file note came from — rendered, so the model knows whether it
+/// is reading its own words or a summarizer's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LedgerNoteSource {
+    /// The model's own text in a later assistant message naming the file.
+    ModelNote,
+    /// A per-file line of a compaction summary.
+    Summary,
+}
+
+#[derive(Debug, Clone)]
+pub struct LedgerFileEntry {
+    pub path: String,
+    /// A read without `line_range` returned the whole file.
+    pub whole_file: bool,
+    /// Merged, sorted inclusive line ranges seen via `line_range` reads.
+    pub ranges: Vec<(usize, usize)>,
+    pub total_lines: Option<usize>,
+    pub reads: u32,
+    pub last_read_turn: usize,
+    /// FNV-1a 64 of the content the latest read returned (16 hex chars).
+    pub content_hash: String,
+    /// The latest read's result was not parseable in full (truncated in
+    /// context): the model saw only part of it.
+    pub partial: bool,
+    pub note: Option<(LedgerNoteSource, usize, String)>,
+    /// Turn of a successful write/edit to this path AFTER its last read.
+    pub modified_turn: Option<usize>,
+    seq: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct LedgerSearch {
+    pub pattern: String,
+    pub path: String,
+    pub matches: Option<u64>,
+    pub turn: usize,
+    seq: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct LedgerWrite {
+    pub path: String,
+    pub tool: String,
+    pub count: u32,
+    pub last_turn: usize,
+    seq: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WorkLedger {
+    turn: usize,
+    task_key: Option<u64>,
+    files: Vec<LedgerFileEntry>,
+    searches: Vec<LedgerSearch>,
+    writes: Vec<LedgerWrite>,
+    seen: HashSet<u64>,
+    seen_order: VecDeque<u64>,
+    seq: u64,
+}
+
+/// Deterministic FNV-1a 64 (stable across runs, unlike `DefaultHasher`).
+fn fnv1a64(parts: &[&str]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for part in parts {
+        for byte in part.as_bytes().iter().chain(std::iter::once(&0xffu8)) {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    hash
+}
+
+fn arg_path(args: &serde_json::Value) -> Option<String> {
+    ["path", "file_path", "file", "filepath"]
+        .iter()
+        .find_map(|k| args.get(*k).and_then(|v| v.as_str()))
+        .map(str::to_string)
+}
+
+fn truncate_note(s: &str) -> String {
+    let collapsed = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= LEDGER_NOTE_MAX_CHARS {
+        collapsed
+    } else {
+        let cut: String = collapsed.chars().take(LEDGER_NOTE_MAX_CHARS).collect();
+        format!("{cut}…")
+    }
+}
+
+/// Merge `(start, end)` into a sorted, non-overlapping range list.
+fn merge_range(ranges: &mut Vec<(usize, usize)>, range: (usize, usize)) {
+    let range = if range.0 <= range.1 {
+        range
+    } else {
+        (range.1, range.0)
+    };
+    ranges.push(range);
+    ranges.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+    for (s, e) in ranges.drain(..) {
+        match merged.last_mut() {
+            Some(last) if s <= last.1.saturating_add(1) => last.1 = last.1.max(e),
+            _ => merged.push((s, e)),
+        }
+    }
+    *ranges = merged;
+}
+
+/// Payload of a SUCCESSFUL tool result, or `None` for a failure. `xml` is the
+/// text tool-calling envelope (`<tool_result>…</tool_result>`, escaped).
+fn successful_payload(text: &str, xml: bool) -> Option<String> {
+    if xml {
+        let start = text.find("<tool_result>")? + "<tool_result>".len();
+        let rest = &text[start..];
+        let end = rest.rfind("</tool_result>").unwrap_or(rest.len());
+        let inner = rest[..end].trim();
+        if inner.starts_with("<error>") {
+            return None;
+        }
+        Some(
+            inner
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&amp;", "&"),
+        )
+    } else {
+        if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(text)
+        {
+            if map.contains_key("error") && map.len() == 1 {
+                return None;
+            }
+        }
+        Some(text.to_string())
+    }
+}
+
+/// A sentence of the model's own text that states something about the file:
+/// it names the file, is not an intention to (re-)read it, and carries no
+/// tool markup.
+fn note_for_path(text: &str, path: &str) -> Option<String> {
+    let base = std::path::Path::new(path)
+        .file_name()
+        .map(|b| b.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string());
+    if base.len() < 3 {
+        return None;
+    }
+    const INTENTIONS: &[&str] = &[
+        "let me",
+        "i'll",
+        "i will",
+        "i need to",
+        "i should",
+        "i'm going to",
+        "next",
+        "now ",
+        "first",
+        "read ",
+        "reading",
+        "re-read",
+    ];
+    for line in text.lines() {
+        for sentence in line.split_inclusive(". ") {
+            let s = sentence.trim();
+            if !s.contains(base.as_str()) || s.chars().count() < 20 {
+                continue;
+            }
+            let lower = s.trim_start_matches(['-', '*', ' ']).to_ascii_lowercase();
+            if INTENTIONS.iter().any(|p| lower.starts_with(p))
+                || s.contains('<')
+                || s.contains("{\"")
+            {
+                continue;
+            }
+            return Some(truncate_note(s));
+        }
+    }
+    None
+}
+
+impl WorkLedger {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Advance the turn counter (one per model request). Resets the ledger
+    /// when the active task changed (interactive sessions run several tasks
+    /// through one agent; the ledger then re-learns from whatever history is
+    /// still present).
+    pub fn begin_turn(&mut self, task: Option<&str>) {
+        let key = task.map(|t| fnv1a64(&[t]));
+        if key.is_some() && self.task_key.is_some() && key != self.task_key {
+            *self = Self::default();
+        }
+        if key.is_some() {
+            self.task_key = key;
+        }
+        self.turn += 1;
+    }
+
+    pub fn turn(&self) -> usize {
+        self.turn
+    }
+
+    pub fn files(&self) -> &[LedgerFileEntry] {
+        &self.files
+    }
+
+    pub fn searches(&self) -> &[LedgerSearch] {
+        &self.searches
+    }
+
+    pub fn writes(&self) -> &[LedgerWrite] {
+        &self.writes
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty() && self.searches.is_empty() && self.writes.is_empty()
+    }
+
+    fn mark_seen(&mut self, fp: u64) -> bool {
+        if !self.seen.insert(fp) {
+            return false;
+        }
+        self.seen_order.push_back(fp);
+        while self.seen_order.len() > LEDGER_SEEN_CAP {
+            if let Some(old) = self.seen_order.pop_front() {
+                self.seen.remove(&old);
+            }
+        }
+        true
+    }
+
+    fn next_seq(&mut self) -> u64 {
+        self.seq += 1;
+        self.seq
+    }
+
+    fn normalize_path(path: &str, root: Option<&std::path::Path>) -> String {
+        let trimmed = path.trim();
+        if let Some(root) = root {
+            if let Ok(rel) = std::path::Path::new(trimmed).strip_prefix(root) {
+                let rel = rel.to_string_lossy();
+                if !rel.is_empty() {
+                    return rel.to_string();
+                }
+            }
+        }
+        trimmed.strip_prefix("./").unwrap_or(trimmed).to_string()
+    }
+
+    /// Record every not-yet-seen successful tool result in `messages` and
+    /// every new note source (assistant text naming a read file, compaction
+    /// summary lines). Idempotent: re-observing the same history adds nothing.
+    pub fn observe(&mut self, messages: &[Message], root: Option<&std::path::Path>) {
+        use std::collections::HashMap;
+        let mut native_calls: HashMap<String, (String, String)> = HashMap::new();
+        let mut xml_calls: VecDeque<(String, String, u64)> = VecDeque::new();
+
+        for message in messages {
+            let text = message.content.text();
+            match message.role.as_str() {
+                "assistant" => {
+                    let reasoning = message.reasoning_content.as_deref().unwrap_or_default();
+                    let msg_fp = fnv1a64(&["assistant", text, reasoning]);
+                    if self.mark_seen(msg_fp) {
+                        self.absorb_model_notes(&format!("{text}\n{reasoning}"));
+                    }
+                    match message.tool_calls.as_deref() {
+                        Some(calls) if !calls.is_empty() => {
+                            xml_calls.clear();
+                            for call in calls {
+                                native_calls.insert(
+                                    call.id.clone(),
+                                    (call.function.name.clone(), call.function.arguments.clone()),
+                                );
+                            }
+                        }
+                        _ => {
+                            xml_calls = if text.contains('<') {
+                                crate::api::tool_calling::extract_tool_calls_from_text(text)
+                                    .into_iter()
+                                    .map(|c| (c.function.name, c.function.arguments, msg_fp))
+                                    .collect()
+                            } else {
+                                VecDeque::new()
+                            };
+                        }
+                    }
+                }
+                "tool" => {
+                    let Some(id) = message.tool_call_id.as_deref() else {
+                        continue;
+                    };
+                    let Some((name, args)) = native_calls.get(id).cloned() else {
+                        continue;
+                    };
+                    if !self.mark_seen(fnv1a64(&["tool", id, &name, &args, text])) {
+                        continue;
+                    }
+                    if let Some(payload) = successful_payload(text, false) {
+                        self.record_result(&name, &args, &payload, root);
+                    }
+                }
+                "user" => {
+                    if text.contains("<tool_result>") {
+                        let Some((name, args, owner)) = xml_calls.pop_front() else {
+                            continue;
+                        };
+                        let owner = format!("{owner:x}");
+                        if !self.mark_seen(fnv1a64(&["xml", &owner, &name, &args, text])) {
+                            continue;
+                        }
+                        if let Some(payload) = successful_payload(text, true) {
+                            self.record_result(&name, &args, &payload, root);
+                        }
+                    } else if (text.contains("[CONTEXT SUMMARY")
+                        || text.contains("[AUTO-COMPACT SUMMARY")
+                        || text.contains("[STRUCTURED SUMMARY"))
+                        && self.mark_seen(fnv1a64(&["summary", text]))
+                    {
+                        self.absorb_summary(text);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn record_result(
+        &mut self,
+        name: &str,
+        args: &str,
+        payload: &str,
+        root: Option<&std::path::Path>,
+    ) {
+        let args: serde_json::Value = serde_json::from_str(args).unwrap_or_default();
+        match name {
+            "file_read" => {
+                let Some(path) = arg_path(&args) else {
+                    return;
+                };
+                let path = Self::normalize_path(&path, root);
+                let range = args
+                    .get("line_range")
+                    .and_then(|r| r.as_array())
+                    .and_then(|r| Some((r.first()?.as_u64()?, r.get(1)?.as_u64()?)))
+                    .map(|(a, b)| (a as usize, b as usize));
+                let parsed = serde_json::from_str::<serde_json::Value>(payload).ok();
+                let content = parsed
+                    .as_ref()
+                    .and_then(|v| v.get("content"))
+                    .and_then(|c| c.as_str());
+                let total_lines = parsed
+                    .as_ref()
+                    .and_then(|v| v.get("total_lines"))
+                    .and_then(|t| t.as_u64())
+                    .map(|t| t as usize);
+                let (hash, partial) = match content {
+                    Some(c) => (fnv1a64(&[c]), false),
+                    None => (fnv1a64(&[payload]), true),
+                };
+                self.record_file_read(path, range, total_lines, hash, partial);
+            }
+            "grep_search" => {
+                let pattern = args
+                    .get("pattern")
+                    .and_then(|p| p.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if pattern.is_empty() {
+                    return;
+                }
+                let path = Self::normalize_path(
+                    args.get("path").and_then(|p| p.as_str()).unwrap_or("."),
+                    root,
+                );
+                let matches = serde_json::from_str::<serde_json::Value>(payload)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("total_matches")
+                            .or_else(|| v.get("count"))
+                            .and_then(|n| n.as_u64())
+                    });
+                let seq = self.next_seq();
+                let turn = self.turn;
+                self.searches
+                    .retain(|s| !(s.pattern == pattern && s.path == path));
+                self.searches.push(LedgerSearch {
+                    pattern,
+                    path,
+                    matches,
+                    turn,
+                    seq,
+                });
+                if self.searches.len() > LEDGER_MAX_SEARCHES {
+                    self.searches.remove(0);
+                }
+            }
+            "file_write" | "file_edit" | "file_multi_edit" | "file_delete" => {
+                let Some(path) = arg_path(&args) else {
+                    return;
+                };
+                let path = Self::normalize_path(&path, root);
+                let turn = self.turn;
+                let seq = self.next_seq();
+                if let Some(entry) = self.files.iter_mut().find(|f| f.path == path) {
+                    entry.modified_turn = Some(turn);
+                }
+                if let Some(w) = self.writes.iter_mut().find(|w| w.path == path) {
+                    w.count += 1;
+                    w.last_turn = turn;
+                    w.tool = name.to_string();
+                    w.seq = seq;
+                } else {
+                    self.writes.push(LedgerWrite {
+                        path,
+                        tool: name.to_string(),
+                        count: 1,
+                        last_turn: turn,
+                        seq,
+                    });
+                    if self.writes.len() > LEDGER_MAX_WRITES {
+                        self.writes.remove(0);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn record_file_read(
+        &mut self,
+        path: String,
+        range: Option<(usize, usize)>,
+        total_lines: Option<usize>,
+        hash: u64,
+        partial: bool,
+    ) {
+        let seq = self.next_seq();
+        let turn = self.turn;
+        let hash = format!("{hash:016x}");
+        if let Some(entry) = self.files.iter_mut().find(|f| f.path == path) {
+            // A whole-file read with a new hash means the file changed: the
+            // old ranges describe a different version.
+            if range.is_none() && entry.content_hash != hash {
+                entry.ranges.clear();
+            }
+            match range {
+                Some(r) => merge_range(&mut entry.ranges, r),
+                None => entry.whole_file = true,
+            }
+            entry.total_lines = total_lines.or(entry.total_lines);
+            entry.reads += 1;
+            entry.last_read_turn = turn;
+            entry.content_hash = hash;
+            entry.partial = partial;
+            entry.modified_turn = None;
+            entry.seq = seq;
+        } else {
+            let mut ranges = Vec::new();
+            if let Some(r) = range {
+                merge_range(&mut ranges, r);
+            }
+            self.files.push(LedgerFileEntry {
+                path,
+                whole_file: range.is_none(),
+                ranges,
+                total_lines,
+                reads: 1,
+                last_read_turn: turn,
+                content_hash: hash,
+                partial,
+                note: None,
+                modified_turn: None,
+                seq,
+            });
+            if self.files.len() > LEDGER_MAX_FILES {
+                // Oldest activity first.
+                if let Some(oldest) = self
+                    .files
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, f)| f.seq)
+                    .map(|(i, _)| i)
+                {
+                    self.files.remove(oldest);
+                }
+            }
+        }
+    }
+
+    fn absorb_model_notes(&mut self, text: &str) {
+        if text.trim().is_empty() {
+            return;
+        }
+        let turn = self.turn;
+        for entry in &mut self.files {
+            if let Some(note) = note_for_path(text, &entry.path) {
+                entry.note = Some((LedgerNoteSource::ModelNote, turn, note));
+            }
+        }
+    }
+
+    /// Per-file lines of a compaction summary (`- path: finding`) attach to
+    /// files the ledger KNOWS were read — a summary can never add a file.
+    pub fn absorb_summary(&mut self, text: &str) {
+        let turn = self.turn;
+        for line in text.lines() {
+            let line = line.trim();
+            let Some(body) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) else {
+                continue;
+            };
+            let Some((raw_path, finding)) = body.split_once(": ") else {
+                continue;
+            };
+            let candidate = raw_path.trim().trim_matches(['`', '*']).trim();
+            let candidate = candidate.strip_prefix("./").unwrap_or(candidate);
+            let finding = finding.trim();
+            if candidate.is_empty() || finding.chars().count() < 8 {
+                continue;
+            }
+            let Some(entry) = self.files.iter_mut().find(|f| {
+                f.path == candidate
+                    || f.path.ends_with(&format!("/{candidate}"))
+                    || candidate.ends_with(&format!("/{}", f.path))
+            }) else {
+                continue;
+            };
+            // The model's own note is at least as current; a summary fills
+            // an empty slot, replaces an older summary, or a model note that
+            // predates the latest read.
+            let replace = match &entry.note {
+                None | Some((LedgerNoteSource::Summary, _, _)) => true,
+                Some((LedgerNoteSource::ModelNote, t, _)) => *t < entry.last_read_turn,
+            };
+            if replace {
+                entry.note = Some((LedgerNoteSource::Summary, turn, truncate_note(finding)));
+            }
+        }
+    }
+
+    fn render_file_line(f: &LedgerFileEntry) -> String {
+        let coverage = if f.whole_file {
+            match f.total_lines {
+                Some(n) => format!("whole file ({n} lines)"),
+                None => "whole file".to_string(),
+            }
+        } else {
+            let ranges = f
+                .ranges
+                .iter()
+                .map(|(a, b)| format!("{a}-{b}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            match f.total_lines {
+                Some(n) => format!("lines {ranges} of {n}"),
+                None => format!("lines {ranges}"),
+            }
+        };
+        let mut line = format!(
+            "- {} — {}; read {}x, last turn {}, hash {}",
+            f.path,
+            coverage,
+            f.reads,
+            f.last_read_turn,
+            &f.content_hash[..8.min(f.content_hash.len())]
+        );
+        if f.whole_file && !f.ranges.is_empty() {
+            let ranges = f
+                .ranges
+                .iter()
+                .map(|(a, b)| format!("{a}-{b}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            line.push_str(&format!(" (also ranges {ranges})"));
+        }
+        if f.partial {
+            line.push_str(" (result was truncated: partial view)");
+        }
+        if let Some(t) = f.modified_turn {
+            line.push_str(&format!(
+                " [you modified it at turn {t} — re-read if you need the new content]"
+            ));
+        }
+        if let Some((source, _, note)) = &f.note {
+            let label = match source {
+                LedgerNoteSource::ModelNote => "your note",
+                LedgerNoteSource::Summary => "summary",
+            };
+            line.push_str(&format!("\n  {label}: {note}"));
+        }
+        line
+    }
+
+    /// Render the ledger within `max_tokens` (measured with
+    /// `estimate_content_tokens`). Deliverables first, then files newest
+    /// first, then searches; the oldest entries are dropped first when the
+    /// cap is hit, and the omission is stated. `None` when there is nothing
+    /// to report or not even the header fits.
+    pub fn render(&self, max_tokens: usize) -> Option<String> {
+        use crate::token_count::estimate_content_tokens;
+        if self.is_empty() {
+            return None;
+        }
+        // Per-line costs approximate the joined text; verify the real
+        // measure and re-render against a tighter limit when the join came
+        // out larger (so the omission footer is never the part that is cut).
+        let mut limit = max_tokens;
+        for _ in 0..8 {
+            let out = self.render_within(limit)?;
+            let measured = estimate_content_tokens(&out);
+            if measured <= max_tokens {
+                return Some(out);
+            }
+            limit = limit.checked_sub(measured - max_tokens + 8)?;
+        }
+        None
+    }
+
+    fn render_within(&self, max_tokens: usize) -> Option<String> {
+        use crate::token_count::estimate_content_tokens;
+        let header = format!(
+            "{WORK_LEDGER_HEADER} — turn {}\n\
+             Built from your own successful tool results in this task. Do not re-read a \
+             file listed here unless you need a specific line range you have not seen (or \
+             you modified it since); your earlier findings are summarised here. Reading a \
+             new range is fine.",
+            self.turn
+        );
+        let mut writes: Vec<&LedgerWrite> = self.writes.iter().collect();
+        writes.sort_by_key(|w| std::cmp::Reverse(w.seq));
+        let mut files: Vec<&LedgerFileEntry> = self.files.iter().collect();
+        files.sort_by_key(|f| std::cmp::Reverse(f.seq));
+        let mut searches: Vec<&LedgerSearch> = self.searches.iter().collect();
+        searches.sort_by_key(|s| std::cmp::Reverse(s.seq));
+
+        let sections: [(&str, Vec<String>); 3] = [
+            (
+                "Deliverables (files you wrote/edited successfully):",
+                writes
+                    .iter()
+                    .map(|w| {
+                        format!(
+                            "- {} — {} x{}, last turn {}",
+                            w.path, w.tool, w.count, w.last_turn
+                        )
+                    })
+                    .collect(),
+            ),
+            (
+                "Files already read (newest first):",
+                files.iter().map(|f| Self::render_file_line(f)).collect(),
+            ),
+            (
+                "Searches already run:",
+                searches
+                    .iter()
+                    .map(|s| {
+                        let matches = s
+                            .matches
+                            .map(|m| format!("{m} matches"))
+                            .unwrap_or_else(|| "results".to_string());
+                        format!(
+                            "- grep {:?} in {} → {}, turn {}",
+                            s.pattern, s.path, matches, s.turn
+                        )
+                    })
+                    .collect(),
+            ),
+        ];
+
+        // Room kept for the omission footer.
+        const FOOTER_RESERVE: usize = 16;
+        let mut used = estimate_content_tokens(&header);
+        if used + FOOTER_RESERVE > max_tokens {
+            return None;
+        }
+        let mut out = header;
+        let mut omitted = 0usize;
+        for (title, lines) in sections {
+            let title_cost = estimate_content_tokens(title) + 1;
+            let mut section = String::new();
+            for (i, line) in lines.iter().enumerate() {
+                let cost = estimate_content_tokens(line)
+                    + 1
+                    + if section.is_empty() { title_cost } else { 0 };
+                if used + cost + FOOTER_RESERVE > max_tokens {
+                    omitted += lines.len() - i;
+                    break;
+                }
+                if section.is_empty() {
+                    section.push_str(title);
+                }
+                section.push('\n');
+                section.push_str(line);
+                used += cost;
+            }
+            if !section.is_empty() {
+                out.push_str("\n\n");
+                out.push_str(&section);
+            }
+        }
+        if omitted > 0 {
+            out.push_str(&format!(
+                "\n({omitted} older ledger entr{} omitted to stay within budget)",
+                if omitted == 1 { "y" } else { "ies" }
+            ));
+        }
+        Some(out)
     }
 }
 
