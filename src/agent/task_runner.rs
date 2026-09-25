@@ -1528,18 +1528,28 @@ impl Agent {
         // previous segment must not decide this one's exit status.
         self.last_run_failure_mode = None;
         let result = self.run_execution_loop_inner(task_description, mode).await;
-        // The client raises WallClockBudgetExceeded when the deadline hits
-        // an IN-FLIGHT call. The planning arm returns that error directly
-        // without classifying it, so the run ended with no failure mode
-        // (no TIMEOUT tag, no task_failed event, no partial). Classify it
-        // here, on every path, exactly as `enforce_hard_budgets` does.
+        // The client raises typed budget stops mid-call: WallClockBudgetExceeded
+        // (deadline hit an in-flight call), CallTimeBudgetExceeded (one call
+        // past agent.max_call_secs) and UsageBudgetExceeded (token/cost cap).
+        // The planning arm returns them directly without classifying, so the
+        // run ended with no failure mode (no TIMEOUT tag, no task_failed
+        // event, no partial). Classify every such stop here, on every path,
+        // exactly as `enforce_hard_budgets` does, using the typed cause's own
+        // message so the classifier sees the canonical wording.
         if let Err(e) = &result {
-            let wall_clock_stop = e.chain().any(|c| {
-                c.downcast_ref::<crate::api::client::WallClockBudgetExceeded>()
-                    .is_some()
+            let budget_reason = e.chain().find_map(|c| {
+                if let Some(w) = c.downcast_ref::<crate::api::client::WallClockBudgetExceeded>() {
+                    Some(w.to_string())
+                } else if let Some(t) =
+                    c.downcast_ref::<crate::api::client::CallTimeBudgetExceeded>()
+                {
+                    Some(t.to_string())
+                } else {
+                    c.downcast_ref::<crate::api::client::UsageBudgetExceeded>()
+                        .map(|u| u.to_string())
+                }
             });
-            if wall_clock_stop && !self.failure_mode_finalized {
-                let reason = e.to_string();
+            if let Some(reason) = budget_reason.filter(|_| !self.failure_mode_finalized) {
                 self.record_task_outcome(task_description, Outcome::Partial, Some(&reason));
                 self.finalize_failure_mode(RunOutcome::Failed { reason })
                     .await;

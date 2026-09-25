@@ -209,3 +209,40 @@ async fn deadline_overrun_stays_a_timeout_failure_carrying_the_labelled_partial(
     assert!(rendered.contains("not a result"));
     server.stop().await;
 }
+
+/// 0.8.2 live validation D1: a call aborted at `agent.max_call_secs` ended
+/// labelled MAX_ITERATIONS ("raise max_iterations"). Through the real loop
+/// it is now CALL_TIME_CAP, still a failure, and carries the partial.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn per_call_cap_abort_is_labelled_call_time_cap_through_the_loop() {
+    let _state = crate::test_support::ExecGuard::hold();
+    let server = MockLlmServer::builder()
+        .with_response("too slow")
+        .with_latency(5_000)
+        .build()
+        .await;
+    let mut config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
+    config.agent.max_call_secs = Some(1);
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.current_checkpoint = Some(TaskCheckpoint::new(
+        "call-cap".to_string(),
+        "Implement the parser fix.".to_string(),
+    ));
+    agent
+        .messages
+        .push(Message::assistant("Interim: the fix belongs in lex()."));
+    let result = agent.continue_execution().await;
+    assert!(result.is_err(), "{result:?}");
+    let fm = agent
+        .last_run_failure_mode()
+        .unwrap_or_else(|| panic!("classified: {result:?}"));
+    assert_eq!(fm.kind, FailureKind::CallTimeCap, "{fm:?}");
+    assert_ne!(crate::errors::process_exit_code(&result, None), 0);
+    let partial = agent.partial_progress(&result).expect("partial carried");
+    assert_eq!(partial.label, PARTIAL_TASK_LABEL);
+    server.stop().await;
+}

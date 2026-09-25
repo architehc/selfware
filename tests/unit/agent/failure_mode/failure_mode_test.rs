@@ -811,3 +811,68 @@ fn passing_or_absent_verification_and_failure_verdicts_pass_through() {
     assert_eq!(mode.kind, FailureKind::FakeComplete);
     assert_eq!(mode.evidence, "base evidence");
 }
+
+// ── budget stops get their own honest label (0.8.2 live validation D1) ──
+
+#[tokio::test]
+async fn per_call_cap_stop_is_call_time_cap_not_max_iterations() {
+    let mut agent = make_agent().await;
+    agent.test_set_mutating_count(1);
+    let mode = FailureMode::classify(
+        &agent,
+        RunOutcome::Failed {
+            reason: "Per-call time cap exceeded: 600s >= 600s (agent.max_call_secs)".to_string(),
+        },
+    );
+    assert_eq!(mode.kind, FailureKind::CallTimeCap, "{mode:?}");
+    assert_eq!(mode.kind.tag(), "CALL_TIME_CAP");
+    assert!(
+        mode.advice.contains("agent.max_call_secs"),
+        "{}",
+        mode.advice
+    );
+    assert!(
+        !mode.advice.contains("raise max_iterations"),
+        "{}",
+        mode.advice
+    );
+    assert!(!mode.kind.is_nonfailure());
+    assert!(mode.cli_banner().contains("CALL_TIME_CAP"));
+}
+
+#[tokio::test]
+async fn cost_cap_stop_names_the_cost_budget() {
+    let agent = make_agent().await;
+    let mode = FailureMode::classify(
+        &agent,
+        RunOutcome::Failed {
+            reason: "Cost budget exhausted: $1.0100 >= $1.0000".to_string(),
+        },
+    );
+    assert_eq!(mode.kind, FailureKind::BudgetExhausted);
+    assert!(
+        mode.evidence.starts_with("cost budget exhausted"),
+        "{mode:?}"
+    );
+    assert!(mode.advice.contains("--max-cost-usd"), "{}", mode.advice);
+}
+
+#[tokio::test]
+async fn token_and_wall_clock_stops_keep_their_labels() {
+    let agent = make_agent().await;
+    let token = FailureMode::classify(
+        &agent,
+        RunOutcome::Failed {
+            reason: "Token budget exhausted: 10 >= 5 tokens".to_string(),
+        },
+    );
+    assert_eq!(token.kind, FailureKind::BudgetExhausted);
+    assert!(token.advice.contains("--max-budget-tokens"));
+    let wall = FailureMode::classify(
+        &agent,
+        RunOutcome::Failed {
+            reason: "Wall-clock timeout: 905s >= 900s".to_string(),
+        },
+    );
+    assert_eq!(wall.kind, FailureKind::Timeout);
+}

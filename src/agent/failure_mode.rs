@@ -38,6 +38,11 @@ pub enum FailureKind {
     RetryLoop,
     /// Wall-clock budget exhausted while making progress.
     Timeout,
+    /// ONE model call exceeded the per-call cap (`agent.max_call_secs`) and
+    /// was aborted. Distinct from `Timeout` (the run's wall budget) and from
+    /// `MaxIterations`: neither more wall time nor more iterations helps —
+    /// the cap, the output budget or the reasoning effort must change.
+    CallTimeCap,
     /// Selfware-side panic, invariant violation, or known bug.
     SelfwareError,
     /// Completed naturally but performed zero mutating tool calls — no files
@@ -107,6 +112,7 @@ impl FailureKind {
             FailureKind::NontermProse => "NONTERM_PROSE",
             FailureKind::RetryLoop => "RETRY_LOOP",
             FailureKind::Timeout => "TIMEOUT",
+            FailureKind::CallTimeCap => "CALL_TIME_CAP",
             FailureKind::SelfwareError => "SELFWARE_ERROR",
             FailureKind::NoChange => "NO_CHANGES",
             FailureKind::BudgetExhausted => "BUDGET_EXHAUSTED",
@@ -370,6 +376,38 @@ impl FailureMode {
                         safety_blocked,
                         read_only,
                     );
+                }
+                // Per-call cap (`agent.max_call_secs`): one call was aborted.
+                // Its message ("Per-call time cap exceeded") carries neither
+                // "timeout" nor "wall-clock", so it used to fall through to
+                // MAX_ITERATIONS with "raise max_iterations" advice (0.8.2
+                // live validation D1). Name the real knob.
+                if reason.contains("Per-call time cap exceeded")
+                    || reason.contains("agent.max_call_secs")
+                {
+                    return FailureMode {
+                        restored_files: Vec::new(),
+                        kind: FailureKind::CallTimeCap,
+                        evidence: format!(
+                            "{} — one model call was aborted at the per-call cap, with {} mutating tool calls completed",
+                            truncate(&reason, 120),
+                            mutating
+                        ),
+                        advice: "raise agent.max_call_secs in the config, or lower max_tokens / reasoning effort so one call fits; more iterations or wall time will not help".to_string(),
+                    };
+                }
+                // Cost cap: same kind as the token cap, but name the right knob.
+                if reason.contains("Cost budget exhausted") {
+                    return FailureMode {
+                        restored_files: Vec::new(),
+                        kind: FailureKind::BudgetExhausted,
+                        evidence: format!(
+                            "cost budget exhausted with {} mutating tool calls completed ({})",
+                            mutating,
+                            truncate(&reason, 80)
+                        ),
+                        advice: "increase --max-cost-usd or shrink the task scope".to_string(),
+                    };
                 }
                 // Token-budget exhaustion is NOT a wall-clock timeout — the fix
                 // is a bigger --max-budget-tokens, not more wall time. Check it
