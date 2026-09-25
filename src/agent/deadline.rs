@@ -549,11 +549,21 @@ impl Agent {
     /// grounding status keeps the wrong counts and problems and gains the
     /// "citations not corrected: deadline|budget" note, so the banner is ⚠️
     /// and the outcome is not green (rule 3). Never accepts a draft judged
-    /// before a later edit. Returns the accepted text.
+    /// before a later edit, nor one a newer write-up superseded. Returns the
+    /// accepted text.
     pub(super) fn take_rejected_draft_at_limit(&mut self) -> Option<String> {
         let (cause, why) = self.one_turn_no_fit()?;
         let draft = {
             let mut state = self.citation_gate.lock().unwrap_or_else(|e| e.into_inner());
+            if state
+                .rejected_draft
+                .as_ref()
+                .is_some_and(|d| !self.rejected_draft_is_newest_write_up(&d.text))
+            {
+                // A newer write-up superseded it: never deliver the older one.
+                state.rejected_draft = None;
+                return None;
+            }
             let fresh = state.rejected_draft.as_ref().is_some_and(|d| {
                 d.mutation_sequence == self.mutation_sequence && !d.text.trim().is_empty()
             });
@@ -587,9 +597,29 @@ impl Agent {
         Some(text)
     }
 
+    /// Whether the citation gate's kept draft is still the run's newest
+    /// write-up: walking the history newest first, the draft's own prose is
+    /// met before any other assistant message with at least
+    /// [`PARTIAL_TEXT_MIN_CHARS`] of prose. A newer write-up the gate never
+    /// judged (the run stopped first) supersedes it. With the draft compacted
+    /// out of the history and nothing newer, it still stands.
+    fn rejected_draft_is_newest_write_up(&self, draft: &str) -> bool {
+        let draft = answer_prose(draft);
+        for m in self.messages.iter().rev().filter(|m| m.role == "assistant") {
+            let prose = answer_prose(&m.content.text_all());
+            if prose == draft {
+                return true;
+            }
+            if prose.chars().count() >= PARTIAL_TEXT_MIN_CHARS {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Answer text for a timeout partial (see
     /// [`PartialProgress::last_assistant_text`]): the draft the citation
-    /// gate last rejected, else every assistant write-up segment of at least
+    /// gate last rejected while it is still the newest write-up, else every assistant write-up segment of at least
     /// `PARTIAL_TEXT_MIN_CHARS` prose chars, oldest first — reviews told
     /// to write up part by part spread the answer over several turns, and
     /// the newest segment alone would drop the earlier parts. Bounded to
@@ -601,6 +631,7 @@ impl Agent {
             .unwrap_or_else(|e| e.into_inner())
             .rejected_draft
             .as_ref()
+            .filter(|d| self.rejected_draft_is_newest_write_up(&d.text))
             .map(|d| answer_prose(&d.text))
             .filter(|t| t.chars().count() >= PARTIAL_TEXT_MIN_CHARS);
         let text = gate_draft.or_else(|| {

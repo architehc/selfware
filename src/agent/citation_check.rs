@@ -1234,7 +1234,8 @@ pub(crate) struct CitationGateState {
     /// Outcome of the latest evaluation, read by the summary/banner/JSON.
     pub status: Option<GroundingStatus>,
     /// The latest answer the gate rejected, with its grounding outcome and
-    /// the mutation sequence it was judged at. The deadline path accepts it
+    /// the mutation sequence it was judged at; cleared when a later answer
+    /// is accepted. The deadline path accepts it
     /// when a correction round can no longer fit, and the timeout partial
     /// carries it (see [`super::deadline`]).
     pub rejected_draft: Option<RejectedDraft>,
@@ -1348,6 +1349,8 @@ impl super::Agent {
 
         if report.total == 0 && !is_read_only {
             // Nothing cited and not a review/report task: nothing to say.
+            // This answer supersedes any draft rejected earlier.
+            state.rejected_draft = None;
             state.status = None;
             state.last_eval = Some((key, None));
             return None;
@@ -1416,13 +1419,15 @@ impl super::Agent {
         status.not_corrected = limit_step_aside
             .as_ref()
             .map(|w| w.cause.note_word().to_string());
-        if result.is_some() {
-            state.rejected_draft = Some(RejectedDraft {
-                text: answer.clone(),
-                status: status.clone(),
-                mutation_sequence: self.mutation_sequence,
-            });
-        }
+        // The kept draft is always the LATEST judged answer: a rejection
+        // replaces it, and an accepted answer (clean, or accepted with the
+        // count reported) retires it — otherwise the limit path and the
+        // timeout partial delivered a stale rejected v1 over an accepted v2.
+        state.rejected_draft = result.is_some().then(|| RejectedDraft {
+            text: answer.clone(),
+            status: status.clone(),
+            mutation_sequence: self.mutation_sequence,
+        });
         // Counts come from the status, never a literal: a same-step
         // re-evaluation of a still-wrong answer has no round marker and used
         // to report "0 wrong" next to "N wrong" (0.8.2 live validation D13).

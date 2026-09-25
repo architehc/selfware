@@ -1064,6 +1064,46 @@ async fn gate_rejection_outside_the_deadline_reserve_still_runs_a_correction_rou
     assert_eq!(draft.status.problem_count(), 1);
 }
 
+/// Review finding (wrong-answer risk): v1 rejected → v2 accepted → the
+/// deadline arrives while another gate still holds completion. The limit
+/// path used to deliver the stale rejected v1 over the accepted v2.
+#[tokio::test]
+async fn an_accepted_later_draft_retires_the_rejected_one_at_the_deadline() {
+    let ws = workspace();
+    // 800 s left: v1 gets a correction round, and its draft is kept.
+    let mut agent = deadline_gate_agent(ws.path(), 100).await;
+    answer(&mut agent, 1, WRONG_ANSWER);
+    assert!(agent.citation_gate(true).is_some(), "v1 rejected");
+    assert!(agent.citation_gate.lock().unwrap().rejected_draft.is_some());
+    answer(&mut agent, 2, FIXED_ANSWER);
+    assert_eq!(agent.citation_gate(true), None, "v2 accepted");
+    assert!(
+        agent.citation_gate.lock().unwrap().rejected_draft.is_none(),
+        "an accepted answer retires the kept rejected draft"
+    );
+    agent.last_assistant_response = FIXED_ANSWER.to_string();
+    // 10 s left: not even one more turn fits.
+    agent.task_start_time = std::time::Instant::now() - std::time::Duration::from_secs(890);
+    assert_eq!(agent.take_rejected_draft_at_limit(), None);
+    assert_eq!(agent.last_assistant_response, FIXED_ANSWER, "v2 delivered");
+    let status = agent.grounding_status().expect("status");
+    assert_eq!(status.problem_count(), 0, "v2's clean status stands");
+    assert_eq!(status.not_corrected, None);
+}
+
+/// The same for an answer with no citations at all on a mutation task
+/// (the gate's early "nothing to say" return) — it still supersedes v1.
+#[tokio::test]
+async fn an_uncited_later_answer_retires_the_rejected_draft_too() {
+    let ws = workspace();
+    let mut agent = deadline_gate_agent(ws.path(), 100).await;
+    answer(&mut agent, 1, WRONG_ANSWER);
+    assert!(agent.citation_gate(true).is_some());
+    answer(&mut agent, 2, "Done: the helper now returns a u32.");
+    assert_eq!(agent.citation_gate(false), None);
+    assert!(agent.citation_gate.lock().unwrap().rejected_draft.is_none());
+}
+
 /// Without a wall budget nothing changes.
 #[tokio::test]
 async fn gate_without_a_wall_budget_never_steps_aside_for_time() {

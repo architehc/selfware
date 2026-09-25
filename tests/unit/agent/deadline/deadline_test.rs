@@ -547,6 +547,38 @@ async fn rejected_draft_is_taken_only_when_one_call_no_longer_fits() {
     server.stop().await;
 }
 
+/// Rule-5 sweep of the stale-draft finding: a newer write-up the gate never
+/// judged supersedes the kept rejected draft — the limit path no longer
+/// delivers the older draft, and the partial ends with the newer text.
+#[tokio::test]
+async fn a_newer_write_up_supersedes_the_kept_rejected_draft() {
+    let server = MockLlmServer::builder().with_response("x").build().await;
+    let mut config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
+    config.agent.max_wall_secs = Some(900);
+    let mut agent = Agent::new(config).await.unwrap();
+    let v1 = format!("# Review v1\n\n{}", "Finding about the parser. ".repeat(12));
+    let v2 = format!("# Review v2\n\n{}", "Finding about the loop. ".repeat(12));
+    agent.messages.push(Message::assistant(v1.clone()));
+    set_rejected_draft(&agent, &v1);
+    backdate(&mut agent, 890); // 10 s left: one more turn does not fit
+
+    // Control: v1 is still the newest write-up, so it is taken.
+    assert_eq!(
+        agent.take_rejected_draft_at_limit().as_deref(),
+        Some(v1.trim())
+    );
+
+    set_rejected_draft(&agent, &v1);
+    agent.messages.push(Message::assistant(v2.clone()));
+    assert_eq!(agent.take_rejected_draft_at_limit(), None, "v1 is stale");
+    assert!(agent.citation_gate.lock().unwrap().rejected_draft.is_none());
+
+    set_rejected_draft(&agent, &v1);
+    let text = agent.partial_answer_text().expect("write-up carried");
+    assert!(text.ends_with(&answer_prose(&v2)), "{text}");
+    server.stop().await;
+}
+
 /// b2_350000 replayed through the loop: the gate rejected the draft, the
 /// correction round ate the budget, and 139 s remain against a 232 s
 /// slowest call. The run now finishes with the draft — no model call, exit
