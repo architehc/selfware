@@ -1,7 +1,10 @@
 use tracing::{debug, info, warn};
 
 use super::*;
-use crate::api::tool_calling::{extract_tool_calls, extract_tool_calls_from_text};
+use crate::api::tool_calling::{
+    extract_tool_calls_detailed, extract_tool_calls_from_text_detailed,
+};
+use crate::tool_parser::ParseRejection;
 
 pub(super) type CollectedToolCall = (String, String, Option<String>);
 
@@ -16,12 +19,18 @@ impl Agent {
     ///
     /// This replaces the previously-duplicated native-vs-text branching logic
     /// so the agent and the SWL runtime parse responses identically.
+    ///
+    /// The second element lists tool-call text the parser could not accept
+    /// (malformed or mixed syntax). Those calls did NOT run; the caller must
+    /// report them to the model as refused calls (see `dispatch_model_batch`).
+    /// The reasoning fallback goes through the same parser and is adopted
+    /// whole (calls and rejections) when it yields calls.
     pub(super) fn collect_tool_calls(
         &self,
         content: &str,
         reasoning_content: Option<&str>,
         native_tool_calls: Option<&Vec<crate::api::types::ToolCall>>,
-    ) -> Vec<(String, String, Option<String>)> {
+    ) -> (Vec<CollectedToolCall>, Vec<ParseRejection>) {
         // Build a synthetic Message we can hand off to the unified extractor.
         let msg = crate::api::types::Message {
             role: "assistant".to_string(),
@@ -32,7 +41,9 @@ impl Agent {
             name: None,
         };
 
-        let mut extracted = extract_tool_calls(&msg, self.effective_native_fc());
+        let detailed = extract_tool_calls_detailed(&msg, self.effective_native_fc());
+        let mut extracted = detailed.calls;
+        let mut rejections = detailed.rejections;
 
         // Canonicalize alias argument spellings (old_string → old_str,
         // file_path → path, cmd → command, ...) immediately after extraction:
@@ -68,18 +79,27 @@ impl Agent {
             });
         }
 
-        // Fallback: when the content branch produced nothing, scan reasoning_content.
-        if extracted.is_empty() {
+        // Fallback: when the content branch produced nothing (no call and no
+        // rejected call markup), scan reasoning_content with the same parser.
+        if extracted.is_empty() && rejections.is_empty() {
             if let Some(reasoning_text) = reasoning_content {
-                let from_reasoning = extract_tool_calls_from_text(reasoning_text);
-                if !from_reasoning.is_empty() {
+                let from_reasoning = extract_tool_calls_from_text_detailed(reasoning_text);
+                if !from_reasoning.calls.is_empty() {
                     info!(
                         "Found {} tool calls in reasoning content",
-                        from_reasoning.len()
+                        from_reasoning.calls.len()
                     );
-                    extracted = from_reasoning;
+                    extracted = from_reasoning.calls;
+                    rejections = from_reasoning.rejections;
                 }
             }
+        }
+        for rejection in &rejections {
+            warn!(
+                "Unparsed tool call ({}) will be reported to the model: {}",
+                rejection.tool_name.as_deref().unwrap_or("unknown tool"),
+                rejection.reason
+            );
         }
 
         if !extracted.is_empty() {
@@ -89,7 +109,7 @@ impl Agent {
             );
         }
 
-        extracted
+        let calls = extracted
             .into_iter()
             .map(|tc| {
                 debug!(
@@ -108,6 +128,7 @@ impl Agent {
                 };
                 (tc.function.name, tc.function.arguments, id)
             })
-            .collect()
+            .collect();
+        (calls, rejections)
     }
 }

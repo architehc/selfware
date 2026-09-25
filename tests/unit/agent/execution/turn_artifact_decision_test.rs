@@ -250,3 +250,76 @@ async fn existing_turn_file_is_never_overwritten() {
     assert!(!turns.join("turn_0004.json").exists());
     assert_eq!(agent.turn_artifact_seq, 3, "numbering continues after it");
 }
+
+/// D6: b3_review turn_0010 (verbatim qwen38-flash-next content). The first
+/// call parses; the second (`<function=tool>` + `<name>` + `<arguments>`
+/// closed by `</tool>`) matches no parser. 0.8.2 silently dropped it: not
+/// executed, not in rejected_tools, no tool result. It must now be refused
+/// through the dispatcher funnel so the model is told.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn d6_unparseable_call_in_mixed_batch_is_rejected_and_reported() {
+    let cwd = crate::test_support::CwdGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    cwd.switch_to(dir.path());
+    std::fs::write(dir.path().join("notes.txt"), "hello\n").unwrap();
+
+    let content = "\n\n<tool>\n<name>file_read</name>\n<arguments>{\"path\": \"notes.txt\"}</arguments>\n</tool>\n</tool_call>\n<tool_call>\n<function=tool>\n<name>file_read</name>\n<arguments>{\"path\": \"src/agent/tool_validator.rs\"}</arguments>\n</tool>";
+    let (agent, result) = run_one_step(content, dir.path()).await;
+    assert!(result.is_ok(), "step must not error: {:?}", result.err());
+
+    let decision = only_decision(dir.path());
+    assert_eq!(decision["kind"], "executed_tools", "{decision}");
+    assert_eq!(decision["tools"].as_array().unwrap().len(), 1, "{decision}");
+    let rejected = decision["rejected_tools"].as_array().unwrap();
+    assert_eq!(rejected.len(), 1, "{decision}");
+    assert_eq!(rejected[0]["name"], "file_read");
+    assert!(
+        rejected[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("NOT executed"),
+        "{decision}"
+    );
+    // The model sees a tool result for the rejected call.
+    let told = agent.messages.iter().any(|m| {
+        let text = m.content.text_all();
+        text.contains("NOT executed") && text.contains("src/agent/tool_validator.rs")
+    });
+    assert!(told, "the rejection must reach the model as a tool result");
+}
+
+/// D6: b3_resume turn_0002 (verbatim): the response's only call is
+/// malformed. The turn is a rejected tool call, not a final answer.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn d6_all_calls_unparseable_is_rejected_not_final_answer() {
+    let cwd = crate::test_support::CwdGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    cwd.switch_to(dir.path());
+
+    let content = "\n\nI'll start with stages 4 and 5. Let me read the checkpoint, replay, and recovery implementation bodies.\n\n<tool_call>\n<function=tool>\n<parameter=name>\nfile_read</name>\n<parameter=arguments>{\"path\": \"src/evolve/replay.rs\", \"line_range\": [1, 200]}\n</parameter>\n</tool>\n</tool_call>";
+    let (agent, result) = run_one_step(content, dir.path()).await;
+    assert!(
+        matches!(result, Ok(false)),
+        "the turn must continue, not complete: {:?}",
+        result
+    );
+    let decision = only_decision(dir.path());
+    assert_eq!(decision["kind"], "rejected_tools", "{decision}");
+    assert_eq!(
+        decision["rejected_tools"].as_array().unwrap().len(),
+        1,
+        "{decision}"
+    );
+    assert!(agent
+        .messages
+        .iter()
+        .any(|m| m.content.text_all().contains("NOT executed")));
+}

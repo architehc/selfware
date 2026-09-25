@@ -660,13 +660,32 @@ impl Agent {
     /// with each call, then record the turn's real decision: executed calls
     /// with their outcomes, calls refused before execution with the reason,
     /// or a stop before dispatch (budget cap, progress guard, cancellation).
+    ///
+    /// `parse_rejections` are tool calls from the same response that no parser
+    /// accepted: each is answered with a refusal tool-result BEFORE the batch
+    /// runs, so the model is told it did not run and the artifact lists it in
+    /// `rejected_tools` (the same funnel as every other pre-execution refusal).
     async fn dispatch_model_batch(
         &mut self,
         ctx: &TurnArtifactCtx,
         tool_calls: Vec<CollectedToolCall>,
+        parse_rejections: &[crate::tool_parser::ParseRejection],
     ) -> Result<()> {
         self.dispatch_journal = Some(Vec::new());
-        let batch_result = self.execute_tool_batch(tool_calls).await;
+        for rejection in parse_rejections {
+            let name = rejection
+                .tool_name
+                .clone()
+                .unwrap_or_else(|| "unparsed_tool_call".to_string());
+            let call_id = format!("call_{}", uuid::Uuid::new_v4());
+            self.push_tool_result_message(false, &call_id, &name, "{}", false, &rejection.reason)
+                .await;
+        }
+        let batch_result = if tool_calls.is_empty() {
+            Ok(())
+        } else {
+            self.execute_tool_batch(tool_calls).await
+        };
         let journal = self.dispatch_journal.take().unwrap_or_default();
         let unanswered_reason = match &batch_result {
             Err(e) => format!("not dispatched: {}", e),
@@ -893,7 +912,7 @@ impl Agent {
         // the per-turn debug capture below uses it to write the artifact.
         let chat_metadata = response.metadata.clone();
 
-        let tool_calls = self.collect_tool_calls(
+        let (tool_calls, parse_rejections) = self.collect_tool_calls(
             &content,
             response.reasoning_content.as_deref(),
             response.native_tool_calls.as_ref(),
@@ -1126,6 +1145,25 @@ impl Agent {
                     ));
                 }
             }
+        }
+
+        // Every tool call in the response was malformed (no parser accepted
+        // it): the turn is neither a final answer nor a no-action turn. Answer
+        // each rejected call with a refusal so the model learns it did not run
+        // and re-issues it, instead of believing it executed.
+        if tool_calls.is_empty() && !parse_rejections.is_empty() {
+            info!(
+                "{} tool call(s) could not be parsed — reporting them as rejected",
+                parse_rejections.len()
+            );
+            self.dispatch_model_batch(&artifact_ctx, Vec::new(), &parse_rejections)
+                .await?;
+            self.cognitive_state.episodic_memory.what_failed(
+                "tool_format",
+                "Malformed tool call detected — reported as rejected tool call(s)",
+            );
+            self.note_mutation_no_tool_stall("malformed tool XML")?;
+            return Ok(false);
         }
 
         // Detect malformed tool calls and inject correction before treating as completion
@@ -1748,7 +1786,9 @@ impl Agent {
         // its evidence necessarily omits this turn's changes. Record a second,
         // clearly-labelled snapshot afterwards -- and on the error path too,
         // since a batch that failed part-way still moved the tree.
-        let batch_result = self.dispatch_model_batch(&artifact_ctx, tool_calls).await;
+        let batch_result = self
+            .dispatch_model_batch(&artifact_ctx, tool_calls, &parse_rejections)
+            .await;
         self.write_post_execution_evidence().await;
         batch_result?;
 

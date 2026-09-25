@@ -21,7 +21,7 @@
 //! `chat_with_profile()`, and the SWL runtime.
 
 use super::types::{Message, ToolCall, ToolDefinition, ToolFunction};
-use crate::tool_parser::{parse_tool_calls, ParsedToolCall};
+use crate::tool_parser::{parse_tool_calls, ParseRejection, ParsedToolCall};
 
 /// Attach tool definitions to a chat-completion request body.
 ///
@@ -64,19 +64,34 @@ pub fn attach_tools(
 ///
 /// In all cases the returned `ToolCall` values are normalized OpenAI-style
 /// objects (id/type/function) so downstream code never needs to distinguish.
-pub fn extract_tool_calls(message: &Message, _native_function_calling: bool) -> Vec<ToolCall> {
+pub fn extract_tool_calls(message: &Message, native_function_calling: bool) -> Vec<ToolCall> {
+    extract_tool_calls_detailed(message, native_function_calling).calls
+}
+
+/// Tool calls extracted from a message, plus the tool-call text the parser
+/// could not accept. Rejections are never executed; callers that dispatch
+/// tools must report them to the model (see `Agent::collect_tool_calls`).
+#[derive(Debug, Default)]
+pub struct ExtractedToolCalls {
+    pub calls: Vec<ToolCall>,
+    pub rejections: Vec<ParseRejection>,
+}
+
+/// [`extract_tool_calls`] that also returns the parse rejections of the
+/// text-fallback path (native calls carry none).
+pub fn extract_tool_calls_detailed(
+    message: &Message,
+    _native_function_calling: bool,
+) -> ExtractedToolCalls {
     if let Some(native) = &message.tool_calls {
         if !native.is_empty() {
-            return native.clone();
+            return ExtractedToolCalls {
+                calls: native.clone(),
+                rejections: Vec::new(),
+            };
         }
     }
-    let text = message.content.text_all();
-    let parsed = parse_tool_calls(&text);
-    parsed
-        .tool_calls
-        .into_iter()
-        .map(parsed_to_tool_call)
-        .collect()
+    extract_tool_calls_from_text_detailed(&message.content.text_all())
 }
 
 /// Convert a [`ParsedToolCall`] (from the text parser) into an OpenAI-style
@@ -101,12 +116,20 @@ pub fn parsed_to_tool_call(parsed: ParsedToolCall) -> ToolCall {
 /// (e.g. the streaming path in `agent/assistant_response.rs`, which
 /// receives the assembled text directly).
 pub fn extract_tool_calls_from_text(content: &str) -> Vec<ToolCall> {
+    extract_tool_calls_from_text_detailed(content).calls
+}
+
+/// [`extract_tool_calls_from_text`] that also returns the parse rejections.
+pub fn extract_tool_calls_from_text_detailed(content: &str) -> ExtractedToolCalls {
     let parsed = parse_tool_calls(content);
-    parsed
-        .tool_calls
-        .into_iter()
-        .map(parsed_to_tool_call)
-        .collect()
+    ExtractedToolCalls {
+        calls: parsed
+            .tool_calls
+            .into_iter()
+            .map(parsed_to_tool_call)
+            .collect(),
+        rejections: parsed.rejections,
+    }
 }
 
 #[cfg(test)]

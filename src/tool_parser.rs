@@ -42,6 +42,9 @@ pub struct ParseResult {
     pub text_content: String,
     /// Parsing errors encountered (non-fatal)
     pub parse_errors: Vec<String>,
+    /// Tool-call text that was NOT executed because no parser accepted it
+    /// (malformed or mixed syntax, invalid JSON). Callers must tell the model.
+    pub rejections: Vec<ParseRejection>,
 }
 
 // All regex patterns are compiled once and cached via OnceLock to avoid
@@ -280,17 +283,456 @@ fn normalize_malformed_xml(content: &str) -> String {
     result
 }
 
-/// Parse content for tool calls using multiple strategies
+/// A span of the response that looked like a tool call but that no parser
+/// could turn into an executable call. Surfaced to the model as a refused
+/// call (never silently dropped): the model must learn the call did not run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseRejection {
+    /// Best-effort name of the tool the model tried to call, when the region
+    /// names one (`<function=x>`, `<name>x</name>`, `call tool="x"`).
+    pub tool_name: Option<String>,
+    /// Why the region was not executed, phrased for the model.
+    pub reason: String,
+    /// The rejected text (verbatim, may be long).
+    pub raw_text: String,
+}
+
+/// One tool-call match of one syntax family, located in the parsed text.
+struct Candidate {
+    span: std::ops::Range<usize>,
+    /// Family priority: lower wins when two families claim overlapping text.
+    family: usize,
+    result: Result<ParsedToolCall>,
+}
+
+/// Run one regex family over the whole text. `build` returns `None` for a
+/// match that is not a tool call at all (e.g. a JSON block without a name).
+fn regex_family(
+    content: &str,
+    regex: &Regex,
+    family: usize,
+    build: impl Fn(&regex::Captures<'_>, String) -> Option<Result<ParsedToolCall>>,
+) -> Vec<Candidate> {
+    regex
+        .captures_iter(content)
+        .filter_map(|cap| {
+            let whole = cap.get(0)?;
+            let raw = whole.as_str().to_string();
+            build(&cap, raw).map(|result| Candidate {
+                span: whole.range(),
+                family,
+                result,
+            })
+        })
+        .collect()
+}
+
+/// `<tool>`-wrapped families whose body is `name` + `<arguments>` (groups 1, 2).
+fn xml_name_args_call(cap: &regex::Captures<'_>, raw: String) -> Option<Result<ParsedToolCall>> {
+    let name = cap[1].trim().to_string();
+    Some(
+        parse_xml_arguments(cap[2].trim()).map(|arguments| ParsedToolCall {
+            tool_name: name,
+            arguments,
+            raw_text: raw,
+            parse_method: ParseMethod::Xml,
+        }),
+    )
+}
+
+/// Qwen3 `<function=name>` + `<parameter=…>` families (groups 1, 2).
+fn qwen3_function_call(cap: &regex::Captures<'_>, raw: String) -> Option<Result<ParsedToolCall>> {
+    let name = resolve_qwen_tool_name(&cap[1], &cap[2]);
+    Some(
+        parse_qwen3_parameters(&cap[1], &cap[2]).map(|arguments| ParsedToolCall {
+            tool_name: name,
+            arguments,
+            raw_text: raw,
+            parse_method: ParseMethod::Xml,
+        }),
+    )
+}
+
+fn tool_call_json_regex() -> &'static Regex {
+    static TOOL_CALL_JSON_REGEX: OnceLock<Regex> = OnceLock::new();
+    TOOL_CALL_JSON_REGEX.get_or_init(|| {
+        Regex::new(r"(?s)<tool_call>\s*(\{.*?\})\s*</tool_call>")
+            .expect("Invalid tool_call JSON regex")
+    })
+}
+
+/// Every supported syntax family, matched over the WHOLE text, in priority
+/// order (the order in which the families used to be tried one after the
+/// other). Priority only matters when two families claim overlapping text.
+fn collect_candidates(content: &str) -> Vec<Candidate> {
+    let mut all = Vec::new();
+    let xml_families: [&Regex; 6] = [
+        xml_tool_regex(),
+        xml_tool_alt_regex(),
+        xml_tool_alt2_regex(),
+        xml_tool_function_regex(),
+        xml_tool_function_tag_regex(),
+        // Qwen's missing </arguments> variant: <tool><name>x</name><arguments>{...}</tool></tool>
+        xml_tool_missing_args_close_regex(),
+    ];
+    for (family, regex) in xml_families.into_iter().enumerate() {
+        all.extend(regex_family(content, regex, family, xml_name_args_call));
+    }
+    // <tool_call><function=name><parameter=key>value</parameter>...</function></tool_call>
+    all.extend(regex_family(
+        content,
+        qwen3_tool_call_regex(),
+        6,
+        qwen3_function_call,
+    ));
+    // <tool_call>{"name": "tool", "arguments": {...}}</tool_call> (Qwen3.5 / sglang)
+    all.extend(regex_family(
+        content,
+        tool_call_json_regex(),
+        7,
+        |cap, raw| match serde_json::from_str::<serde_json::Value>(cap[1].trim()) {
+            Ok(json) => {
+                let name = json
+                    .get("name")
+                    .or(json.get("tool"))
+                    .or(json.get("function"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())?;
+                let arguments = json
+                    .get("arguments")
+                    .or(json.get("args"))
+                    .or(json.get("parameters"))
+                    .cloned()
+                    .unwrap_or(serde_json::json!({}));
+                Some(Ok(ParsedToolCall {
+                    tool_name: name,
+                    arguments,
+                    raw_text: raw,
+                    parse_method: ParseMethod::Json,
+                }))
+            }
+            Err(e) => Some(Err(anyhow::anyhow!("Invalid JSON in <tool_call>: {}", e))),
+        },
+    ));
+    // <function=name>{"key": "value"}</function>. Outranks the bare function
+    // family: both share the `<function=name>…</function>` structure, but this
+    // variant carries inline JSON while the bare variant uses <parameter> tags.
+    all.extend(regex_family(
+        content,
+        openai_function_regex(),
+        8,
+        |cap, raw| {
+            let name = cap[1].trim().to_string();
+            Some(
+                serde_json::from_str::<serde_json::Value>(cap[2].trim())
+                    .map(|arguments| ParsedToolCall {
+                        tool_name: name,
+                        arguments,
+                        raw_text: raw,
+                        parse_method: ParseMethod::Xml,
+                    })
+                    .map_err(|e| anyhow::anyhow!("Invalid JSON in OpenAI function call: {}", e)),
+            )
+        },
+    ));
+    // <function=name><parameter=key>value</parameter>...</function>
+    all.extend(regex_family(
+        content,
+        bare_function_regex(),
+        9,
+        qwen3_function_call,
+    ));
+    for (family, found) in [
+        (10, try_parse_kimi_tools(content)),
+        (11, try_parse_json_blocks(content)),
+        (12, try_parse_plain_function_calls(content)),
+    ] {
+        for (result, span) in found.unwrap_or_default() {
+            all.push(Candidate {
+                span,
+                family,
+                result,
+            });
+        }
+    }
+    all
+}
+
+/// Resolve overlapping candidates: every piece of text is claimed by at most
+/// one call. Higher-priority families claim first (on overlap the family that
+/// used to be tried first wins); the survivors are returned in text order.
+fn resolve_overlaps(mut candidates: Vec<Candidate>) -> Vec<Candidate> {
+    candidates.sort_by_key(|c| (c.family, c.span.start));
+    let mut kept: Vec<Candidate> = Vec::new();
+    for candidate in candidates {
+        let overlaps = kept
+            .iter()
+            .any(|k| candidate.span.start < k.span.end && k.span.start < candidate.span.end);
+        if !overlaps {
+            kept.push(candidate);
+        }
+    }
+    kept.sort_by_key(|c| c.span.start);
+    kept
+}
+
+/// Generic wrapper names models put in the function slot while carrying the
+/// real tool in a `name` parameter: `<function=tool><parameter=name>X</parameter>
+/// <parameter=arguments>{…}</parameter></function>`.
+const GENERIC_WRAPPER_NAMES: &[&str] = &["tool", "tool_call", "function", "call"];
+
+/// Unwrap a generic-wrapper call to the real tool: when the tool name is one
+/// of [`GENERIC_WRAPPER_NAMES`] and the arguments are exactly `name` (a
+/// string) plus `arguments` (a JSON object, or a string holding one).
+fn unwrap_generic_wrapper(mut call: ParsedToolCall) -> ParsedToolCall {
+    if !GENERIC_WRAPPER_NAMES.contains(&call.tool_name.trim()) {
+        return call;
+    }
+    let Some(obj) = call.arguments.as_object() else {
+        return call;
+    };
+    if obj.len() != 2 {
+        return call;
+    }
+    let Some(inner_name) = obj
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+    else {
+        return call;
+    };
+    let inner_args = match obj.get("arguments") {
+        Some(v @ serde_json::Value::Object(_)) => v.clone(),
+        Some(serde_json::Value::String(s)) => {
+            match serde_json::from_str::<serde_json::Value>(s.trim()) {
+                Ok(v @ serde_json::Value::Object(_)) => v,
+                _ => return call,
+            }
+        }
+        _ => return call,
+    };
+    call.tool_name = inner_name.to_string();
+    call.arguments = inner_args;
+    call
+}
+
+/// Byte ranges of markdown code: fenced blocks (```/~~~, to the closing fence
+/// or end of text) and inline backtick spans. Text inside is quoted, never a
+/// live tool call or reasoning marker.
+pub(crate) fn markdown_code_spans(content: &str) -> Vec<std::ops::Range<usize>> {
+    let mut spans = Vec::new();
+    let bytes = content.as_bytes();
+    let mut line_start = 0usize;
+    let mut fence: Option<(usize, &str)> = None; // (start, marker)
+    while line_start < content.len() {
+        let line_end = content[line_start..]
+            .find('\n')
+            .map(|i| line_start + i + 1)
+            .unwrap_or(content.len());
+        let line = &content[line_start..line_end];
+        let trimmed = line.trim_start();
+        match fence {
+            Some((start, marker)) => {
+                if trimmed.starts_with(marker) {
+                    spans.push(start..line_end);
+                    fence = None;
+                }
+            }
+            None => {
+                if trimmed.starts_with("```") {
+                    fence = Some((line_start, "```"));
+                } else if trimmed.starts_with("~~~") {
+                    fence = Some((line_start, "~~~"));
+                } else {
+                    // Inline code spans on this line: a run of N backticks
+                    // closed by the next run of exactly N backticks.
+                    let mut i = line_start;
+                    while i < line_end {
+                        if bytes[i] != b'`' {
+                            i += 1;
+                            continue;
+                        }
+                        let open_start = i;
+                        while i < line_end && bytes[i] == b'`' {
+                            i += 1;
+                        }
+                        let run = i - open_start;
+                        let mut j = i;
+                        let mut closed = None;
+                        while j < line_end {
+                            if bytes[j] == b'`' {
+                                let close_start = j;
+                                while j < line_end && bytes[j] == b'`' {
+                                    j += 1;
+                                }
+                                if j - close_start == run {
+                                    closed = Some(j);
+                                    break;
+                                }
+                            } else {
+                                j += 1;
+                            }
+                        }
+                        if let Some(end) = closed {
+                            spans.push(open_start..end);
+                            i = end;
+                        }
+                    }
+                }
+            }
+        }
+        line_start = line_end;
+    }
+    if let Some((start, _)) = fence {
+        spans.push(start..content.len());
+    }
+    spans
+}
+
+fn in_spans(pos: usize, spans: &[std::ops::Range<usize>]) -> bool {
+    spans.iter().any(|s| s.contains(&pos))
+}
+
+/// Openers of a tool-call region in any supported syntax.
+const TOOL_CALL_OPENERS: &[&str] = &["<tool_call>", "<tool>", "<function=", "<|open|>call "];
+
+/// Wrapper tokens that carry no call on their own (a stray `</tool_call>`
+/// after a parsed call, a `<tool_call>` directly around a parsed call).
+const TOOL_CALL_WRAPPERS: &[&str] = &[
+    "<tool_call>",
+    "</tool_call>",
+    "</tool>",
+    "</function>",
+    "<|open|>tools<|sep|>",
+    "<|close|>tools<|sep|>",
+    "<|close|>tools",
+];
+
+fn strip_wrappers(text: &str) -> String {
+    let mut out = text.to_string();
+    for w in TOOL_CALL_WRAPPERS {
+        out = out.replace(w, "");
+    }
+    out.trim().to_string()
+}
+
+/// Best-effort name of the tool a rejected region tried to call.
+fn guess_rejected_tool_name(region: &str) -> Option<String> {
+    static NAME_REGEX: OnceLock<Regex> = OnceLock::new();
+    let re = NAME_REGEX.get_or_init(|| {
+        Regex::new(
+            r#"<function=([A-Za-z_][A-Za-z0-9_]*)|<name>\s*([A-Za-z_][A-Za-z0-9_]*)\s*</name>|<parameter=name>\s*([A-Za-z_][A-Za-z0-9_]*)\s*</parameter>|call\s+tool="([^"]+)""#,
+        )
+        .expect("Invalid rejected-name regex")
+    });
+    let mut generic = None;
+    for cap in re.captures_iter(region) {
+        let name = (1..=4)
+            .find_map(|i| cap.get(i))
+            .map(|m| m.as_str().to_string())?;
+        if GENERIC_WRAPPER_NAMES.contains(&name.as_str()) {
+            generic.get_or_insert(name);
+        } else {
+            return Some(name);
+        }
+    }
+    generic
+}
+
+const REJECTION_FORMAT_HINT: &str =
+    "Re-issue it as <tool><name>TOOL_NAME</name><arguments>{JSON object}</arguments></tool>.";
+
+fn rejection_preview(raw: &str) -> String {
+    const MAX: usize = 200;
+    let raw = raw.trim();
+    if raw.len() <= MAX {
+        raw.to_string()
+    } else {
+        format!("{}…", &raw[..raw.floor_char_boundary(MAX)])
+    }
+}
+
+/// Regions outside every claimed span that open like a tool call (a
+/// [`TOOL_CALL_OPENERS`] token at line start, outside markdown code) but that
+/// no parser accepted. Prose and quoted code never produce a rejection.
+fn find_unparsed_regions(
+    content: &str,
+    claimed: &[std::ops::Range<usize>],
+) -> Vec<std::ops::Range<usize>> {
+    let code = markdown_code_spans(content);
+    let mut openers: Vec<usize> = Vec::new();
+    for opener in TOOL_CALL_OPENERS {
+        for (pos, _) in content.match_indices(opener) {
+            if in_spans(pos, claimed) || in_spans(pos, &code) {
+                continue;
+            }
+            let line_start = content[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            // Only wrapper tokens (or nothing) may precede the opener on its line.
+            if !strip_wrappers(&content[line_start..pos]).is_empty() {
+                continue;
+            }
+            openers.push(pos);
+        }
+    }
+    openers.sort_unstable();
+    openers.dedup();
+
+    let mut regions: Vec<std::ops::Range<usize>> = Vec::new();
+    for &pos in &openers {
+        if let Some(last) = regions.last_mut() {
+            // `<tool_call>` directly followed by `<function=…>` is ONE call.
+            if pos <= last.end || strip_wrappers(&content[last.start..pos]).is_empty() {
+                continue;
+            }
+        }
+        let next_claim = claimed
+            .iter()
+            .map(|s| s.start)
+            .filter(|&s| s > pos)
+            .min()
+            .unwrap_or(content.len());
+        regions.push(pos..next_claim);
+    }
+    // Split regions at later openers that start a new call, and keep only
+    // regions that carry more than wrapper tokens.
+    let mut split: Vec<std::ops::Range<usize>> = Vec::new();
+    for region in regions {
+        let mut start = region.start;
+        let inner: Vec<usize> = openers
+            .iter()
+            .copied()
+            .filter(|&p| p > region.start && p < region.end)
+            .collect();
+        for p in inner {
+            if !strip_wrappers(&content[start..p]).is_empty()
+                && (content[p..].starts_with("<tool_call>") || content[p..].starts_with("<tool>"))
+            {
+                split.push(start..p);
+                start = p;
+            }
+        }
+        split.push(start..region.end);
+    }
+    split
+        .into_iter()
+        .filter(|r| !strip_wrappers(&content[r.clone()]).is_empty())
+        .collect()
+}
+
+/// Parse content for tool calls using multiple strategies.
+///
+/// Every supported syntax family is matched over the whole text, overlapping
+/// matches resolve to one call (two parsers never both claim the same text),
+/// and the calls come back in text order — so a response that mixes syntaxes
+/// yields every call, not only the first family's. The same call written in
+/// two syntaxes executes once. Text that opens like a tool call but that no
+/// parser accepts is reported in [`ParseResult::rejections`].
 pub fn parse_tool_calls(content: &str) -> ParseResult {
     // Enforce maximum input size to prevent pathological regex performance.
     // Use char-boundary-safe truncation to avoid panics on multi-byte UTF-8.
     let content = if content.len() > MAX_TOOL_PARSER_INPUT_SIZE {
-        // Find the largest index <= MAX_TOOL_PARSER_INPUT_SIZE that is a char boundary
-        let mut end = MAX_TOOL_PARSER_INPUT_SIZE;
-        while end > 0 && !content.is_char_boundary(end) {
-            end -= 1;
-        }
-        &content[..end]
+        &content[..content.floor_char_boundary(MAX_TOOL_PARSER_INPUT_SIZE)]
     } else {
         content
     };
@@ -302,8 +744,9 @@ pub fn parse_tool_calls(content: &str) -> ParseResult {
 
     let mut result = ParseResult {
         tool_calls: Vec::new(),
-        text_content: content.to_string(),
+        text_content: String::new(),
         parse_errors: Vec::new(),
+        rejections: Vec::new(),
     };
 
     // Warn about unclosed tool tags (common with Qwen3.5 quantized models)
@@ -316,363 +759,124 @@ pub fn parse_tool_calls(content: &str) -> ParseResult {
         );
     }
 
-    // Strategy 1: Try XML-style parsing first (most common for our agent)
-    if let Some(xml_results) = try_parse_xml(content) {
-        for (tool_call, raw) in xml_results {
-            match tool_call {
-                Ok(tc) => {
-                    // Remove the raw XML from text content
-                    result.text_content = result.text_content.replace(&raw, "");
-                    result.tool_calls.push(tc);
+    let kept = resolve_overlaps(collect_candidates(content));
+    let claimed: Vec<std::ops::Range<usize>> = kept.iter().map(|c| c.span.clone()).collect();
+
+    // Parser errors (e.g. invalid JSON inside <tool_call>) and regions no
+    // parser accepted, in text order.
+    let mut rejected: Vec<(usize, ParseRejection)> = Vec::new();
+    // Spans removed from the text content: the executed calls, and restated
+    // duplicates of them.
+    let mut removed: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut seen: Vec<(usize, String, serde_json::Value)> = Vec::new();
+    for candidate in kept {
+        match candidate.result {
+            Ok(call) => {
+                let call = unwrap_generic_wrapper(call);
+                removed.push(candidate.span.clone());
+                // The same call restated in another syntax runs once.
+                let duplicate = seen.iter().any(|(family, name, args)| {
+                    *family != candidate.family
+                        && *name == call.tool_name
+                        && *args == call.arguments
+                });
+                if duplicate {
+                    tracing::debug!(
+                        "Dropping restated duplicate of '{}' written in a second syntax",
+                        call.tool_name
+                    );
+                    continue;
                 }
-                Err(e) => {
-                    result.parse_errors.push(format!("XML parse error: {}", e));
-                }
+                seen.push((
+                    candidate.family,
+                    call.tool_name.clone(),
+                    call.arguments.clone(),
+                ));
+                result.tool_calls.push(call);
+            }
+            Err(e) => {
+                let raw = &content[candidate.span.clone()];
+                result
+                    .parse_errors
+                    .push(format!("Tool call parse error: {}", e));
+                rejected.push((
+                    candidate.span.start,
+                    ParseRejection {
+                        tool_name: guess_rejected_tool_name(raw),
+                        reason: format!(
+                            "Tool call NOT executed: it could not be parsed ({}). {} Call text: {}",
+                            e,
+                            REJECTION_FORMAT_HINT,
+                            rejection_preview(raw)
+                        ),
+                        raw_text: raw.to_string(),
+                    },
+                ));
             }
         }
     }
+    for region in find_unparsed_regions(content, &claimed) {
+        let raw = &content[region.clone()];
+        let tool_name = guess_rejected_tool_name(raw);
+        let what = tool_name
+            .as_deref()
+            .map(|n| format!("a call to '{}'", n))
+            .unwrap_or_else(|| "a tool call".to_string());
+        result.parse_errors.push(format!(
+            "Unparsed tool-call markup: {}",
+            rejection_preview(raw)
+        ));
+        rejected.push((
+            region.start,
+            ParseRejection {
+                tool_name,
+                reason: format!(
+                    "Tool call NOT executed: {} was written in a malformed or mixed syntax that no parser accepts. {} Call text: {}",
+                    what,
+                    REJECTION_FORMAT_HINT,
+                    rejection_preview(raw)
+                ),
+                raw_text: raw.to_string(),
+            },
+        ));
+    }
+    rejected.sort_by_key(|(start, _)| *start);
+    result.rejections = rejected.into_iter().map(|(_, r)| r).collect();
 
-    // Strategy 1b: Try Moonshot/Kimi delimiter format (<|open|>tools<|sep|> or <|open|>call tool=...)
-    if result.tool_calls.is_empty() {
-        if let Some(kimi_results) = try_parse_kimi_tools(content) {
-            for (tool_call, raw) in kimi_results {
-                match tool_call {
-                    Ok(tc) => {
-                        result.text_content = result.text_content.replace(&raw, "");
-                        result.tool_calls.push(tc);
-                    }
-                    Err(e) => {
-                        result
-                            .parse_errors
-                            .push(format!("Kimi tool parse error: {}", e));
-                    }
-                }
-            }
-            // Strip any residual container tokens: <|open|>tools<|sep|>, <|close|>tools<|sep|>, <|close|>message<|sep|>
-            result.text_content = result
-                .text_content
-                .replace("<|open|>tools<|sep|>", "")
-                .replace("<|close|>tools<|sep|>", "")
-                .replace("<|close|>tools", "")
-                .replace("<|close|>message<|sep|>", "")
-                .replace("<|close|>message", "");
+    // Text content: everything outside the executed calls, minus the Kimi
+    // container tokens that wrap them.
+    removed.sort_by_key(|r| r.start);
+    let mut text = String::with_capacity(content.len());
+    let mut cursor = 0;
+    for span in removed {
+        if span.start > cursor {
+            text.push_str(&content[cursor..span.start]);
+        }
+        cursor = cursor.max(span.end);
+    }
+    text.push_str(&content[cursor.min(content.len())..]);
+    if content.contains("call tool=") {
+        for token in [
+            "<|open|>tools<|sep|>",
+            "<|close|>tools<|sep|>",
+            "<|close|>tools",
+            "<|close|>message<|sep|>",
+            "<|close|>message",
+        ] {
+            text = text.replace(token, "");
         }
     }
-
-    // Strategy 2: Try JSON code blocks if no XML found
-    if result.tool_calls.is_empty() {
-        if let Some(json_results) = try_parse_json_blocks(content) {
-            for (tool_call, raw) in json_results {
-                match tool_call {
-                    Ok(tc) => {
-                        result.text_content = result.text_content.replace(&raw, "");
-                        result.tool_calls.push(tc);
-                    }
-                    Err(e) => {
-                        result.parse_errors.push(format!("JSON parse error: {}", e));
-                    }
-                }
-            }
-        }
-    }
-
-    // Strategy 3: Try plain function-call syntax as last resort
-    // Models sometimes output tool_name("arg1", "arg2") or tool_name(json) without XML tags
-    if result.tool_calls.is_empty() {
-        if let Some(func_results) = try_parse_plain_function_calls(content) {
-            for (tool_call, raw) in func_results {
-                match tool_call {
-                    Ok(tc) => {
-                        result.text_content = result.text_content.replace(&raw, "");
-                        result.tool_calls.push(tc);
-                    }
-                    Err(e) => {
-                        result
-                            .parse_errors
-                            .push(format!("Plain function parse error: {}", e));
-                    }
-                }
-            }
-        }
-    }
-
-    // Clean up text content
-    result.text_content = result.text_content.trim().to_string();
+    result.text_content = text.trim().to_string();
 
     result
 }
 
-/// Try to parse XML-style tool calls
-/// Supports both standard format and Qwen3-style format
-fn try_parse_xml(content: &str) -> Option<Vec<(Result<ParsedToolCall>, String)>> {
-    let regex = xml_tool_regex();
-    let alt_regex = xml_tool_alt_regex();
-
-    // Try standard format first
-    let mut results: Vec<_> = regex
-        .captures_iter(content)
-        .map(|cap| {
-            let raw = cap[0].to_string();
-            let name = cap[1].trim().to_string();
-            let args_str = cap[2].trim();
-
-            let result = parse_xml_arguments(args_str).map(|arguments| ParsedToolCall {
-                tool_name: name,
-                arguments,
-                raw_text: raw.clone(),
-                parse_method: ParseMethod::Xml,
-            });
-
-            (result, raw)
-        })
-        .collect();
-
-    // If no matches, try alternate format (Qwen3-style: <name=tool_name</name>)
-    if results.is_empty() {
-        results = alt_regex
-            .captures_iter(content)
-            .map(|cap| {
-                let raw = cap[0].to_string();
-                let name = cap[1].trim().to_string();
-                let args_str = cap[2].trim();
-
-                let result = parse_xml_arguments(args_str).map(|arguments| ParsedToolCall {
-                    tool_name: name,
-                    arguments,
-                    raw_text: raw.clone(),
-                    parse_method: ParseMethod::Xml,
-                });
-
-                (result, raw)
-            })
-            .collect();
-    }
-
-    // If still no matches, try second alternate format (<name=tool_name>)
-    if results.is_empty() {
-        let alt2_regex = xml_tool_alt2_regex();
-        results = alt2_regex
-            .captures_iter(content)
-            .map(|cap| {
-                let raw = cap[0].to_string();
-                let name = cap[1].trim().to_string();
-                let args_str = cap[2].trim();
-
-                let result = parse_xml_arguments(args_str).map(|arguments| ParsedToolCall {
-                    tool_name: name,
-                    arguments,
-                    raw_text: raw.clone(),
-                    parse_method: ParseMethod::Xml,
-                });
-
-                (result, raw)
-            })
-            .collect();
-    }
-
-    // If still no matches, try function-style format (<function=tool_name</function>)
-    if results.is_empty() {
-        let func_regex = xml_tool_function_regex();
-        results = func_regex
-            .captures_iter(content)
-            .map(|cap| {
-                let raw = cap[0].to_string();
-                let name = cap[1].trim().to_string();
-                let args_str = cap[2].trim();
-
-                let result = parse_xml_arguments(args_str).map(|arguments| ParsedToolCall {
-                    tool_name: name,
-                    arguments,
-                    raw_text: raw.clone(),
-                    parse_method: ParseMethod::Xml,
-                });
-
-                (result, raw)
-            })
-            .collect();
-    }
-
-    // If still no matches, try function tag format (<function>tool_name</function>)
-    if results.is_empty() {
-        let func_tag_regex = xml_tool_function_tag_regex();
-        results = func_tag_regex
-            .captures_iter(content)
-            .map(|cap| {
-                let raw = cap[0].to_string();
-                let name = cap[1].trim().to_string();
-                let args_str = cap[2].trim();
-
-                let result = parse_xml_arguments(args_str).map(|arguments| ParsedToolCall {
-                    tool_name: name,
-                    arguments,
-                    raw_text: raw.clone(),
-                    parse_method: ParseMethod::Xml,
-                });
-
-                (result, raw)
-            })
-            .collect();
-    }
-
-    // If still no matches, recover Qwen's missing </arguments> variant:
-    // <tool><name>x</name><arguments>{...}</tool></tool>
-    if results.is_empty() {
-        let malformed_regex = xml_tool_missing_args_close_regex();
-        results = malformed_regex
-            .captures_iter(content)
-            .map(|cap| {
-                let raw = cap[0].to_string();
-                let name = cap[1].trim().to_string();
-                let args_str = cap[2].trim();
-
-                let result = parse_xml_arguments(args_str).map(|arguments| ParsedToolCall {
-                    tool_name: name,
-                    arguments,
-                    raw_text: raw.clone(),
-                    parse_method: ParseMethod::Xml,
-                });
-
-                (result, raw)
-            })
-            .collect();
-    }
-
-    // If still no matches, try Qwen3 tool_call format
-    // Format: <tool_call><function=name><parameter=key>value</parameter>...</function></tool_call>
-    if results.is_empty() {
-        let qwen3_regex = qwen3_tool_call_regex();
-        results = qwen3_regex
-            .captures_iter(content)
-            .map(|cap| {
-                let raw = cap[0].to_string();
-                let name = resolve_qwen_tool_name(&cap[1], &cap[2]);
-                let params_str = &cap[2];
-
-                let result =
-                    parse_qwen3_parameters(&cap[1], params_str).map(|arguments| ParsedToolCall {
-                        tool_name: name,
-                        arguments,
-                        raw_text: raw.clone(),
-                        parse_method: ParseMethod::Xml,
-                    });
-
-                (result, raw)
-            })
-            .collect();
-    }
-
-    // Try <tool_call> with inline JSON format (Qwen3.5 122B / sglang)
-    // Format: <tool_call>\n{"name": "tool", "arguments": {...}}\n</tool_call>
-    if results.is_empty() {
-        static TOOL_CALL_JSON_REGEX: once_cell::sync::OnceCell<Regex> =
-            once_cell::sync::OnceCell::new();
-        let tc_regex = TOOL_CALL_JSON_REGEX.get_or_init(|| {
-            Regex::new(r"(?s)<tool_call>\s*(\{.*?\})\s*</tool_call>")
-                .expect("Invalid tool_call JSON regex")
-        });
-
-        results = tc_regex
-            .captures_iter(content)
-            .filter_map(|cap| {
-                let raw = cap[0].to_string();
-                let json_str = cap[1].trim();
-
-                match serde_json::from_str::<serde_json::Value>(json_str) {
-                    Ok(json) => {
-                        let name = json
-                            .get("name")
-                            .or(json.get("tool"))
-                            .or(json.get("function"))
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string())?;
-                        let arguments = json
-                            .get("arguments")
-                            .or(json.get("args"))
-                            .or(json.get("parameters"))
-                            .cloned()
-                            .unwrap_or(serde_json::json!({}));
-
-                        Some((
-                            Ok(ParsedToolCall {
-                                tool_name: name,
-                                arguments,
-                                raw_text: raw.clone(),
-                                parse_method: ParseMethod::Json,
-                            }),
-                            raw,
-                        ))
-                    }
-                    Err(e) => Some((
-                        Err(anyhow::anyhow!("Invalid JSON in <tool_call>: {}", e)),
-                        raw,
-                    )),
-                }
-            })
-            .collect();
-    }
-
-    // If still no matches, try OpenAI function format with inline JSON
-    // Format: <function=name>{"key": "value"}</function>
-    // This MUST come before the bare function regex because both share the
-    // `<function=name>...</function>` structure, but this variant carries
-    // inline JSON while the bare variant uses `<parameter>` tags.
-    if results.is_empty() {
-        let openai_regex = openai_function_regex();
-        results = openai_regex
-            .captures_iter(content)
-            .map(|cap| {
-                let raw = cap[0].to_string();
-                let name = cap[1].trim().to_string();
-                let json_str = cap[2].trim();
-
-                let result = serde_json::from_str::<serde_json::Value>(json_str)
-                    .map(|arguments| ParsedToolCall {
-                        tool_name: name,
-                        arguments,
-                        raw_text: raw.clone(),
-                        parse_method: ParseMethod::Xml,
-                    })
-                    .map_err(|e| anyhow::anyhow!("Invalid JSON in OpenAI function call: {}", e));
-
-                (result, raw)
-            })
-            .collect();
-    }
-
-    // If still no matches, try bare function format (without tool_call wrapper)
-    // Format: <function=name><parameter=key>value</parameter>...</function>
-    if results.is_empty() {
-        let bare_func_regex = bare_function_regex();
-        results = bare_func_regex
-            .captures_iter(content)
-            .map(|cap| {
-                let raw = cap[0].to_string();
-                let name = resolve_qwen_tool_name(&cap[1], &cap[2]);
-                let params_str = &cap[2];
-
-                let result =
-                    parse_qwen3_parameters(&cap[1], params_str).map(|arguments| ParsedToolCall {
-                        tool_name: name,
-                        arguments,
-                        raw_text: raw.clone(),
-                        parse_method: ParseMethod::Xml,
-                    });
-
-                (result, raw)
-            })
-            .collect();
-    }
-
-    if results.is_empty() {
-        None
-    } else {
-        Some(results)
-    }
-}
+/// A parsed (or failed) call with the byte span of the text it came from.
+type SpannedCall = (Result<ParsedToolCall>, std::ops::Range<usize>);
 
 /// Try to parse Moonshot/Kimi delimiter-style tool calls:
 /// `<|open|>call tool="name" index="1"<|sep|><|open|>argument key="arg" type="string"<|sep|>val<|close|>argument<|close|>call`
-fn try_parse_kimi_tools(content: &str) -> Option<Vec<(Result<ParsedToolCall>, String)>> {
+fn try_parse_kimi_tools(content: &str) -> Option<Vec<SpannedCall>> {
     if !content.contains("call tool=") {
         return None;
     }
@@ -682,7 +886,9 @@ fn try_parse_kimi_tools(content: &str) -> Option<Vec<(Result<ParsedToolCall>, St
     let results: Vec<_> = regex
         .captures_iter(content)
         .map(|cap| {
-            let raw = cap[0].to_string();
+            let whole = cap.get(0).expect("regex group 0 always matches");
+            let raw = whole.as_str().to_string();
+            let span = whole.range();
             let tool_name = cap[1].trim().to_string();
             let body = &cap[2];
 
@@ -738,7 +944,7 @@ fn try_parse_kimi_tools(content: &str) -> Option<Vec<(Result<ParsedToolCall>, St
                 parse_method: ParseMethod::Xml,
             };
 
-            (Ok(call), raw)
+            (Ok(call), span)
         })
         .collect();
 
@@ -946,7 +1152,7 @@ fn parse_xml_arguments(args_str: &str) -> Result<serde_json::Value> {
 }
 
 /// Try to parse JSON code blocks as tool calls
-fn try_parse_json_blocks(content: &str) -> Option<Vec<(Result<ParsedToolCall>, String)>> {
+fn try_parse_json_blocks(content: &str) -> Option<Vec<SpannedCall>> {
     let regex = json_block_regex();
 
     if !regex.is_match(content) {
@@ -956,7 +1162,9 @@ fn try_parse_json_blocks(content: &str) -> Option<Vec<(Result<ParsedToolCall>, S
     let results: Vec<_> = regex
         .captures_iter(content)
         .filter_map(|cap| {
-            let raw = cap[0].to_string();
+            let whole = cap.get(0).expect("regex group 0 always matches");
+            let raw = whole.as_str().to_string();
+            let span = whole.range();
             let json_str = &cap[1];
 
             // Try to parse as a tool call structure
@@ -983,13 +1191,13 @@ fn try_parse_json_blocks(content: &str) -> Option<Vec<(Result<ParsedToolCall>, S
                                 raw_text: raw.clone(),
                                 parse_method: ParseMethod::Json,
                             }),
-                            raw,
+                            span,
                         ))
                     } else {
                         None
                     }
                 }
-                Err(e) => Some((Err(anyhow::anyhow!("Invalid JSON: {}", e)), raw)),
+                Err(e) => Some((Err(anyhow::anyhow!("Invalid JSON: {}", e)), span)),
             }
         })
         .collect();
@@ -1009,7 +1217,7 @@ fn try_parse_json_blocks(content: &str) -> Option<Vec<(Result<ParsedToolCall>, S
 ///   tool_name({"key": "value"})
 ///
 /// This is a last-resort fallback for models that don't wrap tool calls in XML tags.
-fn try_parse_plain_function_calls(content: &str) -> Option<Vec<(Result<ParsedToolCall>, String)>> {
+fn try_parse_plain_function_calls(content: &str) -> Option<Vec<SpannedCall>> {
     // Known tool name prefixes — we only match calls that look like real tools
     const KNOWN_TOOLS: &[&str] = &[
         "file_read",
@@ -1118,7 +1326,9 @@ fn try_parse_plain_function_calls(content: &str) -> Option<Vec<(Result<ParsedToo
     let mut results = Vec::new();
 
     for cap in regex.captures_iter(content) {
-        let raw = cap[0].to_string();
+        let whole = cap.get(0).expect("regex group 0 always matches");
+        let raw = whole.as_str().to_string();
+        let span = whole.range();
         let name = cap[1].to_string();
         let args_raw = cap[2].trim();
 
@@ -1193,7 +1403,7 @@ fn try_parse_plain_function_calls(content: &str) -> Option<Vec<(Result<ParsedToo
                 raw_text: raw.clone(),
                 parse_method: ParseMethod::Json,
             }),
-            raw,
+            span,
         ));
     }
 

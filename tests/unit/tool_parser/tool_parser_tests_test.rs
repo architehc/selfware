@@ -288,6 +288,7 @@ fn test_parse_result_debug() {
         tool_calls: vec![],
         text_content: "test".to_string(),
         parse_errors: vec![],
+        rejections: vec![],
     };
     let debug_str = format!("{:?}", result);
     assert!(debug_str.contains("ParseResult"));
@@ -1193,4 +1194,228 @@ fn test_qwen_hybrid_guard_sees_parameter_name_dialect() {
     );
     assert_eq!(result.tool_calls[0].arguments["path"], "a.md");
     assert_eq!(result.tool_calls[0].arguments["content"], "x");
+}
+
+// ---------------------------------------------------------------------------
+// D6: mixed-format batches. Every fixture below is the verbatim `content` of a
+// qwen38-flash-next response from the 0.8.2 validation (runs/b3_review,
+// runs/long_review turn artifacts).
+// ---------------------------------------------------------------------------
+
+/// b3_review turn_0014: an XML `<tool>` call followed by a Qwen3
+/// `<function=…><parameter name=…>` call. 0.8.2 executed only the first.
+const B3_TURN_0014: &str = "\n\n<tool>\n<name>file_read</name>\n<arguments>{\"path\": \"src/agent/tool_validator.rs\"}</arguments>\n</tool>\n</tool_call>\n<tool_call>\n<function=directory_tree>\n<parameter name=\"path\">tests/unit\n</parameter>\n<parameter name=\"max_depth\">2\n</parameter>\n</function>\n</tool_call>";
+
+/// b3_review turn_0010: the second call is `<function=tool>` + `<name>` +
+/// `<arguments>` closed by `</tool>` — a syntax no parser accepts.
+const B3_TURN_0010: &str = "\n\n<tool>\n<name>file_read</name>\n<arguments>{\"path\": \"src/agent/tool_dispatch/mod.rs\", \"line_range\": [1900, 2180]}</arguments>\n</tool>\n</tool_call>\n<tool_call>\n<function=tool>\n<name>file_read</name>\n<arguments>{\"path\": \"src/agent/tool_validator.rs\"}</arguments>\n</tool>";
+
+/// b3_review turn_0003: second call `<function=file_read>` + `<arguments>`
+/// closed by `</tool>` (no `</function>`).
+const B3_TURN_0003: &str = "\n\n<tool>\n<name>file_read</name>\n<arguments>{\"path\": \"src/api/streaming.rs\", \"line_range\": [1, 200]}</arguments>\n</tool>\n</tool_call>\n<tool_call>\n<function=file_read>\n<arguments>{\"path\": \"src/tool_parser.rs\", \"line_range\": [1, 160]}</arguments>\n</tool>";
+
+/// b3_review turn_0002: two `<tool>` calls, the second wrapped in
+/// `<tool_call>` — wrappers alone are not a rejected call.
+const B3_TURN_0002: &str = "\n\n<tool>\n<name>directory_tree</name>\n<arguments>{\"path\": \"src/api\", \"max_depth\": 2}</arguments>\n</tool>\n</tool_call>\n<tool_call>\n<tool>\n<name>directory_tree</name>\n<arguments>{\"path\": \"src/agent\", \"max_depth\": 2}</arguments>\n</tool>\n</tool_call>";
+
+/// b3_review turn_0024: a malformed `<tool>` call (parameter instead of
+/// arguments) followed by a valid Qwen3 call.
+const B3_TURN_0024: &str = "\n\n<tool>\n<name>grep_search</name>\n<parameter name=\"arguments\">{\"pattern\": \"fn save|fn load|delta|last_write|persisted_tool_call_count|fn save_final|workspace|identity\", \"path\": \"src/checkpoint.rs\", \"context_lines\": 1, \"max_matches\": 40}</parameter>\n</tool>\n</tool_call>\n<tool_call>\n<function=glob_find>\n<parameter name=\"pattern\">src/checkpoint*.rs\n</parameter>\n</function>\n</tool_call>";
+
+fn names(result: &ParseResult) -> Vec<&str> {
+    result
+        .tool_calls
+        .iter()
+        .map(|c| c.tool_name.as_str())
+        .collect()
+}
+
+#[test]
+fn d6_turn_0014_mixed_xml_then_qwen3_parses_both_calls() {
+    let result = parse_tool_calls(B3_TURN_0014);
+    assert_eq!(names(&result), vec!["file_read", "directory_tree"]);
+    assert_eq!(
+        result.tool_calls[0].arguments,
+        serde_json::json!({"path": "src/agent/tool_validator.rs"})
+    );
+    assert_eq!(
+        result.tool_calls[1].arguments,
+        serde_json::json!({"path": "tests/unit", "max_depth": 2})
+    );
+    assert!(result.rejections.is_empty(), "{:?}", result.rejections);
+}
+
+#[test]
+fn d6_mixed_qwen3_then_xml_parses_both_in_text_order() {
+    // Same two calls, opposite order.
+    let content = "<tool_call>\n<function=directory_tree>\n<parameter name=\"path\">tests/unit\n</parameter>\n<parameter name=\"max_depth\">2\n</parameter>\n</function>\n</tool_call>\n<tool>\n<name>file_read</name>\n<arguments>{\"path\": \"src/agent/tool_validator.rs\"}</arguments>\n</tool>";
+    let result = parse_tool_calls(content);
+    assert_eq!(names(&result), vec!["directory_tree", "file_read"]);
+    assert!(result.rejections.is_empty(), "{:?}", result.rejections);
+}
+
+#[test]
+fn d6_mixed_json_tool_call_and_xml_in_both_orders() {
+    let json = "<tool_call>\n{\"name\": \"glob_find\", \"arguments\": {\"pattern\": \"src/*.rs\"}}\n</tool_call>";
+    let xml =
+        "<tool>\n<name>file_read</name>\n<arguments>{\"path\": \"a.rs\"}</arguments>\n</tool>";
+    let r1 = parse_tool_calls(&format!("{json}\n{xml}"));
+    assert_eq!(names(&r1), vec!["glob_find", "file_read"]);
+    let r2 = parse_tool_calls(&format!("{xml}\n{json}"));
+    assert_eq!(names(&r2), vec!["file_read", "glob_find"]);
+    assert!(r1.rejections.is_empty() && r2.rejections.is_empty());
+}
+
+#[test]
+fn d6_mixed_openai_function_and_bare_qwen3_in_both_orders() {
+    let openai = "<function=file_read>{\"path\": \"a.rs\"}</function>";
+    let bare = "<function=glob_find>\n<parameter=pattern>*.rs</parameter>\n</function>";
+    let r1 = parse_tool_calls(&format!("{openai}\n{bare}"));
+    assert_eq!(names(&r1), vec!["file_read", "glob_find"]);
+    assert_eq!(r1.tool_calls[0].arguments["path"], "a.rs");
+    let r2 = parse_tool_calls(&format!("{bare}\n{openai}"));
+    assert_eq!(names(&r2), vec!["glob_find", "file_read"]);
+}
+
+#[test]
+fn d6_same_call_in_two_formats_executes_once() {
+    let content = "<tool>\n<name>file_read</name>\n<arguments>{\"path\": \"src/agent/tool_validator.rs\"}</arguments>\n</tool>\n</tool_call>\n<tool_call>\n<function=file_read>\n<parameter name=\"path\">src/agent/tool_validator.rs\n</parameter>\n</function>\n</tool_call>";
+    let result = parse_tool_calls(content);
+    assert_eq!(names(&result), vec!["file_read"]);
+    assert!(result.rejections.is_empty(), "{:?}", result.rejections);
+}
+
+#[test]
+fn d6_nested_formats_claim_text_once() {
+    // A Qwen3 call wrapped in <tool_call>: the wrapper family and the bare
+    // family both match; the overlap resolves to ONE call.
+    let content = "<tool_call>\n<function=glob_find>\n<parameter=pattern>*.rs</parameter>\n</function>\n</tool_call>";
+    let result = parse_tool_calls(content);
+    assert_eq!(names(&result), vec!["glob_find"]);
+    // A JSON code block inside a file_write payload is payload, not a call.
+    let content = "<tool>\n<name>file_write</name>\n<arguments>{\"path\": \"README.md\", \"content\": \"```json\\n{\\\"name\\\": \\\"shell_exec\\\"}\\n```\"}</arguments>\n</tool>";
+    let result = parse_tool_calls(content);
+    assert_eq!(names(&result), vec!["file_write"]);
+}
+
+#[test]
+fn d6_turn_0010_unparseable_second_call_is_rejected_not_dropped() {
+    let result = parse_tool_calls(B3_TURN_0010);
+    assert_eq!(names(&result), vec!["file_read"]);
+    assert_eq!(result.tool_calls[0].arguments["line_range"][0], 1900);
+    assert_eq!(result.rejections.len(), 1, "{:?}", result.rejections);
+    let rejection = &result.rejections[0];
+    assert_eq!(rejection.tool_name.as_deref(), Some("file_read"));
+    assert!(rejection.reason.contains("NOT executed"));
+    assert!(rejection.raw_text.contains("src/agent/tool_validator.rs"));
+}
+
+#[test]
+fn d6_turn_0003_function_with_tool_close_is_rejected() {
+    let result = parse_tool_calls(B3_TURN_0003);
+    assert_eq!(names(&result), vec!["file_read"]);
+    assert_eq!(
+        result.tool_calls[0].arguments["path"],
+        "src/api/streaming.rs"
+    );
+    assert_eq!(result.rejections.len(), 1, "{:?}", result.rejections);
+    assert_eq!(result.rejections[0].tool_name.as_deref(), Some("file_read"));
+    assert!(result.rejections[0].raw_text.contains("src/tool_parser.rs"));
+}
+
+#[test]
+fn d6_turn_0002_wrapper_tags_alone_are_not_rejections() {
+    let result = parse_tool_calls(B3_TURN_0002);
+    assert_eq!(names(&result), vec!["directory_tree", "directory_tree"]);
+    assert!(result.rejections.is_empty(), "{:?}", result.rejections);
+}
+
+#[test]
+fn d6_turn_0024_malformed_first_valid_second() {
+    let result = parse_tool_calls(B3_TURN_0024);
+    assert_eq!(names(&result), vec!["glob_find"]);
+    assert_eq!(
+        result.tool_calls[0].arguments["pattern"],
+        "src/checkpoint*.rs"
+    );
+    assert_eq!(result.rejections.len(), 1, "{:?}", result.rejections);
+    assert_eq!(
+        result.rejections[0].tool_name.as_deref(),
+        Some("grep_search")
+    );
+}
+
+#[test]
+fn d6_quoted_markup_in_prose_and_code_is_not_a_rejection() {
+    // A final answer that discusses tool-call syntax is not a tool call.
+    let content = "The parser accepts `<tool_call>` and `<function=name>` forms.\n\n```xml\n<tool_call>\n<function=tool>\n<name>x</name>\n</tool_call>\n```\n\nIn prose, a stray <function=foo> mention mid-line is text.";
+    let result = parse_tool_calls(content);
+    assert!(result.tool_calls.is_empty());
+    assert!(result.rejections.is_empty(), "{:?}", result.rejections);
+}
+
+#[test]
+fn d6_invalid_json_tool_call_is_rejected_with_reason() {
+    let content = "<tool>\n<name>file_read</name>\n<arguments>{\"path\": \"a.rs\"}</arguments>\n</tool>\n<tool_call>\n{\"name\": \"glob_find\", \"arguments\": {\"pattern\": }\n</tool_call>";
+    let result = parse_tool_calls(content);
+    assert_eq!(names(&result), vec!["file_read"]);
+    assert_eq!(result.rejections.len(), 1, "{:?}", result.rejections);
+    assert!(result.rejections[0].reason.contains("Invalid JSON"));
+}
+
+// ---------------------------------------------------------------------------
+// D3: generic wrapper `<function=tool><parameter=name>X</parameter>
+// <parameter=arguments>{..}</parameter>` unwraps to the real tool
+// (runs/long_review turns 0002, 0003 — 0.8.2 rejected a tool named 'tool').
+// ---------------------------------------------------------------------------
+
+const LONG_TURN_0002: &str = "\n\n<tool_call>\n<function=tool>\n<parameter=name>\ncontext_focus\n</parameter>\n<parameter=arguments>\n{\"query\": \"API streaming tool call parsing malformed empty truncated response\", \"max_files\": 5}\n</parameter>\n</function>\n</tool_call>";
+
+const LONG_TURN_0003: &str = "\n\n<tool_call>\n<function=tool>\n<parameter=name>\nfile_read\n</parameter>\n<parameter=arguments>\n{\"path\": \"src/api/streaming.rs\"}\n</parameter>\n</function>\n</tool_call>";
+
+#[test]
+fn d3_long_review_turn_0002_unwraps_generic_tool_wrapper() {
+    let result = parse_tool_calls(LONG_TURN_0002);
+    assert_eq!(names(&result), vec!["context_focus"]);
+    assert_eq!(
+        result.tool_calls[0].arguments,
+        serde_json::json!({
+            "query": "API streaming tool call parsing malformed empty truncated response",
+            "max_files": 5
+        })
+    );
+}
+
+#[test]
+fn d3_long_review_turn_0003_unwraps_generic_tool_wrapper() {
+    let result = parse_tool_calls(LONG_TURN_0003);
+    assert_eq!(names(&result), vec!["file_read"]);
+    assert_eq!(
+        result.tool_calls[0].arguments,
+        serde_json::json!({"path": "src/api/streaming.rs"})
+    );
+}
+
+#[test]
+fn d3_unwrap_accepts_string_arguments_and_every_wrapper_name() {
+    for wrapper in ["tool", "tool_call", "function", "call"] {
+        let content = format!(
+            "<function={wrapper}>\n<parameter=name>file_read</parameter>\n<parameter=arguments>\"{{\\\"path\\\": \\\"a.rs\\\"}}\"</parameter>\n</function>"
+        );
+        let result = parse_tool_calls(&content);
+        assert_eq!(names(&result), vec!["file_read"], "wrapper {wrapper}");
+        assert_eq!(result.tool_calls[0].arguments["path"], "a.rs");
+    }
+}
+
+#[test]
+fn d3_unwrap_leaves_real_tools_and_extra_parameters_alone() {
+    // A real tool with `name`/`arguments` parameters is not a wrapper.
+    let content = "<function=knowledge_add>\n<parameter=name>x</parameter>\n<parameter=arguments>{\"a\": 1}</parameter>\n</function>";
+    let result = parse_tool_calls(content);
+    assert_eq!(names(&result), vec!["knowledge_add"]);
+    // A wrapper with a third parameter is not exactly name + arguments.
+    let content = "<function=tool>\n<parameter=name>file_read</parameter>\n<parameter=arguments>{\"path\": \"a\"}</parameter>\n<parameter=extra>1</parameter>\n</function>";
+    let result = parse_tool_calls(content);
+    assert_eq!(names(&result), vec!["tool"]);
 }
