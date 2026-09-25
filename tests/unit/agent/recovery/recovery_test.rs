@@ -502,3 +502,44 @@ fn repetition_signature_folds_revision_only_for_non_mutating_observers() {
         "mutating calls keep the plain fingerprint"
     );
 }
+
+// ── Final answers that QUOTE tool syntax are not malformed calls ──────
+//
+// The parser (N6/D6) treats markdown code as quoted text; the legacy
+// malformed-XML detector must agree, or a final report that explains the
+// `<tool>` syntax in backticks is punished with a "your tool call was
+// malformed" correction and never completes.
+
+#[test]
+fn quoted_tool_syntax_in_final_answer_is_not_malformed() {
+    let answers = [
+        // val082 runs/long_review turn_0099 shape: inline code span.
+        "Key findings:\n- `src/tool_parser.rs` parses `<tool><name>...</name><arguments>...</arguments></tool>` XML.\n- Done.",
+        "The Qwen dialect `<function=file_read><parameter=path>a.rs</parameter></function>` and `<tool_call>` are both accepted.",
+        "An unclosed `<tool>` tag and a stray `</tool_call>` are reported as rejections.",
+        "Kimi uses `<|open|>call tool=\"x\"` delimiters.",
+        // Fenced block.
+        "Write calls as:\n\n```xml\n<tool>\n<name>file_read</name>\n<arguments>{...}</arguments>\n</tool>\n```\n\nThat is all.",
+        "Qwen form:\n\n~~~\n<function=file_read>\n<parameter=path>a.rs</parameter>\n</function>\n~~~\n",
+    ];
+    for answer in answers {
+        assert!(!looks_like_malformed_tool_xml(answer), "{answer}");
+    }
+}
+
+#[test]
+fn unquoted_malformed_tool_syntax_is_still_flagged() {
+    // The same markup outside code is a (malformed) call attempt.
+    for content in [
+        "Reading it now.\n<function=file_read><parameter=path>a.rs</parameter>",
+        "Reading it now.\n<tool><name>file_read</name><arguments>{bad}</arguments></tool>",
+        "Reading it now.\n<tool><name>file_read</name>",
+        "`quoted` then a real attempt:\n<tool_call>{\"name\": \"git_diff\"}",
+        // An unclosed fence never hides markup that follows it on a later
+        // line (markdown_code_spans runs an unclosed fence to the end, so
+        // only markup BEFORE it is checked here).
+        "<name=file_read>\n```\nnever closed",
+    ] {
+        assert!(looks_like_malformed_tool_xml(content), "{content}");
+    }
+}

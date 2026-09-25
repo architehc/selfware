@@ -93,8 +93,14 @@ pub(super) fn hash_text_signature(text: &str) -> u64 {
     hasher.finish()
 }
 
+/// Whether tool-less content holds a tool-call ATTEMPT that no parser
+/// accepted. Markdown code (inline spans and fences, as the parser reads
+/// them via `crate::tool_parser::outside_markdown_code`) is quoted text: a
+/// final answer that explains the `<tool>` syntax in backticks is not a
+/// malformed call, exactly as the parser never executes or rejects it.
 pub(super) fn looks_like_malformed_tool_xml(content: &str) -> bool {
-    let trimmed = content.trim();
+    let prose = crate::tool_parser::outside_markdown_code(content);
+    let trimmed = prose.trim();
     if trimmed.is_empty() {
         return false;
     }

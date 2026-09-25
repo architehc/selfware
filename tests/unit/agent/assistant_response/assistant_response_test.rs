@@ -1,6 +1,6 @@
 use super::{
     build_assistant_history_message, context_boundary_insert_pos, history_ends_on_open_pair,
-    insertion_splits_tool_pair, resolve_step_token_counts,
+    insertion_splits_tool_pair, reasoning_carries_tool_markup, resolve_step_token_counts,
 };
 use crate::config::{Config, ExecutionMode};
 use crate::testing::mock_api::MockLlmServer;
@@ -729,5 +729,29 @@ async fn length_truncation_with_content_is_not_retried() {
         );
         assert!(reasoning_retry_events(&recorder).is_empty());
         server.stop().await;
+    }
+}
+
+/// A content-less turn's reasoning is promoted to content only when it
+/// carries a tool-call ATTEMPT. Reasoning that quotes the syntax in markdown
+/// code (as the parser reads code: quoted, never a call) is a monologue and
+/// must not become the final answer text.
+#[test]
+fn reasoning_quoting_tool_syntax_in_code_is_not_promoted() {
+    for quoted in [
+        "The parser accepts `<tool><name>x</name><arguments>{}</arguments></tool>`.",
+        "Qwen emits `<function=file_read>` and `<tool_call>` wrappers.",
+        "Example:\n```xml\n<tool>\n<name>file_read</name>\n</tool>\n```\nDone thinking.",
+    ] {
+        assert!(!reasoning_carries_tool_markup(quoted), "{quoted}");
+    }
+    for live in [
+        "Reading it.\n<tool>\n<name>file_read</name>\n<arguments>{\"path\": \"a\"}</arguments>\n</tool>",
+        "<function=file_read>\n<parameter=path>a</parameter>\n</function>",
+        "<tool_call>{\"name\": \"git_diff\"}</tool_call>",
+        "<|open|>call tool=\"file_read\"",
+        "`quoted` first, then\n<tool>\n<name>file_read</name>",
+    ] {
+        assert!(reasoning_carries_tool_markup(live), "{live}");
     }
 }

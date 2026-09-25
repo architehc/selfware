@@ -448,11 +448,7 @@ impl Agent {
         let mut content = content;
         if content.trim().is_empty() {
             if let Some(r) = reasoning.as_ref().filter(|r| !r.trim().is_empty()) {
-                let has_tool_markup = r.contains("<tool")
-                    || r.contains("<function=")
-                    || r.contains("<|open|>call")
-                    || r.contains("<tool_call>");
-                if has_tool_markup || native_tool_calls.is_some() {
+                if reasoning_carries_tool_markup(r) || native_tool_calls.is_some() {
                     info!(
                         "Content empty but reasoning_content has tool calls ({} chars) — promoting to content",
                         r.len()
@@ -1348,6 +1344,18 @@ pub(super) fn resolve_step_token_counts(
         reported_prompt.unwrap_or(prompt_estimate),
         reported_completion.unwrap_or(output_estimate),
     )
+}
+
+/// Whether reasoning text carries tool-call markup, so that a content-less
+/// turn's reasoning may be promoted to content for the tool parser. Markdown
+/// code is quoted text (`crate::tool_parser::outside_markdown_code`), as the
+/// parser reads it: a monologue that quotes the syntax is never promoted.
+fn reasoning_carries_tool_markup(reasoning: &str) -> bool {
+    let r = crate::tool_parser::outside_markdown_code(reasoning);
+    r.contains("<tool")
+        || r.contains("<function=")
+        || r.contains("<|open|>call")
+        || r.contains("<tool_call>")
 }
 
 #[cfg(test)]

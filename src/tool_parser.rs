@@ -830,6 +830,21 @@ pub(crate) fn markdown_code_spans(content: &str) -> Vec<std::ops::Range<usize>> 
     spans
 }
 
+/// `content` with every markdown code span (see [`markdown_code_spans`])
+/// replaced by one space: the prose a tool-markup check may look at. Quoted
+/// syntax is never a call attempt.
+pub(crate) fn outside_markdown_code(content: &str) -> String {
+    let mut prose = String::with_capacity(content.len());
+    let mut cursor = 0;
+    for span in markdown_code_spans(content) {
+        prose.push_str(&content[cursor..span.start]);
+        prose.push(' ');
+        cursor = span.end;
+    }
+    prose.push_str(&content[cursor..]);
+    prose
+}
+
 fn in_spans(pos: usize, spans: &[std::ops::Range<usize>]) -> bool {
     spans.iter().any(|s| s.contains(&pos))
 }
