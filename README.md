@@ -500,7 +500,7 @@ max_tokens     = 24576    # bounds a runaway reasoning stream
 context_length = 163840   # 160k; the largest real prompt we saw was 127k
 
 [agent]
-max_call_secs = 600               # the longest real call took 358 s
+max_call_secs = 1628              # 24,576 tokens at the slowest measured 15.1 tok/s
 native_function_calling = false   # see below
 
 [concurrency]
@@ -512,9 +512,13 @@ max_global  = 16   # 8 streams + 8 tool permits
   65536, a runaway reasoning stream can run ~27 minutes at ~40 tok/s. The
   longest completion a real task needed was 13.4k tokens.
   `reasoning_effort` has no measurable effect on this model.
-- **`agent.max_call_secs` ≈ 600.** Fails a stuck call with a typed error instead
-  of hanging. Keep streaming on (the default): an ngrok-style gateway cuts
-  non-streaming requests at 300 s.
+- **`agent.max_call_secs` 1628.** Fails a stuck call with a typed error instead
+  of hanging, without killing a call `max_tokens` allows: a full 24,576-token
+  call at the slowest whole-call rate measured on this endpoint (15.1 tok/s,
+  prefill included) takes 1,628 s. Under load the endpoint decodes at
+  17–20 tok/s; the former 600 s cap killed a legitimate 701 s turn.
+  `max_tokens` still bounds a runaway stream. Keep streaming on (the
+  default): an ngrok-style gateway cuts non-streaming requests at 300 s.
 - **`context_length` 163840.** Bigger windows cost more than they give: time
   to first token was 13 s at 99k tokens vs 40 s at 257k, and decode dropped to
   17 tok/s.

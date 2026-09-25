@@ -135,7 +135,7 @@ async fn test_generate_config_applies_profile_pinned_context_and_budget() {
     );
     assert_eq!(config.concurrency.max_streams, 8);
     assert_eq!(config.concurrency.max_global, 16);
-    assert_eq!(config.agent.max_call_secs, Some(600));
+    assert_eq!(config.agent.max_call_secs, Some(1_628));
     assert!(!config.agent.native_function_calling);
     assert!(config.agent.streaming);
     config.validate().unwrap();

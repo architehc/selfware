@@ -282,7 +282,7 @@ fn qwen38_profile_sets_preserve_thinking_false_and_sampling_defaults() {
     assert_eq!(p.temperature, Some(0.7));
     assert_eq!(p.context_length, Some(163_840));
     assert_eq!(p.max_tokens, Some(24_576));
-    assert_eq!(p.max_call_secs, Some(600));
+    assert_eq!(p.max_call_secs, Some(1_628));
     assert_eq!(p.max_streams, Some(8));
     assert_eq!(p.max_global, Some(16));
     let obj = p.extra_body.as_object().expect("extra_body object");
@@ -348,14 +348,14 @@ fn test_apply_profile_sets_context_length_and_max_streams_for_qwen38() {
     assert_eq!(config.max_tokens, 24_576);
     assert_eq!(config.concurrency.max_streams, 8);
     assert_eq!(config.concurrency.max_global, 16);
-    assert_eq!(config.agent.max_call_secs, Some(600));
+    assert_eq!(config.agent.max_call_secs, Some(1_628));
     assert_eq!(config.temperature, 0.7);
 }
 
 #[test]
 fn qwen38_measured_defaults_yield_to_explicit_user_config() {
     // Profile defaults (context 163,840 / max_tokens 24,576 / 8 streams /
-    // max_call_secs 600) must never override values the user set in TOML.
+    // max_call_secs 1,628) must never override values the user set in TOML.
     let toml = r#"
 model = "qwen38-flash-next"
 max_tokens = 4096
@@ -405,12 +405,12 @@ fn profiles_without_call_cap_leave_max_call_secs_uncapped() {
 #[test]
 fn qwen38_max_call_secs_scales_with_max_tokens() {
     let p = match_profile("qwen38-flash-next").expect("qwen38 profile");
-    assert_eq!(p.max_call_secs_for(24_576), Some((600, false)));
-    assert_eq!(p.max_call_secs_for(8_192), Some((600, false)));
-    // ceil(600 * 65536 / 24576) = ceil(1600.0) = 1600
-    assert_eq!(p.max_call_secs_for(65_536), Some((1_600, true)));
-    // ceil(600 * 30000 / 24576) = ceil(732.42) = 733
-    assert_eq!(p.max_call_secs_for(30_000), Some((733, true)));
+    assert_eq!(p.max_call_secs_for(24_576), Some((1_628, false)));
+    assert_eq!(p.max_call_secs_for(8_192), Some((1_628, false)));
+    // ceil(1628 * 65536 / 24576) = ceil(4341.33) = 4342
+    assert_eq!(p.max_call_secs_for(65_536), Some((4_342, true)));
+    // ceil(1628 * 30000 / 24576) = ceil(1987.30) = 1988
+    assert_eq!(p.max_call_secs_for(30_000), Some((1_988, true)));
 }
 
 /// Rule-5 sweep: every built-in profile that sets both fields gets the same

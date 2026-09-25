@@ -389,7 +389,7 @@ fn test_load_empty_file_uses_defaults() {
     // profile-less default).
     assert_eq!(config.max_tokens, 24576);
     assert_eq!(config.context_length, 163_840);
-    assert_eq!(config.agent.max_call_secs, Some(600));
+    assert_eq!(config.agent.max_call_secs, Some(1_628));
 }
 
 #[test]
@@ -2756,8 +2756,8 @@ fn test_config_load_pins_qwen38_context_and_derives_token_budget() {
     );
     assert_eq!(
         config.agent.max_call_secs,
-        Some(600),
-        "qwen3.8 profile must default agent.max_call_secs to 600"
+        Some(1_628),
+        "qwen3.8 profile must default agent.max_call_secs to 1,628"
     );
 
     // Explicit user context_length overrides the profile pin
@@ -2795,7 +2795,7 @@ fn test_config_load_qwen38_max_call_secs_provenance_and_explicit_override() {
         "qwen38_call_cap_default.toml",
     );
     let config = Config::load(Some(path.to_str().unwrap())).unwrap();
-    assert_eq!(config.agent.max_call_secs, Some(600));
+    assert_eq!(config.agent.max_call_secs, Some(1_628));
     assert!(matches!(
         config.sources.get("agent.max_call_secs"),
         Some(ConfigSource::Profile(name)) if name == "qwen38"
@@ -3365,8 +3365,8 @@ fn test_config_load_qwen38_max_call_secs_scales_with_explicit_max_tokens() {
     assert_eq!(config.max_tokens, 65_536);
     assert_eq!(
         config.agent.max_call_secs,
-        Some(1_600),
-        "ceil(600 * 65536 / 24576) = 1600"
+        Some(4_342),
+        "ceil(1628 * 65536 / 24576) = 4342"
     );
     assert!(
         matches!(
@@ -3393,7 +3393,7 @@ fn test_config_load_qwen38_max_call_secs_scales_with_explicit_max_tokens() {
     let config2 = Config::load(Some(path2.to_str().unwrap())).unwrap();
     assert_eq!(config2.agent.max_call_secs, Some(900));
 
-    // Neither explicit: the profile pair, 600 s.
+    // Neither explicit: the profile pair, 1,628 s.
     let (_dir3, path3) = write_temp_config(
         r#"
         endpoint = "http://localhost:8000/v1"
@@ -3403,7 +3403,7 @@ fn test_config_load_qwen38_max_call_secs_scales_with_explicit_max_tokens() {
     );
     let config3 = Config::load(Some(path3.to_str().unwrap())).unwrap();
     assert_eq!(config3.max_tokens, 24_576);
-    assert_eq!(config3.agent.max_call_secs, Some(600));
+    assert_eq!(config3.agent.max_call_secs, Some(1_628));
 }
 
 #[test]
@@ -3418,5 +3418,5 @@ fn tracked_llm_selfware_design_config_uses_the_measured_qwen38_profile() {
     assert_eq!(config.model, "qwen38-flash-next");
     assert_eq!(config.context_length, 163_840, "profile context_length");
     assert_eq!(config.max_tokens, 24_576, "profile max_tokens");
-    assert_eq!(config.agent.max_call_secs, Some(600), "profile call cap");
+    assert_eq!(config.agent.max_call_secs, Some(1_628), "profile call cap");
 }

@@ -7,7 +7,7 @@ api_key = "EMPTY"
 model = "qwen38-flash-next"
 # max_tokens and context_length are deliberately NOT set here: the built-in
 # qwen38 profile supplies the values measured against this endpoint
-# (context_length 163,840, max_tokens 24,576, agent.max_call_secs 600; see
+# (context_length 163,840, max_tokens 24,576, agent.max_call_secs 1,628; see
 # docs/model-playbook.md). Explicit values here override the profile — the
 # earlier 350,000 window let prompts grow past what the server serves
 # (174,897 prompt tokens observed against 163,840) and the reads that fell

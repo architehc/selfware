@@ -56,11 +56,11 @@ impl ModelDefaultsProfile {
     /// The per-call wall-time cap this profile implies for `max_tokens`.
     ///
     /// A profile's `max_call_secs` is sized for its OWN `max_tokens` (decode
-    /// time dominates: qwen38's 600 s = 24,576 tokens at the measured ~42
-    /// tok/s plus prefill). When `max_tokens` exceeds the profile's value the
-    /// cap scales by the same ratio, rounded up:
+    /// time dominates: qwen38's 1,628 s = 24,576 tokens at the slowest
+    /// measured 15.1 tok/s, prefill included). When `max_tokens` exceeds the
+    /// profile's value the cap scales by the same ratio, rounded up:
     /// `ceil(max_call_secs * max_tokens / profile_max_tokens)` — e.g. 65,536
-    /// tokens → ceil(600 * 65536 / 24576) = 1,600 s. At or below the
+    /// tokens → ceil(1628 * 65536 / 24576) = 4,342 s. At or below the
     /// profile's value, or for a profile without both fields, the profile
     /// cap applies unchanged. Returns `(secs, scaled)`.
     pub fn max_call_secs_for(&self, max_tokens: usize) -> Option<(u64, bool)> {
@@ -182,14 +182,22 @@ fn qwen38_defaults_profile(name: &'static str, pattern: &'static str) -> ModelDe
         // execution, avoiding tool starvation.
         max_global: Some(16),
         // Fail a stuck call with a typed CallTimeBudgetExceeded instead of
-        // hanging: the longest real call measured was 358 s, and a full
-        // 24,576-token reasoning stream at the measured ~42 tok/s decode
-        // takes ~585 s, plus prefill (13 s TTFT at a 99k prompt) = ~600 s.
-        // This cap is sized FOR this profile's max_tokens: when the user
-        // raises max_tokens, `max_call_secs_for` scales it proportionally
-        // (0.8.2 validation D7: a TOML max_tokens = 65,536 kept this 600 s
-        // cap and killed final-report calls 0.8.0 completed in up to 864 s).
-        max_call_secs: Some(600),
+        // hanging, while never killing a call max_tokens allows. Sized as a
+        // full 24,576-token stream at the SLOWEST whole-call rate measured
+        // on this endpoint: 15.1 tok/s (val083 b2_350000, 3,495 tokens in
+        // 231 s at a 154k prompt; across the 42 val082/val083 calls with
+        // >= 1,500 completion tokens p05 16.5, p10 19.0). Whole-call rate
+        // includes prefill, so no separate allowance: ceil(24,576 / 15.1) =
+        // 1,628 s. The former 600 s assumed ~42 tok/s; under load the
+        // endpoint decodes at 17–20 tok/s and a legitimate 13,799-token
+        // mid-run turn took 701 s (val083 review step 19) — the 600 s cap
+        // killed calls max_tokens permits. Runaway protection stays with
+        // max_tokens (it bounds any stream); this cap only has to catch a
+        // stalled or pathological call. Static rather than tracking the
+        // run's decode rate: the first call of a run has no measurement and
+        // must not be killed either. When the user raises max_tokens,
+        // `max_call_secs_for` scales the cap proportionally (0.8.2 D7).
+        max_call_secs: Some(1_628),
         extra_body: json!({
             "top_p": 0.95,
             "top_k": 20,
