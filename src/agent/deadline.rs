@@ -179,7 +179,7 @@ pub struct PartialProgress {
     /// The most recent substantive answer text (prose only, tool-call markup
     /// stripped, bounded): the draft the completion gate last rejected when
     /// there is one, else the write-up segments the model produced (each at
-    /// least [`PARTIAL_TEXT_MIN_CHARS`]), oldest first. Unfinished work, not
+    /// least `PARTIAL_TEXT_MIN_CHARS`), oldest first. Unfinished work, not
     /// an accepted answer. `None` when no such text exists (the ledger then
     /// stands alone).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -339,7 +339,7 @@ impl Agent {
     /// Answer text for a timeout partial (see
     /// [`PartialProgress::last_assistant_text`]): the draft the citation
     /// gate last rejected, else every assistant write-up segment of at least
-    /// [`PARTIAL_TEXT_MIN_CHARS`] prose chars, oldest first — reviews told
+    /// `PARTIAL_TEXT_MIN_CHARS` prose chars, oldest first — reviews told
     /// to write up part by part spread the answer over several turns, and
     /// the newest segment alone would drop the earlier parts. Bounded to
     /// [`PARTIAL_TEXT_MAX_CHARS`], keeping the newest text.
