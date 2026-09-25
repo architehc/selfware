@@ -484,6 +484,12 @@ fn read_line_raw() -> Result<LineInput> {
     }
 }
 
+/// Whether a Ctrl/Alt-modified char is AltGr output (Windows reports AltGr as
+/// CONTROL|ALT) rather than a shortcut chord.
+fn is_altgr_text(ctrl: bool, alt: bool, c: char) -> bool {
+    ctrl && alt && !c.is_control() && !c.is_ascii_alphanumeric()
+}
+
 /// Process one raw-mode key event, mutating the line buffer.
 ///
 /// Returns `Some(LineInput)` when the key completes input (Enter, Esc, or a
@@ -511,6 +517,26 @@ fn handle_raw_key(
                 out.flush()?;
                 return Ok(Some(LineInput::Esc));
             }
+            // Ctrl+J (LF) / Ctrl+M (CR) are Enter in raw mode, as in the chat
+            // listener.
+            if matches!(c, 'j' | 'J' | 'm' | 'M') {
+                write!(out, "\r\n")?;
+                out.flush()?;
+                return Ok(Some(LineInput::Line(std::mem::take(buf))));
+            }
+        }
+    }
+    // Any other Ctrl/Alt chord (Ctrl+A, Alt+B, ...) is an editing shortcut
+    // this reader does not implement: drop it rather than appending the bare
+    // letter. Exception: on Windows, AltGr arrives as CONTROL|ALT carrying the
+    // PRINTABLE character it produced ('@', '{', '€', 'ą' on non-US layouts),
+    // so that combination with a non-ASCII-alphanumeric, non-control char is
+    // real typed text and is kept.
+    if let KeyCode::Char(c) = key.code {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        if (ctrl || alt) && !is_altgr_text(ctrl, alt, c) {
+            return Ok(None);
         }
     }
     Ok(match key.code {

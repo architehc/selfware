@@ -35,7 +35,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 /// Default worktree base directory within .selfware/
@@ -65,6 +65,210 @@ async fn find_git_root(root: &WorkspaceRoot) -> Result<PathBuf> {
 
     let root = String::from_utf8_lossy(&output.stdout);
     Ok(PathBuf::from(root.trim()))
+}
+
+/// Upper bound on each `git worktree list/prune` housekeeping call. Pruning
+/// is metadata-only and never worth stalling a tool call for.
+const PRUNE_GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Ledger (inside the git common dir) of worktree paths selfware created
+/// outside the default base, so their stale records can be recognised as
+/// selfware's after the directory is gone.
+const CREATED_LEDGER: &str = "selfware-created-worktrees";
+
+/// Run a housekeeping git command in `dir` with a sanitized environment and a
+/// bounded timeout (the child is killed if the timeout fires).
+async fn run_git_bounded(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
+    let mut cmd = tokio::process::Command::new("git");
+    crate::safety::process_env::sanitize_command_env(&mut cmd);
+    cmd.current_dir(dir).args(args).kill_on_drop(true);
+    match tokio::time::timeout(PRUNE_GIT_TIMEOUT, cmd.output()).await {
+        Ok(out) => out.with_context(|| format!("Failed to execute git {}", args.join(" "))),
+        Err(_) => anyhow::bail!(
+            "git {} timed out after {}s",
+            args.join(" "),
+            PRUNE_GIT_TIMEOUT.as_secs()
+        ),
+    }
+}
+
+/// The repository's common git dir (shared by all worktrees), absolute.
+async fn git_common_dir(dir: &Path) -> Result<PathBuf> {
+    let out = run_git_bounded(dir, &["rev-parse", "--git-common-dir"]).await?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "Not a git repository: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let raw = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    Ok(if raw.is_absolute() {
+        raw
+    } else {
+        dir.join(raw)
+    })
+}
+
+/// Remember that selfware created the worktree at `path`.
+async fn record_created_worktree(repo_dir: &Path, path: &Path) {
+    let Ok(common) = git_common_dir(repo_dir).await else {
+        return;
+    };
+    let ledger = common.join(CREATED_LEDGER);
+    // git lists worktrees by their real path (e.g. /private/var on macOS),
+    // so record the canonical form while the directory still exists.
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let line = format!("{}\n", path.to_string_lossy());
+    let appended = async {
+        use tokio::io::AsyncWriteExt;
+        let mut f = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&ledger)
+            .await?;
+        f.write_all(line.as_bytes()).await
+    }
+    .await;
+    if let Err(e) = appended {
+        warn!(
+            "Could not record created worktree in {}: {}",
+            ledger.display(),
+            e
+        );
+    }
+}
+
+/// Whether selfware created the worktree recorded at `path`: it lives under
+/// the default `.selfware/worktrees` base, or it is in the created ledger.
+fn is_selfware_worktree(path: &Path, ledger: &[PathBuf]) -> bool {
+    let components: Vec<_> = path.components().map(|c| c.as_os_str()).collect();
+    let under_default_base = components
+        .windows(2)
+        .any(|w| w[0] == ".selfware" && w[1] == "worktrees");
+    under_default_base || ledger.iter().any(|p| p == path)
+}
+
+/// Result of a stale-worktree prune attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PruneOutcome {
+    /// No selfware-created worktree record points at a missing directory.
+    NothingStale,
+    /// `git worktree prune` ran; these selfware records were stale.
+    Pruned(Vec<PathBuf>),
+    /// Stale selfware records exist, but so do stale records selfware did
+    /// NOT create. `git worktree prune` cannot be scoped to a subset, so it
+    /// was not run: the user's own records are never touched.
+    SkippedForeign { selfware: usize, foreign: usize },
+}
+
+/// Prune stale worktree records that selfware created.
+///
+/// After an unexpected termination the directory of a selfware worktree can
+/// be gone while git still lists it. This runs `git worktree prune` — which
+/// only drops ADMIN RECORDS whose directory no longer exists and never removes
+/// a directory — but only when every prunable record belongs to selfware.
+pub async fn prune_stale_selfware_worktrees(repo_dir: &Path) -> Result<PruneOutcome> {
+    let out = run_git_bounded(repo_dir, &["worktree", "list", "--porcelain"]).await?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "git worktree list failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let entries = parse_worktree_list(&String::from_utf8_lossy(&out.stdout));
+    let ledger: Vec<PathBuf> = match git_common_dir(repo_dir).await {
+        Ok(common) => tokio::fs::read_to_string(common.join(CREATED_LEDGER))
+            .await
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(PathBuf::from)
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    let mut ours = Vec::new();
+    let mut foreign = 0usize;
+    for entry in entries.iter().filter(|e| e.prunable) {
+        let path = PathBuf::from(&entry.path);
+        // Belt and braces: git said prunable; only a record whose directory
+        // is really gone counts.
+        if path.exists() {
+            continue;
+        }
+        if is_selfware_worktree(&path, &ledger) {
+            ours.push(path);
+        } else {
+            foreign += 1;
+        }
+    }
+    if ours.is_empty() {
+        return Ok(PruneOutcome::NothingStale);
+    }
+    if foreign > 0 {
+        warn!(
+            "Not pruning {} stale selfware worktree record(s): {} stale record(s) not \
+             created by selfware would also be pruned (run `git worktree prune` yourself)",
+            ours.len(),
+            foreign
+        );
+        return Ok(PruneOutcome::SkippedForeign {
+            selfware: ours.len(),
+            foreign,
+        });
+    }
+    let out = run_git_bounded(repo_dir, &["worktree", "prune"]).await?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "git worktree prune failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    info!("Pruned {} stale selfware worktree record(s)", ours.len());
+    Ok(PruneOutcome::Pruned(ours))
+}
+
+/// Best-effort prune for the enter/exit paths: failures are logged, never
+/// fatal. Returns the pruned paths for the tool's JSON output.
+async fn prune_best_effort(repo_dir: &Path) -> Vec<String> {
+    match prune_stale_selfware_worktrees(repo_dir).await {
+        Ok(PruneOutcome::Pruned(paths)) => paths
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect(),
+        Ok(_) => Vec::new(),
+        Err(e) => {
+            warn!("Stale worktree prune skipped: {}", e);
+            Vec::new()
+        }
+    }
+}
+
+/// Repositories already pruned at tool startup in this process.
+static STARTUP_PRUNED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Tool-startup hook: when the worktree tools are registered for a workspace
+/// that has a `.selfware/worktrees` base (selfware has created worktrees
+/// here), prune stale selfware records once per process, in the background.
+/// A no-op without a Tokio runtime, outside such a workspace, and in unit
+/// tests (which must not touch the developer's repository).
+pub fn startup_prune(workspace: &Path) {
+    if cfg!(test) || !workspace.join(DEFAULT_WORKTREE_BASE).is_dir() {
+        return;
+    }
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    {
+        let mut seen = STARTUP_PRUNED.lock().unwrap_or_else(|e| e.into_inner());
+        if !seen.insert(workspace.to_path_buf()) {
+            return;
+        }
+    }
+    let dir = workspace.to_path_buf();
+    handle.spawn(async move {
+        let _ = prune_best_effort(&dir).await;
+    });
 }
 
 /// Validate a branch name to prevent shell injection
@@ -111,6 +315,9 @@ pub struct WorktreeEntry {
     pub branch: Option<String>,
     pub detached: bool,
     pub bare: bool,
+    /// git reports this record as prunable (its directory is gone).
+    #[serde(default)]
+    pub prunable: bool,
 }
 
 #[derive(Default)]
@@ -213,6 +420,10 @@ impl Tool for EnterWorktreeTool {
         let git_root = find_git_root(&root).await?;
         let original_dir = root.path();
 
+        // Drop stale records of selfware worktrees whose directories vanished
+        // (e.g. after an unexpected termination) before adding a new one.
+        let pruned = prune_best_effort(&git_root).await;
+
         // Resolve worktree path. A relative path is resolved against the
         // workspace root — the same directory it was validated against —
         // so `git worktree add` (run in git_root) and the enter below agree
@@ -260,6 +471,8 @@ impl Tool for EnterWorktreeTool {
             anyhow::bail!("Failed to create worktree: {}", stderr);
         }
 
+        record_created_worktree(&git_root, &worktree_path).await;
+
         let worktree_path_str = worktree_path.to_string_lossy().to_string();
         let branch_used = branch_arg.unwrap_or("(detached)").to_string();
 
@@ -278,7 +491,8 @@ impl Tool for EnterWorktreeTool {
             "worktree_path": worktree_path_str,
             "branch": branch_used,
             "previous_path": original_dir.to_string_lossy().to_string(),
-            "git_root": git_root.to_string_lossy().to_string()
+            "git_root": git_root.to_string_lossy().to_string(),
+            "pruned_stale_worktrees": pruned
         }))
     }
 
@@ -361,11 +575,14 @@ impl Tool for ExitWorktreeTool {
 
         info!("Exited worktree, returned to: {}", restored_path.display());
 
+        let pruned = prune_best_effort(&restored_path).await;
+
         Ok(serde_json::json!({
             "success": true,
             "previous_path": removed_path.map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
             "current_path": restored_path.to_string_lossy().to_string(),
-            "removed": removed
+            "removed": removed,
+            "pruned_stale_worktrees": pruned
         }))
     }
 
@@ -442,6 +659,7 @@ fn parse_worktree_list(output: &str) -> Vec<WorktreeEntry> {
         branch: None,
         detached: false,
         bare: false,
+        prunable: false,
     };
 
     for line in output.lines() {
@@ -454,6 +672,7 @@ fn parse_worktree_list(output: &str) -> Vec<WorktreeEntry> {
                     branch: None,
                     detached: false,
                     bare: false,
+                    prunable: false,
                 };
             }
             continue;
@@ -468,8 +687,10 @@ fn parse_worktree_list(output: &str) -> Vec<WorktreeEntry> {
             current.detached = true;
         } else if line == "bare" {
             current.bare = true;
+        } else if line == "prunable" || line.starts_with("prunable ") {
+            current.prunable = true;
         }
-        // Ignore other fields (HEAD, locked, prunable)
+        // Ignore other fields (HEAD, locked)
     }
 
     // Don't forget the last entry

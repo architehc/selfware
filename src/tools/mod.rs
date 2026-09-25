@@ -471,6 +471,9 @@ impl ToolRegistry {
             registry.register_deferred(GitPush::new());
             registry.register_deferred(GitCheckpoint::new());
         }
+        // Worktree tool startup: prune stale selfware-created worktree
+        // records (background, once per process, metadata only).
+        git_worktree::startup_prune(&registry.workspace_root().path());
 
         // Deferred: Cargo/Build operations
         registry.register_deferred(CargoClippy);

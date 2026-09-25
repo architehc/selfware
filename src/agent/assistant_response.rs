@@ -451,8 +451,11 @@ impl Agent {
                     );
 
                     let response = self
-                        .client
-                        .chat_with_meta(request_messages, self.api_tools(), ThinkingMode::Enabled)
+                        .await_nonstreaming_llm(self.client.chat_with_meta(
+                            request_messages,
+                            self.api_tools(),
+                            ThinkingMode::Enabled,
+                        ))
                         .await
                         .with_context(|| {
                             format!(
@@ -529,8 +532,11 @@ impl Agent {
             }
         } else {
             let response = self
-                .client
-                .chat_with_meta(request_messages, self.api_tools(), ThinkingMode::Enabled)
+                .await_nonstreaming_llm(self.client.chat_with_meta(
+                    request_messages,
+                    self.api_tools(),
+                    ThinkingMode::Enabled,
+                ))
                 .await;
             let (response, sync_meta) = match response {
                 Ok((response, meta)) => (response, meta),

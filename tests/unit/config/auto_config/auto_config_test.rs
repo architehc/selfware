@@ -116,8 +116,8 @@ async fn test_generate_config_uses_reported_context_length() {
 async fn test_generate_config_applies_profile_pinned_context_and_budget() {
     // When the server advertises a 1M context window (1,048,576), generate_config
     // for a profile-pinned model (e.g. qwen38-flash-next) must NOT blindly emit 1M.
-    // It must apply the deliberate operational safety margin (350,000) and standard
-    // 60% budget (210,000) alongside concurrency limits.
+    // It must apply the deliberate operational measured window (163,840) and standard
+    // 60% budget (98,304) alongside concurrency limits.
     let url = spawn_mock_server(1_048_576);
     let configurator = AutoConfigurator::new(&url, None);
     let config = configurator
@@ -126,15 +126,16 @@ async fn test_generate_config_applies_profile_pinned_context_and_budget() {
         .unwrap();
 
     assert_eq!(
-        config.context_length, 350_000,
+        config.context_length, 163_840,
         "wizard must honor profile-pinned operational context length instead of 1M"
     );
     assert_eq!(
-        config.agent.token_budget, 210_000,
-        "wizard must derive standard 60% budget (210,000) from 350,000 context"
+        config.agent.token_budget, 98_304,
+        "wizard must derive standard 60% budget (98,304) from 350,000 context"
     );
-    assert_eq!(config.concurrency.max_streams, 16);
-    assert_eq!(config.concurrency.max_global, 24);
+    assert_eq!(config.concurrency.max_streams, 8);
+    assert_eq!(config.concurrency.max_global, 16);
+    assert_eq!(config.agent.max_call_secs, Some(600));
     assert!(!config.agent.native_function_calling);
     assert!(config.agent.streaming);
     config.validate().unwrap();

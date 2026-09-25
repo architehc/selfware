@@ -334,6 +334,53 @@ fn test_ctrl_chords_abort_even_after_typed_text() {
 }
 
 #[test]
+fn test_other_ctrl_and_alt_chords_are_dropped_not_appended() {
+    let keys = [
+        KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT),
+        KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('I'), KeyModifiers::SHIFT),
+    ];
+    let (input, buf) = raw_line(&keys);
+    assert_eq!(input, LineInput::Line(String::new()), "still editing");
+    assert_eq!(buf, "hiI", "Ctrl+A/E/W and Alt+B must not add letters");
+}
+
+#[test]
+fn test_ctrl_j_and_ctrl_m_submit_like_enter() {
+    for c in ['j', 'm'] {
+        let keys = [
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL),
+        ];
+        let (input, buf) = raw_line(&keys);
+        assert_eq!(input, LineInput::Line("ok".to_string()), "ctrl+{c}");
+        assert_eq!(buf, "", "buffer handed off on submit");
+    }
+}
+
+#[test]
+fn test_altgr_printable_chars_are_kept() {
+    // Windows reports AltGr as CONTROL|ALT with the produced character.
+    let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
+    let keys = [
+        KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('@'), altgr),
+        KeyEvent::new(KeyCode::Char('{'), altgr),
+        KeyEvent::new(KeyCode::Char('€'), altgr),
+        KeyEvent::new(KeyCode::Char('ą'), altgr),
+        // Ctrl+Alt+<ascii letter> is a chord, not AltGr text.
+        KeyEvent::new(KeyCode::Char('x'), altgr),
+    ];
+    let (_, buf) = raw_line(&keys);
+    assert_eq!(buf, "a@{€ą");
+}
+
+#[test]
 fn test_esc_still_cancels() {
     let (input, _) = raw_line(&[KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)]);
     assert_eq!(input, LineInput::Esc);

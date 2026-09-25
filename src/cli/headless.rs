@@ -455,6 +455,21 @@ impl JsonlProgressEmitter {
                 })
                 .to_string(),
             ),
+            ProgressEvent::LlmWaiting {
+                elapsed_secs,
+                phase,
+                tokens_so_far,
+                tokens_source,
+            } => Some(
+                serde_json::json!({
+                    "event": "llm_waiting",
+                    "elapsed_secs": elapsed_secs,
+                    "phase": phase,
+                    "tokens_so_far": tokens_so_far,
+                    "tokens_source": tokens_source,
+                })
+                .to_string(),
+            ),
             _ => None,
         }
     }

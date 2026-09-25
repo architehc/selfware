@@ -69,6 +69,20 @@ impl VerificationScope {
         if self.runner_exists == Some(false) {
             return Relevance::NoRunner;
         }
+        let relevance = self.relevance_by_root(task_root);
+        // `runner_exists` is only ever set for cargo-run checks. A cargo
+        // result whose project lies outside a task that has no Cargo.toml of
+        // its own concerns a Rust project the task is not working on.
+        if relevance == Relevance::Unknown
+            && self.runner_exists.is_some()
+            && !cargo_applies_to_task(task_root)
+        {
+            return Relevance::OutOfScope;
+        }
+        relevance
+    }
+
+    fn relevance_by_root(&self, task_root: &Path) -> Relevance {
         let Some(project_root) = &self.project_root else {
             return Relevance::Unknown;
         };
@@ -141,8 +155,30 @@ pub struct VerificationRecord {
 }
 
 impl VerificationRecord {
+    ///
+    /// A cargo check (`cargo_*` tool, `cargo ...` command, or a Rust post-edit
+    /// gate) in a task whose root has no `Cargo.toml` can only be about some
+    /// other project: when its scope would otherwise be Unknown it is
+    /// OutOfScope — reported, never blocking. Rust tasks (manifest at the
+    /// task root) keep the strict Unknown-blocks rule, as do non-cargo checks.
     pub fn relevance_to(&self, task_root: &Path) -> Relevance {
-        self.scope.relevance_to(task_root)
+        let relevance = self.scope.relevance_to(task_root);
+        if relevance == Relevance::Unknown
+            && self.is_cargo_check()
+            && !cargo_applies_to_task(task_root)
+        {
+            return Relevance::OutOfScope;
+        }
+        relevance
+    }
+
+    /// Whether this record came from cargo. New records mark this with
+    /// `scope.runner_exists` (set only for cargo); records restored from older
+    /// checkpoints are recognised by their check identity / command.
+    pub fn is_cargo_check(&self) -> bool {
+        self.scope.runner_exists.is_some()
+            || self.check_id.starts_with("cargo")
+            || self.command.trim_start().starts_with("cargo")
     }
 
     /// Whether this result still describes the current tree.
@@ -408,12 +444,68 @@ mod tests {
     fn a_sibling_project_is_not_silently_dismissed() {
         // Out-of-scope is reserved for projects that ENCLOSE the task, which is
         // the case that can be established. A sibling is Unknown, and blocks.
+        // (Uses a non-cargo check: a cargo sibling of a task WITHOUT its own
+        // Cargo.toml is out of scope — see the non-Rust tests below.)
         let (_tmp, parent, py) = nested();
         let sibling = parent.join("other");
         fs::create_dir_all(&sibling).unwrap();
-        let record = record("cargo_check", Some(&sibling), &py, false, 1);
+        let record = record("make check", Some(&sibling), &py, false, 1);
         assert_eq!(record.relevance_to(&py), Relevance::Unknown);
         assert!(record.blocks_completion(&py, 1));
+    }
+
+    #[test]
+    fn a_cargo_sibling_of_a_rust_task_still_blocks() {
+        // A Rust task (manifest at its root) keeps the strict rule: a cargo
+        // failure it cannot attribute is Unknown, and blocks.
+        let (_tmp, parent, _py) = nested();
+        let task = parent.join("rust_task");
+        fs::create_dir_all(&task).unwrap();
+        fs::write(task.join("Cargo.toml"), "[package]\nname=\"t\"\n").unwrap();
+        let sibling = parent.join("other");
+        fs::create_dir_all(&sibling).unwrap();
+        let record = record("cargo_check", Some(&sibling), &task, false, 1);
+        assert_eq!(record.relevance_to(&task), Relevance::Unknown);
+        assert!(record.blocks_completion(&task, 1));
+    }
+
+    #[test]
+    fn cargo_failures_never_block_a_task_without_a_cargo_manifest() {
+        // Non-Rust task root (no Cargo.toml): a cargo_* failure from a sibling
+        // or unrelated project is out of scope -- reported, never blocking --
+        // whichever way the record was built.
+        let (_tmp, parent, py) = nested();
+        let sibling = parent.join("other");
+        fs::create_dir_all(&sibling).unwrap();
+        fs::write(sibling.join("Cargo.toml"), "[package]\nname=\"o\"\n").unwrap();
+
+        // Old-checkpoint shape: runner_exists unknown, identified by check id.
+        let legacy = record("cargo_test", Some(&sibling), &py, false, 1);
+        assert!(legacy.is_cargo_check());
+        assert_eq!(legacy.relevance_to(&py), Relevance::OutOfScope);
+        assert!(!legacy.blocks_completion(&py, 1));
+
+        // Live shape: scope_for_command run from the sibling directory.
+        let live = VerificationRecord {
+            check_id: check_id_for("cargo_test", ""),
+            command: "cargo_test".to_string(),
+            scope: scope_for_command("cargo_test", "", &sibling),
+            passed: false,
+            mutation_sequence: 1,
+            summary: "cargo_test failed".to_string(),
+        };
+        assert_eq!(live.scope.runner_exists, Some(true));
+        assert_eq!(live.relevance_to(&py), Relevance::OutOfScope);
+
+        let mut ledger = VerificationLedger::default();
+        ledger.record(live);
+        ledger.record(legacy);
+        assert!(ledger.blocking(&py, 1).is_none(), "nothing cargo blocks");
+        assert_eq!(ledger.out_of_scope(&py).len(), 2, "but both are reported");
+
+        // A non-cargo failure in the same place is untouched: still blocks.
+        let other = record("make check", Some(&sibling), &py, false, 1);
+        assert!(other.blocks_completion(&py, 1));
     }
 
     /// A Python-only workspace: NO Cargo.toml anywhere in the ancestry.

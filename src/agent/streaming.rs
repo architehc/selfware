@@ -340,6 +340,50 @@ impl Agent {
             && super::tool_dispatch::task_requires_mutation(self.task_context_for_classification())
     }
 
+    /// Surface one waiting heartbeat: always as a [`ProgressEvent`]
+    /// (stream-json / stderr trace), and on whichever spinner is still live
+    /// (TUI or terminal) as `"<phrase> — <phase> <N>s"`. Once the spinner has
+    /// stopped (content or reasoning is visibly streaming) only the progress
+    /// event is emitted.
+    ///
+    /// [`ProgressEvent`]: super::progress::ProgressEvent
+    pub(super) fn report_llm_wait(
+        &self,
+        event: super::progress::ProgressEvent,
+        base_phrase: &str,
+        tui_spinner_live: bool,
+        terminal_spinner: Option<&crate::ui::spinner::TerminalSpinner>,
+    ) {
+        if tui_spinner_live {
+            if let Some(text) = super::llm_wait::spinner_status(base_phrase, &event, true) {
+                self.emit_event(AgentEvent::SpinnerUpdate { message: text });
+            }
+        } else if let Some(s) = terminal_spinner {
+            // The terminal spinner already appends its own elapsed time.
+            if let Some(text) = super::llm_wait::spinner_status(base_phrase, &event, false) {
+                s.set_message(&text);
+            }
+        }
+        self.emit_progress(event);
+    }
+
+    /// Run a NON-streaming model call with the waiting heartbeat: every
+    /// `LLM_WAIT_TICK` an `llm_waiting phase=awaiting_response` progress event
+    /// is emitted until the response arrives (the phase of a non-streaming
+    /// call is not observable, so none is guessed).
+    pub(super) async fn await_nonstreaming_llm<F, T>(&self, fut: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        // Boxed so the caller's async frame does not grow by the request future.
+        super::llm_wait::await_with_ticks(
+            Box::pin(fut),
+            super::llm_wait::LlmWaitTicker::start(),
+            |ev| self.emit_progress(ev),
+        )
+        .await
+    }
+
     pub(super) async fn chat_streaming(
         &self,
         messages: Vec<Message>,
@@ -403,10 +447,33 @@ impl Agent {
             .await
             .map_err(|e| anyhow::anyhow!("concurrency governor error: {}", e))?;
 
-        let (stream, request_meta) = self
-            .client
-            .chat_stream_with_meta(messages, tools, thinking)
-            .await?;
+        // Waiting heartbeat: a queued/prefilling or long-reasoning call can be
+        // silent for minutes, so every LLM_WAIT_TICK surface elapsed time,
+        // phase, and tokens so far (progress event + spinner text).
+        let mut wait_ticker = super::llm_wait::LlmWaitTicker::start();
+        // Boxed: keeps the large request future out of this (already deep)
+        // async frame — inlining it overflowed the test-thread stack.
+        let mut send_fut = Box::pin(self.client.chat_stream_with_meta(messages, tools, thinking));
+        let (stream, request_meta) = loop {
+            tokio::select! {
+                biased;
+                sent = &mut send_fut => break sent?,
+                _ = tokio::time::sleep_until(wait_ticker.next_due()) => {
+                    // Headers not back yet: still queued / prefilling.
+                    let event = wait_ticker.fire(
+                        super::llm_wait::LlmWaitPhase::Prefill,
+                        0,
+                        super::llm_wait::LlmWaitTokenSource::Estimate,
+                    );
+                    self.report_llm_wait(
+                        event,
+                        initial_phrase,
+                        tui_active && tui_spinner_active,
+                        spinner.as_ref(),
+                    );
+                }
+            }
+        };
         // request_meta is plumbed through to meta_out at the bottom of this
         // function, after we've also harvested finish_reason / token usage
         // from the SSE stream.
@@ -459,10 +526,32 @@ impl Agent {
                     }
                     break;
                 }
-                result = rx.recv() => {
-                    match result {
-                        Some(r) => r,
-                        None => break,
+                step = super::llm_wait::recv_or_tick(&mut rx, &wait_ticker) => {
+                    match step {
+                        super::llm_wait::RecvOrTick::Item(Some(r)) => r,
+                        super::llm_wait::RecvOrTick::Item(None) => break,
+                        super::llm_wait::RecvOrTick::Tick => {
+                            let phase = super::llm_wait::LlmWaitPhase::classify(
+                                &content,
+                                &reasoning,
+                                tool_calls.len(),
+                                in_reasoning
+                                    || suppressed_tag_idx.is_some_and(|i| i >= 2),
+                            );
+                            let (tokens, source) = super::llm_wait::tokens_so_far(
+                                captured_completion_tokens,
+                                &content,
+                                &reasoning,
+                            );
+                            let event = wait_ticker.fire(phase, tokens, source);
+                            self.report_llm_wait(
+                                event,
+                                initial_phrase,
+                                tui_active && tui_spinner_active,
+                                spinner.as_ref(),
+                            );
+                            continue;
+                        }
                     }
                 }
             };
@@ -625,12 +714,17 @@ impl Agent {
                     }
                 }
                 StreamChunk::Reasoning(text) => {
-                    // Stop spinner on first reasoning
+                    // Stop spinner on first reasoning — unless (compact,
+                    // non-TUI) the reasoning is not printed: then the spinner
+                    // is the only sign of life and keeps showing the
+                    // waiting heartbeat until content arrives.
                     if tui_active && tui_spinner_active {
                         self.emit_event(AgentEvent::SpinnerStop);
                         tui_spinner_active = false;
-                    } else if let Some(s) = spinner.take() {
-                        drop(s);
+                    } else if !tui_active && !output::is_compact() {
+                        if let Some(s) = spinner.take() {
+                            drop(s);
+                        }
                     }
                     sticky_state
                         .is_thinking

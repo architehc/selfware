@@ -45,6 +45,8 @@ pub struct ModelDefaultsProfile {
     pub context_length: Option<usize>,
     pub max_streams: Option<usize>,
     pub max_global: Option<usize>,
+    /// Default for `agent.max_call_secs` (per-call wall-time cap).
+    pub max_call_secs: Option<u64>,
     /// Extra JSON fields to merge into `config.extra_body`.
     /// Keys already present in the user's `extra_body` are preserved.
     pub extra_body: Value,
@@ -61,6 +63,7 @@ pub struct AppliedFields {
     pub context_length: bool,
     pub max_streams: bool,
     pub max_global: bool,
+    pub max_call_secs: bool,
     /// Names of `extra_body` keys that were filled from the profile.
     pub extra_body_keys: Vec<String>,
 }
@@ -74,6 +77,7 @@ impl AppliedFields {
             && !self.context_length
             && !self.max_streams
             && !self.max_global
+            && !self.max_call_secs
             && self.extra_body_keys.is_empty()
     }
 
@@ -101,6 +105,9 @@ impl AppliedFields {
         if self.max_global {
             parts.push("concurrency.max_global".to_string());
         }
+        if self.max_call_secs {
+            parts.push("agent.max_call_secs".to_string());
+        }
         for k in &self.extra_body_keys {
             parts.push(format!("extra_body.{}", k));
         }
@@ -115,16 +122,32 @@ fn qwen38_defaults_profile(name: &'static str, pattern: &'static str) -> ModelDe
         native_function_calling: Some(false),
         streaming: Some(true),
         temperature: Some(0.7),
-        max_tokens: Some(32768),
-        // Pin context_length to 350_000 as a deliberate operational safety margin
-        // (rather than a measured architectural ceiling). While 823,538 tokens succeeded
-        // on longer-lived connections / revised network routing (2026-09-15), 350k tokens
-        // prefills reliably under ~57s without risking upstream gateway timeout cliffs.
-        context_length: Some(350_000),
-        max_streams: Some(16),
-        // Pin max_global to 24 alongside max_streams: 16 so 16 inflight streams
-        // leave 8 global permits for simultaneous tool execution, avoiding tool starvation.
-        max_global: Some(24),
+        // Only max_tokens bounds this model's reasoning (reasoning_effort has
+        // no measurable effect): at ~40 tok/s a runaway 65k-token reasoning
+        // stream runs ~27 minutes.  The longest real completion need measured
+        // on llm.selfware.design (2026-09-24) was 13.4k tokens, so 24,576
+        // leaves ~1.8x headroom while capping a runaway at ~10 minutes.
+        max_tokens: Some(24_576),
+        // Pin context_length to 163,840 (160k) from measurements against
+        // llm.selfware.design (SGLang, 2026-09-24): the largest real agent
+        // prompt was 127k tokens, while bigger windows cost more than they
+        // give -- time to first token was 13 s at 99k vs 40 s at 257k, and
+        // decode dropped to 17 tok/s at the large end.  The model accepts far
+        // more (823,538 tokens succeeded 2026-09-15), so this is an
+        // operational choice, not an architectural ceiling.
+        context_length: Some(163_840),
+        // The endpoint runs SGLang with max_running_requests = 8: a 9th
+        // concurrent stream only queues server-side (and its prefill wait
+        // counts against our timeouts), so pin max_streams to exactly 8.
+        max_streams: Some(8),
+        // Pin max_global = max_streams + 8 so 8 inflight streams still leave
+        // 8 global permits (the default max_tools) for simultaneous tool
+        // execution, avoiding tool starvation.
+        max_global: Some(16),
+        // Fail a stuck call with a typed CallTimeBudgetExceeded instead of
+        // hanging: the longest real call measured was 358 s, and a full
+        // 24,576-token reasoning stream at ~40 tok/s takes ~10 minutes.
+        max_call_secs: Some(600),
         extra_body: json!({
             "top_p": 0.95,
             "top_k": 20,
@@ -159,6 +182,7 @@ pub fn builtin_profiles() -> Vec<ModelDefaultsProfile> {
             context_length: None,
             max_streams: None,
             max_global: None,
+            max_call_secs: None,
             extra_body: json!({}),
         },
         // GLM-5.2 (z-ai) — card-recommended
@@ -176,6 +200,7 @@ pub fn builtin_profiles() -> Vec<ModelDefaultsProfile> {
             context_length: None,
             max_streams: None,
             max_global: None,
+            max_call_secs: None,
             extra_body: json!({
                 "top_p": 0.95,
                 "chat_template_kwargs": {
@@ -187,9 +212,9 @@ pub fn builtin_profiles() -> Vec<ModelDefaultsProfile> {
         // Follows upstream card defaults: temp=0.7 for agentic reproducibility,
         // top_p=0.95, top_k=20, min_p=0.0, presence_penalty=0.0, repetition_penalty=1.0.
         // Sets preserve_thinking=false as the agent-loop default to keep multi-turn
-        // context growth compact. Pinned to operational safety margin of ~350,000
-        // (measured 823,538 tokens succeeded 2026-09-15; 350k bounds prefill to ~57s, safely
-        // under the 60s upstream gateway timeout cliff) and 16 streams with max_global = 24.
+        // context growth compact. Operational limits measured on llm.selfware.design
+        // (2026-09-24): context 163,840, max_tokens 24,576, 8 streams (the server's
+        // max_running_requests) with max_global = 16.  See qwen38_defaults_profile.
         // Native FC is false since SGLang Qwen3.8 emits XML tool calls in content.
         qwen38_defaults_profile("qwen3.8", "qwen3.8-*"),
         qwen38_defaults_profile("qwen38", "qwen38-flash-*"),
@@ -207,6 +232,7 @@ pub fn builtin_profiles() -> Vec<ModelDefaultsProfile> {
             context_length: None,
             max_streams: None,
             max_global: None,
+            max_call_secs: None,
             extra_body: json!({
                 "top_p": 0.8,
                 "top_k": 20,
@@ -230,6 +256,7 @@ pub fn builtin_profiles() -> Vec<ModelDefaultsProfile> {
             context_length: None,
             max_streams: None,
             max_global: None,
+            max_call_secs: None,
             extra_body: json!({
                 "top_p": 0.95,
                 "top_k": 20,
@@ -248,6 +275,7 @@ pub fn builtin_profiles() -> Vec<ModelDefaultsProfile> {
             context_length: None,
             max_streams: None,
             max_global: None,
+            max_call_secs: None,
             extra_body: Value::Null,
         },
         // OpenAI GPT — same story: native tools + streaming.
@@ -261,6 +289,7 @@ pub fn builtin_profiles() -> Vec<ModelDefaultsProfile> {
             context_length: None,
             max_streams: None,
             max_global: None,
+            max_call_secs: None,
             extra_body: Value::Null,
         },
     ]
@@ -385,6 +414,12 @@ pub fn apply_profile(
             applied.max_global = true;
         }
     }
+    if !user_explicit.max_call_secs {
+        if let Some(v) = profile.max_call_secs {
+            config.agent.max_call_secs = Some(v);
+            applied.max_call_secs = true;
+        }
+    }
 
     // Merge extra_body — only keys NOT already present in the user's map.
     if let Value::Object(profile_extra) = &profile.extra_body {
@@ -412,6 +447,7 @@ pub struct UserExplicitFields {
     pub context_length: bool,
     pub max_streams: bool,
     pub max_global: bool,
+    pub max_call_secs: bool,
     pub extra_body_keys: Vec<String>,
 }
 
@@ -448,6 +484,9 @@ impl UserExplicitFields {
             }
             if agent.contains_key("streaming") {
                 out.streaming = true;
+            }
+            if agent.contains_key("max_call_secs") {
+                out.max_call_secs = true;
             }
         }
         if let Some(toml::Value::Table(extra)) = table.get("extra_body") {

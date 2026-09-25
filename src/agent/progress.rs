@@ -41,6 +41,19 @@ pub enum ProgressEvent {
         completion_tokens: u32,
         elapsed_ms: u64,
     },
+    /// Heartbeat while a model call is still in flight (every ~15 s): the
+    /// request is queued/prefilling (`phase = "prefill"`), streaming reasoning
+    /// (`"reasoning"`), streaming the answer (`"streaming"`), or a
+    /// non-streaming call whose phase cannot be observed
+    /// (`"awaiting_response"`). `tokens_source` names where `tokens_so_far`
+    /// came from (`usage` = provider-reported, `estimate` = counted from the
+    /// streamed text, `none` = nothing observable yet).
+    LlmWaiting {
+        elapsed_secs: u64,
+        phase: String,
+        tokens_so_far: usize,
+        tokens_source: String,
+    },
     /// A tool call has started.
     ToolCallStarted {
         tool: String,
@@ -129,6 +142,7 @@ impl ProgressEvent {
             ProgressEvent::StepStarted { .. } => "step_started",
             ProgressEvent::LlmRequestSent { .. } => "llm_request_sent",
             ProgressEvent::LlmResponseReceived { .. } => "llm_response_received",
+            ProgressEvent::LlmWaiting { .. } => "llm_waiting",
             ProgressEvent::ToolCallStarted { .. } => "tool_call_started",
             ProgressEvent::ToolCallCompleted { .. } => "tool_call_completed",
             ProgressEvent::GuardFired { .. } => "guard_fired",
@@ -252,6 +266,15 @@ pub fn render_event_kv(event: &ProgressEvent) -> String {
         } => format!(
             "kind=llm_response_received finish_reason={} completion_tokens={} {}ms",
             finish_reason, completion_tokens, elapsed_ms
+        ),
+        ProgressEvent::LlmWaiting {
+            elapsed_secs,
+            phase,
+            tokens_so_far,
+            tokens_source,
+        } => format!(
+            "kind=llm_waiting elapsed={}s phase={} tokens_so_far={} tokens_source={}",
+            elapsed_secs, phase, tokens_so_far, tokens_source
         ),
         ProgressEvent::ToolCallStarted { tool, args_short } => {
             if args_short.is_empty() {

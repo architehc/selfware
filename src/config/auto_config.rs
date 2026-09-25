@@ -238,7 +238,7 @@ impl AutoConfigurator {
         let model_root = model_info.map(|m| m.root.as_str()).unwrap_or(model);
 
         let profile = crate::config::model_profiles::match_profile(model);
-        // If a profile pins context_length (e.g. 350k operational margin for Qwen3.8),
+        // If a profile pins context_length (e.g. the measured 160k operational window for Qwen3.8),
         // use that deliberate margin instead of blindly accepting the server's raw
         // advertised max_model_len (e.g. 1M), which leads to upstream gateway timeout cliffs.
         let effective_context_len = profile
@@ -293,7 +293,7 @@ impl AutoConfigurator {
             .unwrap_or(results.streaming);
 
         // Preferred budget: when context_length is profile-pinned, derive the standard
-        // 60%-of-context budget (e.g. 210,000 for 350,000). Otherwise, context minus
+        // 60%-of-context budget (e.g. 98,304 for 163,840). Otherwise, context minus
         // headroom for output + overhead. When that saturates to 0 (small/unknown context),
         // the 0 sentinel lets `validate_generated` derive the standard 60%-of-context budget.
         config.agent.token_budget = if profile.as_ref().and_then(|p| p.context_length).is_some() {
@@ -308,6 +308,9 @@ impl AutoConfigurator {
             }
             if let Some(mg) = p.max_global {
                 config.concurrency.max_global = mg;
+            }
+            if let Some(secs) = p.max_call_secs {
+                config.agent.max_call_secs = Some(secs);
             }
             if let serde_json::Value::Object(extra) = &p.extra_body {
                 let dest = config.extra_body.get_or_insert_with(serde_json::Map::new);

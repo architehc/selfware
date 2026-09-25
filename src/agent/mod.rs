@@ -107,6 +107,7 @@ pub mod input_census;
 mod interactive;
 pub mod last_tool;
 mod learning;
+pub mod llm_wait;
 pub mod loop_control;
 mod phi_observation;
 pub mod plan_mode;

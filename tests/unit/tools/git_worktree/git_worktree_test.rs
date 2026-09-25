@@ -467,3 +467,154 @@ async fn test_enter_worktree_tool_error_preserves_root() {
     assert!(!root.is_in_worktree());
     assert!(root.current_worktree().is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Stale worktree pruning
+// ---------------------------------------------------------------------------
+
+fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {:?} failed: {:?}", args, out);
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+fn listed_paths(dir: &std::path::Path) -> Vec<String> {
+    parse_worktree_list(&git_in(dir, &["worktree", "list", "--porcelain"]))
+        .into_iter()
+        .map(|e| e.path)
+        .collect()
+}
+
+#[test]
+fn test_parse_worktree_list_marks_prunable() {
+    let out = "worktree /repo\nHEAD abc\nbranch refs/heads/main\n\n\
+               worktree /repo/.selfware/worktrees/w1\nHEAD abc\ndetached\n\
+               prunable gitdir file points to non-existent location\n";
+    let entries = parse_worktree_list(out);
+    assert!(!entries[0].prunable);
+    assert!(entries[1].prunable);
+}
+
+#[tokio::test]
+async fn test_prune_removes_only_stale_selfware_records_never_directories() {
+    let (_dir, base, _root) = isolated_git_repo();
+    let stale = base.join(".selfware/worktrees/crashed");
+    let live = base.join(".selfware/worktrees/live");
+    git_in(
+        &base,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            &stale.to_string_lossy(),
+        ],
+    );
+    git_in(
+        &base,
+        &["worktree", "add", "-q", "--detach", &live.to_string_lossy()],
+    );
+    // Simulate an unexpected termination: the directory vanished, the
+    // record lingers.
+    std::fs::remove_dir_all(&stale).unwrap();
+    assert_eq!(listed_paths(&base).len(), 3);
+
+    let outcome = prune_stale_selfware_worktrees(&base).await.unwrap();
+    assert_eq!(outcome, PruneOutcome::Pruned(vec![stale.clone()]));
+    let paths = listed_paths(&base);
+    assert_eq!(paths.len(), 2, "stale record pruned: {paths:?}");
+    assert!(!paths.contains(&stale.to_string_lossy().to_string()));
+    assert!(live.join("f.txt").is_file(), "live worktree dir untouched");
+
+    // Idempotent: nothing left to prune.
+    assert_eq!(
+        prune_stale_selfware_worktrees(&base).await.unwrap(),
+        PruneOutcome::NothingStale
+    );
+}
+
+#[tokio::test]
+async fn test_prune_never_touches_worktrees_selfware_did_not_create() {
+    let (_dir, base, _root) = isolated_git_repo();
+    let users = base.join("users-own-wt");
+    let ours = base.join(".selfware/worktrees/crashed");
+    git_in(
+        &base,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            &users.to_string_lossy(),
+        ],
+    );
+    std::fs::remove_dir_all(&users).unwrap();
+
+    // Only a foreign stale record: nothing selfware's, nothing pruned.
+    assert_eq!(
+        prune_stale_selfware_worktrees(&base).await.unwrap(),
+        PruneOutcome::NothingStale
+    );
+    assert_eq!(listed_paths(&base).len(), 2, "user's record kept");
+
+    // Mixed: `git worktree prune` cannot be scoped, so it is not run.
+    git_in(
+        &base,
+        &["worktree", "add", "-q", "--detach", &ours.to_string_lossy()],
+    );
+    std::fs::remove_dir_all(&ours).unwrap();
+    assert_eq!(
+        prune_stale_selfware_worktrees(&base).await.unwrap(),
+        PruneOutcome::SkippedForeign {
+            selfware: 1,
+            foreign: 1
+        }
+    );
+    assert_eq!(listed_paths(&base).len(), 3, "nothing pruned");
+}
+
+#[tokio::test]
+async fn test_enter_worktree_records_custom_path_and_prunes_it_when_stale() {
+    crate::tools::file::reset_safety_config_for_tests();
+    let (_dir, base, root) = isolated_git_repo();
+    // A custom (non-default-base) path created through the tool is
+    // recognised as selfware's via the created-ledger.
+    let enter = EnterWorktreeTool::with_safety_config(SafetyConfig::default());
+    workspace_root::scope(
+        root.clone(),
+        enter.execute(serde_json::json!({ "path": "custom_wt" })),
+    )
+    .await
+    .expect("enter_worktree failed");
+    let exit = ExitWorktreeTool::new();
+    workspace_root::scope(root.clone(), exit.execute(serde_json::json!({})))
+        .await
+        .expect("exit_worktree failed");
+
+    let custom = base.join("custom_wt");
+    std::fs::remove_dir_all(&custom).unwrap();
+    assert_eq!(listed_paths(&base).len(), 2);
+
+    // The next enter prunes the stale record before adding a new worktree.
+    let res = workspace_root::scope(
+        root.clone(),
+        enter.execute(serde_json::json!({ "path": "second_wt" })),
+    )
+    .await
+    .expect("second enter_worktree failed");
+    assert_eq!(
+        res["pruned_stale_worktrees"],
+        serde_json::json!([custom.to_string_lossy()])
+    );
+    let paths = listed_paths(&base);
+    assert!(
+        !paths.contains(&custom.to_string_lossy().to_string()),
+        "{paths:?}"
+    );
+    assert_eq!(paths.len(), 2, "main + second_wt");
+}

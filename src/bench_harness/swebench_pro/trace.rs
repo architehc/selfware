@@ -255,6 +255,9 @@ impl ProgressEmitter for TraceProgressEmitter {
                 // Also record the command name as a lightweight hint.
                 let _ = name;
             }
+            // Heartbeats carry no trace-worthy state; the request/response
+            // pair already brackets the call.
+            ProgressEvent::LlmWaiting { .. } => {}
             ProgressEvent::StepCompleted { .. }
             | ProgressEvent::TaskCompleted { .. }
             | ProgressEvent::TaskFailed { .. }

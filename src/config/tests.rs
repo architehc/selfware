@@ -1814,9 +1814,10 @@ fn test_config_load_empty_file() {
     assert_eq!(config.model, "qwen38-flash-next");
     // The default model matches the built-in qwen38 profile, which fills
     // native_function_calling = false (SGLang emits XML tool calls in
-    // content) and the profile's 32,768 completion cap for any field the
-    // empty config omits — not the 65,536 profile-less default.
-    assert_eq!(config.max_tokens, 32768);
+    // content) and the profile's measured 24,576 completion cap for any field
+    // the empty config omits — not the 65,536 profile-less default.
+    assert_eq!(config.max_tokens, 24576);
+    assert_eq!(config.agent.max_call_secs, Some(600));
     assert_eq!(config.matched_profile.as_deref(), Some("qwen38"));
     assert!(config.models.contains_key("default"));
 }

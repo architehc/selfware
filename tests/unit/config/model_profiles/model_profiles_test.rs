@@ -226,6 +226,7 @@ fn apply_profile_respects_explicit_user_config() {
         context_length: false,
         max_streams: false,
         max_global: false,
+        max_call_secs: false,
         extra_body_keys: vec!["presence_penalty".to_string()],
     };
     let applied = apply_profile(&mut config, &profile, &user_explicit);
@@ -257,6 +258,7 @@ fn applied_fields_render_is_stable() {
         context_length: true,
         max_streams: true,
         max_global: true,
+        max_call_secs: false,
         extra_body_keys: vec!["a".to_string(), "b".to_string()],
     };
     let s = af.render();
@@ -277,9 +279,11 @@ fn qwen38_profile_sets_preserve_thinking_false_and_sampling_defaults() {
     assert_eq!(p.native_function_calling, Some(false));
     assert_eq!(p.streaming, Some(true));
     assert_eq!(p.temperature, Some(0.7));
-    assert_eq!(p.context_length, Some(350_000));
-    assert_eq!(p.max_streams, Some(16));
-    assert_eq!(p.max_global, Some(24));
+    assert_eq!(p.context_length, Some(163_840));
+    assert_eq!(p.max_tokens, Some(24_576));
+    assert_eq!(p.max_call_secs, Some(600));
+    assert_eq!(p.max_streams, Some(8));
+    assert_eq!(p.max_global, Some(16));
     let obj = p.extra_body.as_object().expect("extra_body object");
     assert_eq!(obj.get("top_p"), Some(&json!(0.95)));
     assert_eq!(obj.get("top_k"), Some(&json!(20)));
@@ -296,9 +300,9 @@ fn qwen38_profile_sets_preserve_thinking_false_and_sampling_defaults() {
     assert_eq!(p2.name, "qwen38");
     assert_eq!(p2.native_function_calling, Some(false));
     assert_eq!(p2.temperature, Some(0.7));
-    assert_eq!(p2.context_length, Some(350_000));
-    assert_eq!(p2.max_streams, Some(16));
-    assert_eq!(p2.max_global, Some(24));
+    assert_eq!(p2.context_length, Some(163_840));
+    assert_eq!(p2.max_streams, Some(8));
+    assert_eq!(p2.max_global, Some(16));
     let obj2 = p2.extra_body.as_object().expect("extra_body object");
     let ctk2 = obj2
         .get("chat_template_kwargs")
@@ -338,8 +342,59 @@ fn test_apply_profile_sets_context_length_and_max_streams_for_qwen38() {
     assert!(applied.context_length);
     assert!(applied.max_streams);
     assert!(applied.max_global);
-    assert_eq!(config.context_length, 350_000);
-    assert_eq!(config.concurrency.max_streams, 16);
-    assert_eq!(config.concurrency.max_global, 24);
+    assert!(applied.max_call_secs);
+    assert_eq!(config.context_length, 163_840);
+    assert_eq!(config.max_tokens, 24_576);
+    assert_eq!(config.concurrency.max_streams, 8);
+    assert_eq!(config.concurrency.max_global, 16);
+    assert_eq!(config.agent.max_call_secs, Some(600));
     assert_eq!(config.temperature, 0.7);
+}
+
+#[test]
+fn qwen38_measured_defaults_yield_to_explicit_user_config() {
+    // Profile defaults (context 163,840 / max_tokens 24,576 / 8 streams /
+    // max_call_secs 600) must never override values the user set in TOML.
+    let toml = r#"
+model = "qwen38-flash-next"
+max_tokens = 4096
+context_length = 65536
+
+[concurrency]
+max_streams = 2
+max_global = 5
+
+[agent]
+max_call_secs = 120
+"#;
+    let user_explicit = UserExplicitFields::from_toml(toml);
+    assert!(user_explicit.max_call_secs);
+    let mut config = Config {
+        max_tokens: 4096,
+        context_length: 65536,
+        ..Default::default()
+    };
+    config.concurrency.max_streams = 2;
+    config.concurrency.max_global = 5;
+    config.agent.max_call_secs = Some(120);
+    let profile = match_profile("qwen38-flash-next").unwrap();
+    let applied = apply_profile(&mut config, &profile, &user_explicit);
+    assert!(!applied.max_tokens && !applied.context_length);
+    assert!(!applied.max_streams && !applied.max_global && !applied.max_call_secs);
+    assert_eq!(config.max_tokens, 4096);
+    assert_eq!(config.context_length, 65536);
+    assert_eq!(config.concurrency.max_streams, 2);
+    assert_eq!(config.concurrency.max_global, 5);
+    assert_eq!(config.agent.max_call_secs, Some(120));
+}
+
+#[test]
+fn profiles_without_call_cap_leave_max_call_secs_uncapped() {
+    for model in ["qwen3.6-27b", "glm-5.2", "claude-sonnet-5", "gpt-6"] {
+        let mut config = Config::default();
+        let profile = match_profile(model).unwrap();
+        let applied = apply_profile(&mut config, &profile, &UserExplicitFields::default());
+        assert!(!applied.max_call_secs, "{model}");
+        assert_eq!(config.agent.max_call_secs, None, "{model}");
+    }
 }

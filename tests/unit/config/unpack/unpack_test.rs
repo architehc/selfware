@@ -980,14 +980,14 @@ fn test_unpack_preserves_profile_pinned_context_length_over_advertised() {
     let profile =
         crate::config::model_profiles::match_profile("qwen38-flash-next").expect("qwen profile");
     let pinned_ctx = profile.context_length.expect("pinned context length");
-    assert_eq!(pinned_ctx, 350_000);
+    assert_eq!(pinned_ctx, 163_840);
 
     let mut detected = Config::default();
     detected.endpoint = "http://localhost:8000/v1".to_string();
     detected.model = "qwen38-flash-next".to_string();
     detected.context_length = pinned_ctx;
-    detected.max_tokens = 32768;
-    detected.agent.token_budget = 210_000;
+    detected.max_tokens = 24576;
+    detected.agent.token_budget = 98_304;
 
     let best = DiscoveredEndpoint {
         provider: "Generic".to_string(),
@@ -1004,7 +1004,7 @@ fn test_unpack_preserves_profile_pinned_context_length_over_advertised() {
     config.context_length = detected.context_length;
     config.agent.token_budget = detected.agent.token_budget;
 
-    assert_eq!(config.context_length, 350_000);
-    assert_eq!(config.agent.token_budget, 210_000);
+    assert_eq!(config.context_length, 163_840);
+    assert_eq!(config.agent.token_budget, 98_304);
     assert_ne!(config.context_length, best.context_length);
 }

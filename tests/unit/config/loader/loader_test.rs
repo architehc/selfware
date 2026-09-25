@@ -384,10 +384,12 @@ fn test_load_empty_file_uses_defaults() {
     let config = Config::load(Some(path.to_str().unwrap())).unwrap();
     assert_eq!(config.endpoint, "https://llm.selfware.design/v1");
     assert_eq!(config.model, "qwen38-flash-next");
-    // The default model matches the built-in qwen38 profile, whose 32,768
-    // completion cap fills the omitted field (not the 65,536 profile-less
-    // default).
-    assert_eq!(config.max_tokens, 32768);
+    // The default model matches the built-in qwen38 profile, whose measured
+    // 24,576 completion cap fills the omitted field (not the 65,536
+    // profile-less default).
+    assert_eq!(config.max_tokens, 24576);
+    assert_eq!(config.context_length, 163_840);
+    assert_eq!(config.agent.max_call_secs, Some(600));
 }
 
 #[test]
@@ -2649,24 +2651,29 @@ fn test_config_load_pins_qwen38_context_and_derives_token_budget() {
     let config = Config::load(Some(path.to_str().unwrap())).unwrap();
     assert_eq!(config.matched_profile.as_deref(), Some("qwen3.8"));
     assert_eq!(
-        config.context_length, 350_000,
-        "qwen3.8 profile must pin context_length to 350,000"
+        config.context_length, 163_840,
+        "qwen3.8 profile must pin context_length to 163,840"
     );
     assert_eq!(
-        config.max_tokens, 32_768,
-        "qwen3.8 profile must pin max_tokens to 32,768"
+        config.max_tokens, 24_576,
+        "qwen3.8 profile must pin max_tokens to 24,576"
     );
     assert_eq!(
-        config.agent.token_budget, 210_000,
-        "agent token_budget must be derived as 60% of context (210,000 for 350,000)"
+        config.agent.token_budget, 98_304,
+        "agent token_budget must be derived as 60% of context (98,304 for 163,840)"
     );
     assert_eq!(
-        config.concurrency.max_streams, 16,
-        "qwen3.8 profile must pin max_streams to 16"
+        config.concurrency.max_streams, 8,
+        "qwen3.8 profile must pin max_streams to 8"
     );
     assert_eq!(
-        config.concurrency.max_global, 24,
-        "qwen3.8 profile must pin max_global to 24"
+        config.concurrency.max_global, 16,
+        "qwen3.8 profile must pin max_global to 16"
+    );
+    assert_eq!(
+        config.agent.max_call_secs,
+        Some(600),
+        "qwen3.8 profile must default agent.max_call_secs to 600"
     );
 
     // Explicit user context_length overrides the profile pin
@@ -2687,6 +2694,59 @@ fn test_config_load_pins_qwen38_context_and_derives_token_budget() {
         config2.agent.token_budget, 300_000,
         "derived token_budget must follow the explicit context_length (60% of 500,000 = 300,000)"
     );
+    assert_eq!(
+        config2.max_tokens, 24_576,
+        "profile still fills fields the user did not set"
+    );
+}
+
+#[test]
+fn test_config_load_qwen38_max_call_secs_provenance_and_explicit_override() {
+    let _guard = clear_env();
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "http://localhost:8000/v1"
+        model = "qwen38-flash-next"
+        "#,
+        "qwen38_call_cap_default.toml",
+    );
+    let config = Config::load(Some(path.to_str().unwrap())).unwrap();
+    assert_eq!(config.agent.max_call_secs, Some(600));
+    assert!(matches!(
+        config.sources.get("agent.max_call_secs"),
+        Some(ConfigSource::Profile(name)) if name == "qwen38"
+    ));
+    assert!(config
+        .matched_profile_applied
+        .iter()
+        .any(|f| f == "agent.max_call_secs"));
+
+    let (_dir2, path2) = write_temp_config(
+        r#"
+        endpoint = "http://localhost:8000/v1"
+        model = "qwen38-flash-next"
+        max_tokens = 8192
+
+        [agent]
+        max_call_secs = 90
+
+        [concurrency]
+        max_streams = 3
+        "#,
+        "qwen38_call_cap_explicit.toml",
+    );
+    let config2 = Config::load(Some(path2.to_str().unwrap())).unwrap();
+    assert_eq!(config2.agent.max_call_secs, Some(90), "explicit cap wins");
+    assert_eq!(config2.max_tokens, 8192, "explicit max_tokens wins");
+    assert_eq!(config2.concurrency.max_streams, 3, "explicit streams win");
+    assert_eq!(
+        config2.concurrency.max_global, 16,
+        "unset field still filled"
+    );
+    assert!(!config2
+        .matched_profile_applied
+        .iter()
+        .any(|f| f == "agent.max_call_secs" || f == "max_tokens"));
 }
 
 // =========================================================================

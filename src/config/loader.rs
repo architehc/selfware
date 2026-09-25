@@ -1060,6 +1060,9 @@ impl Config {
                 if applied.max_global {
                     fields.push("concurrency.max_global".to_string());
                 }
+                if applied.max_call_secs {
+                    fields.push("agent.max_call_secs".to_string());
+                }
                 for k in &applied.extra_body_keys {
                     fields.push(format!("extra_body.{}", k));
                 }

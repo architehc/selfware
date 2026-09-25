@@ -489,31 +489,37 @@ stderr, so stdout is pure JSON.
 
 ## Running against llm.selfware.design / SGLang
 
-The zero-config defaults work, but for long autonomous tasks on
-`qwen38-flash-next` we recommend these settings, measured against the endpoint
-on 2026-09-24:
+The built-in `qwen38` profile already applies these settings (measured
+against the endpoint on 2026-09-24) to any field you do not set yourself;
+explicit values in your config always win. Spelled out, they are:
 
 ```toml
 endpoint       = "https://llm.selfware.design/v1"
 model          = "qwen38-flash-next"
 max_tokens     = 24576    # bounds a runaway reasoning stream
-context_length = 131072   # 128k–160k; the largest real prompt we saw was 127k
+context_length = 163840   # 160k; the largest real prompt we saw was 127k
 
 [agent]
 max_call_secs = 600               # the longest real call took 358 s
 native_function_calling = false   # see below
+
+[concurrency]
+max_streams = 8    # the server's max_running_requests
+max_global  = 16   # 8 streams + 8 tool permits
 ```
 
 - **`max_tokens` ≈ 24576.** Only `max_tokens` bounds this model's reasoning: at
-  65536, a runaway reasoning stream can run ~27 minutes at ~40 tok/s.
+  65536, a runaway reasoning stream can run ~27 minutes at ~40 tok/s. The
+  longest completion a real task needed was 13.4k tokens.
   `reasoning_effort` has no measurable effect on this model.
 - **`agent.max_call_secs` ≈ 600.** Fails a stuck call with a typed error instead
   of hanging. Keep streaming on (the default): an ngrok-style gateway cuts
   non-streaming requests at 300 s.
-- **`context_length` 128k–160k.** Bigger windows cost more than they give: time
+- **`context_length` 163840.** Bigger windows cost more than they give: time
   to first token was 13 s at 99k tokens vs 40 s at 257k, and decode dropped to
-  17 tok/s. The built-in profile for this model allows 350k, so set it lower
-  explicitly.
+  17 tok/s.
+- **`concurrency.max_streams` 8.** The endpoint serves at most 8 requests at
+  once; more streams only queue server-side.
 - **`native_function_calling = false`** unless the server's tool parser is
   `qwen3_coder`; with that parser, native tool calling works.
 

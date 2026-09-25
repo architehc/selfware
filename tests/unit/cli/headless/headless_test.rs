@@ -200,6 +200,23 @@ fn jsonl_emits_llm_events_with_tokens_and_finish_reason() {
 }
 
 #[test]
+fn jsonl_emits_llm_waiting_heartbeat() {
+    let line = JsonlProgressEmitter::event_json_line(ProgressEvent::LlmWaiting {
+        elapsed_secs: 45,
+        phase: "prefill".to_string(),
+        tokens_so_far: 0,
+        tokens_source: "estimate".to_string(),
+    })
+    .expect("llm_waiting must be emitted in stream-json");
+    let v: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(v["event"], "llm_waiting");
+    assert_eq!(v["elapsed_secs"], 45);
+    assert_eq!(v["phase"], "prefill");
+    assert_eq!(v["tokens_so_far"], 0);
+    assert_eq!(v["tokens_source"], "estimate");
+}
+
+#[test]
 fn test_step_completed_constructor() {
     let ev = HeadlessEvent::step_completed(7);
     assert_eq!(ev.event, "step_completed");

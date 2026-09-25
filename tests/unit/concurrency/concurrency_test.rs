@@ -89,11 +89,10 @@ async fn test_default_values() {
 }
 
 #[tokio::test]
-async fn test_concurrency_governor_16_slot_server_cap_queues_17th() {
-    // SGLang endpoint deployment has a 16-slot concurrency limit.
-    // The profile pins max_streams to 16 AND max_global to 16 alongside it,
-    // so acquire_stream (which holds both a stream permit and a global permit)
-    // is not capped by the default max_global of 12.
+async fn test_concurrency_governor_8_slot_server_cap_queues_9th() {
+    // The llm.selfware.design SGLang deployment runs max_running_requests = 8.
+    // The profile pins max_streams to 8 and max_global to 16 alongside it,
+    // so 8 inflight streams still leave 8 global permits for tool execution.
     let mut config = crate::config::Config {
         model: "qwen38-flash-next".to_string(),
         ..Default::default()
@@ -103,37 +102,36 @@ async fn test_concurrency_governor_16_slot_server_cap_queues_17th() {
     let user_explicit = crate::config::model_profiles::UserExplicitFields::default();
     crate::config::model_profiles::apply_profile(&mut config, &profile, &user_explicit);
 
-    assert_eq!(config.concurrency.max_streams, 16);
-    assert_eq!(config.concurrency.max_global, 24);
+    assert_eq!(config.concurrency.max_streams, 8);
+    assert_eq!(config.concurrency.max_global, 16);
 
     let gov = ConcurrencyGovernor::from_config(&config.concurrency);
 
     let mut permits = Vec::new();
-    for _ in 0..16 {
+    for _ in 0..8 {
         permits.push(
             gov.acquire_stream()
                 .await
-                .expect("slot within 16 must be granted"),
+                .expect("slot within 8 must be granted"),
         );
     }
 
     assert_eq!(gov.stats().streams_available, 0);
     assert_eq!(gov.stats().global_available, 8);
 
-    // 17th stream request must wait / queue when all 16 slots are held
+    // 9th stream request must wait / queue when all 8 slots are held
     let timeout_result =
         tokio::time::timeout(std::time::Duration::from_millis(50), gov.acquire_stream()).await;
     assert!(
         timeout_result.is_err(),
-        "17th stream must queue while 16 slots are held"
+        "9th stream must queue while 8 slots are held"
     );
 
-    // Once a permit drops, the 17th request acquires successfully
+    // Once a permit drops, the 9th request acquires successfully
     drop(permits.pop());
     assert_eq!(gov.stats().streams_available, 1);
-    let p17 =
-        tokio::time::timeout(std::time::Duration::from_millis(50), gov.acquire_stream()).await;
-    assert!(p17.is_ok(), "17th stream acquires once a permit frees up");
+    let p9 = tokio::time::timeout(std::time::Duration::from_millis(50), gov.acquire_stream()).await;
+    assert!(p9.is_ok(), "9th stream acquires once a permit frees up");
 }
 
 /// Parked category waiters now hold the global permit they acquired BEFORE
