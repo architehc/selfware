@@ -354,8 +354,19 @@ impl Config {
     }
 }
 
+/// JSON view of a config section with every secret redacted
+/// ([`model::redact_config_secrets`]): for `Debug` fields whose own `Debug`
+/// would print raw `extra_body` headers or MCP `env` values.
+fn redacted_view<T: Serialize>(section: &T) -> serde_json::Value {
+    let mut value = serde_json::to_value(section).unwrap_or_default();
+    model::redact_config_secrets(&mut value);
+    value
+}
+
 // Manual `Debug` implementation that delegates to `RedactedString`'s `Debug`
 // (which prints `[REDACTED]`) to prevent accidental exposure of credentials.
+// `models`, `extra_body` and `mcp` print as redacted JSON views: their own
+// `Debug` would show `extra_body` headers and MCP server `env` maps raw.
 impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")
@@ -375,14 +386,14 @@ impl std::fmt::Debug for Config {
             .field("evolution", &self.evolution)
             .field("cache", &self.cache)
             .field("debug", &self.debug)
-            .field("models", &self.models)
+            .field("models", &redacted_view(&self.models))
             .field("execution_mode", &self.execution_mode)
             .field("compact_mode", &self.compact_mode)
             .field("verbose_mode", &self.verbose_mode)
             .field("show_tokens", &self.show_tokens)
-            .field("extra_body", &self.extra_body)
+            .field("extra_body", &redacted_view(&self.extra_body))
             .field("qa", &self.qa)
-            .field("mcp", &self.mcp)
+            .field("mcp", &redacted_view(&self.mcp))
             .field("hooks", &self.hooks)
             .field("computer", &self.computer)
             .field("plan_mode", &self.plan_mode)

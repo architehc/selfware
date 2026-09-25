@@ -88,47 +88,27 @@ pub(crate) fn is_placeholder_credential(value: &str) -> bool {
     false
 }
 
-/// Key names that carry a secret wherever they appear in the config tree
-/// (top-level `api_key`, `[models.*].api_key`, arbitrary `extra_body` maps).
-/// Deliberately exact-ish: `max_tokens` / `token_budget` are NOT secrets.
-#[cfg_attr(not(unix), allow(dead_code))]
-fn is_secret_field_name(key: &str) -> bool {
-    let k = key.to_ascii_lowercase();
-    matches!(
-        k.as_str(),
-        "api_key"
-            | "apikey"
-            | "token"
-            | "secret"
-            | "password"
-            | "passwd"
-            | "authorization"
-            | "bearer"
-    ) || k.ends_with("_api_key")
-        || k.ends_with("_token")
-        || k.ends_with("_secret")
-        || k.ends_with("_password")
-}
-
 /// Decide from the parsed TOML whether a config file stores a real
-/// credential. Covers the same fields [`super::model::redact_config_secrets`]
-/// treats as secret (every `api_key`, every value of an MCP server `env`
-/// map) plus secret-named keys anywhere (e.g. an `Authorization` header in
-/// `extra_body`). Placeholders do not count ([`is_placeholder_credential`]).
+/// credential: a value under a secret-named key
+/// ([`super::model::is_secret_key_name`]) or inside an `env` / `headers` map
+/// ([`super::model::is_secret_map_name`]) — the same predicate every config
+/// view redacts with ([`super::model::redact_config_secrets`]).
+/// Placeholders do not count ([`is_placeholder_credential`]).
 /// Unparseable content returns `true` — fail toward warning.
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn config_content_holds_credential(content: &str) -> bool {
     fn walk(value: &toml::Value, in_env_map: bool) -> bool {
         match value {
             toml::Value::Table(table) => table.iter().any(|(key, val)| {
-                if in_env_map || is_secret_field_name(key) {
+                let secret = super::model::is_secret_key_name(key);
+                if in_env_map || secret {
                     if let toml::Value::String(s) = val {
                         if !is_placeholder_credential(s) {
                             return true;
                         }
                     }
                 }
-                walk(val, key == "env" || key == "headers")
+                walk(val, secret || super::model::is_secret_map_name(key))
             }),
             toml::Value::Array(items) => items.iter().any(|v| walk(v, false)),
             toml::Value::String(s) => in_env_map && !is_placeholder_credential(s),

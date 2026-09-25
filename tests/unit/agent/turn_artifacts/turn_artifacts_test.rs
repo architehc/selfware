@@ -93,8 +93,10 @@ fn sanitize_strips_nested_headers_with_mixed_case() {
     assert_eq!(body["headers"]["X-Api-Key"], "<redacted>");
     assert_eq!(body["headers"]["AUTHORIZATION"], "<redacted>");
     assert_eq!(body["headers"]["X-API-KEY"], "<redacted>");
-    // Non-secret header preserved.
-    assert_eq!(body["headers"]["Content-Type"], "application/json");
+    // A `headers` map is a secret map under the shared config predicate
+    // (the classifier counts `[extra_body.headers] X-Custom` as a
+    // credential), so even a non-secret-named header is redacted.
+    assert_eq!(body["headers"]["Content-Type"], "<redacted>");
 }
 
 #[test]
@@ -507,4 +509,28 @@ fn next_free_step_skips_existing_files() {
     std::fs::write(artifact_path(&dir, 4), "{}").unwrap();
     assert_eq!(next_free_step(tmp.path(), 1), 3);
     assert_eq!(next_free_step(tmp.path(), 4), 5);
+}
+
+#[test]
+fn sanitize_uses_the_config_secret_predicate() {
+    // Turn artifacts and config views share one secret predicate: every
+    // value of a `headers` / `env` map, `passwd`, `*_secret`, `*_password`.
+    let mut body = serde_json::json!({
+        "model": "selfware",
+        "extra": {
+            "headers": { "X-Custom": "hdr-leak" },
+            "env": { "ANY": "env-leak" },
+            "passwd": "pwd-leak",
+            "client-secret": "cs-leak",
+            "db_password": "dbpw-leak",
+        },
+        "max_tokens": 10,
+    });
+    sanitize_request_body(&mut body);
+    let s = body.to_string();
+    for leak in ["hdr-leak", "env-leak", "pwd-leak", "cs-leak", "dbpw-leak"] {
+        assert!(!s.contains(leak), "{leak} leaked: {s}");
+    }
+    assert_eq!(body["model"], "selfware");
+    assert_eq!(body["max_tokens"], 10);
 }

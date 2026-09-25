@@ -2494,3 +2494,31 @@ async fn resumed_run_emits_the_fresh_run_result_object() {
     assert!(finish_resumed_run(&agent, &ok, 1, None, true, HeadlessOutputFormat::Text).is_none());
     server.stop().await;
 }
+
+/// `selfware config show` rows go through the shared config redaction: an
+/// `[extra_body.headers]` credential or an upper-case secret name is shown
+/// as the marker, never in the clear.
+#[test]
+fn config_show_redacts_extra_body_secrets() {
+    let _guard = clear_config_env();
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_path = tmp.path().join("selfware.toml");
+    std::fs::write(
+        &cfg_path,
+        "[extra_body]\ntop_p = 0.9\nAPI_KEY = \"sk-upper-show-leak\"\n\n[extra_body.headers]\nAuthorization = \"Bearer hdr-show-leak\"\n",
+    )
+    .unwrap();
+    let cfg = Config::load(Some(cfg_path.to_str().unwrap())).unwrap();
+    let rows = super::config_show_rows(&cfg);
+    let shown: String = rows
+        .iter()
+        .map(|(k, v, _)| format!("{k} = {v}\n"))
+        .collect();
+    assert!(!shown.contains("sk-upper-show-leak"), "{shown}");
+    assert!(!shown.contains("hdr-show-leak"), "{shown}");
+    assert!(shown.contains("extra_body.top_p = 0.9"), "{shown}");
+    assert!(
+        shown.contains(crate::config::model::REDACTED_SECRET_MARKER),
+        "{shown}"
+    );
+}

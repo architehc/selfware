@@ -373,9 +373,13 @@ impl AutoConfigurator {
         println!("auto_recovery = true");
         println!("max_recovery_attempts = 3");
         if let Some(ref extra) = config.extra_body {
+            // A display, not the saved file: secrets print as the marker.
+            let mut view = serde_json::Value::Object(extra.clone());
+            crate::config::model::redact_config_secrets(&mut view);
+            let extra = view.as_object().cloned().unwrap_or_default();
             println!();
             println!("[extra_body]");
-            for (k, v) in extra {
+            for (k, v) in &extra {
                 if let Some(obj) = v.as_object() {
                     let inner: Vec<String> =
                         obj.iter().map(|(ik, iv)| format!("{ik} = {iv}")).collect();

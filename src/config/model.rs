@@ -81,6 +81,49 @@ impl From<&str> for RedactedString {
 /// consumers (e.g. the MCP `selfware://config` resource).
 pub const REDACTED_SECRET_MARKER: &str = "<redacted>";
 
+/// THE secret-key predicate: a key whose value is a credential wherever it
+/// appears (config tree, `extra_body`, request bodies). Case-insensitive,
+/// `-` and `_` equivalent: `api_key`, `API_KEY`, `x-api-key`,
+/// `openai_api_key`, `token`, `access-token`, `*_token`, `secret`,
+/// `client_secret`, `password`, `db_password`, `passwd`, `authorization`,
+/// `bearer`. Deliberately NOT `max_tokens`, `token_budget`,
+/// `completion_tokens`, `tokenizer`, `tool_call_id`.
+///
+/// Shared by the config credential classifier
+/// (`config::loader::config_content_holds_credential`), every config view
+/// ([`redact_config_secrets`]) and the turn-artifact / debug request-body
+/// sanitizer, so what counts as a secret cannot drift between them.
+pub(crate) fn is_secret_key_name(key: &str) -> bool {
+    let k = key.to_ascii_lowercase().replace('-', "_");
+    matches!(
+        k.as_str(),
+        "token" | "secret" | "password" | "passwd" | "authorization" | "bearer"
+    ) || k.contains("api_key")
+        || k.contains("apikey")
+        || k.ends_with("_token")
+        || k.ends_with("_secret")
+        || k.ends_with("_password")
+}
+
+/// A map whose every value is a credential whatever its key: an `env` map
+/// (MCP server environments, `GITHUB_TOKEN`, `DB_URL`, …) or a `headers`
+/// map (`X-Custom = "…"` auth headers). Case-insensitive.
+pub(crate) fn is_secret_map_name(key: &str) -> bool {
+    key.eq_ignore_ascii_case("env") || key.eq_ignore_ascii_case("headers")
+}
+
+/// Replace every non-null string / number at or below `value`.
+fn redact_all(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(_) | serde_json::Value::Number(_) => {
+            *value = serde_json::Value::String(REDACTED_SECRET_MARKER.to_string());
+        }
+        serde_json::Value::Object(map) => map.values_mut().for_each(redact_all),
+        serde_json::Value::Array(items) => items.iter_mut().for_each(redact_all),
+        _ => {}
+    }
+}
+
 /// Redact secrets from a JSON view of the configuration, in place.
 ///
 /// [`RedactedString`]'s `Serialize` impl intentionally emits the real value
@@ -89,37 +132,25 @@ pub const REDACTED_SECRET_MARKER: &str = "<redacted>";
 /// consumes it. Views handed to third parties must pass through this
 /// instead:
 ///
-/// - every string value under an `api_key` key (the top-level
-///   `Config.api_key` and each `[models.*]` profile key) is replaced with
+/// - every value under a secret-named key ([`is_secret_key_name`]: every
+///   `api_key`, `Authorization`, `API_KEY`, `*_token`, …) is replaced with
 ///   [`REDACTED_SECRET_MARKER`];
-/// - every string value inside an `env` object (per-MCP-server environment
-///   maps, e.g. `GITHUB_TOKEN = "…"`) is replaced as well.
+/// - every value inside an `env` or `headers` map ([`is_secret_map_name`])
+///   is replaced as well.
 ///
-/// Both recurse through arbitrary sub-objects/arrays, so secrets nested at
-/// any depth are covered. Deserialization is unaffected — this is a
-/// one-way view transformation.
+/// This is exactly what the config credential classifier counts as a
+/// credential. It recurses through arbitrary sub-objects/arrays, so secrets
+/// nested at any depth are covered; nulls stay null. Deserialization is
+/// unaffected — this is a one-way view transformation.
 pub fn redact_config_secrets(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(map) => {
             for (key, val) in map.iter_mut() {
-                if key == "api_key" {
-                    if val.is_string() {
-                        *val = serde_json::Value::String(REDACTED_SECRET_MARKER.to_string());
-                    }
-                    continue;
+                if is_secret_key_name(key) || is_secret_map_name(key) {
+                    redact_all(val);
+                } else {
+                    redact_config_secrets(val);
                 }
-                if key == "env" {
-                    if let serde_json::Value::Object(env_map) = val {
-                        for env_val in env_map.values_mut() {
-                            if env_val.is_string() {
-                                *env_val =
-                                    serde_json::Value::String(REDACTED_SECRET_MARKER.to_string());
-                            }
-                        }
-                    }
-                    continue;
-                }
-                redact_config_secrets(val);
             }
         }
         serde_json::Value::Array(items) => {

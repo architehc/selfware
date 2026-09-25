@@ -1996,3 +1996,45 @@ async fn test_resources_read_blocks_denied_paths() {
     assert!(!tree_str.contains(".env"));
     assert!(!tree_str.contains("id_ed25519"));
 }
+
+/// `[extra_body.headers]` credentials and upper-case secret names are
+/// credentials to the config classifier, so they must not reach MCP
+/// clients either (the resource used to redact only `api_key` and `env`).
+#[tokio::test]
+async fn test_resources_read_config_redacts_headers_and_uppercase_secrets() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("selfware.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+[extra_body]
+top_p = 0.9
+API_KEY = "sk-upper-mcp-leak"
+
+[extra_body.headers]
+Authorization = "Bearer hdr-mcp-leak"
+X-Custom = "custom-mcp-leak"
+"#,
+    )
+    .unwrap();
+
+    let server = McpServer::with_config(Some(config_path.to_string_lossy().to_string()));
+    initialize_server(&server).await;
+
+    let request = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(Value::from(32)),
+        method: "resources/read".to_string(),
+        params: Some(serde_json::json!({"uri": "selfware://config"})),
+    };
+
+    let response = server.handle_request(&request).await.unwrap();
+    assert!(response.error.is_none());
+    let result = response.result.unwrap();
+    let text = result["contents"][0]["text"].as_str().unwrap_or("");
+    // The config loaded (not an error object), so the view is meaningful.
+    assert!(text.contains("\"top_p\""), "config did not load: {text}");
+    for leak in ["sk-upper-mcp-leak", "hdr-mcp-leak", "custom-mcp-leak"] {
+        assert!(!text.contains(leak), "{leak} leaked to MCP clients: {text}");
+    }
+}

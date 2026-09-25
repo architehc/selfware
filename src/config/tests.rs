@@ -4481,3 +4481,42 @@ fn context_mode_and_fit_ratio_parse_from_toml() {
     assert_eq!(config.context_mode, "compact");
     assert!((config.context_fit_ratio - 0.5).abs() < f64::EPSILON);
 }
+
+/// `{:?}` of a Config (logs, panics) goes through the shared config
+/// redaction too: `extra_body` headers, MCP server env maps and per-profile
+/// `extra_body` never print in the clear.
+#[test]
+fn test_config_debug_redacts_extra_body_mcp_env_and_profile_secrets() {
+    let config: Config = toml::from_str(
+        r#"
+[extra_body]
+top_p = 0.9
+API_KEY = "sk-upper-debug-leak"
+
+[extra_body.headers]
+Authorization = "Bearer hdr-debug-leak"
+
+[models.alt]
+endpoint = "http://x/v1"
+model = "m"
+extra_body = { headers = { X-Custom = "profile-debug-leak" } }
+
+[[mcp.servers]]
+name = "gh"
+command = "npx"
+env = { GITHUB_TOKEN = "env-debug-leak" }
+"#,
+    )
+    .unwrap();
+    let debug = format!("{:?}", config);
+    for leak in [
+        "sk-upper-debug-leak",
+        "hdr-debug-leak",
+        "profile-debug-leak",
+        "env-debug-leak",
+    ] {
+        assert!(!debug.contains(leak), "{leak} leaked in Debug: {debug}");
+    }
+    assert!(debug.contains("top_p"), "{debug}");
+    assert!(debug.contains("npx"), "{debug}");
+}

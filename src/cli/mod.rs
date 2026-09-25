@@ -6980,6 +6980,11 @@ pub(crate) fn config_show_rows(
     ));
 
     if let Some(extra) = &config.extra_body {
+        // Shown through the shared config redaction: an `[extra_body.headers]`
+        // credential or a secret-named key never prints in the clear.
+        let mut view = serde_json::Value::Object(extra.clone());
+        crate::config::model::redact_config_secrets(&mut view);
+        let extra = view.as_object().cloned().unwrap_or_default();
         let mut keys: Vec<&String> = extra.keys().collect();
         keys.sort();
         for k in keys {

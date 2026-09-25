@@ -3426,3 +3426,34 @@ fn tracked_llm_selfware_design_config_uses_the_measured_qwen38_profile() {
         "iteration cap is not pinned below the default"
     );
 }
+
+/// Classifier and redaction share one secret predicate: every value the
+/// classifier calls a credential is gone from the redacted JSON view that
+/// MCP clients / `config show` see.
+#[test]
+fn test_every_classified_credential_is_redacted_in_config_views() {
+    use super::config_content_holds_credential as holds;
+    for keyed in [
+        "api_key = \"LEAK1\"",
+        "[models.alt]\nendpoint = \"http://x\"\nmodel = \"m\"\napi_key = \"LEAK2\"",
+        "[[mcp.servers]]\nname = \"gh\"\ncommand = \"x\"\nenv = { GITHUB_TOKEN = \"LEAK3\" }",
+        "[[mcp.servers]]\nname = \"db\"\ncommand = \"x\"\nenv = { DB_URL = \"LEAK4\" }",
+        "[extra_body]\nauthorization = \"Bearer LEAK5\"",
+        "[extra_body.headers]\nX-Custom = \"LEAK6\"",
+        "[extra_body.headers]\nAuthorization = \"Bearer LEAK7\"",
+        "[extra_body]\nAPI_KEY = \"LEAK8\"",
+        "[extra_body]\nX-Api-Key = \"LEAK9\"",
+        "[extra_body.auth]\nclient_secret = \"LEAK10\"\npasswd = \"LEAK11\"",
+        "[extra_body.Headers]\nX-Trace = \"LEAK12\"",
+    ] {
+        assert!(holds(keyed), "credential missed by the classifier: {keyed}");
+        let parsed: toml::Value = toml::from_str(keyed).unwrap();
+        let mut view = serde_json::to_value(&parsed).unwrap();
+        crate::config::model::redact_config_secrets(&mut view);
+        let shown = view.to_string();
+        assert!(
+            !shown.contains("LEAK"),
+            "classified but not redacted: {keyed} -> {shown}"
+        );
+    }
+}

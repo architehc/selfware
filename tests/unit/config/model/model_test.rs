@@ -384,3 +384,100 @@ fn test_profile_response_timeout_floor_deserialization() {
     assert_eq!(minimal.response_timeout_floor_secs, None);
     assert_eq!(minimal.max_retries, None);
 }
+
+// -------------------------------------------------------------------------
+// One secret predicate for every config view: the redaction must cover
+// everything `config_content_holds_credential` classifies as a credential
+// (headers maps, secret-named keys anywhere, case-insensitive names).
+// -------------------------------------------------------------------------
+
+#[test]
+fn test_redact_config_secrets_extra_body_headers_and_uppercase_names() {
+    let mut value = serde_json::json!({
+        "endpoint": "https://example.test/v1",
+        "max_tokens": 4096,
+        "extra_body": {
+            "top_p": 0.9,
+            "API_KEY": "sk-upper-leak",
+            "Authorization": "Bearer top-leak",
+            "headers": {
+                "Authorization": "Bearer hdr-leak",
+                "X-Custom": "custom-leak"
+            },
+            "auth": { "client_secret": "cs-leak", "Password": "pw-leak", "passwd": "pwd-leak" },
+            "x-api-key": "dash-leak",
+            "Access-Token": "at-leak",
+            "seed": 7
+        },
+        "models": { "alt": { "Api_Key": "sk-profile-leak", "token_budget": 1000 } },
+        "mcp": { "servers": [ { "name": "gh", "ENV": { "ANY": "env-leak" } } ] }
+    });
+    redact_config_secrets(&mut value);
+    let s = value.to_string();
+    for leak in [
+        "sk-upper-leak",
+        "top-leak",
+        "hdr-leak",
+        "custom-leak",
+        "cs-leak",
+        "pw-leak",
+        "pwd-leak",
+        "dash-leak",
+        "at-leak",
+        "sk-profile-leak",
+        "env-leak",
+    ] {
+        assert!(!s.contains(leak), "{leak} leaked: {s}");
+    }
+    assert_eq!(
+        value["extra_body"]["headers"]["X-Custom"],
+        REDACTED_SECRET_MARKER
+    );
+    // Non-secrets stay readable.
+    assert_eq!(value["endpoint"], "https://example.test/v1");
+    assert_eq!(value["max_tokens"], 4096);
+    assert_eq!(value["extra_body"]["top_p"], 0.9);
+    assert_eq!(value["extra_body"]["seed"], 7);
+    assert_eq!(value["models"]["alt"]["token_budget"], 1000);
+    assert_eq!(value["mcp"]["servers"][0]["name"], "gh");
+}
+
+#[test]
+fn test_secret_key_name_is_case_and_separator_insensitive() {
+    for secret in [
+        "api_key",
+        "API_KEY",
+        "ApiKey",
+        "x-api-key",
+        "X-API-KEY",
+        "openai_api_key",
+        "token",
+        "Access-Token",
+        "refresh_token",
+        "secret",
+        "client_secret",
+        "Password",
+        "db_password",
+        "passwd",
+        "Authorization",
+        "bearer",
+    ] {
+        assert!(is_secret_key_name(secret), "{secret}");
+    }
+    for plain in [
+        "max_tokens",
+        "token_budget",
+        "completion_tokens",
+        "tokenizer",
+        "tool_call_id",
+        "show_tokens",
+        "max_budget_tokens",
+        "endpoint",
+        "Content-Type",
+    ] {
+        assert!(!is_secret_key_name(plain), "{plain}");
+    }
+    for map in ["env", "ENV", "headers", "Headers"] {
+        assert!(is_secret_map_name(map), "{map}");
+    }
+}

@@ -250,51 +250,6 @@ pub struct EvidenceSnapshot {
     pub citations: Vec<String>,
 }
 
-/// Sentinel that replaces redacted secret values in artifact files.
-const REDACTED: &str = "<redacted>";
-
-/// Returns `true` if `key` looks like a credential field name.
-///
-/// Matches (case-insensitive):
-/// - `authorization`
-/// - `bearer`
-/// - `secret`
-/// - `password`
-/// - any key containing `api_key`, `apikey`, or `api-key` as a substring
-///   (catches `api_key`, `apiKey`, `x-api-key`, `openai_api_key`, …)
-/// - keys whose normalized form ends in `token` (e.g. `token`, `access_token`,
-///   `auth-token`) but NOT `tool_call_id`, `completion_tokens`,
-///   `prompt_tokens`, `total_tokens`, `max_tokens`, etc.
-fn key_is_secret(key: &str) -> bool {
-    let lower = key.to_ascii_lowercase();
-    if matches!(
-        lower.as_str(),
-        "authorization" | "bearer" | "secret" | "password"
-    ) {
-        return true;
-    }
-    // `api_key`, `apikey`, `api-key`, `x-api-key`, `openai_api_key`, …
-    if lower.contains("api_key") || lower.contains("apikey") || lower.contains("api-key") {
-        return true;
-    }
-    // Token suffix matching: normalize separators so `auth-token` and
-    // `auth_token` both match. We require an exact `token` suffix on a
-    // word boundary, so `*_token` / `*-token` / bare `token` match but
-    // `tokens`, `tokenizer`, `completion_tokens`, `prompt_tokens`,
-    // `total_tokens`, `max_tokens`, `tool_call_id` don't.
-    let norm = lower.replace('-', "_");
-    if norm == "token" {
-        return true;
-    }
-    if let Some(stripped) = norm.strip_suffix("_token") {
-        // Defensive: the stripped prefix must be non-empty.
-        if !stripped.is_empty() {
-            return true;
-        }
-    }
-    false
-}
-
 /// Strip API keys, Authorization headers, and bearer tokens from a request body.
 /// Mutates in place, walking the entire JSON tree to any depth.
 ///
@@ -306,32 +261,13 @@ fn key_is_secret(key: &str) -> bool {
 /// recursively keeps the persistent per-turn artifacts under
 /// `<workdir>/.selfware/turns/` from leaking those.
 ///
-/// Matched keys are replaced with the literal string `"<redacted>"`.  Values
-/// that happen to be objects/arrays are still descended into first, so a
-/// nested credential under a non-secret-named key is still scrubbed.
+/// Uses THE config secret predicate (`crate::config::model::redact_config_secrets`):
+/// every value under a secret-named key (`api_key`, `Authorization`,
+/// `*_token`, `passwd`, … case- and `-`/`_`-insensitive) and every value of
+/// an `env` / `headers` map becomes `"<redacted>"`, so artifacts, debug
+/// request logs and config views agree on what a secret is.
 pub fn sanitize_request_body(body: &mut serde_json::Value) {
-    sanitize_value(body);
-}
-
-/// Recursive walker for [`sanitize_request_body`].
-fn sanitize_value(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(map) => {
-            for (k, v) in map.iter_mut() {
-                if key_is_secret(k) {
-                    *v = serde_json::Value::String(REDACTED.to_string());
-                } else {
-                    sanitize_value(v);
-                }
-            }
-        }
-        serde_json::Value::Array(items) => {
-            for v in items.iter_mut() {
-                sanitize_value(v);
-            }
-        }
-        _ => {}
-    }
+    crate::config::model::redact_config_secrets(body);
 }
 
 /// Resolve the directory artifacts should be written into for the given workdir.
