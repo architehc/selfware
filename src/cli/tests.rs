@@ -2332,3 +2332,25 @@ async fn session_result_exit_status_matches_process_exit_code() {
     }
     server.stop().await;
 }
+
+#[test]
+fn bench_harness_unavailable_names_rebuild_commands_and_exits_nonzero() {
+    let err = bench_harness_unavailable("long-test");
+    let msg = err.to_string();
+    assert!(msg.contains("selfware long-test"), "{msg}");
+    assert!(
+        msg.contains("cargo install selfware --features bench-harness"),
+        "{msg}"
+    );
+    assert!(
+        msg.contains("cargo build --release --features bench-harness"),
+        "{msg}"
+    );
+    // Same exit code as the other unavailable-feature paths (plain error),
+    // never 0 and never misclassified as config/API/safety.
+    let result: anyhow::Result<()> = Err(err);
+    assert_eq!(
+        crate::errors::process_exit_code(&result, None),
+        crate::errors::EXIT_ERROR
+    );
+}

@@ -2146,7 +2146,8 @@ pub async fn run() -> Result<()> {
     #[cfg(not(feature = "tui"))]
     if cli.tui {
         anyhow::bail!(
-            "TUI dashboard requires the 'tui' feature. Rebuild with: cargo build --features tui"
+            "TUI dashboard requires the 'tui' feature (on by default; this build disabled it). \
+             Rebuild with: cargo install selfware --features tui  or  cargo build --release --features tui"
         );
     }
 
@@ -5230,6 +5231,9 @@ async fn handle_command(
                 }
             }
 
+            #[cfg(not(feature = "bench-harness"))]
+            let mut unavailable_suites: Vec<&str> = Vec::new();
+
             // 2. Throughput benchmark
             if suite.contains("throughput") || suite.contains("e2e") || suite.contains("all") {
                 println!(
@@ -5297,9 +5301,10 @@ async fn handle_command(
                 #[cfg(not(feature = "bench-harness"))]
                 {
                     println!(
-                        "{} Benchmark requires --features bench-harness\n",
+                        "{} Throughput benchmark unavailable: this build lacks the `bench-harness` feature\n",
                         "✗".red()
                     );
+                    unavailable_suites.push("throughput");
                 }
             }
 
@@ -5380,10 +5385,23 @@ async fn handle_command(
                 }
 
                 #[cfg(not(feature = "bench-harness"))]
-                println!(
-                    "{} Benchmark requires --features bench-harness\n",
-                    "✗".red()
-                );
+                {
+                    println!(
+                        "{} Multi-language benchmark unavailable: this build lacks the `bench-harness` feature\n",
+                        "✗".red()
+                    );
+                    unavailable_suites.push("multilang");
+                }
+            }
+
+            // Honest status: a suite that could not run is a failure, not a
+            // silent skip under a green "Benchmark complete".
+            #[cfg(not(feature = "bench-harness"))]
+            if !unavailable_suites.is_empty() {
+                return Err(bench_harness_unavailable(&format!(
+                    "bench --suite {}",
+                    unavailable_suites.join(",")
+                )));
             }
 
             let elapsed = start_time.elapsed();
@@ -5560,10 +5578,7 @@ async fn handle_command(
 
             #[cfg(not(feature = "bench-harness"))]
             {
-                println!(
-                    "{} Long-running test requires --features bench-harness\n",
-                    "✗".red()
-                );
+                return Err(bench_harness_unavailable("long-test"));
             }
         }
 
@@ -7086,18 +7101,29 @@ async fn run_swebench_pro_cli(args: args::SwebenchProArgs) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("swebench-pro task join error: {}", e))?
 }
 
-#[cfg(not(feature = "bench-harness"))]
-async fn run_swebench_pro_cli(_args: args::SwebenchProArgs) -> Result<()> {
-    anyhow::bail!(
-        "`bench swebench-pro` requires the `bench-harness` feature: rebuild with `--features bench-harness`."
+/// The error every `bench-harness`-gated subcommand returns on a build
+/// compiled without that feature. It names the exact rebuild commands, and
+/// flows through `errors::get_exit_code` as a plain error (`EXIT_ERROR`, 1),
+/// the same code the other unavailable-feature paths (`--tui` without `tui`)
+/// produce. The feature is deliberately NOT in the default set.
+#[cfg(any(not(feature = "bench-harness"), test))]
+pub(crate) fn bench_harness_unavailable(what: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "`selfware {what}` is unavailable: this binary was built without the \
+         `bench-harness` feature. Rebuild with it:\n  \
+         cargo install selfware --features bench-harness   (installed binary)\n  \
+         cargo build --release --features bench-harness    (source checkout)"
     )
 }
 
 #[cfg(not(feature = "bench-harness"))]
+async fn run_swebench_pro_cli(_args: args::SwebenchProArgs) -> Result<()> {
+    Err(bench_harness_unavailable("bench swebench-pro"))
+}
+
+#[cfg(not(feature = "bench-harness"))]
 fn run_swebench_diagnose(_output_dir: &str) -> Result<()> {
-    anyhow::bail!(
-        "`swebench diagnose` requires the `bench-harness` feature: rebuild with `--features bench-harness`."
-    )
+    Err(bench_harness_unavailable("swebench diagnose"))
 }
 
 #[cfg(feature = "bench-harness")]
