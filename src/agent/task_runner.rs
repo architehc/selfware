@@ -743,6 +743,7 @@ impl Agent {
         self.client.reset_wall_budget();
         // Arm the single-terminal-event guard for this run.
         self.terminal_event_emitted = false;
+        self.failure_mode_finalized = false;
         self.last_run_failure_mode = None;
         // Capture the set of paths already dirty relative to HEAD so the
         // completion gate can exclude pre-existing uncommitted changes.
@@ -1280,6 +1281,7 @@ impl Agent {
         self.task_start_time = std::time::Instant::now();
         // Arm the single-terminal-event guard for this resumed run.
         self.terminal_event_emitted = false;
+        self.failure_mode_finalized = false;
         let task_description = self
             .current_checkpoint
             .as_ref()
@@ -2598,6 +2600,9 @@ impl Agent {
                         progress.fail_phase();
                     }
 
+                    // A stop that already finalized (hard budget) recorded its
+                    // outcome where it tripped; do not record the run twice.
+                    let already_finalized = self.failure_mode_finalized;
                     let fm = self
                         .finalize_failure_mode(RunOutcome::Failed {
                             reason: reason.clone(),
@@ -2606,11 +2611,13 @@ impl Agent {
                     self.emit_terminal_event_once(AgentEvent::Error {
                         message: format!("Task aborted ({}): {}", fm.kind.tag(), fm.evidence),
                     });
-                    self.record_task_outcome(
-                        task_description,
-                        Outcome::Failure,
-                        Some(&format!("{} [{}]", reason, fm.kind.tag())),
-                    );
+                    if !already_finalized {
+                        self.record_task_outcome(
+                            task_description,
+                            Outcome::Failure,
+                            Some(&format!("{} [{}]", reason, fm.kind.tag())),
+                        );
+                    }
                     if let Err(e) = self.fail_checkpoint(&reason) {
                         warn!("Failed to save failed checkpoint: {}", e);
                     }
@@ -2703,6 +2710,16 @@ impl Agent {
     }
 
     async fn finalize_failure_mode(&mut self, outcome: RunOutcome) -> FailureMode {
+        // One terminal verdict per run. A hard-budget stop finalizes where it
+        // trips and then reaches the loop's failure branch as an error; the
+        // first classification (which names the real cause) stands, and no
+        // second `task_failed` is emitted.
+        if self.failure_mode_finalized {
+            if let Some(mode) = self.last_run_failure_mode.clone() {
+                return mode;
+            }
+        }
+        self.failure_mode_finalized = true;
         let mode = FailureMode::classify(self, outcome);
         self.last_run_failure_mode = Some(mode.clone());
         // Wire the classified verdict/advice into the recovery path: set it

@@ -1394,6 +1394,46 @@ fn auto_continue_count_round_trips_through_save_and_delta() {
 }
 
 #[test]
+fn turn_artifact_seq_round_trips_through_save_and_delta() {
+    // Resume must continue `.selfware/turns/` numbering. The sequence rides
+    // in the full save AND in the delta: a value advanced only by delta-only
+    // saves must still load, or the resumed process rewrites turn_0001...
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+    let mut cp = TaskCheckpoint::new("t-turns".to_string(), "d".to_string());
+    cp.turn_artifact_seq = 2;
+    manager.save(&cp).unwrap();
+
+    let base = cp.clone();
+    cp.turn_artifact_seq = 9;
+    cp.set_iteration(1); // any recorded change bumps the version
+    let delta = cp
+        .compute_delta(&base)
+        .expect("a changed sequence is a change");
+    assert_eq!(delta.turn_artifact_seq, Some(9));
+    let mut replayed = base.clone();
+    replayed.apply_delta(&delta).unwrap();
+    assert_eq!(replayed.turn_artifact_seq, 9);
+
+    manager.save(&cp).unwrap();
+    assert_eq!(manager.load("t-turns").unwrap().turn_artifact_seq, 9);
+
+    // A delta that does not touch the field keeps the stored value.
+    cp.set_step(4);
+    manager.save(&cp).unwrap();
+    let loaded = manager.load("t-turns").unwrap();
+    assert_eq!(loaded.turn_artifact_seq, 9);
+    assert_eq!(loaded.current_step, 4);
+
+    // Checkpoints written before the field existed load as 0.
+    let mut legacy = serde_json::to_value(&cp).unwrap();
+    legacy.as_object_mut().unwrap().remove("turn_artifact_seq");
+    let legacy: TaskCheckpoint = serde_json::from_value(legacy).unwrap();
+    assert_eq!(legacy.turn_artifact_seq, 0);
+}
+
+#[test]
 fn test_unrecoverable_checkpoint_is_recovery_required_not_fresh_resume() {
     // Review finding: corrupt primary + corrupt backup used to return a
     // successful BLANK checkpoint, erasing the distinction between

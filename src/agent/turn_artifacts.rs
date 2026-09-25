@@ -17,21 +17,163 @@ use std::path::{Path, PathBuf};
 use crate::api::types::ToolCall;
 
 /// What the agent did with a model response after parsing it.
+///
+/// The decision must name what actually happened (AGENTS.md rule 3): a turn is
+/// `executed_tools` only for the calls that reached execution, calls rejected
+/// before execution are listed with the reason, and a turn whose batch never
+/// reached dispatch says so instead of claiming execution.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AgentDecision {
-    /// Tools were dispatched. Carries the tool names in execution order.
+    /// Tool calls were parsed; whether any of them reaches execution is not
+    /// yet known. Recorded when a turn is captured before dispatch and
+    /// refined once dispatch has happened.
+    ///
+    /// The Rust name is kept for source compatibility with existing call
+    /// sites; it serializes as `pending_dispatch` because no execution has
+    /// been observed when it is recorded.
+    #[serde(rename = "pending_dispatch")]
     ExecutedTools { tools: Vec<String> },
+    /// The batch was dispatched. `tools` lists ONLY the calls that reached
+    /// execution, in order, each with its outcome; calls the dispatcher
+    /// refused before execution (unknown tool, schema validation, safety
+    /// block, policy, duplicate suppression, ...) are in `rejected_tools`.
+    #[serde(rename = "executed_tools")]
+    Dispatched {
+        tools: Vec<ExecutedTool>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        rejected_tools: Vec<RejectedTool>,
+    },
+    /// Every parsed call was refused before execution; nothing ran.
+    RejectedTools { rejected_tools: Vec<RejectedTool> },
+    /// A gate stopped the turn before the batch was dispatched (budget cap,
+    /// plan mode, repetition guard, progress guard, cancellation, ...).
+    /// `tools` names the parsed calls that did not run.
+    StoppedBeforeDispatch { reason: String, tools: Vec<String> },
     /// The model emitted no tool call and no completion text accepted.
     NoToolCall,
     /// A nudge / system directive was injected into history.
     NudgeInjected { reason: String },
     /// The agent gave up on this turn (e.g. tool_call failed validation).
     Aborted { reason: String },
-    /// The model produced a final text answer that passed the gate.
-    Completed { text: String },
+    /// The model produced a final text answer that was accepted.
+    #[serde(alias = "completed")]
+    FinalAnswer { text: String },
     /// The completion gate refused; carries the gate's refusal text.
     Refused { reason: String },
+}
+
+/// A tool call that reached execution, with its outcome.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutedTool {
+    pub name: String,
+    /// Whether the tool reported success.
+    pub ok: bool,
+}
+
+/// A tool call refused before execution, with the refusal the model saw.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RejectedTool {
+    pub name: String,
+    pub reason: String,
+}
+
+/// One dispatcher event for a tool call of the current batch, in order.
+/// Recorded by the dispatch funnels; [`classify_dispatch`] turns the journal
+/// into the turn's [`AgentDecision`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DispatchEvent {
+    /// The call reached execution (the tool ran, or was served from the
+    /// tool cache inside the execution path).
+    Executed { name: String, ok: bool },
+    /// A tool-result (or skip) message was pushed for the call. Paired with
+    /// a preceding unconsumed `Executed` of the same name it is that
+    /// execution's result; otherwise the call was refused before execution
+    /// and `text` is the refusal.
+    Answered {
+        name: String,
+        success: bool,
+        text: String,
+    },
+}
+
+/// Longest refusal reason kept in an artifact.
+const MAX_REJECTION_REASON_CHARS: usize = 300;
+
+/// Classify a dispatched batch from its dispatcher journal.
+///
+/// `parsed` are the tool names the batch was called with, in order. A call
+/// that was neither executed nor answered (e.g. cancellation broke the loop)
+/// is reported as rejected with `unanswered_reason`. With nothing executed
+/// and nothing refused, the batch was stopped before dispatch.
+pub(crate) fn classify_dispatch(
+    parsed: &[String],
+    journal: &[DispatchEvent],
+    unanswered_reason: &str,
+) -> AgentDecision {
+    let mut executed: Vec<ExecutedTool> = Vec::new();
+    let mut rejected: Vec<RejectedTool> = Vec::new();
+    // Executions not yet paired with their result message.
+    let mut open: Vec<usize> = Vec::new();
+    for event in journal {
+        match event {
+            DispatchEvent::Executed { name, ok } => {
+                executed.push(ExecutedTool {
+                    name: name.clone(),
+                    ok: *ok,
+                });
+                open.push(executed.len() - 1);
+            }
+            DispatchEvent::Answered {
+                name,
+                success,
+                text,
+            } => {
+                if let Some(pos) = open.iter().position(|&i| executed[i].name == *name) {
+                    open.remove(pos);
+                } else if !*success {
+                    rejected.push(RejectedTool {
+                        name: name.clone(),
+                        reason: text.chars().take(MAX_REJECTION_REASON_CHARS).collect(),
+                    });
+                }
+            }
+        }
+    }
+    if executed.is_empty() && rejected.is_empty() {
+        return AgentDecision::StoppedBeforeDispatch {
+            reason: unanswered_reason.to_string(),
+            tools: parsed.to_vec(),
+        };
+    }
+    // Parsed calls neither executed nor refused never got a result.
+    let mut accounted: Vec<&str> = executed
+        .iter()
+        .map(|t| t.name.as_str())
+        .chain(rejected.iter().map(|t| t.name.as_str()))
+        .collect();
+    let mut unanswered = Vec::new();
+    for name in parsed {
+        if let Some(pos) = accounted.iter().position(|n| *n == name.as_str()) {
+            accounted.remove(pos);
+        } else {
+            unanswered.push(RejectedTool {
+                name: name.clone(),
+                reason: unanswered_reason.to_string(),
+            });
+        }
+    }
+    rejected.extend(unanswered);
+    if executed.is_empty() {
+        AgentDecision::RejectedTools {
+            rejected_tools: rejected,
+        }
+    } else {
+        AgentDecision::Dispatched {
+            tools: executed,
+            rejected_tools: rejected,
+        }
+    }
 }
 
 /// One captured LLM call with everything needed for offline debugging.
@@ -249,6 +391,23 @@ async fn prune_old_artifacts(dir: &Path) {
     }
 }
 
+/// Path of the artifact file for `step` under `dir`.
+pub fn artifact_path(dir: &Path, step: usize) -> PathBuf {
+    dir.join(format!("turn_{:04}.json", step))
+}
+
+/// The smallest step `>= from` whose artifact file does not exist yet in
+/// `workdir`'s artifact directory. Artifact history is append-only: a new
+/// turn never takes a slot an earlier process (or resumed segment) wrote.
+pub fn next_free_step(workdir: &Path, from: usize) -> usize {
+    let dir = artifact_dir(workdir);
+    let mut step = from.max(1);
+    while artifact_path(&dir, step).exists() {
+        step += 1;
+    }
+    step
+}
+
 /// Write a `TurnArtifact` to `<workdir>/.selfware/turns/turn_{step:04}.json`.
 ///
 /// Errors are logged but never propagated — debug capture must never break
@@ -262,7 +421,7 @@ pub async fn write_artifact(workdir: &Path, artifact: &TurnArtifact) {
     // Drop a .gitignore into the project-local .selfware/ so scratch isn't
     // accidentally committed into the user's repo.
     ensure_selfware_gitignore(&workdir.join(".selfware"));
-    let path = dir.join(format!("turn_{:04}.json", artifact.step));
+    let path = artifact_path(&dir, artifact.step);
     let json = match serde_json::to_string_pretty(artifact) {
         Ok(s) => s,
         Err(e) => {

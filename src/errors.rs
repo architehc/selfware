@@ -596,6 +596,31 @@ pub const EXIT_SAFETY_ERROR: u8 = 5;
 pub const EXIT_CONFIRMATION_REQUIRED: u8 = 6;
 pub const EXIT_INTERRUPTED: u8 = 130;
 
+/// Exit code for a signal-driven shutdown that ended an otherwise-`Ok` run.
+pub const EXIT_TERMINATED: u8 = 143;
+
+/// The process exit code for a finished run: the error mapping of
+/// [`get_exit_code`] on `Err`, and on `Ok` the shutdown signal that ended the
+/// run (143 on SIGTERM, 130 on user interrupt / timeout), else 0.
+///
+/// Single source for `main` and for the structured result's `exit_status`,
+/// so the JSON / stream-json record always equals the real exit code.
+pub fn process_exit_code<T>(
+    result: &anyhow::Result<T>,
+    shutdown: Option<crate::ShutdownReason>,
+) -> u8 {
+    match result {
+        Err(e) => get_exit_code(e),
+        Ok(_) => match shutdown {
+            Some(crate::ShutdownReason::SignalTerminate) => EXIT_TERMINATED,
+            Some(crate::ShutdownReason::UserInterrupt | crate::ShutdownReason::Timeout) => {
+                EXIT_INTERRUPTED
+            }
+            None => EXIT_SUCCESS,
+        },
+    }
+}
+
 /// Determine the appropriate process exit code for an error.
 pub fn get_exit_code(e: &anyhow::Error) -> u8 {
     if is_confirmation_error(e) {
@@ -626,7 +651,7 @@ pub fn get_exit_code(e: &anyhow::Error) -> u8 {
     }
     if let Some(agent_err) = e.downcast_ref::<AgentError>() {
         return match agent_err {
-            AgentError::Terminated(_) => 143,
+            AgentError::Terminated(_) => EXIT_TERMINATED,
             AgentError::Cancelled => EXIT_INTERRUPTED,
             AgentError::CancelledWithReason(_) => EXIT_INTERRUPTED,
             _ => EXIT_ERROR,

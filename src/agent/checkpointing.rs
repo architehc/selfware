@@ -375,6 +375,10 @@ impl Agent {
         ) {
             agent.messages.push(Message::user(note));
         }
+        // Turn artifacts are append-only across resume: continue numbering
+        // after the highest sequence any earlier segment reserved, so the
+        // new process never rewrites turn_0001.json... of the previous one.
+        agent.turn_artifact_seq = agent.turn_artifact_seq.max(checkpoint.turn_artifact_seq);
         agent.last_checkpoint_tool_calls = checkpoint_tool_calls;
         agent.last_checkpoint_persisted_at = Instant::now();
         agent.checkpoint_persisted_once = true;
@@ -523,6 +527,9 @@ impl Agent {
         // Persist the auto-continue chain count so the per-task chain bound
         // survives a restart (`Agent::resume` restores it onto the new loop).
         checkpoint.auto_continue_count = self.loop_control.auto_continue_count();
+        // Persist the turn-artifact sequence so a resumed process continues
+        // numbering `.selfware/turns/` instead of overwriting turn_0001...
+        checkpoint.turn_artifact_seq = checkpoint.turn_artifact_seq.max(self.turn_artifact_seq);
         // Persist the adaptive-budget state (effective cap + grants consumed)
         // so a resume restores the EARNED extension instead of silently
         // rebuilding at the configured cap — and the chain-wide iteration
@@ -904,6 +911,7 @@ impl Agent {
             // the chain count and the hard caps must not lag the terminal
             // record either.
             checkpoint.auto_continue_count = self.loop_control.auto_continue_count();
+            checkpoint.turn_artifact_seq = checkpoint.turn_artifact_seq.max(self.turn_artifact_seq);
             checkpoint.max_budget_tokens = self.config.agent.max_budget_tokens;
             checkpoint.max_wall_secs = self.config.agent.max_wall_secs;
             checkpoint.max_cost_usd = self.config.agent.max_cost_usd;

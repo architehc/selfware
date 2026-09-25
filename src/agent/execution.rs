@@ -24,6 +24,18 @@ pub(super) const ESC_PAUSE_DEADLINE_MS: u64 = 250;
 /// guard's discard branch) and the recovery check.
 pub(super) const FILES_GUARD_DISCARD_MARKER: &str = "<files_guard_discarded_write/>";
 
+/// Everything needed to re-record one turn's artifact once the agent knows
+/// what it actually did with the response.
+struct TurnArtifactCtx {
+    step: usize,
+    meta: Option<crate::api::types::ChatMetadata>,
+    parsed: Vec<crate::api::types::ToolCall>,
+    content: String,
+    reasoning: Option<String>,
+    /// Parsed tool names in call order.
+    tool_names: Vec<String>,
+}
+
 /// Read a line from stdin, temporarily pausing the ESC listener so it yields
 /// raw mode and stops competing for stdin events.  This prevents the deadlock
 /// where `io::stdin().read_line()` blocks forever because crossterm raw mode
@@ -460,7 +472,7 @@ impl Agent {
     /// agent decided to do with the model's response.  Honours
     /// `agent.disable_turn_artifacts`; failures are logged, never returned.
     pub(super) async fn write_turn_artifact(
-        &self,
+        &mut self,
         step: usize,
         chat_metadata: Option<&crate::api::types::ChatMetadata>,
         parsed_tool_calls: &[crate::api::types::ToolCall],
@@ -484,7 +496,22 @@ impl Agent {
                 }
                 AD::Aborted { reason } => Some(("aborted", reason.chars().take(120).collect())),
                 AD::Refused { reason } => Some(("refused", reason.chars().take(120).collect())),
-                AD::ExecutedTools { .. } | AD::Completed { .. } => None,
+                AD::RejectedTools { rejected_tools } => Some((
+                    "rejected_tools",
+                    rejected_tools
+                        .iter()
+                        .map(|t| t.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                        .chars()
+                        .take(120)
+                        .collect(),
+                )),
+                AD::StoppedBeforeDispatch { reason, .. } => Some((
+                    "stopped_before_dispatch",
+                    reason.chars().take(120).collect(),
+                )),
+                AD::ExecutedTools { .. } | AD::Dispatched { .. } | AD::FinalAnswer { .. } => None,
             };
             if let Some((decision_name, detail)) = live {
                 self.emit_progress(super::progress::ProgressEvent::TurnDecision {
@@ -494,6 +521,9 @@ impl Agent {
             }
         }
 
+        // Only an artifact written by THIS call may be refined by a later
+        // replayed step; a skipped write must not leave an older turn there.
+        self.last_turn_artifact = None;
         if self.config.agent.disable_turn_artifacts {
             return;
         }
@@ -544,9 +574,28 @@ impl Agent {
         });
 
         let workdir = crate::tools::workspace_root::current_path();
+        // Append-only history: the first write of a reserved step takes the
+        // next slot no earlier process wrote; refinements of the same turn
+        // reuse that slot. Numbering continues after a moved slot.
+        let slot = match self.turn_artifact_slots.get(&step) {
+            Some(slot) => *slot,
+            None => {
+                let slot = super::turn_artifacts::next_free_step(&workdir, step);
+                if slot != step {
+                    debug!(
+                        "turn artifact {} already exists on disk; writing this turn as {}",
+                        step, slot
+                    );
+                }
+                self.turn_artifact_slots.insert(step, slot);
+                self.turn_artifact_seq = self.turn_artifact_seq.max(slot);
+                slot
+            }
+        };
+        self.last_turn_artifact = Some((step, meta.clone()));
         let evidence = Some(self.evidence_snapshot());
         let artifact = super::turn_artifacts::TurnArtifact {
-            step,
+            step: slot,
             timestamp: chrono::Utc::now(),
             request_body,
             response_body,
@@ -561,6 +610,63 @@ impl Agent {
             logprobs: meta.logprobs.clone(),
         };
         super::turn_artifacts::write_artifact(&workdir, &artifact).await;
+    }
+
+    /// Re-record the decision of the turn described by `ctx`.
+    async fn refine_turn_artifact(
+        &mut self,
+        ctx: &TurnArtifactCtx,
+        decision: super::turn_artifacts::AgentDecision,
+    ) {
+        self.write_turn_artifact(
+            ctx.step,
+            ctx.meta.as_ref(),
+            &ctx.parsed,
+            decision,
+            &ctx.content,
+            ctx.reasoning.as_deref(),
+        )
+        .await;
+    }
+
+    /// Record that the turn's parsed calls never reached dispatch.
+    async fn record_stopped_before_dispatch(&mut self, ctx: &TurnArtifactCtx, reason: &str) {
+        let decision = super::turn_artifacts::AgentDecision::StoppedBeforeDispatch {
+            reason: reason.to_string(),
+            tools: ctx.tool_names.clone(),
+        };
+        self.refine_turn_artifact(ctx, decision).await;
+    }
+
+    /// Record that the turn ended with an accepted final answer.
+    async fn record_final_answer(&mut self, ctx: &TurnArtifactCtx, text: &str) {
+        let decision = super::turn_artifacts::AgentDecision::FinalAnswer {
+            text: text.to_string(),
+        };
+        self.refine_turn_artifact(ctx, decision).await;
+    }
+
+    /// Dispatch the model's batch while journaling what the dispatcher did
+    /// with each call, then record the turn's real decision: executed calls
+    /// with their outcomes, calls refused before execution with the reason,
+    /// or a stop before dispatch (budget cap, progress guard, cancellation).
+    async fn dispatch_model_batch(
+        &mut self,
+        ctx: &TurnArtifactCtx,
+        tool_calls: Vec<CollectedToolCall>,
+    ) -> Result<()> {
+        self.dispatch_journal = Some(Vec::new());
+        let batch_result = self.execute_tool_batch(tool_calls).await;
+        let journal = self.dispatch_journal.take().unwrap_or_default();
+        let unanswered_reason = match &batch_result {
+            Err(e) => format!("not dispatched: {}", e),
+            Ok(()) if self.is_cancelled() => "not dispatched: cancelled".to_string(),
+            Ok(()) => "not dispatched".to_string(),
+        };
+        let decision =
+            super::turn_artifacts::classify_dispatch(&ctx.tool_names, &journal, &unanswered_reason);
+        self.refine_turn_artifact(ctx, decision).await;
+        batch_result
     }
 
     /// Internal execution logic
@@ -851,19 +957,38 @@ impl Agent {
             tool_calls.iter().map(|(n, _, _)| n.clone()).collect();
         // Reserve the next sequence number now so the file naming matches
         // the order calls happened, even when nested helpers also write.
-        let artifact_step = {
-            self.turn_artifact_seq += 1;
-            self.turn_artifact_seq
+        // A replayed step (no fresh API call) refines the artifact of the
+        // turn that produced these calls — the planning turn — instead of
+        // reserving a slot it can never write.
+        let replayed = if use_last_message && chat_metadata.is_none() {
+            self.last_turn_artifact.clone()
+        } else {
+            None
+        };
+        let (artifact_step, artifact_meta) = match replayed {
+            Some((step, meta)) => (step, Some(meta)),
+            None => {
+                self.turn_artifact_seq += 1;
+                (self.turn_artifact_seq, chat_metadata.clone())
+            }
+        };
+        let artifact_ctx = TurnArtifactCtx {
+            step: artifact_step,
+            meta: artifact_meta,
+            parsed: parsed_tool_calls_for_artifact.clone(),
+            content: content.clone(),
+            reasoning: response.reasoning_content.clone(),
+            tool_names: tool_names_for_artifact.clone(),
         };
 
         debug!("Total tool calls to execute: {}", tool_calls.len());
 
         // Per-turn debug capture: write `<workdir>/.selfware/turns/turn_NNNN.json`
-        // immediately after parsing.  Decision is the obvious split between
-        // "executed N tools" and "model returned no tool call" — refusal /
-        // nudge / completion classifications are visible from the agent
-        // decision branches below, but writing the artifact early ensures we
-        // never lose it when later code panics or short-circuits unexpectedly.
+        // immediately after parsing, so it survives a panic or an unexpected
+        // short-circuit. Tool calls are recorded as `pending_dispatch` (nothing
+        // has run yet); the branches below refine the decision to what
+        // actually happened — executed / rejected / stopped before dispatch /
+        // final answer / refused.
         let initial_decision = if parsed_tool_calls_for_artifact.is_empty() && tool_calls.is_empty()
         {
             super::turn_artifacts::AgentDecision::NoToolCall
@@ -872,15 +997,8 @@ impl Agent {
                 tools: tool_names_for_artifact.clone(),
             }
         };
-        self.write_turn_artifact(
-            artifact_step,
-            chat_metadata.as_ref(),
-            &parsed_tool_calls_for_artifact,
-            initial_decision,
-            &content,
-            response.reasoning_content.as_deref(),
-        )
-        .await;
+        self.refine_turn_artifact(&artifact_ctx, initial_decision)
+            .await;
 
         // An empty response is a provider hiccup / dropped stream, not a valid
         // completion — never accept it as the final answer (that would paint a
@@ -1026,6 +1144,7 @@ impl Agent {
             {
                 info!("Completion gate satisfied — accepting substantial final answer");
                 output::final_answer(&clean);
+                self.record_final_answer(&artifact_ctx, &clean).await;
                 self.last_assistant_response = clean;
                 return Ok(true);
             }
@@ -1050,6 +1169,7 @@ impl Agent {
             if looks_final && self.check_completion_gate().await.is_none() {
                 info!("Read-only task: accepting substantial final answer");
                 output::final_answer(&clean);
+                self.record_final_answer(&artifact_ctx, &clean).await;
                 self.last_assistant_response = clean;
                 return Ok(true);
             }
@@ -1075,6 +1195,7 @@ impl Agent {
                     );
                     let best = self.last_assistant_response.clone();
                     output::final_answer(&best);
+                    self.record_final_answer(&artifact_ctx, &best).await;
                     return Ok(true);
                 }
                 if self.readonly_no_tool_streak >= 12 {
@@ -1193,6 +1314,7 @@ impl Agent {
                             .trim()
                             .to_string();
                         output::final_answer(&clean);
+                        self.record_final_answer(&artifact_ctx, &clean).await;
                         self.last_assistant_response = clean;
                         return Ok(true);
                     }
@@ -1382,15 +1504,11 @@ impl Agent {
                 }
                 // Refine the previously-written turn artifact: this turn ended
                 // with a gate refusal, not a plain "no tool call".
-                self.write_turn_artifact(
-                    artifact_step,
-                    chat_metadata.as_ref(),
-                    &parsed_tool_calls_for_artifact,
+                self.refine_turn_artifact(
+                    &artifact_ctx,
                     super::turn_artifacts::AgentDecision::Refused {
                         reason: gate_msg.clone(),
                     },
-                    &content,
-                    response.reasoning_content.as_deref(),
                 )
                 .await;
                 self.messages
@@ -1436,17 +1554,8 @@ impl Agent {
                 .to_string();
             output::final_answer(&clean_content);
             // Refine the artifact decision: this turn ended in a final answer.
-            self.write_turn_artifact(
-                artifact_step,
-                chat_metadata.as_ref(),
-                &parsed_tool_calls_for_artifact,
-                super::turn_artifacts::AgentDecision::Completed {
-                    text: clean_content.clone(),
-                },
-                &content,
-                response.reasoning_content.as_deref(),
-            )
-            .await;
+            self.record_final_answer(&artifact_ctx, &clean_content)
+                .await;
             self.last_assistant_response = clean_content;
             return Ok(true);
         }
@@ -1462,6 +1571,11 @@ impl Agent {
 
         if let Some(target) = literal_target {
             info!("Rejected tool calls for exact-response task");
+            self.record_stopped_before_dispatch(
+                &artifact_ctx,
+                "exact-response task: tool calls are not executed",
+            )
+            .await;
             self.messages.push(crate::api::types::Message::user(format!(
                 "<selfware_system_directive>\n\
                  Do NOT use any tools for this task.\n\
@@ -1488,6 +1602,11 @@ impl Agent {
                 ));
             }
             output::final_answer(&plan_summary);
+            self.record_stopped_before_dispatch(
+                &artifact_ctx,
+                "plan mode: tool calls proposed, not executed",
+            )
+            .await;
             self.messages.push(crate::api::types::Message::user(
                 "The above tool calls were proposed but NOT executed (plan mode is active). \
                  Review the plan and confirm, or adjust.",
@@ -1498,6 +1617,11 @@ impl Agent {
 
         // Detect repetition loops before executing
         if let Some(loop_msg) = self.detect_repetition(&tool_calls) {
+            self.record_stopped_before_dispatch(
+                &artifact_ctx,
+                "repetition guard: repeated tool calls were not executed",
+            )
+            .await;
             if self.current_task_requires_mutation()
                 && self.mutating_tool_call_count() > 0
                 && is_observational_shell_batch(&tool_calls)
@@ -1575,17 +1699,19 @@ impl Agent {
         // lacking a FILES: line.
         if self.check_files_guard(has_file_write_intent) {
             info!("Blocked premature edit: no FILES: checklist yet");
-            // Correct the turn artifact: this edit was blocked and never dispatched,
-            // so it must not stay recorded as ExecutedTools (ART-EXEC-MISLABEL).
-            self.write_turn_artifact(
-                artifact_step,
-                chat_metadata.as_ref(),
-                &parsed_tool_calls_for_artifact,
-                super::turn_artifacts::AgentDecision::Refused {
-                    reason: "blocked: no FILES: checklist before the first edit".to_string(),
-                },
-                &content,
-                response.reasoning_content.as_deref(),
+            // Correct the turn artifact: the whole batch was discarded before
+            // dispatch, so nothing may be recorded as executed (ART-EXEC-MISLABEL).
+            let rejected_tools = artifact_ctx
+                .tool_names
+                .iter()
+                .map(|name| super::turn_artifacts::RejectedTool {
+                    name: name.clone(),
+                    reason: "discarded: no FILES: checklist before the first edit".to_string(),
+                })
+                .collect();
+            self.refine_turn_artifact(
+                &artifact_ctx,
+                super::turn_artifacts::AgentDecision::RejectedTools { rejected_tools },
             )
             .await;
             // The directive MUST name exactly what will be accepted next: a
@@ -1612,7 +1738,7 @@ impl Agent {
         // its evidence necessarily omits this turn's changes. Record a second,
         // clearly-labelled snapshot afterwards -- and on the error path too,
         // since a batch that failed part-way still moved the tree.
-        let batch_result = self.execute_tool_batch(tool_calls).await;
+        let batch_result = self.dispatch_model_batch(&artifact_ctx, tool_calls).await;
         self.write_post_execution_evidence().await;
         batch_result?;
 
@@ -2165,3 +2291,7 @@ fn shell_command_is_file_write_intent(command: &str) -> bool {
 #[cfg(test)]
 #[path = "../../tests/unit/agent/execution/execution_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../tests/unit/agent/execution/turn_artifact_decision_test.rs"]
+mod turn_artifact_decision_tests;

@@ -479,3 +479,41 @@ fn reasoning_only_long_call_message_names_the_reasoning() {
     assert!(msg.contains("1234 reasoning chars"), "{msg}");
     assert!(!msg.contains("no reasoning"), "{msg}");
 }
+
+// =========================================================================
+// process_exit_code: one mapping for the process exit and `exit_status`
+// =========================================================================
+
+#[test]
+fn process_exit_code_maps_errors_like_get_exit_code() {
+    let cancelled: anyhow::Result<()> = Err(AgentError::Cancelled.into());
+    assert_eq!(process_exit_code(&cancelled, None), EXIT_INTERRUPTED);
+    let terminated: anyhow::Result<()> = Err(AgentError::Terminated("SIGTERM".into()).into());
+    assert_eq!(process_exit_code(&terminated, None), EXIT_TERMINATED);
+    let generic: anyhow::Result<()> = Err(anyhow::anyhow!("boom"));
+    assert_eq!(process_exit_code(&generic, None), EXIT_ERROR);
+    // An error's own code wins over a concurrent shutdown signal, exactly as
+    // `main` exits.
+    assert_eq!(
+        process_exit_code(&generic, Some(crate::ShutdownReason::SignalTerminate)),
+        EXIT_ERROR
+    );
+}
+
+#[test]
+fn process_exit_code_reports_the_shutdown_signal_on_ok() {
+    let ok: anyhow::Result<()> = Ok(());
+    assert_eq!(process_exit_code(&ok, None), EXIT_SUCCESS);
+    assert_eq!(
+        process_exit_code(&ok, Some(crate::ShutdownReason::SignalTerminate)),
+        143
+    );
+    assert_eq!(
+        process_exit_code(&ok, Some(crate::ShutdownReason::UserInterrupt)),
+        130
+    );
+    assert_eq!(
+        process_exit_code(&ok, Some(crate::ShutdownReason::Timeout)),
+        130
+    );
+}

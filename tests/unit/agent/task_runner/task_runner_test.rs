@@ -4203,3 +4203,92 @@ async fn run_task_genuine_400_stays_fatal() {
     );
     server.stop().await;
 }
+
+/// Terminal progress events (`task_completed` / `task_failed`) in `kinds`.
+fn terminal_progress_events(kinds: &[&str]) -> usize {
+    kinds
+        .iter()
+        .filter(|k| **k == "task_failed" || **k == "task_completed")
+        .count()
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn budget_stop_emits_exactly_one_terminal_event() {
+    // 2026-09-24 live finding: a budget stop emitted `task_failed` twice —
+    // once where `enforce_hard_budgets` tripped (it finalizes the failure
+    // mode) and again when the error reached the loop's failure branch.
+    use std::sync::Arc;
+    let server = MockLlmServer::builder()
+        .with_response(
+            r#"<tool>
+<name>file_read</name>
+<arguments>{"path":"./Cargo.toml"}</arguments>
+</tool>"#,
+        )
+        .with_response(
+            r#"<tool>
+<name>file_read</name>
+<arguments>{"path":"./README.md"}</arguments>
+</tool>"#,
+        )
+        .with_response("Done.")
+        .build()
+        .await;
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.agent.max_budget_tokens = Some(20);
+    let recorder = Arc::new(crate::agent::progress::RecordingProgressEmitter::new());
+    let mut agent = Agent::new(config)
+        .await
+        .unwrap()
+        .with_progress_emitter(recorder.clone());
+
+    let result = agent.run_task("Describe the authentication module").await;
+    let err = result.expect_err("the budget cuts the run off");
+    assert!(err.to_string().contains("Token budget exhausted"), "{err}");
+
+    let kinds = recorder.kinds();
+    assert_eq!(
+        terminal_progress_events(&kinds),
+        1,
+        "exactly one terminal event per run: {kinds:?}"
+    );
+    assert!(kinds.contains(&"task_failed"), "{kinds:?}");
+    server.stop().await;
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn max_iterations_stop_emits_exactly_one_terminal_event() {
+    // Rule 5 sweep of the same latch: the iteration-cap failure path.
+    use std::sync::Arc;
+    let mut builder = MockLlmServer::builder();
+    for i in 0..12 {
+        builder = builder.with_response(format!(
+            "<tool>\n<name>file_read</name>\n<arguments>{{\"path\":\"./f{i}.txt\"}}</arguments>\n</tool>"
+        ));
+    }
+    let server = builder.build().await;
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.agent.max_iterations = 2;
+    let recorder = Arc::new(crate::agent::progress::RecordingProgressEmitter::new());
+    let mut agent = Agent::new(config)
+        .await
+        .unwrap()
+        .with_progress_emitter(recorder.clone());
+
+    let _ = agent.run_task("Describe the authentication module").await;
+    let kinds = recorder.kinds();
+    assert_eq!(
+        terminal_progress_events(&kinds),
+        1,
+        "exactly one terminal event per run: {kinds:?}"
+    );
+    server.stop().await;
+}

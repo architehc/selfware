@@ -2229,7 +2229,7 @@ impl Agent {
                     0,
                 );
                 self.record_failed_tool_attempt(&name, &args_str, failure_kind, &skip_msg);
-                self.push_tool_skip_message(&call_id, use_native_fc, &skip_msg);
+                self.push_tool_skip_message(&name, &call_id, use_native_fc, &skip_msg);
                 continue;
             }
 
@@ -2368,6 +2368,12 @@ impl Agent {
             }
 
             let duration_ms = vt.start_time.elapsed().as_millis() as u64;
+            if self.tools.get(&vt.name).is_some() {
+                self.record_dispatch_event(crate::agent::turn_artifacts::DispatchEvent::Executed {
+                    name: vt.name.clone(),
+                    ok: success,
+                });
+            }
             self.emit_progress(super::progress::ProgressEvent::ToolCallCompleted {
                 tool: vt.name.clone(),
                 ok: success,
@@ -2739,7 +2745,7 @@ impl Agent {
                 0,
             );
             self.record_failed_tool_attempt(&name, &args_str, failure_kind, &skip_msg);
-            self.push_tool_skip_message(&call_id, use_native_fc, &skip_msg);
+            self.push_tool_skip_message(&name, &call_id, use_native_fc, &skip_msg);
             return Ok(());
         }
 
@@ -3149,7 +3155,18 @@ impl Agent {
     /// Push a `<tool_result><skipped>...</skipped></tool_result>` (or native
     /// tool-message equivalent) recording that a tool call was denied/skipped
     /// without being executed.
-    fn push_tool_skip_message(&mut self, call_id: &str, use_native_fc: bool, msg: &str) {
+    fn push_tool_skip_message(
+        &mut self,
+        name: &str,
+        call_id: &str,
+        use_native_fc: bool,
+        msg: &str,
+    ) {
+        self.record_dispatch_event(crate::agent::turn_artifacts::DispatchEvent::Answered {
+            name: name.to_string(),
+            success: false,
+            text: msg.to_string(),
+        });
         if use_native_fc {
             self.messages.push(Message::tool(
                 serde_json::json!({"skipped": msg}).to_string(),
@@ -3203,6 +3220,7 @@ impl Agent {
                         0,
                     );
                     self.push_tool_skip_message(
+                        name,
                         call_id,
                         use_native_fc,
                         &format!("Blocked by YOLO safety gate: {}", reason),
@@ -3221,6 +3239,7 @@ impl Agent {
                             0,
                         );
                         self.push_tool_skip_message(
+                            name,
                             call_id,
                             use_native_fc,
                             &format!(
@@ -3322,7 +3341,7 @@ impl Agent {
             if !approved {
                 let denial = "Tool execution denied via TUI permission prompt";
                 self.record_failed_tool_attempt(name, args_str, "operator_denied", denial);
-                self.push_tool_skip_message(call_id, use_native_fc, denial);
+                self.push_tool_skip_message(name, call_id, use_native_fc, denial);
             }
             return Ok(approved);
         }
@@ -3394,7 +3413,7 @@ impl Agent {
         let skip_msg = "Tool execution skipped by user";
         self.record_failed_tool_attempt(name, args_str, "operator_denied", skip_msg);
         cli_println!("{} {}", "⏭️".bright_yellow(), skip_msg);
-        self.push_tool_skip_message(call_id, use_native_fc, skip_msg);
+        self.push_tool_skip_message(name, call_id, use_native_fc, skip_msg);
         Ok(false)
     }
 
@@ -3565,12 +3584,28 @@ impl Agent {
         };
         let elapsed_ms = start_time.elapsed().as_millis() as u64;
         let ok = matches!(&result, Ok((true, _, _)));
+        // An unregistered name is answered "Unknown tool" by the inner body
+        // without anything running: that is a refusal, not an execution.
+        if self.tool_is_dispatchable(name) {
+            self.record_dispatch_event(crate::agent::turn_artifacts::DispatchEvent::Executed {
+                name: name.to_string(),
+                ok,
+            });
+        }
         self.emit_progress(super::progress::ProgressEvent::ToolCallCompleted {
             tool: name.to_string(),
             ok,
             elapsed_ms,
         });
         result
+    }
+
+    /// Whether `name` resolves to something [`Self::execute_single_tool`]
+    /// actually runs (a context tool, `tool_search`, or a registered tool).
+    fn tool_is_dispatchable(&self, name: &str) -> bool {
+        crate::tools::context::is_context_tool(name)
+            || name == "tool_search"
+            || self.tools.get(name).is_some()
     }
 
     /// Inner body of [`execute_single_tool`] — kept as a separate method so the
@@ -4016,6 +4051,13 @@ impl Agent {
         success: bool,
         result: &str,
     ) {
+        // Turn-artifact journal: every call gets exactly one result message,
+        // so this is where a refusal before execution becomes visible.
+        self.record_dispatch_event(crate::agent::turn_artifacts::DispatchEvent::Answered {
+            name: tool_name.to_string(),
+            success,
+            text: result.to_string(),
+        });
         // An identical re-read of a file whose earlier full result is still
         // visible: send a short, honest note instead of the same content
         // again. The raw result was still produced (and feeds every guard);

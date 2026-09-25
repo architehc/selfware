@@ -94,25 +94,14 @@ async fn async_main() -> ExitCode {
 
     selfware::shutdown_tracing();
 
-    match result {
-        Ok(_) => {
-            if let Some(reason) = selfware::shutdown_reason() {
-                let code = match reason {
-                    selfware::ShutdownReason::SignalTerminate => 143,
-                    selfware::ShutdownReason::UserInterrupt | selfware::ShutdownReason::Timeout => {
-                        130
-                    }
-                };
-                ExitCode::from(code)
-            } else {
-                ExitCode::SUCCESS
-            }
-        }
-        Err(e) => {
-            eprintln!("Error: {:?}", e);
-            ExitCode::from(selfware::errors::get_exit_code(&e))
-        }
+    if let Err(e) = &result {
+        eprintln!("Error: {:?}", e);
     }
+    // Same mapping the structured result's `exit_status` uses.
+    ExitCode::from(selfware::errors::process_exit_code(
+        &result,
+        selfware::shutdown_reason(),
+    ))
 }
 
 /// A re-armable source of shutdown signals. Unlike a bare `tokio::signal::ctrl_c()`

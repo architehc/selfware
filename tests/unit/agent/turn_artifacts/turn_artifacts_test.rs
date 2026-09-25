@@ -307,3 +307,191 @@ async fn turn_artifact_preserves_logprobs() {
         sample_logprobs
     );
 }
+
+// =========================================================================
+// Honest decisions + append-only history (2026-09-24 live validation)
+// =========================================================================
+
+fn executed(name: &str, ok: bool) -> DispatchEvent {
+    DispatchEvent::Executed {
+        name: name.to_string(),
+        ok,
+    }
+}
+
+fn answered(name: &str, success: bool, text: &str) -> DispatchEvent {
+    DispatchEvent::Answered {
+        name: name.to_string(),
+        success,
+        text: text.to_string(),
+    }
+}
+
+fn names(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn classify_lists_only_executed_calls_as_executed() {
+    let journal = vec![
+        answered(
+            "nope",
+            false,
+            "Safety check failed: tool 'nope' does not exist",
+        ),
+        executed("file_read", true),
+        answered("file_read", true, "{...}"),
+        executed("cargo_test", false),
+        answered("cargo_test", false, "1 test failed"),
+    ];
+    let decision = classify_dispatch(
+        &names(&["nope", "file_read", "cargo_test"]),
+        &journal,
+        "not dispatched",
+    );
+    assert_eq!(
+        decision,
+        AgentDecision::Dispatched {
+            tools: vec![
+                ExecutedTool {
+                    name: "file_read".into(),
+                    ok: true
+                },
+                ExecutedTool {
+                    name: "cargo_test".into(),
+                    ok: false
+                },
+            ],
+            rejected_tools: vec![RejectedTool {
+                name: "nope".into(),
+                reason: "Safety check failed: tool 'nope' does not exist".into(),
+            }],
+        },
+        "a failed execution is executed with ok=false, never a rejection"
+    );
+}
+
+#[test]
+fn classify_all_refused_is_rejected_tools() {
+    let journal = vec![
+        answered(
+            "file_edit",
+            false,
+            "Tool call validation failed: missing old_str",
+        ),
+        answered("file_read", false, "Suppressed repeated failing call"),
+    ];
+    let decision = classify_dispatch(&names(&["file_edit", "file_read"]), &journal, "x");
+    match decision {
+        AgentDecision::RejectedTools { rejected_tools } => {
+            assert_eq!(rejected_tools.len(), 2);
+            assert!(rejected_tools[0].reason.contains("validation failed"));
+        }
+        other => panic!("expected rejected_tools, got {other:?}"),
+    }
+}
+
+#[test]
+fn classify_nothing_dispatched_is_stopped_before_dispatch() {
+    let decision = classify_dispatch(
+        &names(&["file_read"]),
+        &[],
+        "not dispatched: Token budget exhausted: 30 >= 20 tokens",
+    );
+    assert_eq!(
+        decision,
+        AgentDecision::StoppedBeforeDispatch {
+            reason: "not dispatched: Token budget exhausted: 30 >= 20 tokens".into(),
+            tools: names(&["file_read"]),
+        }
+    );
+}
+
+#[test]
+fn classify_reports_calls_that_never_got_a_result() {
+    // Cancellation broke the loop after the first call ran.
+    let journal = vec![
+        executed("file_read", true),
+        answered("file_read", true, "ok"),
+    ];
+    let decision = classify_dispatch(
+        &names(&["file_read", "file_write"]),
+        &journal,
+        "not dispatched: cancelled",
+    );
+    match decision {
+        AgentDecision::Dispatched {
+            tools,
+            rejected_tools,
+        } => {
+            assert_eq!(tools.len(), 1);
+            assert_eq!(
+                rejected_tools,
+                vec![RejectedTool {
+                    name: "file_write".into(),
+                    reason: "not dispatched: cancelled".into(),
+                }]
+            );
+        }
+        other => panic!("expected executed_tools, got {other:?}"),
+    }
+}
+
+#[test]
+fn decision_kinds_serialize_to_what_happened() {
+    let kind = |d: &AgentDecision| serde_json::to_value(d).unwrap()["kind"].clone();
+    // Recorded before dispatch: pending, never "executed".
+    assert_eq!(
+        kind(&AgentDecision::ExecutedTools {
+            tools: names(&["file_read"])
+        }),
+        "pending_dispatch"
+    );
+    assert_eq!(
+        kind(&AgentDecision::Dispatched {
+            tools: vec![],
+            rejected_tools: vec![]
+        }),
+        "executed_tools"
+    );
+    assert_eq!(
+        kind(&AgentDecision::FinalAnswer { text: "x".into() }),
+        "final_answer"
+    );
+    assert_eq!(
+        kind(&AgentDecision::StoppedBeforeDispatch {
+            reason: "r".into(),
+            tools: vec![]
+        }),
+        "stopped_before_dispatch"
+    );
+    assert_eq!(
+        kind(&AgentDecision::RejectedTools {
+            rejected_tools: vec![]
+        }),
+        "rejected_tools"
+    );
+    // Artifacts written before the rename still load.
+    let legacy: AgentDecision =
+        serde_json::from_value(serde_json::json!({"kind": "completed", "text": "done"})).unwrap();
+    assert_eq!(
+        legacy,
+        AgentDecision::FinalAnswer {
+            text: "done".into()
+        }
+    );
+}
+
+#[test]
+fn next_free_step_skips_existing_files() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    assert_eq!(next_free_step(tmp.path(), 1), 1);
+    assert_eq!(next_free_step(tmp.path(), 0), 1, "steps are 1-based");
+    let dir = artifact_dir(tmp.path());
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(artifact_path(&dir, 1), "{}").unwrap();
+    std::fs::write(artifact_path(&dir, 2), "{}").unwrap();
+    std::fs::write(artifact_path(&dir, 4), "{}").unwrap();
+    assert_eq!(next_free_step(tmp.path(), 1), 3);
+    assert_eq!(next_free_step(tmp.path(), 4), 5);
+}

@@ -766,6 +766,12 @@ pub struct Agent {
     /// Whether the single authoritative terminal event has been emitted for the
     /// current run (see [`Agent::emit_terminal_event_once`]). Reset at run start.
     terminal_event_emitted: bool,
+    /// Whether the run's failure mode has been classified and its terminal
+    /// progress event (`task_completed` / `task_failed`) emitted. A budget
+    /// stop finalizes inside `enforce_hard_budgets` and then propagates as an
+    /// error into the loop's failure branch, which finalizes again; this
+    /// latch keeps that to one terminal event per run. Reset at run start.
+    failure_mode_finalized: bool,
     /// Chat session store for save/resume/list/delete
     chat_store: ChatStore,
     /// Cancellation token set by Ctrl+C while a task is running
@@ -935,7 +941,21 @@ pub struct Agent {
     last_tool_output: Option<last_tool::LastToolOutput>,
     /// Monotonic counter for `<workdir>/.selfware/turns/turn_NNNN.json` files.
     /// Incremented once per LLM call that produces a captured artifact.
+    /// Persisted in the checkpoint and restored on resume, so numbering
+    /// continues across processes instead of restarting at 1.
     turn_artifact_seq: usize,
+    /// Reserved artifact step -> the file slot it was actually written to.
+    /// A reserved step whose file already exists (written by an earlier
+    /// process) is moved to the next free slot on its first write; later
+    /// refinements of the same turn reuse that slot.
+    turn_artifact_slots: std::collections::HashMap<usize, usize>,
+    /// The most recently written artifact (slot + request metadata), so a
+    /// replayed step (`use_last_message`, no fresh API call) can refine the
+    /// decision of the turn that produced the tool calls.
+    last_turn_artifact: Option<(usize, crate::api::types::ChatMetadata)>,
+    /// Dispatcher journal for the batch currently being classified for its
+    /// turn artifact. `None` when nothing is recording.
+    dispatch_journal: Option<Vec<turn_artifacts::DispatchEvent>>,
     /// Recent screenshot hashes for visual stuck-loop detection.
     recent_screenshot_hashes: std::collections::VecDeque<u64>,
     /// Whether a visual stuck loop was detected on the most recent screenshot.
@@ -1656,6 +1676,7 @@ To call a tool, use this EXACT XML structure:
             edit_history,
             last_assistant_response: String::new(),
             terminal_event_emitted: false,
+            failure_mode_finalized: false,
             chat_store,
             cancelled: Arc::new(AtomicBool::new(false)),
             pending_messages: VecDeque::new(),
@@ -1715,6 +1736,9 @@ To call a tool, use this EXACT XML structure:
             esc_pause_ack: Arc::new(AtomicBool::new(false)),
             last_tool_output: None,
             turn_artifact_seq: 0,
+            turn_artifact_slots: std::collections::HashMap::new(),
+            last_turn_artifact: None,
+            dispatch_journal: None,
             recent_screenshot_hashes: std::collections::VecDeque::new(),
             visual_stuck_loop_active: false,
             visual_state_tracker:
@@ -3303,6 +3327,14 @@ To call a tool, use this EXACT XML structure:
         self.consecutive_stale_verification = 0;
         self.last_failed_verification_summary = None;
         self.post_edit_observational_shell_count = 0;
+    }
+
+    /// Append a dispatcher event to the turn-artifact journal, when one is
+    /// recording.
+    pub(super) fn record_dispatch_event(&mut self, event: turn_artifacts::DispatchEvent) {
+        if let Some(journal) = self.dispatch_journal.as_mut() {
+            journal.push(event);
+        }
     }
 
     /// Increment the total tool-call counter. Should be called for every

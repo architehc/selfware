@@ -481,7 +481,7 @@ For scripts and CI, `--output-format json` prints one result object at the end
 of a headless run, and `--output-format stream-json` prints JSON lines as it
 goes (`step_started`, `tool_call_started`, `tool_call_completed`,
 `task_completed`, `task_failed`, ...). The result object carries the outcome:
-`exit_status` (`0` or `1`), `stop_reason`, `failure_mode`, `num_turns`,
+`exit_status` (the process exit code: `0` on success, `1` on a general error, `130` on interrupt, `143` on SIGTERM, ...), `stop_reason`, `failure_mode`, `num_turns`,
 `usage`, `patch_bytes`, and the final `answer` when there is one. Logs stay on
 stderr, so stdout is pure JSON.
 

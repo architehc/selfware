@@ -225,3 +225,46 @@ async fn cap_stop_reason_constant_matches_the_loop_failure_reason() {
         other => panic!("expected the cap trip, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn resume_continues_turn_artifact_numbering() {
+    // 2026-09-24 live finding: the sequence started at 0 in every process, so
+    // a resumed run rewrote .selfware/turns/turn_0001.json... of the first
+    // segment. The checkpoint now carries it and resume continues after it.
+    let fake_home = tempfile::tempdir().unwrap();
+    let env = crate::test_support::EnvGuard::capture(&["HOME"]);
+    env.set("HOME", fake_home.path().as_os_str());
+
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let endpoint = format!("{}/v1", server.url());
+
+    let mut prior = Agent::new(crate::test_support::mock_agent_config(&endpoint))
+        .await
+        .unwrap();
+    prior.turn_artifact_seq = 7;
+    prior.messages.push(Message::user("prior work".to_string()));
+    let checkpoint = prior.to_checkpoint("turns-task", "a task");
+    assert_eq!(checkpoint.turn_artifact_seq, 7, "to_checkpoint persists it");
+    save_under_fake_home(fake_home.path(), &checkpoint);
+
+    let mut resumed = Agent::resume(
+        crate::test_support::mock_agent_config(&endpoint),
+        "turns-task",
+    )
+    .await
+    .unwrap();
+    assert_eq!(resumed.turn_artifact_seq, 7, "resume restores the sequence");
+
+    // The terminal save path stamps the live value too.
+    resumed.turn_artifact_seq = 11;
+    resumed.refresh_persisted_evidence();
+    assert_eq!(
+        resumed
+            .current_checkpoint
+            .as_ref()
+            .unwrap()
+            .turn_artifact_seq,
+        11
+    );
+    server.stop().await;
+}

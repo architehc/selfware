@@ -2169,7 +2169,12 @@ fn build_session_result(
     duration_ms: u64,
     answer: Option<String>,
 ) -> headless::SessionResult {
-    let exit_status = if run_result.is_ok() { 0 } else { 1 };
+    // The process exits with this same code (src/main.rs), so the structured
+    // record never disagrees with `$?` (130 on interrupt, 143 on SIGTERM, ...).
+    let exit_status = i32::from(crate::errors::process_exit_code(
+        run_result,
+        crate::shutdown_reason(),
+    ));
     let stop_reason = match run_result {
         Ok(()) => agent
             .last_run_failure_mode()

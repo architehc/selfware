@@ -2241,3 +2241,37 @@ fn improve_rollback_restores_pre_run_tree_in_a_real_repo() {
         );
     });
 }
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn session_result_exit_status_matches_process_exit_code() {
+    // 2026-09-24 live finding: `exit_status` was 1 for every error while the
+    // process exited 130 on cancel / 143 on SIGTERM. The structured record
+    // now uses the same mapping `main` exits with.
+    use crate::errors::AgentError;
+    use crate::testing::mock_api::MockLlmServer;
+
+    let server = MockLlmServer::builder().with_response("ok").build().await;
+    let config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
+    let agent = crate::agent::Agent::new(config).await.unwrap();
+
+    let cases: Vec<(anyhow::Error, i32)> = vec![
+        (AgentError::Cancelled.into(), 130),
+        (AgentError::Terminated("SIGTERM".to_string()).into(), 143),
+        (anyhow::anyhow!("something broke"), 1),
+    ];
+    for (error, expected) in cases {
+        let run_result: Result<()> = Err(error);
+        let expected_process = i32::from(crate::errors::process_exit_code(
+            &run_result,
+            crate::shutdown_reason(),
+        ));
+        let result = build_session_result(&agent, &run_result, 5, None);
+        assert_eq!(result.exit_status, expected, "{:?}", run_result);
+        assert_eq!(result.exit_status, expected_process);
+    }
+    server.stop().await;
+}

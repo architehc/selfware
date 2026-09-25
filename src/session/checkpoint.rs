@@ -444,6 +444,12 @@ pub struct CheckpointDelta {
     /// and re-earned continuations the task had already spent.
     #[serde(default)]
     pub auto_continue_count: Option<usize>,
+    /// Turn-artifact sequence high-water mark. Without it a delta-only save
+    /// followed by a resume restarted numbering from the base file's value
+    /// and the resumed process overwrote `.selfware/turns/turn_NNNN.json`
+    /// files the earlier segment had written.
+    #[serde(default)]
+    pub turn_artifact_seq: Option<usize>,
     /// Hard budget caps. A resume that tightened a cap (`--max-cost-usd`
     /// lower than the persisted one) followed by delta-only saves used to
     /// reload the older, HIGHER cap from the base file on the next resume.
@@ -480,6 +486,13 @@ pub struct TaskCheckpoint {
     /// instead of getting a fresh budget of 3 chains per restart.
     #[serde(default)]
     pub auto_continue_count: usize,
+    /// Highest turn-artifact sequence number (`.selfware/turns/turn_NNNN.json`)
+    /// this task has reserved across every segment. A resumed process
+    /// continues numbering after it, so artifact history is append-only
+    /// across resume instead of each process restarting at `turn_0001`.
+    /// `0` on checkpoints written before the field existed.
+    #[serde(default)]
+    pub turn_artifact_seq: usize,
 
     // Context state
     pub messages: Vec<Message>,
@@ -618,6 +631,8 @@ impl TaskCheckpoint {
             .then_some(self.cumulative_iterations);
         let auto_continue_count = (self.auto_continue_count != base.auto_continue_count)
             .then_some(self.auto_continue_count);
+        let turn_artifact_seq =
+            (self.turn_artifact_seq != base.turn_artifact_seq).then_some(self.turn_artifact_seq);
         // Budget caps: a changed cap rides in the delta; a REMOVED cap (the
         // delta's `None` means "unchanged") forces a full write.
         if (self.max_budget_tokens.is_none() && base.max_budget_tokens.is_some())
@@ -721,6 +736,7 @@ impl TaskCheckpoint {
             || extensions_granted.is_some()
             || cumulative_iterations.is_some()
             || auto_continue_count.is_some()
+            || turn_artifact_seq.is_some()
             || max_budget_tokens.is_some()
             || max_wall_secs.is_some()
             || max_cost_usd.is_some()
@@ -754,6 +770,7 @@ impl TaskCheckpoint {
             extensions_granted,
             cumulative_iterations,
             auto_continue_count,
+            turn_artifact_seq,
             max_budget_tokens,
             max_wall_secs,
             max_cost_usd,
@@ -828,6 +845,9 @@ impl TaskCheckpoint {
         if let Some(count) = delta.auto_continue_count {
             self.auto_continue_count = count;
         }
+        if let Some(seq) = delta.turn_artifact_seq {
+            self.turn_artifact_seq = seq;
+        }
         if let Some(cap) = delta.max_budget_tokens {
             self.max_budget_tokens = Some(cap);
         }
@@ -878,6 +898,7 @@ impl TaskCheckpoint {
             current_step: 0,
             current_iteration: 0,
             auto_continue_count: 0,
+            turn_artifact_seq: 0,
             messages: Vec::new(),
             memory_entries: Vec::new(),
             estimated_tokens: 0,
