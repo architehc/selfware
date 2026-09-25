@@ -371,20 +371,25 @@ impl Agent {
     }
 
     /// The labelled partial progress of a run that ended in a wall-clock
-    /// TIMEOUT (or a CALL_TIME_CAP abort) without a final answer; `None` for
-    /// every other outcome.
+    /// TIMEOUT, a CALL_TIME_CAP abort or a token/cost BUDGET_EXHAUSTED stop
+    /// without a final answer; `None` for every other outcome.
     /// Never turns the failure into a success: callers attach it next to the
     /// unchanged failure result and exit status.
     pub fn partial_progress(&self, run_result: &anyhow::Result<()>) -> Option<PartialProgress> {
         let Err(err) = run_result else {
             return None;
         };
-        // The wall-clock deadline, or a single call aborted at the per-call
-        // cap: both end the run mid-work with no answer.
-        let timed_out = self
-            .last_run_failure_mode()
-            .is_some_and(|fm| matches!(fm.kind, FailureKind::Timeout | FailureKind::CallTimeCap));
-        if !timed_out {
+        // The wall-clock deadline, a single call aborted at the per-call cap,
+        // or the token/cost budget: each ends the run mid-work with no
+        // answer. (Replay of val083 b2_163840 on the fixed build hit the 3M
+        // token cap at 678 s with areas 1–6 written up and carried nothing.)
+        let stopped_mid_work = self.last_run_failure_mode().is_some_and(|fm| {
+            matches!(
+                fm.kind,
+                FailureKind::Timeout | FailureKind::CallTimeCap | FailureKind::BudgetExhausted
+            )
+        });
+        if !stopped_mid_work {
             return None;
         }
         let last_assistant_text = self.partial_answer_text();

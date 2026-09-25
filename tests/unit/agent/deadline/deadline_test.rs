@@ -470,6 +470,35 @@ async fn partial_collects_the_part_by_part_write_up_without_narration() {
     server.stop().await;
 }
 
+/// Live replay of b2_163840 on the fixed build: the 3M token cap stopped
+/// the run at 678 s with six areas written up — a budget stop carries the
+/// same labelled partial as a timeout, and stays a failure.
+#[tokio::test]
+async fn token_budget_stop_carries_the_partial_too() {
+    let server = MockLlmServer::builder().with_response("x").build().await;
+    let config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.task_is_read_only = true;
+    for turn in b2_163840().turns {
+        agent.messages.push(Message::assistant(turn));
+    }
+    agent.last_run_failure_mode = Some(crate::agent::failure_mode::FailureMode {
+        restored_files: Vec::new(),
+        kind: FailureKind::BudgetExhausted,
+        evidence: "token budget exhausted with 0 mutating tool calls completed".to_string(),
+        advice: "-".to_string(),
+    });
+    let result: anyhow::Result<()> = Err(anyhow::anyhow!(
+        "Token budget exhausted: 3036263 >= 3000000 tokens"
+    ));
+    let partial = agent.partial_progress(&result).expect("partial carried");
+    assert_eq!(partial.label, PARTIAL_REVIEW_LABEL);
+    let text = partial.last_assistant_text.expect("write-up carried");
+    assert!(text.contains("Area 4"));
+    assert_no_tool_markup(&text);
+    server.stop().await;
+}
+
 #[tokio::test]
 async fn partial_without_answer_text_falls_back_to_the_ledger_alone() {
     let server = MockLlmServer::builder().with_response("x").build().await;
