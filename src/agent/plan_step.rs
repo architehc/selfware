@@ -15,27 +15,31 @@ impl Agent {
         let turn_start = std::time::Instant::now();
         self.log_turn_start_event("planning", false, self.messages.len());
         self.trim_message_history();
-        let mut request_messages = self.messages.clone();
-        if let Some(learning_hint) = self.build_learning_hint(self.learning_context()) {
-            // Merge into existing system message to maintain OpenAI message ordering
-            if let Some(first) = request_messages.first_mut() {
-                if first.role == "system" {
-                    first.content = format!("{}\n\n{}", first.content, learning_hint).into();
-                } else {
-                    request_messages.insert(0, Message::system(learning_hint));
-                }
-            } else {
-                request_messages.insert(0, Message::system(learning_hint));
-            }
-        }
-        // The learning hint is merged AFTER trim_message_history, so re-measure
-        // the assembled request: trim/clamp it back under max_context_tokens, and
-        // if it still does not fit, return the typed ContextOverflow instead of
-        // dispatching an over-budget request (same guard as the execution path in
-        // assistant_response.rs; the planning retry loop routes it to bounded
+        // Same request assembly as the execution path (assistant_response.rs):
+        // per-turn content (the learning hint, the work ledger) travels in the
+        // `<selfware_context_note kind=turn_context>` tail at the END of the
+        // request, and mid-conversation system banners are demoted to user
+        // notes, so the system message is byte-identical to the execution
+        // requests. Merging the hint into the system message here made the
+        // planning request's prefix differ from every execution request's.
+        //
+        // `finish_request_with_tail` fits the history into the budget left
+        // after the measured tail and returns the typed ContextOverflow when
+        // it still does not fit (the planning retry loop routes it to bounded
         // compress-and-retry recovery).
-        let request_messages = Self::fit_request_to_context_budget(
-            request_messages,
+        let turn_hints: Vec<String> = self
+            .build_learning_hint(self.learning_context())
+            .into_iter()
+            .collect();
+        let ledger = self
+            .compressor
+            .render_work_ledger(super::context::work_ledger_token_cap(
+                self.max_context_tokens,
+            ));
+        let request_messages = Self::finish_request_with_tail(
+            self.messages.clone(),
+            turn_hints,
+            ledger,
             self.max_context_tokens,
             self.current_checkpoint.as_ref(),
         )?;

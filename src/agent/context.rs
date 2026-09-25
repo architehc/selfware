@@ -129,6 +129,11 @@ impl ContextCompressor {
         self.with_ledger(|l| l.render(max_tokens))
     }
 
+    /// The ledger's current model turn (the numbering its entries use).
+    pub fn work_ledger_turn(&self) -> usize {
+        self.with_ledger(|l| l.turn())
+    }
+
     /// A copy of the current ledger (inspection / tests).
     pub fn work_ledger(&self) -> WorkLedger {
         self.with_ledger(|l| l.clone())
@@ -488,6 +493,11 @@ const LEDGER_NOTE_MAX_CHARS: usize = 240;
 /// Remembered processed-result fingerprints (bounded FIFO).
 const LEDGER_SEEN_CAP: usize = 4096;
 
+/// JSON key that marks a `file_read` result answered with an "unchanged
+/// since turn N" note instead of the content (see
+/// `Agent::unchanged_reread_note`).
+pub(crate) const UNCHANGED_REREAD_NOTE_KEY: &str = "unchanged_since_turn";
+
 /// Token cap for the rendered ledger at a given context budget: 1/16 of the
 /// window, between 150 and 2,000 tokens (24k window -> 1,500).
 pub(crate) fn work_ledger_token_cap(max_context_tokens: usize) -> usize {
@@ -844,6 +854,15 @@ impl WorkLedger {
                     .and_then(|r| Some((r.first()?.as_u64()?, r.get(1)?.as_u64()?)))
                     .map(|(a, b)| (a as usize, b as usize));
                 let parsed = serde_json::from_str::<serde_json::Value>(payload).ok();
+                // An "unchanged re-read" note (tool_dispatch) carries no
+                // content: the earlier full read is already recorded, and the
+                // note must not turn it into a partial read.
+                if parsed
+                    .as_ref()
+                    .is_some_and(|v| v.get(UNCHANGED_REREAD_NOTE_KEY).is_some())
+                {
+                    return;
+                }
                 let content = parsed
                     .as_ref()
                     .and_then(|v| v.get("content"))

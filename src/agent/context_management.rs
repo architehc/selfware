@@ -848,7 +848,11 @@ impl Agent {
         use crate::token_count::{estimate_content_tokens, estimate_messages_tokens};
 
         let request_messages = Self::demote_mid_conversation_system_messages(request_messages);
-        let tail = Self::build_request_tail(sections, ledger, max_context_tokens / 3);
+        let tail = Self::build_request_tail(
+            sections,
+            ledger,
+            Self::request_tail_token_cap(max_context_tokens),
+        );
         // Measured reservation: the tail as its own message (content +
         // per-message overhead), plus slack for the join separator.
         let reserve = tail
@@ -875,6 +879,13 @@ impl Agent {
             }
         }
         Ok(fitted)
+    }
+
+    /// The most the per-turn request tail (hints + work ledger) may take:
+    /// a third of the context budget. The history is fitted into what is
+    /// left, so a history within `max_context_tokens - this` is sent whole.
+    pub(super) fn request_tail_token_cap(max_context_tokens: usize) -> usize {
+        max_context_tokens / 3
     }
 
     /// Turn every system message AFTER the leading system prompt into a

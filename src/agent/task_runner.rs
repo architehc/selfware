@@ -708,6 +708,7 @@ impl Agent {
         self.stagnation_warned
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.read_result_fingerprints.clear();
+        self.delivered_read_results.clear();
         self.evicted_reread_budget.clear();
         self.best_snapshot.clear();
         self.commit_mode_65_fired

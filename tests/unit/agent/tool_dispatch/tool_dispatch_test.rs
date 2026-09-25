@@ -6870,3 +6870,324 @@ async fn agent_hooks_run_in_the_entered_worktree() {
     assert!(!base.path().join("marker").exists());
     agent.tools.workspace_root().reset_worktrees();
 }
+
+// --- Unchanged re-read short circuit: an identical re-read of content the
+// model can still see is answered with a short note; anything the model can
+// NOT see (evicted, changed, other range, over-budget history) gets the full
+// content. ---
+
+const LEXER_SRC: &str = "pub fn lex(input: &str) -> Vec<Token> {\n    tokenize(input)\n}\n";
+
+fn read_result_json(content: &str) -> String {
+    serde_json::json!({ "path": "src/lexer.rs", "content": content, "total_lines": 3 }).to_string()
+}
+
+async fn reread_agent() -> Agent {
+    let mut agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
+        .await
+        .unwrap();
+    agent.messages = vec![
+        crate::api::types::Message::system("You are selfware."),
+        crate::api::types::Message::user("Fix the lexer"),
+    ];
+    agent
+}
+
+fn native_read_call(id: &str, args: &str) -> crate::api::types::Message {
+    let mut message = crate::api::types::Message::assistant("");
+    message.tool_calls = Some(vec![crate::api::types::ToolCall {
+        id: id.to_string(),
+        call_type: "function".to_string(),
+        function: crate::api::types::ToolFunction {
+            name: "file_read".to_string(),
+            arguments: args.to_string(),
+        },
+    }]);
+    message
+}
+
+fn last_text(agent: &Agent) -> String {
+    agent.messages.last().unwrap().content.text().to_string()
+}
+
+#[tokio::test]
+async fn unchanged_reread_in_context_returns_a_note_not_the_content() {
+    let mut agent = reread_agent().await;
+    let args = r#"{"path":"src/lexer.rs"}"#;
+    agent.messages.push(native_read_call("r1", args));
+    agent
+        .push_tool_result_message(
+            true,
+            "r1",
+            "file_read",
+            args,
+            true,
+            &read_result_json(LEXER_SRC),
+        )
+        .await;
+    assert!(last_text(&agent).contains("tokenize(input)"));
+
+    // Same path, same (whole-file) range, same content, earlier result visible.
+    let args2 = r#"{"path":"./src/lexer.rs"}"#;
+    agent.messages.push(native_read_call("r2", args2));
+    let first_len = agent.messages.len();
+    agent
+        .push_tool_result_message(
+            true,
+            "r2",
+            "file_read",
+            args2,
+            true,
+            &read_result_json(LEXER_SRC),
+        )
+        .await;
+    assert_eq!(agent.messages.len(), first_len + 1);
+    let note = last_text(&agent);
+    assert!(
+        !note.contains("tokenize(input)"),
+        "the content must not be repeated: {note}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&note).expect("note is JSON");
+    assert!(v.get("content").is_none(), "no content field: {note}");
+    assert!(v.get("unchanged_since_turn").is_some(), "{note}");
+    assert!(note.contains("Unchanged since turn"), "{note}");
+    assert!(
+        note.contains("still in your context above"),
+        "the note says where the content is: {note}"
+    );
+    assert_eq!(v["total_lines"], 3);
+    assert_eq!(
+        agent.messages.last().unwrap().tool_call_id.as_deref(),
+        Some("r2"),
+        "the note answers the second call"
+    );
+
+    // The ledger still lists the file as a full (not partial) read.
+    agent.compressor.observe_work(&agent.messages);
+    let ledger = agent.compressor.work_ledger();
+    let entry = ledger
+        .files()
+        .iter()
+        .find(|f| f.path.ends_with("src/lexer.rs"))
+        .expect("the full read is in the ledger");
+    assert!(!entry.partial, "the note must not mark the read partial");
+    assert_eq!(entry.reads, 1, "the note is not a second content delivery");
+}
+
+#[tokio::test]
+async fn unchanged_reread_after_eviction_returns_the_full_content() {
+    let mut agent = reread_agent().await;
+    let args = r#"{"path":"src/lexer.rs"}"#;
+    agent
+        .push_tool_result_message(
+            true,
+            "r1",
+            "file_read",
+            args,
+            true,
+            &read_result_json(LEXER_SRC),
+        )
+        .await;
+    // Trimming / compaction drops the earlier result.
+    agent.messages.retain(|m| m.role != "tool");
+
+    agent
+        .push_tool_result_message(
+            true,
+            "r2",
+            "file_read",
+            args,
+            true,
+            &read_result_json(LEXER_SRC),
+        )
+        .await;
+    let text = last_text(&agent);
+    assert!(
+        text.contains("tokenize(input)"),
+        "evicted content must be delivered again in full: {text}"
+    );
+    assert!(!text.contains("Unchanged since turn"));
+
+    // That fresh copy is now the visible one: a third identical read is noted.
+    agent
+        .push_tool_result_message(
+            true,
+            "r3",
+            "file_read",
+            args,
+            true,
+            &read_result_json(LEXER_SRC),
+        )
+        .await;
+    assert!(last_text(&agent).contains("Unchanged since turn"));
+}
+
+#[tokio::test]
+async fn original_evicted_after_a_note_gets_the_full_content_again() {
+    let mut agent = reread_agent().await;
+    let args = r#"{"path":"src/lexer.rs"}"#;
+    agent
+        .push_tool_result_message(
+            true,
+            "r1",
+            "file_read",
+            args,
+            true,
+            &read_result_json(LEXER_SRC),
+        )
+        .await;
+    agent
+        .push_tool_result_message(
+            true,
+            "r2",
+            "file_read",
+            args,
+            true,
+            &read_result_json(LEXER_SRC),
+        )
+        .await;
+    assert!(last_text(&agent).contains("Unchanged since turn"));
+    // The FULL result (r1) is trimmed away; the note (r2) survives.
+    agent
+        .messages
+        .retain(|m| m.tool_call_id.as_deref() != Some("r1"));
+
+    agent
+        .push_tool_result_message(
+            true,
+            "r3",
+            "file_read",
+            args,
+            true,
+            &read_result_json(LEXER_SRC),
+        )
+        .await;
+    assert!(
+        last_text(&agent).contains("tokenize(input)"),
+        "a surviving note is not content: the full result must come back"
+    );
+}
+
+#[tokio::test]
+async fn changed_content_or_other_range_returns_the_full_content() {
+    let mut agent = reread_agent().await;
+    let args = r#"{"path":"src/lexer.rs"}"#;
+    agent
+        .push_tool_result_message(
+            true,
+            "r1",
+            "file_read",
+            args,
+            true,
+            &read_result_json(LEXER_SRC),
+        )
+        .await;
+
+    // Content changed on disk since the earlier read.
+    let edited = LEXER_SRC.replace("tokenize", "tokenize_v2");
+    agent
+        .push_tool_result_message(
+            true,
+            "r2",
+            "file_read",
+            args,
+            true,
+            &read_result_json(&edited),
+        )
+        .await;
+    assert!(last_text(&agent).contains("tokenize_v2(input)"));
+
+    // A line range never delivered before.
+    let ranged = r#"{"path":"src/lexer.rs","line_range":[1,2]}"#;
+    agent
+        .push_tool_result_message(
+            true,
+            "r3",
+            "file_read",
+            ranged,
+            true,
+            &read_result_json("pub fn lex(input: &str) -> Vec<Token> {\n    tokenize_v2(input)\n"),
+        )
+        .await;
+    assert!(last_text(&agent).contains("tokenize_v2(input)"));
+    assert!(!last_text(&agent).contains("Unchanged since turn"));
+
+    // The same range again, unchanged and visible: noted, naming the range.
+    agent
+        .push_tool_result_message(
+            true,
+            "r4",
+            "file_read",
+            ranged,
+            true,
+            &read_result_json("pub fn lex(input: &str) -> Vec<Token> {\n    tokenize_v2(input)\n"),
+        )
+        .await;
+    let note = last_text(&agent);
+    assert!(note.contains("Unchanged since turn"), "{note}");
+    assert!(note.contains("lines [1,2]"), "{note}");
+}
+
+#[tokio::test]
+async fn unchanged_reread_over_request_budget_returns_the_full_content() {
+    let mut agent = reread_agent().await;
+    let args = r#"{"path":"src/lexer.rs"}"#;
+    agent
+        .push_tool_result_message(
+            true,
+            "r1",
+            "file_read",
+            args,
+            true,
+            &read_result_json(LEXER_SRC),
+        )
+        .await;
+    // A history that does not fit the budget left after the request tail is
+    // trimmed at send time: the earlier result may not reach the model.
+    agent.max_context_tokens = 60;
+    agent
+        .push_tool_result_message(
+            true,
+            "r2",
+            "file_read",
+            args,
+            true,
+            &read_result_json(LEXER_SRC),
+        )
+        .await;
+    assert!(
+        last_text(&agent).contains("tokenize(input)"),
+        "an over-budget history must not rely on the earlier result"
+    );
+}
+
+#[tokio::test]
+async fn unchanged_reread_note_in_xml_mode() {
+    let mut agent = reread_agent().await;
+    let args = r#"{"path":"src/lexer.rs"}"#;
+    agent
+        .push_tool_result_message(
+            false,
+            "r1",
+            "file_read",
+            args,
+            true,
+            &read_result_json(LEXER_SRC),
+        )
+        .await;
+    agent
+        .push_tool_result_message(
+            false,
+            "r2",
+            "file_read",
+            args,
+            true,
+            &read_result_json(LEXER_SRC),
+        )
+        .await;
+    let text = last_text(&agent);
+    assert_eq!(agent.messages.last().unwrap().role, "user");
+    assert!(text.contains("<tool_result>"), "{text}");
+    assert!(text.contains("Unchanged since turn"), "{text}");
+    assert!(!text.contains("tokenize(input)"), "{text}");
+}

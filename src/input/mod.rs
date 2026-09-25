@@ -7,10 +7,12 @@ pub mod command_registry;
 mod completer;
 mod highlighter;
 mod prompt;
+mod submit_menu;
 
 pub use completer::SelfwareCompleter;
 pub use highlighter::SelfwareHighlighter;
 pub use prompt::SelfwarePrompt;
+pub use submit_menu::SubmitOnExactAcceptMenu;
 
 use anyhow::Result;
 use reedline::{
@@ -19,6 +21,8 @@ use reedline::{
     ReedlineMenu, Signal, Vi,
 };
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 /// Input mode for the editor
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -71,6 +75,9 @@ pub struct SelfwareEditor {
     editor: Reedline,
     prompt: SelfwarePrompt,
     config: InputConfig,
+    /// Set by the completion menu when an Enter-accept left the line
+    /// unchanged (see `submit_menu`): the line is then submitted.
+    exact_accept: Arc<AtomicBool>,
 }
 
 impl SelfwareEditor {
@@ -102,14 +109,17 @@ impl SelfwareEditor {
         // Set up hinter
         let hinter = Box::new(DefaultHinter::default());
 
-        // Set up completion menu - IDE style that cycles with Tab
-        let completion_menu = Box::new(
+        // Set up completion menu - IDE style that cycles with Tab. Wrapped so
+        // Enter on an already-complete line submits it (see submit_menu).
+        let exact_accept = Arc::new(AtomicBool::new(false));
+        let completion_menu = Box::new(SubmitOnExactAcceptMenu::new(
             ColumnarMenu::default()
                 .with_name("completion_menu")
                 .with_columns(1) // Single column for clearer selection
                 .with_column_padding(2)
                 .with_marker(" > "), // Show selection marker
-        );
+            exact_accept.clone(),
+        ));
 
         // Set up keybindings
         let keybindings = Self::build_keybindings(config.mode);
@@ -152,6 +162,7 @@ impl SelfwareEditor {
             editor,
             prompt,
             config,
+            exact_accept,
         })
     }
 
@@ -185,6 +196,14 @@ impl SelfwareEditor {
                 ReedlineEvent::Menu("completion_menu".to_string()),
             ]),
         );
+
+        // Enter: with the completion menu open, reedline's Enter only accepts
+        // the selection — `/quit` + Enter left `/quit ` in the buffer and the
+        // session running. The host command that follows lets `read_line`
+        // submit the line when that accept changed nothing (the user had
+        // already typed the whole command). With no menu open, Enter submits
+        // and the host command is never reached.
+        keybindings.add_binding(KeyModifiers::NONE, KeyCode::Enter, enter_event());
 
         // Shift+Tab to cycle execution mode: normal → auto-edit → yolo → daemon → normal
         keybindings.add_binding(
@@ -239,19 +258,40 @@ impl SelfwareEditor {
 
     /// Read a line from the user
     pub fn read_line(&mut self) -> Result<ReadlineResult> {
-        match self.editor.read_line(&self.prompt) {
-            Ok(Signal::Success(line)) => {
-                // Detect sentinel values from ExecuteHostCommand keybindings
-                if line.starts_with("__") && line.ends_with("__") {
-                    Ok(ReadlineResult::HostCommand(line))
-                } else {
-                    Ok(ReadlineResult::Line(line))
+        loop {
+            let signal = self.editor.read_line(&self.prompt);
+            if matches!(&signal, Ok(Signal::Success(line)) if line == submit_menu::MENU_ACCEPT_HOST_COMMAND)
+            {
+                if !self.exact_accept.swap(false, Ordering::SeqCst) {
+                    // The accept completed something (or Enter only inserted
+                    // a continuation newline): keep editing.
+                    continue;
                 }
+                return Ok(self.submit_accepted_line());
             }
-            Ok(Signal::CtrlC) => Ok(ReadlineResult::Interrupt),
-            Ok(Signal::CtrlD) => Ok(ReadlineResult::Eof),
-            Err(e) => Err(e.into()),
+            return classify_signal(signal);
         }
+    }
+
+    /// Submit the current buffer after an Enter whose menu accept left it
+    /// unchanged — what Enter does without a menu: the line is returned,
+    /// recorded in history, and the editor starts empty next time.
+    fn submit_accepted_line(&mut self) -> ReadlineResult {
+        use std::io::Write;
+        let line = self.editor.current_buffer_contents().trim_end().to_string();
+        self.editor.run_edit_commands(&[EditCommand::Clear]);
+        if !line.trim().is_empty() {
+            let _ = self
+                .editor
+                .history_mut()
+                .save(reedline::HistoryItem::from_command_line(line.clone()));
+        }
+        // The editor exited mid-line (host command): clear the closed menu
+        // below the cursor and move to a fresh line, as a submit would.
+        let mut out = std::io::stdout();
+        let _ = write!(out, "\x1b[J\r\n");
+        let _ = out.flush();
+        ReadlineResult::Line(line)
     }
 
     /// Update the prompt with full context including token usage
@@ -271,6 +311,33 @@ impl SelfwareEditor {
         let new_editor = SelfwareEditor::new(self.config.clone())?;
         self.editor = new_editor.editor;
         Ok(new_mode)
+    }
+}
+
+/// The Enter binding: reedline's Enter (submit, or accept the open menu's
+/// selection), then the host command that lets `read_line` submit a line the
+/// accept left unchanged. When Enter submits, `Multiple` stops there.
+fn enter_event() -> ReedlineEvent {
+    ReedlineEvent::Multiple(vec![
+        ReedlineEvent::Enter,
+        ReedlineEvent::ExecuteHostCommand(submit_menu::MENU_ACCEPT_HOST_COMMAND.to_string()),
+    ])
+}
+
+/// Map a reedline signal to a [`ReadlineResult`].
+fn classify_signal(signal: std::io::Result<Signal>) -> Result<ReadlineResult> {
+    match signal {
+        Ok(Signal::Success(line)) => {
+            // Detect sentinel values from ExecuteHostCommand keybindings
+            if line.starts_with("__") && line.ends_with("__") {
+                Ok(ReadlineResult::HostCommand(line))
+            } else {
+                Ok(ReadlineResult::Line(line))
+            }
+        }
+        Ok(Signal::CtrlC) => Ok(ReadlineResult::Interrupt),
+        Ok(Signal::CtrlD) => Ok(ReadlineResult::Eof),
+        Err(e) => Err(e.into()),
     }
 }
 

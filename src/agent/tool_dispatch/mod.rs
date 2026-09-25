@@ -981,6 +981,119 @@ impl Agent {
             .any(|message| Self::message_fingerprint(message) == fingerprint)
     }
 
+    /// Key for one exact `file_read` request: the path (canonical field or
+    /// one of the aliases the tool accepts, `./` stripped) plus the
+    /// `line_range` (absent = whole file).
+    fn file_read_range_key(args_str: &str) -> Option<String> {
+        let args = serde_json::from_str::<Value>(args_str).ok()?;
+        let path = ["path", "file_path", "file", "filepath"]
+            .iter()
+            .find_map(|k| args.get(*k).and_then(Value::as_str))?
+            .trim();
+        let path = path.strip_prefix("./").unwrap_or(path);
+        if path.is_empty() {
+            return None;
+        }
+        let range = match args.get("line_range") {
+            None | Some(Value::Null) => "whole".to_string(),
+            Some(range) => range.to_string(),
+        };
+        Some(format!("{path}\u{1f}{range}"))
+    }
+
+    /// The `content` string of a successful `file_read` result.
+    fn file_read_result_content(result: &str) -> Option<String> {
+        serde_json::from_str::<Value>(result)
+            .ok()?
+            .get("content")?
+            .as_str()
+            .map(str::to_string)
+    }
+
+    /// Remember the full `file_read` result just pushed (the last message),
+    /// so an identical later re-read can be answered with a short note while
+    /// this message is still in the history.
+    fn record_delivered_read_result(&mut self, args_str: &str, raw_result: &str) {
+        let Some(key) = Self::file_read_range_key(args_str) else {
+            return;
+        };
+        let Some(content) = Self::file_read_result_content(raw_result) else {
+            self.delivered_read_results.remove(&key);
+            return;
+        };
+        let Some(message) = self.messages.last() else {
+            return;
+        };
+        let record = super::DeliveredReadResult {
+            content_hash: super::recovery::hash_text_signature(&content),
+            message_fingerprint: Self::message_fingerprint(message),
+            turn: self.compressor.work_ledger_turn(),
+        };
+        self.delivered_read_results.insert(key, record);
+    }
+
+    /// For a successful `file_read` whose result is byte-identical to the
+    /// last full result for the SAME path and line range, a short note to
+    /// send instead of repeating the content — or `None` to send the content.
+    ///
+    /// The note is only used when the model can still see the earlier
+    /// result: its message is in the history unchanged (not trimmed,
+    /// truncated or compacted away), and the history fits the request budget
+    /// left after the per-turn tail, so request assembly will not trim it
+    /// out of the copy that is sent. Anything else returns the full content.
+    pub(super) fn unchanged_reread_note(&self, args_str: &str, raw_result: &str) -> Option<String> {
+        let key = Self::file_read_range_key(args_str)?;
+        let record = self.delivered_read_results.get(&key)?;
+        let content = Self::file_read_result_content(raw_result)?;
+        if super::recovery::hash_text_signature(&content) != record.content_hash {
+            return None;
+        }
+        if !self
+            .messages
+            .iter()
+            .any(|m| Self::message_fingerprint(m) == record.message_fingerprint)
+        {
+            return None;
+        }
+        let history_tokens = crate::token_count::estimate_messages_tokens(&self.messages);
+        let history_budget = self
+            .max_context_tokens
+            .saturating_sub(Self::request_tail_token_cap(self.max_context_tokens));
+        if history_tokens > history_budget {
+            return None;
+        }
+
+        let args = serde_json::from_str::<Value>(args_str).unwrap_or_default();
+        let (path, range) = key.split_once('\u{1f}').unwrap_or((key.as_str(), "whole"));
+        let total_lines = serde_json::from_str::<Value>(raw_result)
+            .ok()
+            .and_then(|v| v.get("total_lines").cloned());
+        let what = if range == "whole" {
+            format!("`{path}`")
+        } else {
+            format!("`{path}` lines {range}")
+        };
+        let mut note = serde_json::json!({
+            "path": path,
+            super::context::UNCHANGED_REREAD_NOTE_KEY: record.turn,
+            "note": format!(
+                "Unchanged since turn {turn}: this read of {what} returned exactly the same \
+                 content as your earlier read of the same path and range, and that earlier \
+                 result is still in your context above — use it. The content is not repeated \
+                 here. If the earlier result leaves your context, reading again returns the \
+                 full content.",
+                turn = record.turn
+            ),
+        });
+        if let Some(range) = args.get("line_range").filter(|r| !r.is_null()) {
+            note["line_range"] = range.clone();
+        }
+        if let Some(total) = total_lines {
+            note["total_lines"] = total;
+        }
+        Some(note.to_string())
+    }
+
     /// Whether this call is a `file_read` re-read of a path whose previous
     /// result left the context AND the selected guard still has exemption
     /// budget for that path; when it does, one unit of that budget is spent.
@@ -3903,6 +4016,34 @@ impl Agent {
         success: bool,
         result: &str,
     ) {
+        // An identical re-read of a file whose earlier full result is still
+        // visible: send a short, honest note instead of the same content
+        // again. The raw result was still produced (and feeds every guard);
+        // only the model-facing message is shortened. The note is NOT
+        // recorded as the path's delivered result — the earlier message
+        // stays the one that carries the content.
+        if success && tool_name == "file_read" {
+            if let Some(note) = self.unchanged_reread_note(args_str, result) {
+                let gate = sanitize_tool_context(
+                    tool_name,
+                    args_str,
+                    &note,
+                    self.config.safety.trust_gate_tool_results,
+                );
+                self.trust_gate_findings += gate.sanitized;
+                if let Some(turn) = self.recent_turn_progress.back_mut() {
+                    turn.had_success = true;
+                }
+                if use_native_fc {
+                    self.messages.push(Message::tool(gate.content, call_id));
+                } else {
+                    let formatted = Self::format_xml_tool_result(&gate.content, true);
+                    self.messages.push(Message::user(formatted));
+                }
+                return;
+            }
+        }
+
         // Detect base64_png in successful tool results and promote to multimodal
         if success {
             if let Some(base64_png) = super::execution::try_extract_base64_png(result) {
@@ -3939,9 +4080,13 @@ impl Agent {
         // previously stored verbatim, which could blow the context-token budget
         // (an OOM surface). summarize_and_spill keeps head+tail, so trailing
         // failure markers still survive.
+        let estimated_result_tokens = crate::token_count::estimate_content_tokens(result);
+        // A spilled result reaches the model only as a summary: it never
+        // counts as delivered content for the unchanged re-read note.
+        let spilled = estimated_result_tokens > MAX_TOOL_RESULT_TOKENS;
         let result_to_store = {
-            let estimated_tokens = crate::token_count::estimate_content_tokens(result);
-            if estimated_tokens > MAX_TOOL_RESULT_TOKENS {
+            let estimated_tokens = estimated_result_tokens;
+            if spilled {
                 info!(
                     "Tool result from '{}' is {} tokens (budget {}), summarizing with disk reference",
                     tool_name, estimated_tokens, MAX_TOOL_RESULT_TOKENS
@@ -4003,6 +4148,15 @@ impl Agent {
         }
         if success {
             self.record_file_read_result_message(tool_name, args_str);
+            if tool_name == "file_read" {
+                if spilled {
+                    if let Some(key) = Self::file_read_range_key(args_str) {
+                        self.delivered_read_results.remove(&key);
+                    }
+                } else {
+                    self.record_delivered_read_result(args_str, result);
+                }
+            }
         }
     }
 

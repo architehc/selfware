@@ -482,6 +482,21 @@ struct EvictedRereadBudget {
     read_only_steps: u32,
 }
 
+/// The last FULL `file_read` result delivered for one exact path + line
+/// range: what it contained and which history message carries it. Used to
+/// answer an identical re-read with a short "unchanged" note instead of the
+/// same content again — but only while that message is still in the history
+/// unchanged (see `Agent::unchanged_reread_note`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DeliveredReadResult {
+    /// Hash of the `content` string the read returned.
+    content_hash: u64,
+    /// Fingerprint (role + text) of the message that carried it.
+    message_fingerprint: u64,
+    /// Work-ledger turn in which it was delivered.
+    turn: usize,
+}
+
 /// Re-reads of one path forgiven per guard after its content left the
 /// context. Matches the redundant-reread guard's own allowance of 3.
 pub(super) const EVICTED_REREAD_EXEMPTION_CAP: u32 = 3;
@@ -882,6 +897,9 @@ pub struct Agent {
     /// trimming dropped file contents, the model re-read them, and the
     /// stagnation guard forced a fabricated deliverable).
     read_result_fingerprints: std::collections::HashMap<String, u64>,
+    /// Last full `file_read` result per exact path + line range (key from
+    /// `Agent::file_read_range_key`), for the unchanged re-read note.
+    delivered_read_results: std::collections::HashMap<String, DeliveredReadResult>,
     /// Per-path exemption budget for evicted re-reads (see
     /// [`EvictedRereadBudget`]).
     evicted_reread_budget: std::collections::HashMap<String, EvictedRereadBudget>,
@@ -1684,6 +1702,7 @@ To call a tool, use this EXACT XML structure:
             stagnation_streak: 0,
             stagnation_warned: std::sync::atomic::AtomicBool::new(false),
             read_result_fingerprints: std::collections::HashMap::new(),
+            delivered_read_results: std::collections::HashMap::new(),
             evicted_reread_budget: std::collections::HashMap::new(),
             verification_deadline_directive_done: std::sync::atomic::AtomicBool::new(false),
             probe_pivot_done: std::sync::atomic::AtomicBool::new(false),

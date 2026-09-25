@@ -1004,3 +1004,118 @@ async fn test_grounded_read_only_report_is_finalizable() {
         "a grounded read-only report should be finalizable during planning"
     );
 }
+
+// -----------------------------------------------------------------------
+// Planning request assembly: prefix-stable, same tail as execution
+// -----------------------------------------------------------------------
+
+fn plan_wire_messages(body: &str) -> Vec<serde_json::Value> {
+    let v: serde_json::Value = serde_json::from_str(body).expect("request body is JSON");
+    v["messages"].as_array().cloned().unwrap_or_default()
+}
+
+fn plan_wire_content(message: &serde_json::Value) -> String {
+    match &message["content"] {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// The planning request must carry the SAME system message as the execution
+/// requests (byte-identical, so a provider prefix cache reuses it): the
+/// learning hint and the work ledger travel in the request tail, and
+/// mid-conversation system banners are demoted to user notes — exactly as
+/// `get_assistant_step_response` assembles them.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn test_plan_request_system_message_matches_execution_request() {
+    let server = MockLlmServer::builder()
+        .with_response("Plan: read the lexer.")
+        .with_response("ok")
+        .build()
+        .await;
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.agent.native_function_calling = true;
+    config.context_length = 24_000;
+    let mut agent = Agent::new(config).await.unwrap();
+    // Give the learner records so a learning hint exists for this context.
+    for _ in 0..5 {
+        agent.self_improvement.record_tool(
+            "file_read",
+            "general",
+            crate::cognitive::self_improvement::Outcome::Success,
+            5,
+            None,
+        );
+    }
+    let learning_hint = agent.build_learning_hint(agent.learning_context());
+    assert!(
+        learning_hint.is_some(),
+        "fixture must produce a learning hint so the test covers it"
+    );
+
+    let mut call = Message::assistant("");
+    call.tool_calls = Some(vec![crate::api::types::ToolCall {
+        id: "r1".to_string(),
+        call_type: "function".to_string(),
+        function: crate::api::types::ToolFunction {
+            name: "file_read".to_string(),
+            arguments: serde_json::json!({ "path": "src/lexer.rs" }).to_string(),
+        },
+    }]);
+    agent.messages = vec![
+        Message::system("You are selfware. Stable system prompt."),
+        Message::user("Fix the lexer bug"),
+        call,
+        Message::tool(
+            serde_json::json!({"content": "fn lex() {}", "total_lines": 1}).to_string(),
+            "r1",
+        ),
+        Message::system("PROGRESS BANNER: step 2 of 8"),
+    ];
+
+    agent.plan().await.unwrap();
+    agent.get_assistant_step_response(false).await.unwrap();
+
+    let bodies = server.captured_request_bodies().await;
+    assert_eq!(bodies.len(), 2);
+    let planning = plan_wire_messages(&bodies[0]);
+    let execution = plan_wire_messages(&bodies[1]);
+
+    assert_eq!(planning[0]["role"], "system");
+    assert_eq!(execution[0]["role"], "system");
+    let plan_sys = plan_wire_content(&planning[0]);
+    assert_eq!(
+        plan_sys,
+        plan_wire_content(&execution[0]),
+        "planning and execution requests must share a byte-identical system message"
+    );
+    assert!(!plan_sys.contains("Work ledger"));
+    assert!(!plan_sys.contains("PROGRESS BANNER"));
+    assert_eq!(
+        planning.iter().filter(|m| m["role"] == "system").count(),
+        1,
+        "only the leading system prompt is sent as role=system"
+    );
+
+    // Per-turn content still reaches the model — in the tail.
+    let last = planning.last().unwrap();
+    assert_eq!(last["role"], "user");
+    let tail = plan_wire_content(last);
+    assert!(tail.contains("kind=turn_context"), "tail: {tail}");
+    assert!(tail.contains("Work ledger"), "tail: {tail}");
+    let hint = learning_hint.unwrap();
+    assert!(
+        !plan_sys.contains(&hint),
+        "learning hint left the system message"
+    );
+    assert!(
+        tail.contains(&hint),
+        "learning hint travels in the tail: {tail}"
+    );
+
+    server.stop().await;
+}
