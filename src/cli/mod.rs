@@ -6903,14 +6903,13 @@ fn load_related_yaml_workflows(
     Ok(())
 }
 
-/// Render the effective configuration with provenance annotations.
-///
-/// Mirrors `selfware config show`. Each row is `key = value [source]`,
-/// formatted into aligned columns for readability.
-pub(crate) fn config_show(config: &Config, json: bool) -> Result<()> {
-    use crate::config::ConfigSource;
-
-    let mut rows: Vec<(String, String, ConfigSource)> = Vec::new();
+/// The `(key, value, source)` rows `selfware config show` prints: the core
+/// endpoint/model fields and EVERY field a model profile can apply, each
+/// with its provenance.
+pub(crate) fn config_show_rows(
+    config: &Config,
+) -> Vec<(String, String, crate::config::ConfigSource)> {
+    let mut rows: Vec<(String, String, crate::config::ConfigSource)> = Vec::new();
 
     rows.push((
         "endpoint".to_string(),
@@ -6958,6 +6957,27 @@ pub(crate) fn config_show(config: &Config, json: bool) -> Result<()> {
         format!("{}", config.agent.step_timeout_secs),
         config.source_of("agent.step_timeout_secs"),
     ));
+    // Every profile-applied field has a row (N2 Rule-5 sweep): the per-call
+    // cap — including its `[profile: qwen38, scaled for max_tokens=N]`
+    // provenance — and the concurrency pins were applied but never shown.
+    rows.push((
+        "agent.max_call_secs".to_string(),
+        match config.agent.max_call_secs {
+            Some(secs) if secs > 0 => format!("{secs}"),
+            _ => "none (uncapped)".to_string(),
+        },
+        config.source_of("agent.max_call_secs"),
+    ));
+    rows.push((
+        "concurrency.max_streams".to_string(),
+        format!("{}", config.concurrency.max_streams),
+        config.source_of("concurrency.max_streams"),
+    ));
+    rows.push((
+        "concurrency.max_global".to_string(),
+        format!("{}", config.concurrency.max_global),
+        config.source_of("concurrency.max_global"),
+    ));
 
     if let Some(extra) = &config.extra_body {
         let mut keys: Vec<&String> = extra.keys().collect();
@@ -6973,6 +6993,15 @@ pub(crate) fn config_show(config: &Config, json: bool) -> Result<()> {
             rows.push((key, val, source));
         }
     }
+    rows
+}
+
+/// Render the effective configuration with provenance annotations.
+///
+/// Mirrors `selfware config show`. Each row is `key = value [source]`,
+/// formatted into aligned columns for readability.
+pub(crate) fn config_show(config: &Config, json: bool) -> Result<()> {
+    let rows = config_show_rows(config);
 
     if json {
         let entries: Vec<serde_json::Value> = rows

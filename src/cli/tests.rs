@@ -589,6 +589,51 @@ fn config_show_renders_provenance_lines() {
     super::config_show(&cfg, true).unwrap();
 }
 
+/// N2 (0.8.3 validation, an/config_show.txt): `config show` never printed
+/// agent.max_call_secs, so the scaled per-call cap and its provenance label
+/// could not be seen.
+#[test]
+fn config_show_prints_the_scaled_call_cap_with_its_provenance() {
+    let _guard = clear_config_env();
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_path = tmp.path().join("selfware.toml");
+    // The default model matches the built-in qwen38 profile (600 s cap sized
+    // for its 24,576 max_tokens); a larger user max_tokens scales it.
+    std::fs::write(&cfg_path, "max_tokens = 65536\n").unwrap();
+    let cfg = Config::load(Some(cfg_path.to_str().unwrap())).unwrap();
+    assert_eq!(cfg.matched_profile.as_deref(), Some("qwen38"));
+
+    let rows = super::config_show_rows(&cfg);
+    let (_, value, source) = rows
+        .iter()
+        .find(|(k, _, _)| k == "agent.max_call_secs")
+        .expect("config show must print agent.max_call_secs");
+    assert_eq!(value, &cfg.agent.max_call_secs.unwrap().to_string());
+    assert_eq!(
+        source.label(),
+        "profile: qwen38, scaled for max_tokens=65536",
+        "the scaled cap names its provenance"
+    );
+
+    // Rule-5: every field the profile applied has a row with the profile as
+    // its source.
+    assert!(!cfg.matched_profile_applied.is_empty());
+    for field in &cfg.matched_profile_applied {
+        let key = match field.as_str() {
+            "native_function_calling" => "agent.native_function_calling",
+            "streaming" => "agent.streaming",
+            other => other,
+        };
+        let row = rows.iter().find(|(k, _, _)| k == key);
+        let (_, _, source) =
+            row.unwrap_or_else(|| panic!("profile-applied field `{key}` missing from config show"));
+        assert!(
+            matches!(source, crate::config::ConfigSource::Profile(_)),
+            "`{key}` should show its profile provenance, got {source:?}"
+        );
+    }
+}
+
 // ── `selfware bench <subcommand>` parsing tests ──
 
 #[test]
