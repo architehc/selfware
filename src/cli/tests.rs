@@ -1308,6 +1308,54 @@ fn render_run_summary_names_a_requirements_audit_that_did_not_run() {
     assert!(!rendered.contains("requirements audit"), "{rendered}");
 }
 
+/// N3 (0.8.3 validation, runs/ts and runs/ts_notsc): the summary printed
+/// the first `UNADDRESSED(2)` verdict after the gate had accepted both
+/// RESOLVED closures. It must show the FINAL ledger state.
+#[test]
+fn render_run_summary_shows_the_final_audit_ledger_state() {
+    let mut summary = sample_summary();
+    summary.requirements_audit = Some(crate::agent::RequirementsAuditStatus::FindingsLedger {
+        verdict: "UNADDRESSED(2) + 1 summary-only (non-blocking)".to_string(),
+        resolved: 2,
+        wontfix: 0,
+        open: 0,
+    });
+    let rendered = render_run_summary(&summary, None);
+    assert!(
+        rendered.contains(
+            "requirements audit: all 2 finding(s) closed (2 RESOLVED, 0 WONTFIX; initial verdict: UNADDRESSED(2) + 1 summary-only (non-blocking))"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.lines().any(|l| l == "outcome: completed"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("requirements audit: UNADDRESSED"),
+        "no stale verdict: {rendered}"
+    );
+
+    // The ledger stepped aside with a finding open: never a bare completion.
+    summary.requirements_audit = Some(crate::agent::RequirementsAuditStatus::FindingsLedger {
+        verdict: "UNADDRESSED(2)".to_string(),
+        resolved: 1,
+        wontfix: 0,
+        open: 1,
+    });
+    let rendered = render_run_summary(&summary, None);
+    assert!(
+        rendered.contains(
+            "outcome: completed — 1 requirements-audit finding(s) still OPEN (ledger stepped aside)"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("requirements audit: 1 of 2 finding(s) still OPEN (1 RESOLVED"),
+        "{rendered}"
+    );
+}
+
 #[test]
 fn render_run_summary_shows_measured_model_latency_when_present() {
     let mut summary = sample_summary();

@@ -2744,6 +2744,28 @@ mod requirements_audit_tests {
             agent.check_audit_ledger().is_none(),
             "a finding closed with real post-finding evidence unblocks"
         );
+        // N3: the run summary reads the FINAL ledger state, never the first
+        // UNADDRESSED verdict the gate has since cleared.
+        let status = agent
+            .requirements_audit_status()
+            .expect("the audit ran and recorded a status");
+        assert_eq!(
+            status,
+            crate::agent::RequirementsAuditStatus::FindingsLedger {
+                verdict: "UNADDRESSED(1)".to_string(),
+                resolved: 1,
+                wontfix: 0,
+                open: 0,
+            }
+        );
+        assert_eq!(status.open_findings(), 0);
+        assert!(
+            status
+                .label()
+                .starts_with("all 1 finding(s) closed (1 RESOLVED"),
+            "{}",
+            status.label()
+        );
         server.stop().await;
     }
 
@@ -2766,6 +2788,14 @@ mod requirements_audit_tests {
         assert!(
             agent.check_audit_ledger().is_none(),
             "after 3 rejections the ledger steps aside for a best-effort completion"
+        );
+        // N3: stepping aside is not closure — the final status says so.
+        let status = agent.requirements_audit_status().unwrap();
+        assert_eq!(status.open_findings(), 1);
+        assert!(
+            status.label().starts_with("1 of 1 finding(s) still OPEN"),
+            "{}",
+            status.label()
         );
         server.stop().await;
     }

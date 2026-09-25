@@ -385,6 +385,16 @@ pub enum RequirementsAuditStatus {
     Performed(String),
     /// The audit applied but produced no verdict; the reason.
     NotPerformed(String),
+    /// The auditor answered with blocking findings that went into the audit
+    /// ledger. `verdict` is the auditor's INITIAL label; the counts are the
+    /// ledger's FINAL state, so the run summary never shows a stale
+    /// `UNADDRESSED(n)` after the gate accepted the closures (N3).
+    FindingsLedger {
+        verdict: String,
+        resolved: usize,
+        wontfix: usize,
+        open: usize,
+    },
 }
 
 impl RequirementsAuditStatus {
@@ -395,6 +405,32 @@ impl RequirementsAuditStatus {
             RequirementsAuditStatus::NotPerformed(reason) => {
                 format!("NOT PERFORMED — {reason}")
             }
+            RequirementsAuditStatus::FindingsLedger {
+                verdict,
+                resolved,
+                wontfix,
+                open,
+            } => {
+                let total = resolved + wontfix + open;
+                if *open == 0 {
+                    format!(
+                        "all {total} finding(s) closed ({resolved} RESOLVED, {wontfix} WONTFIX; initial verdict: {verdict})"
+                    )
+                } else {
+                    format!(
+                        "{open} of {total} finding(s) still OPEN ({resolved} RESOLVED, {wontfix} WONTFIX; initial verdict: {verdict})"
+                    )
+                }
+            }
+        }
+    }
+
+    /// Audit findings the ledger still holds open at the end of the run
+    /// (the ledger steps aside after repeated rejections).
+    pub fn open_findings(&self) -> usize {
+        match self {
+            RequirementsAuditStatus::FindingsLedger { open, .. } => *open,
+            _ => 0,
         }
     }
 
@@ -482,11 +518,19 @@ impl Agent {
     }
 
     /// The completion-time requirements audit's outcome for this task.
+    /// Reflects the FINAL audit-ledger state, not the verdict as first
+    /// recorded (N3).
     pub fn requirements_audit_status(&self) -> Option<RequirementsAuditStatus> {
-        self.requirements_audit_status
+        let recorded = self
+            .requirements_audit_status
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone()
+            .clone();
+        let findings = self
+            .audit_findings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        super::verification::final_requirements_audit_status(recorded, &findings)
     }
 
     /// The run summary's `verification:` value, built from the SAME evidence

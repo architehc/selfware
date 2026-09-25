@@ -3864,6 +3864,29 @@ pub(crate) struct AuditFinding {
     pub created_call_count: usize,
 }
 
+/// The requirements-audit status as the run ends: a performed verdict whose
+/// blocking findings entered the ledger is reported with the ledger's FINAL
+/// counts (N3 — the summary showed the first `UNADDRESSED(2)` after the gate
+/// had accepted both RESOLVED closures). Every other status passes through.
+pub(crate) fn final_requirements_audit_status(
+    recorded: Option<RequirementsAuditStatus>,
+    findings: &[AuditFinding],
+) -> Option<RequirementsAuditStatus> {
+    match recorded {
+        Some(RequirementsAuditStatus::Performed(verdict)) if !findings.is_empty() => {
+            let count =
+                |status: FindingStatus| findings.iter().filter(|f| f.status == status).count();
+            Some(RequirementsAuditStatus::FindingsLedger {
+                verdict,
+                resolved: count(FindingStatus::Resolved),
+                wontfix: count(FindingStatus::Wontfix),
+                open: count(FindingStatus::Open),
+            })
+        }
+        other => other,
+    }
+}
+
 /// Extract a `RESOLVED <id>` / `WONTFIX <id>` closure line from a response.
 fn closure_marker(response: &str, id: &str, verb: &str) -> Option<String> {
     let needle = format!("{verb} {id}");

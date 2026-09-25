@@ -6657,6 +6657,22 @@ fn render_run_summary(summary: &crate::agent::RunSummary, failure: Option<&str>)
                     .to_string(),
             )
         }
+        // Allowed with a warning: the audit ledger stepped aside with
+        // findings still open — never a bare "completed" over them.
+        None if summary
+            .requirements_audit
+            .as_ref()
+            .is_some_and(|a| a.open_findings() > 0) =>
+        {
+            let open = summary
+                .requirements_audit
+                .as_ref()
+                .map(|a| a.open_findings())
+                .unwrap_or_default();
+            lines.push(format!(
+                "outcome: completed — {open} requirements-audit finding(s) still OPEN (ledger stepped aside)"
+            ))
+        }
         // Allowed with a warning: the citation gate stepped aside with
         // citations that still do not match the files.
         None if summary
