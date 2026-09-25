@@ -528,6 +528,31 @@ impl ContextMap {
         self.sync_budget();
     }
 
+    /// Re-key every entry with `rebase` after the agent's workspace root
+    /// moved from `old_root` to `new_root` (a worktree entered or left): an
+    /// entry recorded as `src/a.rs` under the old root must not stand for
+    /// the new root's `src/a.rs`. `rebase` is one-to-one on files, so no two
+    /// entries merge; the project root follows the switch when it was the
+    /// old root.
+    pub(crate) fn rebase_paths(
+        &mut self,
+        old_root: &Path,
+        new_root: &Path,
+        rebase: &dyn Fn(&str) -> String,
+    ) {
+        self.entries = std::mem::take(&mut self.entries)
+            .into_iter()
+            .map(|(path, mut entry)| {
+                let key = PathBuf::from(rebase(&path.to_string_lossy()));
+                entry.path = key.clone();
+                (key, entry)
+            })
+            .collect();
+        if self.project_root == old_root {
+            self.project_root = new_root.to_path_buf();
+        }
+    }
+
     /// Downgrade a file from L3 to L2 (skeleton), freeing tokens.
     /// Returns how many tokens were freed, or 0 if no skeleton available.
     pub fn downgrade_to_skeleton(&mut self, path: &Path) -> usize {

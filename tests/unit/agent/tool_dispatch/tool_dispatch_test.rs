@@ -7796,6 +7796,7 @@ async fn an_unchanged_note_in_a_request_never_points_at_a_result_that_left_it() 
         &|_, _| None,
         100_000,
         None,
+        &agent.compressor.path_keys(),
     )
     .unwrap();
     assert!(request.iter().any(|m| m.content.text() == note));
@@ -7817,6 +7818,7 @@ async fn an_unchanged_note_in_a_request_never_points_at_a_result_that_left_it() 
         &|_, _| None,
         100_000,
         None,
+        &agent.compressor.path_keys(),
     )
     .unwrap();
     let rewritten = request
@@ -7835,6 +7837,154 @@ async fn an_unchanged_note_in_a_request_never_points_at_a_result_that_left_it() 
         crate::token_count::estimate_content_tokens(&rewritten)
             < crate::token_count::estimate_content_tokens(&note)
     );
+}
+
+/// Two checkouts with a same-named file of different content (the review's
+/// worktree probe fixture).
+fn two_checkouts() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("root-base");
+    let worktree = dir.path().join("root-worktree");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::create_dir_all(&worktree).unwrap();
+    std::fs::write(base.join("a.rs"), "BASE FILE").unwrap();
+    std::fs::write(worktree.join("a.rs"), "WORKTREE FILE").unwrap();
+    (dir, base, worktree)
+}
+
+#[tokio::test]
+async fn path_keys_follow_the_workspace_root_into_and_out_of_a_worktree() {
+    // External review of f11e6f68, probe: after entering a worktree the tool
+    // resolved `a.rs` to the worktree file while the key still named the
+    // original checkout's file (root frozen at construction).
+    let (_dir, base, worktree) = two_checkouts();
+    let mut agent = reread_agent().await;
+    let root = agent.tools.workspace_root().clone();
+    root.enter(&base).unwrap();
+    agent.sync_path_key_root();
+    let base_key = agent.canonical_path_key("a.rs");
+    assert_eq!(std::fs::read_to_string(&base_key).unwrap(), "BASE FILE");
+
+    root.enter(&worktree).unwrap();
+    agent.sync_path_key_root();
+    let actual = root.resolve(std::path::Path::new("a.rs"));
+    let tracked = agent.canonical_path_key("a.rs");
+    assert_eq!(
+        std::path::PathBuf::from(&tracked),
+        actual,
+        "key = the file the tool reads"
+    );
+    assert_eq!(std::fs::read_to_string(&tracked).unwrap(), "WORKTREE FILE");
+    assert_ne!(
+        tracked, base_key,
+        "the same relative path, a different file"
+    );
+    assert_eq!(agent.file_tracker.key("a.rs"), tracked);
+    assert_eq!(agent.compressor.key_root(), worktree);
+    // Relative and absolute names of the worktree file are one key.
+    let abs = worktree.join("a.rs").to_string_lossy().into_owned();
+    assert_eq!(agent.canonical_path_key(&abs), tracked);
+    assert_eq!(agent.compressor.path_keys().key(&abs), "a.rs");
+
+    root.exit().unwrap();
+    agent.sync_path_key_root();
+    assert_eq!(agent.canonical_path_key("a.rs"), base_key, "exit maps back");
+    assert_eq!(agent.compressor.key_root(), base);
+
+    // Never the process cwd: a cwd change moves nothing.
+    let elsewhere = tempfile::tempdir().unwrap();
+    let _cwd = crate::test_support::CwdGuard::enter(elsewhere.path());
+    agent.sync_path_key_root();
+    assert_eq!(agent.canonical_path_key("a.rs"), base_key);
+}
+
+#[tokio::test]
+async fn tracked_state_of_one_checkout_never_matches_the_other_after_a_switch() {
+    let (_dir, base, worktree) = two_checkouts();
+    let mut agent = reread_agent().await;
+    let root = agent.tools.workspace_root().clone();
+    root.enter(&base).unwrap();
+    agent.sync_path_key_root();
+    let args = r#"{"path":"a.rs"}"#;
+    // The SAME content in both reads: only the root tells the files apart.
+    let content = "pub fn same() {}\n".repeat(300);
+    let result = serde_json::json!({"content": content, "total_lines": 300}).to_string();
+    agent.messages.push(native_read_call("r1", args));
+    agent
+        .push_tool_result_message(true, "r1", "file_read", args, true, &result)
+        .await;
+    agent.file_tracker.mark_stale("a.rs");
+
+    root.enter(&worktree).unwrap();
+    agent.messages.push(native_read_call("r2", args));
+    agent
+        .push_tool_result_message(true, "r2", "file_read", args, true, &result)
+        .await;
+    // Not "unchanged since turn N": the earlier result is another file.
+    assert!(!last_text(&agent).contains("Unchanged since turn"));
+    assert!(
+        !agent.file_tracker.is_stale("a.rs"),
+        "the other checkout's stale mark"
+    );
+    let base_abs = base.join("a.rs").to_string_lossy().into_owned();
+    assert!(agent.file_tracker.is_stale(&base_abs));
+
+    // Ledger: two files, the other checkout's by its absolute path.
+    agent.compressor.observe_work(&agent.messages);
+    let mut paths: Vec<String> = agent
+        .compressor
+        .work_ledger()
+        .files()
+        .iter()
+        .map(|f| f.path.clone())
+        .collect();
+    paths.sort();
+    let mut expected = vec![base_abs.clone(), "a.rs".to_string()];
+    expected.sort();
+    assert_eq!(paths, expected);
+
+    // In-context tags and compaction pairing see two files too.
+    let keys = agent.compressor.path_keys();
+    let presence = crate::agent::result_compaction::ContextPresence::from_messages_keyed(
+        &agent.messages,
+        &|m, p| keys.key_in(m, p),
+    );
+    assert!(presence.whole("a.rs") && presence.whole(&base_abs));
+    let mut history = agent.messages.clone();
+    history.push(crate::api::types::Message::assistant("next"));
+    let budget = crate::token_count::estimate_messages_tokens(&history) - 100;
+    let report = crate::agent::result_compaction::compact_tool_results_to_budget_opts(
+        &mut history,
+        budget,
+        2,
+        300,
+        &|_| None,
+        true,
+        &keys,
+    );
+    assert!(
+        report.is_none_or(|r| r.superseded.is_empty()),
+        "a read of the other checkout never supersedes this one"
+    );
+
+    // Exit: the base file is `a.rs` again, the worktree file absolute.
+    root.exit().unwrap();
+    agent.sync_path_key_root();
+    let mut paths: Vec<String> = agent
+        .compressor
+        .work_ledger()
+        .files()
+        .iter()
+        .map(|f| f.path.clone())
+        .collect();
+    paths.sort();
+    let mut expected = vec![
+        worktree.join("a.rs").to_string_lossy().into_owned(),
+        "a.rs".to_string(),
+    ];
+    expected.sort();
+    assert_eq!(paths, expected);
+    assert!(agent.file_tracker.is_stale("a.rs"));
 }
 
 #[tokio::test]

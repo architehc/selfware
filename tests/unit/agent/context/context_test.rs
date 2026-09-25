@@ -882,7 +882,12 @@ fn work_ledger_survives_repeated_trims_and_lists_read_files() {
     for _ in 0..5 {
         compressor.begin_ledger_turn(Some(task));
         messages = compressor.hard_compress_with_task(&messages, Some(task));
-        crate::agent::Agent::trim_messages(&mut messages, 60, None);
+        crate::agent::Agent::trim_messages(
+            &mut messages,
+            60,
+            None,
+            &crate::agent::context::PathKeys::default(),
+        );
     }
     assert!(
         !messages

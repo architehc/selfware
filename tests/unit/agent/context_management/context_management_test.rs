@@ -2316,7 +2316,12 @@ async fn test_hard_clamp_to_budget_ensures_strict_context_bound() {
         Message::user(format!("TASK\n{user_pad}")),
     ];
 
-    let (_dropped_msgs, dropped_toks) = Agent::trim_messages(&mut msgs, 24_000, Some(1));
+    let (_dropped_msgs, dropped_toks) = Agent::trim_messages(
+        &mut msgs,
+        24_000,
+        Some(1),
+        &crate::agent::context::PathKeys::default(),
+    );
     let total = crate::token_count::estimate_messages_tokens(&msgs);
     assert!(
         total <= 24_000,
@@ -2453,8 +2458,13 @@ fn fit_request_compacts_latest_arguments_as_last_resort() {
         Message::tool("wrote README.md", "call_big"),
     ];
     let budget = 1_500;
-    let fitted = Agent::fit_request_to_context_budget(msgs, budget, None)
-        .expect("compaction must bring the request under budget");
+    let fitted = Agent::fit_request_to_context_budget(
+        msgs,
+        budget,
+        None,
+        &crate::agent::context::PathKeys::default(),
+    )
+    .expect("compaction must bring the request under budget");
     assert!(crate::token_count::estimate_messages_tokens(&fitted) <= budget);
     assert_valid_tool_pairing(&fitted);
     let call = &fitted[2].tool_calls.as_ref().unwrap()[0];
@@ -2472,8 +2482,13 @@ fn fit_request_returns_typed_context_overflow_when_still_over_budget() {
         Message::system("S".repeat(4_000)),
         Message::user("T".repeat(4_000)),
     ];
-    let err = Agent::fit_request_to_context_budget(msgs, 10, None)
-        .expect_err("an unfittable request must not be returned for dispatch");
+    let err = Agent::fit_request_to_context_budget(
+        msgs,
+        10,
+        None,
+        &crate::agent::context::PathKeys::default(),
+    )
+    .expect_err("an unfittable request must not be returned for dispatch");
     assert!(
         matches!(err, crate::errors::ApiError::ContextOverflow(_)),
         "must be the typed overflow, got {err:?}"
@@ -2490,7 +2505,13 @@ fn fit_request_returns_typed_context_overflow_when_still_over_budget() {
 #[test]
 fn fit_request_is_identity_under_budget() {
     let msgs = vec![Message::system("sys"), Message::user("task")];
-    let fitted = Agent::fit_request_to_context_budget(msgs.clone(), 10_000, None).unwrap();
+    let fitted = Agent::fit_request_to_context_budget(
+        msgs.clone(),
+        10_000,
+        None,
+        &crate::agent::context::PathKeys::default(),
+    )
+    .unwrap();
     assert_eq!(fitted.len(), msgs.len());
     assert_eq!(fitted[1].content.text(), "task");
 }
@@ -2553,7 +2574,12 @@ fn task_text_survives_trimming_at_a_small_budget_with_heavy_tool_traffic() {
     let cp = anchor_checkpoint();
     let anchor = Agent::find_task_anchor_index(&msgs, Some(&cp));
     assert_eq!(anchor, Some(1), "the anchor is the original task message");
-    Agent::trim_messages(&mut msgs, budget, anchor);
+    Agent::trim_messages(
+        &mut msgs,
+        budget,
+        anchor,
+        &crate::agent::context::PathKeys::default(),
+    );
     assert!(
         has_task_verbatim(&msgs),
         "task must survive trim verbatim: {:?}",
@@ -2567,15 +2593,25 @@ fn task_text_survives_trimming_at_a_small_budget_with_heavy_tool_traffic() {
     for _ in 0..5 {
         msgs.extend(tool_traffic(4, 8_000));
         let anchor = Agent::find_task_anchor_index(&msgs, Some(&cp));
-        Agent::trim_messages(&mut msgs, budget, anchor);
+        Agent::trim_messages(
+            &mut msgs,
+            budget,
+            anchor,
+            &crate::agent::context::PathKeys::default(),
+        );
         assert!(has_task_verbatim(&msgs));
     }
 
     // The request-assembly path (trim + clamp + refuse) keeps it too.
     let mut request = msgs.clone();
     request.extend(tool_traffic(10, 8_000));
-    let fitted = Agent::fit_request_to_context_budget(request, budget, Some(&cp))
-        .expect("fits after trimming");
+    let fitted = Agent::fit_request_to_context_budget(
+        request,
+        budget,
+        Some(&cp),
+        &crate::agent::context::PathKeys::default(),
+    )
+    .expect("fits after trimming");
     assert!(has_task_verbatim(&fitted));
     assert!(crate::token_count::estimate_messages_tokens(&fitted) <= budget);
 }
@@ -2598,7 +2634,12 @@ fn hard_clamp_never_truncates_the_task_anchor_below_the_floor() {
         Message::user("continue"),
     ];
     let budget = 6_000;
-    Agent::trim_messages(&mut msgs, budget, Some(1));
+    Agent::trim_messages(
+        &mut msgs,
+        budget,
+        Some(1),
+        &crate::agent::context::PathKeys::default(),
+    );
     let total = crate::token_count::estimate_messages_tokens(&msgs);
     assert!(total <= budget, "clamp must fit the budget, got {total}");
     let anchor = msgs

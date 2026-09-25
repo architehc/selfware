@@ -491,6 +491,7 @@ fn replay_rendered_request_tells_the_model_which_content_is_gone() {
         &|h, cap| compressor.render_work_ledger_for(cap, h),
         budget + 4_000,
         None,
+        &compressor.path_keys(),
     )
     .expect("fits");
     let tail = request.last().unwrap().content.text().to_string();
@@ -535,7 +536,12 @@ fn trim_compacts_before_dropping_on_the_c24_shape() {
         xml_call("src/agent/compression.rs"),
         xml_result(&read_payload(&rust_source("cmp", 3_000))),
     ];
-    let (dropped, saved) = Agent::trim_messages(&mut messages, 11_008, Some(1));
+    let (dropped, saved) = Agent::trim_messages(
+        &mut messages,
+        11_008,
+        Some(1),
+        &crate::agent::context::PathKeys::default(),
+    );
     assert_eq!(dropped, 0, "no message dropped");
     assert!(saved > 0);
     assert_eq!(messages.len(), 6);
@@ -739,9 +745,16 @@ fn old_stubs_are_slimmed_before_a_recent_read_is_stubbed() {
         .map(|i| estimate_content_tokens(messages[i].content.text()))
         .sum();
     let budget = estimate_messages_tokens(&messages) - stub_tokens / 2;
-    let report =
-        compact_tool_results_to_budget_opts(&mut messages, budget, 2, 500, &finding, true, None)
-            .expect("compacted");
+    let report = compact_tool_results_to_budget_opts(
+        &mut messages,
+        budget,
+        2,
+        500,
+        &finding,
+        true,
+        &crate::agent::context::PathKeys::default(),
+    )
+    .expect("compacted");
     // Every old stub is slimmed before any further read is stubbed, and
     // the only read stubbed is an older one, never the two recent reads.
     assert_eq!(report.slimmed.len(), stubs_before, "{report:?}");
@@ -787,8 +800,16 @@ fn a_soft_pass_never_touches_results_the_model_has_not_seen() {
         .map(|m| m.content.text().to_string())
         .collect();
     assert!(
-        compact_tool_results_to_budget_opts(&mut messages, budget, 2, 200, &|_| None, true, None)
-            .is_none(),
+        compact_tool_results_to_budget_opts(
+            &mut messages,
+            budget,
+            2,
+            200,
+            &|_| None,
+            true,
+            &crate::agent::context::PathKeys::default()
+        )
+        .is_none(),
         "nothing the soft pass may touch"
     );
     let after: Vec<String> = messages
@@ -921,8 +942,16 @@ fn supersession_history(later: serde_json::Value) -> Vec<Message> {
 
 fn compact_supersession(messages: &mut [Message], spare: usize) -> ResultCompactionReport {
     let budget = estimate_messages_tokens(messages) - spare;
-    compact_tool_results_to_budget_opts(messages, budget, 2, 300, &|_| None, true, None)
-        .expect("over budget")
+    compact_tool_results_to_budget_opts(
+        messages,
+        budget,
+        2,
+        300,
+        &|_| None,
+        true,
+        &crate::agent::context::PathKeys::default(),
+    )
+    .expect("over budget")
 }
 
 fn contentless_later_results() -> Vec<(&'static str, serde_json::Value)> {

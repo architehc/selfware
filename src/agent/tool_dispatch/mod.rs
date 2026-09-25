@@ -955,6 +955,47 @@ impl Agent {
         super::context::canonical_absolute_path(path, Some(self.path_key_root.as_path()))
     }
 
+    /// Keep the path-key root on the agent's CURRENT workspace root: the
+    /// innermost entered worktree, else the base pinned at construction
+    /// (never the process cwd). Call wherever the root may have changed —
+    /// after every tool result (`enter_worktree` / `exit_worktree`), after
+    /// the `/worktree` commands, and before compaction or request assembly.
+    ///
+    /// On a switch, tracked state is kept but NAMESPACED by the root it was
+    /// recorded under, not cleared: the work ledger is the progress record
+    /// that must survive (clearing it would make the model redo the review
+    /// of the checkout it just left), and the other checkout's files are
+    /// still real files with real findings. So the ledger, the context map
+    /// and the file tracker's path lists are re-keyed (the old checkout's
+    /// `src/a.rs` becomes its absolute path, which never matches the new
+    /// checkout's `src/a.rs`), and every tool result already in the history
+    /// keeps the root it was produced under for compaction and in-context
+    /// tags (`PathKeys`). Maps keyed by absolute path (re-read tracker,
+    /// unchanged-note records, read state, mutation tracking) need no
+    /// change: their keys already name one file each. External review of
+    /// f11e6f68: the root frozen at construction confused the two checkouts.
+    pub(crate) fn sync_path_key_root(&mut self) {
+        let now = self
+            .tools
+            .workspace_root()
+            .current_worktree()
+            .unwrap_or_else(|| self.path_key_base.clone());
+        if now == self.path_key_root {
+            return;
+        }
+        let old = std::mem::replace(&mut self.path_key_root, now.clone());
+        tracing::info!(
+            "workspace root switched: path keys move from {} to {}",
+            old.display(),
+            now.display()
+        );
+        self.compressor.switch_key_root(&self.messages, now.clone());
+        let keys = self.compressor.path_keys();
+        self.context_map
+            .rebase_paths(&old, &now, &|k| keys.rebase(k, Some(old.as_path())));
+        self.file_tracker.rebase_root(now);
+    }
+
     /// Record which paths the mutation just counted touched: named paths
     /// get the current `mutation_sequence`; a mutation without a path list
     /// (shell, VCS, formatter, package tools) may have touched any file.
@@ -4155,6 +4196,31 @@ impl Agent {
     }
 
     pub(super) async fn push_tool_result_message(
+        &mut self,
+        use_native_fc: bool,
+        call_id: &str,
+        tool_name: &str,
+        args_str: &str,
+        success: bool,
+        result: &str,
+    ) {
+        // Every result already in the history was produced under the root
+        // in effect so far; the call that just ran (enter_worktree,
+        // exit_worktree) may have moved it for every later call.
+        self.sync_path_key_root();
+        self.push_tool_result_message_at_root(
+            use_native_fc,
+            call_id,
+            tool_name,
+            args_str,
+            success,
+            result,
+        )
+        .await;
+        self.sync_path_key_root();
+    }
+
+    async fn push_tool_result_message_at_root(
         &mut self,
         use_native_fc: bool,
         call_id: &str,

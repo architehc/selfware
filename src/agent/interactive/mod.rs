@@ -2444,6 +2444,9 @@ impl Agent {
                         std::path::PathBuf::from(&worktree_path),
                     ) {
                         Ok(_) => {
+                            // Path keys follow the root (other checkout's
+                            // files keep their own identity).
+                            self.sync_path_key_root();
                             let branch_display = if branch_arg.is_empty() {
                                 "(detached)".dimmed()
                             } else {
@@ -2495,6 +2498,7 @@ impl Agent {
             // is itself a git top-level). The process cwd is never touched.
             match crate::tools::git_worktree::exit_worktree_dir(self.tools.workspace_root()) {
                 Ok((restored_dir, previous_worktree)) => {
+                    self.sync_path_key_root();
                     println!("{} Exited worktree", "✓".bright_green());
                     if let Some(prev) = &previous_worktree {
                         println!("  Previous: {}", prev.to_string_lossy().dimmed());

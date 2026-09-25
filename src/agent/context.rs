@@ -114,10 +114,11 @@ pub struct ContextCompressor {
     /// summaries left the history above the threshold and ran again the
     /// next turn).
     summary_backoff: Option<usize>,
-    /// Root the ledger's path keys are computed against: the agent's own
-    /// workspace root (`Agent::new` sets it). A standalone compressor falls
-    /// back to the current project root.
-    key_root: Option<std::path::PathBuf>,
+    /// Roots the ledger's path keys are computed against: the agent's own
+    /// workspace root (`Agent::new` sets it, a worktree switch moves it; see
+    /// [`PathKeys`]). A standalone compressor falls back to the current
+    /// project root.
+    path_keys: Option<PathKeys>,
     /// Progress that must outlive every trim/compaction (see [`WorkLedger`]).
     /// Behind a mutex so the `&self` compression paths can record what they
     /// are about to drop before dropping it.
@@ -136,7 +137,7 @@ impl ContextCompressor {
             compression_threshold: (token_budget as f32 * content_ratio) as usize,
             min_messages_to_keep: 6,
             summary_backoff: None,
-            key_root: None,
+            path_keys: None,
             ledger: Mutex::new(WorkLedger::new()),
         }
     }
@@ -155,20 +156,43 @@ impl ContextCompressor {
     /// into the work ledger. Idempotent; called before every trim/compaction
     /// so nothing is dropped unrecorded.
     pub fn observe_work(&self, messages: &[Message]) {
-        let root = self.key_root();
-        self.with_ledger(|l| l.observe(messages, Some(root.as_path())));
+        let keys = self.path_keys();
+        self.with_ledger(|l| l.observe_keyed(messages, &|m, p| keys.key_in(m, p)));
     }
 
     /// Fix the root the ledger's path keys are computed against.
     pub fn set_key_root(&mut self, root: std::path::PathBuf) {
-        self.key_root = Some(root);
+        self.path_keys = Some(PathKeys::at(Some(root.as_path())));
     }
 
-    /// The root for path keys (see `key_root`).
+    /// Move the path keys to `root` (a worktree entered or left): results
+    /// still unrecorded in `messages` are recorded under the root they were
+    /// produced under FIRST, then every ledger key is re-made in the new
+    /// root's space (the other checkout's files keep their identity as
+    /// absolute paths — see [`PathKeys`]).
+    pub(crate) fn switch_key_root(&mut self, messages: &[Message], root: std::path::PathBuf) {
+        self.observe_work(messages);
+        let mut keys = self.path_keys();
+        let previous = keys.switch(messages, root);
+        let rebase = |k: &str| keys.rebase(k, previous.as_deref());
+        self.with_ledger(|l| l.rebase_paths(&rebase));
+        self.path_keys = Some(keys);
+    }
+
+    /// The root for path keys (see `path_keys`).
     pub fn key_root(&self) -> std::path::PathBuf {
-        self.key_root
-            .clone()
+        self.path_keys
+            .as_ref()
+            .and_then(|k| k.current().map(std::path::Path::to_path_buf))
             .unwrap_or_else(super::current_project_root)
+    }
+
+    /// The path keys (see [`PathKeys`]); a standalone compressor keys
+    /// against the current project root.
+    pub(crate) fn path_keys(&self) -> PathKeys {
+        self.path_keys
+            .clone()
+            .unwrap_or_else(|| PathKeys::at(Some(super::current_project_root().as_path())))
     }
 
     /// Start a new model turn for the ledger (resets it on a task change).
@@ -189,10 +213,8 @@ impl ContextCompressor {
         max_tokens: usize,
         messages: &[Message],
     ) -> Option<String> {
-        let root = self.key_root();
-        let presence = ContextPresence::from_messages(messages, &|p| {
-            WorkLedger::normalize_path(p, Some(root.as_path()))
-        });
+        let keys = self.path_keys();
+        let presence = ContextPresence::from_messages_keyed(messages, &|m, p| keys.key_in(m, p));
         self.with_ledger(|l| l.render_in_context(max_tokens, &presence))
     }
 
@@ -493,10 +515,9 @@ impl ContextCompressor {
         let mut compressed = super::Agent::apply_tool_call_pair_invariants(compressed);
         // A kept "unchanged since turn N" note whose earlier result was
         // summarized away now says the content is gone.
-        let root = self.key_root();
         super::result_compaction::repoint_orphaned_unchanged_notes(
             &mut compressed,
-            Some(root.as_path()),
+            &self.path_keys(),
         );
 
         let original_estimate = self.estimate_tokens(messages);
@@ -736,6 +757,105 @@ pub(crate) fn canonical_absolute_path(path: &str, root: Option<&std::path::Path>
         _ => raw.to_path_buf(),
     };
     lexical_normalize(&joined).to_string_lossy().into_owned()
+}
+
+/// The roots an agent's history-derived path keys are computed against: the
+/// workspace root in effect NOW, plus — for every tool result produced
+/// before the last root switch (entering or leaving a git worktree) — the
+/// root it was produced under.
+///
+/// A tool call names `src/a.rs`; which file that is depends on the root the
+/// tool resolved it against. External review of f11e6f68: with one root
+/// frozen at construction, `src/a.rs` in a worktree and `src/a.rs` in the
+/// original checkout shared every key (ledger coverage, stale tracking,
+/// compaction pairing). Keys are therefore made in the CURRENT root's space
+/// ([`canonical_workspace_path`]: root-relative inside it, absolute
+/// outside), and a result from an earlier root is first anchored at that
+/// root — so the other checkout's `src/a.rs` keys as its absolute path and
+/// never matches the current checkout's `src/a.rs`, and switching back maps
+/// it to `src/a.rs` again. Never the process cwd.
+///
+/// Results are identified by `tool_call_id` (native tool calling, the same
+/// identity the call/result pairing relies on) or by the fingerprint of the
+/// result message (XML tool calling). An XML result rewritten in place after
+/// the switch (compacted to a stub or a head) loses its attribution and is
+/// keyed against the current root: a stub delivers nothing, so only a
+/// truncated head of an XML read from before a switch can be misattributed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PathKeys {
+    current: Option<std::path::PathBuf>,
+    earlier: std::collections::HashMap<String, std::path::PathBuf>,
+}
+
+impl PathKeys {
+    /// Keys against `root` (`None` = lexical keys only), no earlier roots.
+    pub(crate) fn at(root: Option<&std::path::Path>) -> Self {
+        Self {
+            current: root.map(std::path::Path::to_path_buf),
+            earlier: std::collections::HashMap::new(),
+        }
+    }
+
+    /// The root in effect now.
+    pub(crate) fn current(&self) -> Option<&std::path::Path> {
+        self.current.as_deref()
+    }
+
+    /// Key of a path named now (a call being made in the current root).
+    pub(crate) fn key(&self, path: &str) -> String {
+        canonical_workspace_path(path, self.current())
+    }
+
+    /// Key of a path named by the call behind the tool-result `message`,
+    /// resolved against the root that result was produced under.
+    pub(crate) fn key_in(&self, message: &Message, path: &str) -> String {
+        match result_identity(message).and_then(|id| self.earlier.get(&id)) {
+            Some(root) if Some(root.as_path()) != self.current() => {
+                self.rebase(path, Some(root.as_path()))
+            }
+            _ => self.key(path),
+        }
+    }
+
+    /// A key (or path) made against `old` re-made in the current root's
+    /// space.
+    pub(crate) fn rebase(&self, key: &str, old: Option<&std::path::Path>) -> String {
+        canonical_workspace_path(&canonical_absolute_path(key, old), self.current())
+    }
+
+    /// Switch to `root`: every tool result in `messages` not already
+    /// attributed to an earlier root was produced under the one in effect
+    /// until now. Attributions of results no longer in `messages` are
+    /// dropped (bounded by the history). Returns the previous root.
+    pub(crate) fn switch(
+        &mut self,
+        messages: &[Message],
+        root: std::path::PathBuf,
+    ) -> Option<std::path::PathBuf> {
+        let previous = self.current.replace(root);
+        let live: HashSet<String> = messages.iter().filter_map(result_identity).collect();
+        self.earlier.retain(|id, _| live.contains(id));
+        if let Some(previous) = &previous {
+            for id in live {
+                self.earlier.entry(id).or_insert_with(|| previous.clone());
+            }
+        }
+        previous
+    }
+}
+
+/// Identity of a tool-result message for [`PathKeys`]: its `tool_call_id`
+/// (native), or the fingerprint of its text (XML `<tool_result>` envelope).
+fn result_identity(message: &Message) -> Option<String> {
+    match message.role.as_str() {
+        "tool" => message.tool_call_id.as_ref().map(|id| format!("id:{id}")),
+        "user" => {
+            let text = message.content.text();
+            text.contains("<tool_result>")
+                .then(|| format!("xml:{:016x}", fnv1a64(&["xml-result", text])))
+        }
+        _ => None,
+    }
 }
 
 fn resolve_task_text(messages: &[Message], task: Option<&str>) -> Option<String> {
@@ -1058,6 +1178,21 @@ impl WorkLedger {
         self.seq
     }
 
+    /// Re-make every path key with `rebase` (a worktree switch; see
+    /// [`PathKeys::rebase`]). Keys stay one per file: the map is a bijection
+    /// on files, so entries never merge.
+    pub(crate) fn rebase_paths(&mut self, rebase: &dyn Fn(&str) -> String) {
+        for f in &mut self.files {
+            f.path = rebase(&f.path);
+        }
+        for s in &mut self.searches {
+            s.path = rebase(&s.path);
+        }
+        for w in &mut self.writes {
+            w.path = rebase(&w.path);
+        }
+    }
+
     /// The ledger key of a path: `canonical_workspace_path`.
     pub(crate) fn normalize_path(path: &str, root: Option<&std::path::Path>) -> String {
         canonical_workspace_path(path, root)
@@ -1067,6 +1202,16 @@ impl WorkLedger {
     /// every new note source (assistant text naming a read file, compaction
     /// summary lines). Idempotent: re-observing the same history adds nothing.
     pub fn observe(&mut self, messages: &[Message], root: Option<&std::path::Path>) {
+        self.observe_keyed(messages, &|_, p| Self::normalize_path(p, root));
+    }
+
+    /// [`Self::observe`] with each path keyed by `key(result message, path)`
+    /// (see [`PathKeys::key_in`]).
+    pub(crate) fn observe_keyed(
+        &mut self,
+        messages: &[Message],
+        key: &dyn Fn(&Message, &str) -> String,
+    ) {
         use std::collections::HashMap;
         let mut native_calls: HashMap<String, (String, String)> = HashMap::new();
         let mut xml_calls: VecDeque<(String, String, u64)> = VecDeque::new();
@@ -1113,7 +1258,7 @@ impl WorkLedger {
                         continue;
                     }
                     if let Some(payload) = successful_payload(text, false) {
-                        self.record_result(&name, &args, &payload, root);
+                        self.record_result(&name, &args, &payload, &|p| key(message, p));
                     }
                 }
                 "user" => {
@@ -1126,7 +1271,7 @@ impl WorkLedger {
                             continue;
                         }
                         if let Some(payload) = successful_payload(text, true) {
-                            self.record_result(&name, &args, &payload, root);
+                            self.record_result(&name, &args, &payload, &|p| key(message, p));
                         }
                     } else if (text.contains("[CONTEXT SUMMARY")
                         || text.contains("[AUTO-COMPACT SUMMARY")
@@ -1146,7 +1291,7 @@ impl WorkLedger {
         name: &str,
         args: &str,
         payload: &str,
-        root: Option<&std::path::Path>,
+        key: &dyn Fn(&str) -> String,
     ) {
         // A result compacted in place (stub / truncated head) is not a new
         // read: the full result was recorded before it was compacted.
@@ -1159,7 +1304,7 @@ impl WorkLedger {
                 let Some(path) = arg_path(&args) else {
                     return;
                 };
-                let path = Self::normalize_path(&path, root);
+                let path = key(&path);
                 let range = args
                     .get("line_range")
                     .and_then(|r| r.as_array())
@@ -1214,10 +1359,7 @@ impl WorkLedger {
                 if pattern.is_empty() {
                     return;
                 }
-                let path = Self::normalize_path(
-                    args.get("path").and_then(|p| p.as_str()).unwrap_or("."),
-                    root,
-                );
+                let path = key(args.get("path").and_then(|p| p.as_str()).unwrap_or("."));
                 let matches = serde_json::from_str::<serde_json::Value>(payload)
                     .ok()
                     .and_then(|v| {
@@ -1256,7 +1398,7 @@ impl WorkLedger {
                 }
                 let mut recorded = HashSet::new();
                 for path in paths {
-                    let path = Self::normalize_path(&path, root);
+                    let path = key(&path);
                     if recorded.insert(path.clone()) {
                         self.record_write(name, path);
                     }
@@ -1414,9 +1556,16 @@ impl WorkLedger {
     /// The recorded finding for `path` (model note or summary line), if any.
     pub fn file_finding(&self, path: &str) -> Option<String> {
         let path = path.trim().trim_start_matches("./");
+        // An exact key first: after a worktree switch the other checkout's
+        // `<abs>/src/a.rs` also ends with `/src/a.rs`.
         self.files
             .iter()
-            .find(|f| f.path == path || f.path.ends_with(&format!("/{path}")))
+            .find(|f| f.path == path)
+            .or_else(|| {
+                self.files
+                    .iter()
+                    .find(|f| f.path.ends_with(&format!("/{path}")))
+            })
             .and_then(|f| f.note.as_ref().map(|(_, _, n)| n.clone()))
     }
 
@@ -1451,13 +1600,21 @@ impl WorkLedger {
             if candidate.is_empty() || finding.chars().count() < 8 {
                 continue;
             }
-            let Some(entry) = self.files.iter_mut().find(|f| {
-                f.path == candidate
-                    || f.path.ends_with(&format!("/{candidate}"))
-                    || candidate.ends_with(&format!("/{}", f.path))
-            }) else {
+            // An exact key first (see `file_finding`).
+            let Some(idx) = self
+                .files
+                .iter()
+                .position(|f| f.path == candidate)
+                .or_else(|| {
+                    self.files.iter().position(|f| {
+                        f.path.ends_with(&format!("/{candidate}"))
+                            || candidate.ends_with(&format!("/{}", f.path))
+                    })
+                })
+            else {
                 continue;
             };
+            let entry = &mut self.files[idx];
             // The model's own note is at least as current; a summary fills
             // an empty slot, replaces an older summary, or a model note that
             // predates the latest read.

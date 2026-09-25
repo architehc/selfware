@@ -656,10 +656,10 @@ struct FileTracker {
     stale_files: HashSet<String>,
     /// Per-file read state used to detect redundant unchanged rereads
     read_state: HashMap<String, FileReadState>,
-    /// The agent's workspace root, fixed when the agent is built: every key
-    /// is computed against it, never against the process cwd (which other
-    /// code — and concurrently running tests — may change between a record
-    /// and its lookup).
+    /// The agent's CURRENT workspace root (`Agent::path_key_root`): every
+    /// key is computed against it, never against the process cwd (which
+    /// other code — and concurrently running tests — may change between a
+    /// record and its lookup).
     root: std::path::PathBuf,
 }
 
@@ -728,6 +728,18 @@ impl FileTracker {
     fn read_state_of_mut(&mut self, path: &str) -> Option<&mut FileReadState> {
         let key = self.key(path);
         self.read_state.get_mut(&key)
+    }
+
+    /// Switch to a new workspace root (a worktree entered or left). The read
+    /// state is keyed by absolute path already; the context-file and stale
+    /// lists keep paths as written, so a relative one is anchored at the
+    /// root it was recorded under first — the other checkout's `src/a.rs`
+    /// must never match this checkout's `src/a.rs`.
+    fn rebase_root(&mut self, root: std::path::PathBuf) {
+        let old = std::mem::replace(&mut self.root, root);
+        let anchor = |p: &String| context::canonical_absolute_path(p, Some(old.as_path()));
+        self.context_files = self.context_files.iter().map(anchor).collect();
+        self.stale_files = self.stale_files.iter().map(anchor).collect();
     }
 }
 
@@ -1007,10 +1019,15 @@ pub struct Agent {
     /// paths are unknown (shell and VCS commands, formatters, package
     /// tools): it may have changed any file.
     last_opaque_mutation_sequence: usize,
-    /// The workspace root every path key of this agent is computed against,
-    /// fixed at construction (`tools.workspace_root()`), never the process
-    /// cwd.
+    /// The workspace root every path key of this agent is computed against:
+    /// the agent's CURRENT root — the innermost entered worktree, else
+    /// `path_key_base` — kept in step by [`Agent::sync_path_key_root`].
+    /// Never the process cwd.
     path_key_root: std::path::PathBuf,
+    /// The base (outside every worktree) the key root returns to, fixed at
+    /// construction: a root that follows the process cwd is pinned here so
+    /// a later cwd change cannot move the keys.
+    path_key_base: std::path::PathBuf,
     /// Per-path exemption budget for evicted re-reads (see
     /// [`EvictedRereadBudget`]).
     evicted_reread_budget: std::collections::HashMap<String, EvictedRereadBudget>,
@@ -1746,9 +1763,16 @@ To call a tool, use this EXACT XML structure:
         // evicting file content after just a few tool calls.
         let mut compressor =
             ContextCompressor::with_content_ratio(max_context_tokens, compressor_content_ratio);
-        // One fixed root for every path key this agent computes (ledger,
-        // re-read tracker, unchanged-note records, context map, stubs).
-        let path_key_root = tools.workspace_root().path();
+        // One root for every path key this agent computes (ledger, re-read
+        // tracker, unchanged-note records, context map, stubs): the current
+        // workspace root, which a worktree switch moves
+        // (`sync_path_key_root`); the base is pinned here, never re-read
+        // from the process cwd.
+        let path_key_base = tools.workspace_root().base();
+        let path_key_root = tools
+            .workspace_root()
+            .current_worktree()
+            .unwrap_or_else(|| path_key_base.clone());
         compressor.set_key_root(path_key_root.clone());
         let governor = ConcurrencyGovernor::shared_from_config(&config.concurrency);
 
@@ -1780,6 +1804,7 @@ To call a tool, use this EXACT XML structure:
             error_analyzer,
             file_tracker: FileTracker::new(path_key_root.clone()),
             path_key_root,
+            path_key_base,
             task_state_notes: VecDeque::new(),
             last_checkpoint_persisted_at: Instant::now(),
             last_checkpoint_tool_calls: 0,

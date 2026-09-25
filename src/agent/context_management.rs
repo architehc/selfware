@@ -391,6 +391,7 @@ impl Agent {
         messages: &mut Vec<Message>,
         max_context_tokens: usize,
         anchor_idx: Option<usize>,
+        path_keys: &super::context::PathKeys,
     ) -> (usize, usize) {
         use crate::token_count::estimate_messages_tokens;
         let total: usize = estimate_messages_tokens(messages);
@@ -402,12 +403,14 @@ impl Agent {
         // content is gone; the latest result only ever cut to a head) before
         // any whole message is dropped — a few huge reads, not many
         // messages, fill small windows (val082 c24/b2_65536).
-        let _ = super::result_compaction::compact_tool_results_to_budget(
+        let _ = super::result_compaction::compact_tool_results_to_budget_opts(
             messages,
             max_context_tokens,
             super::result_compaction::RECENT_RESULTS_KEPT_INTACT,
             super::result_compaction::stub_token_budget(max_context_tokens),
             &|_| None,
+            false,
+            path_keys,
         );
         let compacted_total = estimate_messages_tokens(messages);
         if compacted_total <= max_context_tokens {
@@ -529,7 +532,7 @@ impl Agent {
         // A kept "unchanged since turn N" note whose earlier result was just
         // dropped or cut must not keep telling the model to use it (before
         // the final clamp, which then measures the rewritten note).
-        if super::result_compaction::repoint_orphaned_unchanged_notes(messages, None) > 0 {
+        if super::result_compaction::repoint_orphaned_unchanged_notes(messages, path_keys) > 0 {
             remaining = estimate_messages_tokens(messages);
         }
 
@@ -800,6 +803,7 @@ impl Agent {
         mut request_messages: Vec<Message>,
         max_context_tokens: usize,
         checkpoint: Option<&crate::checkpoint::TaskCheckpoint>,
+        path_keys: &super::context::PathKeys,
     ) -> Result<Vec<Message>, crate::errors::ApiError> {
         use crate::token_count::estimate_messages_tokens;
 
@@ -814,7 +818,12 @@ impl Agent {
 
         if estimate_messages_tokens(&request_messages) > max_context_tokens {
             let anchor_idx = Self::find_task_anchor_index(&request_messages, checkpoint);
-            Self::trim_messages(&mut request_messages, max_context_tokens, anchor_idx);
+            Self::trim_messages(
+                &mut request_messages,
+                max_context_tokens,
+                anchor_idx,
+                path_keys,
+            );
             request_messages = Self::apply_tool_call_pair_invariants(request_messages);
         }
 
@@ -874,6 +883,7 @@ impl Agent {
             &|_, _| ledger.clone(),
             max_context_tokens,
             checkpoint,
+            &super::context::PathKeys::default(),
         )
     }
 
@@ -892,6 +902,7 @@ impl Agent {
         ledger_for: &dyn Fn(&[Message], usize) -> Option<String>,
         max_context_tokens: usize,
         checkpoint: Option<&crate::checkpoint::TaskCheckpoint>,
+        path_keys: &super::context::PathKeys,
     ) -> Result<Vec<Message>, crate::errors::ApiError> {
         use crate::token_count::{estimate_content_tokens, estimate_messages_tokens};
 
@@ -907,14 +918,18 @@ impl Agent {
             .map(|t| super::context::estimate_message_tokens(&Message::user(t.clone())) + 8)
             .unwrap_or(0);
         let history_budget = max_context_tokens.saturating_sub(reserve);
-        let mut fitted =
-            Self::fit_request_to_context_budget(request_messages, history_budget, checkpoint)?;
+        let mut fitted = Self::fit_request_to_context_budget(
+            request_messages,
+            history_budget,
+            checkpoint,
+            path_keys,
+        )?;
         // Every request passes here: whatever route dropped or cut the
         // earlier result an "unchanged since turn N" note points at (trim,
         // summary, compaction, clamp), the note the model sees says so (the
         // rewritten note is shorter than the production note it replaces,
         // and the request is measured again below with its tail).
-        super::result_compaction::repoint_orphaned_unchanged_notes(&mut fitted, None);
+        super::result_compaction::repoint_orphaned_unchanged_notes(&mut fitted, path_keys);
 
         // Re-render against the fitted history (what the model will see).
         let ledger = ledger_for(&fitted, ledger_cap);
@@ -1116,6 +1131,7 @@ impl Agent {
     /// `max_context_tokens`. Removes the oldest non-system messages first.
     pub(super) fn trim_message_history(&mut self) {
         use crate::token_count::estimate_messages_tokens;
+        self.sync_path_key_root();
         // Record progress (files read, findings, deliverables) into the work
         // ledger BEFORE anything can be dropped.
         self.compressor.observe_work(&self.messages);
@@ -1141,8 +1157,9 @@ impl Agent {
 
         let anchor_idx = self.current_task_anchor_index();
         let max_tokens = self.max_context_tokens;
+        let path_keys = self.compressor.path_keys();
         let (dropped_messages, dropped_tokens) =
-            Self::trim_messages(&mut self.messages, max_tokens, anchor_idx);
+            Self::trim_messages(&mut self.messages, max_tokens, anchor_idx, &path_keys);
 
         if dropped_messages > 0 {
             self.emit_progress(super::progress::ProgressEvent::TurnDecision {
@@ -1183,10 +1200,12 @@ impl Agent {
         protect_unseen: bool,
     ) -> Option<super::result_compaction::ResultCompactionReport> {
         use super::result_compaction as rc;
+        self.sync_path_key_root();
         // The full results are recorded (with their symbol digests) before
         // any of them is replaced by a stub.
         self.compressor.observe_work(&self.messages);
         let compressor = &self.compressor;
+        let path_keys = compressor.path_keys();
         let report = rc::compact_tool_results_to_budget_opts(
             &mut self.messages,
             target_tokens,
@@ -1194,7 +1213,7 @@ impl Agent {
             rc::stub_token_budget(self.max_context_tokens),
             &|path| compressor.file_finding(path),
             protect_unseen,
-            Some(self.path_key_root.as_path()),
+            &path_keys,
         )?;
         let messages = self.messages.len();
         let reason = format!("{why}; {}", report.describe());

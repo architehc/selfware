@@ -851,6 +851,7 @@ fn label(name: &str, args: &str) -> String {
 /// Shrink tool results in place until `messages` measure at most
 /// `max_tokens`, oldest first (see [`compact_tool_results_to_budget_opts`];
 /// every result may be touched, the latest only ever cut to a head).
+#[cfg(test)]
 pub(crate) fn compact_tool_results_to_budget(
     messages: &mut [Message],
     max_tokens: usize,
@@ -865,25 +866,25 @@ pub(crate) fn compact_tool_results_to_budget(
         stub_tokens,
         finding,
         false,
-        None,
+        &super::context::PathKeys::default(),
     )
 }
 
 /// Key of a `file_read` call for supersession: normalized path and the
 /// line range (`None` = whole file).
 /// A chunked whole read (or its stub) counts as the lines it showed. The
-/// path is keyed against `root` (the agent's workspace root; `None` =
-/// lexical only), never the process cwd.
+/// path is keyed by `keys` against the workspace root the result was
+/// produced under (see `PathKeys`), never the process cwd.
 fn read_key(
     r: &PairedResult,
     messages: &[Message],
-    root: Option<&std::path::Path>,
+    keys: &super::context::PathKeys,
 ) -> Option<(String, Option<(usize, usize)>)> {
     if r.name != "file_read" {
         return None;
     }
     let args_v: Value = serde_json::from_str(&r.args).unwrap_or_default();
-    let path = super::context::canonical_workspace_path(&arg_path(&args_v)?, root);
+    let path = keys.key_in(&messages[r.idx], &arg_path(&args_v)?);
     let payload = open_envelope(messages[r.idx].content.text(), r.xml)
         .and_then(|env| serde_json::from_str::<Value>(&env.payload).ok());
     let range = shown_range(&args_v, payload.as_ref()).or_else(|| {
@@ -992,7 +993,8 @@ fn replace_payload(messages: &mut [Message], r: &PairedResult, new_payload: &str
 /// skipped for them): a soft (compression-threshold) pass must not stub a
 /// read before the model reads it. Roles, ids and tool calls are never
 /// touched. Returns `None` when the history already fits or nothing could
-/// be compacted.
+/// be compacted. Paths are keyed by `path_keys` (see `PathKeys`); `finding`
+/// receives a path's key.
 pub(crate) fn compact_tool_results_to_budget_opts(
     messages: &mut [Message],
     max_tokens: usize,
@@ -1000,7 +1002,7 @@ pub(crate) fn compact_tool_results_to_budget_opts(
     stub_tokens: usize,
     finding: &dyn Fn(&str) -> Option<String>,
     protect_unseen: bool,
-    root: Option<&std::path::Path>,
+    path_keys: &super::context::PathKeys,
 ) -> Option<ResultCompactionReport> {
     let before = estimate_messages_tokens(messages);
     if before <= max_tokens {
@@ -1029,7 +1031,7 @@ pub(crate) fn compact_tool_results_to_budget_opts(
     };
     let keys: Vec<_> = results
         .iter()
-        .map(|r| read_key(r, messages, root))
+        .map(|r| read_key(r, messages, path_keys))
         .collect();
     // What each result actually delivered (path key, lines): only these can
     // stand in for an earlier read.
@@ -1140,7 +1142,6 @@ pub(crate) fn compact_tool_results_to_budget_opts(
             if is_compacted_payload(&env.payload) {
                 continue;
             }
-            let args_v: Value = serde_json::from_str(&r.args).unwrap_or_default();
             // The finding is per file: only the stub of the path's last
             // content-carrying result carries it (the ledger has it for
             // every file); a later failed read or note never gets a stub
@@ -1148,7 +1149,10 @@ pub(crate) fn compact_tool_results_to_budget_opts(
             let note = if has_later_delivery_same_path(pos) {
                 None
             } else {
-                arg_path(&args_v).and_then(|p| finding(&p))
+                let args_v: Value = serde_json::from_str(&r.args).unwrap_or_default();
+                arg_path(&args_v)
+                    .map(|p| path_keys.key_in(&messages[r.idx], &p))
+                    .and_then(|key| finding(&key))
             };
             let stub = build_stub(&r.name, &r.args, &env.payload, stub_tokens, note.as_deref());
             if replace_payload(messages, r, &stub) {
@@ -1200,7 +1204,7 @@ pub(crate) fn compact_tool_results_to_budget_opts(
 
     // Stage 7: an "unchanged since turn N" note whose earlier result was
     // just compacted away now says so (it told the model to use that result).
-    report.notes_repointed = repoint_orphaned_unchanged_notes(messages, root);
+    report.notes_repointed = repoint_orphaned_unchanged_notes(messages, path_keys);
     if report.notes_repointed > 0 {
         total = estimate_messages_tokens(messages);
     }
@@ -1218,12 +1222,12 @@ pub(crate) fn compact_tool_results_to_budget_opts(
 /// Returns how many notes were rewritten.
 pub(crate) fn repoint_orphaned_unchanged_notes(
     messages: &mut [Message],
-    root: Option<&std::path::Path>,
+    path_keys: &super::context::PathKeys,
 ) -> usize {
     let results = paired_tool_results(messages);
     let keys: Vec<_> = results
         .iter()
-        .map(|r| read_key(r, messages, root))
+        .map(|r| read_key(r, messages, path_keys))
         .collect();
     let mut orphaned = Vec::new();
     for (pos, r) in results.iter().enumerate() {
@@ -1285,7 +1289,17 @@ impl ContextPresence {
     /// Scan `messages` for `file_read` results whose content is intact (or a
     /// truncated head naming its shown lines). `normalize` maps a raw path to
     /// the ledger's key.
+    #[cfg(test)]
     pub fn from_messages(messages: &[Message], normalize: &dyn Fn(&str) -> String) -> Self {
+        Self::from_messages_keyed(messages, &|_, p| normalize(p))
+    }
+
+    /// [`Self::from_messages`] with each path keyed by `key(result message,
+    /// path)` — the root the result was produced under (see `PathKeys`).
+    pub(crate) fn from_messages_keyed(
+        messages: &[Message],
+        key: &dyn Fn(&Message, &str) -> String,
+    ) -> Self {
         let mut out = Self::default();
         for r in paired_tool_results(messages) {
             if r.name != "file_read" {
@@ -1300,7 +1314,7 @@ impl ContextPresence {
             let Some(path) = arg_path(&args_v) else {
                 continue;
             };
-            let key = normalize(&path);
+            let key = key(&messages[r.idx], &path);
             match lines {
                 Some(range) => out.ranges.entry(key).or_default().push(range),
                 None => {

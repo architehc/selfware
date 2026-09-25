@@ -39,6 +39,7 @@ impl Agent {
             .build_learning_hint(self.learning_context())
             .into_iter()
             .collect();
+        self.sync_path_key_root();
         let compressor = &self.compressor;
         let request_messages = Self::finish_request_with_tail_and_ledger(
             self.messages.clone(),
@@ -46,6 +47,7 @@ impl Agent {
             &|history, cap| compressor.render_work_ledger_for(cap, history),
             self.max_context_tokens,
             self.current_checkpoint.as_ref(),
+            &compressor.path_keys(),
         )?;
         // Capture per-call metadata so the planning step also gets a
         // turn_NNNN.json artifact under <workdir>/.selfware/turns/.

@@ -206,7 +206,7 @@ impl Agent {
                                         ),
                                         &|path| compressor.file_finding(path),
                                         true,
-                                        Some(self.path_key_root.as_path()),
+                                        &compressor.path_keys(),
                                     )
                                     .is_some();
                             }
@@ -413,6 +413,7 @@ impl Agent {
         // The history is fitted into the budget LEFT AFTER the per-turn tail
         // (hints + work ledger, measured), and the tail is attached at the
         // very end of the request — never in the system message.
+        self.sync_path_key_root();
         let compressor = &self.compressor;
         request_messages = Self::finish_request_with_tail_and_ledger(
             request_messages,
@@ -420,6 +421,7 @@ impl Agent {
             &|history, cap| compressor.render_work_ledger_for(cap, history),
             self.max_context_tokens,
             self.current_checkpoint.as_ref(),
+            &compressor.path_keys(),
         )?;
 
         let StepCompletion {
