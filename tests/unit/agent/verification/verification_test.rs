@@ -1922,6 +1922,154 @@ mod completion_gate_tests {
         );
     }
 
+    /// A post-edit report built from QA stages (the language_qa path).
+    fn qa_report(
+        stages: Vec<crate::testing::qa_profiles::QaStageResult>,
+    ) -> crate::testing::verification::VerificationReport {
+        use crate::testing::verification::{VerificationGate, VerificationReport};
+        let checks: Vec<_> = stages
+            .into_iter()
+            .map(VerificationGate::qa_stage_to_check_result)
+            .collect();
+        let overall_passed = checks.iter().all(|c| c.passed);
+        VerificationReport {
+            triggered_by: "file_edit:src/inventory.ts".into(),
+            timestamp: chrono::Utc::now(),
+            total_duration_ms: 1,
+            checks,
+            overall_passed,
+            affected_files: vec!["src/inventory.ts".into()],
+            side_effects: vec![],
+            suggested_next_steps: vec![],
+        }
+    }
+
+    // 0.8.2 validation D9b: on a host with no node/npm every QA stage is
+    // not-run. The gate refused completion 7x (StaleVerification demanding
+    // `npm test`) and the run ended VERIFICATION_FAILED. Only not-run stages
+    // at the current revision: no credit, no failure, and the gate stops
+    // demanding a check that cannot run.
+    #[tokio::test]
+    async fn gate_accepts_when_only_not_run_stages_remain() {
+        use crate::testing::qa_profiles::{QaStage, QaStageResult};
+        let (_dir, _cwd) = git_repo(&[("calc.py", "def div(a, b):\n    return a // b\n")]);
+        let mut agent = mutation_task_agent("Fix the divide-by-zero bug in calc.py").await;
+        std::fs::write("calc.py", "def div(a, b):\n    return a / b\n").unwrap();
+        agent.note_mutating_tool_call();
+
+        // Baseline: nothing verified this revision → StaleVerification.
+        let before = agent
+            .mutation_completion_gate()
+            .await
+            .expect("an unverified edit must be refused");
+        assert!(before.contains("StaleVerification"), "{before}");
+
+        let report = qa_report(vec![
+            QaStageResult::not_run(QaStage::Test, "`npm` is not installed"),
+            QaStageResult::not_run(QaStage::Security, "no package-lock.json"),
+        ]);
+        let verdict = agent.absorb_post_edit_report("file_edit", "calc.py", &report);
+        let PostEditVerdict::NotRun(note) = verdict else {
+            panic!("an all-not-run report is NotRun, got {verdict:?}");
+        };
+        assert!(note.contains("`npm` is not installed"), "{note}");
+        assert_eq!(
+            agent.last_successful_verification_mutation_sequence, 0,
+            "not-run checks earn NO credit"
+        );
+        assert!(
+            agent.verification_failures.is_empty(),
+            "and record no failure"
+        );
+        assert_eq!(
+            agent.mutation_completion_gate().await,
+            None,
+            "the gate must not demand a check that cannot run"
+        );
+
+        // A later edit moves the revision: the waiver no longer covers it.
+        agent.note_mutating_tool_call();
+        assert!(agent.mutation_completion_gate().await.is_some());
+    }
+
+    // A stage that RAN and reported problems stays a blocking failure even
+    // when the rest of the report is not-run.
+    #[tokio::test]
+    async fn real_qa_lint_failure_still_blocks_next_to_not_run_stages() {
+        use crate::testing::qa_profiles::{QaStage, QaStageResult};
+        let (_dir, _cwd) = git_repo(&[("calc.py", "def div(a, b):\n    return a // b\n")]);
+        let mut agent = mutation_task_agent("Fix the divide-by-zero bug in calc.py").await;
+        std::fs::write("calc.py", "def div(a, b):\n    return a / b\n").unwrap();
+        agent.note_mutating_tool_call();
+
+        let report = qa_report(vec![
+            QaStageResult {
+                stage: QaStage::Lint,
+                passed: false,
+                duration_ms: 5,
+                output: "calc.py:1:1: F821 undefined name 'x'".into(),
+                error_count: 1,
+                warning_count: 0,
+                not_run: None,
+            },
+            QaStageResult::not_run(QaStage::Test, "no tests were collected"),
+        ]);
+        let verdict = agent.absorb_post_edit_report("file_edit", "calc.py", &report);
+        let PostEditVerdict::Failed(note) = verdict else {
+            panic!("a real lint failure is Failed, got {verdict:?}");
+        };
+        assert!(note.contains("F821"), "the finding is named: {note}");
+        assert!(
+            note.contains("not run (test"),
+            "not-run reason shown: {note}"
+        );
+        let msg = agent
+            .mutation_completion_gate()
+            .await
+            .expect("a real lint failure must block");
+        assert!(msg.contains("gate:lint"), "{msg}");
+        assert!(
+            !msg.contains("gate:test"),
+            "the not-run stage is not blamed: {msg}"
+        );
+    }
+
+    // D12: a passing report's caveats (not-run stages, fallback warnings)
+    // reach the model instead of being dropped.
+    #[tokio::test]
+    async fn passing_report_surfaces_not_run_and_warnings_to_the_model() {
+        use crate::testing::qa_profiles::{QaStage, QaStageResult};
+        let (_dir, _cwd) = git_repo(&[("calc.py", "x = 1\n")]);
+        let mut agent = mutation_task_agent("Fix calc.py").await;
+        agent.note_mutating_tool_call();
+        let mut report = qa_report(vec![QaStageResult::not_run(
+            QaStage::Lint,
+            "no ESLint configuration",
+        )]);
+        report
+            .checks
+            .push(crate::testing::verification::CheckResult {
+                check_type: crate::testing::verification::CheckType::TypeCheck,
+                passed: true,
+                not_run: false,
+                duration_ms: 415,
+                output: "TypeScript syntax check passed".into(),
+                errors: vec![],
+                warnings: vec!["TypeScript syntax check used fallback compiler options".into()],
+                suggestions: vec![],
+            });
+        let verdict = agent.absorb_post_edit_report("file_edit", "src/a.ts", &report);
+        let PostEditVerdict::Passed(Some(note)) = verdict else {
+            panic!("a pass with caveats carries a note, got {verdict:?}");
+        };
+        assert!(note.contains("fallback compiler options"), "{note}");
+        assert!(note.contains("lint: not run ("), "{note}");
+        assert_eq!(
+            agent.last_successful_verification_mutation_sequence, 1,
+            "the check that ran earns credit"
+        );
+    }
+
     /// An agent whose checkpoint (task text `task`) logged `tool_calls`, with
     /// a file written — the "file written without a passing verification"
     /// gate's arming state.

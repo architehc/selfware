@@ -22,6 +22,7 @@ fn test_compute_score_all_pass() {
             output: String::new(),
             error_count: 0,
             warning_count: 0,
+            not_run: None,
         },
         QaStageResult {
             stage: QaStage::Test,
@@ -30,6 +31,7 @@ fn test_compute_score_all_pass() {
             output: String::new(),
             error_count: 0,
             warning_count: 0,
+            not_run: None,
         },
     ];
     let weights = QaWeights::standard();
@@ -47,6 +49,7 @@ fn test_compute_score_all_fail() {
         output: "error".to_string(),
         error_count: 1,
         warning_count: 0,
+        not_run: None,
     }];
     let weights = QaWeights::standard();
     let score = compute_score(&stages, &weights);
@@ -58,4 +61,13 @@ fn test_qa_profile_default() {
     let config = QaConfig::default();
     assert_eq!(config.profile, QaProfile::Standard);
     assert_eq!(config.auto_fix_iterations, 3);
+}
+
+/// A stage that did not run earns no credit, even with zero errors.
+#[test]
+fn test_compute_score_not_run_earns_no_credit() {
+    let weights = QaWeights::standard();
+    let not_run = vec![QaStageResult::not_run(QaStage::Lint, "no ESLint config")];
+    assert_eq!(compute_score(&not_run, &weights), 0.0);
+    assert!(!not_run[0].failed(), "a not-run stage is not a failure");
 }

@@ -165,6 +165,35 @@ pub struct QaStageResult {
     pub output: String,
     pub error_count: usize,
     pub warning_count: usize,
+    /// The stage did NOT run: its tool is missing / could not be spawned, or
+    /// the project does not configure it (no ESLint config, no `test` script,
+    /// no lockfile for an audit, ...). Holds the reason. A not-run stage
+    /// asserts nothing about the code: it is non-blocking, earns no score
+    /// credit, and `passed` is `false` only because nothing passed
+    /// (AGENTS.md Rule 3). Read this before treating `!passed` as a failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_run: Option<String>,
+}
+
+impl QaStageResult {
+    /// A stage that could not run (see [`QaStageResult::not_run`]).
+    pub fn not_run(stage: QaStage, reason: impl Into<String>) -> Self {
+        let reason = reason.into();
+        Self {
+            stage,
+            passed: false,
+            duration_ms: 0,
+            output: format!("{} stage not run: {}", stage, reason),
+            error_count: 0,
+            warning_count: 0,
+            not_run: Some(reason),
+        }
+    }
+
+    /// True when the stage ran and did not pass (a real finding).
+    pub fn failed(&self) -> bool {
+        self.not_run.is_none() && !self.passed
+    }
 }
 
 /// QA pipeline stages.
@@ -211,6 +240,11 @@ pub fn compute_score(stages: &[QaStageResult], weights: &QaWeights) -> f64 {
             QaStage::Security => weights.security,
         };
 
+        // A stage that did not run verified nothing: no credit, not even
+        // the warnings-only partial credit below.
+        if stage.not_run.is_some() {
+            continue;
+        }
         if stage.passed {
             earned += weight;
         } else if stage.warning_count > 0 && stage.error_count == 0 {

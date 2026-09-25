@@ -73,6 +73,26 @@ async fn run_stage(
     project_root: &Path,
     timeout_secs: u64,
 ) -> QaStageResult {
+    run_stage_with_code(stage, program, args, project_root, timeout_secs)
+        .await
+        .0
+}
+
+/// [`run_stage`] plus the child's exit code (`None` when it did not exit
+/// normally or never started), for stages whose runner encodes "nothing to
+/// check" in a dedicated code (pytest / unittest exit 5 = no tests ran).
+///
+/// A program that cannot be SPAWNED (not installed: ENOENT; not executable)
+/// yields a NOT-RUN stage, never a failure: the check asserted nothing about
+/// the code (AGENTS.md Rule 3; 0.8.2 validation D9b, where a missing `npm`
+/// was reported as `test ✗` and blocked completion seven times).
+async fn run_stage_with_code(
+    stage: QaStage,
+    program: &str,
+    args: &[&str],
+    project_root: &Path,
+    timeout_secs: u64,
+) -> (QaStageResult, Option<i32>) {
     use tokio::io::AsyncReadExt;
 
     let start = Instant::now();
@@ -96,14 +116,14 @@ async fn run_stage(
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            return QaStageResult {
-                stage,
-                passed: false,
-                duration_ms: start.elapsed().as_millis() as u64,
-                output: format!("Failed to run {} {:?}: {}", program, args, e),
-                error_count: 1,
-                warning_count: 0,
-            }
+            let reason = if e.kind() == std::io::ErrorKind::NotFound {
+                format!("`{}` is not installed ({})", program, e)
+            } else {
+                format!("`{}` could not be started ({})", program, e)
+            };
+            let mut r = QaStageResult::not_run(stage, reason);
+            r.duration_ms = start.elapsed().as_millis() as u64;
+            return (r, None);
         }
     };
     let child_pid = child.id();
@@ -152,17 +172,25 @@ async fn run_stage(
     });
 
     let wait_result = tokio::time::timeout(timeout, child.wait()).await;
+    let mut exit_code = None;
     let (passed, wait_timed_out) = match wait_result {
-        Ok(Ok(status)) => (status.success(), false),
+        Ok(Ok(status)) => {
+            exit_code = status.code();
+            (status.success(), false)
+        }
         Ok(Err(e)) => {
-            return QaStageResult {
-                stage,
-                passed: false,
-                duration_ms: start.elapsed().as_millis() as u64,
-                output: format!("Failed to run {} {:?}: {}", program, args, e),
-                error_count: 1,
-                warning_count: 0,
-            }
+            return (
+                QaStageResult {
+                    stage,
+                    passed: false,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    output: format!("Failed to run {} {:?}: {}", program, args, e),
+                    error_count: 1,
+                    warning_count: 0,
+                    not_run: None,
+                },
+                None,
+            )
         }
         Err(_) => {
             // Timed out: kill the ENTIRE process group, then reap the child
@@ -236,35 +264,43 @@ async fn run_stage(
     };
 
     if timed_out {
-        return QaStageResult {
-            stage,
-            passed: false,
-            duration_ms,
-            // Keep whatever was captured before the kill after the notice.
-            output: if combined.trim().is_empty() {
-                format!("{} {:?} timed out after {}s", program, args, timeout_secs)
-            } else {
-                format!(
-                    "{} {:?} timed out after {}s\n{}",
-                    program, args, timeout_secs, combined
-                )
+        return (
+            QaStageResult {
+                stage,
+                passed: false,
+                duration_ms,
+                // Keep whatever was captured before the kill after the notice.
+                output: if combined.trim().is_empty() {
+                    format!("{} {:?} timed out after {}s", program, args, timeout_secs)
+                } else {
+                    format!(
+                        "{} {:?} timed out after {}s\n{}",
+                        program, args, timeout_secs, combined
+                    )
+                },
+                error_count: 1,
+                warning_count: 0,
+                not_run: None,
             },
-            error_count: 1,
-            warning_count: 0,
-        };
+            None,
+        );
     }
 
     let error_count = count_pattern(&combined, "error");
     let warning_count = count_pattern(&combined, "warning");
 
-    QaStageResult {
-        stage,
-        passed,
-        duration_ms,
-        output: combined,
-        error_count,
-        warning_count,
-    }
+    (
+        QaStageResult {
+            stage,
+            passed,
+            duration_ms,
+            output: combined,
+            error_count,
+            warning_count,
+            not_run: None,
+        },
+        exit_code,
+    )
 }
 
 /// Rough count of a pattern in output (case-insensitive).
@@ -292,7 +328,7 @@ async fn try_run_stage(
 }
 
 // ============================================================================
-// Python QA Runner
+// Tool resolution
 // ============================================================================
 
 /// Byte-compile-free syntax check of every path in argv (single-quote free:
@@ -346,6 +382,230 @@ async fn resolve_node_tool(project_root: &Path, name: &str) -> Option<String> {
     }
 }
 
+// ============================================================================
+// Stage-configuration probes (shared by the runners)
+// ============================================================================
+//
+// A stage runs only when it can say something about THIS project. Two cases
+// are NOT-RUN rather than a pass or a failure (AGENTS.md Rule 3; 0.8.2
+// validation D9/D9b, where `eslint .` with no config and `npm test` without
+// npm blocked completion of correct code):
+//
+// - the tool is missing: not resolvable via `node_modules/.bin` / PATH, or
+//   the spawn fails (ENOENT) — see `run_stage_with_code`;
+// - the project does not configure the stage: an opinionated tool the
+//   project never opted into (no ESLint/Prettier/flake8/mypy/bandit config,
+//   no formatter config), no `test` script, no lockfile for an audit, no
+//   tests collected, or a network-dependent audit that could not reach its
+//   database.
+//
+// Optional tools that are neither installed nor configured stay silent (as
+// before): they were never part of the pipeline for this project. A stage
+// that RAN and reported problems is still a failure.
+
+/// Read `package.json` at the project root.
+fn read_package_json(project_root: &Path) -> Option<serde_json::Value> {
+    let text = std::fs::read_to_string(project_root.join("package.json")).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Top-level `package.json` key present (e.g. `eslintConfig`, `prettier`).
+fn package_json_has_key(project_root: &Path, key: &str) -> bool {
+    read_package_json(project_root)
+        .and_then(|v| v.get(key).cloned())
+        .is_some()
+}
+
+/// First existing file among `names` in `dir`.
+fn first_existing(dir: &Path, names: &[&str]) -> Option<std::path::PathBuf> {
+    names.iter().map(|n| dir.join(n)).find(|p| p.is_file())
+}
+
+const ESLINT_CONFIG_FILES: &[&str] = &[
+    "eslint.config.js",
+    "eslint.config.mjs",
+    "eslint.config.cjs",
+    "eslint.config.ts",
+    "eslint.config.mts",
+    "eslint.config.cts",
+    ".eslintrc",
+    ".eslintrc.js",
+    ".eslintrc.cjs",
+    ".eslintrc.yaml",
+    ".eslintrc.yml",
+    ".eslintrc.json",
+];
+
+/// The project's ESLint configuration, if any. ESLint resolves config files
+/// by walking UP from the working directory (both flat and legacy formats),
+/// so ancestors count too; `eslintConfig` in package.json is the legacy
+/// in-manifest form.
+pub(crate) fn eslint_config(project_root: &Path) -> Option<String> {
+    for dir in project_root.ancestors() {
+        if let Some(p) = first_existing(dir, ESLINT_CONFIG_FILES) {
+            return Some(p.to_string_lossy().to_string());
+        }
+    }
+    package_json_has_key(project_root, "eslintConfig").then(|| "package.json#eslintConfig".into())
+}
+
+/// ESLint ran but reported that it has no configuration (our probe missed a
+/// config form, or the config resolved away): not a lint finding.
+fn eslint_output_is_unconfigured(output: &str) -> bool {
+    let lower = output.to_lowercase();
+    lower.contains("couldn't find a configuration file")
+        || lower.contains("could not find a configuration file")
+        || lower.contains("couldn't find an eslint.config")
+        || lower.contains("could not find config file")
+}
+
+/// Prettier is opted into by a config file, a `prettier` key in
+/// package.json, or a project-local install.
+fn prettier_configured(project_root: &Path) -> bool {
+    const FILES: &[&str] = &[
+        ".prettierrc",
+        ".prettierrc.json",
+        ".prettierrc.json5",
+        ".prettierrc.yaml",
+        ".prettierrc.yml",
+        ".prettierrc.toml",
+        ".prettierrc.js",
+        ".prettierrc.cjs",
+        ".prettierrc.mjs",
+        ".prettierrc.ts",
+        "prettier.config.js",
+        "prettier.config.cjs",
+        "prettier.config.mjs",
+        "prettier.config.ts",
+    ];
+    first_existing(project_root, FILES).is_some()
+        || package_json_has_key(project_root, "prettier")
+        || super::syntax_toolchain::find_local_node_bin(project_root, "prettier").is_some()
+}
+
+/// The `test` script from package.json, or why the test stage cannot run.
+/// `npm init`'s placeholder (`echo "Error: no test specified" && exit 1`)
+/// is not a test suite: running it "fails" by design.
+pub(crate) fn npm_test_script(project_root: &Path) -> std::result::Result<String, String> {
+    let Some(pkg) = read_package_json(project_root) else {
+        return Err("package.json is missing or not valid JSON".into());
+    };
+    match pkg
+        .get("scripts")
+        .and_then(|s| s.get("test"))
+        .and_then(|t| t.as_str())
+    {
+        None => Err("package.json defines no \"test\" script".into()),
+        Some(t) if t.trim().is_empty() => Err("package.json \"test\" script is empty".into()),
+        Some(t) if t.contains("no test specified") => {
+            Err("package.json \"test\" script is the npm init placeholder".into())
+        }
+        Some(t) => Ok(t.to_string()),
+    }
+}
+
+/// `npm audit` could not reach a verdict (no lockfile, no network, registry
+/// error) — not a vulnerability finding.
+fn npm_audit_not_run_reason(output: &str) -> Option<String> {
+    const MARKERS: &[(&str, &str)] = &[
+        ("enolock", "npm audit needs a lockfile (ENOLOCK)"),
+        ("enotfound", "npm registry unreachable (ENOTFOUND)"),
+        ("eai_again", "npm registry unreachable (EAI_AGAIN)"),
+        ("econnrefused", "npm registry unreachable (ECONNREFUSED)"),
+        ("econnreset", "npm registry unreachable (ECONNRESET)"),
+        ("etimedout", "npm registry unreachable (ETIMEDOUT)"),
+        ("enetunreach", "npm registry unreachable (ENETUNREACH)"),
+        (
+            "audit endpoint returned an error",
+            "npm audit endpoint returned an error",
+        ),
+    ];
+    let lower = output.to_lowercase();
+    MARKERS
+        .iter()
+        .find(|(m, _)| lower.contains(m))
+        .map(|(_, reason)| reason.to_string())
+}
+
+/// Re-label a stage that ran but could not reach a verdict as NOT-RUN,
+/// keeping its output (so the reason is inspectable).
+fn demote_to_not_run(mut r: QaStageResult, reason: String) -> QaStageResult {
+    r.passed = false;
+    r.error_count = 0;
+    r.warning_count = 0;
+    r.output = format!("{} stage not run: {}\n{}", r.stage, reason, r.output);
+    r.not_run = Some(reason);
+    r
+}
+
+/// Contents of a text file, or empty.
+fn read_or_empty(p: &Path) -> String {
+    std::fs::read_to_string(p).unwrap_or_default()
+}
+
+/// A Python tool is configured by a dedicated file or a section in
+/// pyproject.toml / setup.cfg / tox.ini.
+fn python_tool_configured(
+    project_root: &Path,
+    files: &[&str],
+    pyproject_section: Option<&str>,
+    ini_section: Option<&str>,
+) -> bool {
+    if first_existing(project_root, files).is_some() {
+        return true;
+    }
+    if let Some(sec) = pyproject_section {
+        if read_or_empty(&project_root.join("pyproject.toml")).contains(sec) {
+            return true;
+        }
+    }
+    if let Some(sec) = ini_section {
+        for f in ["setup.cfg", "tox.ini"] {
+            if read_or_empty(&project_root.join(f)).contains(sec) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Run `program` for `stage` only when it is on PATH AND the project
+/// configures it. Installed-but-unconfigured → not-run with a reason;
+/// configured-but-missing → not-run; neither → `None` (an optional tool the
+/// project never used stays silent, as before).
+async fn run_if_configured(
+    stage: QaStage,
+    program: &str,
+    args: &[&str],
+    configured: bool,
+    project_root: &Path,
+    timeout_secs: u64,
+) -> Option<QaStageResult> {
+    let installed = on_path(program).await;
+    match (installed, configured) {
+        (true, true) => Some(run_stage(stage, program, args, project_root, timeout_secs).await),
+        (true, false) => Some(QaStageResult::not_run(
+            stage,
+            format!("the project does not configure {}", program),
+        )),
+        (false, true) => Some(QaStageResult::not_run(
+            stage,
+            format!("{} is configured but not installed", program),
+        )),
+        (false, false) => {
+            debug!(
+                "{} neither installed nor configured; {} stage skipped",
+                program, stage
+            );
+            None
+        }
+    }
+}
+
+// ============================================================================
+// Python QA Runner
+// ============================================================================
+
 pub async fn run_python_qa(project_root: &Path, timeout_secs: u64) -> Vec<QaStageResult> {
     let mut results = Vec::new();
 
@@ -354,46 +614,73 @@ pub async fn run_python_qa(project_root: &Path, timeout_secs: u64) -> Vec<QaStag
     // pollution); `-B` + `compile()` writes nothing. The interpreter matching
     // the project's pinned version is used when installed (an older host
     // python3 rejects newer syntax as a false syntax error).
+    //
+    // The pipeline runs under `sh -c`, so a missing interpreter would surface
+    // as a shell exit 127 (a bogus failure), not a spawn error: probe first.
     let interp = python_for_project(project_root).await;
-    let syntax_cmd = format!(
-        "find . -name '*.py' -not -path './.*' -not -path '*/node_modules/*' | head -50 | xargs {} -B -c '{}' 2>&1",
-        interp, PY_COMPILE_ALL
-    );
-    results.push(
-        run_stage(
+    if on_path(&interp).await {
+        let syntax_cmd = format!(
+            "find . -name '*.py' -not -path './.*' -not -path '*/node_modules/*' | head -50 | xargs {} -B -c '{}' 2>&1",
+            interp, PY_COMPILE_ALL
+        );
+        results.push(
+            run_stage(
+                QaStage::Syntax,
+                "sh",
+                &["-c", &syntax_cmd],
+                project_root,
+                timeout_secs,
+            )
+            .await,
+        );
+    } else {
+        results.push(QaStageResult::not_run(
             QaStage::Syntax,
-            "sh",
-            &["-c", &syntax_cmd],
+            format!("`{}` is not installed", interp),
+        ));
+    }
+
+    // Format: ruff format --check (falls back to black) — only for a project
+    // that configures the formatter; an unconfigured project was never
+    // formatted by it, so a diff is not a finding.
+    let ruff_configured = python_tool_configured(
+        project_root,
+        &["ruff.toml", ".ruff.toml"],
+        Some("[tool.ruff"),
+        None,
+    );
+    let black_configured = python_tool_configured(project_root, &[], Some("[tool.black"), None);
+    if on_path("ruff").await {
+        if let Some(r) = run_if_configured(
+            QaStage::Format,
+            "ruff",
+            &["format", "--check", "."],
+            ruff_configured || black_configured,
             project_root,
             timeout_secs,
         )
-        .await,
-    );
-
-    // Format: ruff format --check (falls back to black)
-    if let Some(fmt) = try_run_stage(
-        QaStage::Format,
-        "ruff",
-        &["format", "--check", "."],
-        project_root,
-        timeout_secs,
-    )
-    .await
-    {
-        results.push(fmt);
-    } else if let Some(fmt) = try_run_stage(
+        .await
+        {
+            results.push(r);
+        }
+    } else if let Some(r) = run_if_configured(
         QaStage::Format,
         "black",
         &["--check", "."],
+        black_configured,
         project_root,
         timeout_secs,
     )
     .await
     {
-        results.push(fmt);
+        results.push(r);
     }
 
-    // Lint: ruff check (falls back to flake8)
+    // Lint: `ruff check` runs whenever ruff is installed — its DEFAULT rule
+    // set (pyflakes F + E4/E7/E9) is correctness-only (undefined names,
+    // syntax-level errors), so it is meaningful without project config.
+    // flake8's defaults include pycodestyle style rules (E501 line length,
+    // ...), so it runs only when the project configures it.
     if let Some(lint) = try_run_stage(
         QaStage::Lint,
         "ruff",
@@ -404,17 +691,31 @@ pub async fn run_python_qa(project_root: &Path, timeout_secs: u64) -> Vec<QaStag
     .await
     {
         results.push(lint);
-    } else if let Some(lint) =
-        try_run_stage(QaStage::Lint, "flake8", &["."], project_root, timeout_secs).await
+    } else if let Some(lint) = run_if_configured(
+        QaStage::Lint,
+        "flake8",
+        &["."],
+        python_tool_configured(project_root, &[".flake8"], None, Some("[flake8")),
+        project_root,
+        timeout_secs,
+    )
+    .await
     {
         results.push(lint);
     }
 
-    // TypeCheck: mypy (if available)
-    if let Some(tc) = try_run_stage(
+    // TypeCheck: mypy, only when configured — unconfigured mypy on untyped
+    // code reports missing stubs / untyped imports, not defects.
+    if let Some(tc) = run_if_configured(
         QaStage::TypeCheck,
         "mypy",
         &["."],
+        python_tool_configured(
+            project_root,
+            &["mypy.ini", ".mypy.ini"],
+            Some("[tool.mypy"),
+            Some("[mypy"),
+        ),
         project_root,
         timeout_secs,
     )
@@ -423,35 +724,43 @@ pub async fn run_python_qa(project_root: &Path, timeout_secs: u64) -> Vec<QaStag
         results.push(tc);
     }
 
-    // Test: pytest (falls back to python -m unittest)
-    if let Some(test) = try_run_stage(
-        QaStage::Test,
-        "pytest",
-        &["--quiet", "--tb=short"],
-        project_root,
-        timeout_secs * 2,
-    )
-    .await
-    {
-        results.push(test);
+    // Test: pytest (falls back to python -m unittest). Exit status 5 means
+    // "no tests were collected/ran" for both runners (unittest since 3.12);
+    // older unittest exits 0 after "Ran 0 tests". Neither is a pass or a
+    // failure: nothing was tested.
+    let (test, code) = if on_path("pytest").await {
+        run_stage_with_code(
+            QaStage::Test,
+            "pytest",
+            &["--quiet", "--tb=short"],
+            project_root,
+            timeout_secs * 2,
+        )
+        .await
     } else {
-        results.push(
-            run_stage(
-                QaStage::Test,
-                "python3",
-                &["-m", "unittest", "discover", "-s", ".", "-q"],
-                project_root,
-                timeout_secs * 2,
-            )
-            .await,
-        );
-    }
+        run_stage_with_code(
+            QaStage::Test,
+            "python3",
+            &["-m", "unittest", "discover", "-s", ".", "-q"],
+            project_root,
+            timeout_secs * 2,
+        )
+        .await
+    };
+    results.push(classify_python_test(test, code));
 
-    // Security: bandit (if available)
-    if let Some(sec) = try_run_stage(
+    // Security: bandit, only when configured — its defaults flag every
+    // `assert` (B101), which fails any pytest suite.
+    if let Some(sec) = run_if_configured(
         QaStage::Security,
         "bandit",
         &["-r", ".", "-q"],
+        python_tool_configured(
+            project_root,
+            &[".bandit", "bandit.yaml", "bandit.yml"],
+            Some("[tool.bandit"),
+            None,
+        ),
         project_root,
         timeout_secs,
     )
@@ -463,6 +772,20 @@ pub async fn run_python_qa(project_root: &Path, timeout_secs: u64) -> Vec<QaStag
     results
 }
 
+/// Python test stage verdict: "no tests" is not-run, not a pass/failure.
+pub(crate) fn classify_python_test(r: QaStageResult, exit_code: Option<i32>) -> QaStageResult {
+    if r.not_run.is_some() {
+        return r;
+    }
+    if exit_code == Some(5) {
+        return demote_to_not_run(r, "no tests were collected (exit status 5)".into());
+    }
+    if r.passed && r.output.contains("Ran 0 tests") {
+        return demote_to_not_run(r, "no tests were found (Ran 0 tests)".into());
+    }
+    r
+}
+
 // ============================================================================
 // Node.js / TypeScript QA Runner
 // ============================================================================
@@ -471,7 +794,7 @@ pub async fn run_node_qa(project_root: &Path, timeout_secs: u64) -> Vec<QaStageR
     let mut results = Vec::new();
     let has_ts = project_root.join("tsconfig.json").exists();
 
-    // Syntax / TypeCheck: tsc --noEmit (for TS) or node --check (for JS)
+    // TypeCheck: tsc --noEmit, when the project configures TypeScript.
     if has_ts {
         if let Some(tsc) = resolve_node_tool(project_root, "tsc").await {
             results.push(
@@ -484,66 +807,134 @@ pub async fn run_node_qa(project_root: &Path, timeout_secs: u64) -> Vec<QaStageR
                 )
                 .await,
             );
+        } else {
+            results.push(QaStageResult::not_run(
+                QaStage::TypeCheck,
+                "tsconfig.json present but tsc is not installed (no node_modules/.bin/tsc, not on PATH)",
+            ));
         }
     }
 
-    // Format: prettier --check
-    if let Some(prettier) = resolve_node_tool(project_root, "prettier").await {
-        results.push(
+    if let Some(r) = node_format_stage(project_root, timeout_secs).await {
+        results.push(r);
+    }
+    if let Some(r) = node_lint_stage(project_root, timeout_secs).await {
+        results.push(r);
+    }
+    results.push(node_test_stage(project_root, timeout_secs * 2).await);
+    results.push(node_audit_stage(project_root, timeout_secs).await);
+
+    results
+}
+
+/// Format: prettier --check, only for a project that opted into Prettier.
+pub(crate) async fn node_format_stage(
+    project_root: &Path,
+    timeout_secs: u64,
+) -> Option<QaStageResult> {
+    let prettier = resolve_node_tool(project_root, "prettier").await;
+    let configured = prettier_configured(project_root);
+    match (prettier, configured) {
+        (Some(p), true) => Some(
             run_stage(
                 QaStage::Format,
-                &prettier,
+                &p,
                 &["--check", "."],
                 project_root,
                 timeout_secs,
             )
             .await,
-        );
+        ),
+        (Some(_), false) => Some(QaStageResult::not_run(
+            QaStage::Format,
+            "the project does not configure Prettier (no .prettierrc*/prettier.config.*, no package.json \"prettier\", not a local dependency)",
+        )),
+        (None, true) => Some(QaStageResult::not_run(
+            QaStage::Format,
+            "Prettier is configured but not installed",
+        )),
+        (None, false) => None,
     }
+}
 
-    // Lint: eslint
-    if let Some(eslint) = resolve_node_tool(project_root, "eslint").await {
-        results.push(run_stage(QaStage::Lint, &eslint, &["."], project_root, timeout_secs).await);
+/// Lint: eslint, only with an ESLint configuration. ESLint >= 6 refuses to
+/// run without one ("ESLint couldn't find a configuration file"), which the
+/// 0.8.2 validation (D9) reported as a lint FAILURE that blocked correct code.
+pub(crate) async fn node_lint_stage(
+    project_root: &Path,
+    timeout_secs: u64,
+) -> Option<QaStageResult> {
+    let eslint = resolve_node_tool(project_root, "eslint").await;
+    let config = eslint_config(project_root);
+    match (eslint, config) {
+        (Some(e), Some(_)) => {
+            let r = run_stage(QaStage::Lint, &e, &["."], project_root, timeout_secs).await;
+            if r.failed() && eslint_output_is_unconfigured(&r.output) {
+                Some(demote_to_not_run(
+                    r,
+                    "ESLint found no usable configuration file".into(),
+                ))
+            } else {
+                Some(r)
+            }
+        }
+        (Some(_), None) => Some(QaStageResult::not_run(
+            QaStage::Lint,
+            "no ESLint configuration (eslint.config.*, .eslintrc*, package.json \"eslintConfig\")",
+        )),
+        (None, Some(cfg)) => Some(QaStageResult::not_run(
+            QaStage::Lint,
+            format!("ESLint is configured ({cfg}) but not installed"),
+        )),
+        (None, None) => None,
     }
+}
 
-    // Test: npm test (or vitest / jest)
+/// Test: vitest when installed, else the package.json `test` script via npm.
+pub(crate) async fn node_test_stage(project_root: &Path, timeout_secs: u64) -> QaStageResult {
     if let Some(vitest) = resolve_node_tool(project_root, "vitest").await {
-        results.push(
-            run_stage(
-                QaStage::Test,
-                &vitest,
-                &["run", "--reporter=verbose"],
-                project_root,
-                timeout_secs * 2,
-            )
-            .await,
-        );
-    } else {
-        results.push(
-            run_stage(
-                QaStage::Test,
-                "npm",
-                &["test", "--", "--if-present"],
-                project_root,
-                timeout_secs * 2,
-            )
-            .await,
-        );
-    }
-
-    // Security: npm audit
-    results.push(
-        run_stage(
-            QaStage::Security,
-            "npm",
-            &["audit", "--omit=dev"],
+        return run_stage(
+            QaStage::Test,
+            &vitest,
+            &["run", "--reporter=verbose"],
             project_root,
             timeout_secs,
         )
-        .await,
-    );
+        .await;
+    }
+    if let Err(reason) = npm_test_script(project_root) {
+        return QaStageResult::not_run(QaStage::Test, reason);
+    }
+    // `npm test` (not `npm test -- --if-present`: arguments after `--` go to
+    // the test SCRIPT, where `--if-present` is an unknown flag). A missing
+    // npm is a not-run stage via the spawn error.
+    run_stage(QaStage::Test, "npm", &["test"], project_root, timeout_secs).await
+}
 
-    results
+/// Security: npm audit, which needs a lockfile and the registry.
+pub(crate) async fn node_audit_stage(project_root: &Path, timeout_secs: u64) -> QaStageResult {
+    let has_lock = project_root.join("package-lock.json").is_file()
+        || project_root.join("npm-shrinkwrap.json").is_file();
+    if !has_lock {
+        return QaStageResult::not_run(
+            QaStage::Security,
+            "no package-lock.json / npm-shrinkwrap.json (npm audit needs a lockfile)",
+        );
+    }
+    let r = run_stage(
+        QaStage::Security,
+        "npm",
+        &["audit", "--omit=dev"],
+        project_root,
+        timeout_secs,
+    )
+    .await;
+    if r.failed() {
+        if let Some(reason) = npm_audit_not_run_reason(&r.output) {
+            return demote_to_not_run(r, reason);
+        }
+    }
+    r
 }
 
 // ============================================================================
@@ -553,7 +944,8 @@ pub async fn run_node_qa(project_root: &Path, timeout_secs: u64) -> Vec<QaStageR
 pub async fn run_go_qa(project_root: &Path, timeout_secs: u64) -> Vec<QaStageResult> {
     let mut results = Vec::new();
 
-    // Syntax + TypeCheck: go build
+    // Syntax + TypeCheck: go build (a missing `go` is a not-run stage via
+    // the spawn error in run_stage_with_code).
     results.push(
         run_stage(
             QaStage::Syntax,
@@ -565,17 +957,25 @@ pub async fn run_go_qa(project_root: &Path, timeout_secs: u64) -> Vec<QaStageRes
         .await,
     );
 
-    // Format: gofmt -l
-    results.push(
-        run_stage(
+    // Format: gofmt -l. Runs under `sh -c` with stderr discarded, so a
+    // missing gofmt would print nothing and PASS: probe it first.
+    if on_path("gofmt").await {
+        results.push(
+            run_stage(
+                QaStage::Format,
+                "sh",
+                &["-c", "test -z \"$(gofmt -l . 2>/dev/null)\""],
+                project_root,
+                timeout_secs,
+            )
+            .await,
+        );
+    } else {
+        results.push(QaStageResult::not_run(
             QaStage::Format,
-            "sh",
-            &["-c", "test -z \"$(gofmt -l . 2>/dev/null)\""],
-            project_root,
-            timeout_secs,
-        )
-        .await,
-    );
+            "`gofmt` is not installed",
+        ));
+    }
 
     // Lint: go vet
     results.push(
@@ -590,18 +990,18 @@ pub async fn run_go_qa(project_root: &Path, timeout_secs: u64) -> Vec<QaStageRes
     );
 
     // Test: go test
-    results.push(
-        run_stage(
-            QaStage::Test,
-            "go",
-            &["test", "-v", "./..."],
-            project_root,
-            timeout_secs * 2,
-        )
-        .await,
-    );
+    let test = run_stage(
+        QaStage::Test,
+        "go",
+        &["test", "-v", "./..."],
+        project_root,
+        timeout_secs * 2,
+    )
+    .await;
+    results.push(classify_go_test(test));
 
-    // Security: govulncheck (if available)
+    // Security: govulncheck (if available). It downloads the vulnerability
+    // database, so an unreachable network is not-run, not a finding.
     if let Some(sec) = try_run_stage(
         QaStage::Security,
         "govulncheck",
@@ -611,10 +1011,37 @@ pub async fn run_go_qa(project_root: &Path, timeout_secs: u64) -> Vec<QaStageRes
     )
     .await
     {
-        results.push(sec);
+        let lower = sec.output.to_lowercase();
+        let offline = lower.contains("dial tcp")
+            || lower.contains("no such host")
+            || lower.contains("connection refused")
+            || lower.contains("i/o timeout");
+        results.push(if sec.failed() && offline {
+            demote_to_not_run(
+                sec,
+                "govulncheck could not reach the vulnerability database".into(),
+            )
+        } else {
+            sec
+        });
     }
 
     results
+}
+
+/// `go test` over packages that all report `[no test files]` exits 0 having
+/// tested nothing: not-run, not a pass.
+pub(crate) fn classify_go_test(r: QaStageResult) -> QaStageResult {
+    if r.passed
+        && r.output.contains("[no test files]")
+        && !r
+            .output
+            .lines()
+            .any(|l| l.starts_with("ok ") || l.starts_with("ok\t") || l.starts_with("PASS"))
+    {
+        return demote_to_not_run(r, "no Go test files".into());
+    }
+    r
 }
 
 #[cfg(test)]

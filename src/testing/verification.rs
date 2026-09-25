@@ -24,6 +24,8 @@ use crate::tools::cargo::{parse_cargo_json_messages, CompilerError, Severity};
 struct ReapedOutput {
     success: bool,
     timed_out: bool,
+    /// Exit code of a child that exited normally (`None` on signal/timeout).
+    exit_code: Option<i32>,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
 }
@@ -90,9 +92,12 @@ where
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("Failed to spawn {}", program))?;
+    let mut child = cmd.spawn().map_err(|source| {
+        anyhow::Error::new(SpawnFailed {
+            program: program.to_string(),
+            source,
+        })
+    })?;
     let pid = child.id();
 
     let mut so = child.stdout.take();
@@ -118,8 +123,12 @@ where
     // was reaped, so an unbounded collection would stall verification
     // indefinitely past its timeout (review finding: QA hang beyond timeout).
     let deadline = std::time::Instant::now() + timeout;
+    let mut exit_code = None;
     let (success, wait_timed_out) = match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(Ok(status)) => (status.success(), false),
+        Ok(Ok(status)) => {
+            exit_code = status.code();
+            (status.success(), false)
+        }
         Ok(Err(e)) => return Err(e).with_context(|| format!("{} wait failed", program)),
         Err(_) => {
             #[cfg(unix)]
@@ -196,9 +205,62 @@ where
     Ok(ReapedOutput {
         success,
         timed_out,
+        exit_code: if timed_out { None } else { exit_code },
         stdout,
         stderr,
     })
+}
+
+/// The verification program could not be SPAWNED (not installed, not
+/// executable). Typed so callers can report the check as NOT-RUN instead of
+/// a failure or an aborted verification (AGENTS.md Rule 3).
+#[derive(Debug)]
+pub(crate) struct SpawnFailed {
+    pub program: String,
+    pub source: std::io::Error,
+}
+
+impl std::fmt::Display for SpawnFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Failed to spawn {}: {}", self.program, self.source)
+    }
+}
+
+impl std::error::Error for SpawnFailed {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// A NOT-RUN check for a verification whose program could not be spawned,
+/// or `None` when `e` is some other error (which still propagates).
+fn not_run_if_spawn_failed(check_type: CheckType, e: &anyhow::Error) -> Option<CheckResult> {
+    let sf = e.downcast_ref::<SpawnFailed>()?;
+    let reason = if sf.source.kind() == std::io::ErrorKind::NotFound {
+        format!("`{}` is not installed", sf.program)
+    } else {
+        format!("`{}` could not be started ({})", sf.program, sf.source)
+    };
+    Some(check_not_run(check_type, &reason))
+}
+
+/// A generic NOT-RUN check: non-blocking (`passed`), no credit, reason first
+/// in `warnings` (where the report renders it).
+fn check_not_run(check_type: CheckType, reason: &str) -> CheckResult {
+    CheckResult {
+        check_type,
+        passed: true,
+        not_run: true,
+        duration_ms: 0,
+        output: format!("{} check could not run: {}", check_type.as_str(), reason),
+        errors: vec![],
+        warnings: vec![format!(
+            "{} NOT RUN (nothing was verified): {}",
+            check_type.as_str(),
+            reason
+        )],
+        suggestions: vec![],
+    }
 }
 
 /// Verification result for a single check
@@ -1084,13 +1146,17 @@ impl VerificationGate {
     async fn run_cargo_check(&self) -> Result<CheckResult> {
         let start = Instant::now();
 
-        let output = run_reaped(
+        let output = match run_reaped(
             "cargo",
             &["check", "--message-format=json"],
             &self.project_root,
             self.config.check_timeout_secs,
         )
-        .await?;
+        .await
+        {
+            Ok(o) => o,
+            Err(e) => return not_run_if_spawn_failed(CheckType::TypeCheck, &e).ok_or(e),
+        };
 
         let duration = start.elapsed().as_millis() as u64;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1118,13 +1184,17 @@ impl VerificationGate {
     async fn run_cargo_fmt_check(&self) -> Result<CheckResult> {
         let start = Instant::now();
 
-        let output = run_reaped(
+        let output = match run_reaped(
             "cargo",
             &["fmt", "--check"],
             &self.project_root,
             self.config.check_timeout_secs,
         )
-        .await?;
+        .await
+        {
+            Ok(o) => o,
+            Err(e) => return not_run_if_spawn_failed(CheckType::Format, &e).ok_or(e),
+        };
 
         let duration = start.elapsed().as_millis() as u64;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1181,13 +1251,17 @@ impl VerificationGate {
         // Apply timeout from config (default 5 minutes)
         let timeout_secs = self.config.check_timeout_secs.max(60); // At least 60 seconds
 
-        let output = run_reaped(
+        let output = match run_reaped(
             "cargo",
             &["test", "--no-fail-fast"],
             &self.project_root,
             timeout_secs,
         )
-        .await?;
+        .await
+        {
+            Ok(o) => o,
+            Err(e) => return not_run_if_spawn_failed(CheckType::Test, &e).ok_or(e),
+        };
 
         if output.timed_out {
             // Timeout - the child was killed and reaped (see run_reaped);
@@ -1235,13 +1309,17 @@ impl VerificationGate {
     async fn run_cargo_clippy(&self) -> Result<CheckResult> {
         let start = Instant::now();
 
-        let output = run_reaped(
+        let output = match run_reaped(
             "cargo",
             &["clippy", "--message-format=json", "--", "-D", "warnings"],
             &self.project_root,
             self.config.check_timeout_secs,
         )
-        .await?;
+        .await
+        {
+            Ok(o) => o,
+            Err(e) => return not_run_if_spawn_failed(CheckType::Lint, &e).ok_or(e),
+        };
 
         let duration = start.elapsed().as_millis() as u64;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1318,7 +1396,16 @@ impl VerificationGate {
     }
 
     /// Convert a QA stage result from language_qa into a CheckResult.
-    fn qa_stage_to_check_result(stage: crate::testing::qa_profiles::QaStageResult) -> CheckResult {
+    ///
+    /// A NOT-RUN stage (tool missing, stage not configured by the project)
+    /// becomes a non-blocking `not_run` check whose reason travels in
+    /// `warnings`, so the report the model and the user see says WHY nothing
+    /// was verified (0.8.2 validation D9/D12). A stage that ran and failed
+    /// carries its first meaningful output line as an error, so the report
+    /// names the finding instead of an empty `✗`.
+    pub(crate) fn qa_stage_to_check_result(
+        stage: crate::testing::qa_profiles::QaStageResult,
+    ) -> CheckResult {
         use crate::testing::qa_profiles::QaStage;
         let check_type = match stage.stage {
             QaStage::Syntax | QaStage::TypeCheck => CheckType::TypeCheck,
@@ -1327,13 +1414,52 @@ impl VerificationGate {
             QaStage::Test => CheckType::Test,
             QaStage::Security => CheckType::Custom,
         };
+        if let Some(reason) = stage.not_run {
+            return CheckResult {
+                not_run: true,
+                check_type,
+                passed: true,
+                duration_ms: stage.duration_ms,
+                output: stage.output,
+                errors: vec![],
+                warnings: vec![format!(
+                    "{} ({}) NOT RUN: {}",
+                    check_type.as_str(),
+                    stage.stage,
+                    reason
+                )],
+                suggestions: vec![],
+            };
+        }
+        let errors = if stage.passed {
+            vec![]
+        } else {
+            let first: String = stage
+                .output
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .unwrap_or("no output")
+                .chars()
+                .take(200)
+                .collect();
+            vec![VerificationError {
+                file: "N/A".to_string(),
+                line: None,
+                column: None,
+                message: format!("{} failed: {}", stage.stage, first),
+                code: None,
+                severity: ErrorSeverity::Error,
+                suggestion: None,
+            }]
+        };
         CheckResult {
             not_run: false,
             check_type,
             passed: stage.passed,
             duration_ms: stage.duration_ms,
             output: stage.output,
-            errors: vec![],
+            errors,
             warnings: vec![],
             suggestions: vec![],
         }
@@ -2448,18 +2574,21 @@ impl VerificationGate {
         let start = Instant::now();
         let timeout_secs = self.config.check_timeout_secs.max(60);
 
+        // No inferable test command verified nothing: NOT-RUN, never a
+        // silent pass (it used to render as `✓ test`).
         let Some((program, mut args)) = self.infer_test_command(lang).await else {
-            return Ok(CheckResult {
-                not_run: false,
-                check_type: CheckType::Test,
-                passed: true,
-                duration_ms: 0,
-                output: "No test command inferred for unknown language".to_string(),
-                errors: vec![],
-                warnings: vec![],
-                suggestions: vec![],
-            });
+            return Ok(check_not_run(
+                CheckType::Test,
+                &format!("no {} test command could be inferred", lang),
+            ));
         };
+        // A JS/TS project without a `test` script has no suite to run
+        // (`npm test` fails with "Missing script" — not a test failure).
+        if matches!(lang, RepoLanguage::JavaScript | RepoLanguage::TypeScript) {
+            if let Err(reason) = crate::testing::language_qa::npm_test_script(&self.project_root) {
+                return Ok(check_not_run(CheckType::Test, &reason));
+            }
+        }
 
         // If specific test files were touched, target them when possible
         if lang == RepoLanguage::Python {
@@ -2473,7 +2602,11 @@ impl VerificationGate {
             }
         }
 
-        let output = run_reaped_args(&program, &args, &self.project_root, timeout_secs).await?;
+        let output = match run_reaped_args(&program, &args, &self.project_root, timeout_secs).await
+        {
+            Ok(o) => o,
+            Err(e) => return not_run_if_spawn_failed(CheckType::Test, &e).ok_or(e),
+        };
 
         if output.timed_out {
             return Ok(CheckResult {
@@ -2502,13 +2635,23 @@ impl VerificationGate {
         let duration = start.elapsed().as_millis() as u64;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let combined = format!("{}\n{}", stdout, stderr);
+
+        // Runners that ran but found NO tests verified nothing: pytest /
+        // unittest (3.12+) exit 5, older unittest exits 0 after "Ran 0
+        // tests", and `go test` over packages that all lack test files.
+        if let Some(reason) = targeted_test_found_nothing(lang, output.exit_code, &combined) {
+            let mut r = check_not_run(CheckType::Test, reason);
+            r.duration_ms = duration;
+            return Ok(r);
+        }
 
         Ok(CheckResult {
             not_run: false,
             check_type: CheckType::Test,
             passed: output.success,
             duration_ms: duration,
-            output: format!("{}\n{}", stdout, stderr),
+            output: combined,
             errors: vec![],
             warnings: vec![],
             suggestions: vec![],
@@ -2544,6 +2687,32 @@ impl VerificationGate {
         } else {
             "npm"
         }
+    }
+}
+
+/// Why a targeted test run tested nothing, if it did not.
+pub(crate) fn targeted_test_found_nothing(
+    lang: RepoLanguage,
+    exit_code: Option<i32>,
+    output: &str,
+) -> Option<&'static str> {
+    match lang {
+        RepoLanguage::Python if exit_code == Some(5) => {
+            Some("no tests were collected (exit status 5)")
+        }
+        RepoLanguage::Python if exit_code == Some(0) && output.contains("Ran 0 tests") => {
+            Some("no tests were found (Ran 0 tests)")
+        }
+        RepoLanguage::Go
+            if exit_code == Some(0)
+                && output.contains("[no test files]")
+                && !output.lines().any(|l| {
+                    l.starts_with("ok ") || l.starts_with("ok\t") || l.starts_with("PASS")
+                }) =>
+        {
+            Some("no Go test files")
+        }
+        _ => None,
     }
 }
 
@@ -2844,15 +3013,19 @@ impl std::fmt::Display for VerificationReport {
             "║ Trigger: {:<30} ║",
             truncate_str(&self.triggered_by, 30)
         )?;
-        writeln!(
-            f,
-            "║ Status: {:<31} ║",
-            if self.overall_passed {
-                "✓ PASSED"
-            } else {
-                "✗ FAILED"
+        // Never render green over checks that did not run (AGENTS.md Rule 3):
+        // a report whose every check is not-run verified nothing.
+        let status = if !self.overall_passed {
+            "✗ FAILED".to_string()
+        } else if self.all_checks_not_run() {
+            "○ NOT VERIFIED (no check ran)".to_string()
+        } else {
+            match self.not_run_count() {
+                0 => "✓ PASSED".to_string(),
+                n => format!("✓ PASSED ({n} not run)"),
             }
-        )?;
+        };
+        writeln!(f, "║ Status: {:<31} ║", status)?;
         writeln!(
             f,
             "║ Duration: {:<29} ║",
@@ -2869,21 +3042,51 @@ impl std::fmt::Display for VerificationReport {
             } else {
                 "✗"
             };
-            writeln!(
-                f,
-                "║ {} {}: {}ms{}",
-                status,
-                check.check_type.as_str(),
-                check.duration_ms,
-                if check.not_run { " (not run)" } else { "" }
-            )?;
+            let mut warnings = check.warnings.iter();
+            if check.not_run {
+                // `○ lint: not run (<reason>)`: the reason is the first
+                // warning (every not-run producer puts it there).
+                let reason = warnings
+                    .next()
+                    .map(String::as_str)
+                    .unwrap_or("no reason recorded");
+                writeln!(
+                    f,
+                    "║ {} {}: not run ({})",
+                    status,
+                    check.check_type.as_str(),
+                    truncate_str(reason, REPORT_NOTE_CHARS)
+                )?;
+            } else {
+                writeln!(
+                    f,
+                    "║ {} {}: {}ms",
+                    status,
+                    check.check_type.as_str(),
+                    check.duration_ms
+                )?;
+            }
 
             for error in &check.errors {
                 writeln!(
                     f,
                     "║   └─ {}: {}",
                     error.file,
-                    truncate_str(&error.message, 30)
+                    truncate_str(&error.message, REPORT_NOTE_CHARS)
+                )?;
+            }
+            // Warnings (fallback compiler options, partial not-run, ...) are
+            // part of what was verified and how; dropping them hid the
+            // TypeScript fallback entirely (0.8.2 validation D12).
+            let rest: Vec<&String> = warnings.collect();
+            for w in rest.iter().take(REPORT_MAX_WARNINGS) {
+                writeln!(f, "║   ⚠ {}", truncate_str(w, REPORT_NOTE_CHARS))?;
+            }
+            if rest.len() > REPORT_MAX_WARNINGS {
+                writeln!(
+                    f,
+                    "║   ⚠ (+{} more warning(s))",
+                    rest.len() - REPORT_MAX_WARNINGS
                 )?;
             }
         }
@@ -2898,6 +3101,52 @@ impl std::fmt::Display for VerificationReport {
 
         writeln!(f, "╚══════════════════════════════════════════╝")?;
         Ok(())
+    }
+}
+
+/// Per-line cap for errors, warnings and not-run reasons in the rendered
+/// report (long enough to carry a compiler message or a tool-missing reason).
+const REPORT_NOTE_CHARS: usize = 200;
+/// Warnings rendered per check before collapsing into a count.
+const REPORT_MAX_WARNINGS: usize = 3;
+
+impl VerificationReport {
+    /// Checks that did not run (non-blocking, no credit).
+    pub fn not_run_count(&self) -> usize {
+        self.checks.iter().filter(|c| c.not_run).count()
+    }
+
+    /// True when the report has checks and NONE of them ran: it verified
+    /// nothing, although it is non-blocking (`overall_passed`).
+    pub fn all_checks_not_run(&self) -> bool {
+        !self.checks.is_empty() && self.checks.iter().all(|c| c.not_run)
+    }
+
+    /// Short model/user-facing notes: every not-run check with its reason
+    /// and the warnings of every check that ran. Empty when there is nothing
+    /// to say. Surfaces a PASSING report's caveats (the full report is only
+    /// printed on failure).
+    pub fn caveats(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for c in &self.checks {
+            let kind = c.check_type.as_str();
+            if c.not_run {
+                let reason = c
+                    .warnings
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or("no reason recorded");
+                out.push(format!(
+                    "{kind}: not run ({})",
+                    truncate_str(reason, REPORT_NOTE_CHARS)
+                ));
+            } else {
+                for w in c.warnings.iter().take(REPORT_MAX_WARNINGS) {
+                    out.push(format!("{kind}: ⚠ {}", truncate_str(w, REPORT_NOTE_CHARS)));
+                }
+            }
+        }
+        out
     }
 }
 

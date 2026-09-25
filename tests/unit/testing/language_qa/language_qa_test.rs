@@ -176,3 +176,194 @@ async fn run_stage_drain_timeout_keeps_captured_stdout() {
         result.output
     );
 }
+
+// ---------------------------------------------------------------------------
+// Not-run semantics (0.8.2 validation D9 / D9b)
+// ---------------------------------------------------------------------------
+
+/// Write an executable stub at `node_modules/.bin/<name>` that prints
+/// `stdout` and exits with `code`.
+#[cfg(unix)]
+fn stub_node_bin(root: &std::path::Path, name: &str, stdout: &str, code: i32) {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = root.join("node_modules").join(".bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let p = bin.join(name);
+    std::fs::write(
+        &p,
+        format!("#!/bin/sh\ncat <<'OUT'\n{stdout}\nOUT\nexit {code}\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// D9b: a program that cannot be spawned (`npm` absent on the host) is a
+/// NOT-RUN stage, never `test ✗`.
+#[tokio::test]
+async fn missing_binary_is_not_run_not_a_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = run_stage(
+        QaStage::Test,
+        "selfware-definitely-missing-tool-7f3a",
+        &["test"],
+        dir.path(),
+        10,
+    )
+    .await;
+    let reason = r
+        .not_run
+        .as_deref()
+        .expect("missing binary must be not_run");
+    assert!(reason.contains("not installed"), "{reason}");
+    assert!(!r.failed(), "a not-run stage is not a failure");
+    assert_eq!(r.error_count, 0);
+}
+
+/// D9: eslint installed but the project has no ESLint config → lint is
+/// not-run (ESLint >= 6 refuses to run and the old code reported ✗).
+#[cfg(unix)]
+#[tokio::test]
+async fn eslint_without_config_is_not_run() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+    // Would FAIL if it were run: proves it is not run at all.
+    stub_node_bin(
+        dir.path(),
+        "eslint",
+        "ESLint couldn't find a configuration file.",
+        2,
+    );
+    let r = node_lint_stage(dir.path(), 10)
+        .await
+        .expect("an installed eslint yields a stage");
+    let reason = r.not_run.as_deref().expect("no config → not_run");
+    assert!(reason.contains("no ESLint configuration"), "{reason}");
+    assert!(!r.failed());
+}
+
+/// A config the probe misses still ends not-run when ESLint itself says it
+/// found no configuration.
+#[cfg(unix)]
+#[tokio::test]
+async fn eslint_reporting_no_config_is_demoted_to_not_run() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".eslintrc.json"), "{}").unwrap();
+    stub_node_bin(
+        dir.path(),
+        "eslint",
+        "Oops! Something went wrong! :( ESLint couldn't find a configuration file.",
+        2,
+    );
+    let r = node_lint_stage(dir.path(), 10).await.unwrap();
+    assert!(r.not_run.is_some(), "{}", r.output);
+}
+
+/// A lint stage that RAN and reported problems stays a failure.
+#[cfg(unix)]
+#[tokio::test]
+async fn real_eslint_error_stays_a_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("eslint.config.js"), "export default [];").unwrap();
+    stub_node_bin(
+        dir.path(),
+        "eslint",
+        "src/a.js\n  1:7  error  'x' is assigned a value but never used  no-unused-vars",
+        1,
+    );
+    let r = node_lint_stage(dir.path(), 10).await.unwrap();
+    assert!(r.not_run.is_none(), "{:?}", r.not_run);
+    assert!(r.failed(), "a real lint error must fail: {}", r.output);
+    assert!(r.error_count >= 1);
+}
+
+/// No `test` script (or the npm init placeholder) → test is not-run.
+#[test]
+fn missing_or_placeholder_test_script_is_not_configured() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("package.json"), r#"{"name":"x"}"#).unwrap();
+    let err = npm_test_script(dir.path()).unwrap_err();
+    assert!(err.contains("no \"test\" script"), "{err}");
+
+    std::fs::write(
+        dir.path().join("package.json"),
+        r#"{"scripts":{"test":"echo \"Error: no test specified\" && exit 1"}}"#,
+    )
+    .unwrap();
+    assert!(npm_test_script(dir.path())
+        .unwrap_err()
+        .contains("placeholder"));
+
+    std::fs::write(
+        dir.path().join("package.json"),
+        r#"{"scripts":{"test":"node --test"}}"#,
+    )
+    .unwrap();
+    assert_eq!(npm_test_script(dir.path()).unwrap(), "node --test");
+}
+
+#[tokio::test]
+async fn node_test_stage_without_test_script_is_not_run() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("package.json"), r#"{"name":"x"}"#).unwrap();
+    // A global vitest would take precedence; only assert when absent.
+    if resolve_node_tool(dir.path(), "vitest").await.is_some() {
+        return;
+    }
+    let r = node_test_stage(dir.path(), 10).await;
+    assert!(
+        r.not_run.as_deref().unwrap_or("").contains("test"),
+        "{:?} / {}",
+        r.not_run,
+        r.output
+    );
+}
+
+/// npm audit without a lockfile cannot reach a verdict.
+#[tokio::test]
+async fn npm_audit_without_lockfile_is_not_run() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+    let r = node_audit_stage(dir.path(), 10).await;
+    assert!(r.not_run.as_deref().unwrap().contains("lockfile"));
+    assert_eq!(
+        npm_audit_not_run_reason("npm ERR! code ENOTFOUND\nnpm ERR! network request failed"),
+        Some("npm registry unreachable (ENOTFOUND)".to_string())
+    );
+    assert_eq!(
+        npm_audit_not_run_reason("found 3 high severity vulnerabilities"),
+        None
+    );
+}
+
+/// Rule-5 sweep: "nothing was tested" is not-run for Python and Go too.
+#[test]
+fn no_tests_collected_is_not_run_for_python_and_go() {
+    let ran = |passed: bool, output: &str| QaStageResult {
+        stage: QaStage::Test,
+        passed,
+        duration_ms: 1,
+        output: output.into(),
+        error_count: 0,
+        warning_count: 0,
+        not_run: None,
+    };
+    assert!(
+        classify_python_test(ran(false, "no tests ran in 0.01s"), Some(5))
+            .not_run
+            .is_some()
+    );
+    assert!(
+        classify_python_test(ran(true, "Ran 0 tests in 0.000s\n\nOK"), Some(0))
+            .not_run
+            .is_some()
+    );
+    assert!(classify_python_test(ran(false, "1 failed"), Some(1)).failed());
+    assert!(classify_go_test(ran(true, "?   \tex/m\t[no test files]"))
+        .not_run
+        .is_some());
+    assert!(
+        classify_go_test(ran(true, "?   \tex/a\t[no test files]\nok  \tex/b\t0.01s"))
+            .not_run
+            .is_none()
+    );
+}

@@ -3004,8 +3004,12 @@ fn report_display_marks_not_run_checks() {
         suggested_next_steps: vec![],
     };
     let s = report.to_string();
-    assert!(s.contains("○ type_check") || s.contains("○"), "{s}");
-    assert!(s.contains("(not run)"), "{s}");
+    assert!(s.contains("○ type_check: not run ("), "{s}");
+    assert!(s.contains("gofmt"), "the not-run reason is rendered: {s}");
+    assert!(
+        s.contains("NOT VERIFIED"),
+        "an all-not-run report must not say PASSED: {s}"
+    );
     assert!(
         !s.contains("✓ type_check"),
         "a not-run check must not render green: {s}"
@@ -3369,4 +3373,132 @@ fn walk_files(dir: &Path) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// QA not-run carry-through (0.8.2 validation D9 / D12)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn qa_not_run_stage_becomes_non_blocking_not_run_check_with_reason() {
+    use crate::testing::qa_profiles::{QaStage, QaStageResult};
+    let c = VerificationGate::qa_stage_to_check_result(QaStageResult::not_run(
+        QaStage::Lint,
+        "no ESLint configuration",
+    ));
+    assert!(c.not_run && c.passed, "not-run is non-blocking");
+    assert!(c.errors.is_empty());
+    assert!(
+        c.warnings[0].contains("no ESLint configuration"),
+        "{:?}",
+        c.warnings
+    );
+}
+
+#[test]
+fn qa_failed_stage_keeps_its_finding() {
+    use crate::testing::qa_profiles::{QaStage, QaStageResult};
+    let c = VerificationGate::qa_stage_to_check_result(QaStageResult {
+        stage: QaStage::Lint,
+        passed: false,
+        duration_ms: 3,
+        output: "\nsrc/a.js 1:7 error 'x' is never used".into(),
+        error_count: 1,
+        warning_count: 0,
+        not_run: None,
+    });
+    assert!(!c.passed && !c.not_run);
+    assert!(
+        c.errors[0].message.contains("'x' is never used"),
+        "{:?}",
+        c.errors
+    );
+}
+
+#[test]
+fn report_renders_not_run_reason_and_warnings() {
+    use crate::testing::qa_profiles::{QaStage, QaStageResult};
+    let mut ts = CheckResult {
+        check_type: CheckType::TypeCheck,
+        passed: true,
+        not_run: false,
+        duration_ms: 415,
+        output: "TypeScript syntax check passed".into(),
+        errors: vec![],
+        warnings: vec!["TypeScript syntax check used fallback compiler options".into()],
+        suggestions: vec![],
+    };
+    ts.warnings.push("second".into());
+    let report = VerificationReport {
+        triggered_by: "file_edit:src/a.ts".into(),
+        timestamp: chrono::Utc::now(),
+        total_duration_ms: 1,
+        checks: vec![
+            ts,
+            VerificationGate::qa_stage_to_check_result(QaStageResult::not_run(
+                QaStage::Lint,
+                "no ESLint configuration",
+            )),
+        ],
+        overall_passed: true,
+        affected_files: vec![],
+        side_effects: vec![],
+        suggested_next_steps: vec![],
+    };
+    let s = report.to_string();
+    assert!(s.contains("○ lint: not run ("), "{s}");
+    assert!(s.contains("no ESLint configuration"), "{s}");
+    assert!(s.contains("⚠ TypeScript syntax check used fallback"), "{s}");
+    assert!(s.contains("PASSED (1 not run)"), "{s}");
+    let caveats = report.caveats();
+    assert_eq!(caveats.len(), 3, "{caveats:?}");
+}
+
+#[test]
+fn targeted_test_that_found_nothing_is_not_run() {
+    assert!(targeted_test_found_nothing(RepoLanguage::Python, Some(5), "").is_some());
+    assert!(
+        targeted_test_found_nothing(RepoLanguage::Python, Some(0), "Ran 0 tests\nOK").is_some()
+    );
+    assert!(targeted_test_found_nothing(RepoLanguage::Python, Some(1), "1 failed").is_none());
+    assert!(
+        targeted_test_found_nothing(RepoLanguage::Go, Some(0), "?\tm\t[no test files]").is_some()
+    );
+    assert!(targeted_test_found_nothing(RepoLanguage::Go, Some(0), "ok  \tm\t0.1s").is_none());
+}
+
+/// Rule-5 sweep: the targeted-test path had the same classes — an unknown
+/// language rendered `✓ test` (a pass for nothing), a JS project without a
+/// test script failed on "Missing script", and a missing runner aborted the
+/// whole verification.
+#[tokio::test]
+async fn targeted_test_unconfigured_or_unrunnable_is_not_run() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("package.json"), r#"{"name":"x"}"#).unwrap();
+    let gate = VerificationGate::new(dir.path(), VerificationConfig::default());
+
+    let unknown = gate
+        .run_targeted_test(RepoLanguage::Unknown, &[])
+        .await
+        .unwrap();
+    assert!(unknown.not_run && unknown.passed, "{}", unknown.output);
+
+    let js = gate
+        .run_targeted_test(RepoLanguage::JavaScript, &["a.js".into()])
+        .await
+        .unwrap();
+    assert!(js.not_run, "no test script → not run: {}", js.output);
+    assert!(
+        js.warnings[0].contains("no \"test\" script"),
+        "{:?}",
+        js.warnings
+    );
+
+    let err = anyhow::Error::new(SpawnFailed {
+        program: "mvn".into(),
+        source: std::io::Error::from(std::io::ErrorKind::NotFound),
+    });
+    let r = not_run_if_spawn_failed(CheckType::Test, &err).expect("spawn failure → not run");
+    assert!(r.not_run && r.warnings[0].contains("`mvn` is not installed"));
+    assert!(not_run_if_spawn_failed(CheckType::Test, &anyhow::anyhow!("other")).is_none());
 }

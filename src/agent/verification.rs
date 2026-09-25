@@ -1865,6 +1865,17 @@ impl Agent {
                     self.last_successful_verification_mutation_sequence, self.mutation_sequence
                 ));
             }
+            // No check can run here (every post-edit check at this revision
+            // was not-run): demanding one cannot be satisfied. Accept without
+            // credit; the post-edit report already told the model and the
+            // user that nothing was verified.
+            if self.only_unrunnable_verification_at_current_revision() {
+                info!(
+                    "Completion gate: no verifier can run at mutation #{}; not demanding one",
+                    self.mutation_sequence
+                );
+                return None;
+            }
             // Bootstrap state (W8b, Rule-5 sweep of the write-refusal
             // exemption): nothing but scaffolding exists, so demanding a
             // verification now sends the model to test a project that does
@@ -2590,8 +2601,9 @@ impl Agent {
             && self.has_code_affecting_mutation()
             && !(self.current_task_is_read_only() && self.mutation_sequence == 0)
         {
-            let has_verification = self.has_successful_verification_tool_call()
-                && self.has_fresh_successful_verification();
+            let has_verification = (self.has_successful_verification_tool_call()
+                && self.has_fresh_successful_verification())
+                || self.only_unrunnable_verification_at_current_revision();
             if !has_verification {
                 // Bootstrap exemption (W8b): with only scaffolding on disk
                 // there is nothing to verify yet — refuse completion with a
@@ -2695,7 +2707,8 @@ impl Agent {
 
             if !(all_calls_are_non_code_or_read_only
                 || (self.has_successful_verification_tool_call()
-                    && self.has_fresh_successful_verification()))
+                    && self.has_fresh_successful_verification())
+                || self.only_unrunnable_verification_at_current_revision())
             {
                 return Some(format!(
                     "You must run at least one verification tool that fits this project ({}) \
@@ -3250,53 +3263,49 @@ impl Agent {
             .verify_change(&[path.to_string()], &format!("{}:{}", tool_name, path))
             .await
         {
-            Ok(report) => {
-                // Vacuous pass: every changed file matched exclude_patterns (or
-                // no checks are configured), so ZERO checks actually ran.
-                // Crediting this as a successful verification would mark the
-                // mutation sequence verified without verifying anything
-                // (AGENTS.md rule 3: honest status over optimistic success).
-                if report.overall_passed && report.checks.is_empty() {
+            Ok(report) => match self.absorb_post_edit_report(tool_name, path, &report) {
+                PostEditVerdict::NoChecks => {
                     info!(
                         "Verification after {} on {} ran no applicable checks — not crediting as verified",
                         tool_name, path
                     );
                     spinner.stop_success("No applicable verification checks");
                     None
-                } else if report.overall_passed {
-                    self.last_successful_verification_mutation_sequence = self.mutation_sequence;
-                    // Route through the ledger rather than assigning `None`.
-                    // This path used to clear every outstanding failure on any
-                    // pass, so a green post-edit check erased a red test suite
-                    // the model had run itself moments earlier — the scoped
-                    // clearing rule existed but this caller never reached it.
-                    self.note_verification_report(tool_name, path, &report);
+                }
+                PostEditVerdict::NotRun(note) => {
+                    info!(
+                        "Verification after {} on {}: no check could run — no credit recorded",
+                        tool_name, path
+                    );
+                    spinner.stop_success("Verification not run (no applicable verifier)");
+                    // Shown to the user as a report (not the green
+                    // "Verification passed" line): nothing was verified.
+                    crate::output::verification_report(&format!("{}", report), false);
+                    Some(note)
+                }
+                PostEditVerdict::Passed(note) => {
                     spinner.stop_success("Verification passed");
                     self.cognitive_state.episodic_memory.what_worked(
                         tool_name,
                         &format!("{} on {} passed verification", tool_name, path),
                     );
-                    if crate::output::is_verbose() {
-                        crate::output::verification_report(&format!("{}", report), true);
+                    // A pass with caveats (not-run checks, fallback options)
+                    // prints the full report so the caveats are visible.
+                    if crate::output::is_verbose() || note.is_some() {
+                        crate::output::verification_report(&format!("{}", report), note.is_none());
                     }
-                    None
-                } else {
-                    // The per-check summaries are built inside the ledger
-                    // entry for each failing check, so the gate quotes the check
-                    // that actually failed rather than a flattened first-error.
-                    self.note_verification_report(tool_name, path, &report);
+                    note
+                }
+                PostEditVerdict::Failed(note) => {
                     spinner.stop_error("Verification failed");
                     self.cognitive_state.episodic_memory.what_failed(
                         tool_name,
                         &format!("{} on {} failed verification", tool_name, path),
                     );
                     crate::output::verification_report(&format!("{}", report), false);
-                    Some(format!(
-                        "\n\n<verification_failed>\n{}\n</verification_failed>",
-                        report
-                    ))
+                    Some(note)
                 }
-            }
+            },
             Err(e) => {
                 spinner.stop_error("Verification failed to run");
                 warn!("Verification failed to run: {}", e);
@@ -3316,6 +3325,84 @@ impl Agent {
                 None
             }
         }
+    }
+
+    /// Fold a post-edit verification report into the run's verification
+    /// state and build the note appended to the tool result. Pure
+    /// bookkeeping (no printing), split out of `maybe_verify_file_change` so
+    /// the credit rules are unit-testable:
+    ///
+    /// - no checks at all → no credit (vacuous pass);
+    /// - every check NOT-RUN → no credit and no failure; the revision is
+    ///   marked as one where no runnable verifier exists, and the model is
+    ///   told why (0.8.2 validation D9b);
+    /// - passed → credit, plus a caveat note when some checks did not run or
+    ///   carried warnings (e.g. the TypeScript fallback options, D12);
+    /// - failed → per-check ledger records and the full report.
+    pub(super) fn absorb_post_edit_report(
+        &mut self,
+        tool_name: &str,
+        path: &str,
+        report: &crate::testing::verification::VerificationReport,
+    ) -> PostEditVerdict {
+        // Vacuous pass: every changed file matched exclude_patterns (or no
+        // checks are configured), so ZERO checks actually ran. Crediting it
+        // would mark the mutation sequence verified without verifying
+        // anything (AGENTS.md rule 3: honest status over optimistic success).
+        if report.overall_passed && report.checks.is_empty() {
+            return PostEditVerdict::NoChecks;
+        }
+        if report.overall_passed && report.all_checks_not_run() {
+            self.last_not_run_verification_mutation_sequence = self.mutation_sequence;
+            return PostEditVerdict::NotRun(format!(
+                "\n\n<verification_not_run>\nNo post-edit check could run in this environment, \
+                 so nothing was verified and no verification credit was recorded:\n- {}\n\
+                 Not-run checks do not block completion. Do not install or configure tools \
+                 just to satisfy them unless the task asks for it.\n</verification_not_run>",
+                report.caveats().join("\n- ")
+            ));
+        }
+        // Route through the ledger rather than assigning `None`: a green
+        // post-edit check must clear only the same check's failure, never
+        // a red test suite the model ran itself (per-check records).
+        self.note_verification_report(tool_name, path, report);
+        if report.overall_passed {
+            self.last_successful_verification_mutation_sequence = self.mutation_sequence;
+            let caveats = report.caveats();
+            let note = (!caveats.is_empty()).then(|| {
+                format!(
+                    "\n\n<verification_notes>\nPost-edit verification passed with caveats \
+                     (not-run checks earn no credit and do not block completion):\n- {}\n\
+                     </verification_notes>",
+                    caveats.join("\n- ")
+                )
+            });
+            PostEditVerdict::Passed(note)
+        } else {
+            PostEditVerdict::Failed(format!(
+                "\n\n<verification_failed>\n{}\n</verification_failed>",
+                report
+            ))
+        }
+    }
+
+    /// True when the latest post-edit verification ran at the CURRENT
+    /// revision, every one of its checks was not-run (no verifier this
+    /// environment can run or the project configures), and no failure is
+    /// outstanding. The completion gate then stops demanding a verification
+    /// that cannot run (0.8.2 validation D9b: StaleVerification refused 7x
+    /// demanding `npm test` on a host without npm). This is NOT credit:
+    /// `last_successful_verification_mutation_sequence` is untouched.
+    pub(super) fn only_unrunnable_verification_at_current_revision(&self) -> bool {
+        self.mutation_sequence > 0
+            && self.last_not_run_verification_mutation_sequence >= self.mutation_sequence
+            && self.last_failed_verification_summary.is_none()
+            && self.last_failed_verification_mutation_sequence
+                < self.last_not_run_verification_mutation_sequence
+            && self
+                .verification_failures
+                .blocking(&self.verification_task_root(), self.mutation_sequence)
+                .is_none()
     }
 
     /// Enter each check of a post-edit report into the verification ledger.
@@ -3677,6 +3764,21 @@ const REQUIREMENTS_AUDIT_CAP_SECS: u64 = 180;
 
 /// Short, typed reason the audit call produced no verdict, for the run
 /// summary and stream-json (`requirements audit: NOT PERFORMED — <reason>`).
+/// Outcome of folding a post-edit verification report into the run
+/// (see `Agent::absorb_post_edit_report`). Each non-`NoChecks` variant
+/// carries the note appended to the tool result.
+#[derive(Debug)]
+pub(super) enum PostEditVerdict {
+    /// No check applied; nothing credited.
+    NoChecks,
+    /// Every check was not-run; nothing credited, nothing failed.
+    NotRun(String),
+    /// Passed and credited; `Some` when there are caveats to surface.
+    Passed(Option<String>),
+    /// Failed; the full report.
+    Failed(String),
+}
+
 pub(crate) fn requirements_audit_failure_reason(e: &anyhow::Error) -> String {
     for cause in e.chain() {
         if let Some(t) = cause.downcast_ref::<crate::api::client::SideCallTimeout>() {

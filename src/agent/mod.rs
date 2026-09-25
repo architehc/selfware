@@ -1078,6 +1078,11 @@ pub struct Agent {
     /// "edit → build passes → tests fail → claim" must not complete
     /// (external review of 6e231e2e, finding #2).
     last_failed_verification_mutation_sequence: usize,
+    /// Mutation sequence at which the post-edit verification ran and EVERY
+    /// check was not-run (no verifier available / configured). Not credit:
+    /// it only records that no check this environment can run is being
+    /// demanded at that revision (0.8.2 validation D9b).
+    last_not_run_verification_mutation_sequence: usize,
     /// Three-layer context compression orchestrator
     compression_orchestrator: CompressionOrchestrator,
     /// Lifetime count of successful mutating tool calls (file_write/file_edit/file_delete/etc.)
@@ -1784,6 +1789,7 @@ To call a tool, use this EXACT XML structure:
             // relevance depend on whatever else the process had chdir'd to.
             task_verification_root: Some(crate::tools::workspace_root::current_path()),
             last_failed_verification_mutation_sequence: 0,
+            last_not_run_verification_mutation_sequence: 0,
             compression_orchestrator: CompressionOrchestrator::new(),
             mutating_tool_call_count: 0,
             total_tool_call_count: 0,
@@ -3247,6 +3253,7 @@ To call a tool, use this EXACT XML structure:
         self.last_failed_verification_summary = None;
         self.verification_failures.clear();
         self.last_failed_verification_mutation_sequence = 0;
+        self.last_not_run_verification_mutation_sequence = 0;
         self.permanently_blocked_tool_calls.clear();
         self.prefill_400_count = 0;
         self.prefill_breaker_open = false;
