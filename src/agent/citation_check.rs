@@ -233,6 +233,11 @@ pub struct GroundingStatus {
     /// are expected to be grounded in checkable citations. Not serialized.
     #[serde(skip)]
     pub read_only: bool,
+    /// The gate stepped aside at the wall-clock deadline: the wrong
+    /// citations above were accepted WITHOUT a correction round (see
+    /// [`super::deadline`]). Serialized only when set.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub not_corrected_deadline: bool,
 }
 
 impl GroundingStatus {
@@ -257,6 +262,7 @@ impl GroundingStatus {
                 .map(CheckedCitation::describe)
                 .collect(),
             read_only: false,
+            not_corrected_deadline: false,
         }
     }
 
@@ -334,7 +340,12 @@ impl GroundingStatus {
     /// for a review/report answer ([`Self::none_checkable_note`]).
     pub fn warning_note(&self) -> Option<String> {
         if self.problem_count() > 0 {
-            Some(self.unverified_note())
+            let mut note = self.unverified_note();
+            if self.not_corrected_deadline {
+                note.push_str("; ");
+                note.push_str(super::deadline::CITATIONS_NOT_CORRECTED_DEADLINE);
+            }
+            Some(note)
         } else if self.none_checkable() {
             Some(self.none_checkable_note())
         } else {
@@ -1222,6 +1233,23 @@ pub(crate) struct CitationGateState {
     pub last_eval: Option<((usize, u64), Option<String>)>,
     /// Outcome of the latest evaluation, read by the summary/banner/JSON.
     pub status: Option<GroundingStatus>,
+    /// The latest answer the gate rejected, with its grounding outcome and
+    /// the mutation sequence it was judged at. The deadline path accepts it
+    /// when a correction round can no longer fit, and the timeout partial
+    /// carries it (see [`super::deadline`]).
+    pub rejected_draft: Option<RejectedDraft>,
+}
+
+/// An answer the citation gate rejected (see [`CitationGateState`]).
+#[derive(Debug, Clone)]
+pub(crate) struct RejectedDraft {
+    /// The answer text as judged (think blocks stripped).
+    pub text: String,
+    /// Grounding outcome of that evaluation.
+    pub status: GroundingStatus,
+    /// `Agent::mutation_sequence` at the rejection: a draft judged before
+    /// later edits no longer describes the tree and is never accepted.
+    pub mutation_sequence: usize,
 }
 
 impl super::Agent {
@@ -1335,12 +1363,35 @@ impl super::Agent {
         }
 
         let problems = report.problem_count();
+        // Deadline step-aside: inside the wrap-up reserve (or when one more
+        // model call no longer fits), a correction round would end in a
+        // timeout with no answer at all. Accept this draft with the wrong
+        // count and the "not corrected: deadline" note instead (rule 3).
+        let deadline_step_aside = if problems > 0 && state.last_rejected_step != Some(step) {
+            self.completion_gate_deadline_step_aside()
+        } else {
+            None
+        };
         let (result, marker) = if problems == 0 {
             (None, None)
         } else if state.last_rejected_step == Some(step) {
             // Same turn, re-evaluated content: same round, no new spend.
             let round = state.rejections;
             (Some(correction_directive(&report, round)), None)
+        } else if let Some(why) = &deadline_step_aside {
+            tracing::warn!(
+                "citation check: {problems} of {} citations wrong, but a correction round no \
+                 longer fits ({why}) — accepting the draft with the count reported",
+                report.total
+            );
+            (
+                None,
+                Some(format!(
+                    "{problems} of {} wrong — {} ({why}); completing with this warning",
+                    report.total,
+                    super::deadline::CITATIONS_NOT_CORRECTED_DEADLINE
+                )),
+            )
         } else if state.rejections < CITATION_GATE_REJECTION_BOUND {
             state.rejections += 1;
             state.last_rejected_step = Some(step);
@@ -1369,6 +1420,14 @@ impl super::Agent {
         };
         let mut status = GroundingStatus::from_report(&report, state.rejections, checked_files);
         status.read_only = is_read_only;
+        status.not_corrected_deadline = deadline_step_aside.is_some();
+        if result.is_some() {
+            state.rejected_draft = Some(RejectedDraft {
+                text: answer.clone(),
+                status: status.clone(),
+                mutation_sequence: self.mutation_sequence,
+            });
+        }
         // Counts come from the status, never a literal: a same-step
         // re-evaluation of a still-wrong answer has no round marker and used
         // to report "0 wrong" next to "N wrong" (0.8.2 live validation D13).

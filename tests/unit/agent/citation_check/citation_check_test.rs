@@ -944,3 +944,102 @@ async fn same_step_reevaluation_marker_counts_the_wrong_citations() {
     assert!(details[1].contains("1 wrong"), "{}", details[1]);
     assert!(!details[1].contains("0 wrong"), "{}", details[1]);
 }
+
+// ── deadline step-aside (val083 b2_350000: correction round → no report) ──
+
+/// A review agent with a 900 s wall budget whose slowest call so far took
+/// 100 s (reserve 200 s), `elapsed_secs` into the run.
+async fn deadline_gate_agent(root: &Path, elapsed_secs: u64) -> crate::agent::Agent {
+    let mut agent = gate_agent(root).await;
+    agent.config.agent.max_wall_secs = Some(900);
+    agent
+        .client
+        .record_call_elapsed_for_test(std::time::Duration::from_secs(100));
+    agent.task_start_time =
+        std::time::Instant::now() - std::time::Duration::from_secs(elapsed_secs);
+    agent
+}
+
+#[tokio::test]
+async fn gate_rejection_inside_the_deadline_reserve_accepts_the_draft_with_a_warning() {
+    let ws = workspace();
+    // 150 s left <= 200 s reserve: a correction round no longer fits.
+    let mut agent = deadline_gate_agent(ws.path(), 750).await;
+    answer(&mut agent, 1, WRONG_ANSWER);
+    assert_eq!(
+        agent.citation_gate(true),
+        None,
+        "inside the reserve the gate steps aside"
+    );
+    assert_eq!(agent.check_completion_gate().await, None);
+
+    let status = agent.grounding_status().expect("status recorded");
+    assert!(status.not_corrected_deadline);
+    assert_eq!((status.total, status.problem_count()), (2, 1));
+    assert_eq!(status.correction_rounds, 0, "no round was fed back");
+    assert_eq!(status.problems.len(), 1);
+    assert_eq!(
+        status.warning_note().as_deref(),
+        Some(
+            "citations: 1 of 2 could not be verified (1 wrong); citations not corrected: deadline"
+        )
+    );
+    // The serialized grounding object carries the flag with the counts and
+    // problems (the headless result adds `note` from `warning_note`).
+    let g = serde_json::to_value(&status).unwrap();
+    assert_eq!(g["not_corrected_deadline"], true);
+    assert_eq!(g["wrong_line"], 1);
+    assert_eq!(g["problems"].as_array().map(Vec::len), Some(1));
+
+    // Same non-green outcome as the "some citations could not be verified"
+    // path: ⚠️, never ✅.
+    let base = crate::agent::failure_mode::FailureMode {
+        restored_files: Vec::new(),
+        kind: crate::agent::failure_mode::FailureKind::NoChange,
+        evidence: "completed naturally with 0 mutating tool calls".to_string(),
+        advice: "-".to_string(),
+    };
+    let fm = crate::agent::failure_mode::with_citation_status(base, Some(&status));
+    assert!(fm.evidence.contains("citations not corrected: deadline"));
+    let banner = fm.cli_banner();
+    assert!(
+        banner.starts_with("⚠️") && banner.contains("some citations could not be verified"),
+        "{banner}"
+    );
+    assert!(!banner.contains('✅'), "{banner}");
+}
+
+#[tokio::test]
+async fn gate_rejection_outside_the_deadline_reserve_still_runs_a_correction_round() {
+    let ws = workspace();
+    // 800 s left > 200 s reserve: correction round as before.
+    let mut agent = deadline_gate_agent(ws.path(), 100).await;
+    answer(&mut agent, 1, WRONG_ANSWER);
+    let directive = agent.citation_gate(true).expect("still blocks");
+    assert!(directive.contains("CITATION CHECK"), "{directive}");
+    let status = agent.grounding_status().unwrap();
+    assert!(!status.not_corrected_deadline);
+    assert!(!status
+        .warning_note()
+        .unwrap()
+        .contains("not corrected: deadline"));
+    assert!(serde_json::to_value(&status)
+        .unwrap()
+        .get("not_corrected_deadline")
+        .is_none());
+    // The rejected draft is kept for the deadline path and the partial.
+    let state = agent.citation_gate.lock().unwrap();
+    let draft = state.rejected_draft.as_ref().expect("draft kept");
+    assert_eq!(draft.text, WRONG_ANSWER);
+    assert_eq!(draft.status.problem_count(), 1);
+}
+
+/// Without a wall budget nothing changes.
+#[tokio::test]
+async fn gate_without_a_wall_budget_never_steps_aside_for_time() {
+    let ws = workspace();
+    let mut agent = gate_agent(ws.path()).await;
+    agent.task_start_time = std::time::Instant::now() - std::time::Duration::from_secs(100_000);
+    answer(&mut agent, 1, WRONG_ANSWER);
+    assert!(agent.citation_gate(true).is_some());
+}

@@ -1744,6 +1744,29 @@ impl Agent {
             // Deadline wrap-up (once): remaining wall time below the reserve
             // measured from this run's own model-call latency.
             self.maybe_inject_deadline_wrap_up();
+            // Deadline acceptance: a citation-rejected draft is pending and
+            // not even one more model call fits — finish with that draft (⚠️,
+            // "citations not corrected: deadline") instead of starting a call
+            // the deadline will cut off (val083 b2_350000: no report at all).
+            if let Some(draft) = self.take_rejected_draft_at_deadline() {
+                // The draft never reached the requirements audit (the citation
+                // gate runs first). Inside the deadline window the audit steps
+                // aside without a model call and records NOT PERFORMED; any
+                // other return is a hard budget stop, enforced just below.
+                let read_only = self.current_task_is_read_only();
+                if self.maybe_requirements_audit(read_only).await.is_none() {
+                    output::final_answer(&draft);
+                    record_state_transition("Executing", "Completed");
+                    if mode == LoopMode::NewTask {
+                        progress.finish_all();
+                    }
+                    self.finalize_natural_completion(task_description).await;
+                    if let Err(e) = self.complete_checkpoint() {
+                        warn!("Failed to save completed checkpoint: {}", e);
+                    }
+                    return Ok(());
+                }
+            }
             self.trim_message_history();
 
             // Surface the current step in the live TUI status bar so a

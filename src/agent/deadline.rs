@@ -63,6 +63,98 @@ pub(crate) fn wrap_up_reserve_secs(slowest_call_ms: u64, max_wall_secs: u64) -> 
     measured.max(WRAP_UP_RESERVE_FLOOR_SECS).min(cap)
 }
 
+/// Note a completion gate's status carries when it stepped aside at the
+/// deadline instead of feeding its rejection back for a correction round.
+pub const CITATIONS_NOT_CORRECTED_DEADLINE: &str = "citations not corrected: deadline";
+
+/// Why a completion-gate correction round no longer fits the wall budget,
+/// or `None` when it does.
+///
+/// A correction round is one more model call (the model fixes the answer)
+/// plus the gate re-check. It does not fit when:
+/// - the remaining time is at or below the wrap-up reserve
+///   ([`wrap_up_reserve_secs`], 2 × the slowest call measured this run) —
+///   the same line the wrap-up directive uses, so the gate and the wrap-up
+///   agree on when the run is in its last answer; or
+/// - the remaining time is below ONE slowest measured call (possible when
+///   the reserve is capped at half the budget).
+///
+/// Evidence (val083 b2_350000): the gate rejected a 4,442-char review at
+/// ~360 s of 900; the correction round's re-reads plus one 231 s call left
+/// 139 s against a slowest call of 232 s, and the run timed out with no
+/// report.
+pub(crate) fn correction_round_no_fit(
+    remaining_secs: u64,
+    slowest_call_ms: u64,
+    max_wall_secs: u64,
+) -> Option<String> {
+    let reserve = wrap_up_reserve_secs(slowest_call_ms, max_wall_secs);
+    if remaining_secs <= reserve {
+        return Some(format!(
+            "{remaining_secs}s of the wall budget left <= reserve {reserve}s"
+        ));
+    }
+    if one_call_no_fit(remaining_secs, slowest_call_ms) {
+        return Some(format!(
+            "{remaining_secs}s of the wall budget left < slowest model call {}s",
+            slowest_call_ms.div_ceil(1000)
+        ));
+    }
+    None
+}
+
+/// Whether one more model call can no longer fit: a slowest call has been
+/// measured and the remaining time is below it. Stricter than
+/// [`correction_round_no_fit`] — used to finish WITHOUT another model call.
+pub(crate) fn one_call_no_fit(remaining_secs: u64, slowest_call_ms: u64) -> bool {
+    slowest_call_ms > 0 && remaining_secs.saturating_mul(1000) < slowest_call_ms
+}
+
+/// Minimum prose length (chars, tool-call markup stripped) for an assistant
+/// message to count as answer text in a partial result.
+///
+/// Why 200: measured on the val083 replays (b2_163840, b2_350000,
+/// b3_review), every "next I will read X" / "continuing" narration turn
+/// carried 48–168 chars of prose, and every write-up segment 204–4,440
+/// chars. 200 keeps every write-up and drops every narration line.
+pub(crate) const PARTIAL_TEXT_MIN_CHARS: usize = 200;
+
+/// The prose of an assistant message: think blocks stripped, executed tool
+/// calls removed, and any remaining line that still carries tool-call
+/// markup outside inline code dropped. Never returns tool-call markup.
+pub(crate) fn answer_prose(content: &str) -> String {
+    let text = super::recovery::strip_think_blocks(content);
+    let text = crate::tool_parser::parse_tool_calls(&text).text_content;
+    let kept: Vec<&str> = text
+        .lines()
+        .filter(|line| !carries_tool_markup(line))
+        .collect();
+    kept.join("\n").trim().to_string()
+}
+
+/// Tool-call markup on a line, ignoring `inline code` spans (a review that
+/// quotes `` `<tool>` `` is prose).
+fn carries_tool_markup(line: &str) -> bool {
+    let outside: String = line.split('`').step_by(2).collect::<Vec<_>>().concat();
+    const MARKERS: &[&str] = &[
+        "<tool>",
+        "</tool>",
+        "<tool_call",
+        "</tool_call",
+        "<function",
+        "</function",
+        "<arguments",
+        "</arguments",
+        "<parameter",
+        "</parameter",
+        "<name>",
+        "</name>",
+        "<|open|>",
+        "<|close|>",
+    ];
+    MARKERS.iter().any(|m| outside.contains(m))
+}
+
 /// Label carried by the partial result of a read-only (review/report) run.
 pub const PARTIAL_REVIEW_LABEL: &str = "PARTIAL — NOT A COMPLETED REVIEW";
 /// Label carried by the partial result of any other run.
@@ -84,8 +176,12 @@ pub struct PartialProgress {
     /// Why the run stopped (the terminal error, e.g. `Wall-clock timeout:
     /// 905s >= 900s`).
     pub reason: String,
-    /// The latest non-empty assistant text (think blocks stripped, bounded).
-    /// Intermediate reasoning, not an accepted answer.
+    /// The most recent substantive answer text (prose only, tool-call markup
+    /// stripped, bounded): the draft the completion gate last rejected when
+    /// there is one, else the write-up segments the model produced (each at
+    /// least [`PARTIAL_TEXT_MIN_CHARS`]), oldest first. Unfinished work, not
+    /// an accepted answer. `None` when no such text exists (the ledger then
+    /// stands alone).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_assistant_text: Option<String>,
     /// The work ledger: files read (with ranges and notes), searches run,
@@ -178,6 +274,102 @@ impl Agent {
         });
     }
 
+    /// Why a completion-gate correction round no longer fits this run's
+    /// wall budget (see [`correction_round_no_fit`]); `None` without a wall
+    /// budget or while a round still fits.
+    pub(super) fn completion_gate_deadline_step_aside(&self) -> Option<String> {
+        let max_wall = self.config.agent.max_wall_secs.filter(|&s| s > 0)?;
+        let remaining = max_wall.saturating_sub(self.budget_elapsed_secs());
+        correction_round_no_fit(remaining, self.client.call_latency_stats().max_ms, max_wall)
+    }
+
+    /// Deadline acceptance of a citation-rejected draft: when a correction
+    /// round is still pending and not even one more model call fits
+    /// ([`one_call_no_fit`]), take the draft the gate rejected as the final
+    /// answer instead of starting a call the deadline will cut off. The
+    /// grounding status keeps the wrong counts and problems and gains the
+    /// "not corrected: deadline" note, so the banner is ⚠️ and the outcome
+    /// is not green (rule 3). Never accepts a draft judged before a later
+    /// edit. Returns the accepted text.
+    pub(super) fn take_rejected_draft_at_deadline(&mut self) -> Option<String> {
+        let max_wall = self.config.agent.max_wall_secs.filter(|&s| s > 0)?;
+        let remaining = max_wall.saturating_sub(self.budget_elapsed_secs());
+        let slowest_ms = self.client.call_latency_stats().max_ms;
+        if !one_call_no_fit(remaining, slowest_ms) {
+            return None;
+        }
+        let draft = {
+            let mut state = self.citation_gate.lock().unwrap_or_else(|e| e.into_inner());
+            let fresh = state.rejected_draft.as_ref().is_some_and(|d| {
+                d.mutation_sequence == self.mutation_sequence && !d.text.trim().is_empty()
+            });
+            if !fresh {
+                return None;
+            }
+            let mut draft = state.rejected_draft.take()?;
+            draft.status.not_corrected_deadline = true;
+            state.status = Some(draft.status.clone());
+            draft
+        };
+        let text = draft.text.trim().to_string();
+        tracing::warn!(
+            remaining_secs = remaining,
+            slowest_call_ms = slowest_ms,
+            "deadline: accepting the citation-rejected draft — one more model call does not fit"
+        );
+        crate::output::citation_check(&format!(
+            "{} of {} wrong — {CITATIONS_NOT_CORRECTED_DEADLINE} ({remaining}s left < slowest call \
+             {}s); completing with this warning",
+            draft.status.problem_count(),
+            draft.status.total,
+            slowest_ms.div_ceil(1000)
+        ));
+        self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+            decision: "deadline_accept_draft".to_string(),
+            detail: format!(
+                "{remaining}s left < slowest call {slowest_ms}ms: accepting the draft the citation \
+                 gate rejected ({}); {CITATIONS_NOT_CORRECTED_DEADLINE}",
+                draft.status.grounding_line()
+            ),
+        });
+        self.last_assistant_response = text.clone();
+        Some(text)
+    }
+
+    /// Answer text for a timeout partial (see
+    /// [`PartialProgress::last_assistant_text`]): the draft the citation
+    /// gate last rejected, else every assistant write-up segment of at least
+    /// [`PARTIAL_TEXT_MIN_CHARS`] prose chars, oldest first — reviews told
+    /// to write up part by part spread the answer over several turns, and
+    /// the newest segment alone would drop the earlier parts. Bounded to
+    /// [`PARTIAL_TEXT_MAX_CHARS`], keeping the newest text.
+    fn partial_answer_text(&self) -> Option<String> {
+        let gate_draft = self
+            .citation_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .rejected_draft
+            .as_ref()
+            .map(|d| answer_prose(&d.text))
+            .filter(|t| t.chars().count() >= PARTIAL_TEXT_MIN_CHARS);
+        let text = gate_draft.or_else(|| {
+            let segments: Vec<String> = self
+                .messages
+                .iter()
+                .filter(|m| m.role == "assistant")
+                .map(|m| answer_prose(&m.content.text_all()))
+                .filter(|t| t.chars().count() >= PARTIAL_TEXT_MIN_CHARS)
+                .collect();
+            (!segments.is_empty()).then(|| segments.join("\n\n"))
+        })?;
+        let total = text.chars().count();
+        if total <= PARTIAL_TEXT_MAX_CHARS {
+            return Some(text);
+        }
+        let tail: String = text.chars().skip(total - PARTIAL_TEXT_MAX_CHARS).collect();
+        Some(format!("[…earlier text truncated]\n{tail}"))
+    }
+
     /// The labelled partial progress of a run that ended in a wall-clock
     /// TIMEOUT (or a CALL_TIME_CAP abort) without a final answer; `None` for
     /// every other outcome.
@@ -195,22 +387,7 @@ impl Agent {
         if !timed_out {
             return None;
         }
-        let last_assistant_text = self
-            .messages
-            .iter()
-            .rev()
-            .filter(|m| m.role == "assistant")
-            .map(|m| super::recovery::strip_think_blocks(&m.content.text_all()))
-            .map(|t| t.trim().to_string())
-            .find(|t| !t.is_empty())
-            .map(|t| {
-                if t.chars().count() <= PARTIAL_TEXT_MAX_CHARS {
-                    t
-                } else {
-                    let cut: String = t.chars().take(PARTIAL_TEXT_MAX_CHARS).collect();
-                    format!("{cut}\n…[truncated]")
-                }
-            });
+        let last_assistant_text = self.partial_answer_text();
         // Record whatever the history still holds before rendering (the
         // ledger is otherwise only fed ahead of trims/compactions).
         self.compressor.observe_work(&self.messages);
