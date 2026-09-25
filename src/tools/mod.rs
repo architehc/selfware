@@ -43,6 +43,7 @@ pub mod hot_reload;
 pub mod http;
 pub mod introspect;
 pub mod knowledge;
+pub mod line_numbers;
 pub mod localize_issue;
 pub mod lsp_tools;
 pub mod net_policy;

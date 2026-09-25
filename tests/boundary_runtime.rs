@@ -183,7 +183,11 @@ async fn execute_case(
     receipt["execution"] = json!({"attempted":true, "status":"returned", "result":result});
     let passed = match expected {
         Expected::FileMutation => result["success"] == true,
-        Expected::Read(content) => result["content"] == content,
+        // file_read numbers lines by default: compare the file text.
+        Expected::Read(content) => {
+            selfware::tools::line_numbers::raw_file_read_content(&result).as_deref()
+                == Some(content)
+        }
         Expected::Shell(stdout) => successful_shell(&result) && result["stdout"] == stdout,
         Expected::HostAbsent => {
             result["exit_code"] == 1

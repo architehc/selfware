@@ -41,7 +41,8 @@ async fn test_file_read_with_line_range() {
 
     let result = tool.execute(args).await.unwrap();
     let content = result.get("content").unwrap().as_str().unwrap();
-    assert_eq!(content, "line2\nline3\nline4");
+    // Numbered by default, absolute line numbers.
+    assert_eq!(content, "2\tline2\n3\tline3\n4\tline4");
     assert!(result.get("truncated").unwrap().as_bool().unwrap());
 }
 

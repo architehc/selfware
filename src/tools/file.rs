@@ -1,3 +1,6 @@
+use super::line_numbers::{
+    is_numbered_text, number_lines, strip_numbered, strip_present_prefixes, LINE_NUMBERS_KEY,
+};
 use super::Tool;
 use crate::config::SafetyConfig;
 use crate::errors::ToolError;
@@ -366,7 +369,11 @@ impl Tool for FileRead {
     }
 
     fn description(&self) -> &str {
-        "Read file contents. Use for examining code, configs, or any text file."
+        "Read file contents. Use for examining code, configs, or any text file. By default each \
+         line is prefixed with its 1-based line number and a tab (` 42\tcode`, right-aligned); \
+         numbering stays absolute for a line_range. The number and tab are metadata, NOT file \
+         content: cite them as path:line, and never copy them into file_edit / file_write text. \
+         Pass line_numbers: false for raw content."
     }
 
     fn schema(&self) -> Value {
@@ -383,6 +390,11 @@ impl Tool for FileRead {
                     "minItems": 2,
                     "maxItems": 2,
                     "description": "Optional [start, end] line range (1-indexed, inclusive)"
+                },
+                "line_numbers": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Prefix each line with its absolute line number and a tab (default true). false returns raw content."
                 }
             },
             "required": ["path"]
@@ -397,6 +409,13 @@ impl Tool for FileRead {
             #[serde(alias = "file_path", alias = "file", alias = "filepath")]
             path: String,
             line_range: Option<(usize, usize)>,
+            /// Line-number prefixes on `content` (default on). See
+            /// `crate::tools::line_numbers`.
+            #[serde(default = "default_true")]
+            line_numbers: bool,
+        }
+        fn default_true() -> bool {
+            true
         }
 
         // Relative paths resolve against the agent's workspace root.
@@ -417,11 +436,19 @@ impl Tool for FileRead {
             let (selected_content, lines_scanned, lossy, reached_eof) =
                 read_line_slice(file, start, end).await?;
             let lines_returned = selected_content.lines().count();
+            // Absolute numbering: the first returned line is `start` (the
+            // slice begins there; an empty slice has nothing to number).
+            let selected_content = if args.line_numbers {
+                number_lines(&selected_content, start.max(1))
+            } else {
+                selected_content
+            };
             if reached_eof {
                 // The scan consumed the whole file, so lines_scanned is the
                 // true total line count — safe to report honestly.
                 return Ok(serde_json::json!({
                     "content": selected_content,
+                    LINE_NUMBERS_KEY: args.line_numbers,
                     "lines_returned": lines_returned,
                     "total_lines": lines_scanned,
                     "truncated": false,
@@ -433,6 +460,7 @@ impl Tool for FileRead {
                 // Report has_more instead of a misleading total_lines.
                 return Ok(serde_json::json!({
                     "content": selected_content,
+                    LINE_NUMBERS_KEY: args.line_numbers,
                     "lines_returned": lines_returned,
                     "total_lines": null,
                     "has_more": true,
@@ -452,9 +480,15 @@ impl Tool for FileRead {
         record_file_snapshot(&args.path, &content);
 
         let total_lines = content.lines().count();
+        let content = if args.line_numbers {
+            number_lines(&content, 1)
+        } else {
+            content
+        };
 
         Ok(serde_json::json!({
             "content": content,
+            LINE_NUMBERS_KEY: args.line_numbers,
             "total_lines": total_lines,
             "truncated": false,
             "encoding": if valid_utf8 { "utf-8" } else { "utf-8-lossy" },
@@ -482,7 +516,12 @@ impl Tool for FileWrite {
             "type": "object",
             "properties": {
                 "path": {"type": "string"},
-                "content": {"type": "string"}
+                "content": {"type": "string"},
+                "allow_numbered_lines": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Set only when every line of the content really starts with <number><TAB> (otherwise such content is refused as copied file_read line numbers)"
+                }
             },
             "required": ["path", "content"]
         })
@@ -503,6 +542,10 @@ impl Tool for FileWrite {
             #[serde(default)]
             #[allow(dead_code)]
             backup: Option<bool>,
+            /// Content whose every line starts with `<number><TAB>` is
+            /// refused (copied file_read metadata) unless this is set.
+            #[serde(default)]
+            allow_numbered_lines: bool,
         }
 
         // Relative paths resolve against the agent's workspace root.
@@ -511,6 +554,35 @@ impl Tool for FileWrite {
         let safety = resolve_safety_config(self.safety_config.as_ref());
         validate_tool_path(&args.path, &safety)?;
         let path = PathBuf::from(&args.path);
+
+        // Never write file_read's line-number prefixes into a file. Content
+        // whose EVERY line carries one is refused unless the file already
+        // has that shape (e.g. rewriting a `cat -n` listing) or the caller
+        // says the prefixes are real content.
+        if !args.allow_numbered_lines && is_numbered_text(&args.content) {
+            let existing_is_numbered = if path.exists() {
+                read_file_checked(&args.path, &safety, None)
+                    .await
+                    .map(|(text, _)| is_numbered_text(&text))
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+            if !existing_is_numbered {
+                return Err(ToolError::Execution {
+                    name: "file_write".to_string(),
+                    message: format!(
+                        "Refusing to write {}: every line of the content starts with a \
+                         line-number prefix (`<number><TAB>`), which is file_read's line-number \
+                         metadata, not file content. Remove the `    N\t` prefixes and write \
+                         again. If the numbers really are part of the file, pass \
+                         allow_numbered_lines: true.",
+                        args.path
+                    ),
+                }
+                .into());
+            }
+        }
 
         // Check write size limit to prevent accidentally writing huge files
         if args.content.len() > MAX_WRITE_SIZE {
@@ -629,6 +701,17 @@ impl Tool for FileEdit {
         ensure_valid_utf8(&original_bytes, &args.path, "file_edit")?;
         let line_ending = detect_line_ending(&content);
 
+        // A model that copied file_read's line-number prefixes into old_str:
+        // strip them (from new_str too) only when old_str matches nowhere as
+        // written and the de-numbered text does match.
+        let mut args = args;
+        let mut prefixes_stripped = false;
+        if let Some((old, new)) = denumber_edit(&content, &args.old_str, &args.new_str) {
+            args.old_str = old;
+            args.new_str = new;
+            prefixes_stripped = true;
+        }
+
         // Check for exactly one match
         let matches = content.matches(&args.old_str).count();
         if matches == 0 {
@@ -669,11 +752,16 @@ impl Tool for FileEdit {
         write_atomic_checked(Path::new(&args.path), &new_content, &safety).await?;
         clear_file_snapshot(&args.path);
 
-        Ok(serde_json::json!({
+        let mut result = serde_json::json!({
             "success": true,
             "matches_found": 1,
             "path": args.path
-        }))
+        });
+        if prefixes_stripped {
+            result["line_number_prefixes_stripped"] = Value::Bool(true);
+            result["note"] = Value::String(PREFIXES_STRIPPED_NOTE.to_string());
+        }
+        Ok(result)
     }
 
     fn metadata(&self) -> crate::safety::ToolMetadata {
@@ -792,7 +880,7 @@ impl Tool for FileMultiEdit {
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
-        #[derive(Deserialize)]
+        #[derive(Deserialize, Clone)]
         struct EditItem {
             #[serde(alias = "file_path", alias = "file", alias = "filepath")]
             path: String,
@@ -832,22 +920,33 @@ impl Tool for FileMultiEdit {
         }
 
         // Group edits by file path
-        let mut edits_by_file: HashMap<String, Vec<(usize, &EditItem)>> = HashMap::new();
+        let mut edits_by_file: HashMap<String, Vec<(usize, EditItem)>> = HashMap::new();
         for (idx, edit) in args.edits.iter().enumerate() {
             edits_by_file
                 .entry(edit.path.clone())
                 .or_default()
-                .push((idx, edit));
+                .push((idx, edit.clone()));
         }
+        let mut stripped_edits: Vec<usize> = Vec::new();
 
         // Phase 1: read all files and validate edits (find line ranges, check overlaps, unique matches)
         let mut file_contents: HashMap<String, String> = HashMap::new();
         let mut file_line_endings: HashMap<String, &'static str> = HashMap::new();
 
-        for (path, edits) in &edits_by_file {
+        for (path, edits) in edits_by_file.iter_mut() {
             let (content, original_bytes) = read_file_checked(path, &safety, None).await?;
             ensure_valid_utf8(&original_bytes, path, "file_multi_edit")?;
             file_line_endings.insert(path.clone(), detect_line_ending(&content));
+
+            // Line-number prefixes copied from file_read (see FileEdit).
+            for (idx, edit) in edits.iter_mut() {
+                if let Some((old, new)) = denumber_edit(&content, &edit.old_str, &edit.new_str) {
+                    edit.old_str = old;
+                    edit.new_str = new;
+                    stripped_edits.push(*idx);
+                }
+            }
+            let edits = &*edits;
 
             // Validate each edit: exactly one match
             for (idx, edit) in edits {
@@ -963,12 +1062,20 @@ impl Tool for FileMultiEdit {
             .iter()
             .map(|(path, _)| path.to_string_lossy().into_owned())
             .collect();
-        Ok(serde_json::json!({
+        let mut result = serde_json::json!({
             "success": true,
             "edits_applied": args.edits.len(),
             "files_changed": files_changed.len(),
             "files": files_changed
-        }))
+        });
+        if !stripped_edits.is_empty() {
+            stripped_edits.sort_unstable();
+            result["line_number_prefixes_stripped"] = serde_json::json!(stripped_edits);
+            result["note"] = Value::String(format!(
+                "{PREFIXES_STRIPPED_NOTE} (edits {stripped_edits:?})"
+            ));
+        }
+        Ok(result)
     }
 
     fn metadata(&self) -> crate::safety::ToolMetadata {
@@ -1315,6 +1422,29 @@ async fn read_line_slice(
         }
     }
     Ok((selected.join("\n"), lineno, lossy, reached_eof))
+}
+
+/// Result note when an edit's line-number prefixes were removed.
+pub(crate) const PREFIXES_STRIPPED_NOTE: &str =
+    "line-number prefixes stripped: old_str/new_str carried file_read's `N<TAB>` line-number \
+     metadata; the edit was applied to the text without it";
+
+/// For an edit whose `old` text matches nowhere in `content` as written:
+/// when EVERY line of `old` carries a line-number prefix (`^\s*\d+\t`,
+/// copied from file_read output) and the de-numbered text does occur in
+/// `content`, return `(old, new)` with the prefixes removed (from `new`
+/// only on the lines that have one — lines the model added carry none).
+/// `None` means use the edit as written: text that matches as written is
+/// never touched, since real code can contain digits and tabs.
+pub(crate) fn denumber_edit(content: &str, old: &str, new: &str) -> Option<(String, String)> {
+    if old.is_empty() || content.contains(old) {
+        return None;
+    }
+    let stripped_old = strip_numbered(old)?;
+    if stripped_old.is_empty() || !content.contains(&stripped_old) {
+        return None;
+    }
+    Some((stripped_old, strip_present_prefixes(new)))
 }
 
 /// Write content to a file atomically using a temporary file and rename.

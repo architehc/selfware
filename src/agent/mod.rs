@@ -1269,6 +1269,7 @@ Additional tools can be discovered using tool_search.
 - For read-only tasks (summarize, explain, review), you do NOT need cargo_check — just provide your answer
 - Use grep_search to find specific code instead of reading entire files
 - Use directory_tree to understand structure before reading files
+- file_read shows each line as `<line number><TAB><code>`: the number is metadata, not file content. Cite it as path:line; never copy it into file_edit or file_write text
 - Need containers, browsers, package managers, or other specialized tools? Use tool_search to discover them
 
 ## CRITICAL RULES
@@ -1364,6 +1365,7 @@ To call a tool, use this EXACT XML structure:
 - For read-only tasks (summarize, explain, review), you do NOT need cargo_check — just provide your answer
 - Use grep_search to find specific code instead of reading entire files
 - Use directory_tree to understand structure before reading files
+- file_read shows each line as `<line number><TAB><code>`: the number is metadata, not file content. Cite it as path:line; never copy it into file_edit or file_write text
 - Need containers, browsers, package managers, or other specialized tools? Use tool_search to discover them
 
 ## CRITICAL RULES

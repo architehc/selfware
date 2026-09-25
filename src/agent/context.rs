@@ -906,10 +906,12 @@ impl WorkLedger {
                 {
                     return;
                 }
+                // Hash the file text, not file_read's line-number prefixes:
+                // the same range read raw and numbered is the same version.
                 let content = parsed
                     .as_ref()
-                    .and_then(|v| v.get("content"))
-                    .and_then(|c| c.as_str());
+                    .and_then(crate::tools::line_numbers::raw_file_read_content);
+                let content = content.as_deref();
                 let total_lines = parsed
                     .as_ref()
                     .and_then(|v| v.get("total_lines"))

@@ -1289,6 +1289,58 @@ fn work_ledger_same_range_with_new_content_invalidates_old_coverage() {
 }
 
 #[test]
+fn work_ledger_hashes_raw_text_not_line_number_prefixes() {
+    // The same range read numbered (the default) and then raw
+    // (line_numbers: false) is the same version of the file: the prefixes
+    // are metadata and must not look like a content change.
+    let mut ledger = WorkLedger::new();
+    ledger.begin_turn(Some("task"));
+    let mut history = vec![Message::system("sys"), Message::user("task")];
+    history.extend(tool_pair(
+        "a",
+        "file_read",
+        serde_json::json!({"path": "src/x.rs", "line_range": [10, 11]}),
+        serde_json::json!({"content": "    10\tfn a() {}\n    11\tfn b() {}", "line_numbers": true,
+                           "total_lines": null, "has_more": true}),
+    ));
+    history.extend(tool_pair(
+        "b",
+        "file_read",
+        serde_json::json!({"path": "src/x.rs", "line_range": [30, 31]}),
+        serde_json::json!({"content": "    30\tfn c() {}\n    31\tfn d() {}", "line_numbers": true,
+                           "total_lines": null, "has_more": true}),
+    ));
+    ledger.observe(&history, None);
+    let numbered_hash = ledger.files()[0].content_hash.clone();
+
+    ledger.begin_turn(Some("task"));
+    history.extend(tool_pair(
+        "c",
+        "file_read",
+        serde_json::json!({"path": "src/x.rs", "line_range": [10, 11], "line_numbers": false}),
+        serde_json::json!({"content": "fn a() {}\nfn b() {}", "line_numbers": false,
+                           "total_lines": null, "has_more": true}),
+    ));
+    ledger.observe(&history, None);
+    let entry = &ledger.files()[0];
+    assert_eq!(
+        entry.ranges,
+        vec![(10, 11), (30, 31)],
+        "a raw re-read of a numbered range is not a new version"
+    );
+    // The raw read hashes the same text as the numbered read of that range.
+    let mut numbered_only = WorkLedger::new();
+    numbered_only.begin_turn(Some("task"));
+    numbered_only.observe(&history[..4], None);
+    assert_eq!(
+        numbered_only.files()[0].content_hash,
+        entry.content_hash,
+        "numbered and raw reads of the same text hash equal"
+    );
+    assert_ne!(numbered_hash, entry.content_hash, "different ranges differ");
+}
+
+#[test]
 fn work_ledger_multi_edit_and_patch_apply_mark_the_file_modified() {
     for (name, args) in [
         (

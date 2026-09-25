@@ -215,6 +215,20 @@ fn test_semantic_summary_file_read() {
 }
 
 #[test]
+fn test_semantic_summary_file_read_counts_lines_of_numbered_content() {
+    // Line-number prefixes add no lines: the count matches the file.
+    let args = serde_json::json!({"path": "src/main.rs"});
+    let result = serde_json::json!({
+        "content": crate::tools::line_numbers::number_lines("a\nb\nc\n", 1),
+        "line_numbers": true,
+        "total_lines": 3
+    })
+    .to_string();
+    let summary = semantic_summary("file_read", &args, Some(&result), true, 50);
+    assert!(summary.contains("(3 lines)"), "{summary}");
+}
+
+#[test]
 fn test_semantic_summary_file_write() {
     let args = serde_json::json!({"path": "src/lib.rs"});
     let summary = semantic_summary("file_write", &args, None, true, 50);

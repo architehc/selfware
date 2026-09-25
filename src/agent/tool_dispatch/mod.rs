@@ -998,16 +998,29 @@ impl Agent {
             None | Some(Value::Null) => "whole".to_string(),
             Some(range) => range.to_string(),
         };
-        Some(format!("{path}\u{1f}{range}"))
+        // A raw read (line_numbers: false) shows other text than a numbered
+        // read of the same range: never answer one with "see the other".
+        let mode = if args.get("line_numbers").and_then(Value::as_bool) == Some(false) {
+            "\u{1f}raw"
+        } else {
+            ""
+        };
+        Some(format!("{path}\u{1f}{range}{mode}"))
     }
 
-    /// The `content` string of a successful `file_read` result.
+    /// Load a successful `file_read` result into the context map. The map
+    /// holds file text (token costs, skeletons), so the tool's line-number
+    /// prefixes are removed first.
+    pub(super) async fn track_file_read_result_in_context_map(&mut self, path: &str, result: &str) {
+        if let Some(content) = Self::file_read_result_content(result) {
+            self.track_file_read_in_context_map(path, &content).await;
+        }
+    }
+
+    /// The file text of a successful `file_read` result: `content` without
+    /// the tool's line-number prefixes (see `tools::line_numbers`).
     fn file_read_result_content(result: &str) -> Option<String> {
-        serde_json::from_str::<Value>(result)
-            .ok()?
-            .get("content")?
-            .as_str()
-            .map(str::to_string)
+        crate::tools::line_numbers::raw_file_read_content_str(result)
     }
 
     /// Remember the full `file_read` result just pushed (the last message),
@@ -1072,7 +1085,9 @@ impl Agent {
         }
 
         let args = serde_json::from_str::<Value>(args_str).unwrap_or_default();
-        let (path, range) = key.split_once('\u{1f}').unwrap_or((key.as_str(), "whole"));
+        let mut key_parts = key.split('\u{1f}');
+        let path = key_parts.next().unwrap_or(key.as_str());
+        let range = key_parts.next().unwrap_or("whole");
         let total_lines = serde_json::from_str::<Value>(raw_result)
             .ok()
             .and_then(|v| v.get("total_lines").cloned());
@@ -1499,9 +1514,11 @@ impl Agent {
                 let Ok(json) = serde_json::from_str::<Value>(result) else {
                     return;
                 };
-                let Some(content) = json.get("content").and_then(|v| v.as_str()) else {
+                // Hash the file text, not the line-number prefixes.
+                let Some(content) = crate::tools::line_numbers::raw_file_read_content(&json) else {
                     return;
                 };
+                let content = content.as_str();
                 let total_lines = json
                     .get("total_lines")
                     .and_then(|v| v.as_u64())
@@ -2492,16 +2509,8 @@ impl Agent {
                         {
                             self.file_tracker.context_files.push(path_str.clone());
                         }
-                        if let Some(content) =
-                            serde_json::from_str::<serde_json::Value>(&result_str)
-                                .ok()
-                                .and_then(|v| {
-                                    v.get("content").and_then(|c| c.as_str()).map(String::from)
-                                })
-                        {
-                            self.track_file_read_in_context_map(&path_str, &content)
-                                .await;
-                        }
+                        self.track_file_read_result_in_context_map(&path_str, &result_str)
+                            .await;
                     }
                 }
             }
@@ -2865,15 +2874,8 @@ impl Agent {
                         {
                             self.file_tracker.context_files.push(path_str.clone());
                         }
-                        if let Some(content) = serde_json::from_str::<serde_json::Value>(&result)
-                            .ok()
-                            .and_then(|v| {
-                                v.get("content").and_then(|c| c.as_str()).map(String::from)
-                            })
-                        {
-                            self.track_file_read_in_context_map(&path_str, &content)
-                                .await;
-                        }
+                        self.track_file_read_result_in_context_map(&path_str, &result)
+                            .await;
                     }
                     "file_delete" => {
                         self.file_tracker.remove_deleted(&path_str);

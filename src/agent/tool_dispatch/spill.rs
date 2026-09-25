@@ -254,14 +254,25 @@ pub(crate) fn summarize_file_read(raw: &str) -> String {
         String::new()
     };
 
+    // Numbered content keeps its absolute line-number prefixes in the
+    // preview, so the positions below are only ordinals among the RETURNED
+    // lines (a ranged read does not start at file line 1).
+    let numbered =
+        v.get(crate::tools::line_numbers::LINE_NUMBERS_KEY) == Some(&serde_json::Value::Bool(true));
     let mut summary = format!(
-        "File: {} total lines\n\n--- First 100 lines ---\n{}",
-        total_lines, head
+        "File: {} total lines\n{}\n--- First 100 lines ---\n{}",
+        total_lines,
+        if numbered {
+            "(each line keeps its line-number prefix: that number is the file line)\n"
+        } else {
+            ""
+        },
+        head
     );
     if !tail.is_empty() {
         summary.push_str(&format!(
-            "\n\n--- Last 50 lines (lines {}–{}) ---\n{}",
-            tail_start,
+            "\n\n--- Last 50 lines (returned lines {}–{}) ---\n{}",
+            tail_start + 1,
             lines.len(),
             tail
         ));

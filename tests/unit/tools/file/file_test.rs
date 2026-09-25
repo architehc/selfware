@@ -112,7 +112,12 @@ async fn file_read_line_range_streams_exact_slice() {
         "line_range": [3, 5]
     });
     let result = tool.execute(args).await.unwrap();
-    assert_eq!(result["content"].as_str().unwrap(), "line3\nline4\nline5");
+    // Numbered by default, with ABSOLUTE line numbers (the slice starts at 3).
+    assert_eq!(
+        result["content"].as_str().unwrap(),
+        "3\tline3\n4\tline4\n5\tline5"
+    );
+    assert_eq!(result["line_numbers"], true);
     assert_eq!(result["truncated"], true);
     // The slice ended before EOF, so total_lines must NOT be reported as
     // the range end — it should be null and has_more should be true.
@@ -128,7 +133,7 @@ async fn file_read_line_range_streams_exact_slice() {
         "line_range": [2, 2]
     });
     let result = tool.execute(args).await.unwrap();
-    assert_eq!(result["content"].as_str().unwrap(), "b");
+    assert_eq!(result["content"].as_str().unwrap(), "2\tb");
 }
 
 #[tokio::test]
@@ -150,7 +155,10 @@ async fn file_read_line_range_subset_does_not_claim_total() {
     });
     let result = tool.execute(args).await.unwrap();
     assert_eq!(result["lines_returned"], 3);
-    assert_eq!(result["content"].as_str().unwrap(), "line2\nline3\nline4");
+    assert_eq!(
+        result["content"].as_str().unwrap(),
+        "2\tline2\n3\tline3\n4\tline4"
+    );
     // EOF not reached → total_lines must be null, has_more must be true.
     assert_eq!(result["total_lines"], serde_json::Value::Null);
     assert_eq!(result["has_more"], true);
@@ -650,7 +658,199 @@ async fn test_file_read_single_line_file() {
 
     let result = tool.execute(args).await.unwrap();
     assert_eq!(result["total_lines"], 1);
+    assert_eq!(result["content"], "1\tonly one line");
+
+    // line_numbers: false opts out and returns the raw text.
+    let args = serde_json::json!({"path": file_path.to_str().unwrap(), "line_numbers": false});
+    let result = tool.execute(args).await.unwrap();
     assert_eq!(result["content"], "only one line");
+    assert_eq!(result["line_numbers"], false);
+}
+
+// ---- line-number prefixes: file_read output and the edit tools ----------
+
+#[tokio::test]
+async fn file_read_numbers_whole_and_ranged_reads_absolutely() {
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("n.rs");
+    let body: String = (1..=120).map(|i| format!("l{i}\n")).collect();
+    fs::write(&file_path, &body).unwrap();
+    let tool = FileRead::with_safety_config(permissive_safety_config());
+    let p = file_path.to_str().unwrap();
+
+    let whole = tool.execute(serde_json::json!({"path": p})).await.unwrap();
+    assert_eq!(whole["line_numbers"], true);
+    assert_eq!(whole["total_lines"], 120);
+    let content = whole["content"].as_str().unwrap();
+    assert!(content.starts_with("  1\tl1\n  2\tl2\n"));
+    assert!(content.ends_with("120\tl120\n"), "terminator kept");
+    // Stripping the prefixes gives back the file byte for byte.
+    assert_eq!(
+        crate::tools::line_numbers::raw_file_read_content(&whole).as_deref(),
+        Some(body.as_str())
+    );
+
+    let ranged = tool
+        .execute(serde_json::json!({"path": p, "line_range": [100, 102]}))
+        .await
+        .unwrap();
+    assert_eq!(
+        ranged["content"].as_str().unwrap(),
+        "100\tl100\n101\tl101\n102\tl102"
+    );
+    assert_eq!(ranged["line_numbers"], true);
+
+    let raw = tool
+        .execute(serde_json::json!({"path": p, "line_range": [100, 101], "line_numbers": false}))
+        .await
+        .unwrap();
+    assert_eq!(raw["content"].as_str().unwrap(), "l100\nl101");
+    assert_eq!(raw["line_numbers"], false);
+}
+
+#[tokio::test]
+async fn file_edit_strips_copied_line_number_prefixes_and_says_so() {
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("e.rs");
+    fs::write(&file_path, "fn a() {\n    let x = 1;\n}\n").unwrap();
+    let p = file_path.to_str().unwrap();
+    // The model pasted file_read output, prefixes and all; its new line
+    // (the `let y`) has no prefix.
+    let out = FileEdit::with_safety_config(permissive_safety_config())
+        .execute(serde_json::json!({
+            "path": p,
+            "old_string": "     2\t    let x = 1;\n     3\t}",
+            "new_string": "     2\t    let x = 2;\n    let y = 3;\n     3\t}"
+        }))
+        .await
+        .unwrap();
+    assert_eq!(out["line_number_prefixes_stripped"], true);
+    assert!(out["note"]
+        .as_str()
+        .unwrap()
+        .contains("line-number prefixes stripped"));
+    assert_eq!(
+        fs::read_to_string(&file_path).unwrap(),
+        "fn a() {\n    let x = 2;\n    let y = 3;\n}\n"
+    );
+}
+
+#[tokio::test]
+async fn file_edit_never_strips_text_that_matches_as_written() {
+    // A TSV whose real lines are `<n><TAB>value`: old_str matches as
+    // written, so nothing is stripped from either side.
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("ids.tsv");
+    fs::write(&file_path, "1\tone\n2\ttwo\n3\tthree\n").unwrap();
+    let out = FileEdit::with_safety_config(permissive_safety_config())
+        .execute(serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "old_str": "2\ttwo",
+            "new_str": "2\tTWO"
+        }))
+        .await
+        .unwrap();
+    assert!(out.get("line_number_prefixes_stripped").is_none());
+    assert_eq!(
+        fs::read_to_string(&file_path).unwrap(),
+        "1\tone\n2\tTWO\n3\tthree\n"
+    );
+}
+
+#[tokio::test]
+async fn file_edit_does_not_strip_when_a_line_lacks_the_prefix_or_nothing_matches() {
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("m.rs");
+    fs::write(&file_path, "fn a() {}\nfn b() {}\n").unwrap();
+    let tool = FileEdit::with_safety_config(permissive_safety_config());
+    let p = file_path.to_str().unwrap();
+    // One line without a prefix: not a numbered copy, plain not-found.
+    let err = tool
+        .execute(serde_json::json!({"path": p, "old_str": "     1\tfn a() {}\nfn b() {}", "new_str": "x"}))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("not found"), "{err}");
+    // Every line prefixed but the de-numbered text is not in the file.
+    let err = tool
+        .execute(serde_json::json!({"path": p, "old_str": "     1\tfn z() {}", "new_str": "x"}))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("not found"), "{err}");
+    assert_eq!(
+        fs::read_to_string(&file_path).unwrap(),
+        "fn a() {}\nfn b() {}\n"
+    );
+}
+
+#[tokio::test]
+async fn file_multi_edit_strips_copied_prefixes_per_edit() {
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("mm.rs");
+    fs::write(&file_path, "fn a() {}\nfn b() {}\nfn c() {}\n").unwrap();
+    let p = file_path.to_str().unwrap();
+    let out = FileMultiEdit::with_safety_config(permissive_safety_config())
+        .execute(serde_json::json!({"edits": [
+            {"path": p, "old_str": "     1\tfn a() {}", "new_str": "     1\tfn a2() {}"},
+            {"path": p, "old_str": "fn c() {}", "new_str": "fn c2() {}"}
+        ]}))
+        .await
+        .unwrap();
+    assert_eq!(out["line_number_prefixes_stripped"], serde_json::json!([0]));
+    assert_eq!(
+        fs::read_to_string(&file_path).unwrap(),
+        "fn a2() {}\nfn b() {}\nfn c2() {}\n"
+    );
+}
+
+#[tokio::test]
+async fn file_write_refuses_numbered_content_for_a_file_without_that_shape() {
+    let temp_dir = TempDir::new().unwrap();
+    let tool = FileWrite::with_safety_config(permissive_safety_config());
+    let new_file = temp_dir.path().join("new.rs");
+    let numbered = "     1\tfn main() {}\n     2\t\n";
+    let err = tool
+        .execute(serde_json::json!({"path": new_file.to_str().unwrap(), "content": numbered}))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("line-number prefix"), "{err}");
+    assert!(!new_file.exists(), "nothing written");
+
+    // Existing plain file: refused too.
+    let plain = temp_dir.path().join("plain.rs");
+    fs::write(&plain, "fn main() {}\n").unwrap();
+    assert!(tool
+        .execute(serde_json::json!({"path": plain.to_str().unwrap(), "content": numbered}))
+        .await
+        .is_err());
+    assert_eq!(fs::read_to_string(&plain).unwrap(), "fn main() {}\n");
+
+    // A file that already has the shape (a `cat -n` listing) can be rewritten.
+    let listing = temp_dir.path().join("listing.txt");
+    fs::write(&listing, "1\told\n").unwrap();
+    tool.execute(serde_json::json!({"path": listing.to_str().unwrap(), "content": "1\tnew\n"}))
+        .await
+        .unwrap();
+    assert_eq!(fs::read_to_string(&listing).unwrap(), "1\tnew\n");
+
+    // An explicit opt-in writes numbered-looking content to a new file.
+    let tsv = temp_dir.path().join("ids.tsv");
+    tool.execute(serde_json::json!({
+        "path": tsv.to_str().unwrap(),
+        "content": "1\tone\n2\ttwo\n",
+        "allow_numbered_lines": true
+    }))
+    .await
+    .unwrap();
+    assert_eq!(fs::read_to_string(&tsv).unwrap(), "1\tone\n2\ttwo\n");
+
+    // Ordinary content with some digit-tab lines is not numbered text.
+    let mixed = temp_dir.path().join("mixed.txt");
+    tool.execute(
+        serde_json::json!({"path": mixed.to_str().unwrap(), "content": "header\n1\tone\n"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fs::read_to_string(&mixed).unwrap(), "header\n1\tone\n");
 }
 
 #[tokio::test]
@@ -888,7 +1088,7 @@ async fn test_file_read_line_range_inverted() {
     });
 
     let result = tool.execute(args).await.unwrap();
-    assert_eq!(result["content"], "line3");
+    assert_eq!(result["content"], "3\tline3");
 }
 
 #[tokio::test]
@@ -1839,7 +2039,7 @@ mod fd_checked {
             .execute(serde_json::json!({"path": p_s}))
             .await
             .unwrap();
-        assert_eq!(r["content"], "inside\n");
+        assert_eq!(r["content"], "1\tinside\n");
 
         FileEdit::with_safety_config(cfg.clone())
             .execute(serde_json::json!({"path": p_s, "old_str": "side", "new_str": "SIDE"}))
@@ -1867,7 +2067,7 @@ mod fd_checked {
             .execute(serde_json::json!({"path": p_s, "line_range": [1, 1]}))
             .await
             .unwrap();
-        assert_eq!(r["content"], "rewritten");
+        assert_eq!(r["content"], "1\trewritten");
         let names: Vec<String> = fs::read_dir(ws.join("sub"))
             .unwrap()
             .filter_map(|e| e.ok())

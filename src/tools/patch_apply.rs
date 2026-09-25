@@ -84,6 +84,75 @@ fn parse_diff_stats(diff: &str) -> (usize, usize, usize, Vec<String>) {
     (files, insertions, deletions, targets)
 }
 
+/// Parse the old/new line counts of a hunk header `@@ -a[,b] +c[,d] @@`.
+fn hunk_counts(header: &str) -> Option<(usize, usize)> {
+    let rest = header.strip_prefix("@@ -")?;
+    let (old, rest) = rest.split_once(" +")?;
+    let new = rest.split_once(" @@")?.0;
+    let count = |range: &str| -> Option<usize> {
+        match range.split_once(',') {
+            Some((_, n)) => n.parse().ok(),
+            None => Some(1),
+        }
+    };
+    Some((count(old)?, count(new)?))
+}
+
+/// A diff whose hunk lines carry file_read's line-number prefixes
+/// (` <pad>42<TAB>code`, `-<pad>42<TAB>code`), with those prefixes removed.
+///
+/// Returns `None` unless EVERY context and removed line of every hunk has
+/// the prefix (a genuine diff of numbered-looking content is left alone);
+/// added lines lose a prefix only where they carry one, since lines the
+/// model wrote fresh usually have none. Hunk bodies are delimited by the
+/// header's line counts, so header-like content lines (`--- x`) inside a
+/// hunk are handled as content.
+fn strip_numbered_diff(diff: &str) -> Option<String> {
+    use super::line_numbers::numbered_prefix_len;
+    let mut out = String::with_capacity(diff.len());
+    let mut old_left = 0usize;
+    let mut new_left = 0usize;
+    let mut changed = false;
+    for segment in diff.split_inclusive('\n') {
+        if old_left == 0 && new_left == 0 {
+            if segment.starts_with("@@ ") {
+                let (o, n) = hunk_counts(segment.trim_end())?;
+                old_left = o;
+                new_left = n;
+            }
+            out.push_str(segment);
+            continue;
+        }
+        let marker = segment.chars().next()?;
+        let body = &segment[marker.len_utf8()..];
+        match marker {
+            ' ' | '-' => {
+                let n = numbered_prefix_len(body)?;
+                if marker == ' ' {
+                    old_left = old_left.checked_sub(1)?;
+                    new_left = new_left.checked_sub(1)?;
+                } else {
+                    old_left = old_left.checked_sub(1)?;
+                }
+                out.push(marker);
+                out.push_str(&body[n..]);
+                changed = true;
+            }
+            '+' => {
+                new_left = new_left.checked_sub(1)?;
+                out.push('+');
+                match numbered_prefix_len(body) {
+                    Some(n) => out.push_str(&body[n..]),
+                    None => out.push_str(body),
+                }
+            }
+            '\\' => out.push_str(segment),
+            _ => return None,
+        }
+    }
+    changed.then_some(out)
+}
+
 /// Build a sanitized `git apply` invocation: the tool applies
 /// project-controlled diffs, so the child must not inherit host credentials
 /// (see `safety::process_env`). `kill_on_drop` ensures a dropped future (or
@@ -182,10 +251,38 @@ impl Tool for PatchApply {
             .output()
             .await;
 
+        // A diff built from file_read output may carry its line-number
+        // prefixes. Only when the diff does not apply as written, and every
+        // context/removed line is prefixed, is the de-numbered diff tried.
+        let check_passed = matches!(check_output, Ok(ref out) if out.status.success());
+        let mut numbered_temp: Option<NamedTempFile> = None;
+        if !check_passed {
+            if let Some(stripped) = strip_numbered_diff(diff) {
+                let mut t = NamedTempFile::new()?;
+                t.write_all(stripped.as_bytes())?;
+                let t_path = t.path().to_string_lossy().to_string();
+                let stripped_check = git_apply_command(&["apply", "--check", &t_path])
+                    .output()
+                    .await;
+                if matches!(stripped_check, Ok(ref out) if out.status.success()) {
+                    numbered_temp = Some(t);
+                }
+            }
+        }
+        let prefixes_stripped = numbered_temp.is_some();
+
         let applied = match check_output {
             Ok(ref out) if out.status.success() => {
                 // Check passed — apply for real
                 let apply_out = git_apply_command(&["apply", &temp_path_str]).output().await;
+                matches!(apply_out, Ok(ref o) if o.status.success())
+            }
+            _ if prefixes_stripped => {
+                let t_path = numbered_temp
+                    .as_ref()
+                    .map(|t| t.path().to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let apply_out = git_apply_command(&["apply", &t_path]).output().await;
                 matches!(apply_out, Ok(ref o) if o.status.success())
             }
             _ if allow_3way => {
@@ -206,12 +303,21 @@ impl Tool for PatchApply {
             anyhow::bail!("git apply failed: {}", stderr);
         }
 
-        Ok(serde_json::json!({
+        let mut result = serde_json::json!({
             "success": true,
             "files_changed": files,
             "insertions": insertions,
             "deletions": deletions
-        }))
+        });
+        if prefixes_stripped {
+            result["line_number_prefixes_stripped"] = Value::Bool(true);
+            result["note"] = Value::String(
+                "line-number prefixes stripped: the diff's context/removed lines carried \
+                 file_read's `N<TAB>` line-number metadata; it was applied without it"
+                    .to_string(),
+            );
+        }
+        Ok(result)
     }
 
     fn metadata(&self) -> crate::safety::ToolMetadata {

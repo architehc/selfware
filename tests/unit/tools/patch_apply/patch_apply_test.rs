@@ -268,3 +268,78 @@ async fn git_apply_command_sanitizes_env() {
         "the shared allowlist (PATH) must still reach the child; saw:\n{child_env}"
     );
 }
+
+// ---- line-number prefixes copied from file_read ---------------------------
+
+#[test]
+fn strip_numbered_diff_requires_every_context_and_removed_line_prefixed() {
+    let numbered = "--- a/f.txt\n+++ b/f.txt\n@@ -1,3 +1,3 @@\n      1\talpha\n-     2\tbeta\n+     2\tBETA\n      3\tgamma\n";
+    assert_eq!(
+        strip_numbered_diff(numbered).as_deref(),
+        Some("--- a/f.txt\n+++ b/f.txt\n@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n")
+    );
+    // Added lines without a prefix stay as written.
+    let fresh_add =
+        "--- a/f.txt\n+++ b/f.txt\n@@ -1,2 +1,3 @@\n      1\talpha\n+inserted\n      2\tbeta\n";
+    assert_eq!(
+        strip_numbered_diff(fresh_add).as_deref(),
+        Some("--- a/f.txt\n+++ b/f.txt\n@@ -1,2 +1,3 @@\n alpha\n+inserted\n beta\n")
+    );
+    // One unprefixed removed line: not a numbered copy, left alone.
+    let mixed = "--- a/f.txt\n+++ b/f.txt\n@@ -1,2 +1,2 @@\n      1\talpha\n-beta\n+BETA\n";
+    assert_eq!(strip_numbered_diff(mixed), None);
+    // A plain diff has nothing to strip.
+    let plain = "--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-old\n+new\n";
+    assert_eq!(strip_numbered_diff(plain), None);
+}
+
+fn patch_repo_with(file: &str, content: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    std::fs::write(repo.join(file), content).unwrap();
+    (dir, repo)
+}
+
+#[tokio::test]
+async fn numbered_diff_applies_with_prefixes_stripped_and_says_so() {
+    let (_dir, repo) = patch_repo_with("f.txt", "alpha\nbeta\ngamma\n");
+    let diff = "--- a/f.txt\n+++ b/f.txt\n@@ -1,3 +1,3 @@\n      1\talpha\n-     2\tbeta\n+     2\tBETA\n      3\tgamma\n";
+    let _state = crate::test_support::CwdGuard::enter(&repo);
+    let value = PatchApply
+        .execute(serde_json::json!({"diff": diff, "allow_3way": false}))
+        .await
+        .expect("de-numbered diff must apply");
+    assert_eq!(value["line_number_prefixes_stripped"], true);
+    assert!(value["note"]
+        .as_str()
+        .unwrap()
+        .contains("line-number prefixes stripped"));
+    assert_eq!(
+        std::fs::read_to_string(repo.join("f.txt")).unwrap(),
+        "alpha\nBETA\ngamma\n"
+    );
+}
+
+#[tokio::test]
+async fn diff_of_genuinely_numbered_content_applies_as_written() {
+    // The file itself has `N<TAB>` lines: the diff matches as written and
+    // must never be de-numbered.
+    let (_dir, repo) = patch_repo_with("ids.tsv", "1\tone\n2\ttwo\n");
+    let diff = "--- a/ids.tsv\n+++ b/ids.tsv\n@@ -1,2 +1,2 @@\n 1\tone\n-2\ttwo\n+2\tTWO\n";
+    let _state = crate::test_support::CwdGuard::enter(&repo);
+    let value = PatchApply
+        .execute(serde_json::json!({"diff": diff, "allow_3way": false}))
+        .await
+        .expect("diff matching as written must apply");
+    assert!(value.get("line_number_prefixes_stripped").is_none());
+    assert_eq!(
+        std::fs::read_to_string(repo.join("ids.tsv")).unwrap(),
+        "1\tone\n2\tTWO\n"
+    );
+}

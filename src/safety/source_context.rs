@@ -194,11 +194,22 @@ fn gate_text(text: &str, policy: &TextPolicy<'_>) -> TextGate {
     if text.is_empty() {
         return gate;
     }
+    // Rules see each line WITHOUT a leading line-number prefix
+    // (`^\s*\d+\t`, file_read's default output and its spill preview):
+    // `   42\tsystem: ...` must match the line-anchored role-switch rule
+    // exactly like `system: ...`, and a numbered comment line must still
+    // read as a comment. Removing a prefix never splits or joins logical
+    // lines, so line N of the scan is line N of the text.
+    let scan_owned = text
+        .split_inclusive('\n')
+        .any(|l| crate::tools::line_numbers::numbered_prefix_len(l).is_some())
+        .then(|| crate::tools::line_numbers::strip_present_prefixes(text));
+    let scan_text = scan_owned.as_deref().unwrap_or(text);
     let report = analyze_source(
         &format!("tool:{}", policy.tool_name),
         SourceKind::ToolOutput,
         policy.classification,
-        text,
+        scan_text,
     );
     if report.findings.is_empty() {
         return gate;
@@ -207,6 +218,8 @@ fn gate_text(text: &str, policy: &TextPolicy<'_>) -> TextGate {
     // U+2029); rebuild on the very same split so a finding always rewrites
     // the line it was reported on.
     let lines: Vec<&str> = logical_lines(text).collect();
+    let scan_lines: Vec<&str> = logical_lines(scan_text).collect();
+    debug_assert_eq!(lines.len(), scan_lines.len());
     let mut lines_to_replace: BTreeSet<usize> = BTreeSet::new();
     for finding in &report.findings {
         let sanitize = finding.kind == "hidden_unicode" || finding.severity == "high";
@@ -216,7 +229,7 @@ fn gate_text(text: &str, policy: &TextPolicy<'_>) -> TextGate {
         let line_text = finding
             .line
             .checked_sub(1)
-            .and_then(|i| lines.get(i))
+            .and_then(|i| scan_lines.get(i))
             .copied()
             .unwrap_or("");
         let downgrade = finding.kind == "exfiltration_hint"
@@ -238,6 +251,12 @@ fn gate_text(text: &str, policy: &TextPolicy<'_>) -> TextGate {
     let mut out = String::with_capacity(text.len() + 64);
     for (idx, segment) in lines.iter().enumerate() {
         if lines_to_replace.contains(&(idx + 1)) {
+            // Keep a line-number prefix: the numbering of the lines after a
+            // removed one must stay true.
+            let prefix_len = scan_lines
+                .get(idx)
+                .map_or(0, |scanned| segment.len().saturating_sub(scanned.len()));
+            out.push_str(&segment[..prefix_len]);
             out.push_str(REMOVED_LINE);
             // Keep the line break, normalized to \n: the separator itself may
             // be the hidden character that triggered the finding.

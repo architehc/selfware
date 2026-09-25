@@ -325,6 +325,11 @@ fn evidence_review_answer_is_flagged_with_the_actual_lines() {
         "`check_id_preserves_test_selectors_and_drops_flags` cited at \
          verification_scope.rs:1046-1078 but found at src/agent/verification_scope.rs:493"
     ));
+    // And points at file_read's line-number prefixes instead of counting.
+    assert!(
+        directive.contains("file_read shows each line's number before a tab"),
+        "{directive}"
+    );
     assert!(report.problem_count() > 0);
 }
 
