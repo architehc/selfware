@@ -2381,6 +2381,14 @@ impl Agent {
             (&["java"][..], "java", "mvn test"),
             (&["py"][..], "python", "python3 -m py_compile <path>"),
         ] {
+            // Cargo verifiers only when a manifest applies to this task: a
+            // stray `.rs` write in a non-Rust workspace must not steer the
+            // model into cargo runs that can only fail.
+            if ecosystem == "rust"
+                && !super::verification_scope::cargo_applies_to_task(&self.verification_task_root())
+            {
+                continue;
+            }
             if test_ecosystem != Some(ecosystem) && self.wrote_extension(exts) {
                 cmds.push(suggestion.to_string());
             }
@@ -3363,6 +3371,14 @@ impl Agent {
                 project_root: project_root.clone(),
                 runner_exists,
             };
+            // A check that could not run (missing tool, host too old) is
+            // non-blocking but proves nothing: record neither credit nor a
+            // failure for it (AGENTS.md rule 3 — never green for a check
+            // that was not performed).
+            if check.not_run {
+                debug!("{kind} not run for {path}; no verification credit recorded");
+                continue;
+            }
             let summary = if check.passed {
                 format!("{kind} passed")
             } else {

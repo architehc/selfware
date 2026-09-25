@@ -112,12 +112,11 @@ impl Agent {
                         e
                     );
                     let fallback = self
-                        .client
-                        .chat_with_meta(
+                        .await_nonstreaming_llm(self.client.chat_with_meta(
                             request_messages,
                             self.api_tools(),
                             ThinkingMode::Enabled,
-                        )
+                        ))
                         .await
                         .with_context(|| {
                             format!(
@@ -153,8 +152,11 @@ impl Agent {
             }
         } else {
             let response = self
-                .client
-                .chat_with_meta(request_messages, self.api_tools(), ThinkingMode::Enabled)
+                .await_nonstreaming_llm(self.client.chat_with_meta(
+                    request_messages,
+                    self.api_tools(),
+                    ThinkingMode::Enabled,
+                ))
                 .await;
             let response = match response {
                 Ok((response, meta)) => {
