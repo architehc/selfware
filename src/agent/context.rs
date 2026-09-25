@@ -1422,8 +1422,20 @@ impl WorkLedger {
                  the symbol index gives definitions and line numbers, not code. Before quoting \
                  code or citing exact lines from such a file, re-read just the line range you \
                  need (file_read with line_range); never answer from memory of content that \
-                 is not in context. Do not re-read whole files only to rebuild this record.",
-                self.turn
+                 is not in context. Do not re-read whole files only to rebuild this record.{}",
+                self.turn,
+                if presence.is_some_and(|p| self.files.iter().any(|f| !p.whole(&f.path))) {
+                    // Live 65,536 rerun: the model tried to hold all 14 files
+                    // at once before writing (98 reads, 14 distinct). Say
+                    // plainly that the window cannot, and how to proceed.
+                    "\nYour context cannot hold every file at once. Work one part at a time: \
+                     read what that part needs, then WRITE its findings — with exact \
+                     path:line citations — in your reply right away (your own text stays in \
+                     context), and move on. Do not re-read files you have already written \
+                     up; do not wait until everything is in context before writing."
+                } else {
+                    ""
+                }
             )
         } else {
             format!(

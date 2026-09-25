@@ -500,6 +500,10 @@ fn replay_rendered_request_tells_the_model_which_content_is_gone() {
         "a gone file carries its digest with line numbers:\n{tail}"
     );
     assert!(tail.contains("re-read just the line range you need"));
+    assert!(
+        tail.contains("Your context cannot hold every file at once"),
+        "with content gone, the model is told to write up part by part"
+    );
     assert!(tail.contains("never answer from memory of content that is not in context"));
     assert!(
         !tail.contains("Do not re-read a file listed here"),
