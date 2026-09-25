@@ -1254,6 +1254,7 @@ impl ApiClient {
         let meta = ChatMetadata {
             request_body: body,
             elapsed_ms,
+            time_to_headers_ms: None,
             finish_reason,
             prompt_tokens: coverage.prompt.then_some(prompt_tokens as u32),
             completion_tokens: coverage.completion.then_some(completion_tokens as u32),
@@ -1410,11 +1411,15 @@ impl ApiClient {
                     CircuitBreakerError::OperationFailed(err) => err,
                 }
             })?;
-        let elapsed_ms = started.elapsed().as_millis() as u64;
+        // Only the stream is established here; its body has not been read.
+        let time_to_headers_ms = started.elapsed().as_millis() as u64;
 
         let meta = ChatMetadata {
             request_body: body_for_meta,
-            elapsed_ms,
+            // Provisional: the stream consumer replaces it with the whole-call
+            // time once the body is consumed (see `ChatMetadata::elapsed_ms`).
+            elapsed_ms: time_to_headers_ms,
+            time_to_headers_ms: Some(time_to_headers_ms),
             finish_reason: None,
             prompt_tokens: None,
             completion_tokens: None,

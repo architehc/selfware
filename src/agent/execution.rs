@@ -618,6 +618,7 @@ impl Agent {
             parsed_tool_calls: parsed_tool_calls.to_vec(),
             agent_decision: decision,
             elapsed_ms: meta.elapsed_ms,
+            time_to_headers_ms: meta.time_to_headers_ms,
             evidence,
             logprobs: meta.logprobs.clone(),
         };

@@ -483,8 +483,9 @@ impl Agent {
         let mut captured_total_tokens: Option<u32> = None;
         let mut captured_cost: Option<f64> = None;
         let mut reported_usage = crate::api::Usage::default();
-        // Whole-call timer: request_meta.elapsed_ms measures time-to-headers
-        // for streaming, so the speed sample below needs its own clock.
+        // Clock for the part after the headers: request_meta carries only the
+        // time to headers. The whole call is the sum; the decode-speed sample
+        // below deliberately uses this part alone.
         let stream_started = std::time::Instant::now();
 
         let mut rx = stream.into_channel().await;
@@ -890,21 +891,28 @@ impl Agent {
         // rejected above. The synthesize "stream_end" fallback therefore only
         // fires for a stream that ended on [DONE] without a finish_reason
         // chunk, which is a complete stream, not a truncation.
-        // Measured call shape for the wrap-up forecast (agent::call_forecast):
-        // whole call = time to headers + the stream after them.
+        // Whole call = time to headers + the stream after them. One value for
+        // every consumer: the wrap-up forecast's call shape
+        // (agent::call_forecast), the `llm_response_received` event (whose
+        // contract is the full call — it used to get the stream part only)
+        // and the turn artifact's `elapsed_ms` (which used to get the header
+        // part only: 879 ms for a 701 s call).
+        let time_to_headers_ms = request_meta
+            .time_to_headers_ms
+            .unwrap_or(request_meta.elapsed_ms);
+        let whole_call_ms =
+            time_to_headers_ms.saturating_add(stream_started.elapsed().as_millis() as u64);
         self.client.record_call_shape(
             captured_prompt_tokens.unwrap_or(0) as u64,
             captured_completion_tokens.unwrap_or(0) as u64,
-            request_meta
-                .elapsed_ms
-                .saturating_add(stream_started.elapsed().as_millis() as u64),
+            whole_call_ms,
         );
         self.emit_progress(super::progress::ProgressEvent::LlmResponseReceived {
             finish_reason: captured_finish_reason
                 .clone()
                 .unwrap_or_else(|| "stream_end".into()),
             completion_tokens: captured_completion_tokens.unwrap_or(0),
-            elapsed_ms: stream_started.elapsed().as_millis() as u64,
+            elapsed_ms: whole_call_ms,
         });
 
         // Feed the endpoint's measured effective speed into the client's
@@ -927,7 +935,8 @@ impl Agent {
         if let Some(slot) = meta_out {
             *slot = crate::api::types::ChatMetadata {
                 request_body: request_meta.request_body,
-                elapsed_ms: request_meta.elapsed_ms,
+                elapsed_ms: whole_call_ms,
+                time_to_headers_ms: Some(time_to_headers_ms),
                 finish_reason: captured_finish_reason,
                 prompt_tokens: captured_prompt_tokens,
                 completion_tokens: captured_completion_tokens,

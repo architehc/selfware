@@ -58,6 +58,7 @@ fn sample_artifact() -> TurnArtifact {
             tools: vec!["file_read".into()],
         },
         elapsed_ms: 1234,
+        time_to_headers_ms: Some(56),
         logprobs: None,
     }
 }
@@ -212,6 +213,7 @@ fn turn_artifact_roundtrips_through_json() {
     assert_eq!(decoded.prompt_tokens, original.prompt_tokens);
     assert_eq!(decoded.reasoning_content, original.reasoning_content);
     assert_eq!(decoded.elapsed_ms, original.elapsed_ms);
+    assert_eq!(decoded.time_to_headers_ms, Some(56));
     assert_eq!(decoded.parsed_tool_calls.len(), 1);
     assert_eq!(decoded.parsed_tool_calls[0].function.name, "file_read");
     assert_eq!(decoded.agent_decision, original.agent_decision);
@@ -221,6 +223,17 @@ fn turn_artifact_roundtrips_through_json() {
         decoded.timestamp.timestamp_millis(),
         original.timestamp.timestamp_millis()
     );
+}
+
+/// Artifacts written before the phase split have no `time_to_headers_ms`
+/// and must stay loadable.
+#[test]
+fn artifact_without_time_to_headers_still_loads() {
+    let mut json = serde_json::to_value(sample_artifact()).unwrap();
+    json.as_object_mut().unwrap().remove("time_to_headers_ms");
+    let decoded: TurnArtifact = serde_json::from_value(json).unwrap();
+    assert_eq!(decoded.time_to_headers_ms, None);
+    assert_eq!(decoded.elapsed_ms, 1234);
 }
 
 #[tokio::test]

@@ -799,8 +799,19 @@ pub struct ChatMetadata {
     /// `temperature`, `max_tokens`, etc. Does **not** contain credentials —
     /// those live on HTTP headers, never the body.
     pub request_body: serde_json::Value,
-    /// Wall-clock duration of the HTTP request (or stream consumption).
+    /// Wall-clock duration of the WHOLE call: request send → complete
+    /// response (non-streaming, including the client's internal retries) or
+    /// → end of the consumed stream (streaming).
+    ///
+    /// On the streaming path `ApiClient::chat_stream_with_meta` returns
+    /// before the body is read, so there this holds the time to headers
+    /// until the stream consumer (`Agent::chat_streaming`) replaces it with
+    /// the whole-call time at stream end.
     pub elapsed_ms: u64,
+    /// Streaming only: send → response headers (stream established). Not a
+    /// time-to-first-token — no token has arrived yet. `None` on the
+    /// non-streaming path, where the phases are not observed separately.
+    pub time_to_headers_ms: Option<u64>,
     /// Optional `finish_reason` from the response (`"stop"`, `"length"`,
     /// `"tool_calls"`, …). `None` when the backend doesn't report it.
     pub finish_reason: Option<String>,

@@ -198,7 +198,15 @@ pub struct TurnArtifact {
     pub parsed_tool_calls: Vec<ToolCall>,
     /// What selfware did with it.
     pub agent_decision: AgentDecision,
+    /// Whole model call: request send → complete response / end of stream
+    /// (`ChatMetadata::elapsed_ms`). Artifacts written before 2026-09-25
+    /// held the streaming time-to-headers here instead.
     pub elapsed_ms: u64,
+    /// Streaming only: send → response headers (stream established), a part
+    /// of `elapsed_ms`. Not a time-to-first-token. Absent for non-streaming
+    /// calls and in older artifacts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_to_headers_ms: Option<u64>,
     /// Shadow-mode evidence ledger state at the end of this turn.
     ///
     /// Written so recorded sessions can be inspected empirically: whether the

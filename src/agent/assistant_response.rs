@@ -794,9 +794,10 @@ impl Agent {
         #[allow(unused_assignments)]
         let mut chat_metadata: Option<crate::api::types::ChatMetadata> = None;
         // Whole-call wall time of a SUCCESSFUL streamed call (send → stream
-        // end). `ChatMetadata::elapsed_ms` on the streamed path is only
-        // time-to-headers, so the zero-content long-call check needs its own
-        // clock. `None` for the non-streaming path, whose client already
+        // end), for the zero-content long-call check. Measured here around
+        // the whole `chat_streaming` call (the same phase as
+        // `ChatMetadata::elapsed_ms`, which is only set when a meta slot is
+        // passed). `None` for the non-streaming path, whose client already
         // types a long empty call as `ZeroContentLongCall`.
         let mut streamed_call_elapsed_ms: Option<u64> = None;
         // `force_non_streaming` latches after a streamed turn came back empty: the

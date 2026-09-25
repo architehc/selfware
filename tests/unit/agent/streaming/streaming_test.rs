@@ -575,3 +575,115 @@ async fn streaming_prompt_and_total_without_completion_does_not_double_count() {
     assert_eq!(agent.run_summary().total_tokens, 150);
     server.await.unwrap();
 }
+
+/// Audit item 5 (review turn_0019: artifact elapsed_ms 879 ms for a 701 s
+/// call). A stream whose headers arrive at once but whose body takes
+/// `BODY_DELAY_MS` must report the WHOLE call as `elapsed_ms` — in the
+/// metadata the turn artifact copies, in `llm_response_received` and in the
+/// call shape the deadline forecast measures — with the header time as its
+/// own, smaller field.
+#[tokio::test]
+async fn streamed_call_elapsed_is_the_whole_call_and_headers_time_is_separate() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    const BODY_DELAY_MS: u64 = 400;
+
+    #[derive(Default)]
+    struct Received(std::sync::Mutex<Vec<u64>>);
+    impl super::super::progress::ProgressEmitter for Received {
+        fn emit(&self, event: super::super::progress::ProgressEvent) {
+            if let super::super::progress::ProgressEvent::LlmResponseReceived {
+                elapsed_ms, ..
+            } = event
+            {
+                self.0.lock().unwrap().push(elapsed_ms);
+            }
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        loop {
+            let mut chunk = [0; 8192];
+            let n = socket.read(&mut chunk).await.unwrap();
+            assert!(n > 0);
+            request.extend_from_slice(&chunk[..n]);
+            if let Some(split) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&request[..split]).to_lowercase();
+                let length: usize = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .map(|v| v.trim().parse().unwrap())
+                    .unwrap_or(0);
+                if request.len() >= split + 4 + length {
+                    break;
+                }
+            }
+        }
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n\
+                  data: {\"choices\":[{\"delta\":{\"content\":\"part one \"}}]}\n\n",
+            )
+            .await
+            .unwrap();
+        socket.flush().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(BODY_DELAY_MS)).await;
+        socket
+            .write_all(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"part two\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":4,\"total_tokens\":14}}\n\n\
+                  data: [DONE]\n\n",
+            )
+            .await
+            .unwrap();
+    });
+
+    let mut config = crate::config::Config {
+        endpoint,
+        ..Default::default()
+    };
+    config.cache.enabled = false;
+    let received = std::sync::Arc::new(Received::default());
+    let agent = Agent::new(config)
+        .await
+        .unwrap()
+        .with_progress_emitter(received.clone());
+    let mut meta = crate::api::types::ChatMetadata::default();
+    let (content, _, _) = agent
+        .chat_streaming(
+            vec![Message::user("say it")],
+            None,
+            ThinkingMode::Enabled,
+            Some(&mut meta),
+        )
+        .await
+        .expect("stream completes");
+    server.await.unwrap();
+    assert_eq!(content, "part one part two");
+
+    let headers = meta
+        .time_to_headers_ms
+        .expect("a streamed call records its header time");
+    assert!(
+        meta.elapsed_ms >= BODY_DELAY_MS,
+        "elapsed_ms must cover the body ({BODY_DELAY_MS} ms), got {}",
+        meta.elapsed_ms
+    );
+    assert!(
+        headers < BODY_DELAY_MS && headers <= meta.elapsed_ms,
+        "headers arrived before the delayed body: {headers} vs {}",
+        meta.elapsed_ms
+    );
+    assert_eq!(
+        received.0.lock().unwrap().as_slice(),
+        &[meta.elapsed_ms],
+        "llm_response_received reports the same whole-call time"
+    );
+    let shape = agent.client.call_shapes().last().cloned().expect("shape");
+    assert_eq!(
+        shape.elapsed_ms, meta.elapsed_ms,
+        "the deadline forecast measures the whole call"
+    );
+}
