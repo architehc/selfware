@@ -890,6 +890,15 @@ impl Agent {
         // rejected above. The synthesize "stream_end" fallback therefore only
         // fires for a stream that ended on [DONE] without a finish_reason
         // chunk, which is a complete stream, not a truncation.
+        // Measured call shape for the wrap-up forecast (agent::call_forecast):
+        // whole call = time to headers + the stream after them.
+        self.client.record_call_shape(
+            captured_prompt_tokens.unwrap_or(0) as u64,
+            captured_completion_tokens.unwrap_or(0) as u64,
+            request_meta
+                .elapsed_ms
+                .saturating_add(stream_started.elapsed().as_millis() as u64),
+        );
         self.emit_progress(super::progress::ProgressEvent::LlmResponseReceived {
             finish_reason: captured_finish_reason
                 .clone()

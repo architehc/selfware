@@ -114,6 +114,17 @@ struct State {
     total: Usage,
     pending: Usage,
     call_stats: CallLatencyStats,
+    call_shapes: Vec<CallShape>,
+}
+
+/// One completed model call's measured shape: prompt size, completion
+/// size and wall time. The wrap-up forecast (`agent::call_forecast`)
+/// predicts the next call and the final answer from these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallShape {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub elapsed_ms: u64,
 }
 
 impl State {
@@ -245,6 +256,24 @@ impl UsageLedger {
 
     /// Snapshot of the run's per-call wall-time stats (count / total / max /
     /// slowest-call detail), for the end-of-run summary.
+    /// Record one completed call's shape (see [`CallShape`]).
+    pub(crate) fn record_call_shape(&self, shape: CallShape) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .call_shapes
+            .push(shape);
+    }
+
+    /// Every completed call's shape this run, oldest first.
+    pub fn call_shapes(&self) -> Vec<CallShape> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .call_shapes
+            .clone()
+    }
+
     pub fn call_latency_stats(&self) -> CallLatencyStats {
         self.0
             .lock()

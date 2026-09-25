@@ -3,21 +3,46 @@ use crate::checkpoint::TaskCheckpoint;
 use crate::testing::mock_api::MockLlmServer;
 use std::time::Duration;
 
-// ── the reserve formula (measured latency, floor, cap) ──────────────────
+// ── the time window (forecast next call + final answer, floor, cap) ─────
+
+fn shape(prompt: u64, completion: u64, ms: u64) -> crate::api::usage::CallShape {
+    crate::api::usage::CallShape {
+        prompt_tokens: prompt,
+        completion_tokens: completion,
+        elapsed_ms: ms,
+    }
+}
+
+/// Four 100-token calls at a 100k prompt in 20 s (prefill 0.2 ms/token)
+/// and one 3,000-token call in 150 s (20 tok/s): next call ~25 s, final
+/// answer 20 + 6,526 / 20 = ~347 s → window 372 s.
+fn record_slow_endpoint(agent: &Agent) {
+    for _ in 0..4 {
+        agent.client.record_call_shape(100_000, 100, 20_000);
+    }
+    agent.client.record_call_shape(100_000, 3_000, 150_000);
+}
 
 #[test]
-fn reserve_is_measured_from_the_slowest_call_with_floor_and_cap() {
-    // The live replays (900 s budget): slowest 164.446 s → 2x = 329 s;
-    // slowest 83.558 s → 168 s.
-    assert_eq!(wrap_up_reserve_secs(164_446, 900), 329);
-    assert_eq!(wrap_up_reserve_secs(83_558, 900), 168);
-    // No measurement / fast endpoint: the floor.
-    assert_eq!(wrap_up_reserve_secs(0, 900), WRAP_UP_RESERVE_FLOOR_SECS);
-    assert_eq!(wrap_up_reserve_secs(800, 900), WRAP_UP_RESERVE_FLOOR_SECS);
-    // Slowest call past a quarter of the budget: capped at half of it.
-    assert_eq!(wrap_up_reserve_secs(400_000, 900), 450);
+fn time_window_is_the_forecast_next_call_plus_answer_with_floor_and_cap() {
+    use crate::agent::call_forecast::CallForecast;
+    let slow: Vec<_> = (0..4)
+        .map(|_| shape(100_000, 100, 20_000))
+        .chain([shape(100_000, 3_000, 150_000)])
+        .collect();
+    let f = CallForecast::from_calls(&slow, None);
+    assert_eq!((f.next_call_secs(), f.answer_secs()), (25, 347));
+    assert_eq!(time_window_secs(&f, 900), 372);
+    // Fast endpoint (0.05 ms/token prefill, 300 tok/s): the 30 s floor.
+    let fast = [shape(10_000, 100, 500), shape(10_000, 3_000, 10_000)];
+    let f = CallForecast::from_calls(&fast, None);
+    assert_eq!(time_window_secs(&f, 900), WRAP_UP_RESERVE_FLOOR_SECS);
+    // Very slow endpoint (5 tok/s): capped at two thirds of the budget.
+    let crawl = [shape(100_000, 2_000, 400_000)];
+    let f = CallForecast::from_calls(&crawl, None);
+    assert_eq!(time_window_secs(&f, 900), 600);
     // Sub-minute budgets: the cap wins over the floor.
-    assert_eq!(wrap_up_reserve_secs(0, 40), 20);
+    assert_eq!(time_window_secs(&f, 40), 26);
 }
 
 fn directive_count(agent: &Agent) -> usize {
@@ -33,30 +58,28 @@ fn backdate(agent: &mut Agent, elapsed_secs: u64) {
 }
 
 #[tokio::test]
-async fn wrap_up_fires_once_when_remaining_time_drops_below_the_measured_reserve() {
+async fn wrap_up_fires_once_when_remaining_time_drops_below_the_forecast_window() {
     let server = MockLlmServer::builder().with_response("done").build().await;
     let mut config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
     config.agent.max_wall_secs = Some(900);
     let mut agent = Agent::new(config).await.unwrap();
-    // A slow endpoint: the slowest call so far took 164 s → reserve 329 s.
-    agent
-        .client
-        .record_call_elapsed_for_test(Duration::from_millis(164_446));
+    record_slow_endpoint(&agent); // window 372 s
 
-    backdate(&mut agent, 500); // 400 s left > 329 s
+    backdate(&mut agent, 500); // 400 s left >= 372 s
     agent.maybe_inject_wrap_up();
     assert_eq!(directive_count(&agent), 0, "too early");
 
-    backdate(&mut agent, 580); // 320 s left <= 329 s
+    backdate(&mut agent, 540); // 360 s left < 372 s
     agent.maybe_inject_wrap_up();
     assert_eq!(directive_count(&agent), 1);
     let text = agent.messages.last().unwrap().content.text_all();
     assert!(
-        text.contains("the slowest model call in this run took 165s"),
+        text.contains("a final answer is forecast to take ~347s"),
         "{text}"
     );
     assert!(text.contains("Write your FINAL ANSWER NOW"), "{text}");
     assert!(text.contains("UNFINISHED"), "{text}");
+    assert_eq!(agent.wrap_up_issued(), Some(WrapUpCause::Deadline));
 
     backdate(&mut agent, 700);
     agent.maybe_inject_wrap_up();
@@ -66,19 +89,18 @@ async fn wrap_up_fires_once_when_remaining_time_drops_below_the_measured_reserve
 
 #[tokio::test]
 async fn wrap_up_uses_the_measurement_not_a_fixed_fraction() {
-    // Same elapsed time (580 of 900 s), fast endpoint: the reserve is the
+    // Same elapsed time (540 of 900 s), fast endpoint: the window is the
     // 30 s floor, so nothing fires yet.
     let server = MockLlmServer::builder().with_response("done").build().await;
     let mut config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
     config.agent.max_wall_secs = Some(900);
     let mut agent = Agent::new(config).await.unwrap();
-    agent
-        .client
-        .record_call_elapsed_for_test(Duration::from_millis(2_000));
-    backdate(&mut agent, 580);
+    agent.client.record_call_shape(10_000, 100, 500);
+    agent.client.record_call_shape(10_000, 3_000, 10_000);
+    backdate(&mut agent, 540);
     agent.maybe_inject_wrap_up();
     assert_eq!(directive_count(&agent), 0);
-    backdate(&mut agent, 875); // 25 s left <= 30 s floor
+    backdate(&mut agent, 875); // 25 s left < 30 s floor
     agent.maybe_inject_wrap_up();
     assert_eq!(directive_count(&agent), 1);
     server.stop().await;
@@ -118,11 +140,9 @@ async fn slow_run_near_the_deadline_gets_one_wrap_up_and_answers_in_time() {
         "deadline-ok".to_string(),
         "Review the module and report findings. Do not edit files.".to_string(),
     ));
-    // This run's calls have been slow (120 s → reserve 240 s) and 700 s of
-    // the 900 s budget are gone (resumed segment): 200 s left.
-    agent
-        .client
-        .record_call_elapsed_for_test(Duration::from_secs(120));
+    // A slow endpoint (window 372 s) and 700 s of the 900 s budget gone
+    // (resumed segment): 200 s left.
+    record_slow_endpoint(&agent);
     agent.prior_elapsed_secs = 700;
 
     let result = agent.continue_execution().await;
@@ -253,28 +273,6 @@ async fn per_call_cap_abort_is_labelled_call_time_cap_through_the_loop() {
 }
 
 // ── completion gates vs the deadline (val083 b2_350000) ──────────────────
-
-#[test]
-fn correction_round_fit_is_measured_from_the_run_latency() {
-    // b2_350000 at the rejection: ~540 s left, slowest call 115.6 s →
-    // reserve 232 s: a round still fits.
-    assert_eq!(correction_round_no_fit(540, 115_568, 900), None);
-    // At the wrap-up: 139 s left, slowest 232.4 s (reserve capped at 450).
-    let why = correction_round_no_fit(139, 232_364, 900).expect("no fit");
-    assert!(
-        why.contains("139s") && why.contains("reserve 450s"),
-        "{why}"
-    );
-    // Capped reserve (50 s of a 100 s budget) below one slowest call (80 s):
-    // 60 s left is still too little for one call.
-    let why = correction_round_no_fit(60, 80_000, 100).expect("no fit");
-    assert!(why.contains("slowest model call 80s"), "{why}");
-    assert_eq!(correction_round_no_fit(90, 80_000, 100), None);
-    // One-call fit needs a measurement.
-    assert!(one_call_no_fit(139, 232_364));
-    assert!(!one_call_no_fit(375, 232_364));
-    assert!(!one_call_no_fit(1, 0));
-}
 
 /// Rule-5 sweep: the requirements audit is itself a model call. Inside the
 /// deadline window it steps aside WITHOUT calling the model and records
@@ -517,18 +515,20 @@ async fn rejected_draft_is_taken_only_when_one_call_no_longer_fits() {
     let mut config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
     config.agent.max_wall_secs = Some(900);
     let mut agent = Agent::new(config).await.unwrap();
-    agent
-        .client
-        .record_call_elapsed_for_test(Duration::from_millis(232_364));
+    // b2_350000: its slowest long call (call 19: 3,495 tokens in 231.2 s at
+    // a 154k prompt, 15.1 tok/s) and its rejected draft's call (3,079
+    // tokens) → final answer forecast 154k × 0.615 ms + 3,079 / 15.1 ≈ 298 s.
+    agent.client.record_call_shape(153_934, 3_495, 231_163);
+    agent.wrap_up.lock().unwrap().draft_completion_tokens = Some(3_079);
     let draft = b2_350000().draft;
     set_rejected_draft(&agent, &draft);
 
-    backdate(&mut agent, 525); // 375 s left: one call still fits
+    backdate(&mut agent, 525); // 375 s left: the answer still fits
     assert_eq!(agent.take_rejected_draft_at_limit(), None);
 
     // A draft judged before a later edit is never accepted.
     agent.mutation_sequence += 1;
-    backdate(&mut agent, 761); // 139 s left < 232 s
+    backdate(&mut agent, 761); // 139 s left < ~298 s
     assert_eq!(agent.take_rejected_draft_at_limit(), None);
     agent.mutation_sequence -= 1;
 
@@ -570,9 +570,7 @@ async fn deadline_with_a_pending_rejected_draft_completes_with_it_and_a_warning(
         "deadline-draft".to_string(),
         "Review src/agent and report findings. Do not edit files.".to_string(),
     ));
-    agent
-        .client
-        .record_call_elapsed_for_test(Duration::from_millis(232_364));
+    agent.client.record_call_shape(153_934, 3_495, 231_163);
     agent.prior_elapsed_secs = 761;
     let run = b2_350000();
     agent.messages.push(Message::assistant(run.draft.clone()));
@@ -616,26 +614,28 @@ fn any_wrap_up_count(agent: &Agent) -> usize {
     directive_count(agent) + budget_directive_count(agent)
 }
 
+/// One measured call at a 95k prompt (the b2_163840 replay's size): next
+/// call ~96k tokens, final answer 95k + 6,526 → token window ~197.5k.
+fn record_95k_prompt(agent: &Agent) {
+    agent.client.record_call_shape(95_000, 1_000, 30_000);
+}
+
 #[test]
-fn token_reserve_is_measured_from_the_largest_turn_with_floor_and_cap() {
-    // Replay of b2_163840: ~95k-token turns under a 3M budget → 190k.
-    assert_eq!(token_wrap_up_reserve(95_000, 3_000_000), 190_000);
-    // Nothing measured / small turns: the floor.
-    assert_eq!(
-        token_wrap_up_reserve(0, 3_000_000),
-        TOKEN_WRAP_UP_RESERVE_FLOOR
-    );
-    assert_eq!(token_wrap_up_reserve(5_000, 3_000_000), 40_000);
-    // Small budgets: the cap (half the budget) wins over the floor.
-    assert_eq!(token_wrap_up_reserve(0, 60_000), 30_000);
-    assert!(token_round_no_fit(190_000, 95_000, 3_000_000).is_some());
-    assert!(token_round_no_fit(190_001, 95_000, 3_000_000).is_none());
-    // Cost: 2x the most expensive turn, capped; never without a measurement.
-    assert!((cost_wrap_up_reserve(0.25, 10.0) - 0.5).abs() < 1e-9);
-    assert!((cost_wrap_up_reserve(4.0, 10.0) - 5.0).abs() < 1e-9);
-    assert_eq!(cost_round_no_fit(0.01, 0.0, 10.0), None);
-    assert!(cost_round_no_fit(0.5, 0.25, 10.0).is_some());
-    assert!(cost_round_no_fit(0.51, 0.25, 10.0).is_none());
+fn token_window_is_the_forecast_next_call_plus_answer_with_floor_and_cap() {
+    use crate::agent::call_forecast::CallForecast;
+    let f = CallForecast::from_calls(&[shape(95_000, 1_000, 30_000)], None);
+    assert_eq!(token_window(&f, 3_000_000), 96_000 + 101_526);
+    // Nothing measured: the floor; small budgets: half the budget.
+    let empty = CallForecast::from_calls(&[], None);
+    assert_eq!(token_window(&empty, 3_000_000), TOKEN_WRAP_UP_RESERVE_FLOOR);
+    assert_eq!(token_window(&f, 300_000), 150_000);
+    assert!(token_window_reached(197_525, &f, 3_000_000).is_some());
+    assert!(token_window_reached(197_526, &f, 3_000_000).is_none());
+    // Cost: priced at this run's measured cost per token; never without one.
+    assert_eq!(cost_window_reached(0.01, 0.0, &f, 10.0), None);
+    // 197,526 tokens at $0.000001 = ~$0.1975.
+    assert!(cost_window_reached(0.19, 0.000_001, &f, 10.0).is_some());
+    assert!(cost_window_reached(0.20, 0.000_001, &f, 10.0).is_none());
 }
 
 /// Tokens approach the cap: each turn uses 40k tokens against a 200k
@@ -744,12 +744,9 @@ async fn deadline_and_budget_reserves_together_inject_exactly_once() {
     config.agent.max_wall_secs = Some(900);
     config.agent.max_budget_tokens = Some(3_000_000);
     let mut agent = Agent::new(config).await.unwrap();
-    agent
-        .client
-        .record_call_elapsed_for_test(Duration::from_secs(100)); // reserve 200 s
-    agent.wrap_up.lock().unwrap().max_turn_tokens = 95_000; // reserve 190k
+    record_95k_prompt(&agent); // token window ~197.5k
     agent.client.ensure_budget_floor(2_900_000, 0.0); // 100k left
-    backdate(&mut agent, 800); // 100 s left
+    backdate(&mut agent, 800); // 100 s left, inside the time window too
     agent.maybe_inject_wrap_up();
     agent.maybe_inject_wrap_up();
     assert_eq!(any_wrap_up_count(&agent), 1);
@@ -765,18 +762,15 @@ async fn budget_wrap_up_blocks_a_later_deadline_wrap_up() {
     config.agent.max_wall_secs = Some(900);
     config.agent.max_budget_tokens = Some(3_000_000);
     let mut agent = Agent::new(config).await.unwrap();
-    agent
-        .client
-        .record_call_elapsed_for_test(Duration::from_secs(100));
-    agent.wrap_up.lock().unwrap().max_turn_tokens = 95_000;
-    agent.client.ensure_budget_floor(2_850_000, 0.0); // 150k left <= 190k
-    backdate(&mut agent, 100); // plenty of time
+    record_95k_prompt(&agent);
+    agent.client.ensure_budget_floor(2_850_000, 0.0); // 150k left < ~197.5k
+    backdate(&mut agent, 0); // 900 s left: outside the time window
     agent.maybe_inject_wrap_up();
     assert_eq!(agent.wrap_up_issued(), Some(WrapUpCause::TokenBudget));
     let text = agent.messages.last().unwrap().content.text_all();
     assert!(
         text.contains("150000 tokens of the token budget remain")
-            && text.contains("largest turn in this run used 95000 tokens"),
+            && text.contains("forecast to use ~101526 tokens"),
         "{text}"
     );
     backdate(&mut agent, 850); // now inside the deadline reserve too
@@ -785,22 +779,25 @@ async fn budget_wrap_up_blocks_a_later_deadline_wrap_up() {
     server.stop().await;
 }
 
-/// The per-turn maximum is measured from the ledger between loop turns;
-/// the first observation is only the baseline (a resumed total is not one
-/// turn).
+/// A tool-less answer of substance is a draft: its call's completion size
+/// becomes the forecast answer size. A tool-call turn is not a draft.
 #[tokio::test]
-async fn turn_usage_is_measured_between_loop_turns() {
+async fn draft_calls_set_the_forecast_answer_size() {
     let server = MockLlmServer::builder().with_response("x").build().await;
     let config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
-    let agent = Agent::new(config).await.unwrap();
-    agent.client.ensure_budget_floor(1_000_000, 0.0); // resumed segment
+    let mut agent = Agent::new(config).await.unwrap();
+    let run = b2_350000();
+    agent.client.record_call_shape(144_738, 3_079, 115_568);
+    agent.messages.push(Message::assistant(run.draft.clone()));
     agent.observe_turn_usage();
-    assert_eq!(agent.wrap_up.lock().unwrap().max_turn_tokens, 0);
-    agent.client.ensure_budget_floor(1_090_000, 0.0);
+    assert_eq!(agent.call_forecast().answer_completion_tokens, 3_079);
+    // A later tool-call turn (the correction round's grep) changes nothing.
+    agent.client.record_call_shape(153_934, 3_495, 231_163);
+    agent
+        .messages
+        .push(Message::assistant(run.after[4].clone()));
     agent.observe_turn_usage();
-    agent.client.ensure_budget_floor(1_150_000, 0.0);
-    agent.observe_turn_usage();
-    assert_eq!(agent.wrap_up.lock().unwrap().max_turn_tokens, 90_000);
+    assert_eq!(agent.call_forecast().answer_completion_tokens, 3_079);
     server.stop().await;
 }
 
@@ -812,12 +809,12 @@ async fn rejected_draft_is_taken_when_one_turn_no_longer_fits_the_budget() {
     let mut config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
     config.agent.max_budget_tokens = Some(3_000_000);
     let mut agent = Agent::new(config).await.unwrap();
-    agent.wrap_up.lock().unwrap().max_turn_tokens = 95_000;
+    record_95k_prompt(&agent);
     let draft = b2_350000().draft;
     set_rejected_draft(&agent, &draft);
     agent.client.ensure_budget_floor(2_850_000, 0.0); // 150k left: a turn fits
     assert_eq!(agent.take_rejected_draft_at_limit(), None);
-    agent.client.ensure_budget_floor(2_920_000, 0.0); // 80k left < 95k
+    agent.client.ensure_budget_floor(2_920_000, 0.0); // 80k left < ~101.5k answer
     assert_eq!(
         agent.take_rejected_draft_at_limit().as_deref(),
         Some(draft.trim())

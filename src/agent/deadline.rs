@@ -1,110 +1,131 @@
 //! Wrap-up for the wall-clock, token and cost budgets (one latch, whichever
-//! limit's measured reserve is reached first), the completion-gate
-//! step-aside inside those reserves, and the labelled partial result a run
-//! carries when it still hits a limit without a final answer.
+//! limit is reached first), the completion-gate step-aside inside those
+//! windows, and the labelled partial result a run carries when it still
+//! hits a limit without a final answer.
 //!
-//! Evidence (external review 2026-09-25, live replay on llm.selfware.design):
-//! two read-only reviews with a 15-minute budget both ended TIMEOUT with no
-//! final report. Completed model calls took a median of 28–45 s (slowest
-//! 84 s / 164 s), and the call in flight at the deadline had been reasoning
-//! for over three minutes. The existing nudges track iterations, tokens or
-//! fixed wall fractions (the 65% / 85% commit-mode bands) — none of them
-//! knows how long THIS run's model calls take, so on a slow endpoint the
-//! last nudge landed with less time left than one call needs.
+//! The window is FORECAST one turn ahead from this run's measured calls
+//! ([`super::call_forecast`]): the wrap-up fires when what is left after
+//! the next ordinary call would no longer fit the final answer, so it can
+//! never land after the last call that fits.
 
+use super::call_forecast::CallForecast;
 use super::failure_mode::FailureKind;
 use super::Agent;
 use crate::api::types::Message;
 use serde::{Deserialize, Serialize};
 
-/// Multiplier on the slowest model call measured so far this run.
+/// Lower bound on the time window, in seconds.
 ///
-/// Why 2: after the wrap-up lands, the run needs one answer-writing call —
-/// the output-heaviest turn, so budget it at the slowest call seen — and the
-/// deterministic completion gates (citation check, requirements audit) can
-/// bounce that answer back for one correction round, which is a second call.
-/// Two slowest calls cover answer + one correction. On the live replays this
-/// gives a 329 s reserve (slowest 164.4 s; wrap-up at ~571 s of 900) and a
-/// 168 s reserve (slowest 83.6 s; wrap-up at ~732 s) — both runs would have
-/// been told to answer while an answer still fit.
-pub(crate) const WRAP_UP_LATENCY_MARGIN: u64 = 2;
-
-/// Lower bound on the reserve, in seconds.
-///
-/// Why 30: before any call completes there is no measurement, and on a fast
-/// endpoint (sub-second calls) 2 × slowest would leave only a second or two,
-/// less than the tool execution, gates and verification between turns take.
-/// 30 s is about one typical call on the slowest endpoint measured (the live
+/// Why 30: before any call completes the forecast has only its fallbacks,
+/// and on a fast endpoint the forecast shrinks to seconds — less than the
+/// tool execution, gates and verification between turns take. 30 s is
+/// about one typical call on the slowest endpoint measured (the live
 /// replays' lower median was 28 s).
 pub(crate) const WRAP_UP_RESERVE_FLOOR_SECS: u64 = 30;
 
-/// Upper bound on the reserve: at most `1 / WRAP_UP_RESERVE_CAP_DIVISOR` of
-/// the wall budget.
+/// Upper bound on the time window: at most `NUM / DEN` of the wall budget.
 ///
-/// Why half: a larger reserve would put the run into wrap-up before it has
-/// spent half its time exploring. A run whose slowest call already exceeds a
-/// quarter of the budget cannot fit both exploration and an answer, and
-/// wrapping up at the half-way mark is the best it can do. The cap wins over
-/// the floor for budgets under a minute.
-pub(crate) const WRAP_UP_RESERVE_CAP_DIVISOR: u64 = 2;
+/// Why two thirds: the measured final answer on llm.selfware.design takes
+/// up to half of a 900 s budget by itself (b2_65536: 305 s; the forecast
+/// for the largest measured report is ~450 s), plus the next ordinary call.
+/// With the former half cap the b2_65536 window (504 s) was clipped to
+/// 450 s and the wrap-up fired only after the 189 s write-up call, when
+/// the answer no longer fit. Two thirds keeps a third of the budget for
+/// exploration.
+pub(crate) const WRAP_UP_RESERVE_CAP_NUM: u64 = 2;
+/// See [`WRAP_UP_RESERVE_CAP_NUM`].
+pub(crate) const WRAP_UP_RESERVE_CAP_DEN: u64 = 3;
 
-/// Seconds of wall budget to hold back for the final answer, from the
-/// slowest model call measured so far this run (`slowest_call_ms`, the
-/// client's measured `CallLatencyStats::max_ms`; 0 when none completed).
+/// Upper bound on the token/cost window: half the budget (a larger window
+/// would wrap up before half the budget was spent exploring; one final
+/// answer is far below half of any budget that fits a review).
+pub(crate) const BUDGET_RESERVE_CAP_DIVISOR: u64 = 2;
+
+/// Lower bound on the token window.
 ///
-/// The slowest call is used rather than a percentile: the client keeps
-/// count / total / max, a run makes a few dozen calls (13–30 in the live
-/// replays) so a p90 sits at or next to the max anyway, and the call that
-/// matters — the final answer — is tail-shaped (output-heavy).
-pub(crate) fn wrap_up_reserve_secs(slowest_call_ms: u64, max_wall_secs: u64) -> u64 {
-    let measured = slowest_call_ms
-        .saturating_mul(WRAP_UP_LATENCY_MARGIN)
-        .div_ceil(1000);
-    let cap = max_wall_secs / WRAP_UP_RESERVE_CAP_DIVISOR;
-    measured.max(WRAP_UP_RESERVE_FLOOR_SECS).min(cap)
+/// Why 40,000: before a call completes there is no measured prompt, and
+/// every call re-sends at least the system prompt, tool schemas and task —
+/// 20,638 prompt tokens on the first request of val083 b2_350000 — so the
+/// next call plus an answer is at least ~40k.
+pub(crate) const TOKEN_WRAP_UP_RESERVE_FLOOR: u64 = 40_000;
+
+/// Wall seconds to hold back: the next ordinary call plus the final answer
+/// (forecast), at least the floor, at most the cap.
+pub(crate) fn time_window_secs(forecast: &CallForecast, max_wall_secs: u64) -> u64 {
+    let cap = max_wall_secs.saturating_mul(WRAP_UP_RESERVE_CAP_NUM) / WRAP_UP_RESERVE_CAP_DEN;
+    (forecast.next_call_secs() + forecast.answer_secs())
+        .max(WRAP_UP_RESERVE_FLOOR_SECS)
+        .min(cap)
 }
 
-/// Why a completion-gate correction round no longer fits the wall budget,
-/// or `None` when it does.
-///
-/// A correction round is one more model call (the model fixes the answer)
-/// plus the gate re-check. It does not fit when:
-/// - the remaining time is at or below the wrap-up reserve
-///   ([`wrap_up_reserve_secs`], 2 × the slowest call measured this run) —
-///   the same line the wrap-up directive uses, so the gate and the wrap-up
-///   agree on when the run is in its last answer; or
-/// - the remaining time is below ONE slowest measured call (possible when
-///   the reserve is capped at half the budget).
-///
-/// Evidence (val083 b2_350000): the gate rejected a 4,442-char review at
-/// ~360 s of 900; the correction round's re-reads plus one 231 s call left
-/// 139 s against a slowest call of 232 s, and the run timed out with no
-/// report.
-pub(crate) fn correction_round_no_fit(
+/// Tokens to hold back: the next ordinary call plus the final answer
+/// (forecast), at least the floor, at most half the budget.
+pub(crate) fn token_window(forecast: &CallForecast, max_budget_tokens: u64) -> u64 {
+    (forecast.next_call_tokens() + forecast.answer_tokens())
+        .max(TOKEN_WRAP_UP_RESERVE_FLOOR)
+        .min(max_budget_tokens / BUDGET_RESERVE_CAP_DIVISOR)
+}
+
+/// Why the run is inside the wall-clock window (a correction round or
+/// another exploration call no longer fits before the final answer), or
+/// `None`.
+pub(crate) fn time_window_reached(
     remaining_secs: u64,
-    slowest_call_ms: u64,
+    forecast: &CallForecast,
     max_wall_secs: u64,
 ) -> Option<String> {
-    let reserve = wrap_up_reserve_secs(slowest_call_ms, max_wall_secs);
-    if remaining_secs <= reserve {
-        return Some(format!(
-            "{remaining_secs}s of the wall budget left <= reserve {reserve}s"
-        ));
-    }
-    if one_call_no_fit(remaining_secs, slowest_call_ms) {
-        return Some(format!(
-            "{remaining_secs}s of the wall budget left < slowest model call {}s",
-            slowest_call_ms.div_ceil(1000)
-        ));
-    }
-    None
+    let window = time_window_secs(forecast, max_wall_secs);
+    (remaining_secs < window).then(|| {
+        format!(
+            "{remaining_secs}s of the wall budget left < {window}s (next call ~{}s + final answer \
+             ~{}s: {} answer tokens at {:.1} tok/s, prompt {} at {:.3} ms/token)",
+            forecast.next_call_secs(),
+            forecast.answer_secs(),
+            forecast.answer_completion_tokens,
+            forecast.decode_tok_per_sec,
+            forecast.prompt_tokens,
+            forecast.prefill_ms_per_token
+        )
+    })
 }
 
-/// Whether one more model call can no longer fit: a slowest call has been
-/// measured and the remaining time is below it. Stricter than
-/// [`correction_round_no_fit`] — used to finish WITHOUT another model call.
-pub(crate) fn one_call_no_fit(remaining_secs: u64, slowest_call_ms: u64) -> bool {
-    slowest_call_ms > 0 && remaining_secs.saturating_mul(1000) < slowest_call_ms
+/// Why the run is inside the token window, or `None`.
+pub(crate) fn token_window_reached(
+    remaining_tokens: u64,
+    forecast: &CallForecast,
+    max_budget_tokens: u64,
+) -> Option<String> {
+    let window = token_window(forecast, max_budget_tokens);
+    (remaining_tokens < window).then(|| {
+        format!(
+            "{remaining_tokens} tokens of the budget left < {window} (next call ~{} + final \
+             answer ~{} tokens)",
+            forecast.next_call_tokens(),
+            forecast.answer_tokens()
+        )
+    })
+}
+
+/// Why the run is inside the cost window, or `None`. The cost of a token is
+/// this run's measured accounted cost / accounted tokens; without a
+/// reported cost there is nothing to measure and no cost window (rule 4).
+pub(crate) fn cost_window_reached(
+    remaining_usd: f64,
+    usd_per_token: f64,
+    forecast: &CallForecast,
+    max_cost_usd: f64,
+) -> Option<String> {
+    if usd_per_token <= 0.0 {
+        return None;
+    }
+    let window = ((forecast.next_call_tokens() + forecast.answer_tokens()) as f64 * usd_per_token)
+        .min(max_cost_usd / BUDGET_RESERVE_CAP_DIVISOR as f64);
+    (remaining_usd < window).then(|| {
+        format!(
+            "${remaining_usd:.4} of the cost budget left < ${window:.4} (next call + final \
+             answer at ${usd_per_token:.8}/token)"
+        )
+    })
 }
 
 /// Which limit put the run into its last answer.
@@ -158,97 +179,25 @@ impl std::fmt::Display for StepAside {
     }
 }
 
-/// Per-task wrap-up latch and the per-turn usage it is measured from.
+/// Remaining (wall secs, max), (tokens, max) and (usd, usd per token, max)
+/// for each configured limit.
+type RemainingLimits = (
+    Option<(u64, u64)>,
+    Option<(u64, u64)>,
+    Option<(f64, f64, f64)>,
+);
+
+/// Per-task wrap-up latch and the draft measurement the forecast uses.
 #[derive(Debug, Default)]
 pub(crate) struct WrapUpState {
     /// The ONE wrap-up of this task and the limit that triggered it; the
     /// deadline and the budgets share it so they never both inject.
     pub issued: Option<WrapUpCause>,
-    /// (accounted total tokens, cost) at the previous loop turn; `None`
-    /// until the first observation (the baseline).
-    pub last_seen: Option<(usize, f64)>,
-    /// Largest token use of one loop turn this run (every call of the turn:
-    /// the whole prompt is re-sent each call, plus the completion).
-    pub max_turn_tokens: usize,
-    /// Largest cost of one loop turn this run (0 while no cost is reported).
-    pub max_turn_cost: f64,
-}
-
-/// Multiplier on the largest measured turn for the budget reserve — same
-/// reasoning as [`WRAP_UP_LATENCY_MARGIN`]: one answer-writing turn plus one
-/// correction round a completion gate can bounce it into.
-pub(crate) const BUDGET_WRAP_UP_TURN_MARGIN: usize = 2;
-
-/// Lower bound on the token reserve.
-///
-/// Why 40,000: before a turn completes there is no measurement, and every
-/// turn re-sends at least the system prompt, tool schemas and task. That
-/// base measured 20,638 prompt tokens on the first request of val083
-/// b2_350000 (the `llm_request_sent` event), so no turn costs less than
-/// ~20k; two turns (answer + correction) is ~40k.
-pub(crate) const TOKEN_WRAP_UP_RESERVE_FLOOR: usize = 40_000;
-
-/// Token reserve: `2 × largest turn`, at least the floor, at most half the
-/// token budget (same cap reasoning as [`WRAP_UP_RESERVE_CAP_DIVISOR`]: a
-/// larger reserve would wrap up before half the budget was spent exploring).
-pub(crate) fn token_wrap_up_reserve(max_turn_tokens: usize, max_budget_tokens: usize) -> usize {
-    max_turn_tokens
-        .saturating_mul(BUDGET_WRAP_UP_TURN_MARGIN)
-        .max(TOKEN_WRAP_UP_RESERVE_FLOOR)
-        .min(max_budget_tokens / WRAP_UP_RESERVE_CAP_DIVISOR as usize)
-}
-
-/// Cost reserve: `2 × most expensive turn`, at most half the cost budget.
-/// No floor: endpoints that report no cost give nothing to measure, and a
-/// guessed price would be an estimate (rule 4) — with no measured cost the
-/// cost reserve is 0 and only the token/wall reserves apply.
-pub(crate) fn cost_wrap_up_reserve(max_turn_cost: f64, max_cost_usd: f64) -> f64 {
-    (max_turn_cost * BUDGET_WRAP_UP_TURN_MARGIN as f64)
-        .min(max_cost_usd / WRAP_UP_RESERVE_CAP_DIVISOR as f64)
-}
-
-/// Why a correction round no longer fits the token budget: tokens left at
-/// or below the reserve, or below one largest turn.
-pub(crate) fn token_round_no_fit(
-    remaining_tokens: usize,
-    max_turn_tokens: usize,
-    max_budget_tokens: usize,
-) -> Option<String> {
-    let reserve = token_wrap_up_reserve(max_turn_tokens, max_budget_tokens);
-    if remaining_tokens <= reserve {
-        return Some(format!(
-            "{remaining_tokens} tokens of the budget left <= reserve {reserve} \
-             ({BUDGET_WRAP_UP_TURN_MARGIN}x largest turn {max_turn_tokens}, floor \
-             {TOKEN_WRAP_UP_RESERVE_FLOOR}, cap 1/{WRAP_UP_RESERVE_CAP_DIVISOR} of \
-             {max_budget_tokens})"
-        ));
-    }
-    if max_turn_tokens > 0 && remaining_tokens < max_turn_tokens {
-        return Some(format!(
-            "{remaining_tokens} tokens of the budget left < largest turn {max_turn_tokens}"
-        ));
-    }
-    None
-}
-
-/// Why a correction round no longer fits the cost budget (see
-/// [`cost_wrap_up_reserve`]); never fires without a measured turn cost.
-pub(crate) fn cost_round_no_fit(
-    remaining_usd: f64,
-    max_turn_cost: f64,
-    max_cost_usd: f64,
-) -> Option<String> {
-    if max_turn_cost <= 0.0 {
-        return None;
-    }
-    let reserve = cost_wrap_up_reserve(max_turn_cost, max_cost_usd);
-    if remaining_usd <= reserve || remaining_usd < max_turn_cost {
-        return Some(format!(
-            "${remaining_usd:.4} of the cost budget left <= reserve ${reserve:.4} \
-             ({BUDGET_WRAP_UP_TURN_MARGIN}x largest turn ${max_turn_cost:.4})"
-        ));
-    }
-    None
+    /// Calls already attributed (index into the client's call shapes).
+    pub seen_calls: usize,
+    /// Largest completion size of a call that produced a draft (a tool-less
+    /// answer of at least [`PARTIAL_TEXT_MIN_CHARS`] prose chars) this run.
+    pub draft_completion_tokens: Option<u64>,
 }
 
 /// Minimum prose length (chars, tool-call markup stripped) for an assistant
@@ -358,60 +307,106 @@ impl PartialProgress {
 }
 
 impl Agent {
-    /// Fold the usage of the turn that just ended into this run's per-turn
-    /// maxima ([`WrapUpState`]). Called once per loop turn, before the
-    /// wrap-up checks. The first call after a reset only records the
-    /// baseline (a resumed run's seeded total is not one turn).
+    /// Attribute the calls completed since the last loop turn: when the
+    /// newest assistant message is a draft (tool-less, at least
+    /// [`PARTIAL_TEXT_MIN_CHARS`] of prose), its call's completion size is
+    /// a measured final-answer size for the forecast.
     pub(super) fn observe_turn_usage(&self) {
-        let usage = self.client.accounted_usage();
-        let cost = usage.cost.unwrap_or(0.0);
+        let calls = self.client.call_shapes();
         let mut state = self.wrap_up.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((last_tokens, last_cost)) = state.last_seen {
-            let turn_tokens = usage.total_tokens.saturating_sub(last_tokens);
-            let turn_cost = (cost - last_cost).max(0.0);
-            state.max_turn_tokens = state.max_turn_tokens.max(turn_tokens);
-            if turn_cost > state.max_turn_cost {
-                state.max_turn_cost = turn_cost;
+        if calls.len() <= state.seen_calls {
+            return;
+        }
+        state.seen_calls = calls.len();
+        let Some(latest) = self.messages.iter().rev().find(|m| m.role == "assistant") else {
+            return;
+        };
+        let text = latest.content.text_all();
+        let tool_less = latest.tool_calls.as_ref().is_none_or(|t| t.is_empty())
+            && crate::tool_parser::parse_tool_calls(&text)
+                .tool_calls
+                .is_empty();
+        if tool_less && answer_prose(&text).chars().count() >= PARTIAL_TEXT_MIN_CHARS {
+            let tokens = calls.last().map(|c| c.completion_tokens).unwrap_or(0);
+            if tokens > 0 {
+                state.draft_completion_tokens =
+                    Some(state.draft_completion_tokens.unwrap_or(0).max(tokens));
             }
         }
-        state.last_seen = Some((usage.total_tokens, cost));
     }
 
-    /// The limit whose reserve this run is inside, if any: the wall-clock
+    /// The forecast of the next call and the final answer from this run's
+    /// measured calls ([`CallForecast`]).
+    pub(super) fn call_forecast(&self) -> CallForecast {
+        let draft = self
+            .wrap_up
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .draft_completion_tokens;
+        CallForecast::from_calls(&self.client.call_shapes(), draft)
+    }
+
+    /// Remaining wall seconds, tokens and dollars for each configured limit.
+    fn remaining_limits(&self) -> RemainingLimits {
+        let wall = self
+            .config
+            .agent
+            .max_wall_secs
+            .filter(|&s| s > 0)
+            .map(|max| (max.saturating_sub(self.budget_elapsed_secs()), max));
+        let usage = self.client.accounted_usage();
+        let tokens = self
+            .config
+            .agent
+            .max_budget_tokens
+            .filter(|&b| b > 0)
+            .map(|max| {
+                (
+                    (max as u64).saturating_sub(usage.total_tokens as u64),
+                    max as u64,
+                )
+            });
+        let cost = self
+            .config
+            .agent
+            .max_cost_usd
+            .filter(|&c| c > 0.0)
+            .map(|max| {
+                let spent = usage.cost.unwrap_or(0.0);
+                let per_token = if usage.total_tokens > 0 {
+                    spent / usage.total_tokens as f64
+                } else {
+                    0.0
+                };
+                ((max - spent).max(0.0), per_token, max)
+            });
+        (wall, tokens, cost)
+    }
+
+    /// The limit whose window this run is inside, if any: the wall-clock
     /// deadline first (a timeout loses the in-flight answer outright), then
-    /// the token budget, then the cost budget. `None` while every configured
-    /// limit is outside its reserve.
+    /// the token budget, then the cost budget.
     fn limit_in_reserve(&self) -> Option<StepAside> {
-        if let Some(max_wall) = self.config.agent.max_wall_secs.filter(|&s| s > 0) {
-            let remaining = max_wall.saturating_sub(self.budget_elapsed_secs());
-            if let Some(detail) = correction_round_no_fit(
-                remaining,
-                self.client.call_latency_stats().max_ms,
-                max_wall,
-            ) {
+        let forecast = self.call_forecast();
+        let (wall, tokens, cost) = self.remaining_limits();
+        if let Some((remaining, max)) = wall {
+            if let Some(detail) = time_window_reached(remaining, &forecast, max) {
                 return Some(StepAside {
                     cause: WrapUpCause::Deadline,
                     detail,
                 });
             }
         }
-        let usage = self.client.accounted_usage();
-        let (max_turn_tokens, max_turn_cost) = {
-            let s = self.wrap_up.lock().unwrap_or_else(|e| e.into_inner());
-            (s.max_turn_tokens, s.max_turn_cost)
-        };
-        if let Some(max_tokens) = self.config.agent.max_budget_tokens.filter(|&b| b > 0) {
-            let remaining = max_tokens.saturating_sub(usage.total_tokens);
-            if let Some(detail) = token_round_no_fit(remaining, max_turn_tokens, max_tokens) {
+        if let Some((remaining, max)) = tokens {
+            if let Some(detail) = token_window_reached(remaining, &forecast, max) {
                 return Some(StepAside {
                     cause: WrapUpCause::TokenBudget,
                     detail,
                 });
             }
         }
-        if let Some(max_cost) = self.config.agent.max_cost_usd.filter(|&c| c > 0.0) {
-            let remaining = (max_cost - usage.cost.unwrap_or(0.0)).max(0.0);
-            if let Some(detail) = cost_round_no_fit(remaining, max_turn_cost, max_cost) {
+        if let Some((remaining, per_token, max)) = cost {
+            if let Some(detail) = cost_window_reached(remaining, per_token, &forecast, max) {
                 return Some(StepAside {
                     cause: WrapUpCause::CostBudget,
                     detail,
@@ -421,16 +416,14 @@ impl Agent {
         None
     }
 
-    /// One-time wrap-up, whichever limit comes first: when the remaining
-    /// wall time drops to the reserve measured from this run's call latency
-    /// ([`wrap_up_reserve_secs`]), or the remaining token / cost budget to
-    /// the reserve measured from this run's per-turn usage
-    /// ([`token_wrap_up_reserve`], [`cost_wrap_up_reserve`]), tell the model
-    /// to stop exploring and write the final answer now, labelling
-    /// unfinished areas. ONE latch for all limits (reason recorded), so the
-    /// deadline and the budget can never both inject. A call already in
-    /// flight is left alone; the directive lands on the next turn. Latch
-    /// reset in `run_task`.
+    /// One-time wrap-up, whichever limit comes first, evaluated ONE TURN
+    /// AHEAD before each ordinary call: when the time, tokens or cost left
+    /// after the forecast next call would no longer fit the forecast final
+    /// answer ([`time_window_reached`], [`token_window_reached`],
+    /// [`cost_window_reached`]), tell the model to stop exploring and write
+    /// the final answer now, labelling unfinished areas. ONE latch for all
+    /// limits (reason recorded), so the deadline and the budget can never
+    /// both inject. Latch reset in `run_task`.
     pub(super) fn maybe_inject_wrap_up(&mut self) {
         self.observe_turn_usage();
         if self.wrap_up_issued().is_some() {
@@ -443,55 +436,36 @@ impl Agent {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .issued = Some(window.cause);
-        let (headline, room) = match window.cause {
-            WrapUpCause::Deadline => {
-                let stats = self.client.call_latency_stats();
-                let max_wall = self.config.agent.max_wall_secs.unwrap_or(0);
-                let remaining = max_wall.saturating_sub(self.budget_elapsed_secs());
-                let measured = if stats.call_count > 0 {
-                    format!(
-                        "the slowest model call in this run took {}s",
-                        stats.max_ms.div_ceil(1000)
-                    )
-                } else {
-                    "no model call has been timed yet".to_string()
-                };
-                (
-                    "DEADLINE WRAP-UP",
-                    format!(
-                        "about {remaining}s of the wall-clock budget remain and {measured} — \
-                         there is time for roughly one more answer"
-                    ),
-                )
-            }
-            WrapUpCause::TokenBudget | WrapUpCause::CostBudget => {
-                let usage = self.client.accounted_usage();
-                let s = self.wrap_up.lock().unwrap_or_else(|e| e.into_inner());
-                let left = if window.cause == WrapUpCause::TokenBudget {
-                    format!(
-                        "about {} tokens of the token budget remain and the largest turn in this \
-                         run used {} tokens",
-                        self.config
-                            .agent
-                            .max_budget_tokens
-                            .unwrap_or(0)
-                            .saturating_sub(usage.total_tokens),
-                        s.max_turn_tokens
-                    )
-                } else {
-                    format!(
-                        "about ${:.4} of the cost budget remain and the largest turn in this run \
-                         cost ${:.4}",
-                        (self.config.agent.max_cost_usd.unwrap_or(0.0) - usage.cost.unwrap_or(0.0))
-                            .max(0.0),
-                        s.max_turn_cost
-                    )
-                };
-                (
-                    "BUDGET WRAP-UP",
-                    format!("{left} — there is room for roughly one more answer"),
-                )
-            }
+        let forecast = self.call_forecast();
+        let (wall, tokens, cost) = self.remaining_limits();
+        let (headline, left) = match window.cause {
+            WrapUpCause::Deadline => (
+                "DEADLINE WRAP-UP",
+                format!(
+                    "about {}s of the wall-clock budget remain, and a final answer is forecast \
+                     to take ~{}s on this endpoint",
+                    wall.map(|w| w.0).unwrap_or(0),
+                    forecast.answer_secs()
+                ),
+            ),
+            WrapUpCause::TokenBudget => (
+                "BUDGET WRAP-UP",
+                format!(
+                    "about {} tokens of the token budget remain, and a final answer is forecast \
+                     to use ~{} tokens",
+                    tokens.map(|t| t.0).unwrap_or(0),
+                    forecast.answer_tokens()
+                ),
+            ),
+            WrapUpCause::CostBudget => (
+                "BUDGET WRAP-UP",
+                format!(
+                    "about ${:.4} of the cost budget remain, and a final answer is forecast to \
+                     use ~{} tokens",
+                    cost.map(|c| c.0).unwrap_or(0.0),
+                    forecast.answer_tokens()
+                ),
+            ),
         };
         tracing::info!(
             cause = window.cause.label(),
@@ -500,10 +474,11 @@ impl Agent {
         );
         self.messages.push(Message::user(format!(
             "<selfware_system_directive>\n\
-             {headline}: {room}. Stop exploring: do not start new reads, searches or \
-             approaches. Write your FINAL ANSWER NOW from what you already have. Label every \
-             area you did not finish as UNFINISHED (not checked), and do not present \
-             unchecked areas as reviewed.\n\
+             {headline}: {left} — there is room for one more answer, not for more \
+             exploration. Stop exploring: do not start new reads, searches or approaches. \
+             Write your FINAL ANSWER NOW from what you already have. Label every area you did \
+             not finish as UNFINISHED (not checked), and do not present unchecked areas as \
+             reviewed.\n\
              </selfware_system_directive>"
         )));
         let decision = match window.cause {
@@ -524,50 +499,43 @@ impl Agent {
             .issued
     }
 
-    /// Why a completion-gate correction round no longer fits this run's
-    /// wall, token or cost budget (see [`correction_round_no_fit`],
-    /// [`token_round_no_fit`], [`cost_round_no_fit`]); `None` while a round
-    /// still fits every configured limit.
+    /// Why a completion-gate correction round no longer fits: the run is
+    /// inside the wrap-up window of the deadline, the token budget or the
+    /// cost budget (a correction round is at least one more call before
+    /// the answer). `None` while every configured limit still has room.
     pub(super) fn completion_gate_step_aside(&self) -> Option<StepAside> {
         self.limit_in_reserve()
     }
 
-    /// Whether not even one more turn fits any configured limit: time left
-    /// below the slowest call, or tokens / cost left below the largest turn.
+    /// Whether not even the final answer itself fits any configured limit
+    /// any more (time / tokens / cost left below its forecast).
     fn one_turn_no_fit(&self) -> Option<(WrapUpCause, String)> {
-        if let Some(max_wall) = self.config.agent.max_wall_secs.filter(|&s| s > 0) {
-            let remaining = max_wall.saturating_sub(self.budget_elapsed_secs());
-            let slowest_ms = self.client.call_latency_stats().max_ms;
-            if one_call_no_fit(remaining, slowest_ms) {
+        let forecast = self.call_forecast();
+        let (wall, tokens, cost) = self.remaining_limits();
+        if let Some((remaining, _)) = wall {
+            let need = forecast.answer_secs();
+            if remaining < need {
                 return Some((
                     WrapUpCause::Deadline,
-                    format!(
-                        "{remaining}s left < slowest call {}s",
-                        slowest_ms.div_ceil(1000)
-                    ),
+                    format!("{remaining}s left < forecast final answer {need}s"),
                 ));
             }
         }
-        let usage = self.client.accounted_usage();
-        let (max_turn_tokens, max_turn_cost) = {
-            let s = self.wrap_up.lock().unwrap_or_else(|e| e.into_inner());
-            (s.max_turn_tokens, s.max_turn_cost)
-        };
-        if let Some(max_tokens) = self.config.agent.max_budget_tokens.filter(|&b| b > 0) {
-            let remaining = max_tokens.saturating_sub(usage.total_tokens);
-            if max_turn_tokens > 0 && remaining < max_turn_tokens {
+        if let Some((remaining, _)) = tokens {
+            let need = forecast.answer_tokens();
+            if remaining < need {
                 return Some((
                     WrapUpCause::TokenBudget,
-                    format!("{remaining} tokens left < largest turn {max_turn_tokens} tokens"),
+                    format!("{remaining} tokens left < forecast final answer {need} tokens"),
                 ));
             }
         }
-        if let Some(max_cost) = self.config.agent.max_cost_usd.filter(|&c| c > 0.0) {
-            let remaining = (max_cost - usage.cost.unwrap_or(0.0)).max(0.0);
-            if max_turn_cost > 0.0 && remaining < max_turn_cost {
+        if let Some((remaining, per_token, _)) = cost {
+            let need = forecast.answer_tokens() as f64 * per_token;
+            if per_token > 0.0 && remaining < need {
                 return Some((
                     WrapUpCause::CostBudget,
-                    format!("${remaining:.4} left < largest turn ${max_turn_cost:.4}"),
+                    format!("${remaining:.4} left < forecast final answer ${need:.4}"),
                 ));
             }
         }

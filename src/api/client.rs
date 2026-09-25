@@ -1215,6 +1215,11 @@ impl ApiClient {
         let elapsed_ms = call_timing.elapsed_ms();
 
         let finish_reason = resp.choices.first().and_then(|c| c.finish_reason.clone());
+        self.record_call_shape(
+            resp.usage.prompt_tokens as u64,
+            resp.usage.completion_tokens as u64,
+            elapsed_ms,
+        );
 
         self.progress_emitter
             .emit(crate::agent::progress::ProgressEvent::LlmResponseReceived {
@@ -1896,12 +1901,25 @@ impl ApiClient {
         self.usage_ledger.call_latency_stats()
     }
 
-    /// Test hook: fold a synthetic call duration into the run's latency
-    /// stats, as if a call of that length had completed.
-    #[cfg(test)]
-    pub(crate) fn record_call_elapsed_for_test(&self, elapsed: Duration) {
+    /// Record one completed chat call's measured shape (prompt tokens,
+    /// completion tokens, wall time) for the wrap-up forecast.
+    pub(crate) fn record_call_shape(
+        &self,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        elapsed_ms: u64,
+    ) {
         self.usage_ledger
-            .record_call_elapsed(&self.config.model, "chat", elapsed);
+            .record_call_shape(super::usage::CallShape {
+                prompt_tokens,
+                completion_tokens,
+                elapsed_ms,
+            });
+    }
+
+    /// Every completed chat call's measured shape this run, oldest first.
+    pub fn call_shapes(&self) -> Vec<super::usage::CallShape> {
+        self.usage_ledger.call_shapes()
     }
 
     /// Known run usage, including checkpoint totals and measured fallbacks.

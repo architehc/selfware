@@ -93,6 +93,7 @@ macro_rules! cli_prompt {
 
 mod assistant_response;
 pub mod best_snapshot;
+pub mod call_forecast;
 mod checkpointing;
 pub mod citation_check;
 pub mod compression;

@@ -980,14 +980,11 @@ async fn same_step_reevaluation_marker_counts_the_wrong_citations() {
 
 // ── deadline step-aside (val083 b2_350000: correction round → no report) ──
 
-/// A review agent with a 900 s wall budget whose slowest call so far took
-/// 100 s (reserve 200 s), `elapsed_secs` into the run.
+/// A review agent with a 900 s wall budget and no call measured yet (the
+/// forecast fallbacks: window ~436 s), `elapsed_secs` into the run.
 async fn deadline_gate_agent(root: &Path, elapsed_secs: u64) -> crate::agent::Agent {
     let mut agent = gate_agent(root).await;
     agent.config.agent.max_wall_secs = Some(900);
-    agent
-        .client
-        .record_call_elapsed_for_test(std::time::Duration::from_secs(100));
     agent.task_start_time =
         std::time::Instant::now() - std::time::Duration::from_secs(elapsed_secs);
     agent
@@ -996,7 +993,7 @@ async fn deadline_gate_agent(root: &Path, elapsed_secs: u64) -> crate::agent::Ag
 #[tokio::test]
 async fn gate_rejection_inside_the_deadline_reserve_accepts_the_draft_with_a_warning() {
     let ws = workspace();
-    // 150 s left <= 200 s reserve: a correction round no longer fits.
+    // 150 s left < ~436 s window: a correction round no longer fits.
     let mut agent = deadline_gate_agent(ws.path(), 750).await;
     answer(&mut agent, 1, WRONG_ANSWER);
     assert_eq!(
@@ -1045,7 +1042,7 @@ async fn gate_rejection_inside_the_deadline_reserve_accepts_the_draft_with_a_war
 #[tokio::test]
 async fn gate_rejection_outside_the_deadline_reserve_still_runs_a_correction_round() {
     let ws = workspace();
-    // 800 s left > 200 s reserve: correction round as before.
+    // 800 s left > ~436 s window: correction round as before.
     let mut agent = deadline_gate_agent(ws.path(), 100).await;
     answer(&mut agent, 1, WRONG_ANSWER);
     let directive = agent.citation_gate(true).expect("still blocks");
@@ -1084,7 +1081,7 @@ async fn gate_rejection_inside_the_token_budget_reserve_accepts_with_the_budget_
     let ws = workspace();
     let mut agent = gate_agent(ws.path()).await;
     agent.config.agent.max_budget_tokens = Some(3_000_000);
-    agent.wrap_up.lock().unwrap().max_turn_tokens = 95_000; // reserve 190k
+    agent.client.record_call_shape(95_000, 1_000, 30_000); // window ~197.5k
     agent.client.ensure_budget_floor(2_850_000, 0.0); // 150k left
     answer(&mut agent, 1, WRONG_ANSWER);
     assert_eq!(agent.citation_gate(true), None);
@@ -1097,7 +1094,7 @@ async fn gate_rejection_inside_the_token_budget_reserve_accepts_with_the_budget_
 
     let mut agent = gate_agent(ws.path()).await;
     agent.config.agent.max_budget_tokens = Some(3_000_000);
-    agent.wrap_up.lock().unwrap().max_turn_tokens = 95_000;
+    agent.client.record_call_shape(95_000, 1_000, 30_000);
     agent.client.ensure_budget_floor(1_000_000, 0.0);
     answer(&mut agent, 1, WRONG_ANSWER);
     assert!(agent.citation_gate(true).is_some());
