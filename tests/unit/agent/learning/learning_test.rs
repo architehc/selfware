@@ -298,3 +298,47 @@ async fn test_learning_context_defaults_to_general() {
 
     server.stop().await;
 }
+
+/// Audit item 4: every `record_task_outcome` call site passes a typed
+/// detail, and only a `Failure` reaches the error learner. A `Partial`
+/// budget stop is not a completed task.
+#[tokio::test]
+async fn only_failure_details_reach_the_error_learner() {
+    let config = crate::config::Config {
+        endpoint: "http://127.0.0.1:9/v1".to_string(),
+        model: "mock".to_string(),
+        ..Default::default()
+    };
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.self_improvement = crate::cognitive::self_improvement::SelfImprovementEngine::new();
+
+    // The natural-completion statuses and an external stop.
+    for (outcome, status) in [
+        (Outcome::Success, "[green] [REAL_EDIT]"),
+        (Outcome::Partial, "no file changes [NO_CHANGES]"),
+        (Outcome::Abandoned, "Task interrupted by user"),
+    ] {
+        agent.self_improvement.start_session("s");
+        agent.record_task_outcome("do it", outcome, OutcomeDetail::Status(status));
+    }
+    let stats = agent.self_improvement.get_stats();
+    assert_eq!(stats.error_stats.unwrap().total_errors, 0);
+    assert_eq!(stats.usage_stats.as_ref().unwrap().completed_tasks, 2);
+
+    // A budget stop (Partial + failure) and a hard failure.
+    for (outcome, reason) in [
+        (Outcome::Partial, "Wall-clock timeout: 600s >= 600s"),
+        (Outcome::Failure, "Agent failed: Max iterations exceeded"),
+    ] {
+        agent.self_improvement.start_session("s");
+        agent.record_task_outcome("do it", outcome, OutcomeDetail::Failure(reason));
+    }
+    let stats = agent.self_improvement.get_stats();
+    assert_eq!(stats.error_stats.unwrap().total_errors, 2);
+    let usage = stats.usage_stats.unwrap();
+    assert_eq!(usage.total_tasks, 5);
+    assert_eq!(
+        usage.completed_tasks, 2,
+        "a budget stop is not a completed task"
+    );
+}

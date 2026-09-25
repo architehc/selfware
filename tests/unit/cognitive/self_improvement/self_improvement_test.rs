@@ -990,3 +990,86 @@ fn extends_baseline_rejects_replacement_and_truncation() {
     assert!(!mk("FULL SYSTEM").extends_baseline(baseline));
     assert!(!mk("extra\n\nFULL SYSTEM PROMPT").extends_baseline(baseline));
 }
+
+#[test]
+fn legacy_status_shapes_are_recognised_and_real_errors_are_not() {
+    for status in [
+        "[green] [REAL_EDIT]",
+        "no file changes [NO_CHANGES]",
+        "Task interrupted by user",
+        "Task terminated by SIGTERM",
+        "Task cancelled by timeout",
+    ] {
+        assert!(is_legacy_status_error_message(status), "{status}");
+    }
+    for error in [
+        "Agent failed: Max iterations exceeded [MAX_ITERATIONS]",
+        "Wall-clock timeout: 600s >= 600s",
+        "no file changes [NO_CHANGES] and the build broke",
+        "[green] [lowercase]",
+        "[green] []",
+        "API returned status 401",
+    ] {
+        assert!(!is_legacy_status_error_message(error), "{error}");
+    }
+}
+
+/// Audit item 4, persisted data: the val083 improvement_engine.json files
+/// stored each completed run's status as an unrecovered `task_execution`
+/// error. Loading such a file drops those records and the patterns and type
+/// counts they created, and keeps every real error.
+#[test]
+fn loading_drops_persisted_status_records_and_keeps_real_errors() {
+    let engine = SelfImprovementEngine::new();
+    // What the old contract recorded for pyledger + cite2 (statuses) ...
+    for status in ["[green] [REAL_EDIT]", "no file changes [NO_CHANGES]"] {
+        engine.record_error(status, "execution", "ctx", "task_execution", None);
+    }
+    engine.record_error(
+        "Task interrupted by user",
+        "execution",
+        "ctx",
+        "task_execution",
+        None,
+    );
+    // ... and real errors, which must survive.
+    engine.record_error(
+        "Agent failed: Max iterations exceeded [MAX_ITERATIONS]",
+        "execution",
+        "ctx",
+        "task_execution",
+        None,
+    );
+    engine.record_error("file not found", "execution", "ctx", "file_read", None);
+    assert_eq!(engine.get_stats().error_stats.unwrap().total_errors, 5);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("improvement_engine.json");
+    engine.save(&path).unwrap();
+    let loaded = SelfImprovementEngine::load(&path).unwrap();
+
+    let stats = loaded.get_stats().error_stats.unwrap();
+    assert_eq!(stats.total_errors, 2, "three status records dropped");
+    let execution = stats
+        .top_error_types
+        .iter()
+        .find(|(t, _)| t == "execution")
+        .map(|(_, c)| *c);
+    assert_eq!(execution, Some(2), "type counts follow the dropped records");
+    let learner = loaded.error_learner.read().unwrap();
+    assert!(learner.get_pattern("execution:green REALEDIT").is_none());
+    assert!(learner
+        .get_pattern("execution:no file changes NOCHANGES")
+        .is_none());
+    assert!(learner
+        .get_pattern("execution:Task interrupted by user")
+        .is_none());
+    assert!(learner
+        .get_pattern("execution:Agent failed Max iterations ex")
+        .is_some());
+    assert!(learner.get_pattern("execution:file not found").is_some());
+    assert!(learner
+        .records
+        .iter()
+        .all(|r| r.action != "task_execution" || !is_legacy_status_error_message(&r.message)));
+}

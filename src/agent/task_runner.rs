@@ -6,6 +6,7 @@ use super::*;
 use crate::orchestration::swarm::{create_dev_swarm, AgentRole, Swarm, SwarmTask};
 
 use super::failure_mode::{FailureKind, FailureMode, RunOutcome};
+use super::learning::OutcomeDetail;
 use super::tui_events::AgentEvent;
 
 /// Marker delimiters for the per-turn TASK FOCUS overlay stamped onto the
@@ -1612,7 +1613,11 @@ impl Agent {
                 }
             });
             if let Some(reason) = budget_reason.filter(|_| !self.failure_mode_finalized) {
-                self.record_task_outcome(task_description, Outcome::Partial, Some(&reason));
+                self.record_task_outcome(
+                    task_description,
+                    Outcome::Partial,
+                    OutcomeDetail::Failure(&reason),
+                );
                 self.finalize_failure_mode(RunOutcome::Failed { reason })
                     .await;
             }
@@ -1674,7 +1679,11 @@ impl Agent {
             if total >= max_budget {
                 let reason = format!("Token budget exhausted: {} >= {} tokens", total, max_budget);
                 warn!("{}", reason);
-                self.record_task_outcome(task_description, Outcome::Partial, Some(&reason));
+                self.record_task_outcome(
+                    task_description,
+                    Outcome::Partial,
+                    OutcomeDetail::Failure(&reason),
+                );
                 self.finalize_failure_mode(RunOutcome::Failed {
                     reason: reason.clone(),
                 })
@@ -1689,7 +1698,11 @@ impl Agent {
                     self.cumulative_cost_usd, max_cost
                 );
                 warn!("{}", reason);
-                self.record_task_outcome(task_description, Outcome::Partial, Some(&reason));
+                self.record_task_outcome(
+                    task_description,
+                    Outcome::Partial,
+                    OutcomeDetail::Failure(&reason),
+                );
                 self.finalize_failure_mode(RunOutcome::Failed {
                     reason: reason.clone(),
                 })
@@ -1702,7 +1715,11 @@ impl Agent {
             if elapsed >= max_secs {
                 let reason = format!("Wall-clock timeout: {}s >= {}s", elapsed, max_secs);
                 warn!("{}", reason);
-                self.record_task_outcome(task_description, Outcome::Partial, Some(&reason));
+                self.record_task_outcome(
+                    task_description,
+                    Outcome::Partial,
+                    OutcomeDetail::Failure(&reason),
+                );
                 self.finalize_failure_mode(RunOutcome::Failed {
                     reason: reason.clone(),
                 })
@@ -1859,7 +1876,13 @@ impl Agent {
                     format!("\n⚡ Interrupted ({outcome_msg})").bright_yellow()
                 );
                 self.messages.push(Message::user(user_msg));
-                self.record_task_outcome(task_description, Outcome::Abandoned, Some(outcome_msg));
+                // An external stop is the run's outcome, not an error the
+                // agent made: a status, so it never reaches the error learner.
+                self.record_task_outcome(
+                    task_description,
+                    Outcome::Abandoned,
+                    OutcomeDetail::Status(outcome_msg),
+                );
                 // Return a typed cancellation. `run_execution_loop` maps errors
                 // to the single authoritative terminal Error event AND saves the
                 // resumable checkpoint (one save for every cancellation exit);
@@ -1963,7 +1986,7 @@ impl Agent {
                                         self.record_task_outcome(
                                             task_description,
                                             Outcome::Failure,
-                                            Some(&e.to_string()),
+                                            OutcomeDetail::Failure(&e.to_string()),
                                         );
                                         return Err(e);
                                     }
@@ -2791,7 +2814,7 @@ impl Agent {
                         self.record_task_outcome(
                             task_description,
                             Outcome::Failure,
-                            Some(&format!("{} [{}]", reason, fm.kind.tag())),
+                            OutcomeDetail::Failure(&format!("{} [{}]", reason, fm.kind.tag())),
                         );
                     }
                     if let Err(e) = self.fail_checkpoint(&reason) {
@@ -2811,7 +2834,12 @@ impl Agent {
             fm.kind.tag(),
             self.loop_control.current_step()
         );
-        self.record_task_outcome(task_description, Outcome::Partial, Some(&detail));
+        let detail = if fm.kind.is_nonfailure() {
+            OutcomeDetail::Status(&detail)
+        } else {
+            OutcomeDetail::Failure(&detail)
+        };
+        self.record_task_outcome(task_description, Outcome::Partial, detail);
         self.finalize_failure_mode(RunOutcome::Partial).await;
         Ok(())
     }
@@ -2881,7 +2909,15 @@ impl Agent {
                 format!("{} [{}]", fm.evidence, fm.kind.tag()),
             )
         };
-        self.record_task_outcome(task_description, outcome, Some(&detail));
+        // Success and NoChange carry a completion STATUS; only a failure
+        // verdict is an error for the learner (val083: every completed run's
+        // status was stored as an unrecovered execution error).
+        let detail = if fm.kind.is_nonfailure() {
+            OutcomeDetail::Status(&detail)
+        } else {
+            OutcomeDetail::Failure(&detail)
+        };
+        self.record_task_outcome(task_description, outcome, detail);
         fm
     }
 

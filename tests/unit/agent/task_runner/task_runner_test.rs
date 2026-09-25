@@ -4489,6 +4489,9 @@ async fn completed_run_writes_one_snapshot_with_terminal_counters_and_not_run_ch
     let mut agent = Agent::new(config).await.unwrap();
     let data = tempfile::tempdir().unwrap();
     agent.learning_data_dir = Some(data.path().to_path_buf());
+    // Start from an empty engine: `Agent::new` loads whatever state other
+    // tests in this process saved.
+    agent.self_improvement = crate::cognitive::self_improvement::SelfImprovementEngine::new();
 
     let result = agent.run_task("Do a simple task").await;
     assert!(result.is_ok(), "{:?}", result.err());
@@ -4525,7 +4528,28 @@ async fn completed_run_writes_one_snapshot_with_terminal_counters_and_not_run_ch
         Some(total as u64),
         "the prompt record carries the measured token total, not 0"
     );
+    // Audit item 4: the completion status is not an error.
+    let errors = engine["error_learner"]["records"].as_array().unwrap();
+    assert!(
+        errors.iter().all(|r| r["action"] != "task_execution"),
+        "a completed run must not store its status as an execution error: {errors:?}"
+    );
     server.stop().await;
+}
+
+/// The legacy-record filter must recognise exactly the status texts the
+/// natural-completion path builds for its non-failure verdicts.
+#[test]
+fn natural_completion_status_texts_match_the_legacy_record_filter() {
+    use crate::cognitive::self_improvement::is_legacy_status_error_message;
+    assert!(is_legacy_status_error_message(&format!(
+        "[green] [{}]",
+        FailureKind::Success.tag()
+    )));
+    assert!(is_legacy_status_error_message(&format!(
+        "no file changes [{}]",
+        FailureKind::NoChange.tag()
+    )));
 }
 
 /// A failed run (terminal 401 at planning) used to write NO snapshot and
@@ -4553,6 +4577,9 @@ async fn failed_run_writes_a_failure_snapshot_and_persists_learning() {
     let mut agent = Agent::new(config).await.unwrap();
     let data = tempfile::tempdir().unwrap();
     agent.learning_data_dir = Some(data.path().to_path_buf());
+    // Start from an empty engine: `Agent::new` loads whatever state other
+    // tests in this process saved.
+    agent.self_improvement = crate::cognitive::self_improvement::SelfImprovementEngine::new();
 
     assert!(agent.run_task("Do a simple task").await.is_err());
 
@@ -4596,6 +4623,9 @@ async fn interrupted_run_writes_an_interrupted_snapshot() {
     let mut agent = Agent::new(config).await.unwrap();
     let data = tempfile::tempdir().unwrap();
     agent.learning_data_dir = Some(data.path().to_path_buf());
+    // Start from an empty engine: `Agent::new` loads whatever state other
+    // tests in this process saved.
+    agent.self_improvement = crate::cognitive::self_improvement::SelfImprovementEngine::new();
     agent
         .cancelled
         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -4606,5 +4636,15 @@ async fn interrupted_run_writes_an_interrupted_snapshot() {
     assert_eq!(snapshots.len(), 1);
     assert_eq!(snapshots[0]["outcome"], "interrupted");
     assert_eq!(snapshots[0]["task_success_rate"], 0.0);
+    // An external stop is a status, not an execution error.
+    let engine: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(data.path().join("improvement_engine.json")).unwrap(),
+    )
+    .unwrap();
+    let errors = engine["error_learner"]["records"].as_array().unwrap();
+    assert!(
+        errors.iter().all(|r| r["action"] != "task_execution"),
+        "{errors:?}"
+    );
     server.stop().await;
 }

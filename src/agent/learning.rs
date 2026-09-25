@@ -2,6 +2,44 @@ use tracing::info;
 
 use super::*;
 
+/// The text that accompanies a recorded task outcome, typed by what it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OutcomeDetail<'a> {
+    /// A status line — a completion verdict (`[green] [REAL_EDIT]`,
+    /// `no file changes [NO_CHANGES]`) or an external stop ("Task
+    /// interrupted by user"). Logged with the outcome; never an error.
+    Status(&'a str),
+    /// A real failure of the run: logged AND taught to the error learner.
+    Failure(&'a str),
+}
+
+impl<'a> OutcomeDetail<'a> {
+    pub(super) fn text(&self) -> &'a str {
+        match *self {
+            OutcomeDetail::Status(text) | OutcomeDetail::Failure(text) => text,
+        }
+    }
+}
+
+/// The platform data dir + `selfware`: where `improvement_engine.json`,
+/// `metrics/snapshots.jsonl` and the episodic memory live.
+///
+/// Unit-test builds use a per-process temp dir instead. Every terminal
+/// outcome now saves the learning state, so a test run would otherwise load
+/// and overwrite the developer's real learning files with mock-task results.
+pub(super) fn default_learning_data_dir() -> std::path::PathBuf {
+    #[cfg(test)]
+    {
+        std::env::temp_dir().join(format!("selfware-test-learning-{}", std::process::id()))
+    }
+    #[cfg(not(test))]
+    {
+        dirs::data_local_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("selfware")
+    }
+}
+
 impl Agent {
     pub(super) fn infer_task_type(task: &str) -> &'static str {
         let task_lower = task.to_lowercase();
@@ -93,14 +131,22 @@ impl Agent {
         self.publish_phi_activity(crate::phi::activity::ActivityPhase::Running);
     }
 
+    /// Record the task's outcome in telemetry and the learning engine.
+    ///
+    /// `detail` says what the accompanying text IS: only
+    /// [`OutcomeDetail::Failure`] reaches the error learner. Every site used
+    /// to pass its text as `error: Option<&str>`, and any `Some` was recorded
+    /// as an unrecovered `task_execution` error — including the completion
+    /// status `[green] [REAL_EDIT]` / `no file changes [NO_CHANGES]` of every
+    /// successful run (8 of 14 persisted error records in the val083 audit).
     pub(super) fn record_task_outcome(
         &mut self,
         task_prompt: &str,
         outcome: Outcome,
-        error: Option<&str>,
+        detail: OutcomeDetail<'_>,
     ) {
         self.sync_api_usage();
-        self.log_task_outcome_event(task_prompt, outcome, error);
+        self.log_task_outcome_event(task_prompt, outcome, Some(detail.text()));
         self.publish_phi_activity(match outcome {
             Outcome::Success => crate::phi::activity::ActivityPhase::Completed,
             Outcome::Partial => crate::phi::activity::ActivityPhase::Partial,
@@ -117,14 +163,19 @@ impl Agent {
             // Same counter as `SessionResult.usage.total` (synced above).
             self.cumulative_token_usage.total,
         );
-        self.self_improvement.record_task(outcome.is_positive());
+        // "Completed" for the usage analyzer: a positive outcome that is not
+        // a failure. `Partial` alone also covers budget and wall-clock stops
+        // (recorded with a `Failure` detail), which used to count as
+        // completed tasks.
+        self.self_improvement
+            .record_task(outcome.is_positive() && matches!(detail, OutcomeDetail::Status(_)));
 
-        if let Some(err) = error {
+        if let OutcomeDetail::Failure(err) = detail {
             self.self_improvement.record_error(
                 err,
                 Self::classify_error_type(err),
                 self.learning_context(),
-                "task_execution",
+                crate::cognitive::self_improvement::TASK_EXECUTION_ACTION,
                 None,
             );
         }
@@ -135,11 +186,9 @@ impl Agent {
     /// Where the persisted learning state lives: the test override, else the
     /// platform data dir + `selfware` (the path `Agent::new` loads from).
     pub(super) fn learning_data_dir(&self) -> std::path::PathBuf {
-        self.learning_data_dir.clone().unwrap_or_else(|| {
-            dirs::data_local_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join("selfware")
-        })
+        self.learning_data_dir
+            .clone()
+            .unwrap_or_else(default_learning_data_dir)
     }
 
     /// Measured facts about the run that just ended, from the counters the

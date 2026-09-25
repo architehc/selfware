@@ -1297,10 +1297,8 @@ impl Agent {
         }
 
         // Load persisted self-improvement engine state if available
-        let improvement_engine_path = dirs::data_local_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("selfware")
-            .join("improvement_engine.json");
+        let improvement_engine_path =
+            learning::default_learning_data_dir().join("improvement_engine.json");
 
         let self_improvement = if tokio::fs::try_exists(&improvement_engine_path)
             .await

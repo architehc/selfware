@@ -1119,13 +1119,132 @@ impl ErrorPatternLearner {
     }
 
     fn from_snapshot(snapshot: ErrorLearnerSnapshot) -> Self {
-        Self {
+        let mut learner = Self {
             records: snapshot.records,
             patterns: snapshot.patterns,
             type_counts: snapshot.type_counts,
             max_records: MAX_ENTRIES,
+        };
+        let purged = learner.purge_legacy_status_records();
+        if purged > 0 {
+            tracing::info!(
+                "Dropped {} persisted task-status record(s) that were stored as errors",
+                purged
+            );
         }
+        learner
     }
+
+    /// Remove the terminal STATUS texts an older build stored as
+    /// `task_execution` errors (see [`is_legacy_status_error_message`]),
+    /// together with the patterns and type counts they created. Returns how
+    /// many records were dropped.
+    ///
+    /// Filtering on load rather than rewriting the file keeps this a
+    /// read-side correction: the next save writes the cleaned state. A
+    /// pattern is keyed by error type + message prefix, so a pattern whose
+    /// key is a status shape only ever counted status records and is removed
+    /// whole; its count may include records already trimmed from `records`,
+    /// so the type count is reduced by the larger of the two tallies.
+    fn purge_legacy_status_records(&mut self) -> usize {
+        let is_status = |r: &ErrorRecord| {
+            r.action == TASK_EXECUTION_ACTION && is_legacy_status_error_message(&r.message)
+        };
+        let dropped: Vec<ErrorRecord> = self
+            .records
+            .iter()
+            .filter(|r| is_status(r))
+            .cloned()
+            .collect();
+        self.records.retain(|r| !is_status(r));
+
+        let mut per_type: HashMap<String, usize> = HashMap::new();
+        for record in &dropped {
+            *per_type.entry(record.error_type.clone()).or_insert(0) += 1;
+        }
+        let status_patterns: Vec<String> = self
+            .patterns
+            .iter()
+            .filter(|(id, p)| {
+                p.triggering_actions
+                    .iter()
+                    .all(|a| a == TASK_EXECUTION_ACTION)
+                    && id
+                        .split_once(':')
+                        .is_some_and(|(_, prefix)| is_legacy_status_pattern_prefix(prefix))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut pattern_counts: HashMap<String, usize> = HashMap::new();
+        for id in status_patterns {
+            if let Some(pattern) = self.patterns.remove(&id) {
+                *pattern_counts.entry(pattern.error_type).or_insert(0) += pattern.count;
+            }
+        }
+        for (error_type, pattern_count) in pattern_counts {
+            let n = per_type.entry(error_type).or_insert(0);
+            *n = (*n).max(pattern_count);
+        }
+        for (error_type, n) in per_type {
+            if let Some(count) = self.type_counts.get_mut(&error_type) {
+                *count = count.saturating_sub(n);
+                if *count == 0 {
+                    self.type_counts.remove(&error_type);
+                }
+            }
+        }
+        dropped.len()
+    }
+}
+
+/// The `action` the agent's task-outcome recorder files its errors under.
+pub(crate) const TASK_EXECUTION_ACTION: &str = "task_execution";
+
+/// True for a terminal STATUS text that an older build passed to
+/// `record_error` as if it were an error (statistical audit 2026-09-25: 8 of
+/// 14 persisted error records). The shapes are the natural-completion
+/// statuses `[green] [<TAG>]` and `no file changes [<TAG>]`, and the three
+/// external-stop statuses of the loop's cancellation check. The agent no
+/// longer records any of these as errors; this recognises the ones already
+/// on disk.
+pub(crate) fn is_legacy_status_error_message(message: &str) -> bool {
+    let tagged = |prefix: &str| {
+        message
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_prefix('['))
+            .and_then(|rest| rest.strip_suffix(']'))
+            .is_some_and(|tag| {
+                !tag.is_empty()
+                    && tag
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            })
+    };
+    tagged("[green] ")
+        || tagged("no file changes ")
+        || matches!(
+            message,
+            "Task interrupted by user" | "Task terminated by SIGTERM" | "Task cancelled by timeout"
+        )
+}
+
+/// The message-prefix half of a pattern id built from a legacy status text
+/// (`compute_pattern_id` keeps only alphanumerics and whitespace).
+fn is_legacy_status_pattern_prefix(prefix: &str) -> bool {
+    let tag_only = |rest: &str| {
+        !rest.is_empty()
+            && rest
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+    };
+    prefix.strip_prefix("green ").is_some_and(tag_only)
+        || prefix
+            .strip_prefix("no file changes ")
+            .is_some_and(tag_only)
+        || matches!(
+            prefix,
+            "Task interrupted by user" | "Task terminated by SIGTERM" | "Task cancelled by timeout"
+        )
 }
 
 impl Default for ErrorPatternLearner {
