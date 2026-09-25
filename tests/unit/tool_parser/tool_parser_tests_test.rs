@@ -1207,7 +1207,8 @@ fn test_qwen_hybrid_guard_sees_parameter_name_dialect() {
 const B3_TURN_0014: &str = "\n\n<tool>\n<name>file_read</name>\n<arguments>{\"path\": \"src/agent/tool_validator.rs\"}</arguments>\n</tool>\n</tool_call>\n<tool_call>\n<function=directory_tree>\n<parameter name=\"path\">tests/unit\n</parameter>\n<parameter name=\"max_depth\">2\n</parameter>\n</function>\n</tool_call>";
 
 /// b3_review turn_0010: the second call is `<function=tool>` + `<name>` +
-/// `<arguments>` closed by `</tool>` — a syntax no parser accepts.
+/// `<arguments>` closed by `</tool>` — the generic wrapper written with an
+/// `<arguments>` element (0.8.3 D3 variant), unwrapped to the named tool.
 const B3_TURN_0010: &str = "\n\n<tool>\n<name>file_read</name>\n<arguments>{\"path\": \"src/agent/tool_dispatch/mod.rs\", \"line_range\": [1900, 2180]}</arguments>\n</tool>\n</tool_call>\n<tool_call>\n<function=tool>\n<name>file_read</name>\n<arguments>{\"path\": \"src/agent/tool_validator.rs\"}</arguments>\n</tool>";
 
 /// b3_review turn_0003: second call `<function=file_read>` + `<arguments>`
@@ -1299,15 +1300,17 @@ fn d6_nested_formats_claim_text_once() {
 }
 
 #[test]
-fn d6_turn_0010_unparseable_second_call_is_rejected_not_dropped() {
+fn d6_turn_0010_generic_wrapper_second_call_is_unwrapped() {
+    // Until 0.8.3 this second call was rejected (no parser accepted it); the
+    // D3-variant family now unwraps it to the file_read it names.
     let result = parse_tool_calls(B3_TURN_0010);
-    assert_eq!(names(&result), vec!["file_read"]);
+    assert_eq!(names(&result), vec!["file_read", "file_read"]);
     assert_eq!(result.tool_calls[0].arguments["line_range"][0], 1900);
-    assert_eq!(result.rejections.len(), 1, "{:?}", result.rejections);
-    let rejection = &result.rejections[0];
-    assert_eq!(rejection.tool_name.as_deref(), Some("file_read"));
-    assert!(rejection.reason.contains("NOT executed"));
-    assert!(rejection.raw_text.contains("src/agent/tool_validator.rs"));
+    assert_eq!(
+        result.tool_calls[1].arguments,
+        serde_json::json!({"path": "src/agent/tool_validator.rs"})
+    );
+    assert!(result.rejections.is_empty(), "{:?}", result.rejections);
 }
 
 #[test]
@@ -1418,4 +1421,306 @@ fn d3_unwrap_leaves_real_tools_and_extra_parameters_alone() {
     let content = "<function=tool>\n<parameter=name>file_read</parameter>\n<parameter=arguments>{\"path\": \"a\"}</parameter>\n<parameter=extra>1</parameter>\n</function>";
     let result = parse_tool_calls(content);
     assert_eq!(names(&result), vec!["tool"]);
+}
+
+// ---------------------------------------------------------------------------
+// N6: a prose EXAMPLE of call markup must never start a match. The lazy
+// `<tool>` regex used to start at a backticked example and run on to the
+// real call's `</arguments></tool>` (0.8.3 validation, runs/b3_review
+// turn_0006: a bogus call to `x` ran, the real grep_search was lost).
+// Fixtures are the verbatim `content` of the turn artifacts.
+// ---------------------------------------------------------------------------
+
+const B3_083_TURN_0006: &str = "\n\n**Stage 1 findings (source-confirmed):**\n\n- **Gap in `src/tool_parser.rs`**: the single-`</tool>`-close form `<tool><name>x</name><arguments>{...}</tool>` matches none of the seven XML regexes (`xml_tool_regex` at :88 needs `</arguments>`; `xml_tool_missing_args_close_regex` at :135 needs two `</tool>`), and `normalize_malformed_xml` (:170) doesn't rewrite it because the bare-name rule requires whitespace before the tag name — so the call is silently dropped.\n- `src/api/streaming.rs` `ToolCallAccumulator::process_delta` (:~560) removes an entry on early emission, so a later fragment for the same index starts a fresh entry and loses prior args; `flush` (:~600) then filters entries with empty id.\n\nContinuing to Stage 2.\n\n<tool>\n<name>grep_search</name>\n<arguments>{\"pattern\": \"fn (dispatch|execute_tool_call|run_tool)\", \"path\": \"src/agent/mod.rs\", \"context_lines\": 3, \"max_matches\": 20}</arguments>\n</tool>";
+
+/// val082 runs/long_review turn_0099: a final report that quotes the
+/// `<tool>` syntax in backticks. 0.8.2 executed it as a call to `...`.
+const LONG_082_TURN_0099: &str = "I have enough information to complete the audit. Let me now compile my final report covering all six stages with concrete findings, file:line citations, and distinguishing source-confirmed from runtime-tested behavior.\n\nLet me recall what I've found across the stages:\n\n**Stage 1 - API streaming and tool-call parsing:**\n- `src/api/streaming.rs` - handles SSE parsing, chunk accumulation\n- `src/tool_parser.rs` - parses `<tool><name>...</name><arguments>...</arguments></tool>` XML format\n- `src/agent/streaming.rs` - agent-level streaming coordination\n- `src/agent/recovery.rs` - handles malformed/empty/truncated responses\n\nKey findings:\n- `tool_parser.rs` uses `find(\"";
+
+fn b3_083_turn_0006_real_call() -> serde_json::Value {
+    serde_json::json!({
+        "pattern": "fn (dispatch|execute_tool_call|run_tool)",
+        "path": "src/agent/mod.rs",
+        "context_lines": 3,
+        "max_matches": 20
+    })
+}
+
+#[test]
+fn n6_turn_0006_backticked_example_does_not_swallow_the_real_call() {
+    let result = parse_tool_calls(B3_083_TURN_0006);
+    assert_eq!(names(&result), vec!["grep_search"]);
+    assert_eq!(result.tool_calls[0].arguments, b3_083_turn_0006_real_call());
+    assert!(result.rejections.is_empty(), "{:?}", result.rejections);
+    // The prose (with its quoted example) stays text.
+    assert!(result
+        .text_content
+        .contains("`<tool><name>x</name><arguments>{...}</tool>`"));
+}
+
+#[test]
+fn n6_turn_0006_unquoted_example_still_yields_only_the_real_call() {
+    // Same turn with the backticks stripped: the example no longer sits in a
+    // code span, but its match would run into the real call's line-start
+    // `<tool>` opener, so it is not a call.
+    let content = B3_083_TURN_0006.replace('`', "");
+    let result = parse_tool_calls(&content);
+    assert_eq!(names(&result), vec!["grep_search"]);
+    assert_eq!(result.tool_calls[0].arguments, b3_083_turn_0006_real_call());
+}
+
+#[test]
+fn n6_long_review_turn_0099_quoted_syntax_in_final_report_is_not_a_call() {
+    let result = parse_tool_calls(LONG_082_TURN_0099);
+    assert!(result.tool_calls.is_empty(), "{:?}", names(&result));
+    assert!(result.rejections.is_empty(), "{:?}", result.rejections);
+}
+
+/// One row per regex family: an unterminated prose example of the family's
+/// syntax, and a real call in the same syntax (always `file_read` a.rs).
+const FAMILY_EXAMPLES: &[(&str, &str, &str)] = &[
+    (
+        "xml <tool><name>",
+        "<tool><name>x</name><arguments>{...}",
+        "<tool>\n<name>file_read</name>\n<arguments>{\"path\": \"a.rs\"}</arguments>\n</tool>",
+    ),
+    (
+        "xml <name=x</name>",
+        "<tool><name=x</name><arguments>{...}",
+        "<tool>\n<name=file_read</name>\n<arguments>{\"path\": \"a.rs\"}</arguments>\n</tool>",
+    ),
+    (
+        "xml <name=x>",
+        "<tool><name=x><arguments>{...}",
+        "<tool>\n<name=file_read>\n<arguments>{\"path\": \"a.rs\"}</arguments>\n</tool>",
+    ),
+    (
+        "xml <function=x</function>",
+        "<tool><function=x</function><arguments>{...}",
+        "<tool>\n<function=file_read</function>\n<arguments>{\"path\": \"a.rs\"}</arguments>\n</tool>",
+    ),
+    (
+        "xml <function>x</function>",
+        "<tool><function>x</function><arguments>{...}",
+        "<tool>\n<function>file_read</function>\n<arguments>{\"path\": \"a.rs\"}</arguments>\n</tool>",
+    ),
+    (
+        "xml missing </arguments>",
+        "<tool><name>x</name><arguments>{...}",
+        "<tool>\n<name>file_read</name>\n<arguments>{\"path\": \"a.rs\"}\n</tool>\n</tool>",
+    ),
+    (
+        "qwen3 <tool_call><function=>",
+        "<tool_call><function=x><parameter=p>v</parameter>",
+        "<tool_call>\n<function=file_read>\n<parameter=path>a.rs</parameter>\n</function>\n</tool_call>",
+    ),
+    (
+        "json in <tool_call>",
+        "<tool_call>{\"name\": \"x\", \"arguments\": {}}",
+        "<tool_call>\n{\"name\": \"file_read\", \"arguments\": {\"path\": \"a.rs\"}}\n</tool_call>",
+    ),
+    (
+        "generic wrapper + <arguments> element",
+        "<function=tool><name>x</name><arguments>{...}",
+        "<function=tool>\n<name>file_read</name>\n<arguments>{\"path\": \"a.rs\"}</arguments>\n</tool>",
+    ),
+    (
+        "openai <function=>{json}",
+        "<function=x>{\"a\": 1}",
+        "<function=file_read>{\"path\": \"a.rs\"}</function>",
+    ),
+    (
+        "bare <function=><parameter=>",
+        "<function=x><parameter=p>v</parameter>",
+        "<function=file_read>\n<parameter=path>a.rs</parameter>\n</function>",
+    ),
+    (
+        "kimi call tool=",
+        "<|open|>call tool=\"x\" index=\"0\"<|sep|>",
+        "<|open|>call tool=\"file_read\" index=\"1\"<|sep|><|open|>argument key=\"path\" type=\"string\"<|sep|>a.rs<|close|>argument<|close|>call",
+    ),
+];
+
+fn assert_only_real_file_read(result: &ParseResult, family: &str) {
+    assert_eq!(names(result), vec!["file_read"], "family {family}");
+    assert_eq!(
+        result.tool_calls[0].arguments,
+        serde_json::json!({"path": "a.rs"}),
+        "family {family}"
+    );
+    assert!(
+        result.rejections.is_empty(),
+        "family {family}: {:?}",
+        result.rejections
+    );
+}
+
+#[test]
+fn n6_every_family_real_call_parses_on_its_own() {
+    for (family, _, real) in FAMILY_EXAMPLES {
+        assert_only_real_file_read(&parse_tool_calls(real), family);
+    }
+}
+
+#[test]
+fn n6_every_family_backticked_example_before_real_call_is_ignored() {
+    for (family, example, real) in FAMILY_EXAMPLES {
+        let content = format!("The model may emit `{example}` here.\n\n{real}");
+        assert_only_real_file_read(&parse_tool_calls(&content), family);
+    }
+}
+
+#[test]
+fn n6_every_family_unquoted_example_before_real_call_is_ignored() {
+    for (family, example, real) in FAMILY_EXAMPLES {
+        let content = format!("The model may emit {example} here.\n{real}");
+        assert_only_real_file_read(&parse_tool_calls(&content), family);
+    }
+}
+
+#[test]
+fn n6_every_family_quoted_complete_call_is_not_a_call() {
+    for (family, _, real) in FAMILY_EXAMPLES {
+        // A complete call quoted inline, and quoted in a fence.
+        let inline = format!("Write it as `{}` exactly.", real.replace('\n', ""));
+        let fenced = format!("Write it as:\n\n```xml\n{real}\n```\n\nThat is all.");
+        for content in [inline, fenced] {
+            let result = parse_tool_calls(&content);
+            assert!(
+                result.tool_calls.is_empty(),
+                "family {family}: {:?}",
+                names(&result)
+            );
+            assert!(
+                result.rejections.is_empty(),
+                "family {family}: {:?}",
+                result.rejections
+            );
+        }
+    }
+}
+
+#[test]
+fn n6_plain_function_call_in_a_fence_is_an_example() {
+    let content =
+        "Run it like this:\n\n```\nshell_exec(\"rm -rf target\")\n```\n\nfile_read(\"a.rs\")";
+    assert_only_real_file_read(&parse_tool_calls(content), "plain");
+}
+
+#[test]
+fn n6_markup_inside_a_real_calls_json_payload_is_payload() {
+    // A mid-line `<tool>` inside a JSON string is not another call's opener.
+    let content = "<tool>\n<name>file_write</name>\n<arguments>{\"path\": \"a.md\", \"content\": \"use <tool><name>x</name> tags\"}</arguments>\n</tool>";
+    let result = parse_tool_calls(content);
+    assert_eq!(names(&result), vec!["file_write"]);
+    assert_eq!(
+        result.tool_calls[0].arguments["content"],
+        "use <tool><name>x</name> tags"
+    );
+}
+
+#[test]
+fn n6_fenced_json_block_call_still_parses() {
+    // Fenced JSON is a call syntax of its own, not a quoted example.
+    let content = "```json\n{\"name\": \"file_read\", \"arguments\": {\"path\": \"a.rs\"}}\n```";
+    assert_only_real_file_read(&parse_tool_calls(content), "json block");
+}
+
+// ---------------------------------------------------------------------------
+// D3 variant: the generic wrapper written with an `<arguments>` ELEMENT,
+// `<function=tool><name>X</name><arguments>{..}</arguments></tool>` (or a
+// `<parameter name="name">X</parameter>` header). 0.8.3 runs/long_review
+// rejected 29 such calls (25 `<name>`, 4 `<parameter name="name">`).
+// ---------------------------------------------------------------------------
+
+const LONG_083_TURN_0105: &str = "\n\n<tool>\n<name>file_read</name>\n<arguments>{\"path\": \"/work/src/api/streaming.rs\", \"line_range\": [750, 850]}</arguments>\n</tool>\n</tool_call>\n<tool_call>\n<function=tool>\n<parameter name=\"name\">file_read</parameter>\n<arguments>{\"path\": \"/work/src/tool_parser.rs\", \"line_range\": [120, 320]}</arguments>\n</tool>";
+
+const LONG_083_TURN_0108: &str = "\n\n<tool>\n<name>file_read</name>\n<arguments>{\"path\": \"/work/src/tool_parser.rs\", \"line_range\": [500, 700]}</arguments>\n</tool>\n</tool_call>\n<tool_call>\n<function=tool>\n<name>file_read</name>\n<arguments>{\"path\": \"/work/src/agent/execution.rs\", \"line_range\": [1, 150]}</arguments>\n</tool>\n</tool_call>";
+
+const LONG_083_TURN_0110: &str = "\n\n<tool_call>\n<function=tool>\n<name>file_read</name>\n<arguments>{\"path\": \"/work/src/agent/execution.rs\", \"line_range\": [1, 200]}</arguments>\n</tool>\n</tool_call>\n<tool_call>\n<function=tool>\n<name>file_read</name>\n<arguments>{\"path\": \"/work/src/agent/tool_validator.rs\", \"line_range\": [1, 200]}</arguments>\n</tool>\n</tool_call>";
+
+const LONG_083_TURN_0123: &str = "\n\n<tool>\n<name>file_read</name>\n<arguments>{\"path\": \"/work/src/agent/best_snapshot.rs\", \"line_range\": [1, 150]}</arguments>\n</tool>\n</tool_call>\n<tool_call>\n<function=tool>\n<name>file_read</name>\n<arguments>{\"path\": \"/work/src/hooks/mod.rs\", \"line_range\": [1, 150]}</arguments>\n</tool>\n</tool_call>\n<tool_call>\n<function=tool>\n<name>file_read</name>\n<arguments>{\"path\": \"/work/src/tools/screen_capture.rs\", \"line_range\": [1, 150]}</arguments>\n</tool>\n</tool_call>";
+
+fn paths(result: &ParseResult) -> Vec<&str> {
+    result
+        .tool_calls
+        .iter()
+        .map(|c| c.arguments["path"].as_str().unwrap_or_default())
+        .collect()
+}
+
+#[test]
+fn d3v_turn_0105_parameter_name_header_unwraps() {
+    let result = parse_tool_calls(LONG_083_TURN_0105);
+    assert_eq!(names(&result), vec!["file_read", "file_read"]);
+    assert_eq!(
+        result.tool_calls[1].arguments,
+        serde_json::json!({"path": "/work/src/tool_parser.rs", "line_range": [120, 320]})
+    );
+    assert!(result.rejections.is_empty(), "{:?}", result.rejections);
+}
+
+#[test]
+fn d3v_turn_0108_name_element_header_unwraps() {
+    let result = parse_tool_calls(LONG_083_TURN_0108);
+    assert_eq!(names(&result), vec!["file_read", "file_read"]);
+    assert_eq!(
+        result.tool_calls[1].arguments,
+        serde_json::json!({"path": "/work/src/agent/execution.rs", "line_range": [1, 150]})
+    );
+    assert!(result.rejections.is_empty(), "{:?}", result.rejections);
+}
+
+#[test]
+fn d3v_turn_0110_two_wrapped_calls_both_unwrap() {
+    let result = parse_tool_calls(LONG_083_TURN_0110);
+    assert_eq!(
+        paths(&result),
+        vec![
+            "/work/src/agent/execution.rs",
+            "/work/src/agent/tool_validator.rs"
+        ]
+    );
+    assert_eq!(names(&result), vec!["file_read", "file_read"]);
+    assert!(result.rejections.is_empty(), "{:?}", result.rejections);
+}
+
+#[test]
+fn d3v_turn_0123_xml_then_two_wrapped_calls() {
+    let result = parse_tool_calls(LONG_083_TURN_0123);
+    assert_eq!(
+        paths(&result),
+        vec![
+            "/work/src/agent/best_snapshot.rs",
+            "/work/src/hooks/mod.rs",
+            "/work/src/tools/screen_capture.rs"
+        ]
+    );
+    assert!(result.rejections.is_empty(), "{:?}", result.rejections);
+}
+
+#[test]
+fn d3v_only_generic_wrappers_with_object_arguments_unwrap() {
+    // A real tool name in the function slot is not a wrapper: still rejected
+    // (b3_review turn_0003 shape).
+    let content = "<tool_call>\n<function=file_read>\n<name>file_read</name>\n<arguments>{\"path\": \"a.rs\"}</arguments>\n</tool>";
+    let result = parse_tool_calls(content);
+    assert!(result.tool_calls.is_empty(), "{:?}", names(&result));
+    assert_eq!(result.rejections.len(), 1, "{:?}", result.rejections);
+    // Arguments that are not a JSON object do not unwrap.
+    let content = "<tool_call>\n<function=tool>\n<name>file_read</name>\n<arguments>a.rs</arguments>\n</tool>";
+    let result = parse_tool_calls(content);
+    assert!(result.tool_calls.is_empty(), "{:?}", names(&result));
+    assert_eq!(result.rejections.len(), 1, "{:?}", result.rejections);
+    // An inner name that is not an identifier does not unwrap.
+    let content = "<tool_call>\n<function=tool>\n<name>...</name>\n<arguments>{\"path\": \"a.rs\"}</arguments>\n</tool>";
+    let result = parse_tool_calls(content);
+    assert!(result.tool_calls.is_empty(), "{:?}", names(&result));
+    // Every generic wrapper name, closed by `</function>` too.
+    for wrapper in ["tool", "tool_call", "function", "call"] {
+        let content = format!(
+            "<function={wrapper}>\n<parameter=name>file_read</parameter>\n<arguments>{{\"path\": \"a.rs\"}}</arguments>\n</function>"
+        );
+        assert_only_real_file_read(&parse_tool_calls(&content), wrapper);
+    }
 }

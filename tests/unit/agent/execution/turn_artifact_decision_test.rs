@@ -251,9 +251,11 @@ async fn existing_turn_file_is_never_overwritten() {
     assert_eq!(agent.turn_artifact_seq, 3, "numbering continues after it");
 }
 
-/// D6: b3_review turn_0010 (verbatim qwen38-flash-next content). The first
-/// call parses; the second (`<function=tool>` + `<name>` + `<arguments>`
-/// closed by `</tool>`) matches no parser. 0.8.2 silently dropped it: not
+/// D6: b3_review turn_0003 shape (qwen38-flash-next). The first call parses;
+/// the second (`<function=file_read>` + `<arguments>` closed by `</tool>`)
+/// matches no parser. (The turn_0010 shape used here before, a generic
+/// `<function=tool>` wrapper, is unwrapped since the 0.8.3 D3-variant fix.)
+/// 0.8.2 silently dropped such a call: not
 /// executed, not in rejected_tools, no tool result. It must now be refused
 /// through the dispatcher funnel so the model is told.
 #[tokio::test]
@@ -267,7 +269,7 @@ async fn d6_unparseable_call_in_mixed_batch_is_rejected_and_reported() {
     cwd.switch_to(dir.path());
     std::fs::write(dir.path().join("notes.txt"), "hello\n").unwrap();
 
-    let content = "\n\n<tool>\n<name>file_read</name>\n<arguments>{\"path\": \"notes.txt\"}</arguments>\n</tool>\n</tool_call>\n<tool_call>\n<function=tool>\n<name>file_read</name>\n<arguments>{\"path\": \"src/agent/tool_validator.rs\"}</arguments>\n</tool>";
+    let content = "\n\n<tool>\n<name>file_read</name>\n<arguments>{\"path\": \"notes.txt\"}</arguments>\n</tool>\n</tool_call>\n<tool_call>\n<function=file_read>\n<arguments>{\"path\": \"src/agent/tool_validator.rs\"}</arguments>\n</tool>";
     let (agent, result) = run_one_step(content, dir.path()).await;
     assert!(result.is_ok(), "step must not error: {:?}", result.err());
 

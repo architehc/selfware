@@ -208,6 +208,54 @@ fn openai_function_regex() -> &'static Regex {
     })
 }
 
+/// Generic wrapper written with an `<arguments>` ELEMENT (runs/long_review,
+/// 0.8.3 validation): `<function=tool>` + a `<name>X</name>` or
+/// `<parameter name="name">X</parameter>` header (any parameter dialect) +
+/// `<arguments>{…}</arguments>`, closed by `</tool>` or `</function>`, and
+/// nothing else in the body. Groups: 1 wrapper, 2|3 inner name, 4 arguments.
+fn generic_wrapper_element_regex() -> &'static Regex {
+    static GENERIC_WRAPPER_ELEMENT_REGEX: OnceLock<Regex> = OnceLock::new();
+    GENERIC_WRAPPER_ELEMENT_REGEX.get_or_init(|| {
+        Regex::new(
+            r#"(?s)<function=([a-zA-Z_][a-zA-Z0-9_]*)>\s*(?:<name>\s*([^<]*?)\s*</name>|<parameter(?:\s*=\s*|\s+name\s*=\s*)(?:"name"|'name'|name)\s*>\s*([^<]*?)\s*</parameter>)\s*<arguments>([\s\S]*?)</arguments>\s*(?:</tool>|</function>)"#,
+        )
+        .expect("Invalid generic wrapper element regex")
+    })
+}
+
+/// A [`generic_wrapper_element_regex`] match is a call only when the
+/// generic-wrapper conditions of [`unwrap_generic_wrapper`] hold (a generic
+/// wrapper name, a non-empty inner name, arguments that are a JSON object);
+/// anything else is left to the other families / the rejection report.
+fn generic_wrapper_element_call(
+    cap: &regex::Captures<'_>,
+    raw: String,
+) -> Option<Result<ParsedToolCall>> {
+    let wrapper = cap[1].trim();
+    if !GENERIC_WRAPPER_NAMES.contains(&wrapper) {
+        return None;
+    }
+    let inner_name = cap.get(2).or_else(|| cap.get(3))?.as_str().trim();
+    let identifier = inner_name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && inner_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !identifier {
+        return None;
+    }
+    let arguments = serde_json::from_str::<serde_json::Value>(cap[4].trim()).ok()?;
+    let call = unwrap_generic_wrapper(ParsedToolCall {
+        tool_name: wrapper.to_string(),
+        arguments: serde_json::json!({"name": inner_name, "arguments": arguments}),
+        raw_text: raw,
+        parse_method: ParseMethod::Xml,
+    });
+    (!GENERIC_WRAPPER_NAMES.contains(&call.tool_name.as_str())).then_some(Ok(call))
+}
+
 /// Cached regex for parsing XML elements: `<tag>content</tag>`
 /// Used by `parse_xml_arguments` to extract key-value pairs from XML-style arguments.
 fn xml_element_regex() -> &'static Regex {
@@ -305,16 +353,86 @@ struct Candidate {
     result: Result<ParsedToolCall>,
 }
 
-/// Run one regex family over the whole text. `build` returns `None` for a
-/// match that is not a tool call at all (e.g. a JSON block without a name).
+/// Whether `pos` opens a line: only whitespace and [`TOOL_CALL_WRAPPERS`]
+/// tokens precede it on its line.
+fn at_line_start(content: &str, pos: usize) -> bool {
+    let line_start = content[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    strip_wrappers(&content[line_start..pos]).is_empty()
+}
+
+/// Where a match at `span` runs into ANOTHER call: the first line-start
+/// [`TOOL_CALL_OPENERS`] token inside the match that follows real payload
+/// (not just the match's own opening tokens — `<tool_call>` directly
+/// followed by `<function=x>` is one head). A lazy match that runs past such
+/// an opener started at a prose example and swallowed the next real call.
+fn inner_call_opener(content: &str, span: &std::ops::Range<usize>) -> Option<usize> {
+    static FUNCTION_TAG: OnceLock<Regex> = OnceLock::new();
+    let function_tag = FUNCTION_TAG
+        .get_or_init(|| Regex::new(r"<function=[^<>\s]*>?").expect("Invalid function tag regex"));
+    let text = &content[span.clone()];
+    let mut inner: Vec<usize> = TOOL_CALL_OPENERS
+        .iter()
+        .flat_map(|opener| text.match_indices(opener).map(|(p, _)| p))
+        .filter(|&p| p > 0 && at_line_start(content, span.start + p))
+        .collect();
+    inner.sort_unstable();
+    inner.into_iter().find(|&p| {
+        let mut head = function_tag.replace_all(&text[..p], "").to_string();
+        for opener in TOOL_CALL_OPENERS {
+            head = head.replace(opener, "");
+        }
+        !strip_wrappers(&head).is_empty()
+    })
+}
+
+/// Every match of `regex` that can be a live call, found left to right:
+/// - a match that STARTS inside markdown code (`code`: inline spans and
+///   fences) is a quoted example, never a call — the scan resumes after that
+///   code span, so the example cannot swallow the call that follows it;
+/// - a match that runs into another call's opener (see [`inner_call_opener`])
+///   is not a call either — the scan resumes AT that inner opener.
+///
+/// Families whose syntax IS a code fence (JSON blocks) do not use this.
+fn live_matches<'c>(
+    content: &'c str,
+    regex: &Regex,
+    code: &[std::ops::Range<usize>],
+) -> Vec<regex::Captures<'c>> {
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while pos <= content.len() {
+        let Some(cap) = regex.captures_at(content, pos) else {
+            break;
+        };
+        let whole = cap.get(0).expect("regex group 0 always matches");
+        if let Some(span) = code.iter().find(|s| s.contains(&whole.start())) {
+            pos = span.end.max(whole.start() + 1);
+        } else if let Some(p) = inner_call_opener(content, &whole.range()) {
+            pos = whole.start() + p;
+        } else {
+            pos = whole.end().max(whole.start() + 1);
+            out.push(cap);
+            continue;
+        }
+        while pos < content.len() && !content.is_char_boundary(pos) {
+            pos += 1;
+        }
+    }
+    out
+}
+
+/// Run one regex family over the whole text (live matches only, see
+/// [`live_matches`]). `build` returns `None` for a match that is not a tool
+/// call at all (e.g. a JSON block without a name).
 fn regex_family(
     content: &str,
     regex: &Regex,
     family: usize,
+    code: &[std::ops::Range<usize>],
     build: impl Fn(&regex::Captures<'_>, String) -> Option<Result<ParsedToolCall>>,
 ) -> Vec<Candidate> {
-    regex
-        .captures_iter(content)
+    live_matches(content, regex, code)
+        .into_iter()
         .filter_map(|cap| {
             let whole = cap.get(0)?;
             let raw = whole.as_str().to_string();
@@ -365,6 +483,7 @@ fn tool_call_json_regex() -> &'static Regex {
 /// order (the order in which the families used to be tried one after the
 /// other). Priority only matters when two families claim overlapping text.
 fn collect_candidates(content: &str) -> Vec<Candidate> {
+    let code = markdown_code_spans(content);
     let mut all = Vec::new();
     let xml_families: [&Regex; 6] = [
         xml_tool_regex(),
@@ -376,13 +495,20 @@ fn collect_candidates(content: &str) -> Vec<Candidate> {
         xml_tool_missing_args_close_regex(),
     ];
     for (family, regex) in xml_families.into_iter().enumerate() {
-        all.extend(regex_family(content, regex, family, xml_name_args_call));
+        all.extend(regex_family(
+            content,
+            regex,
+            family,
+            &code,
+            xml_name_args_call,
+        ));
     }
     // <tool_call><function=name><parameter=key>value</parameter>...</function></tool_call>
     all.extend(regex_family(
         content,
         qwen3_tool_call_regex(),
         6,
+        &code,
         qwen3_function_call,
     ));
     // <tool_call>{"name": "tool", "arguments": {...}}</tool_call> (Qwen3.5 / sglang)
@@ -390,6 +516,7 @@ fn collect_candidates(content: &str) -> Vec<Candidate> {
         content,
         tool_call_json_regex(),
         7,
+        &code,
         |cap, raw| match serde_json::from_str::<serde_json::Value>(cap[1].trim()) {
             Ok(json) => {
                 let name = json
@@ -414,13 +541,24 @@ fn collect_candidates(content: &str) -> Vec<Candidate> {
             Err(e) => Some(Err(anyhow::anyhow!("Invalid JSON in <tool_call>: {}", e))),
         },
     ));
+    // <function=tool><name>X</name><arguments>{…}</arguments></tool> (or a
+    // `<parameter name="name">X</parameter>` header, or a `</function>`
+    // close): the generic wrapper written with an `<arguments>` element.
+    all.extend(regex_family(
+        content,
+        generic_wrapper_element_regex(),
+        8,
+        &code,
+        generic_wrapper_element_call,
+    ));
     // <function=name>{"key": "value"}</function>. Outranks the bare function
     // family: both share the `<function=name>…</function>` structure, but this
     // variant carries inline JSON while the bare variant uses <parameter> tags.
     all.extend(regex_family(
         content,
         openai_function_regex(),
-        8,
+        9,
+        &code,
         |cap, raw| {
             let name = cap[1].trim().to_string();
             Some(
@@ -439,13 +577,17 @@ fn collect_candidates(content: &str) -> Vec<Candidate> {
     all.extend(regex_family(
         content,
         bare_function_regex(),
-        9,
+        10,
+        &code,
         qwen3_function_call,
     ));
     for (family, found) in [
-        (10, try_parse_kimi_tools(content)),
-        (11, try_parse_json_blocks(content)),
-        (12, try_parse_plain_function_calls(content)),
+        (11, try_parse_kimi_tools(content, &code)),
+        // Fenced JSON blocks are code by construction (not filtered by
+        // `code`): `[^`]*` already stops a match at the next fence, so one
+        // block cannot swallow another.
+        (12, try_parse_json_blocks(content)),
+        (13, try_parse_plain_function_calls(content, &code)),
     ] {
         for (result, span) in found.unwrap_or_default() {
             all.push(Candidate {
@@ -876,15 +1018,18 @@ type SpannedCall = (Result<ParsedToolCall>, std::ops::Range<usize>);
 
 /// Try to parse Moonshot/Kimi delimiter-style tool calls:
 /// `<|open|>call tool="name" index="1"<|sep|><|open|>argument key="arg" type="string"<|sep|>val<|close|>argument<|close|>call`
-fn try_parse_kimi_tools(content: &str) -> Option<Vec<SpannedCall>> {
+fn try_parse_kimi_tools(
+    content: &str,
+    code: &[std::ops::Range<usize>],
+) -> Option<Vec<SpannedCall>> {
     if !content.contains("call tool=") {
         return None;
     }
     let regex = kimi_call_regex();
     let arg_regex = kimi_arg_regex();
 
-    let results: Vec<_> = regex
-        .captures_iter(content)
+    let results: Vec<_> = live_matches(content, regex, code)
+        .into_iter()
         .map(|cap| {
             let whole = cap.get(0).expect("regex group 0 always matches");
             let raw = whole.as_str().to_string();
@@ -1217,7 +1362,10 @@ fn try_parse_json_blocks(content: &str) -> Option<Vec<SpannedCall>> {
 ///   tool_name({"key": "value"})
 ///
 /// This is a last-resort fallback for models that don't wrap tool calls in XML tags.
-fn try_parse_plain_function_calls(content: &str) -> Option<Vec<SpannedCall>> {
+fn try_parse_plain_function_calls(
+    content: &str,
+    code: &[std::ops::Range<usize>],
+) -> Option<Vec<SpannedCall>> {
     // Known tool name prefixes — we only match calls that look like real tools
     const KNOWN_TOOLS: &[&str] = &[
         "file_read",
@@ -1327,6 +1475,10 @@ fn try_parse_plain_function_calls(content: &str) -> Option<Vec<SpannedCall>> {
 
     for cap in regex.captures_iter(content) {
         let whole = cap.get(0).expect("regex group 0 always matches");
+        // A call line inside markdown code is a quoted example.
+        if in_spans(whole.start(), code) {
+            continue;
+        }
         let raw = whole.as_str().to_string();
         let span = whole.range();
         let name = cap[1].to_string();
