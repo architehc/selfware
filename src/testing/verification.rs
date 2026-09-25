@@ -60,10 +60,28 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
+    run_reaped_env(program, args, cwd, timeout_secs, &[]).await
+}
+
+/// [`run_reaped_args`] plus task-specific environment variables, set AFTER
+/// the sanitizer clears the inherited environment (e.g.
+/// `PYTHONDONTWRITEBYTECODE=1` for the Python syntax check).
+async fn run_reaped_env<I, S>(
+    program: &str,
+    args: I,
+    cwd: &Path,
+    timeout_secs: u64,
+    env: &[(&str, &str)],
+) -> Result<ReapedOutput>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
     use tokio::io::AsyncReadExt;
 
     let mut cmd = Command::new(program);
     crate::safety::process_env::sanitize_command_env(&mut cmd);
+    cmd.envs(env.iter().copied());
     cmd.kill_on_drop(true);
     cmd.args(args).current_dir(cwd);
     #[cfg(unix)]
@@ -187,7 +205,16 @@ where
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckResult {
     pub check_type: CheckType,
+    /// Whether the check blocks. A check that could NOT run (`not_run`) is
+    /// non-blocking and therefore `passed`, but it verified nothing: read
+    /// `not_run` before presenting a pass.
     pub passed: bool,
+    /// The check did not run at all (tool missing, could not be started, or
+    /// the host toolchain cannot judge this project's language level). It
+    /// asserts nothing about the code: neither a pass nor a failure
+    /// (AGENTS.md Rule 3). `output`/`warnings` say why.
+    #[serde(default)]
+    pub not_run: bool,
     pub duration_ms: u64,
     pub output: String,
     pub errors: Vec<VerificationError>,
@@ -266,8 +293,8 @@ impl RepoLanguage {
     pub fn extensions(&self) -> &'static [&'static str] {
         match self {
             Self::Python => &[".py"],
-            Self::JavaScript => &[".js", ".jsx"],
-            Self::TypeScript => &[".ts", ".tsx"],
+            Self::JavaScript => &[".js", ".jsx", ".mjs", ".cjs"],
+            Self::TypeScript => &[".ts", ".tsx", ".mts", ".cts"],
             Self::Java => &[".java"],
             Self::CSharp => &[".cs"],
             Self::Cpp => &[".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp"],
@@ -283,8 +310,8 @@ impl RepoLanguage {
     pub fn from_extension(ext: &str) -> Option<Self> {
         match ext {
             ".py" => Some(Self::Python),
-            ".js" | ".jsx" => Some(Self::JavaScript),
-            ".ts" | ".tsx" => Some(Self::TypeScript),
+            ".js" | ".jsx" | ".mjs" | ".cjs" => Some(Self::JavaScript),
+            ".ts" | ".tsx" | ".mts" | ".cts" => Some(Self::TypeScript),
             ".java" => Some(Self::Java),
             ".cs" => Some(Self::CSharp),
             ".c" | ".cc" | ".cpp" | ".cxx" | ".h" | ".hh" | ".hpp" => Some(Self::Cpp),
@@ -566,6 +593,7 @@ fn rustfmt_output_is_tool_unavailable(combined: &str) -> bool {
 /// sqlfluff-not-installed precedent in `run_cheap_syntax_check`.
 fn rustfmt_unavailable_result(lang: RepoLanguage, duration_ms: u64, output: &str) -> CheckResult {
     CheckResult {
+        not_run: true,
         check_type: CheckType::TypeCheck,
         passed: true,
         duration_ms,
@@ -847,6 +875,7 @@ impl VerificationGate {
                 ));
             }
             checks.push(CheckResult {
+                not_run: false,
                 check_type: CheckType::Test,
                 passed,
                 duration_ms,
@@ -1070,6 +1099,7 @@ impl VerificationGate {
         let (errors, warnings) = parse_cargo_json_output(&stdout);
 
         Ok(CheckResult {
+            not_run: false,
             check_type: CheckType::TypeCheck,
             passed: output.success,
             duration_ms: duration,
@@ -1107,6 +1137,7 @@ impl VerificationGate {
         // ToolUnavailable arm (same blind spot, sibling site).
         if !output.success && rustfmt_output_is_tool_unavailable(&format!("{stdout}\n{stderr}")) {
             return Ok(CheckResult {
+                not_run: true,
                 check_type: CheckType::Format,
                 passed: true,
                 duration_ms: duration,
@@ -1122,6 +1153,7 @@ impl VerificationGate {
         }
 
         Ok(CheckResult {
+            not_run: false,
             check_type: CheckType::Format,
             passed: output.success,
             duration_ms: duration,
@@ -1161,6 +1193,7 @@ impl VerificationGate {
             // Timeout - the child was killed and reaped (see run_reaped);
             // return a graceful error as before.
             return Ok(CheckResult {
+                not_run: false,
                 check_type: CheckType::Test,
                 passed: false,
                 duration_ms: timeout_secs * 1000,
@@ -1187,6 +1220,7 @@ impl VerificationGate {
         let errors = parse_test_failures(&stdout, &stderr);
 
         Ok(CheckResult {
+            not_run: false,
             check_type: CheckType::Test,
             passed: output.success,
             duration_ms: duration,
@@ -1216,6 +1250,7 @@ impl VerificationGate {
         let (errors, warnings) = parse_cargo_json_output(&stdout);
 
         Ok(CheckResult {
+            not_run: false,
             check_type: CheckType::Lint,
             passed: output.success,
             duration_ms: duration,
@@ -1244,6 +1279,7 @@ impl VerificationGate {
         let stderr = String::from_utf8_lossy(&output.stderr);
 
         Ok(CheckResult {
+            not_run: false,
             check_type: CheckType::Custom,
             passed: output.success,
             duration_ms: duration,
@@ -1292,6 +1328,7 @@ impl VerificationGate {
             QaStage::Security => CheckType::Custom,
         };
         CheckResult {
+            not_run: false,
             check_type,
             passed: stage.passed,
             duration_ms: stage.duration_ms,
@@ -1459,6 +1496,13 @@ impl VerificationGate {
     }
 
     /// Run a cheap syntax check on ONLY the touched files.
+    ///
+    /// Python, JavaScript, TypeScript, Java and C/C++ first resolve the
+    /// project's language level (see [`super::syntax_toolchain`]): a direct
+    /// tool invocation with the tool's built-in defaults rejected valid modern
+    /// code as a syntax error. A verifier that is missing, cannot start, or
+    /// cannot judge the project's language level yields a NOT-RUN result
+    /// (`not_run`), never a pass or a failure (AGENTS.md Rule 3).
     async fn run_cheap_syntax_check(
         &self,
         lang: RepoLanguage,
@@ -1466,54 +1510,48 @@ impl VerificationGate {
     ) -> Result<CheckResult> {
         let start = Instant::now();
         let full_paths: Vec<_> = files.iter().map(|f| self.resolve_file_path(f)).collect();
+        if full_paths.is_empty() {
+            return Ok(CheckResult {
+                not_run: false,
+                check_type: CheckType::TypeCheck,
+                passed: true,
+                duration_ms: 0,
+                output: format!("No {} files to check", lang),
+                errors: vec![],
+                warnings: vec![],
+                suggestions: vec![],
+            });
+        }
         // Rust only: one rustfmt invocation per resolved edition (a direct
         // rustfmt run does not read Cargo.toml and would otherwise parse as
         // Rust 2015, rejecting valid `async fn` as a syntax error).
         let mut rust_groups: Vec<(super::rust_edition::ResolvedEdition, Vec<PathBuf>)> = Vec::new();
+        // Project-level build commands (`dotnet build`, `swift build`) must run
+        // where the project file is, not in the edited file's directory (they
+        // do not search upward and failed with "no project found").
+        let mut project_level = false;
+        // Scratch output for `csc` (removed on drop; never a fixed /tmp path).
+        let mut _csc_out: Option<tempfile::TempDir> = None;
 
         let (program, args): (&str, Vec<String>) = match lang {
             RepoLanguage::Python => {
-                let mut a = vec!["-m".to_string(), "py_compile".to_string()];
-                for p in &full_paths {
-                    a.push(p.to_string_lossy().to_string());
-                }
-                ("python3", a)
+                return Ok(self.check_python_syntax(files, &full_paths, start).await)
             }
             RepoLanguage::JavaScript => {
-                if let Some(p) = full_paths.first() {
-                    (
-                        "node",
-                        vec!["--check".to_string(), p.to_string_lossy().to_string()],
-                    )
-                } else {
-                    return Ok(CheckResult {
-                        check_type: CheckType::TypeCheck,
-                        passed: true,
-                        duration_ms: 0,
-                        output: "No JS files to check".to_string(),
-                        errors: vec![],
-                        warnings: vec![],
-                        suggestions: vec![],
-                    });
-                }
+                return Ok(self
+                    .check_javascript_syntax(files, &full_paths, start)
+                    .await)
             }
             RepoLanguage::TypeScript => {
-                let mut a = vec!["tsc".to_string(), "--noEmit".to_string()];
-                for p in &full_paths {
-                    a.push(p.to_string_lossy().to_string());
-                }
-                ("npx", a)
+                return Ok(self
+                    .check_typescript_syntax(files, &full_paths, start)
+                    .await)
             }
             RepoLanguage::Java => {
-                let mut a = vec![
-                    "-Xlint:none".to_string(),
-                    "-d".to_string(),
-                    "/tmp".to_string(),
-                ];
-                for p in &full_paths {
-                    a.push(p.to_string_lossy().to_string());
-                }
-                ("javac", a)
+                return Ok(self.check_java_syntax(files, &full_paths, start).await)
+            }
+            RepoLanguage::Cpp => {
+                return Ok(self.check_c_family_syntax(files, &full_paths, start).await)
             }
             RepoLanguage::CSharp => {
                 if self.project_root.join("global.json").exists()
@@ -1531,45 +1569,31 @@ impl VerificationGate {
                                 .is_some_and(|x| matches!(x, "sln" | "csproj"))
                         })
                 {
+                    project_level = true;
                     ("dotnet", vec!["build".to_string(), "--nologo".to_string()])
                 } else {
+                    let out = match tempfile::Builder::new()
+                        .prefix("selfware-csharp-check")
+                        .tempdir()
+                    {
+                        Ok(d) => d,
+                        Err(e) => {
+                            return Ok(syntax_not_run(
+                                lang,
+                                &format!("could not create a scratch output dir: {e}"),
+                                0,
+                            ))
+                        }
+                    };
                     let mut a = vec![
                         "-target:library".to_string(),
-                        "-out:/tmp/selfware-csharp-check.dll".to_string(),
+                        format!("-out:{}", out.path().join("check.dll").display()),
                     ];
                     for p in &full_paths {
                         a.push(p.to_string_lossy().to_string());
                     }
+                    _csc_out = Some(out);
                     ("csc", a)
-                }
-            }
-            RepoLanguage::Cpp => {
-                if self.project_root.join("CMakeLists.txt").exists() {
-                    ("cmake", vec!["--build".to_string(), ".".to_string()])
-                } else if let Some(p) = full_paths.first() {
-                    let compiler = if p
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .is_some_and(|e| matches!(e, "c"))
-                    {
-                        "cc"
-                    } else {
-                        "c++"
-                    };
-                    (
-                        compiler,
-                        vec!["-fsyntax-only".to_string(), p.to_string_lossy().to_string()],
-                    )
-                } else {
-                    return Ok(CheckResult {
-                        check_type: CheckType::TypeCheck,
-                        passed: true,
-                        duration_ms: 0,
-                        output: "No C/C++ files to check".to_string(),
-                        errors: vec![],
-                        warnings: vec![],
-                        suggestions: vec![],
-                    });
                 }
             }
             RepoLanguage::Sql => {
@@ -1585,6 +1609,7 @@ impl VerificationGate {
                     ("sqlfluff", a)
                 } else {
                     return Ok(CheckResult {
+                        not_run: true,
                         check_type: CheckType::TypeCheck,
                         passed: true,
                         duration_ms: 0,
@@ -1606,91 +1631,50 @@ impl VerificationGate {
             }
             RepoLanguage::Swift => {
                 if self.project_root.join("Package.swift").exists() {
+                    project_level = true;
                     ("swift", vec!["build".to_string()])
-                } else if let Some(p) = full_paths.first() {
-                    (
-                        "swiftc",
-                        vec!["-parse".to_string(), p.to_string_lossy().to_string()],
-                    )
                 } else {
-                    return Ok(CheckResult {
-                        check_type: CheckType::TypeCheck,
-                        passed: true,
-                        duration_ms: 0,
-                        output: "No Swift files to check".to_string(),
-                        errors: vec![],
-                        warnings: vec![],
-                        suggestions: vec![],
-                    });
+                    // Every edited file, not just the first.
+                    let mut a = vec!["-parse".to_string()];
+                    a.extend(full_paths.iter().map(|p| p.to_string_lossy().to_string()));
+                    ("swiftc", a)
                 }
             }
             RepoLanguage::Rust => {
-                if full_paths.is_empty() {
-                    return Ok(CheckResult {
-                        check_type: CheckType::TypeCheck,
-                        passed: true,
-                        duration_ms: 0,
-                        output: "No Rust files to check".to_string(),
-                        errors: vec![],
-                        warnings: vec![],
-                        suggestions: vec![],
-                    });
-                }
                 // Args are built per edition group below.
                 rust_groups = super::rust_edition::group_by_edition(&full_paths);
                 ("rustfmt", Vec::new())
             }
             RepoLanguage::Unknown => {
-                return Ok(CheckResult {
-                    check_type: CheckType::TypeCheck,
-                    passed: true,
-                    duration_ms: 0,
-                    output: "Unknown language, skipping syntax check".to_string(),
-                    errors: vec![],
-                    warnings: vec![],
-                    suggestions: vec![],
-                });
+                return Ok(syntax_not_run(
+                    lang,
+                    "unknown language, no syntax checker applies",
+                    0,
+                ));
             }
         };
 
-        if !matches!(program, "sh") && !self.command_exists(program).await {
-            return Ok(CheckResult {
-                check_type: CheckType::TypeCheck,
-                passed: false,
-                duration_ms: 0,
-                output: format!(
-                    "{} syntax check could not run: `{}` not found",
-                    lang, program
-                ),
-                errors: vec![VerificationError {
-                    file: files.first().cloned().unwrap_or_default(),
-                    line: None,
-                    column: None,
-                    message: format!("{} verifier `{}` not found", lang, program),
-                    code: Some("VERIFIER_NOT_FOUND".to_string()),
-                    severity: ErrorSeverity::Error,
-                    suggestion: Some(format!(
-                        "Install `{}` or run a project-specific verifier",
-                        program
-                    )),
-                }],
-                warnings: vec![],
-                suggestions: vec![format!(
-                    "Run a project-specific {} verification command manually",
-                    lang
-                )],
-            });
+        if !self.command_exists(program).await {
+            return Ok(syntax_not_run(
+                lang,
+                &format!("`{}` not found on PATH", program),
+                0,
+            ));
         }
 
-        let check_dir = full_paths
-            .first()
-            .and_then(|p| p.parent())
-            .filter(|p| p.is_dir())
-            .map(|p| p.to_path_buf())
-            // Explicit working dir, then the project root -- never the
-            // ambient process cwd (see `resolve_file_path`).
-            .or_else(|| self.working_dir.clone())
-            .unwrap_or_else(|| self.project_root.clone());
+        let check_dir = if project_level {
+            self.project_root.clone()
+        } else {
+            full_paths
+                .first()
+                .and_then(|p| p.parent())
+                .filter(|p| p.is_dir())
+                .map(|p| p.to_path_buf())
+                // Explicit working dir, then the project root -- never the
+                // ambient process cwd (see `resolve_file_path`).
+                .or_else(|| self.working_dir.clone())
+                .unwrap_or_else(|| self.project_root.clone())
+        };
 
         let invocations: Vec<Vec<String>> = if program == "rustfmt" {
             rust_groups
@@ -1708,30 +1692,24 @@ impl VerificationGate {
         let mut all_success = true;
         let mut combined = String::new();
         for args in &invocations {
-            let mut check_cmd = Command::new(program);
-            // The syntax checker consumes project-controlled files; sanitize its
-            // environment so it never inherits host credentials.
-            crate::safety::process_env::sanitize_command_env(&mut check_cmd);
-            check_cmd.kill_on_drop(true);
-            let output = check_cmd
-                .args(args)
-                .current_dir(&check_dir)
-                .output()
-                .await
-                .context(format!("Failed to run {} syntax check", lang))?;
-            all_success &= output.status.success();
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let part = if stderr.is_empty() {
-                stdout.to_string()
-            } else {
-                format!("{}\n{}", stdout, stderr)
-            };
-            if !part.is_empty() {
-                if !combined.is_empty() {
-                    combined.push('\n');
+            // Sanitized env + timeout + process-group reaping (run_reaped_env).
+            match self.run_syntax_tool(program, args, &check_dir, &[]).await {
+                ToolRun::NotRun(reason) => {
+                    return Ok(syntax_not_run(
+                        lang,
+                        &reason,
+                        start.elapsed().as_millis() as u64,
+                    ));
                 }
-                combined.push_str(&part);
+                ToolRun::Done { success, output } => {
+                    all_success &= success;
+                    if !output.is_empty() {
+                        if !combined.is_empty() {
+                            combined.push('\n');
+                        }
+                        combined.push_str(&output);
+                    }
+                }
             }
         }
         let duration = start.elapsed().as_millis() as u64;
@@ -1776,6 +1754,7 @@ impl VerificationGate {
                 }
                 RustfmtFailureKind::FormattingDiff => {
                     return Ok(CheckResult {
+                        not_run: false,
                         check_type: CheckType::TypeCheck,
                         passed: true,
                         duration_ms: duration,
@@ -1816,6 +1795,7 @@ impl VerificationGate {
         }
 
         Ok(CheckResult {
+            not_run: false,
             check_type: CheckType::TypeCheck,
             passed: all_success,
             duration_ms: duration,
@@ -1860,6 +1840,527 @@ impl VerificationGate {
                 vec![format!("Fix {} syntax errors before running tests", lang)]
             },
         })
+    }
+
+    /// Run one syntax-tool invocation: sanitized environment, the configured
+    /// timeout, process-group reaping. A spawn failure is NOT-RUN (the tool
+    /// never executed); a timeout stays a failure (fail-closed, like every
+    /// other reaped verification command).
+    async fn run_syntax_tool(
+        &self,
+        program: &str,
+        args: &[String],
+        cwd: &Path,
+        env: &[(&str, &str)],
+    ) -> ToolRun {
+        match run_reaped_env(program, args, cwd, self.config.check_timeout_secs, env).await {
+            Err(e) => ToolRun::NotRun(format!("`{}` could not be started: {:#}", program, e)),
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let output = if stderr.is_empty() {
+                    stdout.to_string()
+                } else {
+                    format!("{}\n{}", stdout, stderr)
+                };
+                ToolRun::Done {
+                    success: out.success,
+                    output,
+                }
+            }
+        }
+    }
+
+    /// `node_modules/.bin/tsc` nearest `near`, else `tsc` on PATH. Never
+    /// `npx`: it silently downloads a package when none is installed.
+    async fn resolve_tsc(&self, near: &Path) -> Option<String> {
+        if let Some(p) = super::syntax_toolchain::find_local_node_bin(near, "tsc") {
+            return Some(p.to_string_lossy().to_string());
+        }
+        if self.command_exists("tsc").await {
+            Some("tsc".to_string())
+        } else {
+            None
+        }
+    }
+
+    /// Python: `compile()` (never writes bytecode) under the interpreter that
+    /// matches the project's pinned version when one is installed. A host
+    /// interpreter OLDER than the pin cannot judge newer syntax, so its
+    /// rejection is reported as not-run, not as a syntax failure.
+    async fn check_python_syntax(
+        &self,
+        files: &[String],
+        paths: &[PathBuf],
+        start: Instant,
+    ) -> CheckResult {
+        use super::syntax_toolchain as tc;
+        let mut tally = SyntaxTally::new(RepoLanguage::Python, files);
+        let mut groups: Vec<(Option<tc::PythonPin>, Vec<PathBuf>)> = Vec::new();
+        for p in paths {
+            let pin = tc::resolve_python_pin(p, &self.project_root);
+            match groups.iter_mut().find(|(g, _)| *g == pin) {
+                Some((_, v)) => v.push(p.clone()),
+                None => groups.push((pin, vec![p.clone()])),
+            }
+        }
+        for (pin, group) in groups {
+            let mut interp = "python3".to_string();
+            if let Some(pin) = &pin {
+                let exact = format!("python{}.{}", pin.min.0, pin.min.1);
+                if self.command_exists(&exact).await {
+                    interp = exact;
+                }
+            }
+            if !self.command_exists(&interp).await {
+                tally.record(ToolRun::NotRun(format!("`{}` not found on PATH", interp)));
+                continue;
+            }
+            let mut args = vec![
+                "-B".to_string(),
+                "-c".to_string(),
+                tc::PYTHON_CHECK_SCRIPT.to_string(),
+            ];
+            args.extend(group.iter().map(|p| p.to_string_lossy().to_string()));
+            let cwd = dir_of(&group[0]).unwrap_or_else(|| self.project_root.clone());
+            let run = self
+                .run_syntax_tool(&interp, &args, &cwd, &[("PYTHONDONTWRITEBYTECODE", "1")])
+                .await;
+            let ToolRun::Done { success, output } = run else {
+                tally.record(run);
+                continue;
+            };
+            let host = tc::parse_python_check_version(&output);
+            let output = output
+                .lines()
+                .filter(|l| !l.starts_with("selfware-python-version "))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let host_desc = host
+                .map(|(a, b)| format!("{a}.{b}"))
+                .unwrap_or_else(|| "(unknown version)".to_string());
+            let pin_desc = pin
+                .as_ref()
+                .map(|p| format!("; project requires {}.{} ({})", p.min.0, p.min.1, p.source))
+                .unwrap_or_default();
+            tally.notes.push(format!(
+                "{} file(s) compiled by {} {}{}",
+                group.len(),
+                interp,
+                host_desc,
+                pin_desc
+            ));
+            if host.is_none() && !success {
+                tally.record(ToolRun::NotRun(format!(
+                    "{} did not run the check script: {}",
+                    interp,
+                    first_nonempty_line(&output)
+                )));
+                continue;
+            }
+            if let (Some(pin), Some(h)) = (&pin, host) {
+                if h < pin.min {
+                    if !success {
+                        tally.record(ToolRun::NotRun(format!(
+                            "host {} is {}, older than the project's Python {}.{} ({}); it cannot judge newer syntax, so its rejection is not a verdict (install python{}.{} to verify)",
+                            interp, host_desc, pin.min.0, pin.min.1, pin.source, pin.min.0, pin.min.1
+                        )));
+                        continue;
+                    }
+                    tally.warnings.push(format!(
+                        "Python syntax checked with {} {}, older than the project's Python {}.{} ({})",
+                        interp, host_desc, pin.min.0, pin.min.1, pin.source
+                    ));
+                }
+            }
+            tally.record(ToolRun::Done { success, output });
+        }
+        tally.finish(start.elapsed().as_millis() as u64)
+    }
+
+    /// JavaScript: `node --check` on EVERY file (it only ever checked the
+    /// first). ES-module syntax that node would parse as CommonJS is checked
+    /// as a module (an `.mjs` copy, which every node version parses as ESM);
+    /// JSX, which node cannot parse at all, goes to `tsc --allowJs`
+    /// (syntactic diagnostics only).
+    async fn check_javascript_syntax(
+        &self,
+        files: &[String],
+        paths: &[PathBuf],
+        start: Instant,
+    ) -> CheckResult {
+        use super::syntax_toolchain::{self as tc, JsMode};
+        let mut tally = SyntaxTally::new(RepoLanguage::JavaScript, files);
+        let node_ok = self.command_exists("node").await;
+        for p in paths {
+            let label = file_label(p);
+            let src = std::fs::read_to_string(p).unwrap_or_default();
+            let cwd = dir_of(p).unwrap_or_else(|| self.project_root.clone());
+            let mode = tc::js_mode(p, &self.project_root, &src);
+            if mode == JsMode::Jsx {
+                tally.notes.push(format!("{label}: JSX, parsed by tsc"));
+                let run = self.jsx_syntax_run(p, &cwd).await;
+                tally.record(run);
+                continue;
+            }
+            if !node_ok {
+                tally.record(ToolRun::NotRun("`node` not found on PATH".to_string()));
+                continue;
+            }
+            let path_str = p.to_string_lossy().to_string();
+            let run = match &mode {
+                JsMode::ForceModule(why) => {
+                    tally
+                        .notes
+                        .push(format!("{label}: parsed as an ES module ({why})"));
+                    self.node_check_as_module(p, &cwd).await
+                }
+                JsMode::Native(why) => {
+                    tally.notes.push(format!("{label}: {why}"));
+                    self.run_syntax_tool("node", &["--check".to_string(), path_str], &cwd, &[])
+                        .await
+                }
+                JsMode::Jsx => unreachable!("handled above"),
+            };
+            // JSX inside a `.js` file (React without a .jsx extension): node
+            // rejects the `<`; let a JSX-aware parser decide instead.
+            if let ToolRun::Done {
+                success: false,
+                output,
+            } = &run
+            {
+                if tc::node_output_suggests_jsx(output) {
+                    tally.notes.push(format!(
+                        "{label}: node rejected `<`, re-parsed as JSX by tsc"
+                    ));
+                    let jsx = self.jsx_syntax_run(p, &cwd).await;
+                    tally.record(jsx);
+                    continue;
+                }
+            }
+            tally.record(run);
+        }
+        tally.finish(start.elapsed().as_millis() as u64)
+    }
+
+    /// `node --check` on a temporary `.mjs` copy of `p` (parse goal: module),
+    /// with the temp path rewritten back to `p` in the output.
+    async fn node_check_as_module(&self, p: &Path, cwd: &Path) -> ToolRun {
+        let tmp = match tempfile::Builder::new()
+            .prefix("selfware-js-check")
+            .tempdir()
+        {
+            Ok(t) => t,
+            Err(e) => return ToolRun::NotRun(format!("could not create a temp dir: {e}")),
+        };
+        let stem = p
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "module".to_string());
+        let copy = tmp.path().join(format!("{stem}.mjs"));
+        if let Err(e) = std::fs::copy(p, &copy) {
+            return ToolRun::NotRun(format!("could not stage {} for checking: {e}", p.display()));
+        }
+        let run = self
+            .run_syntax_tool(
+                "node",
+                &["--check".to_string(), copy.to_string_lossy().to_string()],
+                cwd,
+                &[],
+            )
+            .await;
+        match run {
+            ToolRun::Done { success, output } => ToolRun::Done {
+                success,
+                output: output.replace(
+                    copy.to_string_lossy().as_ref(),
+                    p.to_string_lossy().as_ref(),
+                ),
+            },
+            other => other,
+        }
+    }
+
+    /// Syntax-only JSX parse via `tsc --allowJs` (no `checkJs`: JavaScript
+    /// files get syntactic diagnostics only).
+    async fn jsx_syntax_run(&self, p: &Path, cwd: &Path) -> ToolRun {
+        let Some(tsc) = self.resolve_tsc(p).await else {
+            return ToolRun::NotRun(format!(
+                "{} contains JSX, which node cannot parse, and no TypeScript compiler (`tsc`) is installed to parse it (npx is not used: it would download packages)",
+                file_label(p)
+            ));
+        };
+        let mut args = super::syntax_toolchain::jsx_syntax_args();
+        args.push(p.to_string_lossy().to_string());
+        self.run_syntax_tool(&tsc, &args, cwd, &[]).await
+    }
+
+    /// TypeScript: with a `tsconfig.json`, check through a temporary config
+    /// that `extends` it and lists only the edited files (project options,
+    /// no whole-project typecheck); without one, explicit modern defaults
+    /// (reported as a fallback). The compiler is the project-local
+    /// `node_modules/.bin/tsc` or `tsc` on PATH — never `npx`.
+    async fn check_typescript_syntax(
+        &self,
+        files: &[String],
+        paths: &[PathBuf],
+        start: Instant,
+    ) -> CheckResult {
+        use super::syntax_toolchain as tc;
+        static WRAPPER_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let mut tally = SyntaxTally::new(RepoLanguage::TypeScript, files);
+        let mut groups: Vec<(Option<PathBuf>, Vec<PathBuf>)> = Vec::new();
+        for p in paths {
+            let cfg = tc::resolve_ts_project(p, &self.project_root);
+            match groups.iter_mut().find(|(g, _)| *g == cfg) {
+                Some((_, v)) => v.push(p.clone()),
+                None => groups.push((cfg, vec![p.clone()])),
+            }
+        }
+        for (cfg, group) in groups {
+            let near = cfg.clone().unwrap_or_else(|| group[0].clone());
+            let Some(tsc) = self.resolve_tsc(&near).await else {
+                tally.record(ToolRun::NotRun(
+                    "TypeScript compiler not installed: no node_modules/.bin/tsc above the file and no `tsc` on PATH (npx is not used: it would silently download packages)".to_string(),
+                ));
+                continue;
+            };
+            if let Some(cfg) = &cfg {
+                let dir = cfg.parent().map(Path::to_path_buf).unwrap_or_default();
+                let wrapper = dir.join(format!(
+                    ".selfware-syntax-check-{}-{}.json",
+                    std::process::id(),
+                    WRAPPER_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                ));
+                match std::fs::write(&wrapper, tc::ts_wrapper_config_json(cfg, &group)) {
+                    Ok(()) => {
+                        let _cleanup = RemoveOnDrop(wrapper.clone());
+                        tally.notes.push(format!(
+                            "{} file(s) checked with project config {}",
+                            group.len(),
+                            cfg.display()
+                        ));
+                        let args = vec!["-p".to_string(), wrapper.to_string_lossy().to_string()];
+                        let run = self.run_syntax_tool(&tsc, &args, &dir, &[]).await;
+                        tally.record(run);
+                        continue;
+                    }
+                    Err(e) => tally.warnings.push(format!(
+                        "could not write a temporary tsconfig next to {} ({e}); checked with fallback compiler options instead",
+                        cfg.display()
+                    )),
+                }
+            }
+            let mut args = tc::ts_fallback_args();
+            args.extend(group.iter().map(|p| p.to_string_lossy().to_string()));
+            tally.notes.push(format!(
+                "{} file(s) checked with fallback options (no tsconfig.json)",
+                group.len()
+            ));
+            tally.warnings.push(format!(
+                "TypeScript syntax check used fallback compiler options ({}): no tsconfig.json applies to {}",
+                tc::ts_fallback_args().join(" "),
+                group.iter().map(|p| file_label(p)).collect::<Vec<_>>().join(", ")
+            ));
+            let cwd = dir_of(&group[0]).unwrap_or_else(|| self.project_root.clone());
+            let run = self.run_syntax_tool(&tsc, &args, &cwd, &[]).await;
+            tally.record(run);
+        }
+        tally.finish(start.elapsed().as_millis() as u64)
+    }
+
+    /// Java: `--release` from the build file when the host javac supports
+    /// it, `-sourcepath` from the package declaration, class output into a
+    /// temp dir that is removed afterwards (it used to be `/tmp` itself).
+    async fn check_java_syntax(
+        &self,
+        files: &[String],
+        paths: &[PathBuf],
+        start: Instant,
+    ) -> CheckResult {
+        use super::syntax_toolchain as tc;
+        let mut tally = SyntaxTally::new(RepoLanguage::Java, files);
+        if !self.command_exists("javac").await {
+            tally.record(ToolRun::NotRun("`javac` not found on PATH".to_string()));
+            return tally.finish(start.elapsed().as_millis() as u64);
+        }
+        let host = match self
+            .run_syntax_tool("javac", &["-version".to_string()], &self.project_root, &[])
+            .await
+        {
+            ToolRun::Done { output, .. } => tc::parse_javac_version(&output),
+            ToolRun::NotRun(r) => {
+                tally.record(ToolRun::NotRun(r));
+                return tally.finish(start.elapsed().as_millis() as u64);
+            }
+        };
+        let mut groups: Vec<(Option<tc::JavaRelease>, Vec<PathBuf>)> = Vec::new();
+        for p in paths {
+            let rel = tc::resolve_java_release(p, &self.project_root);
+            match groups.iter_mut().find(|(g, _)| *g == rel) {
+                Some((_, v)) => v.push(p.clone()),
+                None => groups.push((rel, vec![p.clone()])),
+            }
+        }
+        for (rel, group) in groups {
+            let out = match tempfile::Builder::new().prefix("selfware-javac-").tempdir() {
+                Ok(d) => d,
+                Err(e) => {
+                    tally.record(ToolRun::NotRun(format!(
+                        "could not create a class output dir: {e}"
+                    )));
+                    continue;
+                }
+            };
+            let mut base = vec![
+                "-Xlint:none".to_string(),
+                "-proc:none".to_string(),
+                "-implicit:none".to_string(),
+                "-d".to_string(),
+                out.path().to_string_lossy().to_string(),
+            ];
+            let mut roots: Vec<PathBuf> = Vec::new();
+            for p in &group {
+                let src = std::fs::read_to_string(p).unwrap_or_default();
+                if let Some(r) = tc::java_source_root(p, &src) {
+                    if !roots.contains(&r) {
+                        roots.push(r);
+                    }
+                }
+            }
+            if let Ok(sp) = std::env::join_paths(&roots) {
+                if !roots.is_empty() {
+                    base.push("-sourcepath".to_string());
+                    base.push(sp.to_string_lossy().to_string());
+                }
+            }
+            let host_desc = host
+                .map(|h| h.to_string())
+                .unwrap_or_else(|| "(unknown version)".to_string());
+            let mut release_args: Vec<String> = Vec::new();
+            let mut host_too_old = false;
+            match (&rel, host) {
+                (Some(r), Some(h)) if r.release > h => {
+                    host_too_old = true;
+                    tally.warnings.push(format!(
+                        "host javac {} is older than the project's Java {} ({})",
+                        h, r.release, r.source
+                    ));
+                }
+                (Some(r), Some(h)) if h >= 9 && r.release >= 8 => {
+                    release_args = vec!["--release".to_string(), r.release.to_string()];
+                    tally.notes.push(format!(
+                        "{} file(s) compiled with javac {} --release {} ({})",
+                        group.len(),
+                        h,
+                        r.release,
+                        r.source
+                    ));
+                }
+                (Some(r), _) => tally.warnings.push(format!(
+                    "project Java {} ({}) not passed as --release to javac {}",
+                    r.release, r.source, host_desc
+                )),
+                (None, _) => tally.warnings.push(format!(
+                    "no Java release level found in pom.xml/build.gradle; javac {} used its default",
+                    host_desc
+                )),
+            }
+            let file_args: Vec<String> = group
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect();
+            let cwd = dir_of(&group[0]).unwrap_or_else(|| self.project_root.clone());
+            let mut args = base.clone();
+            args.extend(release_args.iter().cloned());
+            args.extend(file_args.iter().cloned());
+            let mut run = self.run_syntax_tool("javac", &args, &cwd, &[]).await;
+            if let ToolRun::Done {
+                success: false,
+                output,
+            } = &run
+            {
+                if !release_args.is_empty()
+                    && output.contains("release version")
+                    && output.contains("not supported")
+                {
+                    tally.warnings.push(format!(
+                        "javac {} does not support --release {}; re-checked with its default",
+                        host_desc, release_args[1]
+                    ));
+                    let mut args = base.clone();
+                    args.extend(file_args.iter().cloned());
+                    run = self.run_syntax_tool("javac", &args, &cwd, &[]).await;
+                }
+            }
+            if host_too_old {
+                if let (ToolRun::Done { success: false, .. }, Some(r)) = (&run, &rel) {
+                    tally.record(ToolRun::NotRun(format!(
+                        "host javac {} is older than the project's Java {} ({}); it cannot judge newer syntax, so its rejection is not a verdict",
+                        host_desc, r.release, r.source
+                    )));
+                    continue;
+                }
+            }
+            tally.record(run);
+            drop(out);
+        }
+        tally.finish(start.elapsed().as_millis() as u64)
+    }
+
+    /// C/C++: each file parsed with `-fsyntax-only` under the standard (and
+    /// include paths/defines) the project actually builds with:
+    /// `compile_commands.json` → CMake standard → modern fallback. This
+    /// replaces `cmake --build .` for CMake projects, which ran in the edited
+    /// file's directory (never a configured build tree) and so failed on
+    /// every edit, and it checks every file instead of only the first.
+    async fn check_c_family_syntax(
+        &self,
+        files: &[String],
+        paths: &[PathBuf],
+        start: Instant,
+    ) -> CheckResult {
+        use super::syntax_toolchain as tc;
+        let mut tally = SyntaxTally::new(RepoLanguage::Cpp, files);
+        for p in paths {
+            let resolved = tc::resolve_c_flags(p, &self.project_root);
+            let compiler = resolved.lang.compiler();
+            if !self.command_exists(compiler).await {
+                tally.record(ToolRun::NotRun(format!("`{}` not found on PATH", compiler)));
+                continue;
+            }
+            let std = resolved
+                .flags
+                .iter()
+                .find(|f| f.starts_with("-std="))
+                .cloned()
+                .unwrap_or_default();
+            tally.notes.push(format!(
+                "{}: {} {} ({})",
+                file_label(p),
+                compiler,
+                std,
+                resolved.source
+            ));
+            if resolved.fallback {
+                tally.warnings.push(format!(
+                    "C/C++ syntax check of {} used a fallback standard: {}",
+                    file_label(p),
+                    resolved.source
+                ));
+            }
+            let mut args = resolved.flags.clone();
+            args.extend([
+                "-fsyntax-only".to_string(),
+                "-x".to_string(),
+                resolved.lang.x_lang().to_string(),
+                p.to_string_lossy().to_string(),
+            ]);
+            let cwd = dir_of(p).unwrap_or_else(|| self.project_root.clone());
+            let run = self.run_syntax_tool(compiler, &args, &cwd, &[]).await;
+            tally.record(run);
+        }
+        tally.finish(start.elapsed().as_millis() as u64)
     }
 
     /// Infer the appropriate test command for the repository.
@@ -1949,6 +2450,7 @@ impl VerificationGate {
 
         let Some((program, mut args)) = self.infer_test_command(lang).await else {
             return Ok(CheckResult {
+                not_run: false,
                 check_type: CheckType::Test,
                 passed: true,
                 duration_ms: 0,
@@ -1975,6 +2477,7 @@ impl VerificationGate {
 
         if output.timed_out {
             return Ok(CheckResult {
+                not_run: false,
                 check_type: CheckType::Test,
                 passed: false,
                 duration_ms: timeout_secs * 1000,
@@ -2001,6 +2504,7 @@ impl VerificationGate {
         let stderr = String::from_utf8_lossy(&output.stderr);
 
         Ok(CheckResult {
+            not_run: false,
             check_type: CheckType::Test,
             passed: output.success,
             duration_ms: duration,
@@ -2163,6 +2667,172 @@ fn parse_test_failures(stdout: &str, stderr: &str) -> Vec<VerificationError> {
     errors
 }
 
+/// Outcome of one syntax-tool invocation.
+enum ToolRun {
+    /// The tool ran to completion (or timed out: fail-closed).
+    Done { success: bool, output: String },
+    /// The tool never ran / cannot judge; the string says why.
+    NotRun(String),
+}
+
+/// The NOT-RUN result: non-blocking (`passed`), flagged `not_run`, no
+/// errors, and explicit that nothing was verified (AGENTS.md Rule 3).
+fn syntax_not_run(lang: RepoLanguage, reason: &str, duration_ms: u64) -> CheckResult {
+    CheckResult {
+        check_type: CheckType::TypeCheck,
+        passed: true,
+        not_run: true,
+        duration_ms,
+        output: format!("{} syntax check could not run: {}", lang, reason),
+        errors: vec![],
+        warnings: vec![format!(
+            "{} syntax check NOT RUN (no files were verified): {}",
+            lang, reason
+        )],
+        suggestions: vec![format!(
+            "Install the {} verifier or run a project-specific check manually",
+            lang
+        )],
+    }
+}
+
+/// Accumulates per-file / per-group syntax runs into one [`CheckResult`]:
+/// any failure fails; nothing completed → not-run; otherwise a pass that
+/// names what was checked and lists any part that did not run.
+struct SyntaxTally {
+    lang: RepoLanguage,
+    first_file: String,
+    completed: usize,
+    failures: Vec<String>,
+    not_run: Vec<String>,
+    /// What was checked and how (resolution provenance).
+    notes: Vec<String>,
+    /// Fallbacks and caveats.
+    warnings: Vec<String>,
+}
+
+impl SyntaxTally {
+    fn new(lang: RepoLanguage, files: &[String]) -> Self {
+        Self {
+            lang,
+            first_file: files.first().cloned().unwrap_or_default(),
+            completed: 0,
+            failures: Vec::new(),
+            not_run: Vec::new(),
+            notes: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    fn record(&mut self, run: ToolRun) {
+        match run {
+            ToolRun::Done { success, output } => {
+                self.completed += 1;
+                if !success {
+                    self.failures.push(if output.trim().is_empty() {
+                        "syntax check failed (no output)".to_string()
+                    } else {
+                        output
+                    });
+                }
+            }
+            ToolRun::NotRun(reason) => self.not_run.push(reason),
+        }
+    }
+
+    fn finish(self, duration_ms: u64) -> CheckResult {
+        let lang = self.lang;
+        let notes = if self.notes.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", self.notes.join("; "))
+        };
+        if self.completed == 0 && self.failures.is_empty() {
+            let reason = if self.not_run.is_empty() {
+                "no verifier ran".to_string()
+            } else {
+                self.not_run.join("; ")
+            };
+            let mut r = syntax_not_run(lang, &reason, duration_ms);
+            r.warnings.extend(self.warnings);
+            return r;
+        }
+        let mut warnings = self.warnings;
+        warnings.extend(
+            self.not_run
+                .iter()
+                .map(|r| format!("{} syntax check NOT RUN for part of the edit: {}", lang, r)),
+        );
+        if !self.failures.is_empty() {
+            let combined = self.failures.join("\n");
+            let first: String = first_nonempty_line(&combined).chars().take(150).collect();
+            return CheckResult {
+                check_type: CheckType::TypeCheck,
+                passed: false,
+                not_run: false,
+                duration_ms,
+                output: format!("{}{}", combined, notes),
+                errors: vec![VerificationError {
+                    file: self.first_file,
+                    line: None,
+                    column: None,
+                    message: format!("{} syntax check failed: {}", lang, first),
+                    code: None,
+                    severity: ErrorSeverity::Error,
+                    suggestion: Some(format!("Check {} syntax and fix errors", lang)),
+                }],
+                warnings,
+                suggestions: vec![format!("Fix {} syntax errors before running tests", lang)],
+            };
+        }
+        let mut output = format!("{} syntax check passed{}", lang, notes);
+        if !self.not_run.is_empty() {
+            output.push_str(&format!(
+                "; NOT RUN for {} part(s): {}",
+                self.not_run.len(),
+                self.not_run.join("; ")
+            ));
+        }
+        CheckResult {
+            check_type: CheckType::TypeCheck,
+            passed: true,
+            not_run: false,
+            duration_ms,
+            output,
+            errors: vec![],
+            warnings,
+            suggestions: vec![],
+        }
+    }
+}
+
+fn first_nonempty_line(s: &str) -> &str {
+    s.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("syntax check failed")
+}
+
+fn file_label(p: &Path) -> String {
+    p.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| p.display().to_string())
+}
+
+fn dir_of(p: &Path) -> Option<PathBuf> {
+    p.parent().filter(|d| d.is_dir()).map(Path::to_path_buf)
+}
+
+/// Removes a temporary file (the TypeScript wrapper config) when dropped,
+/// including on early return or panic.
+struct RemoveOnDrop(PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// Format a verification report for display
 impl std::fmt::Display for VerificationReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -2191,13 +2861,21 @@ impl std::fmt::Display for VerificationReport {
         writeln!(f, "╠══════════════════════════════════════════╣")?;
 
         for check in &self.checks {
-            let status = if check.passed { "✓" } else { "✗" };
+            // A check that did not run is neither a pass nor a failure.
+            let status = if check.not_run {
+                "○"
+            } else if check.passed {
+                "✓"
+            } else {
+                "✗"
+            };
             writeln!(
                 f,
-                "║ {} {}: {}ms",
+                "║ {} {}: {}ms{}",
                 status,
                 check.check_type.as_str(),
-                check.duration_ms
+                check.duration_ms,
+                if check.not_run { " (not run)" } else { "" }
             )?;
 
             for error in &check.errors {

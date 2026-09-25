@@ -295,27 +295,75 @@ async fn try_run_stage(
 // Python QA Runner
 // ============================================================================
 
+/// Byte-compile-free syntax check of every path in argv (single-quote free:
+/// it is embedded in a `sh -c '...'` string).
+const PY_COMPILE_ALL: &str = r#"import sys
+rc = 0
+for p in sys.argv[1:]:
+    try:
+        compile(open(p, "rb").read(), p, "exec", dont_inherit=True)
+    except SyntaxError as e:
+        rc = 1
+        print("%s:%s: SyntaxError: %s" % (p, e.lineno, e.msg))
+sys.exit(rc)"#;
+
+/// `pythonX.Y` matching the project's pinned version when that interpreter
+/// is installed, else `python3`.
+async fn python_for_project(project_root: &Path) -> String {
+    if let Some(pin) = super::syntax_toolchain::resolve_python_pin(project_root, project_root) {
+        let exact = format!("python{}.{}", pin.min.0, pin.min.1);
+        if on_path(&exact).await {
+            return exact;
+        }
+    }
+    "python3".to_string()
+}
+
+/// True when `program` resolves on the (sanitized) PATH.
+async fn on_path(program: &str) -> bool {
+    let mut which = Command::new("which");
+    crate::safety::process_env::sanitize_command_env(&mut which);
+    matches!(which.arg(program).output().await, Ok(o) if o.status.success())
+}
+
+/// A Node CLI tool resolved WITHOUT `npx`: the project-local
+/// `node_modules/.bin/<name>` first, then `<name>` on PATH. `npx` silently
+/// DOWNLOADS a package that is not installed (and for `tsc` it fetches the
+/// unrelated `tsc` npm stub), so a missing tool is reported as a skipped
+/// stage instead of a network install or a bogus failure.
+async fn resolve_node_tool(project_root: &Path, name: &str) -> Option<String> {
+    if let Some(p) = super::syntax_toolchain::find_local_node_bin(project_root, name) {
+        return Some(p.to_string_lossy().to_string());
+    }
+    if on_path(name).await {
+        Some(name.to_string())
+    } else {
+        debug!(
+            "{} not installed (no node_modules/.bin, not on PATH); stage skipped",
+            name
+        );
+        None
+    }
+}
+
 pub async fn run_python_qa(project_root: &Path, timeout_secs: u64) -> Vec<QaStageResult> {
     let mut results = Vec::new();
 
-    // Syntax: python -m py_compile (check all .py files)
-    results.push(
-        run_stage(
-            QaStage::Syntax,
-            "python3",
-            &["-m", "py_compile", "--help"], // placeholder - we'll use a find command
-            project_root,
-            timeout_secs,
-        )
-        .await,
+    // Syntax: compile() every .py file (up to 50). NOT `py_compile`, which
+    // writes `__pycache__/*.pyc` next to every file it checks (workspace
+    // pollution); `-B` + `compile()` writes nothing. The interpreter matching
+    // the project's pinned version is used when installed (an older host
+    // python3 rejects newer syntax as a false syntax error).
+    let interp = python_for_project(project_root).await;
+    let syntax_cmd = format!(
+        "find . -name '*.py' -not -path './.*' -not -path '*/node_modules/*' | head -50 | xargs {} -B -c '{}' 2>&1",
+        interp, PY_COMPILE_ALL
     );
-    // Override with a more comprehensive syntax check
-    results.pop();
     results.push(
         run_stage(
             QaStage::Syntax,
             "sh",
-            &["-c", "find . -name '*.py' -not -path './.*' -not -path '*/node_modules/*' | head -50 | xargs python3 -m py_compile 2>&1"],
+            &["-c", &syntax_cmd],
             project_root,
             timeout_secs,
         )
@@ -425,11 +473,27 @@ pub async fn run_node_qa(project_root: &Path, timeout_secs: u64) -> Vec<QaStageR
 
     // Syntax / TypeCheck: tsc --noEmit (for TS) or node --check (for JS)
     if has_ts {
+        if let Some(tsc) = resolve_node_tool(project_root, "tsc").await {
+            results.push(
+                run_stage(
+                    QaStage::TypeCheck,
+                    &tsc,
+                    &["--noEmit"],
+                    project_root,
+                    timeout_secs,
+                )
+                .await,
+            );
+        }
+    }
+
+    // Format: prettier --check
+    if let Some(prettier) = resolve_node_tool(project_root, "prettier").await {
         results.push(
             run_stage(
-                QaStage::TypeCheck,
-                "npx",
-                &["tsc", "--noEmit"],
+                QaStage::Format,
+                &prettier,
+                &["--check", "."],
                 project_root,
                 timeout_secs,
             )
@@ -437,43 +501,23 @@ pub async fn run_node_qa(project_root: &Path, timeout_secs: u64) -> Vec<QaStageR
         );
     }
 
-    // Format: prettier --check
-    if let Some(fmt) = try_run_stage(
-        QaStage::Format,
-        "npx",
-        &["prettier", "--check", "."],
-        project_root,
-        timeout_secs,
-    )
-    .await
-    {
-        results.push(fmt);
-    }
-
     // Lint: eslint
-    if let Some(lint) = try_run_stage(
-        QaStage::Lint,
-        "npx",
-        &["eslint", "."],
-        project_root,
-        timeout_secs,
-    )
-    .await
-    {
-        results.push(lint);
+    if let Some(eslint) = resolve_node_tool(project_root, "eslint").await {
+        results.push(run_stage(QaStage::Lint, &eslint, &["."], project_root, timeout_secs).await);
     }
 
     // Test: npm test (or vitest / jest)
-    if let Some(test) = try_run_stage(
-        QaStage::Test,
-        "npx",
-        &["vitest", "run", "--reporter=verbose"],
-        project_root,
-        timeout_secs * 2,
-    )
-    .await
-    {
-        results.push(test);
+    if let Some(vitest) = resolve_node_tool(project_root, "vitest").await {
+        results.push(
+            run_stage(
+                QaStage::Test,
+                &vitest,
+                &["run", "--reporter=verbose"],
+                project_root,
+                timeout_secs * 2,
+            )
+            .await,
+        );
     } else {
         results.push(
             run_stage(

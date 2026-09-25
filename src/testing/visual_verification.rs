@@ -344,6 +344,7 @@ impl VisualVerifier {
                 let passed = vr.passed && errors.is_empty();
 
                 Ok(super::verification::CheckResult {
+                    not_run: false,
                     check_type: super::verification::CheckType::Custom,
                     passed,
                     duration_ms,
@@ -358,6 +359,7 @@ impl VisualVerifier {
                 })
             }
             Err(e) => Ok(super::verification::CheckResult {
+                not_run: false,
                 check_type: super::verification::CheckType::Custom,
                 passed: false,
                 duration_ms,

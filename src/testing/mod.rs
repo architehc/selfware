@@ -11,5 +11,6 @@ pub mod language_qa;
 pub mod mock_api;
 pub mod qa_profiles;
 pub mod rust_edition;
+pub mod syntax_toolchain;
 pub mod verification;
 pub mod visual_verification;

@@ -192,6 +192,7 @@ fn test_verification_report_display() {
         timestamp: chrono::Utc::now(),
         total_duration_ms: 1234,
         checks: vec![CheckResult {
+            not_run: false,
             check_type: CheckType::TypeCheck,
             passed: true,
             duration_ms: 500,
@@ -256,6 +257,7 @@ fn test_check_type_custom() {
 #[test]
 fn test_check_result_creation() {
     let result = CheckResult {
+        not_run: false,
         check_type: CheckType::TypeCheck,
         passed: true,
         duration_ms: 100,
@@ -407,6 +409,7 @@ fn test_verification_report_display_failed() {
         timestamp: chrono::Utc::now(),
         total_duration_ms: 500,
         checks: vec![CheckResult {
+            not_run: false,
             check_type: CheckType::TypeCheck,
             passed: false,
             duration_ms: 500,
@@ -586,6 +589,7 @@ fn test_verification_report_clone() {
 #[test]
 fn test_check_result_serde() {
     let result = CheckResult {
+        not_run: false,
         check_type: CheckType::Test,
         passed: true,
         duration_ms: 50,
@@ -736,6 +740,7 @@ fn test_side_effect_serde_roundtrip() {
 #[test]
 fn test_check_result_serde_roundtrip_with_errors() {
     let result = CheckResult {
+        not_run: false,
         check_type: CheckType::Lint,
         passed: false,
         duration_ms: 999,
@@ -822,6 +827,7 @@ fn test_verification_report_serde_roundtrip() {
         total_duration_ms: 2500,
         checks: vec![
             CheckResult {
+                not_run: false,
                 check_type: CheckType::TypeCheck,
                 passed: true,
                 duration_ms: 1000,
@@ -831,6 +837,7 @@ fn test_verification_report_serde_roundtrip() {
                 suggestions: vec![],
             },
             CheckResult {
+                not_run: false,
                 check_type: CheckType::Format,
                 passed: false,
                 duration_ms: 200,
@@ -1229,6 +1236,7 @@ fn test_verification_report_display_multiple_checks() {
         total_duration_ms: 3000,
         checks: vec![
             CheckResult {
+                not_run: false,
                 check_type: CheckType::TypeCheck,
                 passed: true,
                 duration_ms: 1000,
@@ -1238,6 +1246,7 @@ fn test_verification_report_display_multiple_checks() {
                 suggestions: vec![],
             },
             CheckResult {
+                not_run: false,
                 check_type: CheckType::Format,
                 passed: true,
                 duration_ms: 200,
@@ -1247,6 +1256,7 @@ fn test_verification_report_display_multiple_checks() {
                 suggestions: vec![],
             },
             CheckResult {
+                not_run: false,
                 check_type: CheckType::Lint,
                 passed: false,
                 duration_ms: 800,
@@ -1290,6 +1300,7 @@ fn test_verification_report_display_multiple_errors_in_check() {
         timestamp: chrono::Utc::now(),
         total_duration_ms: 100,
         checks: vec![CheckResult {
+            not_run: false,
             check_type: CheckType::TypeCheck,
             passed: false,
             duration_ms: 100,
@@ -1598,6 +1609,7 @@ async fn test_full_verify_with_no_files() {
 #[test]
 fn test_check_result_clone() {
     let result = CheckResult {
+        not_run: false,
         check_type: CheckType::Lint,
         passed: false,
         duration_ms: 250,
@@ -1698,6 +1710,7 @@ fn test_side_effect_type_debug() {
 #[test]
 fn test_check_result_debug() {
     let result = CheckResult {
+        not_run: false,
         check_type: CheckType::TypeCheck,
         passed: true,
         duration_ms: 0,
@@ -1837,6 +1850,7 @@ fn test_overall_passed_with_empty_checks() {
 fn test_overall_passed_all_pass() {
     let checks = [
         CheckResult {
+            not_run: false,
             check_type: CheckType::TypeCheck,
             passed: true,
             duration_ms: 0,
@@ -1846,6 +1860,7 @@ fn test_overall_passed_all_pass() {
             suggestions: vec![],
         },
         CheckResult {
+            not_run: false,
             check_type: CheckType::Format,
             passed: true,
             duration_ms: 0,
@@ -1862,6 +1877,7 @@ fn test_overall_passed_all_pass() {
 fn test_overall_passed_one_fails() {
     let checks = [
         CheckResult {
+            not_run: false,
             check_type: CheckType::TypeCheck,
             passed: true,
             duration_ms: 0,
@@ -1871,6 +1887,7 @@ fn test_overall_passed_one_fails() {
             suggestions: vec![],
         },
         CheckResult {
+            not_run: false,
             check_type: CheckType::Test,
             passed: false,
             duration_ms: 0,
@@ -2271,19 +2288,16 @@ fn classify_rustfmt_failure_shim_error_does_not_mask_real_errors() {
 }
 
 /// When rustfmt cannot run on this machine — no binary at all
-/// (`VERIFIER_NOT_FOUND`), or a rustup shim whose toolchain lacks the
-/// component (e.g. CI's MSRV toolchain) — assert the honest "check did not
-/// run" shape instead of the formatter verdicts, and return true so the
+/// (not-run: "`rustfmt` not found"), or a rustup shim whose toolchain lacks
+/// the component (e.g. CI's MSRV toolchain) — assert the honest "check did
+/// not run" shape instead of the formatter verdicts, and return true so the
 /// caller stops. With rustfmt present this returns false and the caller's
 /// full assertions run unchanged.
 fn rustfmt_absent_path_asserted(result: &CheckResult) -> bool {
-    if result
-        .errors
-        .iter()
-        .any(|e| e.code.as_deref() == Some("VERIFIER_NOT_FOUND"))
-    {
-        eprintln!("rustfmt not installed — asserting the verifier-not-found path");
+    if result.not_run && result.output.contains("`rustfmt` not found") {
+        eprintln!("rustfmt not installed — asserting the not-run path");
         assert_eq!(result.check_type, CheckType::TypeCheck);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
         return true;
     }
     if result
@@ -2898,4 +2912,461 @@ async fn cheap_syntax_check_rust_mixed_edition_files() {
     assert!(result.passed, "{}", result.output);
     assert!(result.output.contains("edition 2015"), "{}", result.output);
     assert!(result.output.contains("edition 2021"), "{}", result.output);
+}
+
+// ─── Cheap syntax checks: project language level, honest not-run ───
+//
+// Integration tests below exercise the real toolchain when it is installed
+// and SKIP (with a note) otherwise; the resolvers themselves are covered
+// toolchain-free in tests/unit/testing/syntax_toolchain.
+
+fn write_file(root: &Path, rel: &str, text: &str) {
+    let p = root.join(rel);
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(p, text).unwrap();
+}
+
+async fn tool_missing(gate: &VerificationGate, tool: &str) -> bool {
+    if gate.command_exists(tool).await {
+        return false;
+    }
+    eprintln!("`{tool}` not installed — skipping toolchain integration assertions");
+    true
+}
+
+/// A not-run result is non-blocking but claims nothing.
+fn assert_not_run_shape(r: &CheckResult) {
+    assert!(r.not_run, "expected not-run: {}", r.output);
+    assert!(r.passed, "not-run must not block: {}", r.output);
+    assert!(
+        r.errors.is_empty(),
+        "not-run claims no verdict: {:?}",
+        r.errors
+    );
+    assert!(r.output.contains("could not run"), "{}", r.output);
+    assert!(
+        r.warnings.iter().any(|w| w.contains("NOT RUN")),
+        "{:?}",
+        r.warnings
+    );
+}
+
+#[test]
+fn syntax_tally_outcomes_are_honest() {
+    let files = vec!["a".to_string()];
+    // Nothing ran → not-run, never a pass.
+    let mut t = SyntaxTally::new(RepoLanguage::Java, &files);
+    t.record(ToolRun::NotRun("`javac` not found on PATH".into()));
+    assert_not_run_shape(&t.finish(1));
+
+    // Partial: a pass that names the part that did not run.
+    let mut t = SyntaxTally::new(RepoLanguage::JavaScript, &files);
+    t.record(ToolRun::Done {
+        success: true,
+        output: String::new(),
+    });
+    t.record(ToolRun::NotRun("no tsc for JSX".into()));
+    let r = t.finish(1);
+    assert!(r.passed && !r.not_run);
+    assert!(r.output.contains("NOT RUN for 1 part(s)"), "{}", r.output);
+    assert!(r.warnings.iter().any(|w| w.contains("no tsc for JSX")));
+
+    // Any failure fails, even alongside not-run parts.
+    let mut t = SyntaxTally::new(RepoLanguage::Cpp, &files);
+    t.record(ToolRun::NotRun("x".into()));
+    t.record(ToolRun::Done {
+        success: false,
+        output: "a.cpp:1:1: error: boom".into(),
+    });
+    let r = t.finish(1);
+    assert!(!r.passed && !r.not_run);
+    assert!(r.errors[0]
+        .message
+        .contains("syntax check failed: a.cpp:1:1: error: boom"));
+}
+
+#[test]
+fn report_display_marks_not_run_checks() {
+    let report = VerificationReport {
+        triggered_by: "edit".into(),
+        timestamp: chrono::Utc::now(),
+        total_duration_ms: 1,
+        checks: vec![syntax_not_run(
+            RepoLanguage::Go,
+            "`gofmt` not found on PATH",
+            0,
+        )],
+        overall_passed: true,
+        affected_files: vec![],
+        side_effects: vec![],
+        suggested_next_steps: vec![],
+    };
+    let s = report.to_string();
+    assert!(s.contains("○ type_check") || s.contains("○"), "{s}");
+    assert!(s.contains("(not run)"), "{s}");
+    assert!(
+        !s.contains("✓ type_check"),
+        "a not-run check must not render green: {s}"
+    );
+}
+
+#[tokio::test]
+async fn cheap_syntax_check_unknown_language_is_not_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let gate = VerificationGate::new(tmp.path(), VerificationConfig::default());
+    let r = gate
+        .run_cheap_syntax_check(RepoLanguage::Unknown, &["x.zz".to_string()])
+        .await
+        .unwrap();
+    assert_not_run_shape(&r);
+}
+
+#[tokio::test]
+async fn cheap_syntax_check_python_never_writes_bytecode() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_file(tmp.path(), "pkg/good.py", "def f():\n    return 1\n");
+    let gate = VerificationGate::new(tmp.path(), VerificationConfig::default());
+    if tool_missing(&gate, "python3").await {
+        return;
+    }
+    let r = gate
+        .run_cheap_syntax_check(RepoLanguage::Python, &["pkg/good.py".to_string()])
+        .await
+        .unwrap();
+    assert!(r.passed && !r.not_run, "{}", r.output);
+    assert!(
+        !tmp.path().join("pkg/__pycache__").exists(),
+        "the syntax check must not write __pycache__ into the workspace"
+    );
+    assert!(r.output.contains("compiled by python"), "{}", r.output);
+}
+
+#[tokio::test]
+async fn cheap_syntax_check_python_pin_newer_than_host_is_not_run_not_failure() {
+    // The project requires a Python no host has; a (here: genuine) syntax
+    // rejection by the older host is "could not verify", never a failure.
+    let tmp = tempfile::tempdir().unwrap();
+    write_file(
+        tmp.path(),
+        "pyproject.toml",
+        "[project]\nname = \"x\"\nrequires-python = \">=3.99\"\n",
+    );
+    write_file(tmp.path(), "m.py", "def f(:\n");
+    let gate = VerificationGate::new(tmp.path(), VerificationConfig::default());
+    if tool_missing(&gate, "python3").await {
+        return;
+    }
+    let r = gate
+        .run_cheap_syntax_check(RepoLanguage::Python, &["m.py".to_string()])
+        .await
+        .unwrap();
+    assert_not_run_shape(&r);
+    assert!(
+        r.output.contains("older than the project's Python 3.99"),
+        "{}",
+        r.output
+    );
+}
+
+#[tokio::test]
+async fn cheap_syntax_check_python_modern_syntax_under_pin() {
+    // `match` (3.10+) with the project pinned to 3.10: either an interpreter
+    // new enough parses it (pass), or the host is too old (not-run) — it is
+    // never reported as a syntax failure.
+    let tmp = tempfile::tempdir().unwrap();
+    write_file(tmp.path(), ".python-version", "3.10\n");
+    write_file(
+        tmp.path(),
+        "m.py",
+        "def f(x):\n    match x:\n        case 1:\n            return 'one'\n        case _:\n            return 'other'\n",
+    );
+    let gate = VerificationGate::new(tmp.path(), VerificationConfig::default());
+    if tool_missing(&gate, "python3").await {
+        return;
+    }
+    let r = gate
+        .run_cheap_syntax_check(RepoLanguage::Python, &["m.py".to_string()])
+        .await
+        .unwrap();
+    assert!(r.passed, "modern syntax must not fail: {}", r.output);
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+}
+
+#[tokio::test]
+async fn cheap_syntax_check_javascript_esm_and_every_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Explicit commonjs package: node would reject `import` as a syntax
+    // error; the gate parses ESM-shaped files as modules.
+    write_file(tmp.path(), "package.json", r#"{"type":"commonjs"}"#);
+    write_file(
+        tmp.path(),
+        "esm.js",
+        "import fs from 'node:fs';\nexport const x = await Promise.resolve(fs);\n",
+    );
+    write_file(tmp.path(), "mod.mjs", "export default 1;\n");
+    write_file(tmp.path(), "cjs.js", "module.exports = require('fs');\n");
+    write_file(tmp.path(), "broken.js", "function (\n");
+    let gate = VerificationGate::new(tmp.path(), VerificationConfig::default());
+    if tool_missing(&gate, "node").await {
+        return;
+    }
+    let good = ["esm.js", "mod.mjs", "cjs.js"].map(String::from);
+    let r = gate
+        .run_cheap_syntax_check(RepoLanguage::JavaScript, &good)
+        .await
+        .unwrap();
+    assert!(r.passed && !r.not_run, "{}", r.output);
+    assert!(r.output.contains("parsed as an ES module"), "{}", r.output);
+
+    // The broken file is LAST: every file is checked, not just the first.
+    let mut with_bad = good.to_vec();
+    with_bad.push("broken.js".to_string());
+    let r = gate
+        .run_cheap_syntax_check(RepoLanguage::JavaScript, &with_bad)
+        .await
+        .unwrap();
+    assert!(
+        !r.passed,
+        "a syntax error in a later file must fail: {}",
+        r.output
+    );
+}
+
+#[tokio::test]
+async fn cheap_syntax_check_jsx_is_never_a_false_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_file(
+        tmp.path(),
+        "App.jsx",
+        "export default function App() { return <div className=\"a\">hi</div>; }\n",
+    );
+    write_file(tmp.path(), "Bad.jsx", "const a = <div>;\n");
+    let gate = VerificationGate::new(tmp.path(), VerificationConfig::default());
+    let r = gate
+        .run_cheap_syntax_check(RepoLanguage::JavaScript, &["App.jsx".to_string()])
+        .await
+        .unwrap();
+    if gate.resolve_tsc(tmp.path()).await.is_none() {
+        // No JSX-aware parser: honest not-run (node cannot parse JSX).
+        assert_not_run_shape(&r);
+        return;
+    }
+    assert!(r.passed && !r.not_run, "{}", r.output);
+    let r = gate
+        .run_cheap_syntax_check(RepoLanguage::JavaScript, &["Bad.jsx".to_string()])
+        .await
+        .unwrap();
+    assert!(!r.passed, "unclosed JSX must fail: {}", r.output);
+}
+
+#[tokio::test]
+async fn cheap_syntax_check_typescript_uses_project_tsconfig() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_file(
+        tmp.path(),
+        "tsconfig.json",
+        r#"{
+  // decorators + ES2022 lib: tsc's own defaults reject both
+  "compilerOptions": { "target": "es2022", "experimentalDecorators": true, "strict": true, "composite": true, "outDir": "dist" },
+  "include": ["src"],
+}"#,
+    );
+    write_file(
+        tmp.path(),
+        "src/a.ts",
+        "function d(_t: object, _k: string, _i: number) {}\nexport class A { m(@d x: number) { return x; } }\nexport const y = [1].at(-1);\n",
+    );
+    // A pre-existing error elsewhere in the project must not fail this edit.
+    write_file(
+        tmp.path(),
+        "src/other.ts",
+        "export const q: number = 's';\n",
+    );
+    let gate = VerificationGate::new(tmp.path(), VerificationConfig::default());
+    if gate.resolve_tsc(tmp.path()).await.is_none() {
+        let r = gate
+            .run_cheap_syntax_check(RepoLanguage::TypeScript, &["src/a.ts".to_string()])
+            .await
+            .unwrap();
+        assert_not_run_shape(&r);
+        assert!(r.output.contains("npx is not used"), "{}", r.output);
+        return;
+    }
+    let r = gate
+        .run_cheap_syntax_check(RepoLanguage::TypeScript, &["src/a.ts".to_string()])
+        .await
+        .unwrap();
+    assert!(r.passed && !r.not_run, "{}", r.output);
+    assert!(r.output.contains("project config"), "{}", r.output);
+    let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(".selfware-syntax-check")
+        })
+        .collect();
+    assert!(leftovers.is_empty(), "temporary tsconfig must be removed");
+    assert!(!tmp.path().join("dist").exists(), "check must not emit");
+
+    let r = gate
+        .run_cheap_syntax_check(RepoLanguage::TypeScript, &["src/other.ts".to_string()])
+        .await
+        .unwrap();
+    assert!(
+        !r.passed,
+        "a real type error in the edited file fails: {}",
+        r.output
+    );
+}
+
+#[tokio::test]
+async fn cheap_syntax_check_typescript_without_tsconfig_uses_modern_fallback() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_file(
+        tmp.path(),
+        "a.ts",
+        "export const y: number | undefined = [1].at(-1);\n",
+    );
+    let gate = VerificationGate::new(tmp.path(), VerificationConfig::default());
+    if gate.resolve_tsc(tmp.path()).await.is_none() {
+        eprintln!("tsc not installed — skipping");
+        return;
+    }
+    let r = gate
+        .run_cheap_syntax_check(RepoLanguage::TypeScript, &["a.ts".to_string()])
+        .await
+        .unwrap();
+    assert!(r.passed, "{}", r.output);
+    assert!(
+        r.warnings
+            .iter()
+            .any(|w| w.contains("fallback compiler options")),
+        "the fallback must be reported: {:?}",
+        r.warnings
+    );
+}
+
+#[tokio::test]
+async fn cheap_syntax_check_cpp_uses_project_standard() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cxx20 = "#include <concepts>\ntemplate <typename T> concept Num = std::integral<T>;\nauto f(Num auto x) { return x; }\nstruct P { int a; int b; };\nP p{.a = 1, .b = 2};\n";
+    write_file(tmp.path(), "loose/a.cpp", cxx20);
+    write_file(
+        tmp.path(),
+        "proj/CMakeLists.txt",
+        "cmake_minimum_required(VERSION 3.20)\nproject(p CXX)\nset(CMAKE_CXX_STANDARD 20)\n",
+    );
+    write_file(tmp.path(), "proj/src/a.cpp", cxx20);
+    write_file(tmp.path(), "proj/src/b.cpp", "int main() { return 0 }\n");
+    let gate = VerificationGate::new(tmp.path(), VerificationConfig::default());
+    if tool_missing(&gate, "c++").await {
+        return;
+    }
+    // No config: modern fallback, reported as such.
+    let r = gate
+        .run_cheap_syntax_check(RepoLanguage::Cpp, &["loose/a.cpp".to_string()])
+        .await
+        .unwrap();
+    assert!(r.passed, "{}", r.output);
+    assert!(
+        r.warnings.iter().any(|w| w.contains("fallback standard")),
+        "{:?}",
+        r.warnings
+    );
+
+    // CMake project: the declared standard (this used to run `cmake --build .`
+    // in the source dir, which fails on every edit).
+    let proj = VerificationGate::new(tmp.path().join("proj"), VerificationConfig::default());
+    let r = proj
+        .run_cheap_syntax_check(RepoLanguage::Cpp, &["src/a.cpp".to_string()])
+        .await
+        .unwrap();
+    assert!(r.passed && !r.not_run, "{}", r.output);
+    assert!(r.output.contains("gnu++20"), "{}", r.output);
+    let r = proj
+        .run_cheap_syntax_check(
+            RepoLanguage::Cpp,
+            &["src/a.cpp".to_string(), "src/b.cpp".to_string()],
+        )
+        .await
+        .unwrap();
+    assert!(!r.passed, "every file is checked: {}", r.output);
+}
+
+#[tokio::test]
+async fn cheap_syntax_check_java_release_and_clean_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_file(
+        tmp.path(),
+        "pom.xml",
+        "<project><properties><maven.compiler.release>17</maven.compiler.release></properties></project>",
+    );
+    write_file(
+        tmp.path(),
+        "src/main/java/com/x/Point.java",
+        "package com.x;\npublic record Point(int x, int y) {}\n",
+    );
+    // References a sibling class: resolved through -sourcepath.
+    write_file(
+        tmp.path(),
+        "src/main/java/com/x/Use.java",
+        "package com.x;\npublic class Use {\n  String s = \"\"\"\n    text block\n    \"\"\";\n  Point p = new Point(1, 2);\n}\n",
+    );
+    write_file(
+        tmp.path(),
+        "src/main/java/com/x/Bad.java",
+        "package com.x;\npublic class Bad { void f( }\n",
+    );
+    let gate = VerificationGate::new(tmp.path(), VerificationConfig::default());
+    if tool_missing(&gate, "javac").await {
+        return;
+    }
+    let r = gate
+        .run_cheap_syntax_check(
+            RepoLanguage::Java,
+            &["src/main/java/com/x/Use.java".to_string()],
+        )
+        .await
+        .unwrap();
+    if r.not_run {
+        // e.g. a macOS /usr/bin/javac stub with no JDK installed.
+        assert_not_run_shape(&r);
+        return;
+    }
+    assert!(r.passed, "{}", r.output);
+    assert!(
+        r.output.contains("--release 17") || r.warnings.iter().any(|w| w.contains("Java 17")),
+        "the project release level must be applied or its absence reported: {} {:?}",
+        r.output,
+        r.warnings
+    );
+    let has_class = walk_files(tmp.path())
+        .iter()
+        .any(|p| p.extension().and_then(|e| e.to_str()) == Some("class"));
+    assert!(!has_class, "javac output must not land in the workspace");
+    let r = gate
+        .run_cheap_syntax_check(
+            RepoLanguage::Java,
+            &["src/main/java/com/x/Bad.java".to_string()],
+        )
+        .await
+        .unwrap();
+    assert!(!r.passed, "{}", r.output);
+}
+
+fn walk_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(dir).unwrap().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            out.extend(walk_files(&p));
+        } else {
+            out.push(p);
+        }
+    }
+    out
 }
