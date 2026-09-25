@@ -100,6 +100,16 @@ pub(crate) fn diagnostic_sink() -> DiagnosticSink {
     diagnostic_sink_for(is_json_mode())
 }
 
+/// Print one line of human chrome (status notes, "Resuming task …") to the
+/// [`diagnostic_sink`] of the current mode: stdout in text mode, stderr in
+/// structured output so stdout carries ONLY the JSON result.
+pub(crate) fn chrome_line(line: &str) {
+    match diagnostic_sink() {
+        DiagnosticSink::Stdout => println!("{line}"),
+        DiagnosticSink::Stderr => eprintln!("{line}"),
+    }
+}
+
 pub(crate) fn set_streaming_mode(streaming: bool) {
     STREAMING_MODE.store(streaming, Ordering::SeqCst);
 }

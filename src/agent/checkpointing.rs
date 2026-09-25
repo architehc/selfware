@@ -223,15 +223,20 @@ impl Agent {
             );
         }
 
-        println!(
+        // Human chrome. Structured output (`--output-format json` /
+        // `stream-json`) keeps stdout for the result object alone, so the
+        // chrome goes to stderr there (D8 follow-up: these lines preceded the
+        // resumed run's JSON result on stdout).
+        let chrome = |line: String| crate::output::chrome_line(&line);
+        chrome(format!(
             "{} Resuming task: {}",
             "🔄".bright_cyan(),
             checkpoint.task_description.bright_white()
-        );
-        println!(
+        ));
+        chrome(format!(
             "   Current step: {}, Status: {:?}",
             checkpoint.current_step, checkpoint.status
-        );
+        ));
 
         // Restore the hard budget caps persisted at checkpoint time, unless the
         // resume command re-passed a flag (CLI override wins). Without this a
@@ -242,12 +247,12 @@ impl Agent {
             || checkpoint.max_wall_secs.is_some()
             || checkpoint.max_cost_usd.is_some()
         {
-            println!(
+            chrome(format!(
                 "   Budget caps: tokens={:?}, wall_secs={:?}, cost_usd={:?}",
                 config.agent.max_budget_tokens,
                 config.agent.max_wall_secs,
                 config.agent.max_cost_usd
-            );
+            ));
         }
 
         // Build all restored state in temporary variables first, then commit

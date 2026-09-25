@@ -1990,10 +1990,10 @@ pub async fn run() -> Result<()> {
             cli.resume_session.is_some(),
         ) {
             if !cli.quiet {
-                println!(
+                output::chrome_line(&format!(
                     "{} --autocontinue ignored — explicit task/resume argument given",
                     Glyphs::sprout()
-                );
+                ));
             }
         } else {
             let workspace = current_workspace_identity()?;
@@ -2026,10 +2026,10 @@ pub async fn run() -> Result<()> {
                         "no in-progress task from this workspace found; starting normally"
                     );
                     if !cli.quiet {
-                        println!(
+                        output::chrome_line(&format!(
                             "{} --autocontinue: no in-progress task in this workspace to resume — starting normally",
                             Glyphs::sprout()
-                        );
+                        ));
                     }
                 }
             }
