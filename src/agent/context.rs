@@ -1257,8 +1257,17 @@ impl WorkLedger {
                     if !self.mark_seen(fnv1a64(&["tool", id, &name, &args, text])) {
                         continue;
                     }
+                    // The CALL's identity, not its text: a result compacted
+                    // after it was recorded is the same read, not a new one.
+                    let first_sight = self.mark_seen(fnv1a64(&["tool-call", id, &name, &args]));
                     if let Some(payload) = successful_payload(text, false) {
-                        self.record_result(&name, &args, &payload, &|p| key(message, p));
+                        self.record_result(
+                            &name,
+                            &args,
+                            &payload,
+                            &|p| key(message, p),
+                            first_sight,
+                        );
                     }
                 }
                 "user" => {
@@ -1267,11 +1276,20 @@ impl WorkLedger {
                             continue;
                         };
                         let owner = format!("{owner:x}");
+                        let position = format!("{}", xml_calls.len());
                         if !self.mark_seen(fnv1a64(&["xml", &owner, &name, &args, text])) {
                             continue;
                         }
+                        let first_sight =
+                            self.mark_seen(fnv1a64(&["xml-call", &owner, &name, &args, &position]));
                         if let Some(payload) = successful_payload(text, true) {
-                            self.record_result(&name, &args, &payload, &|p| key(message, p));
+                            self.record_result(
+                                &name,
+                                &args,
+                                &payload,
+                                &|p| key(message, p),
+                                first_sight,
+                            );
                         }
                     } else if (text.contains("[CONTEXT SUMMARY")
                         || text.contains("[AUTO-COMPACT SUMMARY")
@@ -1292,10 +1310,17 @@ impl WorkLedger {
         args: &str,
         payload: &str,
         key: &dyn Fn(&str) -> String,
+        first_sight: bool,
     ) {
         // A result compacted in place (stub / truncated head) is not a new
-        // read: the full result was recorded before it was compacted.
+        // read: the full result was recorded before it was compacted. Seen
+        // for the FIRST time already compacted — a history rebuilt on
+        // resume — it is the only record left of that read: restore what
+        // the stub names.
         if super::result_compaction::is_compacted_payload(payload) {
+            if first_sight && name == "file_read" {
+                self.restore_compacted_read(args, payload, key);
+            }
             return;
         }
         let args: serde_json::Value = serde_json::from_str(args).unwrap_or_default();
@@ -1343,6 +1368,7 @@ impl WorkLedger {
                     Some(c) => (fnv1a64(&[c]), false),
                     None => (fnv1a64(&[payload]), true),
                 };
+                let hash = Some(hash);
                 let symbols = content
                     .map(|c| {
                         super::result_compaction::symbol_digest(c, range.map_or(1, |r| r.0.max(1)))
@@ -1436,18 +1462,95 @@ impl WorkLedger {
         }
     }
 
+    /// Restore a `file_read` from its compacted form (see `record_result`):
+    /// a full stub gives coverage, line count, content hash, symbol index
+    /// and the finding it carried; a slim stub its coverage; a truncated
+    /// head the lines it shows. A superseded stub is skipped (the later read
+    /// carrying its lines is recorded itself), and so is a stub that names
+    /// no read of its own (an orphaned unchanged re-read note).
+    fn restore_compacted_read(&mut self, args: &str, payload: &str, key: &dyn Fn(&str) -> String) {
+        use super::result_compaction::COMPACTED_RESULT_KEY;
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
+            return;
+        };
+        if v.get("superseded").is_some() {
+            return;
+        }
+        let args_v: serde_json::Value = serde_json::from_str(args).unwrap_or_default();
+        let Some(path) = arg_path(&args_v) else {
+            return;
+        };
+        let path = key(&path);
+        let pair = |x: Option<&serde_json::Value>| -> Option<(usize, usize)> {
+            let r = x?.as_array()?;
+            Some((r.first()?.as_u64()? as usize, r.get(1)?.as_u64()? as usize))
+        };
+        let total_lines = v
+            .get("total_lines")
+            .and_then(|t| t.as_u64())
+            .map(|t| t as usize);
+        match v.get(COMPACTED_RESULT_KEY).and_then(|k| k.as_str()) {
+            Some("stub") => {
+                let hash = v
+                    .get("content_hash")
+                    .and_then(|h| h.as_str())
+                    .and_then(|h| u64::from_str_radix(h, 16).ok());
+                if hash.is_none() && v.get("slim").is_none() {
+                    return;
+                }
+                let symbols = v
+                    .get("symbols")
+                    .and_then(|s| s.as_array())
+                    .map(|s| {
+                        s.iter()
+                            .filter_map(|line| {
+                                let (n, text) = line.as_str()?.split_once(": ")?;
+                                Some((n.trim().parse().ok()?, text.to_string()))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let range = pair(v.get("line_range"));
+                self.record_file_read(path.clone(), range, total_lines, hash, false, symbols);
+                if let Some(finding) = v.get("findings").and_then(|f| f.as_str()) {
+                    let turn = self.turn;
+                    if let Some(entry) = self.files.iter_mut().find(|f| f.path == path) {
+                        if entry.note.is_none() {
+                            entry.note =
+                                Some((LedgerNoteSource::Summary, turn, truncate_note(finding)));
+                        }
+                    }
+                }
+            }
+            Some("truncated") => {
+                let Some(range) = pair(v.get("shown_line_range")) else {
+                    return;
+                };
+                let symbols = v
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .map(|c| super::result_compaction::symbol_digest(c, range.0.max(1)))
+                    .unwrap_or_default();
+                self.record_file_read(path, Some(range), total_lines, None, false, symbols);
+            }
+            _ => {}
+        }
+    }
+
     fn record_file_read(
         &mut self,
         path: String,
         range: Option<(usize, usize)>,
         total_lines: Option<usize>,
-        hash: u64,
+        hash: Option<u64>,
         partial: bool,
         symbols: Vec<(usize, String)>,
     ) {
         let seq = self.next_seq();
         let turn = self.turn;
-        let hash = format!("{hash:016x}");
+        // `None`: the content's hash is unknown (a slim stub or a truncated
+        // head restored on resume) — nothing to compare a later read with.
+        let hash = hash.map(|h| format!("{h:016x}"));
         let range = range.map(|(a, b)| if a <= b { (a, b) } else { (b, a) });
         if let Some(entry) = self.files.iter_mut().find(|f| f.path == path) {
             // The recorded coverage belongs to another version when the SAME
@@ -1455,10 +1558,12 @@ impl WorkLedger {
             // or when the file was modified and nothing was reread since.
             // Different ranges are never compared with each other, and a
             // range hash is never compared with a whole-file hash.
-            let content_changed = entry
-                .read_hashes
-                .iter()
-                .any(|(k, h)| *k == range && *h != hash);
+            let content_changed = hash.as_ref().is_some_and(|hash| {
+                entry
+                    .read_hashes
+                    .iter()
+                    .any(|(k, h)| *k == range && h != hash)
+            });
             let edited_unseen = entry.modified_turn.is_some() && !entry.reread_since_modified;
             if content_changed || edited_unseen {
                 // Fresh coverage of the new version: the old ranges,
@@ -1478,12 +1583,14 @@ impl WorkLedger {
             entry.total_lines = total_lines.or(entry.total_lines);
             entry.reads += 1;
             entry.last_read_turn = turn;
-            entry.content_hash = hash.clone();
             entry.partial = partial;
-            entry.read_hashes.retain(|(k, _)| *k != range);
-            entry.read_hashes.push((range, hash));
-            if entry.read_hashes.len() > LEDGER_MAX_RANGE_HASHES {
-                entry.read_hashes.remove(0);
+            if let Some(hash) = hash {
+                entry.content_hash = hash.clone();
+                entry.read_hashes.retain(|(k, _)| *k != range);
+                entry.read_hashes.push((range, hash));
+                if entry.read_hashes.len() > LEDGER_MAX_RANGE_HASHES {
+                    entry.read_hashes.remove(0);
+                }
             }
             // Ranges spanning every line of a version whose line count is
             // known cover the whole file.
@@ -1514,12 +1621,12 @@ impl WorkLedger {
                 total_lines,
                 reads: 1,
                 last_read_turn: turn,
-                content_hash: hash.clone(),
+                content_hash: hash.clone().unwrap_or_default(),
                 partial,
                 note: None,
                 modified_turn: None,
                 reread_since_modified: false,
-                read_hashes: vec![(range, hash)],
+                read_hashes: hash.map(|h| vec![(range, h)]).unwrap_or_default(),
                 symbols: {
                     let mut merged = Vec::new();
                     Self::merge_symbols(&mut merged, symbols);

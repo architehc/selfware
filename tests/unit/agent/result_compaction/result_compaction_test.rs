@@ -1214,3 +1214,128 @@ fn rust_source_matches_the_append_and_measure_loop() {
         assert_eq!(rust_source("s", target), out, "{target}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// A resumed ledger rebuilds what compaction left in the stubs
+// ---------------------------------------------------------------------------
+//
+// External review (2026-09-25): the work ledger is not persisted; on resume
+// it is rebuilt from the checkpointed messages, and reads already stubbed
+// were skipped — coverage, symbol index and findings of every compacted
+// read were lost across a resume.
+
+fn stubbed_review_history(live: &mut WorkLedger) -> Vec<Message> {
+    let mut messages = vec![system_prompt(), Message::user(TASK)];
+    for (id, args) in [
+        ("r1", serde_json::json!({"path": "src/a.rs"})),
+        (
+            "r2",
+            serde_json::json!({"path": "src/b.rs", "line_range": [1, 40]}),
+        ),
+        ("r3", serde_json::json!({"path": "src/c.rs"})),
+    ] {
+        messages.push(native_call(id, "file_read", args));
+        messages.push(Message::tool(read_payload(&rust_source(id, 3_000)), id));
+    }
+    messages.push(Message::assistant("Continue the review"));
+    live.begin_turn(Some("review"));
+    live.observe(&messages, None);
+    live.absorb_summary("- src/a.rs: the parser entry point and its error recovery");
+    let old = estimate_content_tokens(messages[3].content.text())
+        + estimate_content_tokens(messages[5].content.text());
+    let budget = estimate_messages_tokens(&messages) - old + 1_500;
+    let live_ref = &*live;
+    compact_tool_results_to_budget_opts(
+        &mut messages,
+        budget,
+        1,
+        400,
+        &|p| live_ref.file_finding(p),
+        true,
+        &crate::agent::context::PathKeys::default(),
+    )
+    .expect("compacted");
+    for idx in [3, 5] {
+        assert_eq!(payload_of(&messages[idx])[COMPACTED_RESULT_KEY], "stub");
+    }
+    messages
+}
+
+fn resume(messages: &[Message]) -> WorkLedger {
+    let mut checkpoint =
+        crate::session::checkpoint::TaskCheckpoint::new("t1".to_string(), "review".to_string());
+    checkpoint.messages = messages.to_vec();
+    let json = serde_json::to_string(&checkpoint).unwrap();
+    let restored: crate::session::checkpoint::TaskCheckpoint = serde_json::from_str(&json).unwrap();
+    let mut rebuilt = WorkLedger::new();
+    rebuilt.begin_turn(Some("review"));
+    rebuilt.observe(&restored.messages, None);
+    rebuilt
+}
+
+fn entry<'a>(ledger: &'a WorkLedger, path: &str) -> &'a crate::agent::context::LedgerFileEntry {
+    ledger
+        .files()
+        .iter()
+        .find(|f| f.path == path)
+        .unwrap_or_else(|| panic!("{path} not in the ledger: {:?}", ledger.files()))
+}
+
+#[test]
+fn a_resumed_ledger_keeps_coverage_symbols_and_findings_of_stubbed_reads() {
+    let mut live = WorkLedger::new();
+    let messages = stubbed_review_history(&mut live);
+    // The live ledger does not count a stub as another read.
+    live.observe(&messages, None);
+    assert_eq!(entry(&live, "src/a.rs").reads, 1);
+
+    let rebuilt = resume(&messages);
+    let a = entry(&rebuilt, "src/a.rs");
+    assert!(a.whole_file);
+    assert_eq!(a.reads, 1);
+    assert!(!a.symbols.is_empty(), "the stub's symbol index");
+    assert_eq!(a.content_hash, entry(&live, "src/a.rs").content_hash);
+    assert!(
+        a.note
+            .as_ref()
+            .is_some_and(|(_, _, n)| n.contains("parser entry point")),
+        "{:?}",
+        a.note
+    );
+    assert_eq!(entry(&rebuilt, "src/b.rs").ranges, vec![(1, 40)]);
+    assert!(entry(&rebuilt, "src/c.rs").whole_file);
+}
+
+#[test]
+fn a_resumed_ledger_keeps_the_coverage_of_slimmed_and_skips_superseded_stubs() {
+    let mut live = WorkLedger::new();
+    let mut messages = stubbed_review_history(&mut live);
+    messages[3].content =
+        MessageContent::Text(slim_stub("file_read", r#"{"path":"src/a.rs"}"#, false));
+    messages[5].content = MessageContent::Text(slim_stub(
+        "file_read",
+        r#"{"path":"src/b.rs","line_range":[1,40]}"#,
+        true,
+    ));
+    let rebuilt = resume(&messages);
+    assert!(
+        entry(&rebuilt, "src/a.rs").whole_file,
+        "a slim stub still names its coverage"
+    );
+    assert!(
+        !rebuilt.files().iter().any(|f| f.path == "src/b.rs"),
+        "a superseded stub defers to the later read that carries its lines"
+    );
+    // A later read of the same file is not taken for a changed version: the
+    // slim stub restored no content hash to compare against.
+    let mut later = messages.clone();
+    later.push(native_call(
+        "r4",
+        "file_read",
+        serde_json::json!({"path": "src/a.rs"}),
+    ));
+    later.push(Message::tool(read_payload(&rust_source("r1", 3_000)), "r4"));
+    let mut rebuilt = resume(&messages);
+    rebuilt.observe(&later, None);
+    assert!(entry(&rebuilt, "src/a.rs").whole_file);
+}

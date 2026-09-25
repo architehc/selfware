@@ -387,7 +387,14 @@ pub(crate) fn build_stub(
             let first_line = range.map_or(1, |r| r.0.max(1));
             let lines_in_result = content.lines().count();
             let symbols = symbol_digest(content, first_line);
-            let hash = format!("{:016x}", super::context::content_fingerprint(content));
+            // The ledger hashes the file text, not file_read's line-number
+            // prefixes: the same here, so a stub's hash matches the ledger
+            // line (and a ledger rebuilt from the stub on resume).
+            let raw = parsed
+                .as_ref()
+                .and_then(crate::tools::line_numbers::raw_file_read_content)
+                .unwrap_or_else(|| content.to_string());
+            let hash = format!("{:016x}", super::context::content_fingerprint(&raw));
             let what = match range {
                 Some((a, b)) => format!("lines {a}-{b} of `{path}`"),
                 None => format!("`{path}`"),
