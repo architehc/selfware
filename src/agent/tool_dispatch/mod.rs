@@ -1011,20 +1011,34 @@ impl Agent {
             return;
         };
         let fingerprint = Self::message_fingerprint(message);
-        self.read_result_fingerprints.insert(path, fingerprint);
+        self.read_result_fingerprints
+            .insert(path, Some(fingerprint));
+    }
+
+    /// Record that the latest successful `file_read` of this path delivered
+    /// no file content (its result was spilled to a summary): a re-read is
+    /// then a recovery, like a re-read of an evicted result.
+    fn record_file_read_without_content(&mut self, tool_name: &str, args_str: &str) {
+        if let Some(path) = self.file_read_path(tool_name, args_str) {
+            self.read_result_fingerprints.insert(path, None);
+        }
     }
 
     /// True when `path` was read successfully earlier in this task but that
     /// result is no longer in the message history unchanged: dropped by
     /// trimming, cut by the per-message truncation, or folded into a
-    /// compaction summary. A path never read before is NOT evicted (a first
-    /// read is ordinary exploration and counts as usual).
+    /// compaction summary — or it never delivered the file at all (spilled
+    /// to a summary). A path never read before is NOT evicted (a first read
+    /// is ordinary exploration and counts as usual).
     pub(super) fn prior_read_evicted_from_context(&self, path: &str) -> bool {
         let Some(&fingerprint) = self
             .read_result_fingerprints
             .get(&self.canonical_path_key(path))
         else {
             return false;
+        };
+        let Some(fingerprint) = fingerprint else {
+            return true;
         };
         !self
             .messages
@@ -4300,7 +4314,14 @@ impl Agent {
             self.messages.push(Message::user(formatted));
         }
         if success {
-            self.record_file_read_result_message(tool_name, args_str);
+            if spilled && tool_name == "file_read" {
+                // A summary with a disk reference is not the file: the
+                // evicted-reread check must not treat it as content still
+                // in context (Rule 5 sweep of the supersession fix).
+                self.record_file_read_without_content(tool_name, args_str);
+            } else {
+                self.record_file_read_result_message(tool_name, args_str);
+            }
             if tool_name == "file_read" {
                 // A spilled or chunked result is not the content the call
                 // asked for: never an "unchanged" reference for a re-read.

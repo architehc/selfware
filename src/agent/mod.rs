@@ -990,8 +990,10 @@ pub struct Agent {
     /// fingerprint no longer matches any message in `self.messages` is a
     /// recovery from context trimming/compaction, not a read loop (c24:
     /// trimming dropped file contents, the model re-read them, and the
-    /// stagnation guard forced a fabricated deliverable).
-    read_result_fingerprints: std::collections::HashMap<String, u64>,
+    /// stagnation guard forced a fabricated deliverable). `None`: the latest
+    /// successful read delivered no file content (spilled to a summary), so
+    /// a re-read restores content the model never had.
+    read_result_fingerprints: std::collections::HashMap<String, Option<u64>>,
     /// Last full `file_read` result per exact path + line range (key from
     /// `Agent::file_read_range_key`), for the unchanged re-read note.
     delivered_read_results: std::collections::HashMap<String, DeliveredReadResult>,

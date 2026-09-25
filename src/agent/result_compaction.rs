@@ -17,7 +17,8 @@
 //!   content hash, a symbol index with line numbers, the ledger's findings —
 //!   that says plainly the full content is no longer in context and how to
 //!   get exact lines back (`file_read` with `line_range`);
-//! * a read whose lines a later read shows again becomes a one-line
+//! * a read whose lines a later result actually delivers again (never a
+//!   failed read, a stub or an unchanged re-read note) becomes a one-line
 //!   "superseded" stub, and old stubs are slimmed (their symbol index and
 //!   findings live on in the work ledger) before any recent read is touched
 //!   — val083 long_review: ~30 stubs outweighed the intact reads 12.9k to
@@ -689,9 +690,61 @@ fn shown_range(args: &Value, payload: Option<&Value>) -> Option<(usize, usize)> 
     arg_range(args).or_else(|| {
         let v = payload?;
         v.get(CHUNKED_WHOLE_READ_KEY)?;
-        let r = v.get("shown_line_range")?.as_array()?;
-        Some((r.first()?.as_u64()? as usize, r.get(1)?.as_u64()? as usize))
+        shown_line_range(v)
     })
+}
+
+/// A payload's own `shown_line_range` (chunked whole reads and truncated
+/// heads carry it).
+fn shown_line_range(v: &Value) -> Option<(usize, usize)> {
+    let r = v.get("shown_line_range")?.as_array()?;
+    Some((r.first()?.as_u64()? as usize, r.get(1)?.as_u64()? as usize))
+}
+
+/// The file lines a `file_read` result actually DELIVERED to the model:
+/// `Some(None)` = the whole file, `Some(Some(range))` = those lines, `None`
+/// = no file content at all.
+///
+/// Only a successful result with `content` delivers anything: a failed read
+/// (`{"error": ..}`, an XML `<error>`), a stub, an "unchanged since turn N"
+/// note (it points back at an EARLIER result; it has no content of its own)
+/// and any other result without `content` deliver nothing. A truncated
+/// head, a chunked whole read — any result naming `shown_line_range` —
+/// delivers only those lines; a result that says it was cut
+/// (`truncated`/`has_more`) without saying which lines it shows delivers
+/// nothing this module can rely on. A ranged read delivers its range.
+///
+/// External review of f11e6f68: supersession read the coverage from the
+/// call's arguments alone, so a failed re-read, a stub, a note or a
+/// truncated head of the same path "superseded" (stubbed) the only intact
+/// copy of the file.
+fn delivered_lines(r: &PairedResult, messages: &[Message]) -> Option<Option<(usize, usize)>> {
+    if r.name != "file_read" {
+        return None;
+    }
+    let env = open_envelope(messages[r.idx].content.text(), r.xml)?;
+    let v: Value = serde_json::from_str(&env.payload).ok()?;
+    if v.get("error").is_some() || v.get(super::context::UNCHANGED_REREAD_NOTE_KEY).is_some() {
+        return None;
+    }
+    v.get("content")?.as_str()?;
+    match v.get(COMPACTED_RESULT_KEY).and_then(Value::as_str) {
+        Some("truncated") => return shown_line_range(&v).map(Some),
+        Some(_) => return None,
+        None => {}
+    }
+    let args_v: Value = serde_json::from_str(&r.args).unwrap_or_default();
+    if let Some(range) = arg_range(&args_v) {
+        return Some(Some(range));
+    }
+    if let Some(range) = shown_line_range(&v) {
+        return Some(Some(range));
+    }
+    let cut = |k: &str| v.get(k).and_then(Value::as_bool) == Some(true);
+    if cut("truncated") || cut("has_more") {
+        return None;
+    }
+    Some(None)
 }
 
 // ---------------------------------------------------------------------------
@@ -714,6 +767,9 @@ pub(crate) struct ResultCompactionReport {
     pub slimmed: Vec<String>,
     /// Auto-loaded codebase overviews removed (stage 0).
     pub overviews_removed: usize,
+    /// "Unchanged since turn N" notes rewritten because the earlier result
+    /// they pointed at left the context (stage 7).
+    pub notes_repointed: usize,
 }
 
 impl ResultCompactionReport {
@@ -723,6 +779,7 @@ impl ResultCompactionReport {
             || !self.superseded.is_empty()
             || !self.slimmed.is_empty()
             || self.overviews_removed > 0
+            || self.notes_repointed > 0
     }
 
     /// One-line description for the `context_compression` event.
@@ -755,6 +812,12 @@ impl ResultCompactionReport {
                 "{} read(s) superseded by a later read of the same lines: {}",
                 self.superseded.len(),
                 list(&self.superseded)
+            ));
+        }
+        if self.notes_repointed > 0 {
+            parts.push(format!(
+                "{} unchanged re-read note(s) now say their earlier result left the context",
+                self.notes_repointed
             ));
         }
         if !self.slimmed.is_empty() {
@@ -902,9 +965,11 @@ fn replace_payload(messages: &mut [Message], r: &PairedResult, new_payload: &str
 /// Shrink tool results in place until `messages` measure at most
 /// `max_tokens`, cheapest loss first:
 ///
-/// 1. a `file_read` result whose lines a LATER read in the history shows
-///    again (the same range, a wider one, or the whole file) becomes a
-///    one-line "superseded" stub — nothing is lost;
+/// 1. a `file_read` result whose lines a LATER result in the history
+///    actually delivers again (the same range, a wider one, or the whole
+///    file — successful, intact or naming its shown lines; never a failed
+///    read, a stub or an unchanged re-read note, see `delivered_lines`)
+///    becomes a one-line "superseded" stub — nothing is lost;
 /// 2. stubs left by earlier passes are slimmed (symbol index and findings
 ///    dropped — the work ledger keeps both per file), duplicate-path stubs
 ///    first, then oldest first;
@@ -913,7 +978,9 @@ fn replace_payload(messages: &mut [Message], r: &PairedResult, new_payload: &str
 /// 4. those new stubs are slimmed too;
 /// 5. then the recent results, except the very latest, become stubs;
 /// 6. then the latest result is cut to a head that fits (never below
-///    [`MIN_TRUNCATED_RESULT_TOKENS`]).
+///    [`MIN_TRUNCATED_RESULT_TOKENS`]);
+/// 7. an "unchanged since turn N" note whose earlier result no longer
+///    delivers its lines says so ([`repoint_orphaned_unchanged_notes`]).
 ///
 /// val083 long_review measured why the order matters: ~30 stubs of 1.1k
 /// chars each (12.9k tokens) outweighed the intact reads (1.1k tokens), so
@@ -964,11 +1031,21 @@ pub(crate) fn compact_tool_results_to_budget_opts(
         .iter()
         .map(|r| read_key(r, messages, root))
         .collect();
+    // What each result actually delivered (path key, lines): only these can
+    // stand in for an earlier read.
+    let delivered: Vec<Option<(String, Option<(usize, usize)>)>> = results
+        .iter()
+        .zip(&keys)
+        .map(|(r, key)| {
+            let (path, _) = key.as_ref()?;
+            Some((path.clone(), delivered_lines(r, messages)?))
+        })
+        .collect();
     let covered_later = |pos: usize| -> bool {
         let Some((path, range)) = &keys[pos] else {
             return false;
         };
-        keys[pos + 1..]
+        delivered[pos + 1..]
             .iter()
             .flatten()
             .any(|(p, r)| p == path && read_covers(*r, *range))
@@ -978,6 +1055,17 @@ pub(crate) fn compact_tool_results_to_budget_opts(
             return false;
         };
         keys[pos + 1..].iter().flatten().any(|(p, _)| p == path)
+    };
+    // Whether a later result delivers content of the same file (the ledger's
+    // finding then belongs in THAT result's eventual stub, not this one).
+    let has_later_delivery_same_path = |pos: usize| -> bool {
+        let Some((path, _)) = &keys[pos] else {
+            return false;
+        };
+        delivered[pos + 1..]
+            .iter()
+            .flatten()
+            .any(|(p, _)| p == path)
     };
     let usable = |messages: &[Message], pos: usize| -> bool {
         messages[results[pos].idx].content.image_count() == 0
@@ -1054,8 +1142,10 @@ pub(crate) fn compact_tool_results_to_budget_opts(
             }
             let args_v: Value = serde_json::from_str(&r.args).unwrap_or_default();
             // The finding is per file: only the stub of the path's last
-            // result carries it (the ledger has it for every file).
-            let note = if has_later_same_path(pos) {
+            // content-carrying result carries it (the ledger has it for
+            // every file); a later failed read or note never gets a stub
+            // with a finding.
+            let note = if has_later_delivery_same_path(pos) {
                 None
             } else {
                 arg_path(&args_v).and_then(|p| finding(&p))
@@ -1108,8 +1198,78 @@ pub(crate) fn compact_tool_results_to_budget_opts(
         }
     }
 
+    // Stage 7: an "unchanged since turn N" note whose earlier result was
+    // just compacted away now says so (it told the model to use that result).
+    report.notes_repointed = repoint_orphaned_unchanged_notes(messages, root);
+    if report.notes_repointed > 0 {
+        total = estimate_messages_tokens(messages);
+    }
+
     report.after_tokens = total;
     report.changed().then_some(report)
+}
+
+/// Rewrite every "unchanged since turn N" re-read note (see
+/// `unchanged_reread_note` in tool dispatch) whose earlier result no longer
+/// delivers the lines it names — compacted to a stub or a head, or dropped
+/// from `messages` — into a stub that says the content is NOT in context.
+/// The note told the model "that earlier result is still in your context
+/// above — use it"; once it is gone that is false (AGENTS.md rule 3).
+/// Returns how many notes were rewritten.
+pub(crate) fn repoint_orphaned_unchanged_notes(
+    messages: &mut [Message],
+    root: Option<&std::path::Path>,
+) -> usize {
+    let results = paired_tool_results(messages);
+    let keys: Vec<_> = results
+        .iter()
+        .map(|r| read_key(r, messages, root))
+        .collect();
+    let mut orphaned = Vec::new();
+    for (pos, r) in results.iter().enumerate() {
+        let Some((path, range)) = &keys[pos] else {
+            continue;
+        };
+        let is_note = open_envelope(messages[r.idx].content.text(), r.xml)
+            .and_then(|env| serde_json::from_str::<Value>(&env.payload).ok())
+            .is_some_and(|v| v.get(super::context::UNCHANGED_REREAD_NOTE_KEY).is_some());
+        if !is_note {
+            continue;
+        }
+        let backed = results[..pos]
+            .iter()
+            .zip(&keys[..pos])
+            .any(|(earlier, key)| {
+                key.as_ref().is_some_and(|(p, _)| p == path)
+                    && delivered_lines(earlier, messages).is_some_and(|d| read_covers(d, *range))
+            });
+        if !backed {
+            orphaned.push(pos);
+        }
+    }
+    let mut rewritten = 0;
+    for pos in orphaned {
+        let r = &results[pos];
+        let text = messages[r.idx].content.text().to_string();
+        let Some(env) = open_envelope(&text, r.xml) else {
+            continue;
+        };
+        let args_v: Value = serde_json::from_str(&r.args).unwrap_or_default();
+        let stub = json!({
+            COMPACTED_RESULT_KEY: "stub",
+            "tool": r.name,
+            "path": arg_path(&args_v).unwrap_or_else(|| "?".to_string()),
+            "line_range": arg_range(&args_v).map(|(a, b)| json!([a, b])).unwrap_or(Value::Null),
+            "content_in_context": false,
+            "note": "NO LONGER in your context: this re-read matched an earlier read whose \
+                     result has since left your context. Re-read the line_range you need \
+                     before quoting.",
+        });
+        messages[r.idx].content =
+            MessageContent::Text(close_envelope(&env, &stub.to_string(), r.xml));
+        rewritten += 1;
+    }
+    rewritten
 }
 
 /// Where each file's read content stands in a history: whole file present,
@@ -1131,11 +1291,9 @@ impl ContextPresence {
             if r.name != "file_read" {
                 continue;
             }
-            let text = messages[r.idx].content.text();
-            let Some(env) = open_envelope(text, r.xml) else {
-                continue;
-            };
-            let Ok(v) = serde_json::from_str::<Value>(&env.payload) else {
+            // The same "what did this result deliver" rule supersession uses
+            // (failed reads, stubs and unchanged notes carry no content).
+            let Some(lines) = delivered_lines(&r, messages) else {
                 continue;
             };
             let args_v: Value = serde_json::from_str(&r.args).unwrap_or_default();
@@ -1143,31 +1301,10 @@ impl ContextPresence {
                 continue;
             };
             let key = normalize(&path);
-            match v.get(COMPACTED_RESULT_KEY).and_then(|k| k.as_str()) {
-                Some("truncated") => {
-                    if let Some(sr) = v.get("shown_line_range").and_then(|s| s.as_array()) {
-                        if let (Some(a), Some(b)) = (
-                            sr.first().and_then(|x| x.as_u64()),
-                            sr.get(1).and_then(|x| x.as_u64()),
-                        ) {
-                            out.ranges
-                                .entry(key)
-                                .or_default()
-                                .push((a as usize, b as usize));
-                        }
-                    }
-                }
-                Some(_) => {}
+            match lines {
+                Some(range) => out.ranges.entry(key).or_default().push(range),
                 None => {
-                    if v.get("content").and_then(|c| c.as_str()).is_none() {
-                        continue;
-                    }
-                    match shown_range(&args_v, Some(&v)) {
-                        Some(range) => out.ranges.entry(key).or_default().push(range),
-                        None => {
-                            out.whole.insert(key);
-                        }
-                    }
+                    out.whole.insert(key);
                 }
             }
         }

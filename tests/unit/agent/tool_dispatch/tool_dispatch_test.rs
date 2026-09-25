@@ -7728,6 +7728,116 @@ async fn path_keys_do_not_move_when_the_process_cwd_changes() {
 }
 
 #[tokio::test]
+async fn a_spilled_read_never_counts_as_content_still_in_context() {
+    // Rule 5 sweep of the supersession fix (review of f11e6f68): the
+    // evicted-reread check treated the latest successful read's MESSAGE as
+    // the file's content in context, even when that message was a spill
+    // summary that never carried the file.
+    let mut agent = reread_agent().await;
+    let args = r#"{"path":"src/huge.rs","line_range":[1,40000]}"#;
+    let huge = "pub fn filler_item(x: usize) -> usize { x + 1 }\n".repeat(40_000);
+    let result = serde_json::json!({"content": huge, "total_lines": 40_000}).to_string();
+    agent.messages.push(native_read_call("r1", args));
+    agent
+        .push_tool_result_message(true, "r1", "file_read", args, true, &result)
+        .await;
+    let text = last_text(&agent);
+    assert!(
+        text.contains("[SUMMARY —") || text.contains("[TRUNCATED —"),
+        "precondition: the result was spilled to a summary"
+    );
+    assert!(
+        agent.prior_read_evicted_from_context("src/huge.rs"),
+        "a re-read restores content the model never had"
+    );
+
+    // A read that did deliver its content is still in context.
+    let small = r#"{"path":"src/lexer.rs"}"#;
+    agent.messages.push(native_read_call("r2", small));
+    agent
+        .push_tool_result_message(
+            true,
+            "r2",
+            "file_read",
+            small,
+            true,
+            &read_result_json(LEXER_SRC),
+        )
+        .await;
+    assert!(!agent.prior_read_evicted_from_context("src/lexer.rs"));
+}
+
+#[tokio::test]
+async fn an_unchanged_note_in_a_request_never_points_at_a_result_that_left_it() {
+    // Rule 5 sweep: every request passes the note repoint, whichever route
+    // (compaction, trim, summary, clamp) removed the earlier result.
+    let mut agent = reread_agent().await;
+    let args = r#"{"path":"src/lexer.rs"}"#;
+    for id in ["r1", "r2"] {
+        agent.messages.push(native_read_call(id, args));
+        agent
+            .push_tool_result_message(
+                true,
+                id,
+                "file_read",
+                args,
+                true,
+                &read_result_json(LEXER_SRC),
+            )
+            .await;
+    }
+    let note = last_text(&agent);
+    assert!(note.contains("Unchanged since turn"), "{note}");
+
+    // The earlier result intact: the request keeps the note.
+    let request = Agent::finish_request_with_tail_and_ledger(
+        agent.messages.clone(),
+        Vec::new(),
+        &|_, _| None,
+        100_000,
+        None,
+    )
+    .unwrap();
+    assert!(request.iter().any(|m| m.content.text() == note));
+
+    // The earlier result compacted away: the note now says the content is gone,
+    // in fewer tokens than the note it replaces.
+    let mut history = agent.messages.clone();
+    let first = history
+        .iter()
+        .position(|m| m.tool_call_id.as_deref() == Some("r1"))
+        .unwrap();
+    history[first].content = crate::api::types::MessageContent::Text(
+        r#"{"compacted_tool_result":"stub","tool":"file_read","path":"src/lexer.rs","content_in_context":false}"#
+            .to_string(),
+    );
+    let request = Agent::finish_request_with_tail_and_ledger(
+        history,
+        Vec::new(),
+        &|_, _| None,
+        100_000,
+        None,
+    )
+    .unwrap();
+    let rewritten = request
+        .iter()
+        .find(|m| m.tool_call_id.as_deref() == Some("r2"))
+        .unwrap()
+        .content
+        .text()
+        .to_string();
+    assert!(!rewritten.contains("Unchanged since turn"), "{rewritten}");
+    assert!(
+        rewritten.contains("NO LONGER in your context"),
+        "{rewritten}"
+    );
+    assert!(
+        crate::token_count::estimate_content_tokens(&rewritten)
+            < crate::token_count::estimate_content_tokens(&note)
+    );
+}
+
+#[tokio::test]
 async fn path_aliases_share_one_key_in_the_reread_tracker_and_the_note() {
     // External review 2026-09-25 (Rule 5 sweep of the ledger alias bug):
     // every path-keyed map agrees that `./a/../src/lexer.rs`,

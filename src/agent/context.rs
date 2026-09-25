@@ -490,7 +490,14 @@ impl ContextCompressor {
         // assistant `tool_calls` at the TAIL (e.g. an interrupted final turn)
         // still 400s. Enforce the same invariants as the hardened compaction
         // path so every compression route yields an API-valid message list.
-        let compressed = super::Agent::apply_tool_call_pair_invariants(compressed);
+        let mut compressed = super::Agent::apply_tool_call_pair_invariants(compressed);
+        // A kept "unchanged since turn N" note whose earlier result was
+        // summarized away now says the content is gone.
+        let root = self.key_root();
+        super::result_compaction::repoint_orphaned_unchanged_notes(
+            &mut compressed,
+            Some(root.as_path()),
+        );
 
         let original_estimate = self.estimate_tokens(messages);
         let new_estimate = self.estimate_tokens(&compressed);

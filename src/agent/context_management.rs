@@ -486,7 +486,6 @@ impl Agent {
             idx += 1;
             k
         });
-
         // Fallback: If still over budget, truncate individual oversized messages
         // to the per-message cap (3/4 of the budget). This applies to the task
         // anchor too — an injected multi-100K-token task payload must still
@@ -525,6 +524,13 @@ impl Agent {
                     remaining = estimate_messages_tokens(messages);
                 }
             }
+        }
+
+        // A kept "unchanged since turn N" note whose earlier result was just
+        // dropped or cut must not keep telling the model to use it (before
+        // the final clamp, which then measures the rewritten note).
+        if super::result_compaction::repoint_orphaned_unchanged_notes(messages, None) > 0 {
+            remaining = estimate_messages_tokens(messages);
         }
 
         // Final clamp: If still over budget (e.g. system message + anchor together exceed budget,
@@ -903,6 +909,12 @@ impl Agent {
         let history_budget = max_context_tokens.saturating_sub(reserve);
         let mut fitted =
             Self::fit_request_to_context_budget(request_messages, history_budget, checkpoint)?;
+        // Every request passes here: whatever route dropped or cut the
+        // earlier result an "unchanged since turn N" note points at (trim,
+        // summary, compaction, clamp), the note the model sees says so (the
+        // rewritten note is shorter than the production note it replaces,
+        // and the request is measured again below with its tail).
+        super::result_compaction::repoint_orphaned_unchanged_notes(&mut fitted, None);
 
         // Re-render against the fitted history (what the model will see).
         let ledger = ledger_for(&fitted, ledger_cap);

@@ -890,3 +890,170 @@ fn a_whole_read_that_fits_is_left_alone_and_tiny_rooms_get_the_floor() {
     // Not a successful read (no content): untouched.
     assert!(chunk_whole_read(&"x".repeat(20_000), 100).is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Supersession needs a later result that DELIVERED the lines
+// ---------------------------------------------------------------------------
+//
+// External review of f11e6f68 (2026-09-25): an earlier full read was stubbed
+// as "superseded" by a later result for the same path that carried no file
+// content — a failed read, a stub, a truncated head, an "unchanged since
+// turn N" note — deleting the only readable copy while an unrelated older
+// read could have been compacted instead.
+
+fn supersession_history(later: serde_json::Value) -> Vec<Message> {
+    vec![
+        Message::system("Review"),
+        Message::user("Review src/a.rs"),
+        native_call(
+            "older",
+            "file_read",
+            serde_json::json!({"path": "src/older.rs"}),
+        ),
+        Message::tool(read_payload(&"pub fn older() {}\n".repeat(400)), "older"),
+        native_call("a", "file_read", serde_json::json!({"path": "src/a.rs"})),
+        Message::tool(read_payload(&"pub fn important() {}\n".repeat(400)), "a"),
+        native_call("b", "file_read", serde_json::json!({"path": "src/a.rs"})),
+        Message::tool(later.to_string(), "b"),
+        Message::assistant("Continue review"),
+    ]
+}
+
+fn compact_supersession(messages: &mut [Message], spare: usize) -> ResultCompactionReport {
+    let budget = estimate_messages_tokens(messages) - spare;
+    compact_tool_results_to_budget_opts(messages, budget, 2, 300, &|_| None, true, None)
+        .expect("over budget")
+}
+
+fn contentless_later_results() -> Vec<(&'static str, serde_json::Value)> {
+    vec![
+        (
+            "failed read",
+            serde_json::json!({"error": "permission denied"}),
+        ),
+        (
+            "already compacted stub",
+            serde_json::json!({"compacted_tool_result": "stub", "tool": "file_read",
+                "path": "src/a.rs", "line_range": null, "content_in_context": false}),
+        ),
+        (
+            "truncated whole read",
+            serde_json::json!({"compacted_tool_result": "truncated", "path": "src/a.rs",
+                "content": "pub fn important() {}", "shown_line_range": [1, 1],
+                "total_lines": 400}),
+        ),
+        (
+            "unchanged re-read note",
+            serde_json::json!({"path": "src/a.rs",
+                crate::agent::context::UNCHANGED_REREAD_NOTE_KEY: 1,
+                "note": "Unchanged since turn 1: use the earlier result."}),
+        ),
+    ]
+}
+
+#[test]
+fn a_later_result_without_the_content_never_supersedes_the_earlier_read() {
+    for (label, later) in contentless_later_results() {
+        let mut messages = supersession_history(later);
+        let report = compact_supersession(&mut messages, 500);
+        assert!(report.superseded.is_empty(), "{label}: {report:?}");
+        let kept = payload_of(&messages[5]);
+        assert!(
+            kept.get(COMPACTED_RESULT_KEY).is_none(),
+            "{label}: the only readable copy of src/a.rs was compacted: {kept}"
+        );
+        let presence = ContextPresence::from_messages(&messages, &|p| p.to_string());
+        assert!(presence.whole("src/a.rs"), "{label}");
+        assert!(
+            !presence.whole("src/older.rs"),
+            "{label}: the unrelated older read goes instead"
+        );
+    }
+}
+
+#[test]
+fn a_later_xml_error_never_supersedes_the_earlier_read() {
+    let mut messages = vec![
+        Message::system("Review"),
+        Message::user("Review src/a.rs"),
+        xml_call("src/older.rs"),
+        xml_result(&read_payload(&"pub fn older() {}\n".repeat(400))),
+        xml_call("src/a.rs"),
+        xml_result(&read_payload(&"pub fn important() {}\n".repeat(400))),
+        xml_call("src/a.rs"),
+        Message::user("<tool_result><error>permission denied</error></tool_result>"),
+        Message::assistant("Continue review"),
+    ];
+    let report = compact_supersession(&mut messages, 500);
+    assert!(report.superseded.is_empty(), "{report:?}");
+    assert!(payload_of(&messages[5]).get(COMPACTED_RESULT_KEY).is_none());
+}
+
+#[test]
+fn a_real_later_full_read_still_supersedes_the_earlier_copy() {
+    let later: serde_json::Value =
+        serde_json::from_str(&read_payload(&"pub fn important() {}\n".repeat(400))).unwrap();
+    let mut messages = supersession_history(later);
+    let report = compact_supersession(&mut messages, 500);
+    assert_eq!(report.superseded, vec!["file_read src/a.rs".to_string()]);
+    assert_eq!(payload_of(&messages[5])["superseded"], true);
+    let presence = ContextPresence::from_messages(&messages, &|p| p.to_string());
+    assert!(presence.whole("src/a.rs"), "the later copy is intact");
+    assert!(presence.whole("src/older.rs"), "nothing else had to go");
+}
+
+#[test]
+fn a_truncated_head_supersedes_only_the_lines_it_shows() {
+    // `shown_line_range` is honored for every truncation format: the head
+    // shows line 1 again, so an earlier read of lines 1-1 is superseded
+    // (a whole read is not — see the test above).
+    let head = serde_json::json!({"compacted_tool_result": "truncated", "path": "src/a.rs",
+        "content": "pub fn important() {}", "shown_line_range": [1, 1], "total_lines": 400});
+    let mut messages = supersession_history(head);
+    messages[4] = native_call(
+        "a",
+        "file_read",
+        serde_json::json!({"path": "src/a.rs", "line_range": [1, 1]}),
+    );
+    let report = compact_supersession(&mut messages, 500);
+    assert_eq!(
+        report.superseded,
+        vec!["file_read src/a.rs:1-1".to_string()]
+    );
+}
+
+#[test]
+fn an_unchanged_note_whose_earlier_result_was_compacted_stops_pointing_at_it() {
+    // Rule 5 sweep: the note says the earlier result "is still in your
+    // context above — use it". Once compaction stubs that result, the note
+    // must say the content is gone instead.
+    let note = serde_json::json!({"path": "src/a.rs",
+        crate::agent::context::UNCHANGED_REREAD_NOTE_KEY: 1,
+        "note": "Unchanged since turn 1: this read of `src/a.rs` returned exactly the same \
+                 content as your earlier read of the same path and range, and that earlier \
+                 result is still in your context above — use it."});
+    let mut messages = supersession_history(note);
+    // Both old reads have to go.
+    let big = estimate_content_tokens(messages[3].content.text())
+        + estimate_content_tokens(messages[5].content.text());
+    compact_supersession(&mut messages, big - 400);
+    assert!(payload_of(&messages[5]).get(COMPACTED_RESULT_KEY).is_some());
+    let note = payload_of(&messages[7]);
+    assert!(
+        note.get(crate::agent::context::UNCHANGED_REREAD_NOTE_KEY)
+            .is_none(),
+        "{note}"
+    );
+    assert_eq!(note["content_in_context"], false, "{note}");
+    assert!(
+        note["note"].as_str().unwrap().contains("NO LONGER"),
+        "{note}"
+    );
+
+    // While the earlier result is intact, the note is left as it is.
+    let note = serde_json::json!({"path": "src/a.rs",
+        crate::agent::context::UNCHANGED_REREAD_NOTE_KEY: 1, "note": "use it"});
+    let mut messages = supersession_history(note.clone());
+    compact_supersession(&mut messages, 500);
+    assert_eq!(payload_of(&messages[7]), note);
+}
