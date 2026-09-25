@@ -424,7 +424,17 @@ impl Agent {
             let target_is_new = serde_json::from_str::<serde_json::Value>(args_str)
                 .ok()
                 .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from))
-                .map(|p| !std::path::Path::new(&p).exists())
+                .map(|p| {
+                    // The path is model output probed BEFORE the safety
+                    // check: only answer "new" for an anchored path the
+                    // file-tool policy allows, so the guard's decision never
+                    // reveals whether a file outside the workspace exists.
+                    let anchored = self
+                        .tools
+                        .workspace_root()
+                        .anchor_path(std::path::Path::new(&p));
+                    self.validate_context_path(&anchored).is_ok() && !anchored.exists()
+                })
                 .unwrap_or(false);
             if !target_is_new {
                 return false;

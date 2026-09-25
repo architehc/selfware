@@ -93,7 +93,8 @@ pub(crate) const AUDIT_NOT_PERFORMED_NOTE: &str = "requirements audit NOT PERFOR
 /// Evidence marker for a completed run whose answer (or written deliverable)
 /// still carries citations the deterministic check could not verify;
 /// `cli_banner` keys its non-clean header on it. The full note reads
-/// `citations: N of M could not be verified`.
+/// `citations: N of M could not be verified (W wrong, K without a checkable
+/// symbol)`.
 pub(crate) const CITATIONS_UNVERIFIED_NOTE: &str = "could not be verified";
 
 impl FailureKind {
@@ -613,7 +614,8 @@ pub(crate) fn with_audit_status(
 /// gate's bounded correction rounds) into a non-failure verdict's evidence.
 /// Like [`with_audit_status`], the kind — and the exit status — is unchanged,
 /// but the banner and every evidence consumer see
-/// `citations: N of M could not be verified` instead of a clean pass
+/// `citations: N of M could not be verified (W wrong, K without a checkable
+/// symbol)`.instead of a clean pass
 /// (AGENTS.md rule 3). Failure verdicts and fully verified answers pass
 /// through unchanged.
 pub(crate) fn with_citation_status(

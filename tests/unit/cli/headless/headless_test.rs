@@ -1305,7 +1305,10 @@ fn session_result_json_carries_grounding_with_unverified_count() {
     assert_eq!(g["unverified"], 10);
     assert_eq!(g["wrong_line"], 3);
     assert_eq!(g["correction_rounds"], 2);
-    assert_eq!(g["note"], "citations: 3 of 50 could not be verified");
+    assert_eq!(
+        g["note"],
+        "citations: 10 of 50 could not be verified (3 wrong, 7 without a checkable symbol)"
+    );
     assert_eq!(
         g["summary"],
         "Grounding: 40 verified citations, 10 unverified (3 wrong, 7 without a checkable symbol)"

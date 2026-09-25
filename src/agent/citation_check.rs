@@ -18,7 +18,7 @@
 //! The completion gate (`Agent::citation_gate`) feeds wrong citations back to
 //! the model for at most `CITATION_GATE_REJECTION_BOUND` correction rounds
 //! (the audit ledger's bounded step-aside pattern), then lets the run complete
-//! with an explicit "citations: N of M could not be verified" in the run
+//! with an explicit "citations: N of M could not be verified (W wrong, ...)" in the run
 //! summary, the banner, stream-json and the JSON result.
 
 use regex::Regex;
@@ -26,6 +26,8 @@ use serde::Serialize;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+
+use crate::safety::path_validator::{lexical_normalize_path, PathValidator};
 
 /// A named symbol counts as "in the cited range" within this many lines of it.
 pub(crate) const LINE_TOLERANCE: usize = 3;
@@ -259,14 +261,36 @@ impl GroundingStatus {
         self.total.saturating_sub(self.verified)
     }
 
-    /// `citations: N of M could not be verified` — the note the banner,
-    /// run summary and failure-mode evidence carry when problems remain.
+    /// `citations: N of M could not be verified (W wrong, K without a
+    /// checkable symbol)` — the note the banner, run summary, JSON result
+    /// and failure-mode evidence carry when problems remain. N is
+    /// [`Self::unverified_count`] (everything not positively verified), so
+    /// the count and the words agree, and the breakdown matches
+    /// [`Self::grounding_line`].
     pub fn unverified_note(&self) -> String {
         format!(
-            "citations: {} of {} could not be verified",
-            self.problem_count(),
-            self.total
+            "citations: {} of {} could not be verified{}",
+            self.unverified_count(),
+            self.total,
+            self.unverified_breakdown()
         )
+    }
+
+    /// ` (W wrong, K without a checkable symbol)`, parts omitted when zero;
+    /// empty when everything verified.
+    fn unverified_breakdown(&self) -> String {
+        let mut parts = Vec::new();
+        if self.problem_count() > 0 {
+            parts.push(format!("{} wrong", self.problem_count()));
+        }
+        if self.unverifiable > 0 {
+            parts.push(format!("{} without a checkable symbol", self.unverifiable));
+        }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", parts.join(", "))
+        }
     }
 
     /// The summary's "Grounding:" line. Names what was actually checked:
@@ -277,18 +301,7 @@ impl GroundingStatus {
             return "Grounding: no path:line citations in the answer (nothing checked against files)"
                 .to_string();
         }
-        let mut parts = Vec::new();
-        if self.problem_count() > 0 {
-            parts.push(format!("{} wrong", self.problem_count()));
-        }
-        if self.unverifiable > 0 {
-            parts.push(format!("{} without a checkable symbol", self.unverifiable));
-        }
-        let detail = if parts.is_empty() {
-            String::new()
-        } else {
-            format!(" ({})", parts.join(", "))
-        };
+        let detail = self.unverified_breakdown();
         format!(
             "Grounding: {} verified citations, {} unverified{detail}",
             self.verified,
@@ -442,25 +455,86 @@ fn normalize_symbol(span: &str) -> Option<String> {
     Some(last)
 }
 
+/// Reason recorded for a citation whose path fails workspace confinement or
+/// the file-tool path policy. Deliberately uniform: it never says whether
+/// the target exists, how long it is, or where a symbol sits in it.
+pub(crate) const OUTSIDE_POLICY_REASON: &str = "outside workspace/policy";
+
 /// Resolves cited paths against the workspace and caches file lines.
+///
+/// Confinement: the cited path is MODEL OUTPUT, and verdicts ("found at
+/// line M", "no such file") are fed back to the model, so citation checks
+/// hold the same boundary the file tools hold. Every candidate
+/// 1. must lexically stay inside the workspace root (absolute paths outside
+///    it and `..` escapes are refused before the filesystem is touched),
+/// 2. must pass the file tools' own [`PathValidator`] policy (allowed,
+///    denied and protected-system paths) anchored at the canonical root,
+/// 3. must resolve — symlinks followed — to a location inside the canonical
+///    root, and
+/// 4. is read only through [`PathValidator::open_regular_file`], which
+///    re-validates the OPENED descriptor's real path (no check-then-open
+///    race); that real path is checked against the root once more.
+///
+/// A candidate failing any step is `Unverifiable` with
+/// [`OUTSIDE_POLICY_REASON`] and is never read; it is never reported as a
+/// missing file or a wrong line, which would leak its existence or content.
 pub struct CitationResolver {
+    /// Canonical workspace root (symlinks resolved).
     root: PathBuf,
+    /// The root as given, when it differs from the canonical form (macOS
+    /// `/var` → `/private/var`): absolute citations written against it are
+    /// mapped onto the canonical root.
+    given_root: PathBuf,
+    validator: PathValidator,
     /// Full paths mentioned anywhere in the checked text (disambiguation).
     mentioned: Vec<String>,
     index: Option<Vec<PathBuf>>,
-    files: HashMap<PathBuf, Option<Vec<String>>>,
+    files: HashMap<PathBuf, Loaded>,
+}
+
+/// A candidate file after confinement and (maybe) reading.
+enum Loaded {
+    Lines(Vec<String>),
+    /// Failed confinement or policy: never read.
+    Refused,
+    /// Inside the workspace and allowed, but could not be read (too large,
+    /// not a regular file, vanished).
+    Unreadable,
 }
 
 enum Resolution {
     Found(PathBuf),
     Ambiguous(Vec<PathBuf>),
     Missing,
+    /// Fails workspace confinement or path policy.
+    Refused,
+}
+
+/// Outcome of confining one path (see [`CitationResolver`]).
+enum Confined {
+    /// Inside the root, allowed, exists: the absolute (lexical) path.
+    Existing(PathBuf),
+    /// Inside the root and allowed, but nothing is there.
+    Absent,
+    Refused,
 }
 
 impl CitationResolver {
+    /// Resolver confined to `root` under the default file-tool policy
+    /// (`allowed_paths = ["./**"]` anchored at `root`, default denied paths).
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self::with_policy(root, &crate::config::SafetyConfig::default())
+    }
+
+    /// Resolver confined to `root` AND the given file-tool policy — the
+    /// agent passes its own `[safety]` config, the one its file tools use.
+    pub fn with_policy(root: impl Into<PathBuf>, policy: &crate::config::SafetyConfig) -> Self {
+        let given_root = root.into();
+        let root = std::fs::canonicalize(&given_root).unwrap_or_else(|_| given_root.clone());
         CitationResolver {
-            root: root.into(),
+            validator: PathValidator::new(policy, root.clone()),
+            root,
+            given_root,
             mentioned: Vec::new(),
             index: None,
             files: HashMap::new(),
@@ -474,9 +548,61 @@ impl CitationResolver {
             .into_owned()
     }
 
+    /// Steps 1–3 of the confinement contract (see the type docs). Touches
+    /// the filesystem only after the lexical check has passed.
+    fn confine(&self, cited: &str) -> Confined {
+        if cited.contains('\0') {
+            return Confined::Refused;
+        }
+        let raw = Path::new(cited);
+        let joined = if raw.is_absolute() {
+            raw.to_path_buf()
+        } else {
+            self.root.join(raw)
+        };
+        let lexical = lexical_normalize_path(&joined);
+        // 1. Lexical containment (absolute paths and `..` escapes).
+        let lexical = if lexical.starts_with(&self.root) {
+            lexical
+        } else if let Ok(rest) = lexical.strip_prefix(&self.given_root) {
+            self.root.join(rest)
+        } else {
+            return Confined::Refused;
+        };
+        // 2. The file tools' own policy (allowed/denied/protected paths).
+        if self.validator.validate(&lexical.to_string_lossy()).is_err() {
+            return Confined::Refused;
+        }
+        // 3. Real location (symlinks followed) must stay inside the root.
+        //    A missing path is judged by its deepest existing ancestor, so a
+        //    symlinked directory pointing outside cannot answer "missing".
+        match std::fs::canonicalize(&lexical) {
+            Ok(real) if real.starts_with(&self.root) => Confined::Existing(lexical),
+            Ok(_) => Confined::Refused,
+            Err(_) => {
+                let inside = lexical
+                    .ancestors()
+                    .skip(1)
+                    .find_map(|a| std::fs::canonicalize(a).ok())
+                    .is_some_and(|real| real.starts_with(&self.root));
+                if inside && std::fs::symlink_metadata(&lexical).is_err() {
+                    Confined::Absent
+                } else {
+                    // A dangling symlink (target unknown) or an ancestor
+                    // outside the root: refuse rather than say "missing".
+                    Confined::Refused
+                }
+            }
+        }
+    }
+
     fn index(&mut self) -> &[PathBuf] {
         if self.index.is_none() {
             let mut entries = Vec::new();
+            // `follow_links(false)`: a symlink is reported as a symlink, not
+            // as its target's type, so the file filter below drops every
+            // symlink — one pointing outside the root never enters the
+            // suffix index (and each candidate is re-confined on read).
             let walker = walkdir::WalkDir::new(&self.root)
                 .follow_links(false)
                 .into_iter()
@@ -489,7 +615,7 @@ impl CitationResolver {
                             || name == "__pycache__")
                 });
             for entry in walker.flatten() {
-                if entry.file_type().is_file() {
+                if entry.file_type().is_file() && !entry.path_is_symlink() {
                     entries.push(entry.into_path());
                     if entries.len() >= MAX_INDEX_ENTRIES {
                         break;
@@ -502,15 +628,13 @@ impl CitationResolver {
     }
 
     fn resolve(&mut self, cited: &str) -> Resolution {
-        let direct = if Path::new(cited).is_absolute() {
-            PathBuf::from(cited)
-        } else {
-            self.root.join(cited)
-        };
-        if direct.is_file() {
-            return Resolution::Found(direct);
+        match self.confine(cited) {
+            Confined::Existing(path) => return Resolution::Found(path),
+            Confined::Refused => return Resolution::Refused,
+            Confined::Absent => {}
         }
         // Bare or partial path (`verification_scope.rs`): match by suffix.
+        // Only in-root, non-symlink index entries can match (see `index`).
         let suffix: Vec<&str> = cited.split('/').filter(|s| !s.is_empty()).collect();
         if suffix.is_empty() {
             return Resolution::Missing;
@@ -554,29 +678,72 @@ impl CitationResolver {
         }
     }
 
-    fn lines(&mut self, path: &Path) -> Option<&Vec<String>> {
+    /// Step 4: open through the validated descriptor and read from it.
+    fn load(&self, path: &Path) -> Loaded {
+        use std::io::Read;
+        let path_str = path.to_string_lossy();
+        if !matches!(self.confine(&path_str), Confined::Existing(_)) {
+            return Loaded::Refused;
+        }
+        let Ok(opened) = self.validator.open_regular_file(&path_str) else {
+            // Policy refusal or not a regular file: either way, never read.
+            return Loaded::Refused;
+        };
+        if !opened.real_path.starts_with(&self.root) {
+            return Loaded::Refused;
+        }
+        let mut file = opened.file;
+        match file.metadata() {
+            Ok(m) if m.len() <= MAX_FILE_BYTES => {}
+            _ => return Loaded::Unreadable,
+        }
+        let mut bytes = Vec::new();
+        if file.read_to_end(&mut bytes).is_err() {
+            return Loaded::Unreadable;
+        }
+        Loaded::Lines(
+            String::from_utf8_lossy(&bytes)
+                .lines()
+                .map(str::to_string)
+                .collect(),
+        )
+    }
+
+    fn lines(&mut self, path: &Path) -> &Loaded {
         if !self.files.contains_key(path) {
-            let loaded = std::fs::metadata(path)
-                .ok()
-                .filter(|m| m.len() <= MAX_FILE_BYTES)
-                .and_then(|_| std::fs::read(path).ok())
-                .map(|bytes| {
-                    String::from_utf8_lossy(&bytes)
-                        .lines()
-                        .map(str::to_string)
-                        .collect::<Vec<_>>()
-                });
+            let loaded = self.load(path);
             self.files.insert(path.to_path_buf(), loaded);
         }
-        self.files.get(path).and_then(Option::as_ref)
+        self.files.get(path).expect("just inserted")
+    }
+
+    /// Read a file named by model output (a written deliverable) under the
+    /// same confinement as citations. `None` when it fails confinement or
+    /// policy, is missing, or cannot be read — callers skip it silently.
+    pub(crate) fn read_confined(&mut self, cited: &str) -> Option<String> {
+        let Confined::Existing(path) = self.confine(cited) else {
+            return None;
+        };
+        match self.lines(&path) {
+            Loaded::Lines(lines) => Some(lines.join("\n")),
+            Loaded::Refused | Loaded::Unreadable => None,
+        }
     }
 
     fn check_in_file(&mut self, path: &Path, c: &Citation) -> CitationVerdict {
         let file = self.relative_display(path);
-        let Some(lines) = self.lines(path) else {
-            return CitationVerdict::Unverifiable {
-                reason: format!("{file} could not be read"),
-            };
+        let lines = match self.lines(path) {
+            Loaded::Lines(lines) => lines,
+            Loaded::Refused => {
+                return CitationVerdict::Unverifiable {
+                    reason: OUTSIDE_POLICY_REASON.to_string(),
+                }
+            }
+            Loaded::Unreadable => {
+                return CitationVerdict::Unverifiable {
+                    reason: format!("{file} could not be read"),
+                }
+            }
         };
         let line_count = lines.len();
         if c.start == 0 || c.end < c.start || c.end > line_count {
@@ -602,6 +769,9 @@ impl CitationResolver {
     pub fn check(&mut self, c: &Citation) -> CitationVerdict {
         match self.resolve(&c.path) {
             Resolution::Missing => CitationVerdict::MissingFile,
+            Resolution::Refused => CitationVerdict::Unverifiable {
+                reason: OUTSIDE_POLICY_REASON.to_string(),
+            },
             Resolution::Found(path) => self.check_in_file(&path, c),
             Resolution::Ambiguous(candidates) => {
                 // Verified when exactly one same-named file confirms it;
@@ -836,21 +1006,15 @@ impl super::Agent {
     pub(super) fn citation_gate(&self, is_read_only: bool) -> Option<String> {
         let root = self.tools.workspace_root().path();
         let answer = self.citation_candidate_answer();
+        // Deliverable paths come from the model's tool arguments: read them
+        // under the same workspace + file-tool policy confinement as the
+        // citations themselves (a file written then swapped for a symlink
+        // is skipped, never followed).
+        let mut resolver = CitationResolver::with_policy(&root, &self.config.safety);
         let deliverables: Vec<(String, String)> = self
             .written_deliverables()
             .into_iter()
-            .filter_map(|p| {
-                let full = if Path::new(&p).is_absolute() {
-                    PathBuf::from(&p)
-                } else {
-                    root.join(&p)
-                };
-                let meta = std::fs::metadata(&full).ok()?;
-                if meta.len() > MAX_FILE_BYTES {
-                    return None;
-                }
-                std::fs::read_to_string(&full).ok().map(|text| (p, text))
-            })
+            .filter_map(|p| resolver.read_confined(&p).map(|text| (p, text)))
             .collect();
 
         let step = self.loop_control.current_step();
@@ -868,7 +1032,6 @@ impl super::Agent {
             }
         }
 
-        let mut resolver = CitationResolver::new(root);
         let mut report = resolver.verify_text(&answer, ANSWER_SOURCE);
         let mut checked_files = Vec::new();
         for (path, text) in &deliverables {
@@ -900,7 +1063,7 @@ impl super::Agent {
             (
                 Some(correction_directive(&report, round)),
                 Some(format!(
-                    "{problems} of {} could not be verified — correction round {round}/{CITATION_GATE_REJECTION_BOUND}",
+                    "{problems} of {} wrong — correction round {round}/{CITATION_GATE_REJECTION_BOUND}",
                     report.total
                 )),
             )
@@ -914,7 +1077,7 @@ impl super::Agent {
             (
                 None,
                 Some(format!(
-                    "{problems} of {} could not be verified after {} correction round(s) — completing with this warning",
+                    "{problems} of {} still wrong after {} correction round(s) — completing with this warning",
                     report.total, state.rejections
                 )),
             )

@@ -241,7 +241,7 @@ fn report_counts_and_grounding_line() {
     );
     assert_eq!(
         status.unverified_note(),
-        "citations: 3 of 5 could not be verified"
+        "citations: 4 of 5 could not be verified (3 wrong, 1 without a checkable symbol)"
     );
     assert!(status.problems[0].contains("but found at src/agent/widget.rs:25"));
 }
@@ -407,7 +407,7 @@ async fn gate_is_bounded_then_steps_aside_with_the_count_recorded() {
     assert_eq!(status.correction_rounds, CITATION_GATE_REJECTION_BOUND);
     assert_eq!(
         status.unverified_note(),
-        "citations: 1 of 2 could not be verified"
+        "citations: 1 of 2 could not be verified (1 wrong)"
     );
     // Through the full completion gate as well: no further rejection.
     assert_eq!(agent.check_completion_gate().await, None);
@@ -481,4 +481,234 @@ async fn gate_ignores_uncited_mutation_answers_but_labels_read_only_ones() {
         .expect("read-only answer is labelled");
     assert_eq!(status.total, 0);
     assert!(status.grounding_line().contains("no path:line citations"));
+}
+
+// ── confinement: citations never read outside the workspace/policy ──────
+
+/// `<base>/workspace` holding `inside.rs`, and a sibling `<base>/outside.rs`
+/// the policy (allowed paths = the workspace) rejects — the external
+/// review's probe layout.
+fn confinement_fixture() -> (tempfile::TempDir, PathBuf, crate::config::SafetyConfig) {
+    let base = tempfile::tempdir().expect("tempdir");
+    let ws = base.path().join("workspace");
+    fs::create_dir_all(ws.join("src")).unwrap();
+    fs::write(
+        base.path().join("outside.rs"),
+        "pub fn outside_marker() {}\n",
+    )
+    .unwrap();
+    fs::write(ws.join("inside.rs"), "pub fn inside_marker() {}\n").unwrap();
+    fs::write(
+        ws.join("src/deep.rs"),
+        "// one\n// two\npub fn deep_marker() {}\n",
+    )
+    .unwrap();
+    fs::write(ws.join("secret.rs"), "pub fn secret_marker() {}\n").unwrap();
+    let policy = crate::config::SafetyConfig {
+        allowed_paths: vec![format!("{}/**", ws.display())],
+        denied_paths: vec!["**/secret.rs".to_string()],
+        ..Default::default()
+    };
+    (base, ws, policy)
+}
+
+fn assert_refused_without_read(r: &CitationResolver, report: &CitationReport, label: &str) {
+    assert_eq!(report.total, 1, "{label}: {report:?}");
+    assert_eq!(report.verified, 0, "{label}: must not verify: {report:?}");
+    assert_eq!(report.unverifiable, 1, "{label}: {report:?}");
+    assert_eq!(
+        report.problem_count(),
+        0,
+        "{label}: never missing_file/wrong_line: {report:?}"
+    );
+    // Nothing outside the canonical root was read into the cache.
+    for (path, loaded) in &r.files {
+        if matches!(loaded, Loaded::Lines(_)) {
+            let real = fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+            assert!(
+                real.starts_with(&r.root),
+                "{label}: read {} outside the root",
+                path.display()
+            );
+        }
+    }
+    // No feedback leaks: the correction directive lists no problem.
+    let directive = correction_directive(report, 1);
+    assert!(!directive.contains("outside.rs"), "{label}: {directive}");
+    assert!(!directive.contains("found at"), "{label}: {directive}");
+}
+
+fn refused() -> CitationVerdict {
+    CitationVerdict::Unverifiable {
+        reason: OUTSIDE_POLICY_REASON.to_string(),
+    }
+}
+
+#[test]
+fn parent_absolute_and_symlink_escapes_are_unverifiable_and_unread() {
+    let (base, ws, policy) = confinement_fixture();
+    let outside = base.path().join("outside.rs");
+
+    let mut r = CitationResolver::with_policy(&ws, &policy);
+    let rep = r.verify_text("`outside_marker` (`../outside.rs:1`)", ANSWER_SOURCE);
+    assert_refused_without_read(&r, &rep, "parent path");
+    assert_eq!(
+        r.check(&cite("../outside.rs", 1, 1, Some("outside_marker"))),
+        refused()
+    );
+
+    // A missing file outside must not answer "no such file" either.
+    let mut r = CitationResolver::with_policy(&ws, &policy);
+    let rep = r.verify_text("`gone_marker` (`../gone.rs:1`)", ANSWER_SOURCE);
+    assert_refused_without_read(&r, &rep, "missing outside");
+
+    let mut r = CitationResolver::with_policy(&ws, &policy);
+    let rep = r.verify_text(
+        &format!("`outside_marker` (`{}:1`)", outside.display()),
+        ANSWER_SOURCE,
+    );
+    assert_refused_without_read(&r, &rep, "absolute path");
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&outside, ws.join("link.rs")).unwrap();
+        std::os::unix::fs::symlink(base.path(), ws.join("linkdir")).unwrap();
+        for text in [
+            "`outside_marker` (`link.rs:1`)",
+            "`outside_marker` (`linkdir/outside.rs:1`)",
+            "`gone_marker` (`linkdir/gone.rs:1`)",
+        ] {
+            let mut r = CitationResolver::with_policy(&ws, &policy);
+            let rep = r.verify_text(text, ANSWER_SOURCE);
+            assert_refused_without_read(&r, &rep, text);
+        }
+        // The default policy (`./**`) confines the same way.
+        let mut r = CitationResolver::new(&ws);
+        let rep = r.verify_text("`outside_marker` (`link.rs:1`)", ANSWER_SOURCE);
+        assert_refused_without_read(&r, &rep, "symlink, default policy");
+        assert_eq!(
+            r.check(&cite("link.rs", 1, 1, Some("outside_marker"))),
+            refused()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn suffix_index_excludes_symlinks_to_outside_targets() {
+    let (base, ws, policy) = confinement_fixture();
+    std::os::unix::fs::symlink(base.path().join("outside.rs"), ws.join("src/alias.rs")).unwrap();
+    let mut r = CitationResolver::with_policy(&ws, &policy);
+    // Bare name: not at the root, so only the suffix index could find it.
+    let rep = r.verify_text("`outside_marker` (`alias.rs:1`)", ANSWER_SOURCE);
+    assert_eq!(rep.verified, 0, "{rep:?}");
+    assert!(
+        r.index().iter().all(|p| !p.ends_with("alias.rs")),
+        "symlink entered the suffix index"
+    );
+    assert!(r.files.values().all(|l| !matches!(
+        l,
+        Loaded::Lines(lines) if lines.iter().any(|x| x.contains("outside_marker"))
+    )));
+}
+
+#[test]
+fn denied_path_inside_the_workspace_is_unverifiable() {
+    let (_base, ws, policy) = confinement_fixture();
+    let mut r = CitationResolver::with_policy(&ws, &policy);
+    let rep = r.verify_text("`secret_marker` (`secret.rs:1`)", ANSWER_SOURCE);
+    assert_refused_without_read(&r, &rep, "denied path");
+    assert!(r.files.values().all(|l| !matches!(l, Loaded::Lines(_))));
+    assert_eq!(
+        r.check(&cite("secret.rs", 1, 1, Some("secret_marker"))),
+        refused()
+    );
+}
+
+#[test]
+fn legit_relative_absolute_inside_and_suffix_citations_still_verify() {
+    let (_base, ws, policy) = confinement_fixture();
+    let mut r = CitationResolver::with_policy(&ws, &policy);
+    let rep = r.verify_text(
+        &format!(
+            "`inside_marker` (`inside.rs:1`), `deep_marker` (`src/deep.rs:3`), \
+             `deep_marker` (`deep.rs:3`), `inside_marker` (`{}:1`), \
+             `deep_marker` (`src/../src/deep.rs:3`)",
+            ws.join("inside.rs").display()
+        ),
+        ANSWER_SOURCE,
+    );
+    assert_eq!((rep.total, rep.verified), (5, 5), "{rep:?}");
+    // Wrong citations inside the workspace are still reported as such.
+    let v = r.check(&cite("src/deep.rs", 1, 1, Some("inside_marker")));
+    assert!(matches!(v, CitationVerdict::SymbolNotFound { .. }), "{v:?}");
+    assert_eq!(
+        r.check(&cite("src/nope.rs", 1, 1, Some("x"))),
+        CitationVerdict::MissingFile
+    );
+}
+
+/// Review P3: the note said "1 of 2 could not be verified" while two were
+/// unverified (one wrong, one without a checkable symbol).
+#[test]
+fn unverified_note_count_agrees_with_the_grounding_line() {
+    let (_base, ws, _policy) = confinement_fixture();
+    let mut r = CitationResolver::new(&ws);
+    let report = r.verify_text(
+        "inside.rs:1 and `missing_symbol` (`inside.rs:1`)",
+        ANSWER_SOURCE,
+    );
+    let status = GroundingStatus::from_report(&report, 2, vec![]);
+    assert_eq!(status.unverified_count(), 2);
+    assert_eq!(
+        status.unverified_note(),
+        "citations: 2 of 2 could not be verified (1 wrong, 1 without a checkable symbol)"
+    );
+    assert_eq!(
+        status.grounding_line(),
+        "Grounding: 0 verified citations, 2 unverified (1 wrong, 1 without a checkable symbol)"
+    );
+    // The failure-mode evidence carries the same note.
+    let base = crate::agent::failure_mode::FailureMode {
+        restored_files: Vec::new(),
+        kind: crate::agent::failure_mode::FailureKind::NoChange,
+        evidence: "completed".to_string(),
+        advice: "-".to_string(),
+    };
+    let fm = crate::agent::failure_mode::with_citation_status(base, Some(&status));
+    assert!(
+        fm.evidence.ends_with(&status.unverified_note()),
+        "{}",
+        fm.evidence
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn gate_skips_a_deliverable_swapped_for_an_outside_symlink() {
+    let (base, ws, _policy) = confinement_fixture();
+    fs::write(
+        base.path().join("OUT.md"),
+        "`outside_marker` (`inside.rs:1`)\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(base.path().join("OUT.md"), ws.join("REVIEW.md")).unwrap();
+    let mut agent = gate_agent(&ws).await;
+    agent
+        .current_checkpoint
+        .as_mut()
+        .unwrap()
+        .log_tool_call(crate::checkpoint::ToolCallLog {
+            timestamp: chrono::Utc::now(),
+            tool_name: "file_write".to_string(),
+            arguments: serde_json::json!({"path": "REVIEW.md", "content": "..."}).to_string(),
+            result: Some("ok".to_string()),
+            success: true,
+            duration_ms: Some(1),
+        });
+    answer(&mut agent, 1, "Wrote the review to REVIEW.md.");
+    assert_eq!(agent.citation_gate(true), None);
+    let status = agent.grounding_status().expect("read-only answer labelled");
+    assert!(status.checked_files.is_empty(), "{status:?}");
+    assert_eq!(status.total, 0);
 }

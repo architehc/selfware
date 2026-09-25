@@ -1228,7 +1228,7 @@ fn render_run_summary_names_unverified_citations() {
     );
     assert!(
         rendered.contains(
-            "outcome: completed — citations: 3 of 50 could not be verified (answer not fully grounded)"
+            "outcome: completed — citations: 10 of 50 could not be verified (3 wrong, 7 without a checkable symbol) (answer not fully grounded)"
         ),
         "{rendered}"
     );

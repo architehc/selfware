@@ -885,7 +885,7 @@ async fn test_writes_target_only_new_files_classification() {
 
     let server = MockLlmServer::builder().with_response("done").build().await;
     let config = test_config(format!("{}/v1", server.url()));
-    let agent = Agent::new(config).await.unwrap();
+    let mut agent = Agent::new(config).await.unwrap();
 
     // Write to a path that does not exist → creation, not a blind edit.
     let new_write = vec![(
@@ -947,6 +947,27 @@ async fn test_writes_target_only_new_files_classification() {
         None,
     )];
     assert!(!agent.writes_target_only_new_files(&read_only));
+
+    // A path outside the workspace/policy is never probed: missing or not,
+    // the answer is the same (gated), so the guard leaks no existence bit.
+    // (The mock config allows `/**`; confine it to the workspace, as the
+    // default policy does.)
+    agent.config.safety.allowed_paths = vec!["./**".to_string()];
+    let outside_dir = tempfile::tempdir().unwrap();
+    for name in ["absent.rs", "present.rs"] {
+        if name == "present.rs" {
+            std::fs::write(outside_dir.path().join(name), "x").unwrap();
+        }
+        let outside = vec![(
+            "file_write".to_string(),
+            serde_json::json!({"path": outside_dir.path().join(name), "content": "x"}).to_string(),
+            None,
+        )];
+        assert!(
+            !agent.writes_target_only_new_files(&outside),
+            "{name}: outside path must stay gated"
+        );
+    }
 
     server.stop().await;
 }

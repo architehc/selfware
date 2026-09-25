@@ -220,7 +220,8 @@ pub fn emit_result(
 /// `unverified`, per-kind counts, `problems` naming actual locations, and the
 /// summary's `Grounding:` line). Omitted when nothing was checked, so runs
 /// without citations keep the pre-existing shape. When citations remain
-/// wrong, `grounding.note` reads `citations: N of M could not be verified`.
+/// wrong, `grounding.note` reads `citations: N of M could not be verified
+/// (W wrong, K without a checkable symbol)`, N agreeing with `unverified`.
 pub fn session_result_json(
     result: &SessionResult,
     grounding: Option<&crate::agent::citation_check::GroundingStatus>,
