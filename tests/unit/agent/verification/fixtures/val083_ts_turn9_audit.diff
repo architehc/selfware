@@ -1,0 +1,60 @@
+diff --git a/src/format.ts b/src/format.ts
+index 87efd6d..c4a9c66 100644
+--- a/src/format.ts
++++ b/src/format.ts
+@@ -8,11 +8,18 @@ export function formatPrice(value: number): string {
+ }
+ 
+ export function describe(item: Item): string {
+-  let label: string = item.name;
+-  label = item.qty;
++  const label: string = item.name;
+   return `${label} x${item.qty} @ ${formatPrice(item.price)}`;
+ }
+ 
+ export function listing(inv: Inventory): string[] {
+   return [...inv.entries()].map((i) => describe(i));
+ }
++
++export function totalValue(inv: Inventory): number {
++  let total = 0;
++  for (const item of inv.entries()) {
++    total += item.qty * item.price;
++  }
++  return total;
++}
+diff --git a/src/inventory.ts b/src/inventory.ts
+index 967387f..3529f8a 100644
+--- a/src/inventory.ts
++++ b/src/inventory.ts
+@@ -21,6 +21,30 @@ export class Inventory {
+     return this.#items.get(sku);
+   }
+ 
++  removeItem(sku: string, qty: number): void {
++    const item = this.#items.get(sku);
++    if (!item) {
++      throw new Error(`Unknown SKU: ${sku}`);
++    }
++    if (item.qty < qty) {
++      throw new Error(`Insufficient stock for SKU: ${sku}`);
++    }
++    item.qty -= qty;
++    if (item.qty === 0) {
++      this.#items.delete(sku);
++    }
++  }
++
++  lowStock(threshold: number): string[] {
++    const skus: string[] = [];
++    for (const item of this.#items.values()) {
++      if (item.qty < threshold) {
++        skus.push(item.sku);
++      }
++    }
++    return skus.sort((a, b) => a.localeCompare(b));
++  }
++
+   *entries(): IterableIterator<Item> {
+     for (const item of this.#items.values()) {
+       yield item;

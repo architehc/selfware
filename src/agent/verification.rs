@@ -3016,6 +3016,65 @@ impl Agent {
             .unwrap_or_else(|e| e.into_inner()) = Some(status);
     }
 
+    /// Bounded evidence for the requirements audit: each changed file's diff
+    /// against the task's start commit (else `HEAD`), or its current contents
+    /// when git has no base for it, cut to
+    /// `REQUIREMENTS_AUDIT_EVIDENCE_MAX_TOKENS` by `bound_audit_evidence`.
+    /// Every cut is marked "not shown" so the auditor can tell an absent
+    /// line from an omitted one.
+    async fn requirements_audit_evidence(&self, files_changed: &[String]) -> String {
+        let workspace = self.tools.workspace_root();
+        let root = workspace.path();
+        let task_start = self
+            .current_checkpoint
+            .as_ref()
+            .and_then(|cp| cp.task_start_head.clone())
+            // Persisted in a checkpoint file: accept only a hex object id so
+            // it can never become a git option.
+            .filter(|h| h.len() >= 7 && h.chars().all(|c| c.is_ascii_hexdigit()));
+        let (base, base_label) = match &task_start {
+            Some(head) => (
+                head.clone(),
+                format!("diff against the task's start commit {}", &head[..7]),
+            ),
+            None => ("HEAD".to_string(), "diff against HEAD".to_string()),
+        };
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(REQUIREMENTS_AUDIT_GIT_CAP_SECS);
+        let mut seen = std::collections::HashSet::new();
+        let mut files = Vec::new();
+        for path in files_changed {
+            if !seen.insert(path.as_str()) {
+                continue;
+            }
+            if files.len() >= REQUIREMENTS_AUDIT_EVIDENCE_MAX_FILES {
+                files.push(AuditFileEvidence::note(
+                    path,
+                    "not shown: over the per-audit file limit",
+                ));
+                continue;
+            }
+            let anchored = workspace.anchor_path(Path::new(path));
+            if self.validate_context_path(&anchored).is_err() {
+                files.push(AuditFileEvidence::note(
+                    path,
+                    "not shown: outside the paths this agent may read",
+                ));
+                continue;
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                files.push(AuditFileEvidence::note(
+                    path,
+                    "not shown: evidence gathering hit its time cap",
+                ));
+                continue;
+            }
+            files.push(audit_file_evidence(&root, &base, &base_label, path, &anchored, left).await);
+        }
+        bound_audit_evidence(&files, REQUIREMENTS_AUDIT_EVIDENCE_MAX_TOKENS)
+    }
+
     async fn requirements_audit(&self, instruction: &str) -> Option<String> {
         let summary = self
             .messages
@@ -3041,11 +3100,17 @@ impl Agent {
             })
             .unwrap_or_default();
 
+        // The auditor used to see file NAMES only, so it could not tell a
+        // correct change from a broken one and blocked on its own
+        // uncertainty (val083 ts F1: "Cannot confirm ... without seeing the
+        // file" about a `describe` already returning the exact format).
+        let evidence = self.requirements_audit_evidence(&files_changed).await;
         let messages = build_requirements_audit_prompt(
             instruction,
             &summary,
             &files_changed,
             self.input_census_note.as_deref(),
+            Some(&evidence),
         );
         // Bounded side call (streamed, small output budget, lowered
         // reasoning effort, hard wall cap): sent non-streaming with the
@@ -3115,10 +3180,24 @@ impl Agent {
                         summary_only.join(" | ")
                     );
                 }
+                // A finding the auditor itself could not confirm from the
+                // evidence is reported, never entered in the ledger: blocking
+                // on it demanded rework of correct code (val083 ts F1).
+                let (unverified, items): (Vec<String>, Vec<String>) = items
+                    .into_iter()
+                    .partition(|item| audit_finding_is_unverified(item));
+                if !unverified.is_empty() {
+                    warn!(
+                        "requirements audit: {} UNVERIFIED finding(s) (auditor could not confirm from the evidence) recorded as non-blocking: {}",
+                        unverified.len(),
+                        unverified.join(" | ")
+                    );
+                }
                 if items.is_empty() {
                     info!(
-                        "requirements audit verdict: no deliverable findings ({} summary-only) — not blocking",
-                        summary_only.len()
+                        "requirements audit verdict: no deliverable findings ({} summary-only, {} unverified) — not blocking",
+                        summary_only.len(),
+                        unverified.len()
                     );
                     return None;
                 }
@@ -3803,6 +3882,33 @@ const REQUIREMENTS_AUDIT_MAX_TOKENS: usize = 8192;
 /// cut-off that turned one audit into 4 x 300 s of 503s.
 const REQUIREMENTS_AUDIT_CAP_SECS: u64 = 180;
 
+/// Token budget for the changed-file evidence in the audit prompt, measured
+/// with `crate::token_count::estimate_content_tokens` (AGENTS.md rule 4).
+///
+/// Sized from a measured input, not guessed: the audit-time diff of the
+/// val083 ts run (two files, the run the missing evidence cost 197 s)
+/// measures 530 tokens (the tests assert it stays under 600 and is shown
+/// whole), so a task diff of that shape fits whole with ~7.7x headroom. The
+/// ceiling is half the audit's own output cap
+/// (`REQUIREMENTS_AUDIT_MAX_TOKENS`, 8,192), so the added prefill stays small
+/// next to the decode the side call is already allowed. Larger diffs fall
+/// back to per-hunk excerpts.
+pub(crate) const REQUIREMENTS_AUDIT_EVIDENCE_MAX_TOKENS: usize = 4_096;
+
+/// Changed files the audit gathers evidence for; the rest are named as not
+/// shown.
+const REQUIREMENTS_AUDIT_EVIDENCE_MAX_FILES: usize = 24;
+
+/// Bytes read from one file for the evidence. 16 bytes per budget token:
+/// no content that could fit the token budget is lost unless it averages
+/// more than 16 bytes per token.
+const REQUIREMENTS_AUDIT_EVIDENCE_MAX_READ_BYTES: usize =
+    REQUIREMENTS_AUDIT_EVIDENCE_MAX_TOKENS * 16;
+
+/// Wall cap for gathering all the evidence (the `git diff`s together), so
+/// the audit stays a bounded side call even on a wedged repository.
+const REQUIREMENTS_AUDIT_GIT_CAP_SECS: u64 = 10;
+
 /// Short, typed reason the audit call produced no verdict, for the run
 /// summary and stream-json (`requirements audit: NOT PERFORMED — <reason>`).
 /// Outcome of folding a post-edit verification report into the run
@@ -3940,14 +4046,22 @@ impl RequirementsAudit {
                     .iter()
                     .filter(|item| audit_finding_is_summary_only(item))
                     .count();
-                if summary_only == 0 {
-                    format!("UNADDRESSED({})", items.len())
-                } else {
-                    format!(
-                        "UNADDRESSED({}) + {summary_only} summary-only (non-blocking)",
-                        items.len() - summary_only
-                    )
+                let unverified = items
+                    .iter()
+                    .filter(|item| {
+                        !audit_finding_is_summary_only(item) && audit_finding_is_unverified(item)
+                    })
+                    .count();
+                let mut label = format!("UNADDRESSED({})", items.len() - summary_only - unverified);
+                if summary_only > 0 {
+                    label.push_str(&format!(" + {summary_only} summary-only (non-blocking)"));
                 }
+                if unverified > 0 {
+                    label.push_str(&format!(
+                        " + {unverified} unverified by auditor (non-blocking)"
+                    ));
+                }
+                label
             }
             RequirementsAudit::Unparseable => "unparseable".to_string(),
         }
@@ -3977,6 +4091,55 @@ pub(crate) fn audit_finding_is_summary_only(item: &str) -> bool {
         .any(|tag| rest.starts_with(tag))
 }
 
+/// Tags the auditor puts on a finding it could not confirm from the evidence.
+const AUDIT_UNVERIFIED_TAGS: &[&str] = &["[UNVERIFIED]", "[UNCERTAIN]"];
+
+/// Phrases in the auditor's own voice that say it did not see what it is
+/// claiming. val083 ts F1 was tagged `[DELIVERABLE]` and began "Cannot
+/// confirm ... without seeing the file", so the tag alone is not enough.
+/// Kept to confirm/verify-without-evidence wording: a bare "cannot see" or
+/// "cannot determine" also describes code behavior ("the parser cannot see
+/// nested keys") and must still block.
+const AUDIT_UNVERIFIED_PHRASES: &[&str] = &[
+    "cannot confirm",
+    "can't confirm",
+    "could not confirm",
+    "couldn't confirm",
+    "unable to confirm",
+    "cannot verify without",
+    "can't verify without",
+    "unable to verify without",
+    "without seeing",
+    "without access to the",
+    "not visible in the evidence",
+    "not shown in the evidence",
+    "not in the evidence",
+];
+
+/// Whether an audit finding is one the auditor itself marks as unverified:
+/// an `[UNVERIFIED]`/`[UNCERTAIN]` tag where the category tag goes, or
+/// wording that says it could not confirm the claim from what it was shown.
+/// Such findings are labelled and reported but never block completion
+/// (AGENTS.md rule 3: an unconfirmed suspicion is not an observed failure).
+pub(crate) fn audit_finding_is_unverified(item: &str) -> bool {
+    let upper = item.trim().trim_start_matches("- ").trim().to_uppercase();
+    let rest = upper
+        .strip_prefix("UNADDRESSED")
+        .unwrap_or(upper.as_str())
+        .trim_start();
+    let rest = rest.strip_prefix(':').unwrap_or(rest).trim_start();
+    if AUDIT_UNVERIFIED_TAGS
+        .iter()
+        .any(|tag| rest.starts_with(tag))
+    {
+        return true;
+    }
+    let lower = item.to_lowercase();
+    AUDIT_UNVERIFIED_PHRASES
+        .iter()
+        .any(|phrase| lower.contains(phrase))
+}
+
 /// Parse the audit response: bullet lines carry per-requirement verdicts and a
 /// final `AUDIT:` line carries the overall verdict. The verdict line is
 /// authoritative; bullets are collected for the blocking directive.
@@ -4003,6 +4166,180 @@ pub(crate) fn parse_requirements_audit(response: &str) -> RequirementsAudit {
     }
 }
 
+/// One changed file's evidence for the requirements audit, before bounding.
+#[derive(Debug, Clone)]
+pub(crate) struct AuditFileEvidence {
+    /// The path as the agent wrote it.
+    pub path: String,
+    /// What the body is ("diff against HEAD", "current contents ...").
+    pub label: String,
+    /// Unified diff or file text; empty for a note-only entry.
+    pub body: String,
+}
+
+impl AuditFileEvidence {
+    fn note(path: &str, label: &str) -> Self {
+        Self {
+            path: path.to_string(),
+            label: label.to_string(),
+            body: String::new(),
+        }
+    }
+}
+
+/// Gather one file's evidence: its `git diff` against `base`, or, when git
+/// shows no change for it (untracked, new) or cannot answer (not a
+/// repository), its current contents, labelled as such.
+async fn audit_file_evidence(
+    root: &Path,
+    base: &str,
+    base_label: &str,
+    path: &str,
+    anchored: &Path,
+    time_left: std::time::Duration,
+) -> AuditFileEvidence {
+    let diff = tokio::time::timeout(
+        time_left,
+        tokio::process::Command::new("git")
+            .sanitized_env()
+            .args(["diff", "--no-color", "--no-ext-diff", "-U3", base, "--"])
+            .arg(anchored)
+            .current_dir(root)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .filter(|out| out.status.success())
+    .map(|out| String::from_utf8_lossy(&out.stdout).into_owned());
+    if let Some(diff) = diff.as_ref().filter(|d| !d.trim().is_empty()) {
+        return AuditFileEvidence {
+            path: path.to_string(),
+            label: base_label.to_string(),
+            body: diff.clone(),
+        };
+    }
+    let label = if diff.is_some() {
+        "current contents: git shows no tracked change (new or untracked file)"
+    } else {
+        "current contents: no git base to diff against"
+    };
+    match tokio::fs::read(anchored).await {
+        Ok(bytes) => {
+            let cut = bytes.len().min(REQUIREMENTS_AUDIT_EVIDENCE_MAX_READ_BYTES);
+            let mut body = String::from_utf8_lossy(&bytes[..cut]).into_owned();
+            if cut < bytes.len() {
+                body.push_str(&format!(
+                    "\n[not shown: the remaining {} bytes of this file]\n",
+                    bytes.len() - cut
+                ));
+            }
+            AuditFileEvidence {
+                path: path.to_string(),
+                label: label.to_string(),
+                body,
+            }
+        }
+        Err(_) => AuditFileEvidence::note(path, "not shown: the file does not exist now"),
+    }
+}
+
+/// Split evidence into the units the bound keeps or cuts whole: the diff's
+/// file header, then one unit per hunk (`@@` line plus its lines). Plain
+/// file contents are one unit.
+fn split_evidence_units(body: &str) -> Vec<&str> {
+    let mut units = Vec::new();
+    let mut start = 0;
+    let mut offset = 0;
+    for line in body.split_inclusive('\n') {
+        if offset > start && (line.starts_with("@@") || line.starts_with("diff --git ")) {
+            units.push(&body[start..offset]);
+            start = offset;
+        }
+        offset += line.len();
+    }
+    if start < body.len() {
+        units.push(&body[start..]);
+    }
+    units
+}
+
+/// The leading whole lines of `text` whose measured tokens fit `budget`,
+/// and how many lines were left out.
+fn take_lines_within(text: &str, budget: usize) -> (String, usize) {
+    let mut kept = String::new();
+    let mut used = 0;
+    let mut lines = text.split_inclusive('\n');
+    for line in lines.by_ref() {
+        let t = crate::token_count::estimate_content_tokens(line);
+        if used + t > budget {
+            return (kept, 1 + lines.count());
+        }
+        used += t;
+        kept.push_str(line);
+    }
+    (kept, 0)
+}
+
+/// Bound the audit evidence to `cap` measured tokens.
+///
+/// Whole when it fits. Otherwise each file gets a fair share of what is left
+/// (unused share rolls over to the files after it), filled hunk by hunk; the
+/// hunk that does not fit is excerpted from its `@@` line down, and every
+/// cut is marked "not shown" with what was left out.
+pub(crate) fn bound_audit_evidence(files: &[AuditFileEvidence], cap: usize) -> String {
+    use crate::token_count::estimate_content_tokens as tokens;
+    // Room kept for the "not shown" markers a cut appends.
+    const MARKER_RESERVE: usize = 48;
+    let mut out = String::new();
+    let mut remaining = cap;
+    for (i, file) in files.iter().enumerate() {
+        let share = remaining / (files.len() - i);
+        let mut section = format!("=== {} ({}) ===\n", file.path, file.label);
+        let mut used = tokens(&section);
+        let units = split_evidence_units(&file.body);
+        for (j, unit) in units.iter().enumerate() {
+            let t = tokens(unit);
+            if used + t <= share {
+                section.push_str(unit);
+                used += t;
+                continue;
+            }
+            let (kept, dropped) =
+                take_lines_within(unit, share.saturating_sub(used + MARKER_RESERVE));
+            used += tokens(&kept);
+            section.push_str(&kept);
+            if dropped > 0 {
+                section.push_str(&format!(
+                    "[not shown: {dropped} more line(s) here, over the {cap}-token evidence budget]\n"
+                ));
+            }
+            let rest = units.len() - j - 1;
+            if rest > 0 {
+                section.push_str(&format!(
+                    "[not shown: {rest} more hunk(s) of {}]\n",
+                    file.path
+                ));
+            }
+            break;
+        }
+        let mut used = tokens(&section);
+        if used > remaining {
+            section = take_lines_within(&section, remaining).0;
+            used = tokens(&section);
+        }
+        remaining = remaining.saturating_sub(used);
+        out.push_str(&section);
+    }
+    // Sums of per-part estimates are not exactly the estimate of the whole;
+    // the cap is on the whole.
+    if tokens(&out) > cap {
+        out = take_lines_within(&out, cap).0;
+    }
+    out
+}
+
 /// Build the bounded audit request. The instruction is truncated at 8k chars —
 /// the audit must stay cheap (one small call per task).
 fn build_requirements_audit_prompt(
@@ -4010,6 +4347,7 @@ fn build_requirements_audit_prompt(
     summary: &str,
     files_changed: &[String],
     census: Option<&str>,
+    evidence: Option<&str>,
 ) -> Vec<Message> {
     let instruction = crate::agent::tool_dispatch::truncate_chars(instruction, 8_000);
     let summary = crate::agent::tool_dispatch::truncate_chars(summary, 4_000);
@@ -4030,6 +4368,17 @@ fn build_requirements_audit_prompt(
             )
         })
         .unwrap_or_default();
+    let evidence_block = match evidence.map(str::trim).filter(|e| !e.is_empty()) {
+        Some(evidence) => format!(
+            "Evidence — the changed files as they stand now: a diff against the task's start \
+             where git has one, otherwise current contents. Bounded to \
+             {REQUIREMENTS_AUDIT_EVIDENCE_MAX_TOKENS} tokens; parts cut for size are marked \
+             \"not shown\":\n{evidence}"
+        ),
+        None => "Evidence: none — no file contents could be gathered, so any claim about \
+                 file behavior is [UNVERIFIED]."
+            .to_string(),
+    };
     vec![
         Message::system(
             "You are a hostile test designer reviewing an autonomous coding agent's work. \
@@ -4042,16 +4391,22 @@ fn build_requirements_audit_prompt(
              - edge cases the instruction implies that the code does not handle\n\
              For each plausible failure, one line, tagged with its category, with the evidence \
              that grounds it:\n\
-             - UNADDRESSED [DELIVERABLE]: <what fails in the code/output files> — <evidence from instruction/census/files>\n\
+             - UNADDRESSED [DELIVERABLE]: <what fails in the code/output files> — <the evidence line you saw, naming the file>\n\
+             - UNADDRESSED [UNVERIFIED]: <a failure you suspect but the evidence does not show> — <what you would need to see>\n\
              - UNADDRESSED [SUMMARY]: <a problem only in the WORDING of the agent's final summary \
              (a file listed twice, the summary omits or misstates something the files get right)> — <evidence>\n\
              Use [DELIVERABLE] only for what a hidden verifier could observe in the files or their \
-             behavior; everything about the summary text is [SUMMARY]. Only [DELIVERABLE] findings \
-             block completion. End with a final verdict line exactly `AUDIT: ALL ADDRESSED` \
-             (nothing a hidden test would plausibly check is unhandled) or `AUDIT: UNADDRESSED <n>`.",
+             behavior AND the evidence shows; everything about the summary text is [SUMMARY]. The \
+             evidence is the diff of the changed files (or their current contents): read it before \
+             judging behavior, and do not report what it shows is already correct. When the part \
+             you need is not in the evidence (marked not shown, or absent), tag the finding \
+             [UNVERIFIED] instead of guessing. Only [DELIVERABLE] findings block completion; \
+             [UNVERIFIED] and [SUMMARY] findings are reported and never block. End with a final \
+             verdict line exactly `AUDIT: ALL ADDRESSED` (nothing a hidden test would plausibly \
+             check is unhandled) or `AUDIT: UNADDRESSED <n>`.",
         ),
         Message::user(format!(
-            "Task instruction:\n{instruction}\n\nAgent's final summary:\n{summary}\n\nFiles changed: {files}{census_block}"
+            "Task instruction:\n{instruction}\n\nAgent's final summary:\n{summary}\n\nFiles changed: {files}{census_block}\n\n{evidence_block}"
         )),
     ]
 }

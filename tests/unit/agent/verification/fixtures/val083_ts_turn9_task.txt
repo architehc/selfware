@@ -1,0 +1,5 @@
+This is a small TypeScript project (src/inventory.ts, src/format.ts). It has no tsconfig.json and no installed dependencies: do not add a tsconfig, do not add dependencies and do not install anything. Tasks:
+1. src/format.ts contains a type error. Fix it so `describe` returns "<name> x<qty> @ <price>".
+2. Add two methods to class Inventory in src/inventory.ts: `removeItem(sku: string, qty: number): void`, which throws an Error when the SKU is unknown or the stock is insufficient and otherwise decreases the quantity (deleting the item when it reaches 0); and `lowStock(threshold: number): string[]`, which returns the SKUs whose quantity is strictly below `threshold`, sorted ascending.
+3. Export a function `totalValue(inv: Inventory): number` from src/format.ts that returns the sum of qty * price over all items.
+Make sure every file type-checks. Finish with a short summary of what you changed and how you verified it.

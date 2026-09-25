@@ -2675,6 +2675,7 @@ mod requirements_audit_tests {
             "summary",
             &["src/x.py".to_string()],
             Some("aircraft.json: turnaround_time_min"),
+            None,
         );
         let system = msgs[0].content.text();
         assert!(
@@ -2688,7 +2689,7 @@ mod requirements_audit_tests {
         );
         assert!(user.contains("src/x.py"));
 
-        let without = build_requirements_audit_prompt("instruction", "summary", &[], None);
+        let without = build_requirements_audit_prompt("instruction", "summary", &[], None, None);
         assert!(!without[1].content.text().contains("census ("));
     }
 
@@ -3912,6 +3913,7 @@ mod w8b_gate_bound_tests {
             "summary",
             &["src/x.py".to_string()],
             Some("aircraft.json: turnaround_time_min"),
+            None,
         );
         let system = msgs[0].content.text();
         let user = msgs[1].content.text();
@@ -3926,5 +3928,341 @@ mod w8b_gate_bound_tests {
         );
         assert!(user.contains("working-notes"), "{user}");
         assert!(user.contains("turnaround_time_min"));
+    }
+}
+
+/// Audit 2026-09-25 §5 (val083 ts run): the requirements audit saw file names
+/// only, raised "Cannot confirm ... without seeing the file" as a blocking
+/// [DELIVERABLE] finding about a `describe` that already returned the exact
+/// format, and the rework segment that followed ran 197 s.
+mod audit_evidence_tests {
+    use super::*;
+    use crate::checkpoint::{TaskCheckpoint, ToolCallLog};
+    use crate::testing::mock_api::MockLlmServer;
+    use serde_json::json;
+
+    /// `git diff HEAD` of the val083 ts workspace as the auditor would have
+    /// seen it at turn 9: base commit + the first `file_multi_edit`, rebuilt
+    /// from the run's checkpoint.
+    const TURN9_DIFF: &str = include_str!("fixtures/val083_ts_turn9_audit.diff");
+    const TASK: &str = include_str!("fixtures/val083_ts_turn9_task.txt");
+    /// The auditor's three findings at turn 9, verbatim from the run's
+    /// ledger directive (F1, F2) and stderr (the summary-only one).
+    const AUDITOR_FINDINGS: &str = include_str!("fixtures/val083_ts_turn9_auditor_findings.txt");
+    const BASE_FORMAT: &str = include_str!("fixtures/val083_ts_base/format.ts");
+    const BASE_INVENTORY: &str = include_str!("fixtures/val083_ts_base/inventory.ts");
+
+    /// The line that settles F1: the exact `<name> x<qty> @ <price>` format.
+    const DESCRIBE_RETURN: &str = "return `${label} x${item.qty} @ ${formatPrice(item.price)}`;";
+
+    fn diff_evidence(path: &str, body: &str) -> AuditFileEvidence {
+        AuditFileEvidence {
+            path: path.to_string(),
+            label: "diff against HEAD".to_string(),
+            body: body.to_string(),
+        }
+    }
+
+    #[test]
+    fn val083_audit_time_diff_fits_the_budget_whole() {
+        let tokens = crate::token_count::estimate_content_tokens(TURN9_DIFF);
+        // The measurement the budget is sized from.
+        assert!(tokens < 600, "val083 turn-9 diff measured {tokens} tokens");
+        let evidence = bound_audit_evidence(
+            &[diff_evidence("src", TURN9_DIFF)],
+            REQUIREMENTS_AUDIT_EVIDENCE_MAX_TOKENS,
+        );
+        assert!(evidence.contains(TURN9_DIFF), "shown whole: {evidence}");
+        assert!(!evidence.contains("not shown"), "{evidence}");
+        assert!(evidence.contains(DESCRIBE_RETURN));
+        assert!(evidence.contains("skus.sort((a, b) => a.localeCompare(b))"));
+    }
+
+    #[test]
+    fn oversized_diff_is_excerpted_within_the_cap_and_marked() {
+        let mut big = String::from(
+            "diff --git a/src/big.ts b/src/big.ts\n--- a/src/big.ts\n+++ b/src/big.ts\n",
+        );
+        for hunk in 0..400 {
+            big.push_str(&format!(
+                "@@ -{0},3 +{0},4 @@ fn f{hunk}()\n",
+                hunk * 10 + 1
+            ));
+            for line in 0..6 {
+                big.push_str(&format!(
+                    "+  let value_{hunk}_{line} = compute({hunk}, {line});\n"
+                ));
+            }
+        }
+        let cap = 1_000;
+        assert!(crate::token_count::estimate_content_tokens(&big) > cap * 4);
+        let evidence = bound_audit_evidence(&[diff_evidence("src/big.ts", &big)], cap);
+        let measured = crate::token_count::estimate_content_tokens(&evidence);
+        assert!(measured <= cap, "{measured} tokens over the {cap} cap");
+        // Excerpts start at the file header and a hunk header, and every cut
+        // says what is missing.
+        assert!(evidence.contains("@@ -1,3 +1,4 @@ fn f0()"), "{evidence}");
+        assert!(evidence.contains("value_0_5"), "first hunk shown whole");
+        assert!(
+            evidence.contains("more hunk(s) of src/big.ts]"),
+            "{evidence}"
+        );
+    }
+
+    #[test]
+    fn a_large_first_file_cannot_starve_the_next() {
+        let big: String = (0..3_000)
+            .map(|i| format!("line {i} of a generated fixture\n"))
+            .collect();
+        let files = [
+            AuditFileEvidence {
+                path: "gen/big.txt".to_string(),
+                label: "current contents: no git base to diff against".to_string(),
+                body: big,
+            },
+            diff_evidence("src/format.ts", TURN9_DIFF),
+        ];
+        let evidence = bound_audit_evidence(&files, REQUIREMENTS_AUDIT_EVIDENCE_MAX_TOKENS);
+        assert!(
+            crate::token_count::estimate_content_tokens(&evidence)
+                <= REQUIREMENTS_AUDIT_EVIDENCE_MAX_TOKENS
+        );
+        assert!(
+            evidence.contains("more line(s) here"),
+            "big file cut and marked"
+        );
+        assert!(
+            evidence.contains(DESCRIBE_RETURN),
+            "the small diff after it is still shown whole"
+        );
+    }
+
+    #[test]
+    fn val083_f1_is_unverified_and_f2_still_blocks() {
+        let RequirementsAudit::Unaddressed(items) = parse_requirements_audit(AUDITOR_FINDINGS)
+        else {
+            panic!("recorded response must parse as UNADDRESSED");
+        };
+        assert_eq!(items.len(), 3);
+        let f1 = items.iter().find(|i| i.contains("Cannot confirm")).unwrap();
+        let f2 = items.iter().find(|i| i.contains("lowStock")).unwrap();
+        assert!(audit_finding_is_unverified(f1), "{f1}");
+        // F2 claims an observable ordering defect; it carries no
+        // could-not-see wording, so it stays a blocking finding.
+        assert!(!audit_finding_is_unverified(f2), "{f2}");
+        assert!(audit_finding_is_unverified(
+            "- UNADDRESSED [UNVERIFIED]: rounding of totals — the diff does not show totalValue's caller"
+        ));
+        // A code-behavior sentence that happens to say "cannot see" blocks.
+        assert!(!audit_finding_is_unverified(
+            "- UNADDRESSED [DELIVERABLE]: the parser cannot see nested keys — parse.ts:12 reads only the top level"
+        ));
+        assert_eq!(
+            parse_requirements_audit(AUDITOR_FINDINGS).marker_label(),
+            "UNADDRESSED(1) + 1 summary-only (non-blocking) + 1 unverified by auditor (non-blocking)"
+        );
+    }
+
+    #[test]
+    fn audit_prompt_carries_the_evidence_and_the_unverified_category() {
+        let evidence = bound_audit_evidence(
+            &[diff_evidence("src/format.ts", TURN9_DIFF)],
+            REQUIREMENTS_AUDIT_EVIDENCE_MAX_TOKENS,
+        );
+        let msgs = build_requirements_audit_prompt(
+            TASK,
+            "summary",
+            &["src/format.ts".to_string()],
+            None,
+            Some(&evidence),
+        );
+        let system = msgs[0].content.text();
+        assert!(system.contains("[UNVERIFIED]"), "{system}");
+        let user = msgs[1].content.text();
+        assert!(user.contains(DESCRIBE_RETURN), "{user}");
+        let without = build_requirements_audit_prompt(TASK, "summary", &[], None, None);
+        assert!(without[1].content.text().contains("Evidence: none"));
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git runs");
+        assert!(status.status.success(), "git {args:?}: {status:?}");
+    }
+
+    /// The val083 ts workspace at turn 9, as a real repository: base commit,
+    /// then the first edit applied from the recorded diff.
+    fn turn9_workspace() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/format.ts"), BASE_FORMAT).unwrap();
+        std::fs::write(dir.path().join("src/inventory.ts"), BASE_INVENTORY).unwrap();
+        git(dir.path(), &["init", "-q"]);
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "base"]);
+        std::fs::write(dir.path().join("turn9.diff"), TURN9_DIFF).unwrap();
+        git(dir.path(), &["apply", "turn9.diff"]);
+        std::fs::remove_file(dir.path().join("turn9.diff")).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn file_evidence_is_the_git_diff_else_current_contents() {
+        const TEN_SECS: std::time::Duration = std::time::Duration::from_secs(10);
+        let ws = turn9_workspace();
+        let root = ws.path();
+        let tracked = audit_file_evidence(
+            root,
+            "HEAD",
+            "diff against HEAD",
+            "src/format.ts",
+            &root.join("src/format.ts"),
+            TEN_SECS,
+        )
+        .await;
+        assert_eq!(tracked.label, "diff against HEAD");
+        assert!(tracked.body.contains(DESCRIBE_RETURN), "{tracked:?}");
+        assert!(tracked.body.contains("+export function totalValue"));
+
+        std::fs::write(root.join("src/new.ts"), "export const n = 1;\n").unwrap();
+        let untracked = audit_file_evidence(
+            root,
+            "HEAD",
+            "diff against HEAD",
+            "src/new.ts",
+            &root.join("src/new.ts"),
+            TEN_SECS,
+        )
+        .await;
+        assert!(untracked.label.contains("untracked"), "{untracked:?}");
+        assert_eq!(untracked.body, "export const n = 1;\n");
+
+        let plain = tempfile::tempdir().unwrap();
+        std::fs::write(plain.path().join("a.ts"), "let a = 1;\n").unwrap();
+        let no_repo = audit_file_evidence(
+            plain.path(),
+            "HEAD",
+            "diff against HEAD",
+            "a.ts",
+            &plain.path().join("a.ts"),
+            TEN_SECS,
+        )
+        .await;
+        assert!(no_repo.label.contains("no git base"), "{no_repo:?}");
+        assert_eq!(no_repo.body, "let a = 1;\n");
+    }
+
+    /// A correct change plus its diff (end to end on the recorded turn): the
+    /// request carries the line that settles F1, and the recorded answer then
+    /// blocks on F2 only, with F1 reported as unverified.
+    #[tokio::test]
+    async fn val083_audit_sees_the_diff_and_does_not_block_on_f1() {
+        let ws = turn9_workspace();
+        let server = MockLlmServer::builder()
+            .with_response(AUDITOR_FINDINGS)
+            .build()
+            .await;
+        let root = ws.path().canonicalize().unwrap();
+        let mut config = crate::config::Config {
+            endpoint: format!("{}/v1", server.url()),
+            ..Default::default()
+        };
+        config.agent.min_completion_steps = 0;
+        config.safety.allowed_paths = vec![format!("{}/**", root.display())];
+        let mut agent = Agent::new(config).await.expect("agent should build");
+        agent.tools.workspace_root().enter(&root).unwrap();
+        let mut checkpoint = TaskCheckpoint::new("val083_ts".to_string(), TASK.to_string());
+        for path in ["src/inventory.ts", "src/format.ts"] {
+            checkpoint.log_tool_call(ToolCallLog {
+                timestamp: chrono::Utc::now(),
+                tool_name: "file_multi_edit".to_string(),
+                arguments:
+                    json!({"edits": [{"path": root.join(path), "old_str": "a", "new_str": "b"}]})
+                        .to_string(),
+                result: Some("ok".to_string()),
+                success: true,
+                duration_ms: Some(10),
+            });
+        }
+        agent.current_checkpoint = Some(checkpoint);
+        agent.current_task_context = TASK.to_string();
+        agent.has_written_any_file = true;
+
+        let directive = agent
+            .maybe_requirements_audit(false)
+            .await
+            .expect("F2 is a deliverable finding and still blocks");
+        let bodies = server.captured_request_bodies().await;
+        assert_eq!(bodies.len(), 1);
+        let body: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+        let prompt = body["messages"].to_string();
+        assert!(
+            prompt.contains("${label} x${item.qty} @ ${formatPrice(item.price)}"),
+            "the auditor must be shown the describe body: {prompt}"
+        );
+        assert!(prompt.contains("a.localeCompare(b)"), "and the comparator");
+
+        assert!(directive.contains("lowStock"), "{directive}");
+        assert!(!directive.contains("Cannot confirm"), "{directive}");
+        let ledger = agent.check_audit_ledger().expect("F2 stays open");
+        assert!(ledger.contains("F1") && !ledger.contains("F2:"), "{ledger}");
+        let status = agent.requirements_audit_status().expect("recorded");
+        assert!(
+            status
+                .label()
+                .contains("1 unverified by auditor (non-blocking)"),
+            "{status:?}"
+        );
+        server.stop().await;
+    }
+
+    /// The auditor marks its own finding [UNVERIFIED]: reported, labelled,
+    /// never entered in the blocking ledger.
+    #[tokio::test]
+    async fn uncertain_finding_is_non_blocking_and_labelled() {
+        let server = MockLlmServer::builder()
+            .with_response(
+                "- UNADDRESSED [UNVERIFIED]: numeric-string SKU ordering — the evidence shows \
+                 localeCompare, but not whether hidden tests use numeric SKUs\nAUDIT: UNADDRESSED 1",
+            )
+            .build()
+            .await;
+        let config = crate::config::Config {
+            endpoint: format!("{}/v1", server.url()),
+            ..Default::default()
+        };
+        let mut agent = Agent::new(config).await.expect("agent should build");
+        agent.current_checkpoint = Some(TaskCheckpoint::new(
+            "val083_ts".to_string(),
+            TASK.to_string(),
+        ));
+        agent.current_task_context = TASK.to_string();
+        assert!(
+            agent.maybe_requirements_audit(false).await.is_none(),
+            "an unverified finding never blocks"
+        );
+        assert!(
+            agent.check_audit_ledger().is_none(),
+            "and never enters the ledger"
+        );
+        let status = agent.requirements_audit_status().expect("recorded");
+        assert!(
+            status
+                .label()
+                .contains("UNADDRESSED(0) + 1 unverified by auditor (non-blocking)"),
+            "{status:?}"
+        );
+        server.stop().await;
     }
 }

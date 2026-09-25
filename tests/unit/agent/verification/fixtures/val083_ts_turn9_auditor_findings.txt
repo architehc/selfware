@@ -1,0 +1,4 @@
+- UNADDRESSED [SUMMARY]: `src/format.ts` is listed twice in the "Files changed" line — the summary states: "Files changed: src/inventory.ts, src/format.ts, src/format.ts"
+- UNADDRESSED [DELIVERABLE]: Cannot confirm the `describe` return uses the exact spacing `"<name> x<qty> @ <price>"` (single space before `x`, single spaces around `@`) without seeing the file — if the agent used template literal with different spacing (e.g., `x${qty}` vs ` x${qty}`), a hidden verifier checking the string would fail — instruction specifies exact format with those spaces.
+- UNADDRESSED [DELIVERABLE]: `lowStock` "sorted ascending" — if SKUs are numeric strings (e.g., "10", "2", "1"), `.sort()` gives lexicographic order ("1","10","2") not numeric; the instruction says "sorted ascending" which is ambiguous but a hidden test using numeric-style SKUs would expect `["1","2","10"]` not `["1","10","2"]` — no evidence the agent used a comparator.
+AUDIT: UNADDRESSED 3
