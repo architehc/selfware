@@ -1324,6 +1324,78 @@ fn resume_progress_emitter(
     Some(emitter)
 }
 
+/// Emit the final structured result object (`--output-format json` /
+/// `stream-json`) for an agent run. The ONE emitter shared by fresh runs
+/// (`-p`, `run`) and resumed runs (`resume <id>`, `--continue`,
+/// `--autocontinue`), so every path reports the same keys, an `exit_status`
+/// equal to the process exit code, and `grounding` when present. Returns
+/// the emitted line.
+fn emit_structured_result(
+    agent: &Agent,
+    run_result: &Result<()>,
+    duration_ms: u64,
+    answer: Option<String>,
+) -> Option<String> {
+    let result = build_session_result(agent, run_result, duration_ms, answer);
+    headless::emit_result(&result, agent.grounding_status().as_ref())
+}
+
+/// Continue a resumed agent to completion and report it like a fresh run:
+/// the progress emitter, the answer capture, the human summary (text
+/// formats) and the final structured result (json / stream-json). Shared by
+/// `resume <id>`, `--continue` and `--autocontinue`.
+///
+/// 0.8.2 validation D8: `--output-format stream-json resume <id>` ended with
+/// `task_failed` and no result object (no exit_status, no grounding).
+async fn run_resumed_agent(
+    mut agent: Agent,
+    quiet: bool,
+    output_format: HeadlessOutputFormat,
+) -> Result<()> {
+    let start = std::time::Instant::now();
+    if let Some(emitter) = resume_progress_emitter(quiet, output_format) {
+        agent = agent.with_progress_emitter(emitter);
+    }
+    let answer_capture = headless::AnswerCapture::new();
+    agent = agent.with_event_emitter(std::sync::Arc::new(answer_capture.emitter()));
+    let run_result = agent.continue_execution().await;
+    finish_resumed_run(
+        &agent,
+        &run_result,
+        start.elapsed().as_millis() as u64,
+        answer_capture.take(),
+        quiet,
+        output_format,
+    );
+    run_result
+}
+
+/// Report a finished resumed run: the human summary for text formats, the
+/// shared structured result for json / stream-json. Returns the structured
+/// line when one was emitted.
+fn finish_resumed_run(
+    agent: &Agent,
+    run_result: &Result<()>,
+    duration_ms: u64,
+    answer: Option<String>,
+    quiet: bool,
+    output_format: HeadlessOutputFormat,
+) -> Option<String> {
+    print_resume_run_summary(agent, run_result, quiet, output_format);
+    if is_structured_format(output_format) {
+        emit_structured_result(agent, run_result, duration_ms, answer)
+    } else {
+        None
+    }
+}
+
+fn is_structured_format(output_format: HeadlessOutputFormat) -> bool {
+    matches!(
+        output_format,
+        HeadlessOutputFormat::Json | HeadlessOutputFormat::StreamJson
+    )
+}
+
 /// Print the end-of-run summary for a resumed run — the same block a fresh
 /// headless run prints. The iteration figure is chain-wide
 /// (`chain_run_summary`): token/cost totals, the budget caps, and the
@@ -1883,20 +1955,19 @@ pub async fn run() -> Result<()> {
                 }
             );
         };
-        if !cli.quiet {
+        let is_structured = is_structured_format(cli.output_format);
+        if is_structured {
+            output::set_json_mode(true);
+        }
+        if !cli.quiet && !is_structured {
             println!(
                 "{} Resuming latest session: {}",
                 Glyphs::bookmark(),
                 journal_title(&latest.task_description, 60)
             );
         }
-        let mut agent = Agent::resume(config, &latest.task_id).await?;
-        if let Some(emitter) = resume_progress_emitter(cli.quiet, cli.output_format) {
-            agent = agent.with_progress_emitter(emitter);
-        }
-        let run_result = agent.continue_execution().await;
-        print_resume_run_summary(&agent, &run_result, cli.quiet, cli.output_format);
-        return run_result;
+        let agent = Agent::resume(config, &latest.task_id).await?;
+        return run_resumed_agent(agent, cli.quiet, cli.output_format).await;
     }
 
     // --autocontinue: resume the most recent unfinished task of THIS workspace
@@ -1929,7 +2000,11 @@ pub async fn run() -> Result<()> {
             let checkpoint_manager = crate::checkpoint::CheckpointManager::default_path()?;
             match checkpoint_manager.latest_autoresumable_task(&workspace)? {
                 Some(latest) => {
-                    if !cli.quiet {
+                    let is_structured = is_structured_format(cli.output_format);
+                    if is_structured {
+                        output::set_json_mode(true);
+                    }
+                    if !cli.quiet && !is_structured {
                         println!(
                             "{} Auto-resuming task {} from checkpoint — {}",
                             Glyphs::bookmark(),
@@ -1942,13 +2017,8 @@ pub async fn run() -> Result<()> {
                         workspace = %workspace,
                         "auto-resuming in-progress task from this workspace"
                     );
-                    let mut agent = Agent::resume(config, &latest.task_id).await?;
-                    if let Some(emitter) = resume_progress_emitter(cli.quiet, cli.output_format) {
-                        agent = agent.with_progress_emitter(emitter);
-                    }
-                    let run_result = agent.continue_execution().await;
-                    print_resume_run_summary(&agent, &run_result, cli.quiet, cli.output_format);
-                    return run_result;
+                    let agent = Agent::resume(config, &latest.task_id).await?;
+                    return run_resumed_agent(agent, cli.quiet, cli.output_format).await;
                 }
                 None => {
                     tracing::info!(
@@ -2102,9 +2172,7 @@ pub async fn run() -> Result<()> {
         }
 
         if is_structured {
-            let result =
-                build_session_result(&agent, &run_result, duration_ms, answer_capture.take());
-            headless::emit_result(&result, agent.grounding_status().as_ref());
+            emit_structured_result(&agent, &run_result, duration_ms, answer_capture.take());
         } else if !cli.quiet
             && run_result.is_ok()
             && !matches!(agent.run_summary().verification, Some((false, _)))
@@ -3031,9 +3099,7 @@ async fn handle_command(
             }
 
             if is_structured {
-                let result =
-                    build_session_result(&agent, &run_result, duration_ms, answer_capture.take());
-                headless::emit_result(&result, agent.grounding_status().as_ref());
+                emit_structured_result(&agent, &run_result, duration_ms, answer_capture.take());
             } else if !quiet
                 && run_result.is_ok()
                 && !matches!(agent.run_summary().verification, Some((false, _)))
@@ -3139,7 +3205,12 @@ async fn handle_command(
         }
 
         Commands::Resume { task_id } => {
-            if !quiet {
+            // Machine-readable formats: stdout carries ONLY JSON.
+            let is_structured = is_structured_format(output_format);
+            if is_structured {
+                output::set_json_mode(true);
+            }
+            if !quiet && !is_structured {
                 println!("{}", render_header(ctx));
                 println!(
                     "{} {} journal entry {}...",
@@ -3149,22 +3220,17 @@ async fn handle_command(
                 );
             }
 
-            let mut agent = Agent::resume(config, &task_id).await?;
+            let agent = Agent::resume(config, &task_id).await?;
             if let Some(checkpoint) = &agent.current_checkpoint {
                 let task = checkpoint.task_description.clone();
-                if !quiet {
+                if !quiet && !is_structured {
                     println!(
                         "{} Continuing: {}\n",
                         Glyphs::sprout(),
                         task.craftsman_voice()
                     );
                 }
-                if let Some(emitter) = resume_progress_emitter(quiet, output_format) {
-                    agent = agent.with_progress_emitter(emitter);
-                }
-                let run_result = agent.continue_execution().await;
-                print_resume_run_summary(&agent, &run_result, quiet, output_format);
-                run_result?;
+                run_resumed_agent(agent, quiet, output_format).await?;
             }
         }
 

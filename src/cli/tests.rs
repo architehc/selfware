@@ -2354,3 +2354,50 @@ fn bench_harness_unavailable_names_rebuild_commands_and_exits_nonzero() {
         crate::errors::EXIT_ERROR
     );
 }
+
+/// D8 (0.8.2 validation): `--output-format stream-json resume <id>` ended
+/// with `task_failed` and no result object. The resume path now finishes
+/// through the SAME emitter as a fresh run: its last stdout line is the
+/// result object, with the fresh run's keys and an `exit_status` equal to the
+/// code the process exits with.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn resumed_run_emits_the_fresh_run_result_object() {
+    use crate::errors::AgentError;
+    use crate::testing::mock_api::MockLlmServer;
+
+    let server = MockLlmServer::builder().with_response("ok").build().await;
+    let config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
+    let agent = crate::agent::Agent::new(config).await.unwrap();
+
+    for format in [HeadlessOutputFormat::StreamJson, HeadlessOutputFormat::Json] {
+        let run_result: Result<()> = Err(AgentError::Terminated("SIGTERM".to_string()).into());
+        let returned_code = i32::from(crate::errors::process_exit_code(
+            &run_result,
+            crate::shutdown_reason(),
+        ));
+        let line = finish_resumed_run(&agent, &run_result, 7, None, false, format)
+            .expect("a structured resume must emit the result object");
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["exit_status"], serde_json::json!(returned_code), "{line}");
+        assert_eq!(returned_code, 143);
+
+        // Same object shape as the fresh-run emitter.
+        let fresh = emit_structured_result(&agent, &run_result, 7, None).unwrap();
+        let fresh: serde_json::Value = serde_json::from_str(&fresh).unwrap();
+        let keys = |v: &serde_json::Value| {
+            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            k.sort();
+            k
+        };
+        assert_eq!(keys(&v), keys(&fresh));
+    }
+
+    // Text output keeps the human summary and emits no JSON object.
+    let ok: Result<()> = Ok(());
+    assert!(finish_resumed_run(&agent, &ok, 1, None, true, HeadlessOutputFormat::Text).is_none());
+    server.stop().await;
+}

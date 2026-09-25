@@ -214,12 +214,12 @@ pub fn emit_event(event: &HeadlessEvent) {
 pub fn emit_result(
     result: &SessionResult,
     grounding: Option<&crate::agent::citation_check::GroundingStatus>,
-) {
-    if let Some(json) = session_result_json(result, grounding).and_then(validated_jsonl_line) {
-        let stdout = std::io::stdout();
-        let mut lock = stdout.lock();
-        let _ = writeln!(lock, "{}", json);
-    }
+) -> Option<String> {
+    let json = session_result_json(result, grounding).and_then(validated_jsonl_line)?;
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    let _ = writeln!(lock, "{}", json);
+    Some(json)
 }
 
 /// Serialize a [`SessionResult`] with the run's deterministic citation check
