@@ -1097,3 +1097,318 @@ fn summarizer_input_names_the_native_tool_calls() {
     assert!(summarizer_tool_call_suffix(&Message::assistant("text")).is_empty());
     assert!(PER_FILE_FINDINGS_INSTRUCTION.contains("- <path>: <1-2 sentence key finding"));
 }
+
+// ---------------------------------------------------------------------------
+// Work ledger: edits invalidate coverage and findings of the older version
+// (external review 2026-09-25, P2: a partial reread after an edit advertised
+// the whole pre-edit file as read, kept its old finding and dropped the
+// modification warning).
+// ---------------------------------------------------------------------------
+
+fn tool_pair(
+    id: &str,
+    name: &str,
+    args: serde_json::Value,
+    result: serde_json::Value,
+) -> [Message; 2] {
+    [call(id, name, args), Message::tool(result.to_string(), id)]
+}
+
+/// Whole read -> summary finding -> file_write. Returns the history so far.
+fn read_summarize_write(ledger: &mut WorkLedger) -> Vec<Message> {
+    let mut history = vec![Message::system("sys"), Message::user("review")];
+    ledger.begin_turn(Some("review"));
+    history.extend(tool_pair(
+        "r1",
+        "file_read",
+        serde_json::json!({"path": "example.rs"}),
+        serde_json::json!({"content": "old header\nold policy\n", "total_lines": 2, "truncated": false}),
+    ));
+    ledger.observe(&history, None);
+    ledger.absorb_summary("- example.rs: old policy permits every operation");
+    ledger.begin_turn(Some("review"));
+    history.extend(tool_pair(
+        "w1",
+        "file_write",
+        serde_json::json!({"path": "example.rs", "content": "new header\nnew policy\n"}),
+        serde_json::json!({"success": true}),
+    ));
+    ledger.observe(&history, None);
+    history
+}
+
+fn partial_reread_line_1(history: &mut Vec<Message>) {
+    history.extend(tool_pair(
+        "r2",
+        "file_read",
+        serde_json::json!({"path": "example.rs", "line_range": [1, 1]}),
+        serde_json::json!({"content": "new header\n", "lines_returned": 1, "total_lines": null,
+                           "has_more": true, "truncated": true}),
+    ));
+}
+
+fn assert_partial_post_edit_view(rendered: &str) {
+    assert!(
+        !rendered.contains("example.rs — whole file"),
+        "a partial reread of the new version must not claim the whole file: {rendered}"
+    );
+    assert!(
+        rendered.contains("example.rs — lines 1-1"),
+        "coverage is only the reread range: {rendered}"
+    );
+    assert!(
+        !rendered.contains("summary: old policy permits every operation"),
+        "the pre-edit finding must not be presented as current: {rendered}"
+    );
+    assert!(
+        rendered.contains("you modified it at turn 2")
+            && rendered.contains("only lines 1-1 re-read since"),
+        "the modification warning must survive a partial reread: {rendered}"
+    );
+}
+
+#[test]
+fn work_ledger_partial_reread_after_edit_starts_fresh_coverage() {
+    let mut ledger = WorkLedger::new();
+    let mut history = read_summarize_write(&mut ledger);
+    let before = ledger.render(2_000).unwrap();
+    assert!(before.contains("you modified it at turn 2"), "{before}");
+    assert!(
+        before.contains("pre-edit version"),
+        "before any reread, the old coverage is labelled as the pre-edit version: {before}"
+    );
+
+    ledger.begin_turn(Some("review"));
+    partial_reread_line_1(&mut history);
+    ledger.observe(&history, None);
+
+    let entry = &ledger.files()[0];
+    assert!(!entry.whole_file);
+    assert_eq!(entry.ranges, vec![(1, 1)]);
+    assert!(
+        entry.note.is_none(),
+        "old finding dropped: {:?}",
+        entry.note
+    );
+    assert_eq!(entry.modified_turn, Some(2));
+    assert!(entry.reread_since_modified);
+    assert_partial_post_edit_view(&ledger.render(2_000).unwrap());
+}
+
+#[test]
+fn work_ledger_whole_reread_after_edit_clears_the_warning() {
+    let mut ledger = WorkLedger::new();
+    let mut history = read_summarize_write(&mut ledger);
+    ledger.begin_turn(Some("review"));
+    partial_reread_line_1(&mut history);
+    ledger.observe(&history, None);
+    ledger.begin_turn(Some("review"));
+    history.extend(tool_pair(
+        "r3",
+        "file_read",
+        serde_json::json!({"path": "example.rs"}),
+        serde_json::json!({"content": "new header\nnew policy\n", "total_lines": 2, "truncated": false}),
+    ));
+    ledger.observe(&history, None);
+
+    let entry = &ledger.files()[0];
+    assert!(entry.whole_file);
+    assert_eq!(entry.modified_turn, None);
+    assert!(!entry.reread_since_modified);
+    let rendered = ledger.render(2_000).unwrap();
+    assert!(
+        rendered.contains("example.rs — whole file (2 lines)"),
+        "{rendered}"
+    );
+    // (The header's generic "or you modified it since" stays.)
+    assert!(!rendered.contains("[you modified it"), "{rendered}");
+    assert!(!rendered.contains("old policy permits"), "{rendered}");
+}
+
+#[test]
+fn work_ledger_ranges_that_cover_the_new_version_clear_the_warning() {
+    let mut ledger = WorkLedger::new();
+    let mut history = read_summarize_write(&mut ledger);
+    ledger.begin_turn(Some("review"));
+    partial_reread_line_1(&mut history);
+    history.extend(tool_pair(
+        "r3",
+        "file_read",
+        serde_json::json!({"path": "example.rs", "line_range": [2, 2]}),
+        serde_json::json!({"content": "new policy\n", "lines_returned": 1, "total_lines": 2,
+                           "truncated": false}),
+    ));
+    ledger.observe(&history, None);
+    let entry = &ledger.files()[0];
+    assert!(
+        entry.whole_file,
+        "lines 1-2 of 2 cover the whole new version"
+    );
+    assert_eq!(entry.modified_turn, None);
+}
+
+#[test]
+fn work_ledger_same_range_with_new_content_invalidates_old_coverage() {
+    // A change the ledger did not see (shell edit, another process): the
+    // same range now returns different content, so the older coverage and
+    // findings describe another version.
+    let mut ledger = WorkLedger::new();
+    ledger.begin_turn(Some("task"));
+    let mut history = vec![Message::system("sys"), Message::user("task")];
+    history.extend(tool_pair(
+        "a",
+        "file_read",
+        serde_json::json!({"path": "src/x.rs", "line_range": [1, 10]}),
+        serde_json::json!({"content": "v1 a\n", "total_lines": null, "has_more": true}),
+    ));
+    history.extend(tool_pair(
+        "b",
+        "file_read",
+        serde_json::json!({"path": "src/x.rs", "line_range": [20, 30]}),
+        serde_json::json!({"content": "v1 b\n", "total_lines": null, "has_more": true}),
+    ));
+    ledger.observe(&history, None);
+    ledger.absorb_summary("- src/x.rs: version one has the retry loop");
+    assert_eq!(ledger.files()[0].ranges, vec![(1, 10), (20, 30)]);
+
+    ledger.begin_turn(Some("task"));
+    history.extend(tool_pair(
+        "c",
+        "file_read",
+        serde_json::json!({"path": "src/x.rs", "line_range": [1, 10]}),
+        serde_json::json!({"content": "v2 a\n", "total_lines": null, "has_more": true}),
+    ));
+    ledger.observe(&history, None);
+    let entry = &ledger.files()[0];
+    assert_eq!(
+        entry.ranges,
+        vec![(1, 10)],
+        "only the range seen in the new version"
+    );
+    assert!(entry.note.is_none());
+}
+
+#[test]
+fn work_ledger_multi_edit_and_patch_apply_mark_the_file_modified() {
+    for (name, args) in [
+        (
+            "file_multi_edit",
+            serde_json::json!({"edits": [{"path": "src/a.rs", "old_str": "a", "new_str": "b"}]}),
+        ),
+        (
+            "patch_apply",
+            serde_json::json!({"diff": "--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-a\n+b\n"}),
+        ),
+        (
+            "file_fim_edit",
+            serde_json::json!({"path": "src/a.rs", "prefix": "a", "suffix": "b"}),
+        ),
+    ] {
+        let mut ledger = WorkLedger::new();
+        ledger.begin_turn(Some("task"));
+        let mut history = vec![Message::system("sys"), Message::user("task")];
+        history.extend(tool_pair(
+            "r",
+            "file_read",
+            serde_json::json!({"path": "src/a.rs"}),
+            serde_json::json!({"content": "a\n", "total_lines": 1}),
+        ));
+        history.extend(tool_pair(
+            "w",
+            name,
+            args,
+            serde_json::json!({"success": true}),
+        ));
+        ledger.observe(&history, None);
+        assert_eq!(
+            ledger.files()[0].modified_turn,
+            Some(1),
+            "{name} must mark the read file modified"
+        );
+        assert!(
+            ledger.writes().iter().any(|w| w.path == "src/a.rs"),
+            "{name} must list the deliverable"
+        );
+    }
+}
+
+#[tokio::test]
+async fn work_ledger_edit_then_partial_reread_stays_honest_through_compaction() {
+    let server = crate::testing::mock_api::MockLlmServer::builder()
+        .with_response(
+            "Reviewed example.rs.\n\nFILES READ:\n- example.rs: old policy permits every operation",
+        )
+        .build()
+        .await;
+    let config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
+    let client = ApiClient::new(&config).unwrap();
+    let compressor = ContextCompressor::new(1_000_000);
+
+    let mut scratch = WorkLedger::new();
+    let mut history = read_summarize_write(&mut scratch);
+    partial_reread_line_1(&mut history);
+    for i in 0..6 {
+        history.push(Message::assistant(format!("step {i}")));
+        history.push(Message::user(format!("continue {i}")));
+    }
+    compressor.begin_ledger_turn(Some("review"));
+    let (compressed, _usage) = compressor
+        .compress_with_task(&client, &history, Some("review"))
+        .await
+        .unwrap();
+    assert!(
+        compressed
+            .iter()
+            .any(|m| m.content.text().contains("[CONTEXT SUMMARY")),
+        "precondition: summary compaction happened"
+    );
+    let compressed = compressor.hard_compress_with_task(&compressed, Some("review"));
+    compressor.observe_work(&compressed);
+
+    let rendered = compressor.render_work_ledger(2_000).unwrap();
+    assert!(!rendered.contains("example.rs — whole file"), "{rendered}");
+    assert!(rendered.contains("example.rs — lines 1-1"), "{rendered}");
+    assert!(
+        rendered.contains("only lines 1-1 re-read since"),
+        "{rendered}"
+    );
+    // The summarizer's finding arrived while the edit was not fully reread:
+    // it is labelled as possibly describing the pre-edit version.
+    assert!(
+        rendered.contains("summary: (may predate your edit at turn"),
+        "{rendered}"
+    );
+    server.stop().await;
+}
+
+#[test]
+fn work_ledger_resume_round_trip_keeps_the_invalidation() {
+    // The work ledger is not persisted: a resumed agent rebuilds it from the
+    // checkpointed messages. The rebuilt ledger must show the same
+    // post-edit view as the live one.
+    let mut live = WorkLedger::new();
+    let mut history = read_summarize_write(&mut live);
+    live.begin_turn(Some("review"));
+    partial_reread_line_1(&mut history);
+    live.observe(&history, None);
+
+    let mut checkpoint =
+        crate::session::checkpoint::TaskCheckpoint::new("t1".to_string(), "review".to_string());
+    checkpoint.messages = history.clone();
+    let json = serde_json::to_string(&checkpoint).unwrap();
+    let restored: crate::session::checkpoint::TaskCheckpoint = serde_json::from_str(&json).unwrap();
+
+    let mut rebuilt = WorkLedger::new();
+    rebuilt.begin_turn(Some("review"));
+    rebuilt.observe(&restored.messages, None);
+    let entry = &rebuilt.files()[0];
+    assert!(!entry.whole_file);
+    assert_eq!(entry.ranges, vec![(1, 1)]);
+    assert!(entry.modified_turn.is_some());
+    let rendered = rebuilt.render(2_000).unwrap();
+    assert!(!rendered.contains("example.rs — whole file"), "{rendered}");
+    assert!(
+        rendered.contains("only lines 1-1 re-read since"),
+        "{rendered}"
+    );
+}

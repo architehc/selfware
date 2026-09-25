@@ -497,6 +497,11 @@ struct DeliveredReadResult {
     message_fingerprint: u64,
     /// Work-ledger turn in which it was delivered.
     turn: usize,
+    /// `Agent::mutation_sequence` when it was delivered. Any successful
+    /// state-changing tool since (an edit elsewhere in the file, an edit
+    /// later reverted, a mutating shell command) makes the earlier result a
+    /// different version's, even when the bytes happen to match.
+    mutation_sequence: usize,
 }
 
 /// Re-reads of one path forgiven per guard after its content left the
@@ -3226,6 +3231,9 @@ To call a tool, use this EXACT XML structure:
         self.consecutive_stale_verification = 0;
         self.progress_guard_fire_count = 0;
         self.mutation_sequence = 0;
+        // Delivered-read records carry the mutation sequence they were
+        // delivered at; a restarted sequence would let a stale record match.
+        self.delivered_read_results.clear();
         self.last_successful_verification_mutation_sequence = 0;
         self.last_failed_verification_summary = None;
         self.verification_failures.clear();

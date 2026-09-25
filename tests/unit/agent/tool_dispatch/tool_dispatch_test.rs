@@ -7191,3 +7191,72 @@ async fn unchanged_reread_note_in_xml_mode() {
     assert!(text.contains("Unchanged since turn"), "{text}");
     assert!(!text.contains("tokenize(input)"), "{text}");
 }
+
+#[tokio::test]
+async fn unchanged_reread_note_never_answers_a_read_after_an_edit() {
+    // External review 2026-09-25: "unchanged since turn N" must never answer
+    // a read after the file was edited. An edit outside the reread range
+    // leaves that slice byte-identical, and an edit reverted later leaves the
+    // whole file identical — but the earlier result belongs to another
+    // version of the file either way.
+    let mut agent = reread_agent().await;
+    let ranged = r#"{"path":"src/lexer.rs","line_range":[1,1]}"#;
+    let whole = r#"{"path":"src/lexer.rs"}"#;
+    let first_line = "pub fn lex(input: &str) -> Vec<Token> {\n";
+    for (id, args, content) in [("r1", ranged, first_line), ("r2", whole, LEXER_SRC)] {
+        agent
+            .push_tool_result_message(
+                true,
+                id,
+                "file_read",
+                args,
+                true,
+                &read_result_json(content),
+            )
+            .await;
+    }
+
+    // An edit to line 2 (the dispatcher's lifecycle bookkeeping).
+    let edit = serde_json::json!({
+        "path": "src/lexer.rs", "old_str": "tokenize(input)", "new_str": "tokenize(input)"
+    });
+    agent.note_tool_call_lifecycle(
+        "file_edit",
+        &edit,
+        &edit.to_string(),
+        true,
+        r#"{"success":true}"#,
+    );
+
+    for (id, args, content) in [("r3", ranged, first_line), ("r4", whole, LEXER_SRC)] {
+        agent
+            .push_tool_result_message(
+                true,
+                id,
+                "file_read",
+                args,
+                true,
+                &read_result_json(content),
+            )
+            .await;
+        let text = last_text(&agent);
+        assert!(
+            !text.contains("Unchanged since turn"),
+            "a read after an edit must deliver the content, not a note: {text}"
+        );
+        assert!(text.contains("pub fn lex"), "{text}");
+    }
+
+    // With no edit in between, the post-edit copy is the visible one again.
+    agent
+        .push_tool_result_message(
+            true,
+            "r5",
+            "file_read",
+            whole,
+            true,
+            &read_result_json(LEXER_SRC),
+        )
+        .await;
+    assert!(last_text(&agent).contains("Unchanged since turn"));
+}

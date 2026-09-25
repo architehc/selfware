@@ -490,6 +490,8 @@ const LEDGER_MAX_SEARCHES: usize = 32;
 const LEDGER_MAX_WRITES: usize = 64;
 /// Longest per-file note kept (chars): 1–3 lines of findings.
 const LEDGER_NOTE_MAX_CHARS: usize = 240;
+/// Per-file remembered range hashes (oldest evicted first).
+const LEDGER_MAX_RANGE_HASHES: usize = 32;
 /// Remembered processed-result fingerprints (bounded FIFO).
 const LEDGER_SEEN_CAP: usize = 4096;
 
@@ -524,14 +526,29 @@ pub struct LedgerFileEntry {
     pub total_lines: Option<usize>,
     pub reads: u32,
     pub last_read_turn: usize,
-    /// FNV-1a 64 of the content the latest read returned (16 hex chars).
+    /// FNV-1a 64 (16 hex chars) of the `content` the LATEST read returned:
+    /// the whole file for a whole-file read, only the requested slice for a
+    /// `line_range` read. It identifies that result, not the file version —
+    /// two different ranges hash differently without the file changing.
+    /// Change detection therefore compares only reads of the SAME exact
+    /// range (see `read_hashes`), never a range hash against a whole-file one.
     pub content_hash: String,
     /// The latest read's result was not parseable in full (truncated in
     /// context): the model saw only part of it.
     pub partial: bool,
     pub note: Option<(LedgerNoteSource, usize, String)>,
-    /// Turn of a successful write/edit to this path AFTER its last read.
+    /// Turn of the latest successful write/edit to this path that no read
+    /// has covered in full since. Cleared only when a reread covers the
+    /// whole new version (a whole-file read, or ranges spanning every line).
     pub modified_turn: Option<usize>,
+    /// With `modified_turn` set: `true` once a partial reread has started
+    /// fresh coverage of the new version (`ranges` then lists only lines seen
+    /// AFTER the edit); `false` while the recorded coverage and note still
+    /// describe the pre-edit version.
+    pub reread_since_modified: bool,
+    /// Content hash per exact read range (`None` = whole file) for the
+    /// version the current coverage describes; bounded.
+    read_hashes: Vec<(Option<(usize, usize)>, String)>,
     seq: u64,
 }
 
@@ -913,35 +930,57 @@ impl WorkLedger {
                     self.searches.remove(0);
                 }
             }
-            "file_write" | "file_edit" | "file_multi_edit" | "file_delete" => {
-                let Some(path) = arg_path(&args) else {
-                    return;
-                };
-                let path = Self::normalize_path(&path, root);
-                let turn = self.turn;
-                let seq = self.next_seq();
-                if let Some(entry) = self.files.iter_mut().find(|f| f.path == path) {
-                    entry.modified_turn = Some(turn);
+            // Every file-mutating tool, with the dispatcher's own path
+            // extraction: `file_multi_edit` names its paths inside `edits`
+            // and `patch_apply` inside the diff — a top-level `path` lookup
+            // missed both, so their edits never invalidated read coverage.
+            "file_write" | "file_edit" | "file_multi_edit" | "file_delete" | "file_fim_edit"
+            | "patch_apply" => {
+                let mut paths: Vec<String> =
+                    super::tool_dispatch::helpers::written_paths_for_tool_call(name, &args)
+                        .into_iter()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .collect();
+                if paths.is_empty() {
+                    paths.extend(arg_path(&args));
                 }
-                if let Some(w) = self.writes.iter_mut().find(|w| w.path == path) {
-                    w.count += 1;
-                    w.last_turn = turn;
-                    w.tool = name.to_string();
-                    w.seq = seq;
-                } else {
-                    self.writes.push(LedgerWrite {
-                        path,
-                        tool: name.to_string(),
-                        count: 1,
-                        last_turn: turn,
-                        seq,
-                    });
-                    if self.writes.len() > LEDGER_MAX_WRITES {
-                        self.writes.remove(0);
+                let mut recorded = HashSet::new();
+                for path in paths {
+                    let path = Self::normalize_path(&path, root);
+                    if recorded.insert(path.clone()) {
+                        self.record_write(name, path);
                     }
                 }
             }
             _ => {}
+        }
+    }
+
+    fn record_write(&mut self, name: &str, path: String) {
+        let turn = self.turn;
+        let seq = self.next_seq();
+        if let Some(entry) = self.files.iter_mut().find(|f| f.path == path) {
+            // The recorded coverage (including any post-edit partial
+            // coverage) now describes an older version.
+            entry.modified_turn = Some(turn);
+            entry.reread_since_modified = false;
+        }
+        if let Some(w) = self.writes.iter_mut().find(|w| w.path == path) {
+            w.count += 1;
+            w.last_turn = turn;
+            w.tool = name.to_string();
+            w.seq = seq;
+        } else {
+            self.writes.push(LedgerWrite {
+                path,
+                tool: name.to_string(),
+                count: 1,
+                last_turn: turn,
+                seq,
+            });
+            if self.writes.len() > LEDGER_MAX_WRITES {
+                self.writes.remove(0);
+            }
         }
     }
 
@@ -956,11 +995,26 @@ impl WorkLedger {
         let seq = self.next_seq();
         let turn = self.turn;
         let hash = format!("{hash:016x}");
+        let range = range.map(|(a, b)| if a <= b { (a, b) } else { (b, a) });
         if let Some(entry) = self.files.iter_mut().find(|f| f.path == path) {
-            // A whole-file read with a new hash means the file changed: the
-            // old ranges describe a different version.
-            if range.is_none() && entry.content_hash != hash {
+            // The recorded coverage belongs to another version when the SAME
+            // exact range (or the whole file) now returns different content,
+            // or when the file was modified and nothing was reread since.
+            // Different ranges are never compared with each other, and a
+            // range hash is never compared with a whole-file hash.
+            let content_changed = entry
+                .read_hashes
+                .iter()
+                .any(|(k, h)| *k == range && *h != hash);
+            let edited_unseen = entry.modified_turn.is_some() && !entry.reread_since_modified;
+            if content_changed || edited_unseen {
+                // Fresh coverage of the new version: the old ranges,
+                // whole-file flag, line count and findings are invalid.
+                entry.whole_file = false;
                 entry.ranges.clear();
+                entry.read_hashes.clear();
+                entry.total_lines = None;
+                entry.note = None;
             }
             match range {
                 Some(r) => merge_range(&mut entry.ranges, r),
@@ -969,9 +1023,29 @@ impl WorkLedger {
             entry.total_lines = total_lines.or(entry.total_lines);
             entry.reads += 1;
             entry.last_read_turn = turn;
-            entry.content_hash = hash;
+            entry.content_hash = hash.clone();
             entry.partial = partial;
-            entry.modified_turn = None;
+            entry.read_hashes.retain(|(k, _)| *k != range);
+            entry.read_hashes.push((range, hash));
+            if entry.read_hashes.len() > LEDGER_MAX_RANGE_HASHES {
+                entry.read_hashes.remove(0);
+            }
+            // Ranges spanning every line of a version whose line count is
+            // known cover the whole file.
+            if !entry.whole_file && !partial {
+                if let (Some(n), [(1, end)]) = (entry.total_lines, entry.ranges.as_slice()) {
+                    if n > 0 && *end >= n {
+                        entry.whole_file = true;
+                    }
+                }
+            }
+            if entry.whole_file && !partial {
+                // The current version has been read in full.
+                entry.modified_turn = None;
+                entry.reread_since_modified = false;
+            } else if entry.modified_turn.is_some() {
+                entry.reread_since_modified = true;
+            }
             entry.seq = seq;
         } else {
             let mut ranges = Vec::new();
@@ -985,10 +1059,12 @@ impl WorkLedger {
                 total_lines,
                 reads: 1,
                 last_read_turn: turn,
-                content_hash: hash,
+                content_hash: hash.clone(),
                 partial,
                 note: None,
                 modified_turn: None,
+                reread_since_modified: false,
+                read_hashes: vec![(range, hash)],
                 seq,
             });
             if self.files.len() > LEDGER_MAX_FILES {
@@ -1051,7 +1127,14 @@ impl WorkLedger {
                 Some((LedgerNoteSource::ModelNote, t, _)) => *t < entry.last_read_turn,
             };
             if replace {
-                entry.note = Some((LedgerNoteSource::Summary, turn, truncate_note(finding)));
+                // A summary cannot say which version of the file its finding
+                // describes. While an edit has not been reread in full, it
+                // may describe the pre-edit content: say so.
+                let finding = match entry.modified_turn {
+                    Some(t) => format!("(may predate your edit at turn {t}) {finding}"),
+                    None => finding.to_string(),
+                };
+                entry.note = Some((LedgerNoteSource::Summary, turn, truncate_note(&finding)));
             }
         }
     }
@@ -1095,9 +1178,28 @@ impl WorkLedger {
             line.push_str(" (result was truncated: partial view)");
         }
         if let Some(t) = f.modified_turn {
-            line.push_str(&format!(
-                " [you modified it at turn {t} — re-read if you need the new content]"
-            ));
+            if !f.reread_since_modified {
+                line.push_str(&format!(
+                    " [you modified it at turn {t} — the coverage and notes here describe the \
+                     pre-edit version; re-read if you need the new content]"
+                ));
+            } else if f.ranges.is_empty() {
+                line.push_str(&format!(
+                    " [you modified it at turn {t}; the re-read since was truncated — parts of \
+                     the current version not seen]"
+                ));
+            } else {
+                let ranges = f
+                    .ranges
+                    .iter()
+                    .map(|(a, b)| format!("{a}-{b}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                line.push_str(&format!(
+                    " [you modified it at turn {t}; only lines {ranges} re-read since — other \
+                     lines not seen in their current version]"
+                ));
+            }
         }
         if let Some((source, _, note)) = &f.note {
             let label = match source {

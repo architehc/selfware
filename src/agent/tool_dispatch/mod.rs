@@ -1028,6 +1028,7 @@ impl Agent {
             content_hash: super::recovery::hash_text_signature(&content),
             message_fingerprint: Self::message_fingerprint(message),
             turn: self.compressor.work_ledger_turn(),
+            mutation_sequence: self.mutation_sequence,
         };
         self.delivered_read_results.insert(key, record);
     }
@@ -1040,10 +1041,17 @@ impl Agent {
     /// result: its message is in the history unchanged (not trimmed,
     /// truncated or compacted away), and the history fits the request budget
     /// left after the per-turn tail, so request assembly will not trim it
-    /// out of the copy that is sent. Anything else returns the full content.
+    /// out of the copy that is sent. It is also never used once any
+    /// state-changing tool has succeeded since that result was delivered:
+    /// the earlier result then belongs to another version of the file (an
+    /// edit outside the range, an edit later reverted), so "unchanged since
+    /// turn N" would be false. Anything else returns the full content.
     pub(super) fn unchanged_reread_note(&self, args_str: &str, raw_result: &str) -> Option<String> {
         let key = Self::file_read_range_key(args_str)?;
         let record = self.delivered_read_results.get(&key)?;
+        if record.mutation_sequence != self.mutation_sequence {
+            return None;
+        }
         let content = Self::file_read_result_content(raw_result)?;
         if super::recovery::hash_text_signature(&content) != record.content_hash {
             return None;
