@@ -327,3 +327,120 @@ async fn d6_all_calls_unparseable_is_rejected_not_final_answer() {
         .iter()
         .any(|m| m.content.text_all().contains("NOT executed")));
 }
+
+// ---------------------------------------------------------------------------
+// TOOL_PROTOCOL_STALL: the val084 runs/review turn sequence replayed through
+// the real step loop. `O` turns run a file_read, `P` turns carry only an
+// unparseable call. At f11e6f68 nothing counted the `P` turns on a read-only
+// task and the run spun until SIGTERM at 2,642 s.
+// ---------------------------------------------------------------------------
+
+/// The first 27 turns of val084 runs/review (`O` ran a call, `P` rejected).
+const REVIEW_084_FIRST_27: &str = "OOOOPOOPPOOOPPOPOPOPPOPPOPP";
+
+/// An unparseable generic-wrapper call (its arguments lack the closing brace).
+const UNPARSEABLE_CALL: &str = "\n\n<tool_call>\n<function=tool>\n<parameter=name>\nfile_read</name>\n<parameter=arguments>{\"path\": \"src/agent/execution.rs\", \"line_range\": [760, 1120]\n</arguments>\n</tool>\n</tool_call>";
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn review_084_sequence_stops_with_tool_protocol_stall_at_turn_27() {
+    let cwd = crate::test_support::CwdGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    cwd.switch_to(dir.path());
+
+    let mut builder = MockLlmServer::builder();
+    for (i, turn) in REVIEW_084_FIRST_27.chars().enumerate() {
+        builder = if turn == 'O' {
+            let path = format!("f{i}.txt");
+            std::fs::write(dir.path().join(&path), format!("file {i}\n")).unwrap();
+            builder.with_response(format!(
+                "<tool>\n<name>file_read</name>\n<arguments>{{\"path\": \"{path}\"}}</arguments>\n</tool>"
+            ))
+        } else {
+            builder.with_response(UNPARSEABLE_CALL)
+        };
+    }
+    let server = builder.build().await;
+    let config = artifact_config(&format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+    let mut stopped_at = None;
+    for turn in 1..=REVIEW_084_FIRST_27.len() {
+        if let Err(e) = agent.execute_step_internal(false).await {
+            stopped_at = Some((turn, e));
+            break;
+        }
+    }
+    server.stop().await;
+
+    let (turn, err) = stopped_at.expect("the run must stop before SIGTERM");
+    assert_eq!(turn, 27, "{err:#}");
+    let reason = format!("{err:#}");
+    assert!(
+        reason.starts_with("TOOL_PROTOCOL_STALL: 6 of the last 8"),
+        "{reason}"
+    );
+    assert!(reason.contains("Tool call NOT executed"), "{reason}");
+    // Terminal: the outer runner must not "recover" by re-sending the step.
+    assert!(crate::agent::task_runner::is_fatal_loop_error(&err));
+    // Honest typed outcome with the rejection reasons as evidence.
+    let mode = crate::agent::failure_mode::FailureMode::classify(
+        &agent,
+        crate::agent::failure_mode::RunOutcome::Failed { reason },
+    );
+    assert_eq!(
+        mode.kind,
+        crate::agent::failure_mode::FailureKind::ToolProtocolStall
+    );
+    assert_eq!(mode.kind.tag(), "TOOL_PROTOCOL_STALL");
+    assert!(mode.evidence.contains("Tool call NOT executed"), "{mode:?}");
+    assert!(!mode.kind.is_nonfailure());
+    // The stopping turn is still recorded as what it was.
+    let last = artifacts(dir.path()).pop().unwrap().1;
+    assert_eq!(last["agent_decision"]["kind"], "rejected_tools", "{last}");
+}
+
+/// Rule 5, native path: a malformed native call (arguments not JSON) used
+/// to be dropped before the history push with only a log line. It is now
+/// answered as a rejected call and counts toward the stall window.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn malformed_native_call_is_reported_as_rejected() {
+    let cwd = crate::test_support::CwdGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    cwd.switch_to(dir.path());
+
+    let server = MockLlmServer::builder()
+        .with_tool_calls(vec![crate::testing::mock_api::MockToolCall {
+            id: "call_1".into(),
+            name: "file_read".into(),
+            arguments: "{\"path\": \"a.rs\"".into(),
+        }])
+        .build()
+        .await;
+    let mut config = artifact_config(&format!("{}/v1", server.url()));
+    config.agent.native_function_calling = true;
+    let mut agent = Agent::new(config).await.unwrap();
+    let result = agent.execute_step_internal(false).await;
+    server.stop().await;
+    assert!(matches!(result, Ok(false)), "{result:?}");
+
+    let decision = only_decision(dir.path());
+    assert_eq!(decision["kind"], "rejected_tools", "{decision}");
+    assert_eq!(decision["rejected_tools"][0]["name"], "file_read");
+    assert!(agent.messages.iter().any(|m| m
+        .content
+        .text_all()
+        .contains("native tool call was malformed")));
+    // No unpaired native id entered history.
+    assert!(agent
+        .messages
+        .iter()
+        .all(|m| m.tool_calls.as_ref().is_none_or(|c| c.is_empty())));
+    assert_eq!(agent.protocol_stall.failed_in_window(), 1);
+}

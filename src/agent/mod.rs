@@ -118,6 +118,7 @@ mod plan_step;
 pub mod planning;
 pub mod progress;
 pub mod prompt_builder;
+mod protocol_stall;
 mod recovery;
 pub(crate) mod result_compaction;
 pub mod session_log;
@@ -889,6 +890,13 @@ pub struct Agent {
     /// any real tool call. Used to force-finalize a read-only task that keeps
     /// narrating without answering, instead of spinning to MAX_ITERATIONS.
     readonly_no_tool_streak: usize,
+    /// Outcomes of the last dispatched tool-call turns: stops a run whose
+    /// calls keep failing at the protocol level (`TOOL_PROTOCOL_STALL`).
+    protocol_stall: protocol_stall::ProtocolStallWindow,
+    /// Malformed native tool calls dropped before the history push (their
+    /// unpaired ids would 400 the next request). Reported to the model as
+    /// rejected calls by the next dispatch instead of vanishing.
+    pending_native_rejections: Vec<crate::tool_parser::ParseRejection>,
     /// Lifetime count of completion-gate rejections on a mutation-required task
     /// with zero mutating calls. NOT reset by read-only tool calls or recovery
     /// nudges (that reset is what previously let this loop burn 100 iterations);
@@ -1798,6 +1806,8 @@ To call a tool, use this EXACT XML structure:
             pending_synthesis: None,
             consecutive_no_action_prompts: 0,
             readonly_no_tool_streak: 0,
+            protocol_stall: protocol_stall::ProtocolStallWindow::default(),
+            pending_native_rejections: Vec::new(),
             mutation_gate_rejections: 0,
             consecutive_stale_verification: 0,
             total_no_action_prompts: 0,
@@ -3360,6 +3370,8 @@ To call a tool, use this EXACT XML structure:
         self.recent_failed_tool_attempts.clear();
         self.escalated_edit_args_hashes.clear();
         self.readonly_no_tool_streak = 0;
+        self.protocol_stall.clear();
+        self.pending_native_rejections.clear();
         self.consecutive_empty_responses = 0;
         self.pending_failure_hint = None;
     }

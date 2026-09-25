@@ -36,6 +36,11 @@ pub enum FailureKind {
     NontermProse,
     /// Hard-block reached after repeated failed retries on the same tool.
     RetryLoop,
+    /// Most recent tool-call turns ran nothing because every call failed at
+    /// the tool protocol (unparseable markup, malformed native call, unknown
+    /// tool); the run stopped instead of re-sending the same step. The
+    /// evidence names the last rejection reasons.
+    ToolProtocolStall,
     /// Wall-clock budget exhausted while making progress.
     Timeout,
     /// ONE model call exceeded the per-call cap (`agent.max_call_secs`) and
@@ -117,6 +122,7 @@ impl FailureKind {
             FailureKind::ReadLoop => "READ_LOOP",
             FailureKind::NontermProse => "NONTERM_PROSE",
             FailureKind::RetryLoop => "RETRY_LOOP",
+            FailureKind::ToolProtocolStall => "TOOL_PROTOCOL_STALL",
             FailureKind::Timeout => "TIMEOUT",
             FailureKind::CallTimeCap => "CALL_TIME_CAP",
             FailureKind::SelfwareError => "SELFWARE_ERROR",
@@ -334,6 +340,18 @@ impl FailureMode {
                         kind: FailureKind::NontermProse,
                         evidence: "aborted early: repeated prose-only turns with no tool call".to_string(),
                         advice: "the model narrated instead of acting — ensure native tool-calling works and give a concrete single-goal task; do NOT raise max_iterations".to_string(),
+                    };
+                }
+                if reason.contains(super::protocol_stall::PROTOCOL_STALL_MARKER) {
+                    return FailureMode {
+                        restored_files: Vec::new(),
+                        kind: FailureKind::ToolProtocolStall,
+                        evidence: format!(
+                            "stopped: {} ({} tool calls executed in total)",
+                            truncate(&reason, 700),
+                            total_calls
+                        ),
+                        advice: "the model's tool calls are not in a syntax selfware accepts — check the chat template / native_function_calling setting or switch model; do NOT raise max_iterations".to_string(),
                     };
                 }
                 if reason.contains("READ_LOOP_NO_EDIT") {

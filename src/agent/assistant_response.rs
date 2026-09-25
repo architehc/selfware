@@ -499,19 +499,24 @@ impl Agent {
         // Stored as `assistant.tool_calls` with no matching `role=tool` reply,
         // that call is an unpaired tool_call — which strict backends
         // (vLLM/SGLang) reject with a 400 on the *next* request, sending the
-        // run into a recovery death spiral. Dropping the malformed call makes
-        // the turn a no-op the loop nudges/retries instead. Sanitizing here
+        // run into a recovery death spiral. The malformed call is dropped from
+        // history and reported as a rejected call by the dispatch (as a
+        // plain refusal message, never a `role=tool` reply to an id that is
+        // not in history). Sanitizing here
         // (before both the history push and the dispatched response) keeps
         // history and dispatch consistent, and covers native FC from the
         // non-streaming path too.
         if let Some(calls) = native_tool_calls.take() {
-            let (kept, dropped) = sanitize_tool_calls(calls);
-            if dropped > 0 {
+            let (kept, dropped) = sanitize_tool_calls_reporting(calls);
+            if !dropped.is_empty() {
                 debug!(
                     "Sanitized {} malformed native tool call(s) from assistant step",
-                    dropped
+                    dropped.len()
                 );
             }
+            // Dropped, not forgotten: the next dispatch answers each one as a
+            // rejected call (the model must learn it did not run).
+            self.pending_native_rejections = dropped;
             native_tool_calls = if kept.is_empty() { None } else { Some(kept) };
         }
 
@@ -1203,24 +1208,46 @@ pub(super) fn streamed_long_empty_call_outcome(
 /// See the call site in `get_assistant_step_response` for why an unpaired,
 /// malformed tool_call is dangerous (400 death spiral on strict backends).
 /// Returns the retained calls and the count dropped.
+#[cfg(test)]
 pub(super) fn sanitize_tool_calls(
     calls: Vec<crate::api::types::ToolCall>,
 ) -> (Vec<crate::api::types::ToolCall>, usize) {
-    let before = calls.len();
-    let kept: Vec<_> = calls
-        .into_iter()
-        .filter(|tc| match tc.validate_structure() {
-            Ok(()) => true,
+    let (kept, dropped) = sanitize_tool_calls_reporting(calls);
+    (kept, dropped.len())
+}
+
+/// `sanitize_tool_calls` that also returns one `ParseRejection` per dropped
+/// call, so the caller can tell the model the call did NOT run (a dropped
+/// native call used to vanish: no tool result, no rejected_tools entry, and
+/// nothing counted it toward the protocol-stall stop).
+pub(super) fn sanitize_tool_calls_reporting(
+    calls: Vec<crate::api::types::ToolCall>,
+) -> (
+    Vec<crate::api::types::ToolCall>,
+    Vec<crate::tool_parser::ParseRejection>,
+) {
+    let mut kept = Vec::with_capacity(calls.len());
+    let mut dropped = Vec::new();
+    for tc in calls {
+        match tc.validate_structure() {
+            Ok(()) => kept.push(tc),
             Err(e) => {
                 warn!(
                     "Dropping malformed tool call '{}' before history push: {}",
                     tc.function.name, e
                 );
-                false
+                let name = tc.function.name.trim();
+                dropped.push(crate::tool_parser::ParseRejection {
+                    tool_name: (!name.is_empty()).then(|| name.to_string()),
+                    reason: format!(
+                        "Tool call NOT executed: the native tool call was malformed ({e}). \
+                         Re-issue it with a function name and a JSON object as arguments."
+                    ),
+                    raw_text: tc.function.arguments.clone(),
+                });
             }
-        })
-        .collect();
-    let dropped = before - kept.len();
+        }
+    }
     (kept, dropped)
 }
 

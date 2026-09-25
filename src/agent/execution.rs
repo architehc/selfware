@@ -667,6 +667,10 @@ impl Agent {
     /// accepted: each is answered with a refusal tool-result BEFORE the batch
     /// runs, so the model is told it did not run and the artifact lists it in
     /// `rejected_tools` (the same funnel as every other pre-execution refusal).
+    ///
+    /// Fails with `TOOL_PROTOCOL_STALL` when this turn ran nothing because of
+    /// the tool protocol and too many recent dispatched turns did the same
+    /// (see `protocol_stall`).
     async fn dispatch_model_batch(
         &mut self,
         ctx: &TurnArtifactCtx,
@@ -696,8 +700,23 @@ impl Agent {
         };
         let decision =
             super::turn_artifacts::classify_dispatch(&ctx.tool_names, &journal, &unanswered_reason);
+        // Every dispatched turn, text or native, passes here: this is the one
+        // place that sees whether the turn ran anything or failed at the tool
+        // protocol (unparseable, malformed native, unknown tool).
+        let stall = self
+            .protocol_stall
+            .record(super::protocol_stall::protocol_failure_reasons(
+                &decision,
+                parse_rejections,
+            ));
         self.refine_turn_artifact(ctx, decision).await;
-        batch_result
+        match stall {
+            Some(message) if batch_result.is_ok() => {
+                tracing::warn!("{}", message);
+                Err(anyhow::anyhow!(message))
+            }
+            _ => batch_result,
+        }
     }
 
     /// Internal execution logic
@@ -914,11 +933,15 @@ impl Agent {
         // the per-turn debug capture below uses it to write the artifact.
         let chat_metadata = response.metadata.clone();
 
-        let (tool_calls, parse_rejections) = self.collect_tool_calls(
+        let (tool_calls, mut parse_rejections) = self.collect_tool_calls(
             &content,
             response.reasoning_content.as_deref(),
             response.native_tool_calls.as_ref(),
         );
+        // Malformed native calls dropped before the history push: reported
+        // like unparseable text calls, so the model learns they did not run
+        // and the protocol-stall window counts them.
+        parse_rejections.extend(std::mem::take(&mut self.pending_native_rejections));
         if !tool_calls.is_empty() {
             self.readonly_no_tool_streak = 0;
         }
@@ -1045,7 +1068,9 @@ impl Agent {
         let clean_final = super::recovery::strip_think_blocks(&content)
             .trim()
             .to_string();
-        if clean_final.is_empty() && tool_calls.is_empty() {
+        // A response whose only call was rejected (e.g. a malformed native
+        // call with empty content) delivered a call: not an empty response.
+        if clean_final.is_empty() && tool_calls.is_empty() && parse_rejections.is_empty() {
             self.consecutive_empty_responses += 1;
             // Bounded recovery. The provider closed a stream that generated
             // tokens but delivered none (observed on llm.selfware.design: 74

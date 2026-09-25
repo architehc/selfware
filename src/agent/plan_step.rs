@@ -303,10 +303,15 @@ impl Agent {
         // 400 on the next request — the same hazard fixed in
         // get_assistant_step_response, on the planning path.
         let native_tool_calls = native_tool_calls.and_then(|calls| {
-            let (kept, dropped) = super::assistant_response::sanitize_tool_calls(calls);
-            if dropped > 0 {
-                debug!("Sanitized {} malformed planning tool call(s)", dropped);
+            let (kept, dropped) = super::assistant_response::sanitize_tool_calls_reporting(calls);
+            if !dropped.is_empty() {
+                debug!(
+                    "Sanitized {} malformed planning tool call(s)",
+                    dropped.len()
+                );
             }
+            // Reported by the dispatch that follows, like the execution step.
+            self.pending_native_rejections = dropped;
             (!kept.is_empty()).then_some(kept)
         });
 

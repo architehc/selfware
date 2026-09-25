@@ -252,6 +252,10 @@ pub(super) fn is_fatal_loop_error(error: &anyhow::Error) -> bool {
         // request again just burns the turn budget one empty turn at a time
         // (LOOP-EMPTY-NOTFATAL). Terminal like NONTERM above.
         || msg.contains("EMPTY_RESPONSE_LOOP")
+        // Tool-protocol stall: most recent tool-call turns ran nothing because
+        // their calls were malformed. Recovery would re-send the same step to
+        // the same model (0.8.4 review run: 38 of 53 turns, until SIGTERM).
+        || msg.contains(super::protocol_stall::PROTOCOL_STALL_MARKER)
 }
 
 /// Consecutive context-overflow recoveries (compress + retry) allowed before
