@@ -5,6 +5,81 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.2] - 2026-09-24
+
+Second round of fixes from long-running validation against llm.selfware.design.
+
+### Added
+- **Citation gate.** For review, report and read-only answers, and for written
+  documentation deliverables, every `path:line` citation is checked against the
+  workspace without a model call. Wrong citations are sent back for at most two
+  correction rounds. If some are still wrong, the banner shows ⚠️ instead of ✅,
+  the run summary adds a "Grounding: X verified, Y unverified" line, and the
+  JSON result gains a `grounding` object. The exit status does not change.
+  On the validation review that motivated it, the gate found 50 of 127
+  citations wrong.
+- **LLM waiting status.** An `llm_waiting` event is emitted every 15 s while a
+  model call is in flight, reporting phase and elapsed time. It appears in the
+  stderr trace, in stream-json and in the spinner, and planning calls are
+  covered too.
+
+### Changed
+- **qwen38 profile defaults** (the built-in default model), measured on the
+  endpoint:
+  - `max_streams` 8, `max_global` 16
+  - `context_length` 163,840 (was 350,000)
+  - `max_tokens` 24,576 (was 32,768)
+  - new `max_call_secs` 600
+  - explicit TOML settings still win.
+- **Prefix-stable planning request.** The planning request now carries the same
+  system message as execution requests. The learning hint and work ledger move
+  to the request tail.
+- **Unchanged re-reads.** An identical `file_read` whose earlier result is still
+  in context returns a short note instead of the content again.
+- **Syntax checks use the project's language level.** They read tsconfig, ESM
+  `type`, JSX, the C/C++ standard (compile_commands.json / CMake), the pinned
+  Python version and the Java release. Checks that cannot run are reported as
+  "not run" and earn no verification credit, instead of passing or failing.
+  `npx` is no longer used, because it silently downloads packages.
+- **CI** runs test legs in parallel and runs the red-team corpus gate once per
+  OS at opt-level 2.
+
+### Fixed
+- **Enter submits a fully typed slash command** (e.g. `/quit`) while the
+  completion menu is open. Previously it only accepted the completion, and chat
+  appeared not to exit.
+- **Resumed runs no longer overwrite turn artifacts.** The artifact sequence
+  number is checkpointed.
+- **Turn decisions are honest.** They are recorded as `pending_dispatch`, then
+  as `executed_tools` (with per-tool `ok`), `rejected_tools`,
+  `stopped_before_dispatch` or `final_answer`.
+- **JSON/stream-json `exit_status` equals the process exit code**, including
+  130 on interrupt and 143 on SIGTERM.
+- **Budget stops emit exactly one terminal event.**
+- **Cargo failures no longer block non-Rust tasks.** When the task has no
+  Cargo.toml of its own, cargo results are reported but never block completion.
+- **Interview prompt:** Ctrl+J and Ctrl+M submit, and other Ctrl/Alt chords no
+  longer insert letters.
+- **Stale selfware git worktrees are pruned.** Only selfware's own records are
+  pruned, and directories are never removed.
+
+### Review notes (AGENTS.md rule 2)
+These changes reduce or alter checks:
+- The CI red-team corpus gate no longer repeats in the extras, MSRV and
+  no-default-features configurations. It still runs on ubuntu and macOS, and
+  under coverage.
+- Missing verifier tools, and host toolchains older than the project, are now
+  "not run" instead of failures. CMake projects get a per-file syntax check
+  instead of `cmake --build`.
+- The qwen38 default limits are lower. The tests that pinned the old values now
+  pin the new ones.
+- One verification-scope test case moved from cargo to `make`. The cargo case
+  is covered by two new tests.
+- The turn-artifact schema changed: `executed_tools.tools` is now a list of
+  `{name, ok}`, and `completed` is now `final_answer` (a deserialization alias
+  is kept).
+- The new citation completion gate can reject completion, at most twice.
+
 ## [0.8.1] - 2026-09-24
 
 Fixes from long-running validation against llm.selfware.design (SGLang,
