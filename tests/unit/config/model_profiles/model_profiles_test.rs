@@ -259,6 +259,7 @@ fn applied_fields_render_is_stable() {
         max_streams: true,
         max_global: true,
         max_call_secs: false,
+        max_call_secs_scaled_for_max_tokens: None,
         extra_body_keys: vec!["a".to_string(), "b".to_string()],
     };
     let s = af.render();
@@ -396,5 +397,42 @@ fn profiles_without_call_cap_leave_max_call_secs_uncapped() {
         let applied = apply_profile(&mut config, &profile, &UserExplicitFields::default());
         assert!(!applied.max_call_secs, "{model}");
         assert_eq!(config.agent.max_call_secs, None, "{model}");
+    }
+}
+
+/// D7: the qwen38 cap is sized for its own 24,576 max_tokens; a larger
+/// max_tokens scales it by the same ratio, rounded up.
+#[test]
+fn qwen38_max_call_secs_scales_with_max_tokens() {
+    let p = match_profile("qwen38-flash-next").expect("qwen38 profile");
+    assert_eq!(p.max_call_secs_for(24_576), Some((600, false)));
+    assert_eq!(p.max_call_secs_for(8_192), Some((600, false)));
+    // ceil(600 * 65536 / 24576) = ceil(1600.0) = 1600
+    assert_eq!(p.max_call_secs_for(65_536), Some((1_600, true)));
+    // ceil(600 * 30000 / 24576) = ceil(732.42) = 733
+    assert_eq!(p.max_call_secs_for(30_000), Some((733, true)));
+}
+
+/// Rule-5 sweep: every built-in profile that sets both fields gets the same
+/// sizing rule; a profile without max_call_secs implies no cap.
+#[test]
+fn every_profile_with_both_fields_scales_its_call_cap() {
+    for p in builtin_profiles() {
+        match (p.max_call_secs, p.max_tokens) {
+            (Some(secs), Some(mt)) => {
+                assert_eq!(p.max_call_secs_for(mt), Some((secs, false)), "{}", p.name);
+                let (scaled, did) = p.max_call_secs_for(mt * 2).unwrap();
+                assert!(did && scaled == secs * 2, "{}: {scaled}", p.name);
+            }
+            (None, _) => assert_eq!(p.max_call_secs_for(1 << 20), None, "{}", p.name),
+            (Some(secs), None) => {
+                assert_eq!(
+                    p.max_call_secs_for(1 << 20),
+                    Some((secs, false)),
+                    "{}",
+                    p.name
+                )
+            }
+        }
     }
 }

@@ -1175,7 +1175,14 @@ impl Config {
                         "streaming" => "agent.streaming".to_string(),
                         other => other.to_string(),
                     };
-                    sources.set(dotted, ConfigSource::Profile(profile_name.clone()));
+                    // A cap scaled to the user's max_tokens says so:
+                    // `[profile: qwen38, scaled for max_tokens=65536]`.
+                    let label = if dotted == "agent.max_call_secs" {
+                        applied.max_call_secs_provenance(&profile_name)
+                    } else {
+                        profile_name.clone()
+                    };
+                    sources.set(dotted, ConfigSource::Profile(label));
                 }
                 config.matched_profile_applied = fields;
             }

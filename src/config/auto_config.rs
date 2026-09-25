@@ -309,7 +309,9 @@ impl AutoConfigurator {
             if let Some(mg) = p.max_global {
                 config.concurrency.max_global = mg;
             }
-            if let Some(secs) = p.max_call_secs {
+            // Same sizing rule as the loader: the cap follows this config's
+            // max_tokens (equal to the profile's here, so unscaled today).
+            if let Some((secs, _)) = p.max_call_secs_for(config.max_tokens) {
                 config.agent.max_call_secs = Some(secs);
             }
             if let serde_json::Value::Object(extra) = &p.extra_body {

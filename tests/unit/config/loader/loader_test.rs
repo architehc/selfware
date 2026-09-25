@@ -3346,3 +3346,62 @@ fn bare_install_without_env_endpoint_loads_keyless_default_successfully() {
     assert_eq!(config.endpoint, "https://llm.selfware.design/v1");
     assert!(config.api_key.is_none());
 }
+
+/// D7 (0.8.2 validation): a TOML that raises max_tokens above the qwen38
+/// profile's 24,576 without setting max_call_secs gets the profile cap scaled
+/// by the same ratio, with provenance naming the scaling.
+#[test]
+fn test_config_load_qwen38_max_call_secs_scales_with_explicit_max_tokens() {
+    let _guard = clear_env();
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "http://localhost:8000/v1"
+        model = "qwen38-flash-next"
+        max_tokens = 65536
+        "#,
+        "qwen38_call_cap_scaled.toml",
+    );
+    let config = Config::load(Some(path.to_str().unwrap())).unwrap();
+    assert_eq!(config.max_tokens, 65_536);
+    assert_eq!(
+        config.agent.max_call_secs,
+        Some(1_600),
+        "ceil(600 * 65536 / 24576) = 1600"
+    );
+    assert!(
+        matches!(
+            config.sources.get("agent.max_call_secs"),
+            Some(ConfigSource::Profile(label))
+                if label == "qwen38, scaled for max_tokens=65536"
+        ),
+        "{:?}",
+        config.sources.get("agent.max_call_secs")
+    );
+
+    // Both explicit: the user's cap wins, unscaled.
+    let (_dir2, path2) = write_temp_config(
+        r#"
+        endpoint = "http://localhost:8000/v1"
+        model = "qwen38-flash-next"
+        max_tokens = 65536
+
+        [agent]
+        max_call_secs = 900
+        "#,
+        "qwen38_call_cap_both.toml",
+    );
+    let config2 = Config::load(Some(path2.to_str().unwrap())).unwrap();
+    assert_eq!(config2.agent.max_call_secs, Some(900));
+
+    // Neither explicit: the profile pair, 600 s.
+    let (_dir3, path3) = write_temp_config(
+        r#"
+        endpoint = "http://localhost:8000/v1"
+        model = "qwen38-flash-next"
+        "#,
+        "qwen38_call_cap_neither.toml",
+    );
+    let config3 = Config::load(Some(path3.to_str().unwrap())).unwrap();
+    assert_eq!(config3.max_tokens, 24_576);
+    assert_eq!(config3.agent.max_call_secs, Some(600));
+}

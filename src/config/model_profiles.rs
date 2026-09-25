@@ -52,6 +52,29 @@ pub struct ModelDefaultsProfile {
     pub extra_body: Value,
 }
 
+impl ModelDefaultsProfile {
+    /// The per-call wall-time cap this profile implies for `max_tokens`.
+    ///
+    /// A profile's `max_call_secs` is sized for its OWN `max_tokens` (decode
+    /// time dominates: qwen38's 600 s = 24,576 tokens at the measured ~42
+    /// tok/s plus prefill). When `max_tokens` exceeds the profile's value the
+    /// cap scales by the same ratio, rounded up:
+    /// `ceil(max_call_secs * max_tokens / profile_max_tokens)` — e.g. 65,536
+    /// tokens → ceil(600 * 65536 / 24576) = 1,600 s. At or below the
+    /// profile's value, or for a profile without both fields, the profile
+    /// cap applies unchanged. Returns `(secs, scaled)`.
+    pub fn max_call_secs_for(&self, max_tokens: usize) -> Option<(u64, bool)> {
+        let secs = self.max_call_secs?;
+        match self.max_tokens {
+            Some(pm) if pm > 0 && max_tokens > pm => {
+                let scaled = (secs as u128 * max_tokens as u128).div_ceil(pm as u128);
+                Some((u64::try_from(scaled).unwrap_or(u64::MAX), true))
+            }
+            _ => Some((secs, false)),
+        }
+    }
+}
+
 /// Names of fields a profile filled in for a particular config.  Returned
 /// by [`apply_profile`] for diagnostic / introspection purposes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -64,11 +87,25 @@ pub struct AppliedFields {
     pub max_streams: bool,
     pub max_global: bool,
     pub max_call_secs: bool,
+    /// Set when the applied `max_call_secs` was SCALED because the user
+    /// raised `max_tokens` above the profile's own value: holds that
+    /// user `max_tokens` (see [`ModelDefaultsProfile::max_call_secs_for`]).
+    pub max_call_secs_scaled_for_max_tokens: Option<usize>,
     /// Names of `extra_body` keys that were filled from the profile.
     pub extra_body_keys: Vec<String>,
 }
 
 impl AppliedFields {
+    /// Provenance label for `agent.max_call_secs` under profile `name`:
+    /// `"qwen38"`, or `"qwen38, scaled for max_tokens=65536"` when the cap
+    /// was scaled to the user's larger `max_tokens`.
+    pub fn max_call_secs_provenance(&self, name: &str) -> String {
+        match self.max_call_secs_scaled_for_max_tokens {
+            Some(n) => format!("{name}, scaled for max_tokens={n}"),
+            None => name.to_string(),
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         !self.native_function_calling
             && !self.streaming
@@ -146,7 +183,12 @@ fn qwen38_defaults_profile(name: &'static str, pattern: &'static str) -> ModelDe
         max_global: Some(16),
         // Fail a stuck call with a typed CallTimeBudgetExceeded instead of
         // hanging: the longest real call measured was 358 s, and a full
-        // 24,576-token reasoning stream at ~40 tok/s takes ~10 minutes.
+        // 24,576-token reasoning stream at the measured ~42 tok/s decode
+        // takes ~585 s, plus prefill (13 s TTFT at a 99k prompt) = ~600 s.
+        // This cap is sized FOR this profile's max_tokens: when the user
+        // raises max_tokens, `max_call_secs_for` scales it proportionally
+        // (0.8.2 validation D7: a TOML max_tokens = 65,536 kept this 600 s
+        // cap and killed final-report calls 0.8.0 completed in up to 864 s).
         max_call_secs: Some(600),
         extra_body: json!({
             "top_p": 0.95,
@@ -415,9 +457,20 @@ pub fn apply_profile(
         }
     }
     if !user_explicit.max_call_secs {
-        if let Some(v) = profile.max_call_secs {
+        // Scale only for an EXPLICIT user max_tokens: a profile-filled
+        // max_tokens equals the profile's own value (no scaling), and an
+        // explicit max_call_secs never reaches this branch (user wins).
+        let effective_max_tokens = if user_explicit.max_tokens {
+            config.max_tokens
+        } else {
+            profile.max_tokens.unwrap_or(config.max_tokens)
+        };
+        if let Some((v, scaled)) = profile.max_call_secs_for(effective_max_tokens) {
             config.agent.max_call_secs = Some(v);
             applied.max_call_secs = true;
+            if scaled {
+                applied.max_call_secs_scaled_for_max_tokens = Some(effective_max_tokens);
+            }
         }
     }
 
