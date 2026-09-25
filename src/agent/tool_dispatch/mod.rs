@@ -1599,7 +1599,21 @@ impl Agent {
         if tool_name == "file_read" {
             if let Ok(args) = serde_json::from_str::<serde_json::Value>(args_str) {
                 if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                    let exists = tokio::fs::try_exists(path).await;
+                    // The path is model output probed BEFORE the safety
+                    // check: resolve it against the agent's workspace (not
+                    // the process cwd) and probe only a path the file-tool
+                    // policy allows, so the retry decision never reveals
+                    // whether a file outside the workspace exists. A refused
+                    // path stays suppressed — the retry would be refused too.
+                    let anchored = self
+                        .tools
+                        .workspace_root()
+                        .anchor_path(std::path::Path::new(path));
+                    let exists = if self.validate_context_path(&anchored).is_ok() {
+                        tokio::fs::try_exists(&anchored).await
+                    } else {
+                        Ok(false)
+                    };
                     if !file_read_retry_stays_suppressed(&exists) {
                         info!(
                             "file_read('{}') was previously suppressed but file is now readable — allowing retry",

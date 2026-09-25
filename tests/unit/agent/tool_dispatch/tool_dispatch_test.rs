@@ -7260,3 +7260,38 @@ async fn unchanged_reread_note_never_answers_a_read_after_an_edit() {
         .await;
     assert!(last_text(&agent).contains("Unchanged since turn"));
 }
+
+#[tokio::test]
+async fn file_read_retry_probe_never_reveals_outside_paths() {
+    // The retry probe runs on model output BEFORE the safety check. A path the
+    // file-tool policy refuses must stay suppressed whether or not it exists,
+    // so the decision leaks no existence bit. (The mock config allows `/**`;
+    // confine it to the workspace, as the default policy does.)
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.config.safety.allowed_paths = vec!["./**".to_string()];
+
+    let outside_dir = tempfile::tempdir().unwrap();
+    let present = outside_dir.path().join("present.rs");
+    std::fs::write(&present, "x").unwrap();
+    for path in [present.clone(), outside_dir.path().join("absent.rs")] {
+        let args = serde_json::json!({ "path": path }).to_string();
+        agent.record_failed_tool_attempt("file_read", &args, "read", "No such file");
+        let suppressed = agent
+            .suppress_repeated_failed_tool_retry(
+                "file_read",
+                &args,
+                "call-1",
+                false,
+                std::time::Instant::now(),
+            )
+            .await;
+        assert!(
+            suppressed,
+            "{}: an outside path must stay suppressed, existing or not",
+            path.display()
+        );
+    }
+    server.stop().await;
+}
