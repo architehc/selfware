@@ -91,12 +91,39 @@ fn decode_rate_comes_from_long_calls_only_at_the_slowest_measured() {
     );
 }
 
-/// A draft this run produced sets the answer size instead of the floor.
+/// A draft larger than the floor raises the answer size; a smaller one
+/// never lowers it (an early draft is not the final report's size).
 #[test]
-fn a_measured_draft_replaces_the_answer_floor() {
+fn a_measured_draft_raises_but_never_lowers_the_answer_floor() {
+    let f = CallForecast::from_calls(&b2_65536_calls(), Some(9_000));
+    assert_eq!(f.answer_completion_tokens, 9_000);
+    assert_eq!(f.answer_tokens(), 36_544 + 9_000);
     let f = CallForecast::from_calls(&b2_65536_calls(), Some(3_079));
-    assert_eq!(f.answer_completion_tokens, 3_079);
-    assert_eq!(f.answer_tokens(), 36_544 + 3_079);
+    assert_eq!(f.answer_completion_tokens, ANSWER_COMPLETION_FLOOR);
+    assert_eq!(f.answer_tokens(), 36_544 + ANSWER_COMPLETION_FLOOR);
+}
+
+/// Review finding: a small early write-up segment (204 prose chars, the
+/// smallest segment measured on the val083 replays; ~800 completion tokens
+/// with its preamble) displaced the floor and collapsed the answer forecast
+/// ~8x, so on a 900 s budget the wrap-up fired about 1 min before the
+/// deadline instead of about 8. The window must be the same as with no
+/// draft at all.
+#[test]
+fn a_small_early_draft_does_not_collapse_the_answer_forecast() {
+    let small = CallForecast::from_calls(&[], Some(800));
+    let none = CallForecast::from_calls(&[], None);
+    assert_eq!(small.answer_completion_tokens, ANSWER_COMPLETION_FLOOR);
+    assert_eq!(small.answer_secs(), none.answer_secs());
+    // 6,526 tokens at the 15 tok/s fallback: ~436 s (~7.3 min), not
+    // 800 / 15 = ~54 s.
+    assert!(small.answer_secs() >= 435, "{small:?}");
+    assert_eq!(time_window_secs(&small, 900), time_window_secs(&none, 900));
+    let with_calls = CallForecast::from_calls(&b2_65536_calls(), Some(800));
+    assert!(
+        time_window_secs(&with_calls, 900) > 488,
+        "the b2_65536 regression window still holds: {with_calls:?}"
+    );
 }
 
 /// No measurement at all: the fallbacks, and a zero prompt.

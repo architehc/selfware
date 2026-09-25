@@ -517,18 +517,20 @@ async fn rejected_draft_is_taken_only_when_one_call_no_longer_fits() {
     let mut agent = Agent::new(config).await.unwrap();
     // b2_350000: its slowest long call (call 19: 3,495 tokens in 231.2 s at
     // a 154k prompt, 15.1 tok/s) and its rejected draft's call (3,079
-    // tokens) → final answer forecast 154k × 0.615 ms + 3,079 / 15.1 ≈ 298 s.
+    // tokens, below the floor, so the answer size stays 6,526) → final
+    // answer forecast 154k × 0.615 ms + 6,526 / 15.1 ≈ 527 s.
     agent.client.record_call_shape(153_934, 3_495, 231_163);
     agent.wrap_up.lock().unwrap().draft_completion_tokens = Some(3_079);
+    assert_eq!(agent.call_forecast().answer_secs(), 527);
     let draft = b2_350000().draft;
     set_rejected_draft(&agent, &draft);
 
-    backdate(&mut agent, 525); // 375 s left: the answer still fits
+    backdate(&mut agent, 300); // 600 s left: the answer still fits
     assert_eq!(agent.take_rejected_draft_at_limit(), None);
 
     // A draft judged before a later edit is never accepted.
     agent.mutation_sequence += 1;
-    backdate(&mut agent, 761); // 139 s left < ~298 s
+    backdate(&mut agent, 761); // 139 s left < ~527 s
     assert_eq!(agent.take_rejected_draft_at_limit(), None);
     agent.mutation_sequence -= 1;
 
@@ -812,7 +814,8 @@ async fn budget_wrap_up_blocks_a_later_deadline_wrap_up() {
 }
 
 /// A tool-less answer of substance is a draft: its call's completion size
-/// becomes the forecast answer size. A tool-call turn is not a draft.
+/// is measured, and the forecast answer size is max(largest draft, floor).
+/// A tool-call turn is not a draft.
 #[tokio::test]
 async fn draft_calls_set_the_forecast_answer_size() {
     let server = MockLlmServer::builder().with_response("x").build().await;
@@ -822,14 +825,28 @@ async fn draft_calls_set_the_forecast_answer_size() {
     agent.client.record_call_shape(144_738, 3_079, 115_568);
     agent.messages.push(Message::assistant(run.draft.clone()));
     agent.observe_turn_usage();
-    assert_eq!(agent.call_forecast().answer_completion_tokens, 3_079);
+    let measured = || agent.wrap_up.lock().unwrap().draft_completion_tokens;
+    assert_eq!(measured(), Some(3_079));
+    // Below the floor: the floor stands.
+    assert_eq!(
+        agent.call_forecast().answer_completion_tokens,
+        crate::agent::call_forecast::ANSWER_COMPLETION_FLOOR
+    );
     // A later tool-call turn (the correction round's grep) changes nothing.
     agent.client.record_call_shape(153_934, 3_495, 231_163);
     agent
         .messages
         .push(Message::assistant(run.after[4].clone()));
     agent.observe_turn_usage();
-    assert_eq!(agent.call_forecast().answer_completion_tokens, 3_079);
+    assert_eq!(
+        agent.wrap_up.lock().unwrap().draft_completion_tokens,
+        Some(3_079)
+    );
+    // A draft above the floor raises the answer size.
+    agent.client.record_call_shape(150_000, 8_000, 500_000);
+    agent.messages.push(Message::assistant(run.draft.clone()));
+    agent.observe_turn_usage();
+    assert_eq!(agent.call_forecast().answer_completion_tokens, 8_000);
     server.stop().await;
 }
 

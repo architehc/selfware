@@ -40,8 +40,9 @@ pub(crate) const PREFILL_SAMPLE_MAX_COMPLETION: u64 = 300;
 /// with a > 5k prompt and < 300 completion tokens (p50 0.297).
 pub(crate) const PREFILL_MS_PER_TOKEN_FALLBACK: f64 = 0.615;
 
-/// Completion tokens assumed for the final answer until this run has
-/// produced a draft (a tool-less answer of substance).
+/// Completion tokens assumed for the final answer: the floor under this
+/// run's largest measured draft (a tool-less answer of substance) — a larger
+/// draft raises it, a smaller one never lowers it.
 ///
 /// Why 6,526: the largest final report measured in the val082/val083
 /// b2/b3 review runs (b3_resume; the others: 3,079 – 5,872, b2_65536 5,288).
@@ -68,8 +69,8 @@ pub(crate) struct CallForecast {
     pub prefill_ms_per_token: f64,
     /// p90 completion size of this run's calls (the next ordinary call).
     pub next_completion_tokens: u64,
-    /// Expected final-answer completion size: this run's largest draft, or
-    /// [`ANSWER_COMPLETION_FLOOR`].
+    /// Expected final-answer completion size: this run's largest draft,
+    /// never below [`ANSWER_COMPLETION_FLOOR`].
     pub answer_completion_tokens: u64,
 }
 
@@ -84,7 +85,8 @@ fn quantile(sorted: &[f64], q: f64) -> Option<f64> {
 
 impl CallForecast {
     /// Forecast from this run's measured calls and its largest draft's
-    /// completion size (`None` when no draft exists yet).
+    /// completion size (`None` when no draft exists yet; the answer size is
+    /// never below [`ANSWER_COMPLETION_FLOOR`]).
     pub(crate) fn from_calls(calls: &[CallShape], draft_completion_tokens: Option<u64>) -> Self {
         let mut decode: Vec<f64> = calls
             .iter()
@@ -111,9 +113,12 @@ impl CallForecast {
             next_completion_tokens: quantile(&completions, SLOW_QUANTILE)
                 .map(|c| c.ceil() as u64)
                 .unwrap_or(0),
+            // max(largest draft, floor): an early draft (a 204-char
+            // write-up segment) is not the final report's size, and letting
+            // it displace the floor collapsed the answer forecast ~8x.
             answer_completion_tokens: draft_completion_tokens
-                .filter(|&t| t > 0)
-                .unwrap_or(ANSWER_COMPLETION_FLOOR),
+                .unwrap_or(0)
+                .max(ANSWER_COMPLETION_FLOOR),
         }
     }
 
