@@ -306,6 +306,17 @@ pub(super) fn annotate_restored_files(mut files: Vec<String>, restored: &[String
     files
 }
 
+/// The gate's contribution to the credited verdict, counting only checks
+/// that actually RAN. A not-run check (missing tool, unconfigured stage) earns
+/// no credit, so a report where nothing could run is no gate evidence at all
+/// (`None`) rather than "verification: passed (n checks)" (AGENTS.md rule 3).
+pub(super) fn gate_verdict_from_checks_that_ran(
+    report: &crate::testing::verification::VerificationReport,
+) -> Option<(bool, usize)> {
+    let ran = report.checks.iter().filter(|c| !c.not_run).count();
+    (ran > 0).then_some((report.overall_passed, ran))
+}
+
 /// Combine the verification evidence into the run summary's
 /// `(overall passed, check count)` — see
 /// [`Agent::credited_verification_summary`]. `None` only when nothing ran.
@@ -521,7 +532,7 @@ impl Agent {
         let gate = self
             .verification_gate
             .last_results()
-            .map(|report| (report.overall_passed, report.checks.len()));
+            .and_then(gate_verdict_from_checks_that_ran);
         credited_verification_verdict(
             gate,
             tool_passes,

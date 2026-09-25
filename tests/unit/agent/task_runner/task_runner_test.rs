@@ -4398,3 +4398,59 @@ async fn test_planning_reasoning_exhaustion_twice_is_terminal_and_names_the_retr
         server.stop().await;
     }
 }
+
+#[test]
+fn gate_verdict_counts_only_checks_that_ran() {
+    use crate::testing::verification::{CheckResult, CheckType, VerificationReport};
+    let check = |check_type, passed, not_run| CheckResult {
+        check_type,
+        passed,
+        not_run,
+        duration_ms: 0,
+        output: String::new(),
+        errors: vec![],
+        warnings: vec![],
+        suggestions: vec![],
+    };
+    let report = |checks: Vec<CheckResult>| VerificationReport {
+        triggered_by: "test".into(),
+        timestamp: Utc::now(),
+        total_duration_ms: 0,
+        overall_passed: checks.iter().all(|c| c.passed),
+        checks,
+        affected_files: vec![],
+        side_effects: vec![],
+        suggested_next_steps: vec![],
+    };
+
+    // Nothing could run: no gate evidence, never "passed (n checks)".
+    let all_not_run = report(vec![
+        check(CheckType::Lint, true, true),
+        check(CheckType::Test, true, true),
+    ]);
+    assert_eq!(gate_verdict_from_checks_that_ran(&all_not_run), None);
+    assert_eq!(
+        credited_verification_verdict(
+            gate_verdict_from_checks_that_ran(&all_not_run),
+            0,
+            0,
+            true,
+            false
+        ),
+        None
+    );
+
+    // Mixed: only the check that ran is counted.
+    let mixed = report(vec![
+        check(CheckType::TypeCheck, true, false),
+        check(CheckType::Lint, true, true),
+    ]);
+    assert_eq!(gate_verdict_from_checks_that_ran(&mixed), Some((true, 1)));
+
+    // A real failure still fails.
+    let failed = report(vec![
+        check(CheckType::Test, false, false),
+        check(CheckType::Lint, true, true),
+    ]);
+    assert_eq!(gate_verdict_from_checks_that_ran(&failed), Some((false, 1)));
+}
