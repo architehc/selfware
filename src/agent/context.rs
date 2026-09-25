@@ -138,7 +138,7 @@ impl ContextCompressor {
 
     /// The rendered ledger for a request whose history is `messages`: each
     /// file says whether its content is in that history (see
-    /// [`WorkLedger::render_in_context`]).
+    /// `WorkLedger::render_in_context`).
     pub fn render_work_ledger_for(
         &self,
         max_tokens: usize,

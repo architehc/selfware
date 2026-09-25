@@ -759,7 +759,7 @@ pub(crate) const OUTSIDE_POLICY_REASON: &str = "outside workspace/policy";
 ///    race); that real path is checked against the root once more.
 ///
 /// A candidate failing any step is `Unverifiable` with
-/// [`OUTSIDE_POLICY_REASON`] and is never read; it is never reported as a
+/// `OUTSIDE_POLICY_REASON` and is never read; it is never reported as a
 /// missing file or a wrong line, which would leak its existence or content.
 pub struct CitationResolver {
     /// Canonical workspace root (symlinks resolved).
