@@ -1064,8 +1064,10 @@ async fn test_compaction_emits_a_context_compression_progress_event() {
         .unwrap()
         .with_progress_emitter(recorder.clone());
     // A compression threshold every request exceeds: the short task history
-    // is at most the kept tail, so the summary path makes no call and the
-    // hard-limit fallback runs — the c24 shape.
+    // is at most the kept tail, so the summary path makes no call. The
+    // history is within the HARD budget, so nothing is dropped any more (the
+    // c24 hard fallbacks dropped the fresh read every time): the event says
+    // the history was kept, and why.
     agent.compressor = context::ContextCompressor::new(40);
 
     let _ = agent.run_task("Just answer immediately").await;
@@ -1083,7 +1085,8 @@ async fn test_compaction_emits_a_context_compression_progress_event() {
         .collect();
     assert!(!details.is_empty(), "no context_compression event");
     let first = &details[0];
-    assert!(first.contains("method=hard_fallback"), "{first}");
+    assert!(first.contains("method=kept"), "{first}");
+    assert!(first.contains("nothing dropped"), "{first}");
     assert!(first.contains("messages "), "{first}");
     assert!(first.contains("tokens ~"), "{first}");
     assert!(
@@ -1126,6 +1129,87 @@ async fn test_overflow_hard_compaction_emits_a_context_compression_event() {
         detail.contains("reason=request hit a context-window overflow"),
         "{detail}"
     );
+}
+
+/// val082 c24/b2_65536: the history was over budget because of a FEW huge
+/// tool results, so dropping whole messages lost the reads. The history
+/// trim now compacts old results in place first, with the ledger's digest
+/// recorded beforehand, and says so in a `result_compaction` event with the
+/// measured numbers — no message is dropped.
+#[tokio::test]
+async fn test_history_trim_compacts_huge_results_in_place_and_reports_it() {
+    use std::sync::Arc;
+    let config = mock_agent_config("http://127.0.0.1:1/v1".to_string(), false);
+    let recorder = Arc::new(super::progress::RecordingProgressEmitter::new());
+    let mut agent = Agent::new(config)
+        .await
+        .unwrap()
+        .with_progress_emitter(recorder.clone());
+    let task = "Review src/agent read-only and cite path:line.";
+    let body = |stem: &str| {
+        (0..700)
+            .map(|i| format!("pub fn {stem}_{i}(x: usize) -> usize {{ x * {i} + 1 }}\n"))
+            .collect::<String>()
+    };
+    agent.messages = vec![Message::system("sys"), Message::user(task)];
+    for (i, path) in ["src/a.rs", "src/b.rs", "src/c.rs"].iter().enumerate() {
+        let id = format!("c{i}");
+        let mut call = Message::assistant("");
+        call.tool_calls = Some(vec![crate::api::types::ToolCall {
+            id: id.clone(),
+            call_type: "function".to_string(),
+            function: crate::api::types::ToolFunction {
+                name: "file_read".to_string(),
+                arguments: serde_json::json!({ "path": path }).to_string(),
+            },
+        }]);
+        agent.messages.push(call);
+        let content = body(&format!("f{i}"));
+        agent.messages.push(Message::tool(
+            serde_json::json!({"content": content, "total_lines": 700}).to_string(),
+            id,
+        ));
+    }
+    let before_len = agent.messages.len();
+    let before = crate::token_count::estimate_messages_tokens(&agent.messages);
+    agent.max_context_tokens = before * 3 / 4;
+    agent.trim_message_history();
+
+    assert_eq!(agent.messages.len(), before_len, "no message dropped");
+    let after = crate::token_count::estimate_messages_tokens(&agent.messages);
+    assert!(after <= agent.max_context_tokens, "{after}");
+    assert!(agent.messages[1].content.text().contains(task));
+    assert!(agent.messages[3]
+        .content
+        .text()
+        .contains("NO LONGER in your context"));
+    let detail = recorder
+        .snapshot()
+        .into_iter()
+        .find_map(|e| match e {
+            progress::ProgressEvent::TurnDecision { decision, detail }
+                if decision == "context_compression" =>
+            {
+                Some(detail)
+            }
+            _ => None,
+        })
+        .expect("context_compression event");
+    assert!(detail.contains("method=result_compaction"), "{detail}");
+    assert!(
+        detail.contains(&format!("tokens ~{before}->~{after}")),
+        "{detail}"
+    );
+    assert!(detail.contains("file_read src/a.rs"), "{detail}");
+    // The ledger recorded the stubbed read's digest before the stub landed.
+    let ledger = agent.compressor.work_ledger();
+    let a = ledger
+        .files()
+        .iter()
+        .find(|f| f.path == "src/a.rs")
+        .unwrap();
+    assert_eq!(a.reads, 1);
+    assert_eq!(a.symbols.first().map(|(l, _)| *l), Some(1));
 }
 
 #[tokio::test]

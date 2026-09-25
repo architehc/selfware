@@ -903,9 +903,12 @@ fn work_ledger_survives_repeated_trims_and_lists_read_files() {
         .render_work_ledger(work_ledger_token_cap(24_000))
         .expect("ledger renders");
     assert!(rendered.contains(WORK_LEDGER_HEADER));
-    assert!(rendered.contains(
-        "Do not re-read a file listed here unless you need a specific line range you have not seen"
-    ));
+    // The header no longer forbids re-reading (val082: the reads' CONTENT
+    // was gone while the ledger said "do not re-read"); it says findings are
+    // not contents and exact lines must be in context before citing.
+    assert!(rendered.contains("they are not the file contents"));
+    assert!(rendered.contains("re-read just the range you need if they are not"));
+    assert!(!rendered.contains("Do not re-read a file listed here"));
     assert!(rendered.contains("src/parser.rs — whole file (3 lines)"));
     assert!(rendered.contains("tests/parser_test.rs — lines 1-40"));
     assert!(rendered.contains("your note: The parser.rs module has parse() and lex()"));
@@ -970,7 +973,7 @@ fn work_ledger_reread_of_unchanged_file_with_new_range_is_recorded() {
     assert_eq!(entry.last_read_turn, 2);
     let rendered = ledger.render(1_500).unwrap();
     assert!(rendered.contains("lines 1-50, 100-150"));
-    assert!(rendered.contains("Reading a new range is fine."));
+    assert!(rendered.contains("re-read just the range you need"));
 }
 
 #[test]

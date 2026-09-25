@@ -1,3 +1,4 @@
+use super::result_compaction::ContextPresence;
 use crate::api::client::SideCall;
 use crate::api::types::{Message, Usage};
 use crate::api::ApiClient;
@@ -135,6 +136,29 @@ impl ContextCompressor {
         self.with_ledger(|l| l.render(max_tokens))
     }
 
+    /// The rendered ledger for a request whose history is `messages`: each
+    /// file says whether its content is in that history (see
+    /// [`WorkLedger::render_in_context`]).
+    pub fn render_work_ledger_for(
+        &self,
+        max_tokens: usize,
+        messages: &[Message],
+    ) -> Option<String> {
+        let root = super::current_project_root();
+        let presence = ContextPresence::from_messages(messages, &|p| {
+            WorkLedger::normalize_path(p, Some(root.as_path()))
+        });
+        self.with_ledger(|l| l.render_in_context(max_tokens, &presence))
+    }
+
+    /// The ledger's recorded finding for a file (stub text for in-place
+    /// result compaction).
+    pub fn file_finding(&self, path: &str) -> Option<String> {
+        let root = super::current_project_root();
+        let key = WorkLedger::normalize_path(path, Some(root.as_path()));
+        self.with_ledger(|l| l.file_finding(&key))
+    }
+
     /// The ledger's current model turn (the numbering its entries use).
     pub fn work_ledger_turn(&self) -> usize {
         self.with_ledger(|l| l.turn())
@@ -162,6 +186,12 @@ impl ContextCompressor {
             estimated, self.compression_threshold
         );
         estimated > self.compression_threshold
+    }
+
+    /// Whether `messages` exceed the hard message-count cap (which
+    /// [`Self::should_compress`] enforces regardless of tokens).
+    pub fn over_message_cap(&self, messages: &[Message]) -> bool {
+        messages.len() > MAX_MESSAGE_COUNT
     }
 
     pub fn estimate_tokens(&self, messages: &[Message]) -> usize {
@@ -518,6 +548,10 @@ const LEDGER_MAX_WRITES: usize = 64;
 const LEDGER_NOTE_MAX_CHARS: usize = 240;
 /// Per-file remembered range hashes (oldest evicted first).
 const LEDGER_MAX_RANGE_HASHES: usize = 32;
+/// Per-file remembered symbols (digest), by line.
+const LEDGER_MAX_SYMBOLS: usize = 64;
+/// Longest rendered symbol digest per file line (chars).
+const LEDGER_SYMBOLS_MAX_CHARS: usize = 360;
 /// Remembered processed-result fingerprints (bounded FIFO).
 const LEDGER_SEEN_CAP: usize = 4096;
 
@@ -575,6 +609,11 @@ pub struct LedgerFileEntry {
     /// Content hash per exact read range (`None` = whole file) for the
     /// version the current coverage describes; bounded.
     read_hashes: Vec<(Option<(usize, usize)>, String)>,
+    /// Digest of what was read: key definitions with their line numbers,
+    /// recorded from the full result BEFORE any trim or compaction can drop
+    /// it (merged across reads of the same version; bounded). Rendered for
+    /// files whose content is no longer in context.
+    pub symbols: Vec<(usize, String)>,
     seq: u64,
 }
 
@@ -606,6 +645,13 @@ pub struct WorkLedger {
     seen: HashSet<u64>,
     seen_order: VecDeque<u64>,
     seq: u64,
+}
+
+/// The ledger's content hash (FNV-1a 64) of one read's `content`, shared
+/// with the result-compaction stubs so a stub's `content_hash` matches the
+/// ledger line.
+pub(crate) fn content_fingerprint(content: &str) -> u64 {
+    fnv1a64(&[content])
 }
 
 /// Deterministic FNV-1a 64 (stable across runs, unlike `DefaultHasher`).
@@ -786,7 +832,7 @@ impl WorkLedger {
         self.seq
     }
 
-    fn normalize_path(path: &str, root: Option<&std::path::Path>) -> String {
+    pub(crate) fn normalize_path(path: &str, root: Option<&std::path::Path>) -> String {
         let trimmed = path.trim();
         if let Some(root) = root {
             if let Ok(rel) = std::path::Path::new(trimmed).strip_prefix(root) {
@@ -884,6 +930,11 @@ impl WorkLedger {
         payload: &str,
         root: Option<&std::path::Path>,
     ) {
+        // A result compacted in place (stub / truncated head) is not a new
+        // read: the full result was recorded before it was compacted.
+        if super::result_compaction::is_compacted_payload(payload) {
+            return;
+        }
         let args: serde_json::Value = serde_json::from_str(args).unwrap_or_default();
         match name {
             "file_read" => {
@@ -921,7 +972,12 @@ impl WorkLedger {
                     Some(c) => (fnv1a64(&[c]), false),
                     None => (fnv1a64(&[payload]), true),
                 };
-                self.record_file_read(path, range, total_lines, hash, partial);
+                let symbols = content
+                    .map(|c| {
+                        super::result_compaction::symbol_digest(c, range.map_or(1, |r| r.0.max(1)))
+                    })
+                    .unwrap_or_default();
+                self.record_file_read(path, range, total_lines, hash, partial, symbols);
             }
             "grep_search" => {
                 let pattern = args
@@ -1019,6 +1075,7 @@ impl WorkLedger {
         total_lines: Option<usize>,
         hash: u64,
         partial: bool,
+        symbols: Vec<(usize, String)>,
     ) {
         let seq = self.next_seq();
         let turn = self.turn;
@@ -1043,7 +1100,9 @@ impl WorkLedger {
                 entry.read_hashes.clear();
                 entry.total_lines = None;
                 entry.note = None;
+                entry.symbols.clear();
             }
+            Self::merge_symbols(&mut entry.symbols, symbols);
             match range {
                 Some(r) => merge_range(&mut entry.ranges, r),
                 None => entry.whole_file = true,
@@ -1093,6 +1152,11 @@ impl WorkLedger {
                 modified_turn: None,
                 reread_since_modified: false,
                 read_hashes: vec![(range, hash)],
+                symbols: {
+                    let mut merged = Vec::new();
+                    Self::merge_symbols(&mut merged, symbols);
+                    merged
+                },
                 seq,
             });
             if self.files.len() > LEDGER_MAX_FILES {
@@ -1108,6 +1172,26 @@ impl WorkLedger {
                 }
             }
         }
+    }
+
+    /// Merge `new` into `into` by line (sorted, deduplicated, bounded).
+    fn merge_symbols(into: &mut Vec<(usize, String)>, new: Vec<(usize, String)>) {
+        for (line, text) in new {
+            if !into.iter().any(|(l, _)| *l == line) {
+                into.push((line, text));
+            }
+        }
+        into.sort_by_key(|(l, _)| *l);
+        into.truncate(LEDGER_MAX_SYMBOLS);
+    }
+
+    /// The recorded finding for `path` (model note or summary line), if any.
+    pub fn file_finding(&self, path: &str) -> Option<String> {
+        let path = path.trim().trim_start_matches("./");
+        self.files
+            .iter()
+            .find(|f| f.path == path || f.path.ends_with(&format!("/{path}")))
+            .and_then(|f| f.note.as_ref().map(|(_, _, n)| n.clone()))
     }
 
     fn absorb_model_notes(&mut self, text: &str) {
@@ -1167,7 +1251,7 @@ impl WorkLedger {
         }
     }
 
-    fn render_file_line(f: &LedgerFileEntry) -> String {
+    fn render_file_line(f: &LedgerFileEntry, presence: Option<&ContextPresence>) -> String {
         let coverage = if f.whole_file {
             match f.total_lines {
                 Some(n) => format!("whole file ({n} lines)"),
@@ -1229,6 +1313,48 @@ impl WorkLedger {
                 ));
             }
         }
+        if let Some(presence) = presence {
+            let fmt_ranges = |r: &[(usize, usize)]| {
+                r.iter()
+                    .map(|(a, b)| format!("{a}-{b}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let in_ranges = presence.ranges(&f.path);
+            if presence.whole(&f.path) {
+                line.push_str(" [content in context]");
+            } else if !in_ranges.is_empty() {
+                line.push_str(&format!(
+                    " [in context: lines {} only — other lines NOT in context]",
+                    fmt_ranges(&in_ranges)
+                ));
+            } else {
+                line.push_str(" [content NOT in context]");
+            }
+            if !presence.whole(&f.path) && !f.symbols.is_empty() {
+                let mut digest = String::new();
+                let mut shown = 0usize;
+                for (n, sym) in &f.symbols {
+                    let item = format!("{n}: {sym}");
+                    if !digest.is_empty()
+                        && digest.chars().count() + item.chars().count() + 2
+                            > LEDGER_SYMBOLS_MAX_CHARS
+                    {
+                        break;
+                    }
+                    if !digest.is_empty() {
+                        digest.push_str("; ");
+                    }
+                    digest.push_str(&item);
+                    shown += 1;
+                }
+                let more = f.symbols.len() - shown;
+                if more > 0 {
+                    digest.push_str(&format!(" (+{more} more)"));
+                }
+                line.push_str(&format!("\n  symbols (index, not code): {digest}"));
+            }
+        }
         if let Some((source, _, note)) = &f.note {
             let label = match source {
                 LedgerNoteSource::ModelNote => "your note",
@@ -1245,6 +1371,23 @@ impl WorkLedger {
     /// cap is hit, and the omission is stated. `None` when there is nothing
     /// to report or not even the header fits.
     pub fn render(&self, max_tokens: usize) -> Option<String> {
+        self.render_with(max_tokens, None)
+    }
+
+    /// [`Self::render`] for a request whose history is `presence`: every
+    /// file line says whether its content is still in context, and files
+    /// whose content is gone carry their symbol digest — so the model knows
+    /// which files it must re-read (a range) before citing, instead of
+    /// answering from memory of dropped content.
+    pub(crate) fn render_in_context(
+        &self,
+        max_tokens: usize,
+        presence: &ContextPresence,
+    ) -> Option<String> {
+        self.render_with(max_tokens, Some(presence))
+    }
+
+    fn render_with(&self, max_tokens: usize, presence: Option<&ContextPresence>) -> Option<String> {
         use crate::token_count::estimate_content_tokens;
         if self.is_empty() {
             return None;
@@ -1254,7 +1397,7 @@ impl WorkLedger {
         // out larger (so the omission footer is never the part that is cut).
         let mut limit = max_tokens;
         for _ in 0..8 {
-            let out = self.render_within(limit)?;
+            let out = self.render_within(limit, presence)?;
             let measured = estimate_content_tokens(&out);
             if measured <= max_tokens {
                 return Some(out);
@@ -1264,16 +1407,34 @@ impl WorkLedger {
         None
     }
 
-    fn render_within(&self, max_tokens: usize) -> Option<String> {
+    fn render_within(
+        &self,
+        max_tokens: usize,
+        presence: Option<&ContextPresence>,
+    ) -> Option<String> {
         use crate::token_count::estimate_content_tokens;
-        let header = format!(
-            "{WORK_LEDGER_HEADER} — turn {}\n\
-             Built from your own successful tool results in this task. Do not re-read a \
-             file listed here unless you need a specific line range you have not seen (or \
-             you modified it since); your earlier findings are summarised here. Reading a \
-             new range is fine.",
-            self.turn
-        );
+        let header = if presence.is_some() {
+            format!(
+                "{WORK_LEDGER_HEADER} — turn {}\n\
+                 Built from your own successful tool results in this task. Each file says \
+                 whether its content is still in your context. [content in context]: use it, \
+                 do not read it again. [content NOT in context]: only this record survives — \
+                 the symbol index gives definitions and line numbers, not code. Before quoting \
+                 code or citing exact lines from such a file, re-read just the line range you \
+                 need (file_read with line_range); never answer from memory of content that \
+                 is not in context. Do not re-read whole files only to rebuild this record.",
+                self.turn
+            )
+        } else {
+            format!(
+                "{WORK_LEDGER_HEADER} — turn {}\n\
+                 Built from your own successful tool results in this task. Your earlier \
+                 findings are summarised here; they are not the file contents. Before quoting \
+                 code or citing exact lines, make sure those lines are in your context — \
+                 re-read just the range you need if they are not.",
+                self.turn
+            )
+        };
         let mut writes: Vec<&LedgerWrite> = self.writes.iter().collect();
         writes.sort_by_key(|w| std::cmp::Reverse(w.seq));
         let mut files: Vec<&LedgerFileEntry> = self.files.iter().collect();
@@ -1296,7 +1457,10 @@ impl WorkLedger {
             ),
             (
                 "Files already read (newest first):",
-                files.iter().map(|f| Self::render_file_line(f)).collect(),
+                files
+                    .iter()
+                    .map(|f| Self::render_file_line(f, presence))
+                    .collect(),
             ),
             (
                 "Searches already run:",

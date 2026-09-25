@@ -398,6 +398,22 @@ impl Agent {
             return (0, 0);
         }
 
+        // Pass 0: shrink old large tool results IN PLACE (stubs that say the
+        // content is gone; the latest result only ever cut to a head) before
+        // any whole message is dropped — a few huge reads, not many
+        // messages, fill small windows (val082 c24/b2_65536).
+        let _ = super::result_compaction::compact_tool_results_to_budget(
+            messages,
+            max_context_tokens,
+            super::result_compaction::RECENT_RESULTS_KEPT_INTACT,
+            super::result_compaction::stub_token_budget(max_context_tokens),
+            &|_| None,
+        );
+        let compacted_total = estimate_messages_tokens(messages);
+        if compacted_total <= max_context_tokens {
+            return (0, total - compacted_total);
+        }
+
         use super::context::estimate_message_tokens;
         let token_counts: Vec<usize> = messages.iter().map(estimate_message_tokens).collect();
         let max_pinned_critical = (max_context_tokens / 6_000).clamp(2, 6);
@@ -414,7 +430,7 @@ impl Agent {
             pinned_critical.insert(anchor);
         }
 
-        let mut remaining = total;
+        let mut remaining = compacted_total;
         let mut keep = vec![true; messages.len()];
         // Pass 1: Drop non-critical non-system messages oldest first
         for (i, tokens) in token_counts.iter().enumerate() {
@@ -838,6 +854,7 @@ impl Agent {
     /// tail would exceed a third of the budget, the hint sections are
     /// truncated (measured) — never the ledger, which is already bounded by
     /// [`super::context::work_ledger_token_cap`].
+    #[cfg(test)]
     pub(super) fn finish_request_with_tail(
         request_messages: Vec<Message>,
         sections: Vec<String>,
@@ -845,14 +862,38 @@ impl Agent {
         max_context_tokens: usize,
         checkpoint: Option<&crate::checkpoint::TaskCheckpoint>,
     ) -> Result<Vec<Message>, crate::errors::ApiError> {
+        Self::finish_request_with_tail_and_ledger(
+            request_messages,
+            sections,
+            &|_, _| ledger.clone(),
+            max_context_tokens,
+            checkpoint,
+        )
+    }
+
+    /// [`Self::finish_request_with_tail`] with the ledger rendered by
+    /// `ledger_for(history, max_tokens)` against the history ACTUALLY sent:
+    /// it is rendered once to size the tail reservation, then again for the
+    /// fitted history, so its "content in context / NOT in context" tags
+    /// describe the request the model sees (fitting may have compacted or
+    /// dropped reads). When the tail does not fit, it is rebuilt within the
+    /// room left (hints truncated first, then a smaller ledger) before it
+    /// is ever dropped — at 65,536 the whole tail, ledger included, was
+    /// dropped next to one huge read and the model restarted the review.
+    pub(super) fn finish_request_with_tail_and_ledger(
+        request_messages: Vec<Message>,
+        sections: Vec<String>,
+        ledger_for: &dyn Fn(&[Message], usize) -> Option<String>,
+        max_context_tokens: usize,
+        checkpoint: Option<&crate::checkpoint::TaskCheckpoint>,
+    ) -> Result<Vec<Message>, crate::errors::ApiError> {
         use crate::token_count::{estimate_content_tokens, estimate_messages_tokens};
 
         let request_messages = Self::demote_mid_conversation_system_messages(request_messages);
-        let tail = Self::build_request_tail(
-            sections,
-            ledger,
-            Self::request_tail_token_cap(max_context_tokens),
-        );
+        let tail_cap = Self::request_tail_token_cap(max_context_tokens);
+        let ledger_cap = super::context::work_ledger_token_cap(max_context_tokens);
+        let provisional = ledger_for(&request_messages, ledger_cap);
+        let tail = Self::build_request_tail(sections.clone(), provisional.clone(), tail_cap);
         // Measured reservation: the tail as its own message (content +
         // per-message overhead), plus slack for the join separator.
         let reserve = tail
@@ -863,19 +904,46 @@ impl Agent {
         let mut fitted =
             Self::fit_request_to_context_budget(request_messages, history_budget, checkpoint)?;
 
+        // Re-render against the fitted history (what the model will see).
+        let ledger = ledger_for(&fitted, ledger_cap);
+        let tail = if ledger == provisional {
+            tail
+        } else {
+            Self::build_request_tail(sections.clone(), ledger, tail_cap)
+        };
+
         if let Some(tail) = tail {
             let without_tail = fitted.clone();
             Self::attach_request_tail(&mut fitted, &tail);
             let measured = estimate_messages_tokens(&fitted);
             if measured > max_context_tokens {
-                tracing::warn!(
-                    "request tail ({} tokens) pushed the request to {} tokens, over the {}-token \
-                     budget; sending without it",
-                    estimate_content_tokens(&tail),
-                    measured,
-                    max_context_tokens
-                );
-                fitted = without_tail;
+                // Rebuild within the measured room: hints are truncated
+                // first (build_request_tail), then the ledger is rendered
+                // smaller (it states what it omits).
+                let room = max_context_tokens
+                    .saturating_sub(estimate_messages_tokens(&without_tail))
+                    .saturating_sub(16);
+                let smaller_ledger = ledger_for(&without_tail, ledger_cap.min(room / 2).max(1));
+                let retry = Self::build_request_tail(sections, smaller_ledger, room);
+                let mut retried = without_tail.clone();
+                let fits = retry.as_ref().is_some_and(|t| {
+                    Self::attach_request_tail(&mut retried, t);
+                    estimate_messages_tokens(&retried) <= max_context_tokens
+                });
+                if fits {
+                    fitted = retried;
+                } else {
+                    tracing::warn!(
+                        "request tail ({} tokens) pushed the request to {} tokens, over the \
+                         {}-token budget, and no smaller tail fits the {} tokens left; sending \
+                         without it",
+                        estimate_content_tokens(&tail),
+                        measured,
+                        max_context_tokens,
+                        room
+                    );
+                    fitted = without_tail;
+                }
             }
         }
         Ok(fitted)
@@ -1046,6 +1114,16 @@ impl Agent {
         if total <= self.max_context_tokens {
             return;
         }
+        // In-place result compaction first (with the ledger's findings in
+        // the stubs); whole messages are dropped only if that is not enough.
+        self.compact_tool_results_logged(
+            self.max_context_tokens,
+            "history over the context budget",
+        );
+        let total: usize = estimate_messages_tokens(&self.messages);
+        if total <= self.max_context_tokens {
+            return;
+        }
         let before_messages = self.messages.len();
 
         let anchor_idx = self.current_task_anchor_index();
@@ -1075,6 +1153,43 @@ impl Agent {
                 removed_messages,
             );
         }
+    }
+
+    /// Compact old, large tool results in the history IN PLACE until it
+    /// measures at most `target_tokens` (see [`super::result_compaction`]),
+    /// recording progress into the work ledger first and emitting a
+    /// `context_compression` event with method `result_compaction` and the
+    /// measured numbers when anything changed. Returns the report.
+    pub(super) fn compact_tool_results_logged(
+        &mut self,
+        target_tokens: usize,
+        why: &str,
+    ) -> Option<super::result_compaction::ResultCompactionReport> {
+        use super::result_compaction as rc;
+        // The full results are recorded (with their symbol digests) before
+        // any of them is replaced by a stub.
+        self.compressor.observe_work(&self.messages);
+        let compressor = &self.compressor;
+        let report = rc::compact_tool_results_to_budget(
+            &mut self.messages,
+            target_tokens,
+            rc::RECENT_RESULTS_KEPT_INTACT,
+            rc::stub_token_budget(self.max_context_tokens),
+            &|path| compressor.file_finding(path),
+        )?;
+        let messages = self.messages.len();
+        let reason = format!("{why}; {}", report.describe());
+        self.log_context_compression_event(super::session_log::ContextCompressionLogDetails {
+            strategy: rc::RESULT_COMPACTION_METHOD,
+            success: report.after_tokens < report.before_tokens,
+            before_messages: messages,
+            after_messages: messages,
+            before_tokens: report.before_tokens,
+            after_tokens: report.after_tokens,
+            threshold: target_tokens,
+            error: Some(&reason),
+        });
+        Some(report)
     }
 
     /// Walk the project directory and register all files at L1 in the context map.

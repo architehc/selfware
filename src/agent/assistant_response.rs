@@ -140,88 +140,115 @@ impl Agent {
         self.trim_message_history();
 
         let compression_threshold = self.compressor.compression_threshold();
+        if self.compressor.should_compress(&self.messages) {
+            info!("Context compression triggered");
+            // Stage 1 — no model call, any message count: shrink old large
+            // tool results IN PLACE (oldest first, recent reads intact). The
+            // val082 windows were full because of a few huge reads, so the
+            // message-count summary below could not act (c24: "too few
+            // messages" on 10 of 12 compactions).
+            self.compact_tool_results_logged(
+                compression_threshold,
+                "history over the compression threshold",
+            );
+        }
         let before_compression_messages = self.messages.len();
         let before_compression_tokens = self.compressor.estimate_tokens(&self.messages);
         if self.compressor.should_compress(&self.messages) {
-            info!("Context compression triggered");
-            match self
-                .compressor
-                .compress_with_task(&self.client, &self.messages, self.current_task_text())
-                .await
-            {
-                Ok((compressed, _usage)) => {
-                    let after_tokens = self.compressor.estimate_tokens(&compressed);
-                    let did_compress = after_tokens < before_compression_tokens
-                        || compressed.len() < before_compression_messages;
-                    if did_compress {
-                        self.messages = compressed;
-                        self.sync_api_usage();
-                        self.log_context_compression_event(
-                            super::session_log::ContextCompressionLogDetails {
-                                strategy: "summary",
-                                success: true,
-                                before_messages: before_compression_messages,
-                                after_messages: self.messages.len(),
-                                before_tokens: before_compression_tokens,
-                                after_tokens,
-                                threshold: compression_threshold,
-                                error: None,
-                            },
-                        );
-                    } else {
-                        // Name the real cause: most "no reduction" fallbacks
-                        // made no summarizer call at all (the history was
-                        // already at most the kept tail) — c24 at 24k: 10 of
-                        // 12 fallbacks.
-                        let reason = if self.compressor.too_few_to_summarize(&self.messages) {
-                            format!(
-                                "too few messages to summarize ({}); no summary call made",
-                                before_compression_messages
-                            )
-                        } else {
-                            format!(
-                                "summary did not reduce size (~{before_compression_tokens} -> ~{after_tokens} tokens)"
-                            )
-                        };
-                        warn!("Context compression summary yielded no size reduction ({reason}), using hard fallback");
-                        self.messages = self
-                            .compressor
-                            .hard_compress_with_task(&self.messages, self.current_task_text());
-                        let final_tokens = self.compressor.estimate_tokens(&self.messages);
-                        self.sync_api_usage();
-                        self.log_context_compression_event(
-                            super::session_log::ContextCompressionLogDetails {
-                                strategy: "hard_fallback",
-                                success: final_tokens < before_compression_tokens,
-                                before_messages: before_compression_messages,
-                                after_messages: self.messages.len(),
-                                before_tokens: before_compression_tokens,
-                                after_tokens: final_tokens,
-                                threshold: compression_threshold,
-                                error: Some(&reason),
-                            },
-                        );
+            // Stage 2 — summary of the older messages, when there are any.
+            // Whatever it yields, the history is never swapped for a LARGER
+            // one, and a summary that cannot help is not a reason to drop
+            // anything: `trim_message_history` above already holds the
+            // history within the hard budget.
+            let kept_reason: Option<String> =
+                if self.compressor.too_few_to_summarize(&self.messages) {
+                    Some(format!(
+                    "too few messages to summarize ({before_compression_messages}); no summary \
+                     call made; no older tool result left to compact"
+                ))
+                } else {
+                    match self
+                        .compressor
+                        .compress_with_task(&self.client, &self.messages, self.current_task_text())
+                        .await
+                    {
+                        Ok((compressed, _usage)) => {
+                            let after_tokens = self.compressor.estimate_tokens(&compressed);
+                            if after_tokens < before_compression_tokens {
+                                self.messages = compressed;
+                                self.sync_api_usage();
+                                self.log_context_compression_event(
+                                    super::session_log::ContextCompressionLogDetails {
+                                        strategy: "summary",
+                                        success: true,
+                                        before_messages: before_compression_messages,
+                                        after_messages: self.messages.len(),
+                                        before_tokens: before_compression_tokens,
+                                        after_tokens,
+                                        threshold: compression_threshold,
+                                        error: None,
+                                    },
+                                );
+                                None
+                            } else {
+                                self.sync_api_usage();
+                                Some(format!(
+                                    "summary did not reduce size (~{before_compression_tokens} -> \
+                                 ~{after_tokens} tokens); original kept"
+                                ))
+                            }
+                        }
+                        Err(e) => {
+                            // A failed/timed-out summary side call may still have
+                            // been billed: account what the client recorded.
+                            self.sync_api_usage();
+                            Some(format!("summary failed: {e}; original kept"))
+                        }
                     }
-                }
-                Err(e) => {
-                    warn!("Compression failed, using hard limit: {}", e);
+                };
+            if let Some(reason) = kept_reason {
+                let tokens = self.compressor.estimate_tokens(&self.messages);
+                if tokens > self.max_context_tokens
+                    || self.compressor.over_message_cap(&self.messages)
+                {
+                    // Only a history still over the HARD budget (or the
+                    // message-count cap) takes the blunt fallback. The work
+                    // ledger recorded every read (with its symbol digest)
+                    // before this, and tags what is no longer in context.
+                    warn!("Context compression could not fit the history ({reason}), using hard fallback");
                     self.messages = self
                         .compressor
                         .hard_compress_with_task(&self.messages, self.current_task_text());
-                    // A failed/timed-out summary side call may still have
-                    // been billed: account what the client recorded.
-                    self.sync_api_usage();
-                    let error_text = e.to_string();
+                    let final_tokens = self.compressor.estimate_tokens(&self.messages);
                     self.log_context_compression_event(
                         super::session_log::ContextCompressionLogDetails {
                             strategy: "hard_fallback",
+                            success: final_tokens < before_compression_tokens,
+                            before_messages: before_compression_messages,
+                            after_messages: self.messages.len(),
+                            before_tokens: before_compression_tokens,
+                            after_tokens: final_tokens,
+                            threshold: compression_threshold,
+                            error: Some(&reason),
+                        },
+                    );
+                } else {
+                    info!("Context above the compression threshold but within budget: {reason}");
+                    let reason = format!(
+                        "{reason}; history within the hard budget ({tokens}/{} tokens), nothing \
+                         dropped",
+                        self.max_context_tokens
+                    );
+                    self.log_context_compression_event(
+                        super::session_log::ContextCompressionLogDetails {
+                            strategy: "kept",
                             success: false,
                             before_messages: before_compression_messages,
                             after_messages: self.messages.len(),
                             before_tokens: before_compression_tokens,
-                            after_tokens: self.compressor.estimate_tokens(&self.messages),
+                            after_tokens: tokens,
                             threshold: compression_threshold,
-                            error: Some(&error_text),
+                            error: Some(&reason),
                         },
                     );
                 }
@@ -344,15 +371,11 @@ impl Agent {
         // The history is fitted into the budget LEFT AFTER the per-turn tail
         // (hints + work ledger, measured), and the tail is attached at the
         // very end of the request — never in the system message.
-        let ledger = self
-            .compressor
-            .render_work_ledger(super::context::work_ledger_token_cap(
-                self.max_context_tokens,
-            ));
-        request_messages = Self::finish_request_with_tail(
+        let compressor = &self.compressor;
+        request_messages = Self::finish_request_with_tail_and_ledger(
             request_messages,
             turn_hints,
-            ledger,
+            &|history, cap| compressor.render_work_ledger_for(cap, history),
             self.max_context_tokens,
             self.current_checkpoint.as_ref(),
         )?;

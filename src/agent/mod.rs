@@ -118,6 +118,7 @@ pub mod planning;
 pub mod progress;
 pub mod prompt_builder;
 mod recovery;
+pub(crate) mod result_compaction;
 pub mod session_log;
 mod streaming;
 pub(crate) mod task_policy;
@@ -2866,6 +2867,9 @@ To call a tool, use this EXACT XML structure:
 
     /// Run MicroCompact - fast local compression with no API call
     pub fn compact_micro(&mut self) -> compression::CompressionMetrics {
+        // Record progress (reads with their symbol digests) into the work
+        // ledger before this compaction can drop any of it.
+        self.compressor.observe_work(&self.messages);
         let metrics = self.compression_orchestrator.run_micro(&mut self.messages);
         self.ensure_task_anchor_present();
         info!("MicroCompact: {}", metrics.summary());
@@ -2875,6 +2879,9 @@ To call a tool, use this EXACT XML structure:
 
     /// Run AutoCompact - LLM-based summarization
     pub async fn compact_auto(&mut self) -> anyhow::Result<compression::CompressionMetrics> {
+        // Record progress (reads with their symbol digests) into the work
+        // ledger before this compaction can drop any of it.
+        self.compressor.observe_work(&self.messages);
         let metrics = self
             .compression_orchestrator
             .run_auto(&self.client, &mut self.messages)
@@ -2888,6 +2895,9 @@ To call a tool, use this EXACT XML structure:
 
     /// Run FullCompact - nuclear option with file re-injection
     pub async fn compact_full(&mut self) -> anyhow::Result<compression::CompressionMetrics> {
+        // Record progress (reads with their symbol digests) into the work
+        // ledger before this compaction can drop any of it.
+        self.compressor.observe_work(&self.messages);
         let metrics = self
             .compression_orchestrator
             .run_full_with_safety(&self.client, &mut self.messages, &self.config.safety)

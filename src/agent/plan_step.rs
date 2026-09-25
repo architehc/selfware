@@ -39,15 +39,11 @@ impl Agent {
             .build_learning_hint(self.learning_context())
             .into_iter()
             .collect();
-        let ledger = self
-            .compressor
-            .render_work_ledger(super::context::work_ledger_token_cap(
-                self.max_context_tokens,
-            ));
-        let request_messages = Self::finish_request_with_tail(
+        let compressor = &self.compressor;
+        let request_messages = Self::finish_request_with_tail_and_ledger(
             self.messages.clone(),
             turn_hints,
-            ledger,
+            &|history, cap| compressor.render_work_ledger_for(cap, history),
             self.max_context_tokens,
             self.current_checkpoint.as_ref(),
         )?;
