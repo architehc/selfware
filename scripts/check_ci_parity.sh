@@ -9,7 +9,11 @@
 #   2. Documentation job: `cargo doc --no-deps --features extras` with
 #      RUSTDOCFLAGS=-D warnings (catches private/broken intra-doc links).
 #   3. Test (no default features) job: `cargo test --no-default-features`
-#      (catches tests/items that forget their feature cfg).
+#      (catches tests/items that forget their feature cfg), skipping the
+#      red-team corpus gate exactly as that CI job does.
+#   4. Red-team corpus gate job: `cargo test --test redteam_gate_test`
+#      (CI runs it only in its dedicated `redteam-gate` job; here it reuses
+#      the step-3 build).
 #
 # Git runs with init.defaultBranch=master, the stock default on CI runners
 # (a local Apple/Homebrew git may default to `main` and hide branch-name
@@ -27,7 +31,7 @@ REV="${1:-HEAD}"
 SHA="$(cd "${REPO_ROOT}" && git rev-parse --verify "${REV}")"
 
 echo "============================================================"
-echo " CI-parity check (python suite, docs, no-default-features)"
+echo " CI-parity check (python suite, docs, no-default-features, redteam gate)"
 echo " Revision: ${REV} (${SHA})"
 echo "============================================================"
 
@@ -68,9 +72,14 @@ echo "2. cargo doc --no-deps --features extras (RUSTDOCFLAGS=-D warnings)..."
 (cd "${WORKTREE_DIR}" && RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --features extras)
 echo "   cargo doc OK"
 
-echo "3. cargo test --no-default-features </dev/null..."
-(cd "${WORKTREE_DIR}" && cargo test --no-default-features </dev/null)
+echo "3. cargo test --no-default-features (corpus gate skipped, as in CI) </dev/null..."
+(cd "${WORKTREE_DIR}" \
+    && cargo test --no-default-features -- --skip redteam_corpus_respects_gate_expectations </dev/null)
 echo "   cargo test --no-default-features OK"
+
+echo "4. red-team corpus gate (cargo test --test redteam_gate_test) </dev/null..."
+(cd "${WORKTREE_DIR}" && cargo test --no-default-features --test redteam_gate_test </dev/null)
+echo "   red-team corpus gate OK"
 
 echo ""
 echo "============================================================"

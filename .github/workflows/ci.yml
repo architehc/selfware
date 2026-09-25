@@ -9,37 +9,35 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Dev/test builds keep file:line debug info (panics and RUST_BACKTRACE
+  # still resolve) but skip full variable/type debuginfo, which dominates
+  # link time and cache size for the ~20 test binaries.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 permissions:
   contents: read
 
 jobs:
+  # Default-features and extras passes run as parallel matrix legs rather than
+  # back to back in one job (measured on 686810b2: macos-14 ran build 5m +
+  # `cargo test` 30m + `cargo test --features extras` 26m + release build 10m
+  # serially = 73m). Same OS x feature configurations as before; the release
+  # build moved to its own job (`build-release`) and the red-team corpus gate
+  # to `redteam-gate`.
   test:
-    name: Test ${{ matrix.os }} / Rust ${{ matrix.rust }}
+    name: Test ${{ matrix.os }} / ${{ matrix.features }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: ${{ matrix.timeout }}
+    # One cold build + one test pass per leg (~30m on macos-14, ~15m on
+    # ubuntu, from the 686810b2 step timings); 60m leaves 2x headroom.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         # Windows leg skipped per maintainer decision (2026-07-17): runner
         # cancellations kept blocking end-to-end validation. Re-add
-        # windows-2022 (90m timeout) when wanted.
+        # windows-2022 when wanted.
         os: [ubuntu-24.04, macos-14]
-        rust: [stable]
-        include:
-          # 90m. Measured on dcb196b5: build 4-5m, `cargo test` 24m (linux) /
-          # 28m (macos), `cargo test --features extras` 21m / >27m, release
-          # build >11m cold. Both legs passed every test step that finished but
-          # were cancelled at 60m (and at 45m on 287a6e47). Two full test
-          # passes + the release build need ~75-85m.
-          - os: ubuntu-24.04
-            timeout: 90
-          - os: macos-14
-            timeout: 90
-        exclude:
-          # Only test beta on Linux to save CI time
-          - os: macos-14
-            rust: beta
+        features: [default, extras]
 
     steps:
       - name: Checkout
@@ -49,33 +47,97 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-composite0-dev
 
-      - name: Install Rust ${{ matrix.rust }}
+      - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ matrix.rust }}
 
-      - name: Cache cargo registry
-        uses: actions/cache@v5
+      - name: Cache build
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ matrix.rust }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.rust }}-
+          key: test-${{ matrix.features }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build
+        if: matrix.features == 'default'
         run: cargo build --verbose
 
+      # The red-team corpus gate (multi-minute per pass) runs once per OS in
+      # the `redteam-gate` job; every other test runs here.
       - name: Run unit tests
-        run: cargo test --verbose
+        if: matrix.features == 'default'
+        run: cargo test --verbose -- --skip redteam_corpus_respects_gate_expectations
 
       - name: Run tests with all features
-        run: cargo test --features extras --verbose
+        if: matrix.features == 'extras'
+        run: cargo test --features extras --verbose -- --skip redteam_corpus_respects_gate_expectations
+
+  # Moved out of the test matrix so it runs in parallel with the test passes
+  # (7m ubuntu / 10m macos cold on 686810b2).
+  build-release:
+    name: Build release ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-composite0-dev
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build release
         run: cargo build --release --verbose
+
+  # Red-team corpus gate (tests/redteam_gate_test.rs, ~250k-line corpus).
+  # It used to run inside every `cargo test` pass (7 times per CI run, 4-8m
+  # each). It now runs here once per OS -- path_validator has linux- and
+  # macos-specific code, so both OSes keep it -- and the other test jobs
+  # `--skip` it. The checker it drives has no feature-gated code, so one
+  # default-features run per OS covers it. opt-level 2 makes the corpus pass
+  # fast; debug-assertions and overflow-checks stay on (dev profile).
+  redteam-gate:
+    name: Red-team corpus gate ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    env:
+      CARGO_PROFILE_DEV_OPT_LEVEL: 2
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-composite0-dev
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: redteam-opt2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Run red-team corpus gate
+        run: cargo test --verbose --test redteam_gate_test
 
   lint:
     name: Lint
@@ -100,16 +162,11 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Cache cargo registry
-        uses: actions/cache@v5
+      - name: Cache build
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-lint-
+          key: lint
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -137,22 +194,18 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry
-        uses: actions/cache@v5
+      - name: Cache build
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-nodefault-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-nodefault-
+          key: nodefault
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build (no default features)
         run: cargo build --no-default-features
 
+      # Red-team corpus gate: see the `redteam-gate` job.
       - name: Test (no default features)
-        run: cargo test --no-default-features
+        run: cargo test --no-default-features -- --skip redteam_corpus_respects_gate_expectations
 
   # NOTE: a Linux-based aarch64-apple-darwin cross-check is not viable:
   # ring's build script compiles C even under `cargo check`, which needs an
@@ -160,14 +213,16 @@ jobs:
 
   # Minimum supported Rust version
   msrv:
-    name: MSRV (1.95.0)
+    name: MSRV (1.95.0) / ${{ matrix.features }}
     runs-on: ubuntu-24.04
-    # A cold build + two full `cargo test` runs on 1.95 plus the cache-save
-    # post-step. 30m was exceeded on 287a6e47 (default-features tests passed;
-    # the all-features run was cancelled at the limit) once the redteam corpus
-    # gate test grew to a multi-minute run per pass. Match the Test matrix's
-    # budget (60m), which runs the same two passes.
-    timeout-minutes: 60
+    # The two `cargo test` passes (22m + 22m on 686810b2, ~8m of each the
+    # red-team corpus gate) run as parallel legs; the corpus gate runs in
+    # `redteam-gate`. One cold build + one pass is ~17m per leg.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        features: [default, extras]
 
     steps:
       - name: Checkout
@@ -181,25 +236,23 @@ jobs:
         with:
           toolchain: 1.95.0
 
-      - name: Cache cargo registry
-        uses: actions/cache@v5
+      - name: Cache build
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-msrv-
+          key: msrv-${{ matrix.features }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build
+        if: matrix.features == 'default'
         run: cargo build --verbose
 
       - name: Run tests
-        run: cargo test --verbose
+        if: matrix.features == 'default'
+        run: cargo test --verbose -- --skip redteam_corpus_respects_gate_expectations
 
       - name: Run tests with all features
-        run: cargo test --features extras --verbose
+        if: matrix.features == 'extras'
+        run: cargo test --features extras --verbose -- --skip redteam_corpus_respects_gate_expectations
 
   # Performance benchmarks
   bench:
@@ -219,16 +272,11 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry
-        uses: actions/cache@v5
+      - name: Cache build
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-bench-
+          key: bench
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Compile benchmarks
         run: cargo bench --features extras --no-run
@@ -305,13 +353,41 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      # Tests run single-threaded (as they did under tarpaulin) to avoid the
-      # suite's process-global cwd / port-bind races. One instrumented run,
-      # then cheap `report` renders reuse the collected profile data.
+      # Lib unit tests run single-threaded (as they did under tarpaulin) to
+      # avoid the suite's process-global cwd / port-bind races. The bins and
+      # integration-test binaries run at default parallelism, as they do in
+      # every Test job (single-threaded, `evolve` alone took 14m on 686810b2).
+      # Both `--no-report` runs accumulate into one profile (the red-team
+      # corpus gate is included here, so the line-coverage figure is
+      # unchanged), then cheap `report` renders reuse it.
+      # `--test <name>` per integration target: `--tests` would re-run the lib
+      # and `--test '*'` errors on targets whose required-features (e.g.
+      # `integration`) extras does not enable, so the list is the test
+      # targets whose required-features the default+extras set satisfies.
       - name: Generate coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov --features extras --no-report -- --test-threads 1
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --features extras --no-report --lib -- --test-threads 1
+          mapfile -t integration_tests < <(cargo metadata --no-deps --format-version 1 | python3 -c '
+          import json, sys
+          pkg = next(p for p in json.load(sys.stdin)["packages"] if p["name"] == "selfware")
+          on, todo = set(), ["default", "extras"]
+          while todo:
+              f = todo.pop()
+              if f in pkg["features"] and f not in on:
+                  on.add(f)
+                  todo += pkg["features"][f]
+          for t in pkg["targets"]:
+              if "test" in t["kind"] and set(t.get("required-features", [])) <= on:
+                  print("--test=" + t["name"])
+          ')
+          if [ "${#integration_tests[@]}" -eq 0 ]; then
+            echo "::error::no integration test targets found for coverage"
+            exit 1
+          fi
+          echo "integration test targets: ${integration_tests[*]}"
+          cargo llvm-cov --features extras --no-report --bins "${integration_tests[@]}"
           cargo llvm-cov report --cobertura --output-path coverage/cobertura.xml
           cargo llvm-cov report --html --output-dir coverage
           cargo llvm-cov report --summary-only | tee coverage/summary.txt
