@@ -3,14 +3,14 @@
 //! A single model call against a loaded endpoint can take minutes (one
 //! measured call took ~287 s): the request queues and prefills with no tokens
 //! yet, or the model streams a long reasoning block the user may not see. Without
-//! a heartbeat the session looks hung. [`LlmWaitTicker`] fires every
-//! [`LLM_WAIT_TICK`] while a call is in flight and produces a
+//! a heartbeat the session looks hung. `LlmWaitTicker` fires every
+//! `LLM_WAIT_TICK` while a call is in flight and produces a
 //! [`ProgressEvent::LlmWaiting`] naming the elapsed time, the phase the call is
 //! in, and how many completion tokens have arrived so far.
 //!
 //! It is deliberately cheap: one timer deadline per call, no background task,
-//! no locking. Callers `select!` on [`LlmWaitTicker::next_due`] alongside the
-//! chunk receiver (see [`recv_or_tick`]) and render the event themselves.
+//! no locking. Callers `select!` on `LlmWaitTicker::next_due` alongside the
+//! chunk receiver (see `recv_or_tick`) and render the event themselves.
 
 use super::progress::ProgressEvent;
 use std::time::Duration;

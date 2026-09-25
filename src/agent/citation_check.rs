@@ -11,12 +11,12 @@
 //! `path#Lnn[-Lmm]` citations, associates a code-span symbol written right
 //! before a citation ("`sym` (`path:l`)", "`sym` at path:l"), and checks each
 //! against the workspace: the file exists, the range is inside it, and the
-//! named symbol appears within the cited range (± [`LINE_TOLERANCE`]). When it
+//! named symbol appears within the cited range (± `LINE_TOLERANCE`). When it
 //! does not, the file is searched and the actual line is recorded as the
 //! suggested correction.
 //!
 //! The completion gate (`Agent::citation_gate`) feeds wrong citations back to
-//! the model for at most [`CITATION_GATE_REJECTION_BOUND`] correction rounds
+//! the model for at most `CITATION_GATE_REJECTION_BOUND` correction rounds
 //! (the audit ledger's bounded step-aside pattern), then lets the run complete
 //! with an explicit "citations: N of M could not be verified" in the run
 //! summary, the banner, stream-json and the JSON result.

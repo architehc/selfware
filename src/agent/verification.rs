@@ -2381,14 +2381,6 @@ impl Agent {
             (&["java"][..], "java", "mvn test"),
             (&["py"][..], "python", "python3 -m py_compile <path>"),
         ] {
-            // Cargo verifiers only when a manifest applies to this task: a
-            // stray `.rs` write in a non-Rust workspace must not steer the
-            // model into cargo runs that can only fail.
-            if ecosystem == "rust"
-                && !super::verification_scope::cargo_applies_to_task(&self.verification_task_root())
-            {
-                continue;
-            }
             if test_ecosystem != Some(ecosystem) && self.wrote_extension(exts) {
                 cmds.push(suggestion.to_string());
             }
