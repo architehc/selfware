@@ -1279,28 +1279,19 @@ impl super::Agent {
         };
         let mut out: Vec<String> = Vec::new();
         for call in cp.tool_calls.iter().filter(|c| c.success) {
-            if !matches!(
-                call.tool_name.as_str(),
-                "file_write" | "file_edit" | "file_fim_edit" | "file_multi_edit"
-            ) {
+            // Same write-tool set and path extraction as every other write
+            // consumer (patch_apply embeds its targets in the diff).
+            if !super::tool_dispatch::helpers::tool_call_writes_file(&call.tool_name) {
                 continue;
             }
             let Ok(args) = serde_json::from_str::<serde_json::Value>(&call.arguments) else {
                 continue;
             };
-            let mut paths: Vec<String> = args
-                .get("path")
-                .and_then(|p| p.as_str())
-                .map(|p| vec![p.to_string()])
-                .unwrap_or_default();
-            if let Some(edits) = args.get("edits").and_then(|e| e.as_array()) {
-                paths.extend(
-                    edits
-                        .iter()
-                        .filter_map(|e| e.get("path").and_then(|p| p.as_str()))
-                        .map(str::to_string),
-                );
-            }
+            let paths: Vec<String> =
+                super::tool_dispatch::helpers::written_paths_for_tool_call(&call.tool_name, &args)
+                    .into_iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect();
             for p in paths {
                 if is_deliverable_path(&p) && !out.contains(&p) {
                     out.push(p);

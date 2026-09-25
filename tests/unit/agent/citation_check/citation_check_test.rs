@@ -438,6 +438,39 @@ async fn gate_is_bounded_then_steps_aside_with_the_count_recorded() {
 }
 
 #[tokio::test]
+async fn gate_checks_citations_in_deliverables_written_by_patch_apply() {
+    // patch_apply embeds its targets in the diff; the deliverable list must
+    // use the shared write-path helper, not a single `path` argument.
+    let ws = workspace();
+    let mut agent = gate_agent(ws.path()).await;
+    fs::write(
+        ws.path().join("REVIEW.md"),
+        "# Review\n`BetaState` (`src/agent/widget.rs:2`) is the state.\n",
+    )
+    .unwrap();
+    let diff = "--- /dev/null\n+++ b/REVIEW.md\n@@ -0,0 +1,2 @@\n+# Review\n+`BetaState` (`src/agent/widget.rs:2`) is the state.\n";
+    agent
+        .current_checkpoint
+        .as_mut()
+        .unwrap()
+        .log_tool_call(crate::checkpoint::ToolCallLog {
+            timestamp: chrono::Utc::now(),
+            tool_name: "patch_apply".to_string(),
+            arguments: serde_json::json!({ "diff": diff }).to_string(),
+            result: Some("ok".to_string()),
+            success: true,
+            duration_ms: Some(1),
+        });
+    answer(&mut agent, 1, "Wrote the review to REVIEW.md.");
+    let directive = agent
+        .citation_gate(true)
+        .expect("the patched deliverable's wrong citation blocks");
+    assert!(directive.contains("[in REVIEW.md]"), "{directive}");
+    let status = agent.grounding_status().unwrap();
+    assert_eq!(status.checked_files, vec!["REVIEW.md".to_string()]);
+}
+
+#[tokio::test]
 async fn gate_checks_citations_in_written_deliverables() {
     let ws = workspace();
     let mut agent = gate_agent(ws.path()).await;
