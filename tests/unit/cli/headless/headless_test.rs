@@ -52,6 +52,7 @@ fn test_session_result_round_trip() {
         artifact_dir: Some(PathBuf::from("/tmp/artifacts")),
         answer: None,
         requirements_audit: None,
+        partial: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     let de: SessionResult = serde_json::from_str(&json).unwrap();
@@ -86,6 +87,7 @@ fn test_session_result_with_failure_mode() {
         artifact_dir: None,
         answer: None,
         requirements_audit: None,
+        partial: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     let de: SessionResult = serde_json::from_str(&json).unwrap();
@@ -111,6 +113,7 @@ fn test_session_result_json_fields() {
         artifact_dir: Some(PathBuf::from("/out")),
         answer: None,
         requirements_audit: None,
+        partial: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     let v: Value = serde_json::from_str(&json).unwrap();
@@ -361,6 +364,7 @@ fn test_emit_result_does_not_panic() {
         artifact_dir: None,
         answer: None,
         requirements_audit: None,
+        partial: None,
     };
     emit_result(&result, None);
 }
@@ -385,6 +389,7 @@ fn test_session_result_serializes_final_answer() {
         artifact_dir: None,
         answer: Some("Fixed the lint and verified with cargo test.".to_string()),
         requirements_audit: None,
+        partial: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     let v: Value = serde_json::from_str(&json).unwrap();
@@ -417,6 +422,7 @@ fn test_session_result_omits_answer_when_none() {
         artifact_dir: None,
         answer: None,
         requirements_audit: None,
+        partial: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     assert!(
@@ -1019,6 +1025,7 @@ fn cost_field_is_omitted_when_provider_reported_no_pricing() {
         artifact_dir: None,
         answer: None,
         requirements_audit: None,
+        partial: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     assert!(
@@ -1048,6 +1055,7 @@ fn cost_field_is_present_when_provider_priced_usage() {
         artifact_dir: None,
         answer: None,
         requirements_audit: None,
+        partial: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     let v: Value = serde_json::from_str(&json).unwrap();
@@ -1273,6 +1281,7 @@ fn grounding_result() -> SessionResult {
         artifact_dir: None,
         answer: Some("review".to_string()),
         requirements_audit: None,
+        partial: None,
     }
 }
 
@@ -1338,4 +1347,45 @@ fn session_result_json_without_grounding_keeps_the_existing_shape() {
         serde_json::from_str(&session_result_json(&result, Some(&clean)).unwrap()).unwrap();
     assert!(v["grounding"].get("note").is_none());
     assert_eq!(v["grounding"]["unverified"], 0);
+}
+
+// ── wall-clock TIMEOUT carries a labelled partial (deadline wrap-up) ───
+
+/// A run that hit its deadline without a final answer stays a failure:
+/// every pre-existing key keeps its value and order, and the partial
+/// progress rides along under a new `partial` key, labelled.
+#[test]
+fn timeout_result_keeps_its_failure_keys_and_appends_the_labelled_partial() {
+    let mut result = grounding_result();
+    result.exit_status = 1;
+    result.stop_reason = "error: Wall-clock timeout: 905s >= 900s".to_string();
+    result.failure_mode = Some(
+        "TIMEOUT: wall-clock time budget exhausted with 0 mutating tool calls completed"
+            .to_string(),
+    );
+    result.answer = None;
+    let before = serde_json::to_string(&result).unwrap();
+    result.partial = Some(crate::agent::deadline::PartialProgress {
+        label: crate::agent::deadline::PARTIAL_REVIEW_LABEL.to_string(),
+        reason: "Wall-clock timeout: 905s >= 900s".to_string(),
+        last_assistant_text: Some("Interim: lex() skips whitespace twice.".to_string()),
+        work_ledger: Some("src/parser.rs — whole file (2 lines)".to_string()),
+    });
+    let json = session_result_json(&result, None).expect("serializes");
+    assert!(
+        json.starts_with(before.strip_suffix('}').unwrap()),
+        "existing keys unchanged: {json}"
+    );
+    let v: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["exit_status"], 1);
+    assert_eq!(v["stop_reason"], "error: Wall-clock timeout: 905s >= 900s");
+    assert!(v.get("answer").is_none(), "no answer is invented");
+    assert_eq!(v["partial"]["label"], "PARTIAL — NOT A COMPLETED REVIEW");
+    assert_eq!(
+        v["partial"]["last_assistant_text"],
+        "Interim: lex() skips whitespace twice."
+    );
+    // Round-trips for consumers.
+    let de: SessionResult = serde_json::from_str(&json).unwrap();
+    assert_eq!(de.partial, result.partial);
 }

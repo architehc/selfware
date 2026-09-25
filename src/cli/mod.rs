@@ -2094,6 +2094,11 @@ pub async fn run() -> Result<()> {
                 "{}",
                 render_run_summary(&agent.run_summary(), failure.as_deref())
             );
+            // A wall-clock TIMEOUT without a final answer: show what was
+            // gathered, labelled PARTIAL — the run still fails below.
+            if let Some(partial) = agent.partial_progress(&run_result) {
+                println!("{}", partial.render());
+            }
         }
 
         if is_structured {
@@ -2240,6 +2245,7 @@ fn build_session_result(
         artifact_dir,
         answer,
         requirements_audit: agent.requirements_audit_status().map(|a| a.label()),
+        partial: agent.partial_progress(run_result),
     }
 }
 
@@ -3019,6 +3025,9 @@ async fn handle_command(
                     "{}",
                     render_run_summary(&agent.run_summary(), failure.as_deref())
                 );
+                if let Some(partial) = agent.partial_progress(&run_result) {
+                    println!("{}", partial.render());
+                }
             }
 
             if is_structured {

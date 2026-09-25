@@ -727,6 +727,8 @@ impl Agent {
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.commit_mode_85_fired
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.deadline_wrap_up_fired
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         self.audit_findings
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1526,6 +1528,23 @@ impl Agent {
         // previous segment must not decide this one's exit status.
         self.last_run_failure_mode = None;
         let result = self.run_execution_loop_inner(task_description, mode).await;
+        // The client raises WallClockBudgetExceeded when the deadline hits
+        // an IN-FLIGHT call. The planning arm returns that error directly
+        // without classifying it, so the run ended with no failure mode
+        // (no TIMEOUT tag, no task_failed event, no partial). Classify it
+        // here, on every path, exactly as `enforce_hard_budgets` does.
+        if let Err(e) = &result {
+            let wall_clock_stop = e.chain().any(|c| {
+                c.downcast_ref::<crate::api::client::WallClockBudgetExceeded>()
+                    .is_some()
+            });
+            if wall_clock_stop && !self.failure_mode_finalized {
+                let reason = e.to_string();
+                self.record_task_outcome(task_description, Outcome::Partial, Some(&reason));
+                self.finalize_failure_mode(RunOutcome::Failed { reason })
+                    .await;
+            }
+        }
         let result = failure_verdict_as_error(result, self.last_run_failure_mode.as_ref());
         match &result {
             Ok(()) => {
@@ -1701,6 +1720,9 @@ impl Agent {
             self.maybe_inject_verification_deadline_directive();
             // Wall-clock commit-mode bands (65% / 85%), each once per task.
             self.maybe_inject_commit_mode_directive();
+            // Deadline wrap-up (once): remaining wall time below the reserve
+            // measured from this run's own model-call latency.
+            self.maybe_inject_deadline_wrap_up();
             self.trim_message_history();
 
             // Surface the current step in the live TUI status bar so a

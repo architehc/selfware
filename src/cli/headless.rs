@@ -66,6 +66,13 @@ pub struct SessionResult {
     /// did not apply, so runs without one keep the pre-existing shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requirements_audit: Option<String>,
+    /// Best progress of a run that hit its wall-clock deadline WITHOUT a
+    /// final answer, labelled `PARTIAL — NOT A COMPLETED REVIEW` (or `TASK`).
+    /// Present only on such TIMEOUT failures; `exit_status`, `stop_reason`
+    /// and `failure_mode` still say failure. Omitted otherwise, so every
+    /// other run keeps the pre-existing shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial: Option<crate::agent::deadline::PartialProgress>,
 }
 
 /// Individual event emitted in `--output-format stream-json` mode.

@@ -1896,6 +1896,14 @@ impl ApiClient {
         self.usage_ledger.call_latency_stats()
     }
 
+    /// Test hook: fold a synthetic call duration into the run's latency
+    /// stats, as if a call of that length had completed.
+    #[cfg(test)]
+    pub(crate) fn record_call_elapsed_for_test(&self, elapsed: Duration) {
+        self.usage_ledger
+            .record_call_elapsed(&self.config.model, "chat", elapsed);
+    }
+
     /// Known run usage, including checkpoint totals and measured fallbacks.
     /// Individual attempts distinguish provider-reported usage from unknown usage.
     pub fn accounted_usage(&self) -> Usage {
