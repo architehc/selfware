@@ -23,7 +23,8 @@ allowed_paths = ["./**"]
 denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**", "**/target/**"]
 
 [agent]
-max_iterations = 100
+# max_iterations is not pinned: the default (400) applies. Long read-only
+# reviews on this endpoint measured 91-136 turns, so 100 would cut them off.
 step_timeout_secs = 600
 native_function_calling = false
 

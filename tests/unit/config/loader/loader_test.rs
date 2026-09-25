@@ -3419,4 +3419,10 @@ fn tracked_llm_selfware_design_config_uses_the_measured_qwen38_profile() {
     assert_eq!(config.context_length, 163_840, "profile context_length");
     assert_eq!(config.max_tokens, 24_576, "profile max_tokens");
     assert_eq!(config.agent.max_call_secs, Some(1_628), "profile call cap");
+    // Long read-only reviews measured 91-136 turns; a pin of 100 cut them off.
+    assert_eq!(
+        config.agent.max_iterations,
+        crate::config::default_max_iterations(),
+        "iteration cap is not pinned below the default"
+    );
 }
