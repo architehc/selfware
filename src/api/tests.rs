@@ -6029,3 +6029,42 @@ fn test_apply_reasoning_step_down_ladder_and_placements() {
     let mut body = serde_json::json!({"chat_template_kwargs": {"enable_thinking": false}});
     assert_eq!(apply_reasoning_step_down(&mut body, "m"), None);
 }
+
+#[test]
+fn compacted_history_shape_is_role_alternating_at_send() {
+    // Recurring external-review claim: micro_compact / auto_compact
+    // (compression.rs) push the task anchor and then the summary as two user
+    // messages, followed by recent turns that can also start with a user
+    // message, "without coalescing", so strict alternating providers
+    // (Anthropic) would 400. Coalescing happens at SEND time on every path:
+    // this pins that the exact compacted shape leaves here alternating.
+    let mut msgs = vec![
+        Message::system("sys".to_string()),
+        Message::user("[TASK ANCHOR] review the parser".to_string()),
+        Message::user("[CONTEXT SUMMARY] read tool_parser.rs 1-200".to_string()),
+        Message::user("continue with section 2".to_string()),
+        Message::assistant("reading section 2".to_string()),
+        Message::user("section 2 notes".to_string()),
+        Message::user("[SYSTEM] budget note".to_string()),
+    ];
+    canonicalize_message_order(&mut msgs);
+    assert_eq!(msgs[0].role, "system");
+    for pair in msgs[1..].windows(2) {
+        assert_ne!(
+            pair[0].role,
+            pair[1].role,
+            "adjacent same-role messages reach the provider: {:?}",
+            msgs.iter().map(|m| m.role.as_str()).collect::<Vec<_>>()
+        );
+    }
+    // Nothing is lost by the merge.
+    let all: String = msgs.iter().map(|m| m.content.text()).collect();
+    for needle in [
+        "TASK ANCHOR",
+        "CONTEXT SUMMARY",
+        "section 2 notes",
+        "budget note",
+    ] {
+        assert!(all.contains(needle), "{needle} dropped");
+    }
+}
