@@ -102,6 +102,12 @@ pub(crate) const AUDIT_NOT_PERFORMED_NOTE: &str = "requirements audit NOT PERFOR
 /// symbol)`.
 pub(crate) const CITATIONS_UNVERIFIED_NOTE: &str = "could not be verified";
 
+/// Evidence marker for a completed review/report whose answer carries no
+/// checkable citation at all (`citations: none checkable: ...`): nothing was
+/// checked against the files, so no clean ✅ claim either.
+pub(crate) const CITATIONS_NONE_CHECKABLE_NOTE: &str =
+    crate::agent::citation_check::CITATIONS_NONE_CHECKABLE;
+
 impl FailureKind {
     /// Short uppercase tag suitable for log lines and CLI output.
     pub fn tag(&self) -> &'static str {
@@ -507,6 +513,16 @@ impl FailureMode {
                 "⚠️ Task completed ({}) — some citations could not be verified; the answer is not fully grounded",
                 self.kind.tag()
             )
+        } else if self.kind.is_nonfailure()
+            && self.evidence.contains(CITATIONS_NONE_CHECKABLE_NOTE)
+            && !self.evidence.contains(VERIFICATION_FAILED_NOTE)
+        {
+            // A review/report answer with nothing checkable: completed, but
+            // not grounded — say so instead of a clean ✅.
+            format!(
+                "⚠️ Task completed ({}) — {CITATIONS_NONE_CHECKABLE_NOTE}; the answer was not checked against the files",
+                self.kind.tag()
+            )
         } else if self.kind.is_success() {
             format!("✅ Task completed successfully ({})", self.kind.tag())
         } else if matches!(self.kind, FailureKind::NoChange)
@@ -660,9 +676,9 @@ pub(crate) fn with_citation_status(
     base: FailureMode,
     grounding: Option<&crate::agent::citation_check::GroundingStatus>,
 ) -> FailureMode {
-    match grounding {
-        Some(g) if g.problem_count() > 0 && base.kind.is_nonfailure() => FailureMode {
-            evidence: format!("{}; {}", base.evidence, g.unverified_note()),
+    match grounding.and_then(|g| g.warning_note()) {
+        Some(note) if base.kind.is_nonfailure() => FailureMode {
+            evidence: format!("{}; {}", base.evidence, note),
             ..base
         },
         _ => base,

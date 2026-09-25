@@ -2110,7 +2110,7 @@ pub async fn run() -> Result<()> {
             && !matches!(agent.run_summary().verification, Some((false, _)))
             && agent
                 .grounding_status()
-                .is_none_or(|g| g.problem_count() == 0)
+                .is_none_or(|g| g.warning_note().is_none())
         {
             println!("{}", render_task_complete(start.elapsed()));
         }
@@ -3039,7 +3039,7 @@ async fn handle_command(
                 && !matches!(agent.run_summary().verification, Some((false, _)))
                 && agent
                     .grounding_status()
-                    .is_none_or(|g| g.problem_count() == 0)
+                    .is_none_or(|g| g.warning_note().is_none())
             {
                 println!("{}", render_task_complete(start.elapsed()));
             }
@@ -6596,12 +6596,12 @@ fn render_run_summary(summary: &crate::agent::RunSummary, failure: Option<&str>)
         None if summary
             .grounding
             .as_ref()
-            .is_some_and(|g| g.problem_count() > 0) =>
+            .is_some_and(|g| g.warning_note().is_some()) =>
         {
             let note = summary
                 .grounding
                 .as_ref()
-                .map(|g| g.unverified_note())
+                .and_then(|g| g.warning_note())
                 .unwrap_or_default();
             lines.push(format!(
                 "outcome: completed — {note} (answer not fully grounded)"
@@ -6651,8 +6651,8 @@ fn render_run_summary(summary: &crate::agent::RunSummary, failure: Option<&str>)
     }
     if let Some(grounding) = &summary.grounding {
         lines.push(grounding.grounding_line());
-        if grounding.problem_count() > 0 {
-            lines.push(grounding.unverified_note());
+        if let Some(note) = grounding.warning_note() {
+            lines.push(note);
             for problem in grounding.problems.iter().take(5) {
                 lines.push(format!("  - {problem}"));
             }

@@ -8,7 +8,8 @@
 //! (AGENTS.md rule 3).
 //!
 //! This module parses `path:line`, `path:line-line` (also `–`/`—`),
-//! `path#Lnn[-Lmm]` citations, associates a code-span symbol written right
+//! `path#Lnn[-Lmm]` citations, prose `line N` / `(line N)` references tied
+//! to an unambiguous path (see `prose_citations`), associates a code-span symbol written right
 //! before a citation ("`sym` (`path:l`)", "`sym` at path:l"), and checks each
 //! against the workspace: the file exists, the range is inside it, and the
 //! named symbol appears within the cited range (± `LINE_TOLERANCE`). When it
@@ -147,6 +148,9 @@ impl CheckedCitation {
     }
 }
 
+/// Wording of the "no checkable citation" warning (banner, summary, JSON).
+pub(crate) const CITATIONS_NONE_CHECKABLE: &str = "citations: none checkable";
+
 /// Source label for citations taken from the final answer text.
 pub(crate) const ANSWER_SOURCE: &str = "final answer";
 
@@ -225,6 +229,10 @@ pub struct GroundingStatus {
     /// Up to a dozen problem descriptions (wrong-line entries name the
     /// actual location).
     pub problems: Vec<String>,
+    /// The answer belongs to a read-only (review/report) task, whose claims
+    /// are expected to be grounded in checkable citations. Not serialized.
+    #[serde(skip)]
+    pub read_only: bool,
 }
 
 impl GroundingStatus {
@@ -248,6 +256,7 @@ impl GroundingStatus {
                 .take(MAX_LISTED_PROBLEMS)
                 .map(CheckedCitation::describe)
                 .collect(),
+            read_only: false,
         }
     }
 
@@ -293,13 +302,59 @@ impl GroundingStatus {
         }
     }
 
+    /// Citations actually checked against a named symbol or a range: the
+    /// verified ones plus the ones shown wrong.
+    pub fn checkable_count(&self) -> usize {
+        self.verified + self.problem_count()
+    }
+
+    /// A review/report answer with no checkable citation at all: nothing in
+    /// it was checked against the files, so it must not read as grounded
+    /// (0.8.2 live validation D4).
+    pub fn none_checkable(&self) -> bool {
+        self.read_only && self.checkable_count() == 0
+    }
+
+    /// `citations: none checkable: ...` — see [`Self::none_checkable`].
+    pub fn none_checkable_note(&self) -> String {
+        let why = if self.total == 0 {
+            "no path:line citations in the answer".to_string()
+        } else {
+            format!(
+                "{} of {} without a checkable symbol",
+                self.unverifiable, self.total
+            )
+        };
+        format!("{CITATIONS_NONE_CHECKABLE}: {why}")
+    }
+
+    /// The warning note the banner, run summary, JSON `grounding.note` and
+    /// failure-mode evidence carry, or `None` for a grounded answer: wrong
+    /// citations first ([`Self::unverified_note`]), else "none checkable"
+    /// for a review/report answer ([`Self::none_checkable_note`]).
+    pub fn warning_note(&self) -> Option<String> {
+        if self.problem_count() > 0 {
+            Some(self.unverified_note())
+        } else if self.none_checkable() {
+            Some(self.none_checkable_note())
+        } else {
+            None
+        }
+    }
+
     /// The summary's "Grounding:" line. Names what was actually checked:
     /// `verified` means the named symbol was found inside the cited range,
     /// never more (AGENTS.md rule 3).
     pub fn grounding_line(&self) -> String {
         if self.total == 0 {
-            return "Grounding: no path:line citations in the answer (nothing checked against files)"
-                .to_string();
+            let lead = if self.read_only {
+                format!("Grounding: {CITATIONS_NONE_CHECKABLE} — ")
+            } else {
+                "Grounding: ".to_string()
+            };
+            return format!(
+                "{lead}no path:line citations in the answer (nothing checked against files)"
+            );
         }
         let detail = self.unverified_breakdown();
         format!(
@@ -375,15 +430,239 @@ pub fn parse_citations(text: &str) -> Vec<Citation> {
             break;
         }
     }
+    for c in prose_citations(text) {
+        if out.len() >= MAX_CITATIONS_PER_SOURCE {
+            break;
+        }
+        let key = (c.path.clone(), c.start, c.end, c.symbol.clone());
+        if seen.insert(key) {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// A path mention without a `:line` suffix (prose citations tie to these).
+fn bare_path_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(&format!(
+            r"(?P<path>[A-Za-z0-9_./\-]*[A-Za-z0-9_\-]\.(?:{CITABLE_EXTENSIONS}))\b"
+        ))
+        .expect("bare path regex compiles")
+    })
+}
+
+/// A prose line reference: `line N`, `lines N-M`, `(line N)`,
+/// `(test file line N)`.
+fn prose_line_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)(?P<open>\(\s*)?(?P<tf>test\s+file\s+)?\blines?\s+(?P<s>\d{1,7})(?:\s*(?:-|–|—|to)\s*(?P<e>\d{1,7}))?\b",
+        )
+        .expect("prose line regex compiles")
+    })
+}
+
+/// Bare path mentions in `text`: (start, end, path), glued tokens (URLs,
+/// longer identifiers) excluded.
+fn path_mentions(text: &str) -> Vec<(usize, usize, String)> {
+    bare_path_regex()
+        .captures_iter(text)
+        .filter_map(|c| {
+            let m = c.name("path")?;
+            let before = &text[..m.start()];
+            if before.ends_with("//") || before.chars().next_back().is_some_and(is_path_char) {
+                return None;
+            }
+            Some((
+                m.start(),
+                m.end(),
+                m.as_str().trim_start_matches("./").to_string(),
+            ))
+        })
+        .collect()
+}
+
+fn is_test_path(path: &str) -> bool {
+    path.to_ascii_lowercase().contains("test")
+}
+
+fn unique_paths<'a>(it: impl Iterator<Item = &'a String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for p in it {
+        if !out.contains(p) {
+            out.push(p.clone());
+        }
+    }
+    out
+}
+
+/// Prose citations (0.8.2 live validation D4: a review cited everything as
+/// "`sym` (line 22)" under a heading naming the file, so the gate saw 0
+/// citations while 17 of 20 hand-checked were wrong). A `line N` /
+/// `lines N-M` / `(line N)` reference is tied to a path, in this order:
+/// 1. the path right after it (`line N of p`, `lines N-M in p`);
+/// 2. the path right before it (`p, line N`, `p (line N)`, `p at line N`);
+/// 3. the only path named in the same clause (bounded by `.`/`;`/newline);
+/// 4. the nearest preceding markdown heading, when it names one path — or,
+///    naming several, exactly one test path for `test file line N` and
+///    exactly one non-test path otherwise.
+///
+/// A reference with no unambiguous path is not a citation (never guessed).
+fn prose_citations(text: &str) -> Vec<Citation> {
+    let mentions = path_mentions(text);
+    let mut out = Vec::new();
+    for caps in prose_line_regex().captures_iter(text) {
+        let whole = caps.get(0).expect("whole match");
+        let num = |name: &str| {
+            caps.name(name)
+                .and_then(|g| g.as_str().parse::<usize>().ok())
+        };
+        let Some(start) = num("s") else { continue };
+        let end = num("e").unwrap_or(start);
+        let ref_start = whole.start();
+        let test_file = caps.name("tf").is_some();
+
+        // 1. `line N of p` / `line N in p`.
+        let after = &text[whole.end()..];
+        let after_trim = after.trim_start();
+        let lead = after.len() - after_trim.len();
+        let path_after = ["of ", "in "].iter().find_map(|w| {
+            let rest = after_trim.strip_prefix(w)?;
+            let skip = rest.len() - rest.trim_start_matches(['`', '*', ' ']).len();
+            let at = whole.end() + lead + w.len() + skip;
+            mentions.iter().find(|(s, _, _)| *s == at)
+        });
+        // 2. `p, line N` / `p (line N)` / `p at line N`.
+        let path_before = || {
+            let mut b = text[..ref_start].trim_end();
+            for word in ["at", "on"] {
+                if let Some(stripped) = b.strip_suffix(word) {
+                    if stripped.ends_with(char::is_whitespace) {
+                        b = stripped.trim_end();
+                    }
+                }
+            }
+            let b = b.trim_end_matches(['`', '*', ',', ':', '—', '(', ' ']);
+            mentions.iter().find(|(_, e, _)| *e == b.len())
+        };
+        let (path, via_before) = if let Some((_, _, p)) = path_after {
+            (Some(p.clone()), None)
+        } else if let Some((s, _, p)) = path_before() {
+            (Some(p.clone()), Some(*s))
+        } else {
+            // 3. The only path in the same clause.
+            let clause_start = text[..ref_start]
+                .rfind(['\n', ';'])
+                .into_iter()
+                .chain(text[..ref_start].rfind(". ").map(|i| i + 1))
+                .max()
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            let clause_end = text[whole.end()..]
+                .find(['\n', ';'])
+                .into_iter()
+                .chain(text[whole.end()..].find(". "))
+                .min()
+                .map(|i| whole.end() + i)
+                .unwrap_or(text.len());
+            let in_clause = unique_paths(
+                mentions
+                    .iter()
+                    .filter(|(s, e, _)| *s >= clause_start && *e <= clause_end)
+                    .map(|(_, _, p)| p),
+            );
+            if in_clause.len() == 1 {
+                (in_clause.into_iter().next(), None)
+            } else if in_clause.is_empty() {
+                // 4. The nearest preceding heading.
+                let heading = text[..ref_start]
+                    .rsplit('\n')
+                    .find(|l| l.trim_start().starts_with('#'))
+                    .map(|l| {
+                        let off = l.as_ptr() as usize - text.as_ptr() as usize;
+                        (off, off + l.len())
+                    });
+                let named = heading
+                    .map(|(hs, he)| {
+                        unique_paths(
+                            mentions
+                                .iter()
+                                .filter(|(s, e, _)| *s >= hs && *e <= he)
+                                .map(|(_, _, p)| p),
+                        )
+                    })
+                    .unwrap_or_default();
+                let pick = if named.len() == 1 {
+                    named.into_iter().next()
+                } else {
+                    let (tests, others): (Vec<String>, Vec<String>) =
+                        named.into_iter().partition(|p| is_test_path(p));
+                    let pool = if test_file { tests } else { others };
+                    (pool.len() == 1).then(|| pool.into_iter().next().expect("one"))
+                };
+                (pick, None)
+            } else {
+                (None, None)
+            }
+        };
+        let Some(path) = path else { continue };
+        // `symbol_before` expects the text right before a citation, whose
+        // trailing backtick opens the citation's own code span; a prose
+        // reference is not in one, so end the prefix with a neutral "(".
+        let prefix_symbol = |end: usize| symbol_before(&format!("{} (", text[..end].trim_end()));
+        let symbol = prefix_symbol(ref_start).or_else(|| via_before.and_then(prefix_symbol));
+        out.push(Citation {
+            path,
+            start,
+            end,
+            symbol,
+        });
+    }
     out
 }
 
 /// Words allowed between a code-span symbol and its citation:
 /// "`X` (`p:1`)", "`X` at p:1", "`X` enum (`p:1`)", "`X` defined at p:1".
 const CONNECTOR_WORDS: &[&str] = &[
-    "at", "in", "see", "defined", "line", "lines", "enum", "struct", "fn", "function", "method",
-    "test", "trait", "const", "constant", "static", "type", "macro", "module", "impl", "field",
-    "variant", "class", "def",
+    "at",
+    "in",
+    "see",
+    "defined",
+    "line",
+    "lines",
+    "enum",
+    "struct",
+    "fn",
+    "function",
+    "method",
+    "test",
+    "trait",
+    "const",
+    "constant",
+    "static",
+    "type",
+    "macro",
+    "module",
+    "impl",
+    "field",
+    "variant",
+    "class",
+    "def",
+    // "`X` is defined at p:l", "`X` lives at", "`X` is declared in", ...
+    // (0.8.2 live validation D4).
+    "is",
+    "are",
+    "was",
+    "lives",
+    "located",
+    "declared",
+    "implemented",
+    "found",
+    "helper",
+    "on",
 ];
 
 /// The identifier in the code span immediately preceding a citation, if the
@@ -391,9 +670,12 @@ const CONNECTOR_WORDS: &[&str] = &[
 fn symbol_before(before: &str) -> Option<String> {
     let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
     let mut rest = &before[line_start..];
+    // Markdown emphasis around the citation: "`X` is defined at **p:1**".
+    rest = rest.trim_end().trim_end_matches(['*', '_']);
     // The citation itself may sit in a code span: "`X` (`p:1`)".
     rest = rest.trim_end().strip_suffix('`').unwrap_or(rest);
-    for _ in 0..4 {
+    rest = rest.trim_end().trim_end_matches('*');
+    for _ in 0..6 {
         let trimmed = rest.trim_end();
         let trimmed = trimmed
             .strip_suffix('(')
@@ -420,7 +702,8 @@ fn symbol_before(before: &str) -> Option<String> {
         rest = trimmed;
         break;
     }
-    let rest = rest.trim_end();
+    // A bold symbol: "**`X`** at p:1".
+    let rest = rest.trim_end().trim_end_matches('*');
     let inner_end = rest.strip_suffix('`')?;
     let open = inner_end.rfind('`')?;
     // "`render_kv`/`_no_detail`" — a suffix shorthand of the previous span,
@@ -1082,11 +1365,18 @@ impl super::Agent {
                 )),
             )
         };
-        let status = GroundingStatus::from_report(&report, state.rejections, checked_files);
+        let mut status = GroundingStatus::from_report(&report, state.rejections, checked_files);
+        status.read_only = is_read_only;
+        // Counts come from the status, never a literal: a same-step
+        // re-evaluation of a still-wrong answer has no round marker and used
+        // to report "0 wrong" next to "N wrong" (0.8.2 live validation D13).
         let marker = marker.unwrap_or_else(|| {
             format!(
-                "{} checked: {} verified, {} without a checkable symbol, 0 wrong",
-                status.total, status.verified, status.unverifiable
+                "{} checked: {} verified, {} without a checkable symbol, {} wrong",
+                status.total,
+                status.verified,
+                status.unverifiable,
+                status.problem_count()
             )
         });
         state.status = Some(status.clone());

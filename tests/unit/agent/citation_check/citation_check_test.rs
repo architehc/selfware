@@ -712,3 +712,230 @@ async fn gate_skips_a_deliverable_swapped_for_an_outside_symlink() {
     assert!(status.checked_files.is_empty(), "{status:?}");
     assert_eq!(status.total, 0);
 }
+
+// ── 0.8.2 live validation D4 / D13 ──────────────────────────────────────
+
+/// Lines `n` of a fixture file hold `text`; the rest are comments.
+fn fixture_file(lines: usize, at: &[(usize, &str)]) -> String {
+    (1..=lines)
+        .map(|n| {
+            at.iter()
+                .find(|(l, _)| *l == n)
+                .map(|(_, t)| t.to_string())
+                .unwrap_or_else(|| format!("// line {n}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn prose_workspace() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    fs::create_dir_all(dir.path().join("src/agent")).unwrap();
+    fs::create_dir_all(dir.path().join("tests/unit/agent/last_tool")).unwrap();
+    fs::write(
+        dir.path().join("src/agent/last_tool.rs"),
+        fixture_file(
+            60,
+            &[
+                (12, "pub const MAX_FULL_OUTPUT_LEN: usize = 16_384;"),
+                (22, "pub struct LastToolOutput {"),
+                (37, "pub fn store_last_tool_output() {"),
+            ],
+        ),
+    )
+    .unwrap();
+    fs::write(
+        dir.path()
+            .join("tests/unit/agent/last_tool/last_tool_test.rs"),
+        fixture_file(
+            60,
+            &[(48, "fn storing_long_multibyte_output_does_not_panic() {")],
+        ),
+    )
+    .unwrap();
+    dir
+}
+
+/// The b2_350000 shape: the file is named only in the section heading, the
+/// body cites "(line N)" / "(test file line N)".
+#[test]
+fn prose_line_citations_tie_to_the_section_heading_path() {
+    let text =
+        "## 1. `src/agent/last_tool.rs` + `tests/unit/agent/last_tool/last_tool_test.rs`\n\n\
+        The `LastToolOutput` struct (line 22) stores six fields. \
+        `MAX_FULL_OUTPUT_LEN = 16_384` (line 12) bounds it. \
+        `store_last_tool_output` (line 30) truncates. \
+        The test `storing_long_multibyte_output_does_not_panic` (test file line 48) covers it.\n";
+    let cites = parse_citations(text);
+    assert_eq!(cites.len(), 4, "{cites:?}");
+    assert_eq!(cites[1].symbol.as_deref(), Some("MAX_FULL_OUTPUT_LEN"));
+    assert_eq!(
+        cites[0],
+        cite("src/agent/last_tool.rs", 22, 22, Some("LastToolOutput"))
+    );
+    assert_eq!(
+        cites[3],
+        cite(
+            "tests/unit/agent/last_tool/last_tool_test.rs",
+            48,
+            48,
+            Some("storing_long_multibyte_output_does_not_panic")
+        )
+    );
+
+    let ws = prose_workspace();
+    let mut r = CitationResolver::new(ws.path());
+    let rep = r.verify_text(text, ANSWER_SOURCE);
+    assert_eq!((rep.total, rep.verified), (4, 3), "{rep:?}");
+    assert_eq!(rep.wrong_line.len(), 1, "line 30 is wrong: {rep:?}");
+    assert!(rep.wrong_line[0]
+        .describe()
+        .contains("found at src/agent/last_tool.rs:37"));
+}
+
+#[test]
+fn prose_forms_tied_to_a_path_in_the_same_clause() {
+    let cases = [
+        (
+            "`LastToolOutput` is at line 22 of src/agent/last_tool.rs.",
+            22,
+            22,
+        ),
+        ("See src/agent/last_tool.rs, line 22 for `x`.", 22, 22),
+        ("src/agent/last_tool.rs (lines 20-24) defines it.", 20, 24),
+        (
+            "The struct lives in src/agent/last_tool.rs (line 22).",
+            22,
+            22,
+        ),
+    ];
+    for (text, s, e) in cases {
+        let cites = parse_citations(text);
+        assert_eq!(cites.len(), 1, "{text}: {cites:?}");
+        assert_eq!(cites[0].path, "src/agent/last_tool.rs", "{text}");
+        assert_eq!((cites[0].start, cites[0].end), (s, e), "{text}");
+    }
+    assert_eq!(
+        parse_citations("`LastToolOutput` is at line 22 of src/agent/last_tool.rs.")[0].symbol,
+        Some("LastToolOutput".to_string())
+    );
+}
+
+#[test]
+fn prose_references_without_an_unambiguous_path_are_not_citations() {
+    for text in [
+        "The loop runs line 3 of the script twice.",
+        "## `a.rs` and `b.rs`\n\nThe helper (line 4) is fine.",
+        "Compare a.rs and b.rs; the helper at line 9 differs.",
+    ] {
+        assert!(parse_citations(text).is_empty(), "{text}");
+    }
+}
+
+#[test]
+fn is_defined_at_and_bold_markers_carry_the_symbol() {
+    let ws = prose_workspace();
+    let mut r = CitationResolver::new(ws.path());
+    for text in [
+        "`LastToolOutput` is defined at **src/agent/last_tool.rs:22**.",
+        "**`LastToolOutput`** at src/agent/last_tool.rs:22.",
+        "`LastToolOutput` lives at `src/agent/last_tool.rs:22`.",
+    ] {
+        let cites = parse_citations(text);
+        assert_eq!(cites[0].symbol.as_deref(), Some("LastToolOutput"), "{text}");
+        let rep = r.verify_text(text, ANSWER_SOURCE);
+        assert_eq!(rep.verified, 1, "{text}: {rep:?}");
+    }
+}
+
+/// D4(c): a review/report answer with zero checkable citations is not
+/// "fully grounded": the summary, note and banner say "none checkable".
+#[tokio::test]
+async fn review_answer_with_no_checkable_citation_is_not_clean() {
+    let ws = workspace();
+    let mut agent = gate_agent(ws.path()).await;
+    answer(&mut agent, 1, "The module looks fine; nothing to report.");
+    assert_eq!(agent.citation_gate(true), None);
+    let status = agent.grounding_status().expect("labelled");
+    assert!(status.none_checkable());
+    assert!(
+        status
+            .grounding_line()
+            .contains("citations: none checkable"),
+        "{}",
+        status.grounding_line()
+    );
+    assert_eq!(
+        status.warning_note().as_deref(),
+        Some("citations: none checkable: no path:line citations in the answer")
+    );
+    let base = crate::agent::failure_mode::FailureMode {
+        restored_files: Vec::new(),
+        kind: crate::agent::failure_mode::FailureKind::NoChange,
+        evidence: "completed naturally with 0 mutating tool calls".to_string(),
+        advice: "-".to_string(),
+    };
+    let banner = crate::agent::failure_mode::with_citation_status(base, Some(&status)).cli_banner();
+    assert!(banner.starts_with("⚠️"), "{banner}");
+    assert!(banner.contains("citations: none checkable"), "{banner}");
+    assert!(!banner.contains('✅'), "{banner}");
+
+    // Only symbol-less citations: still nothing checkable.
+    answer(&mut agent, 2, "See `widget.rs:10` and README.md:2.");
+    assert_eq!(agent.citation_gate(true), None);
+    let status = agent.grounding_status().unwrap();
+    assert_eq!(
+        status.warning_note().as_deref(),
+        Some("citations: none checkable: 2 of 2 without a checkable symbol")
+    );
+
+    // A grounded answer carries no warning.
+    answer(&mut agent, 3, FIXED_ANSWER);
+    assert_eq!(agent.citation_gate(true), None);
+    assert_eq!(agent.grounding_status().unwrap().warning_note(), None);
+}
+
+/// Mutation tasks are not held to the review standard.
+#[test]
+fn none_checkable_applies_to_review_answers_only() {
+    let status = GroundingStatus {
+        total: 1,
+        unverifiable: 1,
+        ..Default::default()
+    };
+    assert!(!status.none_checkable());
+    assert_eq!(status.warning_note(), None);
+}
+
+/// D13: a same-step re-evaluation of a still-wrong answer reported
+/// "0 wrong" in its marker next to "N wrong" in the Grounding line.
+#[tokio::test]
+async fn same_step_reevaluation_marker_counts_the_wrong_citations() {
+    let ws = workspace();
+    let recorder = std::sync::Arc::new(crate::agent::progress::RecordingProgressEmitter::new());
+    let mut agent = gate_agent(ws.path())
+        .await
+        .with_progress_emitter(recorder.clone());
+    answer(&mut agent, 1, WRONG_ANSWER);
+    assert!(agent.citation_gate(true).is_some());
+    // Same step, different (still wrong) content: re-evaluated, no new round.
+    agent.messages.push(crate::api::types::Message::assistant(
+        "Findings: `alpha_helper` (`src/agent/widget.rs:31`) returns a u32.".to_string(),
+    ));
+    assert!(agent.citation_gate(true).is_some());
+    let details: Vec<String> = recorder
+        .snapshot()
+        .into_iter()
+        .filter_map(|e| match e {
+            crate::agent::progress::ProgressEvent::TurnDecision { decision, detail }
+                if decision == "citation_check" =>
+            {
+                Some(detail)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(details.len(), 2, "{details:?}");
+    assert!(details[1].contains("1 wrong"), "{}", details[1]);
+    assert!(!details[1].contains("0 wrong"), "{}", details[1]);
+}

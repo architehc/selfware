@@ -244,8 +244,8 @@ pub fn session_result_json(
     if let Some(gobj) = gv.as_object_mut() {
         gobj.insert("unverified".into(), g.unverified_count().into());
         gobj.insert("summary".into(), g.grounding_line().into());
-        if g.problem_count() > 0 {
-            gobj.insert("note".into(), g.unverified_note().into());
+        if let Some(note) = g.warning_note() {
+            gobj.insert("note".into(), note.into());
         }
     }
     let head = base.strip_suffix('}')?;
