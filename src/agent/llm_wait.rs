@@ -32,6 +32,11 @@ pub enum LlmWaitPhase {
     /// Non-streaming request: the response arrives all at once, so the phase
     /// cannot be observed — reported honestly instead of guessed.
     AwaitingResponse,
+    /// A bounded auxiliary call (`ApiClient::side_chat`) named by its
+    /// purpose (`context_summary`, `requirements_audit`, …). Its stream is
+    /// collected inside the client, so prefill/reasoning/streaming are not
+    /// told apart; the event names WHICH side call is in flight instead.
+    SideCall(&'static str),
 }
 
 impl LlmWaitPhase {
@@ -41,6 +46,16 @@ impl LlmWaitPhase {
             LlmWaitPhase::Reasoning => "reasoning",
             LlmWaitPhase::Streaming => "streaming",
             LlmWaitPhase::AwaitingResponse => "awaiting_response",
+            LlmWaitPhase::SideCall(_) => "side_call",
+        }
+    }
+
+    /// The `phase` string an [`ProgressEvent::LlmWaiting`] carries:
+    /// [`Self::as_str`], or `side_call:<purpose>` for a side call.
+    pub fn label(self) -> String {
+        match self {
+            LlmWaitPhase::SideCall(purpose) => format!("side_call:{purpose}"),
+            other => other.as_str().to_string(),
         }
     }
 
@@ -108,6 +123,21 @@ pub(crate) fn tokens_so_far(
 pub(crate) async fn await_with_ticks<F, T>(
     fut: F,
     mut ticker: LlmWaitTicker,
+    on_tick: impl FnMut(ProgressEvent),
+) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    await_with_phase_ticks(fut, &mut ticker, LlmWaitPhase::AwaitingResponse, on_tick).await
+}
+
+/// [`await_with_ticks`] with an explicit `phase` and a borrowed ticker, so
+/// one heartbeat cadence (and one elapsed clock) can span several awaited
+/// attempts — a side call's retry keeps counting from the first request.
+pub(crate) async fn await_with_phase_ticks<F, T>(
+    fut: F,
+    ticker: &mut LlmWaitTicker,
+    phase: LlmWaitPhase,
     mut on_tick: impl FnMut(ProgressEvent),
 ) -> T
 where
@@ -119,11 +149,7 @@ where
             biased;
             out = &mut fut => return out,
             _ = tokio::time::sleep_until(ticker.next_due()) => {
-                on_tick(ticker.fire(
-                    LlmWaitPhase::AwaitingResponse,
-                    0,
-                    LlmWaitTokenSource::None,
-                ));
+                on_tick(ticker.fire(phase, 0, LlmWaitTokenSource::None));
             }
         }
     }
@@ -171,7 +197,7 @@ impl LlmWaitTicker {
         }
         ProgressEvent::LlmWaiting {
             elapsed_secs: now.saturating_duration_since(self.started).as_secs(),
-            phase: phase.as_str().to_string(),
+            phase: phase.label(),
             tokens_so_far,
             tokens_source: source.as_str().to_string(),
         }

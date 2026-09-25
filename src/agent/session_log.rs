@@ -65,6 +65,28 @@ pub(super) struct ContextCompressionLogDetails<'a> {
     pub error: Option<&'a str>,
 }
 
+/// One-line, human- and grep-readable detail of a compaction for the
+/// `context_compression` turn decision: method, message and (estimated)
+/// token counts before/after, and the fallback reason when there is one.
+pub(super) fn context_compression_detail(d: &ContextCompressionLogDetails<'_>) -> String {
+    let mut detail = format!(
+        "method={} success={} messages {}->{} tokens ~{}->~{} threshold={}",
+        d.strategy,
+        d.success,
+        d.before_messages,
+        d.after_messages,
+        d.before_tokens,
+        d.after_tokens,
+        d.threshold
+    );
+    if let Some(reason) = d.error {
+        let reason: String = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+        let reason: String = reason.chars().take(240).collect();
+        detail.push_str(&format!(" reason={reason}"));
+    }
+    detail
+}
+
 pub struct SessionLogger {
     tx: mpsc::UnboundedSender<SessionLogEvent>,
     session_id: String,
@@ -624,7 +646,54 @@ impl Agent {
         });
     }
 
+    /// Hard-compress the history (no summarizer call) and record it as a
+    /// compaction event with `strategy` and `reason`.
+    pub(super) fn hard_compress_logged(&mut self, strategy: &str, reason: &str) {
+        let before_messages = self.messages.len();
+        let before_tokens = self.compressor.estimate_tokens(&self.messages);
+        self.messages = self
+            .compressor
+            .hard_compress_with_task(&self.messages, self.current_task_text());
+        let after_tokens = self.compressor.estimate_tokens(&self.messages);
+        self.log_context_compression_event(ContextCompressionLogDetails {
+            strategy,
+            success: after_tokens < before_tokens,
+            before_messages,
+            after_messages: self.messages.len(),
+            before_tokens,
+            after_tokens,
+            threshold: self.compressor.compression_threshold(),
+            error: Some(reason),
+        });
+    }
+
+    /// Record an orchestrated (micro/auto/full) compaction from its metrics.
+    pub(super) fn log_compaction_metrics(
+        &self,
+        strategy: &str,
+        metrics: &super::compression::CompressionMetrics,
+    ) {
+        self.log_context_compression_event(ContextCompressionLogDetails {
+            strategy,
+            success: metrics.tokens_after < metrics.tokens_before,
+            before_messages: metrics.messages_before,
+            after_messages: metrics.messages_after,
+            before_tokens: metrics.tokens_before,
+            after_tokens: metrics.tokens_after,
+            threshold: self.compressor.compression_threshold(),
+            error: None,
+        });
+    }
+
+    /// Record one compaction: a `turn_decision` progress event
+    /// (`decision = "context_compression"`, the same channel as
+    /// `context_trim`, so stream-json and the stderr progress log show it)
+    /// and, when a session logger is installed, the session-log entry.
     pub(super) fn log_context_compression_event(&self, details: ContextCompressionLogDetails<'_>) {
+        self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+            decision: "context_compression".to_string(),
+            detail: context_compression_detail(&details),
+        });
         let Some(logger) = &self.session_logger else {
             return;
         };

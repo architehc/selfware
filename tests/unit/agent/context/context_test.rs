@@ -1412,3 +1412,186 @@ fn work_ledger_resume_round_trip_keeps_the_invalidation() {
         "{rendered}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Automatic compressor summary goes through the bounded side-call path
+// (external review 2026-09-25, P2: compression-wire-probe captured
+// stream:false, max_tokens 24576, enable_thinking:true, reasoning_effort
+// xhigh — the session extra_body merged into an ordinary chat request).
+// ---------------------------------------------------------------------------
+
+/// The review probe's session: xhigh thinking pinned in extra_body and a
+/// 24k main-turn output budget.
+fn xhigh_session_config(endpoint: &str) -> crate::config::Config {
+    let mut config = crate::test_support::mock_agent_config(endpoint);
+    config.max_tokens = 24_576;
+    config.context_length = 163_840;
+    config.extra_body = Some(
+        serde_json::from_value(serde_json::json!({
+            "chat_template_kwargs": {
+                "enable_thinking": true,
+                "reasoning_effort": "xhigh",
+                "preserve_thinking": false
+            }
+        }))
+        .unwrap(),
+    );
+    config
+}
+
+/// The probe's history: 18 messages, enough to summarize.
+fn probe_history() -> Vec<Message> {
+    let mut m = vec![
+        Message::system("system"),
+        Message::user("Review the repo without edits."),
+    ];
+    for i in 0..8 {
+        m.push(Message::assistant(format!("Reviewed example{i}.rs")));
+        m.push(Message::user(format!("Read result {i}")));
+    }
+    m
+}
+
+#[tokio::test]
+async fn compressor_summary_is_a_bounded_streamed_side_call_on_the_wire() {
+    let server = crate::testing::mock_api::MockLlmServer::builder()
+        .with_response("- example.rs: already reviewed the implementation.")
+        .with_usage(11, 7, 18)
+        .build()
+        .await;
+    let config = xhigh_session_config(&format!("{}/v1", server.url()));
+    let client = ApiClient::new(&config).unwrap();
+    let (compressed, usage) = ContextCompressor::new(32_000)
+        .compress_with_task(
+            &client,
+            &probe_history(),
+            Some("Review the repo without edits."),
+        )
+        .await
+        .expect("summary compaction succeeds");
+    assert!(compressed
+        .iter()
+        .any(|m| m.content.text().contains("[CONTEXT SUMMARY")));
+    // Usage of the summarizer call is still carried out to the caller.
+    assert_eq!(usage.prompt_tokens, 11, "{usage:?}");
+    assert_eq!(usage.completion_tokens, 7, "{usage:?}");
+
+    let bodies = server.captured_request_bodies().await;
+    assert_eq!(bodies.len(), 1);
+    let sent: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+    assert_eq!(sent["stream"], true, "the summary must stream: {sent}");
+    assert_eq!(
+        sent["max_tokens"],
+        crate::agent::compression::COMPACT_SUMMARY_MAX_TOKENS,
+        "side-call output budget, not the session's 24576: {sent}"
+    );
+    assert_eq!(
+        sent["chat_template_kwargs"]["reasoning_effort"], "low",
+        "session xhigh effort must be lowered: {sent}"
+    );
+    assert!(sent.get("tools").is_none(), "{sent}");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn compressor_summary_slow_response_is_the_typed_side_call_timeout() {
+    // Headers only after 10 s: the shape of an xhigh summary behind a
+    // gateway. `agent.max_call_secs` tightens the side-call cap to 1 s.
+    let server = crate::testing::mock_api::MockLlmServer::builder()
+        .with_response("late")
+        .with_latency(10_000)
+        .build()
+        .await;
+    let mut config = xhigh_session_config(&format!("{}/v1", server.url()));
+    config.agent.max_call_secs = Some(1);
+    let client = ApiClient::new(&config).unwrap();
+    let started = std::time::Instant::now();
+    let err = ContextCompressor::new(32_000)
+        .compress_with_task(&client, &probe_history(), None)
+        .await
+        .expect_err("a summary over its cap must fail");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "cut at the cap, took {:?}",
+        started.elapsed()
+    );
+    let typed = err
+        .chain()
+        .find_map(|c| c.downcast_ref::<crate::api::client::SideCallTimeout>())
+        .unwrap_or_else(|| panic!("expected SideCallTimeout, got {err:?}"));
+    assert_eq!(typed.purpose, CONTEXT_SUMMARY_PURPOSE);
+    assert_eq!(typed.limit_secs, 1);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn compressor_summary_emits_side_call_waiting_heartbeats() {
+    let server = crate::testing::mock_api::MockLlmServer::builder()
+        .with_response("- example.rs: reviewed.")
+        .with_latency(400)
+        .build()
+        .await;
+    let config = xhigh_session_config(&format!("{}/v1", server.url()));
+    let recorder = std::sync::Arc::new(crate::agent::progress::RecordingProgressEmitter::new());
+    let mut client = ApiClient::new(&config).unwrap();
+    client.with_progress_emitter(recorder.clone());
+    client.side_call_wait_tick_override = Some(std::time::Duration::from_millis(50));
+    ContextCompressor::new(32_000)
+        .compress_with_task(&client, &probe_history(), None)
+        .await
+        .unwrap();
+    let phases: Vec<String> = recorder
+        .snapshot()
+        .into_iter()
+        .filter_map(|e| match e {
+            crate::agent::progress::ProgressEvent::LlmWaiting {
+                phase,
+                tokens_source,
+                ..
+            } => {
+                assert_eq!(tokens_source, "none", "nothing observable is claimed");
+                Some(phase)
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        phases.len() >= 2,
+        "a 400 ms side call at a 50 ms cadence must tick: {phases:?}"
+    );
+    assert!(
+        phases.iter().all(|p| p == "side_call:context_summary"),
+        "{phases:?}"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn compressor_with_too_few_messages_makes_no_call() {
+    // c24 (0.8.2 validation, 24k window): 10 of 12 "no reduction" hard
+    // fallbacks came from this path — the history was already at most the
+    // kept tail, so no summarizer call was made at all. The side-call
+    // routing cannot change that; the caller now names this reason.
+    let server = crate::testing::mock_api::MockLlmServer::builder()
+        .with_response("unused")
+        .build()
+        .await;
+    let client = ApiClient::new(&xhigh_session_config(&format!("{}/v1", server.url()))).unwrap();
+    let compressor = ContextCompressor::new(100);
+    let history = vec![
+        Message::system("x".repeat(4_000)),
+        Message::user("task"),
+        Message::assistant("a"),
+        Message::user("b"),
+    ];
+    assert!(compressor.should_compress(&history));
+    assert!(compressor.too_few_to_summarize(&history));
+    let (out, usage) = compressor
+        .compress_with_task(&client, &history, None)
+        .await
+        .unwrap();
+    assert_eq!(out.len(), history.len());
+    assert_eq!(usage.total_tokens, 0);
+    assert!(server.captured_request_bodies().await.is_empty());
+    server.stop().await;
+}

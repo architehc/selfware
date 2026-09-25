@@ -13,8 +13,9 @@ use anyhow::Result;
 use std::collections::VecDeque;
 use tracing::{debug, info, warn};
 
-/// Output budget for the compaction summary side calls.
-const COMPACT_SUMMARY_MAX_TOKENS: usize = 4096;
+/// Output budget for the compaction summary side calls (also the automatic
+/// `ContextCompressor::compress_with_task` summary).
+pub(crate) const COMPACT_SUMMARY_MAX_TOKENS: usize = 4096;
 
 /// Compression method used
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

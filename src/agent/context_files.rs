@@ -467,6 +467,7 @@ impl Agent {
 
         println!("{} Compressing context...", "🗜️".bright_cyan());
 
+        let before_messages = self.messages.len();
         let (compressed, _usage) = self
             .compressor
             .compress_with_task(&self.client, &self.messages, self.current_task_text())
@@ -480,6 +481,16 @@ impl Agent {
         self.sync_api_usage();
 
         let after = self.compressor.estimate_tokens(&self.messages);
+        self.log_context_compression_event(super::session_log::ContextCompressionLogDetails {
+            strategy: "summary",
+            success: after < before,
+            before_messages,
+            after_messages: self.messages.len(),
+            before_tokens: before,
+            after_tokens: after,
+            threshold: self.compressor.compression_threshold(),
+            error: None,
+        });
         let saved = before.saturating_sub(after);
         let pct = if before > 0 {
             saved as f64 / before as f64 * 100.0

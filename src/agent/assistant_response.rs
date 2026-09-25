@@ -169,7 +169,21 @@ impl Agent {
                             },
                         );
                     } else {
-                        warn!("Context compression summary yielded no size reduction, using hard fallback");
+                        // Name the real cause: most "no reduction" fallbacks
+                        // made no summarizer call at all (the history was
+                        // already at most the kept tail) — c24 at 24k: 10 of
+                        // 12 fallbacks.
+                        let reason = if self.compressor.too_few_to_summarize(&self.messages) {
+                            format!(
+                                "too few messages to summarize ({}); no summary call made",
+                                before_compression_messages
+                            )
+                        } else {
+                            format!(
+                                "summary did not reduce size (~{before_compression_tokens} -> ~{after_tokens} tokens)"
+                            )
+                        };
+                        warn!("Context compression summary yielded no size reduction ({reason}), using hard fallback");
                         self.messages = self
                             .compressor
                             .hard_compress_with_task(&self.messages, self.current_task_text());
@@ -184,7 +198,7 @@ impl Agent {
                                 before_tokens: before_compression_tokens,
                                 after_tokens: final_tokens,
                                 threshold: compression_threshold,
-                                error: Some("summary yielded no reduction"),
+                                error: Some(&reason),
                             },
                         );
                     }
@@ -194,6 +208,9 @@ impl Agent {
                     self.messages = self
                         .compressor
                         .hard_compress_with_task(&self.messages, self.current_task_text());
+                    // A failed/timed-out summary side call may still have
+                    // been billed: account what the client recorded.
+                    self.sync_api_usage();
                     let error_text = e.to_string();
                     self.log_context_compression_event(
                         super::session_log::ContextCompressionLogDetails {

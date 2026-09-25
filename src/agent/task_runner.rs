@@ -1855,9 +1855,9 @@ impl Agent {
                                             "Planning hit a context-window overflow (attempt {}/{}) — hard-compressing before retry",
                                             planning_attempt, MAX_PLANNING_RETRIES
                                         );
-                                        self.messages = self.compressor.hard_compress_with_task(
-                                            &self.messages,
-                                            self.current_task_text(),
+                                        self.hard_compress_logged(
+                                            "hard_overflow",
+                                            "planning request hit a context-window overflow",
                                         );
                                         self.trim_message_history();
                                         continue;
@@ -2461,9 +2461,10 @@ impl Agent {
                     // only make things worse.
                     if is_context_overflow_text(&error) {
                         warn!("Context overflow detected — hard-compressing before retry");
-                        self.messages = self
-                            .compressor
-                            .hard_compress_with_task(&self.messages, self.current_task_text());
+                        self.hard_compress_logged(
+                            "hard_overflow",
+                            "request hit a context-window overflow",
+                        );
                         self.trim_message_history();
                     } else if error.contains("Visual assertion failed") {
                         // Visual assertion failure: provide specific recovery guidance

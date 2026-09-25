@@ -1042,6 +1042,92 @@ async fn test_progress_emitter_records_tool_call_started_and_completed() {
     server.stop().await;
 }
 
+/// 0.8.2 validation D11: compaction was invisible in stream-json/progress
+/// (18 "Context compression triggered" log lines, zero events). Every
+/// compaction now emits a `context_compression` turn decision naming the
+/// method, the before/after message and token counts and the fallback reason.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn test_compaction_emits_a_context_compression_progress_event() {
+    use std::sync::Arc;
+    let server = MockLlmServer::builder()
+        .with_response("All done.")
+        .build()
+        .await;
+    let config = mock_agent_config(format!("{}/v1", server.url()), false);
+    let recorder = Arc::new(super::progress::RecordingProgressEmitter::new());
+    let mut agent = Agent::new(config)
+        .await
+        .unwrap()
+        .with_progress_emitter(recorder.clone());
+    // A compression threshold every request exceeds: the short task history
+    // is at most the kept tail, so the summary path makes no call and the
+    // hard-limit fallback runs — the c24 shape.
+    agent.compressor = context::ContextCompressor::new(40);
+
+    let _ = agent.run_task("Just answer immediately").await;
+    let details: Vec<String> = recorder
+        .snapshot()
+        .into_iter()
+        .filter_map(|e| match e {
+            progress::ProgressEvent::TurnDecision { decision, detail }
+                if decision == "context_compression" =>
+            {
+                Some(detail)
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(!details.is_empty(), "no context_compression event");
+    let first = &details[0];
+    assert!(first.contains("method=hard_fallback"), "{first}");
+    assert!(first.contains("messages "), "{first}");
+    assert!(first.contains("tokens ~"), "{first}");
+    assert!(
+        first.contains("reason=too few messages to summarize"),
+        "the fallback names its real cause: {first}"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn test_overflow_hard_compaction_emits_a_context_compression_event() {
+    use std::sync::Arc;
+    let config = mock_agent_config("http://127.0.0.1:1/v1".to_string(), false);
+    let recorder = Arc::new(super::progress::RecordingProgressEmitter::new());
+    let mut agent = Agent::new(config)
+        .await
+        .unwrap()
+        .with_progress_emitter(recorder.clone());
+    agent.messages = vec![Message::system("sys"), Message::user("task")];
+    for i in 0..10 {
+        agent.messages.push(Message::assistant(format!("step {i}")));
+        agent.messages.push(Message::user(format!("continue {i}")));
+    }
+    agent.hard_compress_logged("hard_overflow", "request hit a context-window overflow");
+    let detail = recorder
+        .snapshot()
+        .into_iter()
+        .find_map(|e| match e {
+            progress::ProgressEvent::TurnDecision { decision, detail }
+                if decision == "context_compression" =>
+            {
+                Some(detail)
+            }
+            _ => None,
+        })
+        .expect("context_compression event");
+    assert!(detail.contains("method=hard_overflow"), "{detail}");
+    assert!(detail.contains("messages 22->"), "{detail}");
+    assert!(
+        detail.contains("reason=request hit a context-window overflow"),
+        "{detail}"
+    );
+}
+
 #[tokio::test]
 async fn test_agent_new_rejects_tiny_context_budget() {
     // The output reservation is clamped to what the context window can hold

@@ -1,6 +1,6 @@
+use crate::api::client::SideCall;
 use crate::api::types::{Message, Usage};
 use crate::api::ApiClient;
-use crate::api::ThinkingMode;
 use crate::token_count::estimate_tokens_with_overhead;
 use anyhow::Result;
 use std::collections::{HashSet, VecDeque};
@@ -9,6 +9,12 @@ use tracing::{debug, info, warn};
 
 /// Per-message overhead tokens (role header, formatting, separators).
 const MESSAGE_OVERHEAD_TOKENS: usize = 4;
+
+/// Side-call purpose of the automatic compressor's summary (typed timeout
+/// label and `side_call:<purpose>` heartbeat phase).
+pub(crate) const CONTEXT_SUMMARY_PURPOSE: &str = "context_summary";
+/// Wall-time cap of that side call.
+pub(crate) const CONTEXT_SUMMARY_TIME_CAP_SECS: u64 = 90;
 
 /// Advance a tail start index past any leading `role == "tool"` messages and
 /// any leading XML tool-result user messages (`<tool_result>` markup) so the
@@ -166,6 +172,14 @@ impl ContextCompressor {
         self.compression_threshold
     }
 
+    /// Whether [`Self::compress_with_task`] returns `messages` unchanged
+    /// WITHOUT a summarizer call because the history is at most the kept
+    /// tail (plus the system message). Callers use it to name the real
+    /// reason a summary compaction fell back to the hard limit.
+    pub fn too_few_to_summarize(&self, messages: &[Message]) -> bool {
+        messages.len() <= self.min_messages_to_keep + 1
+    }
+
     /// Returns the (possibly) compressed messages and the token usage the
     /// summarizer LLM call consumed (zero when no call was made), so the caller
     /// can account it against the budget.
@@ -190,7 +204,7 @@ impl ContextCompressor {
         let zero_usage = Usage::default;
         // Record progress before anything is summarized away.
         self.observe_work(messages);
-        if messages.len() <= self.min_messages_to_keep + 1 {
+        if self.too_few_to_summarize(messages) {
             warn!("Too few messages to compress, returning as-is");
             return Ok((messages.to_vec(), zero_usage()));
         }
@@ -235,12 +249,24 @@ impl ContextCompressor {
             Message::user(summary_content)
         ];
 
-        let response = tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            client.chat(summary_request, None, ThinkingMode::Disabled),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("Context compression API call timed out after 120s"))??;
+        // A bounded side call, like the other compaction summaries
+        // (compression::auto_compact / full_compact): streamed, no tools,
+        // output capped at COMPACT_SUMMARY_MAX_TOKENS instead of the session
+        // max_tokens, session reasoning effort lowered, and a hard wall cap
+        // that fails as the typed `SideCallTimeout`. The previous
+        // `client.chat` went out non-streaming with the session's
+        // max_tokens and extra_body (enable_thinking/xhigh) under a 120 s
+        // outer timeout (external review 2026-09-25 wire capture). 90 s
+        // matches full_compact, which likewise summarizes the whole
+        // pre-tail history.
+        let response = client
+            .side_chat(
+                summary_request,
+                SideCall::new(CONTEXT_SUMMARY_PURPOSE)
+                    .max_tokens(super::compression::COMPACT_SUMMARY_MAX_TOKENS)
+                    .time_cap_secs(CONTEXT_SUMMARY_TIME_CAP_SECS),
+            )
+            .await?;
 
         let summary = response
             .choices

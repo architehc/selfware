@@ -555,6 +555,11 @@ pub struct ApiClient {
     /// (60 s) constant.
     #[cfg(test)]
     pub(crate) zero_content_threshold_override_ms: Option<u64>,
+    /// Test-only override for the side-call waiting-heartbeat cadence
+    /// (`llm_wait::LLM_WAIT_TICK`, 15 s), so a test can observe heartbeats
+    /// without a 15-second server stall.
+    #[cfg(test)]
+    pub(crate) side_call_wait_tick_override: Option<Duration>,
 }
 
 /// EMA of observed effective generation speed (tokens/second) for an
@@ -701,6 +706,8 @@ impl ApiClient {
             speed_tracker: Arc::new(std::sync::Mutex::new(ServerSpeedTracker::new())),
             #[cfg(test)]
             zero_content_threshold_override_ms: None,
+            #[cfg(test)]
+            side_call_wait_tick_override: None,
         })
     }
 
@@ -1426,11 +1433,27 @@ impl ApiClient {
     /// run-terminal [`CallTimeBudgetExceeded`]. A gateway timeout
     /// ([`ApiError::GatewayTimeout`]) is retried at most once, with half the
     /// output budget, then returned typed.
+    ///
+    /// While the call is in flight an `llm_waiting` heartbeat with phase
+    /// `side_call:<purpose>` goes to the client's progress emitter (the same
+    /// sink the agent's main-call heartbeat uses) every
+    /// `llm_wait::LLM_WAIT_TICK` (15 s). The stream
+    /// is collected here, so prefill/reasoning/streaming are not told apart
+    /// and no token count is claimed (`tokens_source = none`); no spinner is
+    /// updated from this layer.
     pub async fn side_chat(&self, messages: Vec<Message>, spec: SideCall) -> Result<ChatResponse> {
+        use crate::agent::llm_wait::{await_with_phase_ticks, LlmWaitPhase, LlmWaitTicker};
         crate::safety::killswitch::check_killswitch(None)?;
         let cap_secs = spec.effective_cap_secs(self.config.agent.max_call_secs);
         let cap = Duration::from_secs(cap_secs);
         let started = Instant::now();
+        #[cfg(test)]
+        let tick = self
+            .side_call_wait_tick_override
+            .unwrap_or(crate::agent::llm_wait::LLM_WAIT_TICK);
+        #[cfg(not(test))]
+        let tick = crate::agent::llm_wait::LLM_WAIT_TICK;
+        let mut wait_ticker = LlmWaitTicker::with_interval(tokio::time::Instant::now(), tick);
         let estimated_tokens = estimate_messages_tokens(&messages);
         let mut body = self.build_chat_body(messages, None, ThinkingMode::Disabled, true)?;
         let mut max_tokens = spec.max_tokens;
@@ -1477,7 +1500,13 @@ impl ApiClient {
                     })?;
                 stream.collect().await
             };
-            let err = match tokio::time::timeout(remaining, call).await {
+            let attempt = await_with_phase_ticks(
+                tokio::time::timeout(remaining, call),
+                &mut wait_ticker,
+                LlmWaitPhase::SideCall(spec.purpose),
+                |event| self.progress_emitter.emit(event),
+            );
+            let err = match attempt.await {
                 Err(_elapsed) => return Err(timeout_err(started)),
                 Ok(Ok(response)) => {
                     let finish_reason = response
@@ -1833,6 +1862,7 @@ impl ApiClient {
         #[cfg(test)]
         {
             client.zero_content_threshold_override_ms = self.zero_content_threshold_override_ms;
+            client.side_call_wait_tick_override = self.side_call_wait_tick_override;
         }
         if config.endpoint == self.config.endpoint && config.model == self.config.model {
             client.speed_tracker = Arc::clone(&self.speed_tracker);
