@@ -91,6 +91,7 @@ impl Agent {
                 || matches!(
                     tool_name.as_str(),
                     "directory_tree"
+                        | "patch_apply"
                         | "symbol_search"
                         | "search"
                         | "grep_search"
@@ -133,10 +134,19 @@ impl Agent {
                                     .filter_map(|edit| edit.get("path").and_then(|v| v.as_str())),
                             );
                         }
+                        // patch_apply names its targets only in the diff
+                        // headers (N1 Rule-5 sweep).
+                        let patch_targets = if tool_name == "patch_apply" {
+                            super::tool_dispatch::written_paths_for_tool_call(&tool_name, &args)
+                        } else {
+                            Vec::new()
+                        };
                         paths.into_iter().all(|path| {
                             self.validate_context_path(std::path::Path::new(path))
                                 .is_ok()
-                        })
+                        }) && patch_targets
+                            .iter()
+                            .all(|path| self.validate_context_path(path).is_ok())
                     });
             if !paths_allowed {
                 let removed = "[trust-gate: restored tool output withheld because its source path is no longer allowed]";

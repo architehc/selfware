@@ -3732,66 +3732,58 @@ impl Agent {
         // Snapshot file before edit/write for undo support + diff display.
         // A NEW mutating edit supersedes the redo stack (standard undo-tree
         // rule: redo only survives until the next change).
+        // file_fim_edit is a single-`path` edit like file_edit: it was missing
+        // here, so a FIM edit got no /undo snapshot (N1 Rule-5 sweep).
         if matches!(
             name,
-            "file_edit" | "file_write" | "file_delete" | "file_multi_edit" | "patch_apply"
+            "file_edit"
+                | "file_write"
+                | "file_fim_edit"
+                | "file_delete"
+                | "file_multi_edit"
+                | "patch_apply"
         ) {
             self.redo_stack.clear();
         }
-        let pre_edit_content: Option<(String, String)> =
-            if matches!(name, "file_edit" | "file_write" | "file_delete") {
-                if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                    // Snapshot the file the tool will actually touch: a
-                    // relative path resolves against this agent's workspace
-                    // root (no-op unless a worktree was entered).
-                    let path_anchored = self.tools.workspace_root().anchor_str(path);
-                    let path = path_anchored.as_str();
-                    if let Ok(content) = tokio::fs::read_to_string(path).await {
-                        use crate::session::edit_history::{EditAction, FileSnapshot};
-                        let snapshot =
-                            FileSnapshot::new(std::path::PathBuf::from(path), content.clone());
-                        let action = EditAction::FileEdit {
-                            path: std::path::PathBuf::from(path),
-                            tool: name.to_string(),
-                        };
-                        self.edit_history.create_checkpoint(action);
-                        self.edit_history.add_file_to_current(snapshot);
-                        Some((path.to_string(), content))
-                    } else {
-                        // New file (file_write to nonexistent path)
-                        Some((path.to_string(), String::new()))
-                    }
+        let pre_edit_content: Option<(String, String)> = if matches!(
+            name,
+            "file_edit" | "file_write" | "file_fim_edit" | "file_delete"
+        ) {
+            if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                // Snapshot the file the tool will actually touch: a
+                // relative path resolves against this agent's workspace
+                // root (no-op unless a worktree was entered).
+                let path_anchored = self.tools.workspace_root().anchor_str(path);
+                let path = path_anchored.as_str();
+                if let Ok(content) = tokio::fs::read_to_string(path).await {
+                    use crate::session::edit_history::{EditAction, FileSnapshot};
+                    let snapshot =
+                        FileSnapshot::new(std::path::PathBuf::from(path), content.clone());
+                    let action = EditAction::FileEdit {
+                        path: std::path::PathBuf::from(path),
+                        tool: name.to_string(),
+                    };
+                    self.edit_history.create_checkpoint(action);
+                    self.edit_history.add_file_to_current(snapshot);
+                    Some((path.to_string(), content))
                 } else {
-                    None
+                    // New file (file_write to nonexistent path)
+                    Some((path.to_string(), String::new()))
                 }
-            } else if name == "file_multi_edit" {
-                // Snapshot EVERY targeted file so `/undo` restores the whole
-                // batch — previously no checkpoint was captured at all and
-                // `/undo` silently reverted an older, unrelated checkpoint.
-                let paths: Vec<std::path::PathBuf> = args
-                    .get("edits")
-                    .and_then(|v| v.as_array())
-                    .map(|edits| {
-                        edits
-                            .iter()
-                            .filter_map(|e| e.get("path").and_then(|p| p.as_str()))
-                            .map(std::path::PathBuf::from)
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                Self::snapshot_files_for_undo(&mut self.edit_history, paths, name).await;
-                None
-            } else if name == "patch_apply" {
-                let paths = args
-                    .get("diff")
-                    .and_then(|v| v.as_str())
-                    .map(patch_target_paths)
-                    .unwrap_or_default();
-                Self::snapshot_files_for_undo(&mut self.edit_history, paths, name).await;
-                None
             } else {
                 None
-            };
+            }
+        } else if matches!(name, "file_multi_edit" | "patch_apply") {
+            // Snapshot EVERY targeted file so `/undo` restores the whole
+            // batch — previously no checkpoint was captured at all and
+            // `/undo` silently reverted an older, unrelated checkpoint.
+            // Same extractor as every other written-path consumer.
+            let paths = written_paths_for_tool_call(name, args);
+            Self::snapshot_files_for_undo(&mut self.edit_history, paths, name).await;
+            None
+        } else {
+            None
+        };
 
         // Acquire concurrency governor permit before executing the tool.
         // The permit is held for the duration of execution and released on drop.
@@ -3884,7 +3876,8 @@ impl Agent {
 
                 // Display color-coded diff for file mutations
                 if let Some((ref path, ref old_content)) = pre_edit_content {
-                    if tool_success && matches!(name, "file_edit" | "file_write") {
+                    if tool_success && matches!(name, "file_edit" | "file_write" | "file_fim_edit")
+                    {
                         if let Ok(new_content) = tokio::fs::read_to_string(path).await {
                             crate::output::display_file_diff(path, old_content, &new_content);
                         }

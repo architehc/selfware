@@ -11,12 +11,33 @@ fn test_hook_event_display() {
 fn test_extract_path_from_args() {
     let args = r#"{"path": "./src/main.rs", "content": "test"}"#;
     assert_eq!(
-        extract_path_from_args(args),
-        Some("./src/main.rs".to_string())
+        extract_paths_from_args("file_write", args),
+        vec!["./src/main.rs".to_string()]
     );
 
     let args = r#"{"command": "cargo test"}"#;
-    assert_eq!(extract_path_from_args(args), None);
+    assert!(extract_paths_from_args("shell_exec", args).is_empty());
+}
+
+#[test]
+fn test_hook_context_sees_every_multi_edit_and_patch_path() {
+    // N1 Rule-5 sweep: `{path}` was empty for file_multi_edit / patch_apply,
+    // whose paths are not a top-level `path` arg.
+    let ctx = HookContext::post_tool(
+        "file_multi_edit",
+        r#"{"edits":[{"path":"a.rs","old_str":"x","new_str":"y"},{"path":"b.rs","old_str":"x","new_str":"y"}]}"#,
+        true,
+        "ok",
+    );
+    assert_eq!(
+        ctx.affected_paths,
+        vec!["a.rs".to_string(), "b.rs".to_string()]
+    );
+    assert_eq!(ctx.affected_path.as_deref(), Some("a.rs"));
+
+    let diff = serde_json::json!({"diff": "--- a/src/x.rs\n+++ b/src/x.rs\n@@ -1 +1 @@\n-a\n+b\n"});
+    let ctx = HookContext::pre_tool("patch_apply", &diff.to_string());
+    assert_eq!(ctx.affected_paths, vec!["src/x.rs".to_string()]);
 }
 
 #[test]

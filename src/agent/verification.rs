@@ -717,6 +717,21 @@ fn patch_target_paths(diff: &str) -> Vec<String> {
         .collect()
 }
 
+/// Every file a file-writing tool call touched, deduplicated in first-seen
+/// order — the set the post-edit verification checks. Uses the shared
+/// extractor (`written_paths_for_tool_call`), so a patch that deletes a file
+/// still verifies the tree it changed.
+fn post_edit_verification_paths(tool_name: &str, args: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for path in super::tool_dispatch::written_paths_for_tool_call(tool_name, args) {
+        let path = path.to_string_lossy().into_owned();
+        if !out.contains(&path) {
+            out.push(path);
+        }
+    }
+    out
+}
+
 fn written_paths(tool_name: &str, args: &Value) -> Vec<String> {
     match tool_name {
         "file_write" | "file_edit" | "file_fim_edit" => args
@@ -3272,14 +3287,23 @@ impl Agent {
             return None;
         }
 
-        let path = args.get("path").and_then(|v| v.as_str())?;
+        // Every edited path, not just a top-level `path` arg (N1, 0.8.3
+        // validation): file_multi_edit carries its paths in `edits[].path`
+        // and patch_apply inside the diff headers, so a `get("path")?` here
+        // returned early and those edits were silently never verified.
+        let paths = post_edit_verification_paths(tool_name, args);
+        if paths.is_empty() {
+            return None;
+        }
+        let label = paths.join(", ");
+        let path = label.as_str();
         info!("Running verification after {} on {}", tool_name, path);
         self.cognitive_state.set_phase(CyclePhase::Verify);
         let spinner = crate::ui::spinner::TerminalSpinner::start("Verifying...");
 
         match self
             .verification_gate
-            .verify_change(&[path.to_string()], &format!("{}:{}", tool_name, path))
+            .verify_change(&paths, &format!("{}:{}", tool_name, path))
             .await
         {
             Ok(report) => match self.absorb_post_edit_report(tool_name, path, &report) {

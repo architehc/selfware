@@ -13,6 +13,18 @@ fn test_expand_placeholders() {
 }
 
 #[test]
+fn test_expand_placeholders_quotes_every_multi_edit_path() {
+    let ctx = HookContext::post_tool(
+        "file_multi_edit",
+        r#"{"edits":[{"path":"a.rs","old_str":"x","new_str":"y"},{"path":"b c.rs","old_str":"x","new_str":"y"}]}"#,
+        true,
+        "ok",
+    );
+    let cmd = expand_placeholders("rustfmt {path}", &ctx);
+    assert_eq!(cmd, "rustfmt 'a.rs' 'b c.rs'");
+}
+
+#[test]
 fn test_expand_placeholders_no_path() {
     let ctx = HookContext::stop();
     let cmd = expand_placeholders("cargo test", &ctx);

@@ -157,3 +157,36 @@ async fn restored_local_path_arrays_are_checked_but_remote_resource_paths_are_pr
         .contains("PROTECTED_ARRAY_SENTINEL"));
     assert_eq!(messages[3].content.text(), "remote resource payload");
 }
+
+#[tokio::test]
+async fn restored_patch_apply_output_obeys_policy_for_its_diff_targets() {
+    // N1 Rule-5 sweep: patch_apply names its targets only in the diff
+    // headers, so the restored-output trust gate never checked them.
+    let patch_call = |id: &str, target: &str| {
+        let mut message = native_call(id, target);
+        let call = &mut message.tool_calls.as_mut().unwrap()[0];
+        call.function.name = "patch_apply".to_string();
+        call.function.arguments = serde_json::json!({
+            "diff": format!("--- a/{target}\n+++ b/{target}\n@@ -1 +1 @@\n-a\n+b\n")
+        })
+        .to_string();
+        message
+    };
+    let mut agent = agent().await;
+    let mut messages = vec![
+        patch_call("safe", "src/safe.rs"),
+        Message::tool("SAFE_PATCH_SENTINEL", "safe"),
+        patch_call("protected", ".env"),
+        Message::tool("PROTECTED_PATCH_SENTINEL", "protected"),
+    ];
+    agent.sanitize_restored_tool_messages(&mut messages, &[]);
+    assert!(messages[1].content.text().contains("SAFE_PATCH_SENTINEL"));
+    assert!(!messages[3]
+        .content
+        .text()
+        .contains("PROTECTED_PATCH_SENTINEL"));
+    assert!(messages[3]
+        .content
+        .text()
+        .contains("source path is no longer allowed"));
+}

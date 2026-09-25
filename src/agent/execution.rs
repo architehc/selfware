@@ -393,11 +393,14 @@ impl Agent {
                 continue;
             }
             saw_write = true;
-            let target_read = serde_json::from_str::<serde_json::Value>(args_str)
-                .ok()
-                .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from))
-                .map(|p| self.file_tracker.read_state.contains_key(&p))
-                .unwrap_or(false);
+            // Every target the call writes — file_multi_edit's `edits[].path`
+            // and patch_apply's diff headers included, not just a top-level
+            // `path` (N1 Rule-5 sweep). No parseable target → blind.
+            let targets = write_targets(name, args_str);
+            let target_read = !targets.is_empty()
+                && targets
+                    .iter()
+                    .all(|p| self.file_tracker.read_state.contains_key(p));
             if !target_read {
                 return false;
             }
@@ -421,10 +424,9 @@ impl Agent {
                 continue;
             }
             saw_write = true;
-            let target_is_new = serde_json::from_str::<serde_json::Value>(args_str)
-                .ok()
-                .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from))
-                .map(|p| {
+            let targets = write_targets(name, args_str);
+            let target_is_new = !targets.is_empty()
+                && targets.iter().all(|p| {
                     // The path is model output probed BEFORE the safety
                     // check: only answer "new" for an anchored path the
                     // file-tool policy allows, so the guard's decision never
@@ -432,10 +434,9 @@ impl Agent {
                     let anchored = self
                         .tools
                         .workspace_root()
-                        .anchor_path(std::path::Path::new(&p));
+                        .anchor_path(std::path::Path::new(p));
                     self.validate_context_path(&anchored).is_ok() && !anchored.exists()
-                })
-                .unwrap_or(false);
+                });
             if !target_is_new {
                 return false;
             }
@@ -2287,6 +2288,20 @@ fn is_observational_shell_batch(tool_calls: &[CollectedToolCall]) -> bool {
 /// builds — deliberately do NOT: the guard's job is to stop blind edits,
 /// and dropping an `npm install` batch for lacking a FILES: line just burns
 /// turns while the model re-issues the identical command.
+/// Every path a file-write-intent call writes, via the shared extractor
+/// (`written_paths_for_tool_call`). Empty for shell writes, whose targets are
+/// not reliably parseable.
+fn write_targets(name: &str, args_str: &str) -> Vec<String> {
+    serde_json::from_str::<serde_json::Value>(args_str)
+        .map(|v| {
+            super::tool_dispatch::written_paths_for_tool_call(name, &v)
+                .into_iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn tool_call_is_file_write_intent(name: &str, args_str: &str) -> bool {
     if name != "shell_exec" {
         return matches!(

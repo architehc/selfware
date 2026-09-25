@@ -110,13 +110,19 @@ pub struct HookContext {
     pub tool_success: Option<bool>,
     /// Tool result string (for PostToolUse events).
     pub tool_result: Option<String>,
-    /// File path affected by the tool, if any.
+    /// File path affected by the tool, if any (the first of
+    /// `affected_paths`).
     pub affected_path: Option<String>,
+    /// EVERY file path the tool affects. A file_multi_edit names its paths
+    /// in `edits[].path` and a patch_apply inside the diff headers, so a
+    /// single top-level `path` lookup left `{path}` empty for them.
+    pub affected_paths: Vec<String>,
 }
 
 impl HookContext {
     pub fn pre_tool(tool_name: &str, tool_args: &str) -> Self {
-        let affected_path = extract_path_from_args(tool_args);
+        let affected_paths = extract_paths_from_args(tool_name, tool_args);
+        let affected_path = affected_paths.first().cloned();
         Self {
             event: HookEvent::PreToolUse,
             tool_name: Some(tool_name.to_string()),
@@ -124,11 +130,13 @@ impl HookContext {
             tool_success: None,
             tool_result: None,
             affected_path,
+            affected_paths,
         }
     }
 
     pub fn post_tool(tool_name: &str, tool_args: &str, success: bool, result: &str) -> Self {
-        let affected_path = extract_path_from_args(tool_args);
+        let affected_paths = extract_paths_from_args(tool_name, tool_args);
+        let affected_path = affected_paths.first().cloned();
         Self {
             event: HookEvent::PostToolUse,
             tool_name: Some(tool_name.to_string()),
@@ -136,6 +144,7 @@ impl HookContext {
             tool_success: Some(success),
             tool_result: Some(result.to_string()),
             affected_path,
+            affected_paths,
         }
     }
 
@@ -147,17 +156,31 @@ impl HookContext {
             tool_success: None,
             tool_result: None,
             affected_path: None,
+            affected_paths: Vec::new(),
         }
     }
 }
 
-/// Extract the `path` field from a JSON args string, if present.
-fn extract_path_from_args(args: &str) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(args)
-        .ok()?
-        .get("path")?
-        .as_str()
-        .map(String::from)
+/// Every file path a tool call affects: the written paths of a file-mutating
+/// tool (shared extractor, covering `edits[].path` and diff headers), else
+/// the top-level `path` arg, if present.
+fn extract_paths_from_args(tool_name: &str, args: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(args) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<String> = Vec::new();
+    for path in crate::agent::tool_dispatch::written_paths_for_tool_call(tool_name, &value) {
+        let path = path.to_string_lossy().into_owned();
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    if paths.is_empty() {
+        if let Some(path) = value.get("path").and_then(|p| p.as_str()) {
+            paths.push(path.to_string());
+        }
+    }
+    paths
 }
 
 /// Configuration for a single hook (loaded from TOML).

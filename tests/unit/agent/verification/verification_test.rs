@@ -98,6 +98,86 @@ async fn excluded_only_file_change_is_not_credited_as_verified() {
     );
 }
 
+/// A post-edit gate whose only check is a post-edit command that can never
+/// run, so ANY verification that actually executes reports a failure — the
+/// observable proof that the call reached `verify_change` with its paths.
+fn always_failing_post_edit_gate(
+    root: &std::path::Path,
+) -> crate::testing::verification::VerificationGate {
+    let config = crate::testing::verification::VerificationConfig {
+        exclude_patterns: Vec::new(),
+        post_edit_test_command: Some("selfware-no-such-post-edit-verifier".to_string()),
+        ..Default::default()
+    };
+    crate::testing::verification::VerificationGate::new(root, config)
+}
+
+#[tokio::test]
+async fn file_multi_edit_triggers_post_edit_verification_on_every_path() {
+    // N1 (0.8.3 validation): `args.get("path")?` returned early for
+    // file_multi_edit (paths live in `edits[].path`), so its edits were never
+    // verified — runs/ts turns 0003/0004/0011 had no verification report.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut agent = Agent::new(crate::config::Config::default())
+        .await
+        .expect("agent should build");
+    agent.verification_gate = always_failing_post_edit_gate(tmp.path());
+
+    let nudge = agent
+        .maybe_verify_file_change(
+            "file_multi_edit",
+            &json!({"edits": [
+                {"path": "a.txt", "old_str": "x", "new_str": "y"},
+                {"path": "b.txt", "old_str": "x", "new_str": "y"},
+                {"path": "a.txt", "old_str": "y", "new_str": "z"}
+            ]}),
+        )
+        .await;
+
+    assert!(
+        nudge.is_some(),
+        "a failing post-edit check after file_multi_edit must reach the model"
+    );
+    let report = agent
+        .verification_gate
+        .last_results()
+        .expect("file_multi_edit must run the post-edit verification");
+    assert_eq!(
+        report.affected_files,
+        vec!["a.txt".to_string(), "b.txt".to_string()],
+        "every edited path is verified, once each"
+    );
+}
+
+#[tokio::test]
+async fn patch_apply_triggers_post_edit_verification_on_diff_targets() {
+    // N1: patch_apply names its targets only inside the diff headers.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut agent = Agent::new(crate::config::Config::default())
+        .await
+        .expect("agent should build");
+    agent.verification_gate = always_failing_post_edit_gate(tmp.path());
+
+    let diff = "--- a/src/one.txt\n+++ b/src/one.txt\n@@ -1 +1 @@\n-a\n+b\n\
+                --- a/two.txt\n+++ b/two.txt\n@@ -1 +1 @@\n-a\n+b\n";
+    let nudge = agent
+        .maybe_verify_file_change("patch_apply", &json!({ "diff": diff }))
+        .await;
+
+    assert!(
+        nudge.is_some(),
+        "a failing post-edit check after patch_apply must reach the model"
+    );
+    let report = agent
+        .verification_gate
+        .last_results()
+        .expect("patch_apply must run the post-edit verification");
+    assert_eq!(
+        report.affected_files,
+        vec!["src/one.txt".to_string(), "two.txt".to_string()]
+    );
+}
+
 #[tokio::test]
 async fn cargo_failure_in_python_only_workspace_is_no_runner_and_unittest_flow_completes() {
     // Finding 1 reproduction, driven through the REAL recording path

@@ -678,6 +678,51 @@ async fn test_edit_to_already_read_file_satisfies_files_guard() {
 }
 
 #[tokio::test]
+async fn test_files_guard_sees_every_multi_edit_and_patch_target() {
+    // N1 Rule-5 sweep: the guard read only a top-level `path`, so a
+    // file_multi_edit / patch_apply to already-read files was always treated
+    // as blind. Every target must now be read for the exemption to apply.
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.file_tracker.read_state.insert(
+        "src/a.rs".to_string(),
+        super::super::FileReadState::default(),
+    );
+
+    let multi = |second: &str| {
+        vec![(
+            "file_multi_edit".to_string(),
+            format!(
+                r#"{{"edits":[{{"path":"src/a.rs","old_str":"x","new_str":"y"}},{{"path":"{second}","old_str":"x","new_str":"y"}}]}}"#
+            ),
+            None,
+        )]
+    };
+    assert!(
+        !agent.writes_target_only_read_files(&multi("src/b.rs")),
+        "one unread target keeps the multi-edit blind"
+    );
+    assert!(
+        agent.writes_target_only_read_files(&multi("src/a.rs")),
+        "a multi-edit whose every target was read is not blind"
+    );
+
+    let patch = vec![(
+        "patch_apply".to_string(),
+        serde_json::json!({"diff": "--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-x\n+y\n"})
+            .to_string(),
+        None,
+    )];
+    assert!(
+        agent.writes_target_only_read_files(&patch),
+        "a patch whose diff targets were read is not blind"
+    );
+
+    server.stop().await;
+}
+
+#[tokio::test]
 async fn test_force_mutation_bypasses_files_guard() {
     let server = MockLlmServer::builder().with_response("done").build().await;
     let config = test_config(format!("{}/v1", server.url()));

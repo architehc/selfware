@@ -182,7 +182,12 @@ async fn run_shell_command_in(
 fn expand_placeholders(command: &str, ctx: &HookContext) -> String {
     let mut result = command.to_string();
 
-    if let Some(ref path) = ctx.affected_path {
+    // Every affected path, each quoted separately (a multi-edit or patch
+    // touches several files; `rustfmt {path}` must see all of them).
+    if !ctx.affected_paths.is_empty() {
+        let quoted: Vec<String> = ctx.affected_paths.iter().map(|p| shell_quote(p)).collect();
+        result = result.replace("{path}", &quoted.join(" "));
+    } else if let Some(ref path) = ctx.affected_path {
         result = result.replace("{path}", &shell_quote(path));
     } else {
         result = result.replace("{path}", "''");
