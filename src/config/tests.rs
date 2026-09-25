@@ -2849,6 +2849,8 @@ fn test_config_load_strict_permissions_error() {
         file,
         r#"
 endpoint = "http://localhost:8000/v1"
+# A real credential: the permission check only guards credential-bearing files.
+api_key = "sk-live-permission-test"
 
 [safety]
 strict_permissions = true
@@ -3671,6 +3673,14 @@ fn test_config_load_selfware_strict_permissions_env() {
 
 [safety]
 strict_permissions = false
+
+# A credential in a model profile (not the top-level key, so the non-Unix
+# branch is not tripped by the strict plaintext-key rule): the permission
+# check only guards credential-bearing files.
+[models.alt]
+endpoint = "http://localhost:8001/v1"
+model = "alt"
+api_key = "sk-live-permission-test"
 "#,
     )
     .unwrap();

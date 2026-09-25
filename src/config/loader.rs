@@ -59,6 +59,89 @@ fn config_warning(message: &str) {
     }
 }
 
+/// True when a credential-bearing config string is really a placeholder:
+/// empty, `EMPTY` (the vLLM/SGLang "no key" convention), `none`/`null`, or an
+/// env-reference such as `${VAR}`, `$VAR` or `env:VAR`. The loader never
+/// expands env references inside the file (keys come from `SELFWARE_API_KEY`
+/// / the keyring instead), so such a literal is not a secret on disk.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) fn is_placeholder_credential(value: &str) -> bool {
+    let v = value.trim();
+    if v.is_empty() {
+        return true;
+    }
+    let lower = v.to_ascii_lowercase();
+    if matches!(lower.as_str(), "empty" | "none" | "null") {
+        return true;
+    }
+    let is_env_name = |name: &str| {
+        !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    if let Some(inner) = v.strip_prefix("${").and_then(|r| r.strip_suffix('}')) {
+        return is_env_name(inner);
+    }
+    if let Some(inner) = v.strip_prefix('$') {
+        return is_env_name(inner);
+    }
+    if let Some(inner) = lower.strip_prefix("env:") {
+        return is_env_name(inner);
+    }
+    false
+}
+
+/// Key names that carry a secret wherever they appear in the config tree
+/// (top-level `api_key`, `[models.*].api_key`, arbitrary `extra_body` maps).
+/// Deliberately exact-ish: `max_tokens` / `token_budget` are NOT secrets.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn is_secret_field_name(key: &str) -> bool {
+    let k = key.to_ascii_lowercase();
+    matches!(
+        k.as_str(),
+        "api_key"
+            | "apikey"
+            | "token"
+            | "secret"
+            | "password"
+            | "passwd"
+            | "authorization"
+            | "bearer"
+    ) || k.ends_with("_api_key")
+        || k.ends_with("_token")
+        || k.ends_with("_secret")
+        || k.ends_with("_password")
+}
+
+/// Decide from the parsed TOML whether a config file stores a real
+/// credential. Covers the same fields [`super::model::redact_config_secrets`]
+/// treats as secret (every `api_key`, every value of an MCP server `env`
+/// map) plus secret-named keys anywhere (e.g. an `Authorization` header in
+/// `extra_body`). Placeholders do not count ([`is_placeholder_credential`]).
+/// Unparseable content returns `true` — fail toward warning.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) fn config_content_holds_credential(content: &str) -> bool {
+    fn walk(value: &toml::Value, in_env_map: bool) -> bool {
+        match value {
+            toml::Value::Table(table) => table.iter().any(|(key, val)| {
+                if in_env_map || is_secret_field_name(key) {
+                    if let toml::Value::String(s) = val {
+                        if !is_placeholder_credential(s) {
+                            return true;
+                        }
+                    }
+                }
+                walk(val, key == "env" || key == "headers")
+            }),
+            toml::Value::Array(items) => items.iter().any(|v| walk(v, false)),
+            toml::Value::String(s) => in_env_map && !is_placeholder_credential(s),
+            _ => false,
+        }
+    }
+    match toml::from_str::<toml::Value>(content) {
+        Ok(value) => walk(&value, false),
+        Err(_) => true,
+    }
+}
+
 /// Walk a parsed TOML value and record `ConfigSource::ConfigFile(path)` for
 /// every leaf key reachable from a known top-level field. Nested keys are
 /// flattened with `.` (e.g. `agent.native_function_calling`,
@@ -415,12 +498,19 @@ impl Config {
         }
     }
 
-    /// On Unix, check whether a config file has overly permissive permissions
-    /// (group- or world-readable). Since the config may contain API keys, we
-    /// warn the user to tighten permissions.
+    /// On Unix, check whether a config file that HOLDS A CREDENTIAL has overly
+    /// permissive permissions (group- or world-readable) and warn the user to
+    /// tighten them.
     ///
-    /// When `strict` is true, world/group-readable permissions cause a hard
-    /// error instead of a warning. Strict mode can be enabled via the
+    /// A keyless config (no `api_key`, or only a placeholder such as `"EMPTY"`,
+    /// and no MCP server `env` secrets) has nothing to protect, so a 0644 mode
+    /// is not reported — git checkouts cannot carry a 0600 mode, which made the
+    /// old unconditional warning fire on every tracked, keyless example config.
+    /// If the file cannot be read or parsed, the check fails TOWARD warning:
+    /// it is treated as credential-bearing.
+    ///
+    /// When `strict` is true, a credential-bearing world/group-readable file is
+    /// a hard error instead of a warning. Strict mode can be enabled via the
     /// `safety.strict_permissions` config option or the
     /// `SELFWARE_STRICT_PERMISSIONS=1` environment variable.
     #[cfg(unix)]
@@ -429,11 +519,18 @@ impl Config {
         if let Ok(metadata) = std::fs::metadata(path) {
             let mode = metadata.permissions().mode();
             if mode & 0o077 != 0 {
+                let holds_credential = match std::fs::read_to_string(path) {
+                    Ok(content) => config_content_holds_credential(&content),
+                    Err(_) => true,
+                };
+                if !holds_credential {
+                    return Ok(());
+                }
                 if strict {
                     bail!(
                         "Config file '{}' has insecure permissions (mode {:o}). \
-                         The file is accessible by other users and may contain API keys. \
-                         Fix with: chmod 600 {} — or disable strict mode by setting \
+                         The file is accessible by other users and contains (or may contain) \
+                         credentials. Fix with: chmod 600 {} — or disable strict mode by setting \
                          safety.strict_permissions = false",
                         path,
                         mode & 0o777,
@@ -441,8 +538,8 @@ impl Config {
                     );
                 }
                 config_warning(&format!(
-                    "Config file '{}' is accessible by other users (mode {:o}). \
-                     This file may contain API keys. Consider running: chmod 600 {}",
+                    "Config file '{}' is accessible by other users (mode {:o}) and contains \
+                     (or may contain) credentials. Consider running: chmod 600 {}",
                     path,
                     mode & 0o777,
                     path

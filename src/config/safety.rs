@@ -19,9 +19,11 @@ pub struct SafetyConfig {
     pub protected_branches: Vec<String>,
     #[serde(default = "default_require_confirmation")]
     pub require_confirmation: Vec<String>,
-    /// When true, config files with overly permissive permissions (group- or
-    /// world-readable, i.e. mode & 0o077 != 0) cause a hard error instead of a
-    /// warning.  Can also be activated via `SELFWARE_STRICT_PERMISSIONS=1`.
+    /// When true, credential-bearing config files with overly permissive
+    /// permissions (group- or world-readable, i.e. mode & 0o077 != 0) cause a
+    /// hard error instead of a warning. Keyless files (no `api_key` or only a
+    /// placeholder like `"EMPTY"`, no MCP `env` secrets) are not checked. Can also be activated via
+    /// `SELFWARE_STRICT_PERMISSIONS=1`.
     /// Default: false (backward compatible -- warn only).
     #[serde(default)]
     pub strict_permissions: bool,

@@ -1455,7 +1455,7 @@ fn test_check_config_file_permissions_insecure_errors_strict() {
     let _guard = clear_env();
     use std::os::unix::fs::PermissionsExt;
     let (_dir, path) = write_temp_config(
-        r#"endpoint = "http://localhost:8000/v1""#,
+        "endpoint = \"http://localhost:8000/v1\"\napi_key = \"sk-live-strict\"\n",
         "strict_fail.toml",
     );
     // Set permissions to 644 (world-readable)
@@ -1469,6 +1469,90 @@ fn test_check_config_file_permissions_insecure_errors_strict() {
         .unwrap_err()
         .to_string()
         .contains("insecure permissions"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_check_config_file_permissions_keyless_world_readable_is_silent() {
+    // The tracked selfware-llm-selfware-design.toml shape: keyless, 0644 from
+    // a checkout. Nothing to protect -> no error even in strict mode.
+    let _guard = clear_env();
+    use std::os::unix::fs::PermissionsExt;
+    let (_dir, path) = write_temp_config(
+        "endpoint = \"https://llm.selfware.design/v1\"\napi_key = \"EMPTY\"\n",
+        "keyless.toml",
+    );
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(!super::config_content_holds_credential(
+        &std::fs::read_to_string(&path).unwrap()
+    ));
+    assert!(Config::check_config_file_permissions(path.to_str().unwrap(), false).is_ok());
+    assert!(Config::check_config_file_permissions(path.to_str().unwrap(), true).is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_check_config_file_permissions_real_key_world_readable_warns_and_strict_errors() {
+    let _guard = clear_env();
+    use std::os::unix::fs::PermissionsExt;
+    let (_dir, path) = write_temp_config(
+        "endpoint = \"https://llm.selfware.design/v1\"\napi_key = \"sk-live-abc123\"\n",
+        "keyed.toml",
+    );
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(super::config_content_holds_credential(
+        &std::fs::read_to_string(&path).unwrap()
+    ));
+    // Non-strict: warns (Ok). Strict: hard error naming the permissions.
+    assert!(Config::check_config_file_permissions(path.to_str().unwrap(), false).is_ok());
+    let err = Config::check_config_file_permissions(path.to_str().unwrap(), true).unwrap_err();
+    assert!(err.to_string().contains("insecure permissions"), "{err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_check_config_file_permissions_unparseable_fails_toward_warning() {
+    let _guard = clear_env();
+    use std::os::unix::fs::PermissionsExt;
+    let (_dir, path) = write_temp_config("this is = = not toml [", "broken.toml");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(Config::check_config_file_permissions(path.to_str().unwrap(), true).is_err());
+}
+
+#[test]
+fn test_config_content_holds_credential_placeholders_and_fields() {
+    use super::config_content_holds_credential as holds;
+    // Placeholders and absent keys: no credential.
+    for keyless in [
+        "endpoint = \"http://x/v1\"",
+        "api_key = \"\"",
+        "api_key = \"   \"",
+        "api_key = \"EMPTY\"",
+        "api_key = \"empty\"",
+        "api_key = \"none\"",
+        "api_key = \"None\"",
+        "api_key = \"null\"",
+        "api_key = \"${SELFWARE_API_KEY}\"",
+        "api_key = \"$OPENROUTER_API_KEY\"",
+        "api_key = \"env:SELFWARE_API_KEY\"",
+        "max_tokens = 4096\n[agent]\ntoken_budget = 1000",
+        "[models.alt]\nendpoint = \"http://x\"\nmodel = \"m\"\napi_key = \"EMPTY\"",
+        "[[mcp.servers]]\nname = \"gh\"\ncommand = \"x\"\nenv = { GITHUB_TOKEN = \"${GITHUB_TOKEN}\" }",
+    ] {
+        assert!(!holds(keyless), "treated as credential: {keyless}");
+    }
+    // Real secrets anywhere the schema accepts one.
+    for keyed in [
+        "api_key = \"sk-real\"",
+        "api_key = \"$not an env name\"",
+        "[models.alt]\nendpoint = \"http://x\"\nmodel = \"m\"\napi_key = \"sk-real\"",
+        "[[mcp.servers]]\nname = \"gh\"\ncommand = \"x\"\nenv = { GITHUB_TOKEN = \"ghp_real\" }",
+        "[[mcp.servers]]\nname = \"db\"\ncommand = \"x\"\nenv = { DB_URL = \"postgres://u:p@h/db\" }",
+        "[extra_body]\nauthorization = \"Bearer real\"",
+        "[extra_body.headers]\nX-Custom = \"real\"",
+    ] {
+        assert!(holds(keyed), "credential missed: {keyed}");
+    }
 }
 
 #[cfg(unix)]
