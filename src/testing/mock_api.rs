@@ -53,6 +53,14 @@ pub enum MockResponse {
     TextWithReasoning { content: String, reasoning: String },
     /// Return a response containing tool calls.
     ToolCalls(Vec<MockToolCall>),
+    /// Return content (possibly empty) plus optional reasoning with an
+    /// explicit `finish_reason` — e.g. `"length"` for a completion cut off by
+    /// the token budget. Served as SSE for streaming requests.
+    Finished {
+        content: String,
+        reasoning: Option<String>,
+        finish_reason: String,
+    },
     /// Return an HTTP error with the given status code and body.
     Error { status: u16, body: String },
     /// Return an HTTP error with custom headers (e.g. Retry-After).
@@ -210,6 +218,22 @@ impl MockLlmServerBuilder {
         self.config.responses.push(MockResponse::TextWithReasoning {
             content: content.into(),
             reasoning: reasoning.into(),
+        });
+        self
+    }
+
+    /// Queue a response with an explicit `finish_reason` (e.g. a
+    /// reasoning-only `"length"` truncation: empty content + reasoning).
+    pub fn with_finished_response(
+        mut self,
+        content: impl Into<String>,
+        reasoning: Option<&str>,
+        finish_reason: impl Into<String>,
+    ) -> Self {
+        self.config.responses.push(MockResponse::Finished {
+            content: content.into(),
+            reasoning: reasoning.map(str::to_string),
+            finish_reason: finish_reason.into(),
         });
         self
     }
@@ -429,6 +453,32 @@ async fn handle_connection(
                 write_http_response(&mut stream, 200, &body, &[]).await?;
             }
         }
+        MockResponse::Finished {
+            content,
+            reasoning,
+            finish_reason,
+        } => {
+            if is_streaming {
+                write_sse_response(
+                    &mut stream,
+                    &content,
+                    reasoning.as_deref(),
+                    &finish_reason,
+                    config.usage,
+                )
+                .await?;
+            } else {
+                let body = format_chat_response_with_finish(
+                    &config.model,
+                    &content,
+                    reasoning.as_deref(),
+                    None,
+                    Some(&finish_reason),
+                    config.usage,
+                );
+                write_http_response(&mut stream, 200, &body, &[]).await?;
+            }
+        }
         MockResponse::ToolCalls(calls) => {
             let tool_calls_json = format_tool_calls(&calls);
             let body = format_chat_response(
@@ -468,6 +518,18 @@ fn format_chat_response(
     tool_calls: Option<&str>,
     usage: MockUsage,
 ) -> String {
+    format_chat_response_with_finish(model, content, reasoning, tool_calls, None, usage)
+}
+
+/// [`format_chat_response`] with an explicit `finish_reason` override.
+fn format_chat_response_with_finish(
+    model: &str,
+    content: &str,
+    reasoning: Option<&str>,
+    tool_calls: Option<&str>,
+    finish_override: Option<&str>,
+    usage: MockUsage,
+) -> String {
     let tool_calls_field = match tool_calls {
         Some(tc) => format!(r#","tool_calls":{}"#, tc),
         None => String::new(),
@@ -481,11 +543,11 @@ fn format_chat_response(
         None => String::new(),
     };
 
-    let finish_reason = if tool_calls.is_some() {
+    let finish_reason = finish_override.unwrap_or(if tool_calls.is_some() {
         "tool_calls"
     } else {
         "stop"
-    };
+    });
 
     // Escape content for JSON embedding
     let escaped_content = serde_json::to_string(content).unwrap_or_else(|_| "\"\"".to_string());
@@ -514,6 +576,18 @@ async fn write_sse_text_response(
     reasoning: Option<&str>,
     usage: MockUsage,
 ) -> std::io::Result<()> {
+    write_sse_response(stream, content, reasoning, "stop", usage).await
+}
+
+/// [`write_sse_text_response`] with an explicit final `finish_reason`. An
+/// empty `content` emits no content delta at all.
+async fn write_sse_response(
+    stream: &mut tokio::net::TcpStream,
+    content: &str,
+    reasoning: Option<&str>,
+    finish_reason: &str,
+    usage: MockUsage,
+) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
 
     let escaped = serde_json::to_string(content).unwrap_or_else(|_| "\"\"".to_string());
@@ -527,11 +601,20 @@ async fn write_sse_text_response(
         String::new()
     };
 
+    let content_event = if content.is_empty() && finish_reason != "stop" {
+        String::new()
+    } else {
+        format!("data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{}\"}},\"finish_reason\":null}}]}}\n\n", escaped)
+    };
     let events = format!(
-        "{}data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{}\"}},\"finish_reason\":null}}]}}\n\n\
-         data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":{},\"completion_tokens\":{},\"total_tokens\":{}}}}}\n\n\
+        "{}{}data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"{}\"}}],\"usage\":{{\"prompt_tokens\":{},\"completion_tokens\":{},\"total_tokens\":{}}}}}\n\n\
          data: [DONE]\n\n",
-        reasoning_event, escaped, usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
+        reasoning_event,
+        content_event,
+        finish_reason,
+        usage.prompt_tokens,
+        usage.completion_tokens,
+        usage.total_tokens,
     );
     let chunk = format!("{:X}\r\n{}\r\n", events.len(), events);
     let response = format!(

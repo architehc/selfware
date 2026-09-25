@@ -5884,3 +5884,148 @@ async fn fast_plain_503_keeps_the_ordinary_retry_policy() {
     assert_eq!(server.captured_request_bodies().await.len(), 3);
     server.stop().await;
 }
+
+// ── Reasoning-budget recovery: client-side visibility and step-down body ──
+
+#[tokio::test]
+async fn test_chat_internal_reasoning_retry_is_visible_and_named_on_failure() {
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bodies = Arc::new(Mutex::new(Vec::<String>::new()));
+    let server = reasoning_mock_server!(listener, bodies.clone(), [EXHAUSTED_BODY, EXHAUSTED_BODY]);
+
+    let config = crate::config::Config {
+        endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+        ..Default::default()
+    };
+    let mut client = ApiClient::new(&config).unwrap();
+    let recorder = crate::agent::progress::RecordingProgressEmitter::new();
+    client.with_progress_emitter(Arc::new(recorder.clone()));
+
+    let err = client
+        .chat(vec![Message::user("q")], None, ThinkingMode::Enabled)
+        .await
+        .expect_err("double exhaustion must fail");
+    let (_, retry) = crate::errors::reasoning_budget_exhaustion(&err).expect("typed");
+    assert!(
+        retry
+            .as_deref()
+            .is_some_and(|n| n.contains("retried once with reasoning_effort=low")),
+        "{retry:?}"
+    );
+    assert!(err.to_string().contains("retried once"), "{err}");
+    let retry_events = recorder
+        .snapshot()
+        .into_iter()
+        .filter(|e| {
+            matches!(e, crate::agent::progress::ProgressEvent::TurnDecision { decision, .. }
+                if decision == "reasoning_budget_retry")
+        })
+        .count();
+    assert_eq!(retry_events, 1, "the internal retry must be announced");
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn test_step_down_request_is_not_retried_again_by_the_client() {
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bodies = Arc::new(Mutex::new(Vec::<String>::new()));
+    let server = reasoning_mock_server!(listener, bodies.clone(), [EXHAUSTED_BODY]);
+
+    // Unpinned config: an `Enabled` request would get the client's own
+    // retry. A `StepDown` request IS the agent's retry — no second one.
+    let config = crate::config::Config {
+        endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config).unwrap();
+    let err = client
+        .chat(vec![Message::user("q")], None, ThinkingMode::StepDown)
+        .await
+        .expect_err("exhausted step-down request fails typed");
+    assert!(matches!(
+        crate::errors::reasoning_budget_exhaustion(&err),
+        Some((_, None))
+    ));
+    let sent = bodies.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1, "no client retry on top of the agent's");
+    assert!(
+        sent[0].contains("\"reasoning_effort\":\"low\""),
+        "unpinned step-down adds reasoning_effort=low: {}",
+        sent[0]
+    );
+    let _ = server.await;
+}
+
+#[test]
+fn test_apply_reasoning_step_down_ladder_and_placements() {
+    use crate::api::client::{apply_reasoning_step_down, ReasoningStepDown};
+    let lowered = |from: &str, to: &str| {
+        Some(ReasoningStepDown::Lowered {
+            from: from.into(),
+            to: to.into(),
+        })
+    };
+
+    // chat_template_kwargs pin, non-Qwen: xhigh -> high. max_tokens untouched.
+    let mut body = serde_json::json!({
+        "model": "glm", "max_tokens": 4096,
+        "chat_template_kwargs": {"reasoning_effort": "xhigh", "enable_thinking": true}
+    });
+    assert_eq!(
+        apply_reasoning_step_down(&mut body, "glm"),
+        lowered("xhigh", "high")
+    );
+    assert_eq!(body["chat_template_kwargs"]["reasoning_effort"], "high");
+    assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
+    assert_eq!(body["max_tokens"], 4096);
+
+    // Qwen refuses "high": xhigh -> medium.
+    let mut body = serde_json::json!({"chat_template_kwargs": {"reasoning_effort": "xhigh"}});
+    assert_eq!(
+        apply_reasoning_step_down(&mut body, "qwen38-flash-next"),
+        lowered("xhigh", "medium")
+    );
+
+    // Every placement is lowered: top-level, kwargs, OpenRouter reasoning.effort.
+    let mut body = serde_json::json!({
+        "reasoning_effort": "medium",
+        "reasoning": {"effort": "high"}
+    });
+    assert_eq!(
+        apply_reasoning_step_down(&mut body, "m"),
+        lowered("medium", "low")
+    );
+    assert_eq!(body["reasoning_effort"], "low");
+    assert_eq!(body["reasoning"]["effort"], "medium");
+
+    // Already at low with a thinking toggle available: disable thinking.
+    let mut body = serde_json::json!({"chat_template_kwargs": {"reasoning_effort": "low"}});
+    assert_eq!(
+        apply_reasoning_step_down(&mut body, "m"),
+        Some(ReasoningStepDown::ThinkingDisabled)
+    );
+    assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
+
+    // Nothing pinned: add reasoning_effort=low (the client's own recovery shape).
+    let mut body = serde_json::json!({"model": "m"});
+    assert_eq!(
+        apply_reasoning_step_down(&mut body, "m"),
+        lowered("provider default", "low")
+    );
+    assert_eq!(body["reasoning_effort"], "low");
+
+    // Pinned at low, no toggle: nothing left — no retry.
+    let mut body = serde_json::json!({"reasoning_effort": "low"});
+    assert_eq!(apply_reasoning_step_down(&mut body, "m"), None);
+    // Thinking already disabled: nothing left.
+    let mut body = serde_json::json!({"chat_template_kwargs": {"enable_thinking": false}});
+    assert_eq!(apply_reasoning_step_down(&mut body, "m"), None);
+}

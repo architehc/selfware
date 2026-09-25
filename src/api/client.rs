@@ -1161,16 +1161,33 @@ impl ApiClient {
         // attempt DID cost money — prompt processed, completion budget burned
         // on hidden reasoning. Its usage must not vanish when `resp` is
         // overwritten by the retry; accumulate it into the reported metadata.
+        //
+        // Pinned reasoning, or a request that IS already the agent's
+        // step-down retry (`ThinkingMode::StepDown`), fails typed with
+        // `retry: None` / no second retry here: the agent's main turn owns
+        // the one bounded step-down retry for those, so a turn never retries
+        // twice. The internal retry below is visible (warn + progress event),
+        // and a second exhaustion names it in the error.
         let mut discarded_usage: Option<crate::api::types::Usage> = None;
-        if reasoning_budget_exhausted(&resp).is_some() {
-            if self.user_pinned_reasoning() {
-                let reasoning_chars = reasoning_budget_exhausted(&resp).unwrap_or(0);
-                return Err(ApiError::ReasoningBudgetExhausted { reasoning_chars }.into());
+        if let Some(reasoning_chars) = reasoning_budget_exhausted(&resp) {
+            if self.user_pinned_reasoning() || thinking == ThinkingMode::StepDown {
+                return Err(ApiError::ReasoningBudgetExhausted {
+                    reasoning_chars,
+                    retry: None,
+                }
+                .into());
             }
-            warn!(
-                "completion budget exhausted by hidden reasoning (finish_reason=length, \
-                 empty answer); retrying once with reasoning_effort=low"
+            let detail = format!(
+                "completion budget exhausted by hidden reasoning ({reasoning_chars} reasoning \
+                 chars, finish_reason=length, empty answer); retrying once with \
+                 reasoning_effort=low"
             );
+            warn!("{detail}");
+            self.progress_emitter
+                .emit(crate::agent::progress::ProgressEvent::TurnDecision {
+                    decision: "reasoning_budget_retry".to_string(),
+                    detail,
+                });
             body["reasoning_effort"] = serde_json::json!("low");
             discarded_usage = Some(resp.usage.clone());
             let retried = self.send_with_retry(&body).await?;
@@ -1179,7 +1196,13 @@ impl ApiClient {
             resp = retried.response;
             body = retried.body;
             if let Some(reasoning_chars) = reasoning_budget_exhausted(&resp) {
-                return Err(ApiError::ReasoningBudgetExhausted { reasoning_chars }.into());
+                return Err(ApiError::ReasoningBudgetExhausted {
+                    reasoning_chars,
+                    retry: Some(
+                        "retried once with reasoning_effort=low, also exhausted".to_string(),
+                    ),
+                }
+                .into());
             }
         }
         let elapsed_ms = call_timing.elapsed_ms();
@@ -1316,6 +1339,12 @@ impl ApiClient {
             },
             Some(&self.config.endpoint),
         )?;
+
+        if thinking == ThinkingMode::StepDown {
+            if let Some(step) = apply_reasoning_step_down(&mut body, &self.config.model) {
+                debug!("reasoning step-down retry: {}", step.describe());
+            }
+        }
 
         if !self.effective_native_fc() {
             convert_body_to_xml(&mut body, &tools, self.config.context_length)?;
@@ -2610,7 +2639,11 @@ impl ApiClient {
         if let Some(reasoning_chars) = reasoning_budget_exhausted(&response) {
             let pinned = extra_body_pins_reasoning(profile.extra_body.as_ref());
             if pinned {
-                return Err(ApiError::ReasoningBudgetExhausted { reasoning_chars }.into());
+                return Err(ApiError::ReasoningBudgetExhausted {
+                    reasoning_chars,
+                    retry: None,
+                }
+                .into());
             }
             let discarded = response.usage.clone();
             body["reasoning_effort"] = serde_json::json!("low");
@@ -2624,7 +2657,13 @@ impl ApiClient {
                 .await?
                 .response;
             if let Some(reasoning_chars) = reasoning_budget_exhausted(&response) {
-                return Err(ApiError::ReasoningBudgetExhausted { reasoning_chars }.into());
+                return Err(ApiError::ReasoningBudgetExhausted {
+                    reasoning_chars,
+                    retry: Some(
+                        "retried once with reasoning_effort=low, also exhausted".to_string(),
+                    ),
+                }
+                .into());
             }
             super::usage::add_response_usage(&mut response.usage, &discarded);
         }
@@ -2665,6 +2704,126 @@ impl LlmClient for ApiClient {
 /// "length"`, empty answer content, and a non-empty reasoning trace. Returns
 /// the reasoning length in chars when exhausted. Models without a reasoning
 /// field can never trip this — a plain truncated answer passes through.
+/// What [`apply_reasoning_step_down`] did to a request body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReasoningStepDown {
+    /// Every reasoning-effort pin was lowered; `from`/`to` name the first
+    /// pin's change (`from = "provider default"` when nothing was pinned and
+    /// a top-level `reasoning_effort=low` was added).
+    Lowered { from: String, to: String },
+    /// No effort could be lowered, so thinking was switched off
+    /// (`chat_template_kwargs.enable_thinking = false`).
+    ThinkingDisabled,
+}
+
+impl ReasoningStepDown {
+    /// Human-readable description for warnings, events and error messages.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Lowered { from, to } => format!("reasoning_effort {from} -> {to}"),
+            Self::ThinkingDisabled => {
+                "thinking disabled (enable_thinking=false; no reasoning effort left to lower)"
+                    .to_string()
+            }
+        }
+    }
+}
+
+/// One level below `effort`, or `None` when it is already the lowest level
+/// (or unrecognized). Qwen chat templates refuse `high` on every serving
+/// stack (see config validation), so for Qwen models `xhigh` steps to
+/// `medium`.
+fn lower_reasoning_effort(effort: &str, is_qwen: bool) -> Option<&'static str> {
+    match effort.trim().to_ascii_lowercase().as_str() {
+        "xhigh" | "max" => Some(if is_qwen { "medium" } else { "high" }),
+        "high" => Some("medium"),
+        "medium" => Some("low"),
+        _ => None,
+    }
+}
+
+/// Step a chat request body's reasoning down one level for the main turn's
+/// single reasoning-budget recovery retry. Never touches `max_tokens`.
+///
+/// 1. Lower every effort pin present — top-level `reasoning_effort`,
+///    `chat_template_kwargs.reasoning_effort`, OpenRouter `reasoning.effort`.
+/// 2. No lowerable pin but a `chat_template_kwargs` map (vLLM/SGLang
+///    thinking models): set `enable_thinking = false`.
+/// 3. Nothing reasoning-related pinned at all: add top-level
+///    `reasoning_effort = "low"` — the same request the non-streaming
+///    client's own recovery sends for unpinned configs.
+///
+/// Returns `None` when nothing can be lowered or disabled (e.g. every pin is
+/// already `low` on an endpoint with no thinking toggle): retrying the
+/// identical request would only burn the budget again.
+pub fn apply_reasoning_step_down(
+    body: &mut serde_json::Value,
+    model: &str,
+) -> Option<ReasoningStepDown> {
+    let is_qwen = model.to_ascii_lowercase().contains("qwen");
+    let obj = body.as_object_mut()?;
+    let mut first: Option<ReasoningStepDown> = None;
+    let mut any_pin = false;
+    let note = |from: &str, to: &str, first: &mut Option<ReasoningStepDown>| {
+        if first.is_none() {
+            *first = Some(ReasoningStepDown::Lowered {
+                from: from.to_string(),
+                to: to.to_string(),
+            });
+        }
+    };
+
+    if let Some(current) = obj.get("reasoning_effort").and_then(|v| v.as_str()) {
+        any_pin = true;
+        if let Some(lower) = lower_reasoning_effort(current, is_qwen) {
+            let from = current.to_string();
+            obj.insert("reasoning_effort".into(), serde_json::json!(lower));
+            note(&from, lower, &mut first);
+        }
+    }
+    if let Some(serde_json::Value::Object(kwargs)) = obj.get_mut("chat_template_kwargs") {
+        if kwargs.contains_key("enable_thinking") {
+            any_pin = true;
+        }
+        if let Some(current) = kwargs.get("reasoning_effort").and_then(|v| v.as_str()) {
+            any_pin = true;
+            if let Some(lower) = lower_reasoning_effort(current, is_qwen) {
+                let from = current.to_string();
+                kwargs.insert("reasoning_effort".into(), serde_json::json!(lower));
+                note(&from, lower, &mut first);
+            }
+        }
+    }
+    if let Some(serde_json::Value::Object(reasoning)) = obj.get_mut("reasoning") {
+        any_pin = true;
+        if let Some(current) = reasoning.get("effort").and_then(|v| v.as_str()) {
+            if let Some(lower) = lower_reasoning_effort(current, is_qwen) {
+                let from = current.to_string();
+                reasoning.insert("effort".into(), serde_json::json!(lower));
+                note(&from, lower, &mut first);
+            }
+        }
+    }
+    if first.is_some() {
+        return first;
+    }
+    if let Some(serde_json::Value::Object(kwargs)) = obj.get_mut("chat_template_kwargs") {
+        if kwargs.get("enable_thinking") != Some(&serde_json::Value::Bool(false)) {
+            kwargs.insert("enable_thinking".into(), serde_json::Value::Bool(false));
+            return Some(ReasoningStepDown::ThinkingDisabled);
+        }
+        return None;
+    }
+    if !any_pin && !obj.contains_key("thinking") {
+        obj.insert("reasoning_effort".into(), serde_json::json!("low"));
+        return Some(ReasoningStepDown::Lowered {
+            from: "provider default".to_string(),
+            to: "low".to_string(),
+        });
+    }
+    None
+}
+
 fn reasoning_budget_exhausted(resp: &ChatResponse) -> Option<usize> {
     let choice = resp.choices.first()?;
     if choice.finish_reason.as_deref() != Some("length") {

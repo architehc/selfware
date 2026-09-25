@@ -486,35 +486,39 @@ async fn streamed_reasoning_only_length_never_becomes_the_final_answer() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     // A raw SSE server that answers any request with one reasoning delta and
-    // a final `finish_reason: "length"` — no answer text, no [DONE].
+    // a final `finish_reason: "length"` — no answer text, no [DONE]. It
+    // serves TWO requests: the original and the main turn's single
+    // reasoning step-down retry, which exhausts the same way.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        // Drain the request head (any method/path).
-        let mut buf = [0u8; 4096];
-        let mut head = Vec::new();
-        loop {
-            let n = socket.read(&mut buf).await.unwrap();
-            if n == 0 {
-                break;
+        for _ in 0..2 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            // Drain the request head (any method/path).
+            let mut buf = [0u8; 4096];
+            let mut head = Vec::new();
+            loop {
+                let n = socket.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                head.extend_from_slice(&buf[..n]);
+                if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
             }
-            head.extend_from_slice(&buf[..n]);
-            if head.windows(4).any(|w| w == b"\r\n\r\n") {
-                break;
-            }
-        }
-        let sse = "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"Let me think about this carefully before the answer gets cut off...\"},\"finish_reason\":null}]}\n\n\
+            let sse = "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"Let me think about this carefully before the answer gets cut off...\"},\"finish_reason\":null}]}\n\n\
                    data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":320,\"total_tokens\":332}}\n\n";
-        // Chunked framing exactly like the passing mock streams: the API
-        // client's body decoder requires it.
-        let chunk = format!("{:X}\r\n{}\r\n", sse.len(), sse);
-        let end_chunk = "0\r\n\r\n";
-        let response = format!(
+            // Chunked framing exactly like the passing mock streams: the API
+            // client's body decoder requires it.
+            let chunk = format!("{:X}\r\n{}\r\n", sse.len(), sse);
+            let end_chunk = "0\r\n\r\n";
+            let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{}{}",
             chunk, end_chunk
         );
-        socket.write_all(response.as_bytes()).await.unwrap();
+            socket.write_all(response.as_bytes()).await.unwrap();
+        }
     });
 
     let config = mock_agent_config(format!("http://{addr}/v1"), true);
@@ -539,5 +543,191 @@ async fn streamed_reasoning_only_length_never_becomes_the_final_answer() {
         ),
         "expected ApiError::ReasoningBudgetExhausted, got: {err:?}"
     );
+    assert!(
+        err.to_string().contains("retried once with"),
+        "the failure must name the step-down retry: {err}"
+    );
     server.await.unwrap();
+}
+
+// ── Reasoning-budget recovery: one bounded step-down retry per main turn ──
+
+/// Config with a pinned reasoning effort (`chat_template_kwargs`, the shape of
+/// the tracked llm.selfware.design config) so the non-streaming client's own
+/// unpinned recovery stays out of the way and the agent's retry is exercised.
+fn pinned_xhigh_config(endpoint: String, streaming: bool) -> Config {
+    let mut config = mock_agent_config(endpoint, streaming);
+    let mut kwargs = serde_json::Map::new();
+    kwargs.insert("reasoning_effort".into(), serde_json::json!("xhigh"));
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "chat_template_kwargs".into(),
+        serde_json::Value::Object(kwargs),
+    );
+    config.extra_body = Some(extra);
+    config
+}
+
+fn reasoning_retry_events(
+    recorder: &crate::agent::progress::RecordingProgressEmitter,
+) -> Vec<(String, String)> {
+    recorder
+        .snapshot()
+        .into_iter()
+        .filter_map(|e| match e {
+            crate::agent::progress::ProgressEvent::TurnDecision { decision, detail }
+                if decision.starts_with("reasoning_budget") =>
+            {
+                Some((decision, detail))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn body_reasoning_effort(raw: &str) -> Option<String> {
+    let json_start = raw.find('{')?;
+    let body: serde_json::Value = serde_json::from_str(&raw[json_start..]).ok()?;
+    body["chat_template_kwargs"]["reasoning_effort"]
+        .as_str()
+        .map(str::to_string)
+}
+
+async fn run_reasoning_recovery_case(
+    streaming: bool,
+    server: &MockLlmServer,
+) -> (
+    anyhow::Result<super::AssistantStepResponse>,
+    crate::agent::progress::RecordingProgressEmitter,
+) {
+    let recorder = crate::agent::progress::RecordingProgressEmitter::new();
+    let config = pinned_xhigh_config(format!("{}/v1", server.url()), streaming);
+    let mut agent = crate::agent::Agent::new(config)
+        .await
+        .unwrap()
+        .with_progress_emitter(std::sync::Arc::new(recorder.clone()));
+    agent
+        .messages
+        .push(crate::api::types::Message::user("Write the refactor plan."));
+    let result = agent.get_assistant_step_response(false).await;
+    (result, recorder)
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn reasoning_only_length_then_success_retries_once_with_lower_effort() {
+    // Both call shapes must reach the recovery: streamed and non-streaming.
+    for streaming in [true, false] {
+        let server = MockLlmServer::builder()
+            .with_finished_response("", Some("thinking until the budget runs out"), "length")
+            .with_response("The refactor plan: extract the parser.")
+            .build()
+            .await;
+        let (result, recorder) = run_reasoning_recovery_case(streaming, &server).await;
+        let resp =
+            result.unwrap_or_else(|e| panic!("streaming={streaming}: retry must recover: {e:?}"));
+        assert_eq!(
+            resp.content, "The refactor plan: extract the parser.",
+            "streaming={streaming}"
+        );
+
+        let bodies = server.captured_request_bodies().await;
+        assert_eq!(bodies.len(), 2, "streaming={streaming}: exactly one retry");
+        assert_eq!(body_reasoning_effort(&bodies[0]).as_deref(), Some("xhigh"));
+        assert_eq!(
+            body_reasoning_effort(&bodies[1]).as_deref(),
+            Some("high"),
+            "streaming={streaming}: retry steps effort down one level"
+        );
+        // max_tokens is never raised by the retry.
+        for raw in &bodies {
+            assert!(
+                raw.contains("\"max_tokens\":8192"),
+                "streaming={streaming}: {raw}"
+            );
+        }
+
+        let events = reasoning_retry_events(&recorder);
+        assert_eq!(events.len(), 1, "streaming={streaming}: {events:?}");
+        assert_eq!(events[0].0, "reasoning_budget_retry");
+        assert!(
+            events[0].1.contains("reasoning_effort xhigh -> high"),
+            "{events:?}"
+        );
+        server.stop().await;
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn reasoning_only_length_twice_fails_typed_naming_the_retry() {
+    for streaming in [true, false] {
+        let server = MockLlmServer::builder()
+            .with_finished_response("", Some("thinking"), "length")
+            .with_finished_response("", Some("still thinking"), "length")
+            .with_response("never reached")
+            .build()
+            .await;
+        let (result, recorder) = run_reasoning_recovery_case(streaming, &server).await;
+        let err = match result {
+            Ok(r) => panic!("streaming={streaming}: must fail, got {:?}", r.content),
+            Err(e) => e,
+        };
+        match crate::errors::reasoning_budget_exhaustion(&err) {
+            Some((_, Some(note))) => assert!(
+                note.contains("retried once with reasoning_effort xhigh -> high"),
+                "streaming={streaming}: {note}"
+            ),
+            other => panic!("streaming={streaming}: expected typed exhaustion with a retry note, got {other:?} / {err:?}"),
+        }
+        assert!(
+            err.to_string()
+                .contains("retried once with reasoning_effort xhigh -> high"),
+            "message must name the retry and its effort: {err}"
+        );
+        assert_eq!(
+            server.captured_request_bodies().await.len(),
+            2,
+            "streaming={streaming}: bounded to ONE retry"
+        );
+        let kinds: Vec<String> = reasoning_retry_events(&recorder)
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["reasoning_budget_retry", "reasoning_budget_retry_failed"],
+            "streaming={streaming}"
+        );
+        server.stop().await;
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn length_truncation_with_content_is_not_retried() {
+    for streaming in [true, false] {
+        let server = MockLlmServer::builder()
+            .with_finished_response("A partial answer that ran out", Some("brief"), "length")
+            .with_response("should not be requested")
+            .build()
+            .await;
+        let (_result, recorder) = run_reasoning_recovery_case(streaming, &server).await;
+        assert_eq!(
+            server.captured_request_bodies().await.len(),
+            1,
+            "streaming={streaming}: a truncation that produced content is not a reasoning-budget trap"
+        );
+        assert!(reasoning_retry_events(&recorder).is_empty());
+        server.stop().await;
+    }
 }

@@ -376,6 +376,12 @@ pub enum ThinkingMode {
     Disabled,
     /// Thinking with a specific token budget
     Budget(usize),
+    /// Recovery retry of a main turn whose whole completion budget went to
+    /// hidden reasoning: the request is built as for `Enabled`, then every
+    /// reasoning-effort pin is stepped down one level, or thinking is
+    /// switched off where no effort can be lowered (see
+    /// [`client::apply_reasoning_step_down`]). `max_tokens` is untouched.
+    StepDown,
 }
 
 #[cfg(test)]

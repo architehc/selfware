@@ -7,7 +7,15 @@ use crate::api::ThinkingMode;
 impl Agent {
     /// Plan phase - returns true if model wants to execute tools (should continue to execution)
     /// This now combines planning with initial tool extraction to avoid double API calls
+    #[cfg(test)] // test entry point; the task loop calls `plan_with_thinking`
     pub(super) async fn plan(&mut self) -> Result<bool> {
+        self.plan_with_thinking(ThinkingMode::Enabled).await
+    }
+
+    /// [`Agent::plan`] with an explicit thinking mode: the planning loop in
+    /// `task_runner` passes `ThinkingMode::StepDown` for its single bounded
+    /// retry after a `ReasoningBudgetExhausted` planning turn.
+    pub(super) async fn plan_with_thinking(&mut self, thinking: ThinkingMode) -> Result<bool> {
         use crate::api::types::Message;
 
         // Tools are embedded in system prompt - see WORKAROUND comment in Agent::new()
@@ -66,7 +74,7 @@ impl Agent {
                 .chat_streaming(
                     request_messages.clone(),
                     self.api_tools(),
-                    ThinkingMode::Enabled,
+                    thinking,
                     Some(&mut plan_meta),
                 )
                 .await
@@ -115,7 +123,7 @@ impl Agent {
                         .await_nonstreaming_llm(self.client.chat_with_meta(
                             request_messages,
                             self.api_tools(),
-                            ThinkingMode::Enabled,
+                            thinking,
                         ))
                         .await
                         .with_context(|| {
@@ -155,7 +163,7 @@ impl Agent {
                 .await_nonstreaming_llm(self.client.chat_with_meta(
                     request_messages,
                     self.api_tools(),
-                    ThinkingMode::Enabled,
+                    thinking,
                 ))
                 .await;
             let response = match response {
@@ -186,6 +194,41 @@ impl Agent {
                 .context("No response from model")?
                 .message
         };
+        // Same contract as the execution turn (assistant_response.rs): a
+        // planning response cut off by the completion budget whose only output
+        // is a reasoning trace is TRUNCATED, not a plan — fail typed so the
+        // planning loop's bounded step-down retry can recover it.
+        if plan_meta.finish_reason.as_deref() == Some("length")
+            && assistant_msg.content.text().trim().is_empty()
+            && assistant_msg
+                .reasoning_content
+                .as_ref()
+                .is_some_and(|r| !r.trim().is_empty())
+        {
+            let reasoning_chars = assistant_msg
+                .reasoning_content
+                .as_ref()
+                .map(|r| r.trim().len())
+                .unwrap_or(0);
+            let err: anyhow::Error = crate::errors::ApiError::ReasoningBudgetExhausted {
+                reasoning_chars,
+                retry: None,
+            }
+            .into();
+            self.log_turn_end_event(
+                "planning",
+                false,
+                false,
+                turn_start.elapsed().as_millis() as u64,
+                Some(err.to_string()),
+                serde_json::json!({
+                    "message_count": self.messages.len(),
+                    "estimated_message_tokens": self.estimate_messages_tokens(),
+                }),
+            );
+            return Err(err);
+        }
+
         let content = &assistant_msg.content;
 
         // Debug logging for planning response

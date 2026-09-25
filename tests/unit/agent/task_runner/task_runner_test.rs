@@ -163,6 +163,20 @@ fn fatal_loop_errors_are_not_recoverable() {
     assert!(is_fatal_loop_error(&anyhow::anyhow!(
         "EMPTY_RESPONSE_LOOP: 2 consecutive empty assistant responses"
     )));
+    // Reasoning-budget exhaustion after the bounded step-down retry is
+    // terminal; before any retry it is not (the next turn owns one retry).
+    assert!(is_fatal_loop_error(&anyhow::Error::from(
+        crate::errors::ApiError::ReasoningBudgetExhausted {
+            reasoning_chars: 10,
+            retry: Some("retried once with reasoning_effort xhigh -> high, also exhausted".into()),
+        }
+    )));
+    assert!(!is_fatal_loop_error(&anyhow::Error::from(
+        crate::errors::ApiError::ReasoningBudgetExhausted {
+            reasoning_chars: 10,
+            retry: None,
+        }
+    )));
     // Typed killswitch downcasting checks
     let ks_err = crate::safety::killswitch::KillswitchError::InProcess {
         reason: "unit test halt".to_string(),
@@ -4291,4 +4305,96 @@ async fn max_iterations_stop_emits_exactly_one_terminal_event() {
         "exactly one terminal event per run: {kinds:?}"
     );
     server.stop().await;
+}
+
+// ── Planning turn: bounded reasoning step-down retry (Rule 5 sweep) ──
+
+fn pinned_xhigh_planning_config(endpoint: String, streaming: bool) -> Config {
+    let mut config = mock_agent_config(endpoint, streaming);
+    config.retry = crate::config::RetrySettings {
+        max_retries: 0,
+        base_delay_ms: 1,
+        max_delay_ms: 1,
+    };
+    config.extra_body = Some(
+        serde_json::json!({"chat_template_kwargs": {"reasoning_effort": "xhigh"}})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    config
+}
+
+fn captured_kwargs_effort(raw: &str) -> Option<String> {
+    let body: serde_json::Value = serde_json::from_str(&raw[raw.find('{')?..]).ok()?;
+    body["chat_template_kwargs"]["reasoning_effort"]
+        .as_str()
+        .map(str::to_string)
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn test_planning_reasoning_exhaustion_retries_once_with_lower_effort() {
+    for streaming in [false, true] {
+        let server = MockLlmServer::builder()
+            .with_finished_response("", Some("planning until the budget runs out"), "length")
+            .with_response("Plan.")
+            .with_response("Done.")
+            .build()
+            .await;
+        let config = pinned_xhigh_planning_config(format!("{}/v1", server.url()), streaming);
+        let mut agent = Agent::new(config).await.unwrap();
+        agent
+            .run_task("Describe the login bug")
+            .await
+            .unwrap_or_else(|e| panic!("streaming={streaming}: step-down retry must recover: {e}"));
+        let bodies = server.captured_request_bodies().await;
+        assert!(bodies.len() >= 2, "streaming={streaming}: {}", bodies.len());
+        assert_eq!(captured_kwargs_effort(&bodies[0]).as_deref(), Some("xhigh"));
+        assert_eq!(
+            captured_kwargs_effort(&bodies[1]).as_deref(),
+            Some("high"),
+            "streaming={streaming}: the planning retry steps effort down one level"
+        );
+        server.stop().await;
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn test_planning_reasoning_exhaustion_twice_is_terminal_and_names_the_retry() {
+    for streaming in [false, true] {
+        let server = MockLlmServer::builder()
+            .with_default_response(MockResponse::Finished {
+                content: String::new(),
+                reasoning: Some("thinking forever".to_string()),
+                finish_reason: "length".to_string(),
+            })
+            .build()
+            .await;
+        let config = pinned_xhigh_planning_config(format!("{}/v1", server.url()), streaming);
+        let mut agent = Agent::new(config).await.unwrap();
+        let err = agent
+            .run_task("Describe the login bug")
+            .await
+            .expect_err("double exhaustion must fail the task");
+        assert!(
+            err.to_string()
+                .contains("retried once with reasoning_effort xhigh -> high, also exhausted"),
+            "streaming={streaming}: {err}"
+        );
+        // Original + ONE step-down retry; no same-effort planning re-sends.
+        assert_eq!(
+            server.captured_request_bodies().await.len(),
+            2,
+            "streaming={streaming}"
+        );
+        server.stop().await;
+    }
 }

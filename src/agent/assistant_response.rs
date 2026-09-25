@@ -34,6 +34,19 @@ pub(super) struct AssistantStepResponse {
     pub metadata: Option<crate::api::types::ChatMetadata>,
 }
 
+/// Raw result of one main-turn model call, before promotion, sanitizing
+/// and history bookkeeping.
+struct StepCompletion {
+    content: String,
+    reasoning: Option<String>,
+    native_tool_calls: Option<Vec<crate::api::types::ToolCall>>,
+    text_fallback_tool_calls: Option<Vec<crate::api::types::ToolCall>>,
+    chat_metadata: Option<crate::api::types::ChatMetadata>,
+    /// Whole-call wall time of a successful streamed call; `None` for the
+    /// non-streaming path.
+    streamed_call_elapsed_ms: Option<u64>,
+}
+
 impl Agent {
     /// Accumulate a NON-streaming response's token usage into the session-wide
     /// counters and display, mirroring what the streaming path does on its
@@ -59,8 +72,6 @@ impl Agent {
         use crate::api::types::Message;
 
         let turn_start = std::time::Instant::now();
-        let mut native_tool_calls: Option<Vec<crate::api::types::ToolCall>> = None;
-        let mut text_fallback_tool_calls: Option<Vec<crate::api::types::ToolCall>> = None;
         self.log_turn_start_event("assistant_step", use_last_message, self.messages.len());
 
         if use_last_message {
@@ -74,9 +85,11 @@ impl Agent {
                 "Using content from last assistant message ({} chars)",
                 last_msg.content.len()
             );
-            if self.effective_native_fc() {
-                native_tool_calls = last_msg.tool_calls.clone();
-            }
+            let native_tool_calls = if self.effective_native_fc() {
+                last_msg.tool_calls.clone()
+            } else {
+                None
+            };
             let content_text = last_msg.content.text().to_string();
             let reasoning_clone = last_msg.reasoning_content.clone();
             let response = AssistantStepResponse {
@@ -327,319 +340,17 @@ impl Agent {
             self.current_checkpoint.as_ref(),
         )?;
 
-        // Captured per-call metadata (request body, finish_reason, tokens,
-        // elapsed_ms) — populated by whichever branch makes the actual call.
-        // Stays `None` only if all branches return early via `?`.
-        #[allow(unused_assignments)]
-        let mut chat_metadata: Option<crate::api::types::ChatMetadata> = None;
-        // Whole-call wall time of a SUCCESSFUL streamed call (send → stream
-        // end). `ChatMetadata::elapsed_ms` on the streamed path is only
-        // time-to-headers, so the zero-content long-call check needs its own
-        // clock. `None` for the non-streaming path, whose client already
-        // types a long empty call as `ZeroContentLongCall`.
-        let mut streamed_call_elapsed_ms: Option<u64> = None;
-        // `force_non_streaming` latches after a streamed turn came back empty: the
-        // streaming path is the one that produced nothing, so the retry uses the
-        // path that did not rather than repeating the failing request.
-        let (content, reasoning) = if self.config.agent.streaming && !self.force_non_streaming {
-            let mut local_meta = crate::api::types::ChatMetadata::default();
-            let stream_call_started = std::time::Instant::now();
-            match self
-                .chat_streaming(
-                    request_messages.clone(),
-                    self.api_tools(),
-                    ThinkingMode::Enabled,
-                    Some(&mut local_meta),
-                )
-                .await
-            {
-                Ok((content, reasoning, stream_tool_calls)) => {
-                    chat_metadata = Some(local_meta);
-                    streamed_call_elapsed_ms =
-                        Some(stream_call_started.elapsed().as_millis() as u64);
-                    if self.effective_native_fc() {
-                        let has_native = stream_tool_calls
-                            .as_ref()
-                            .map(|t| !t.is_empty())
-                            .unwrap_or(false);
-
-                        if has_native {
-                            native_tool_calls = stream_tool_calls.clone();
-                            info!(
-                                "Received {} native tool calls from stream",
-                                native_tool_calls.as_ref().map(|t| t.len()).unwrap_or(0)
-                            );
-                        } else if !content.is_empty() {
-                            // Fallback: sglang returns tool_calls:[] but puts
-                            // Qwen3-format calls in content. Route through the
-                            // unified extractor so this path matches the agent
-                            // and SWL runtime parsers exactly.
-                            let parsed_calls =
-                                crate::api::tool_calling::extract_tool_calls_from_text(&content);
-                            if !parsed_calls.is_empty() {
-                                info!(
-                                    "Native FC returned empty tool_calls; parsed {} from content (sglang fallback)",
-                                    parsed_calls.len()
-                                );
-                                // Preserve native/message-history invariants:
-                                // text-fallback calls are dispatched from text,
-                                // but must NOT be stored as assistant.tool_calls
-                                // because their results are emitted as XML/user
-                                // messages rather than role=tool messages.
-                                text_fallback_tool_calls = Some(parsed_calls);
-                            }
-                        }
-                    }
-                    (content, reasoning)
-                }
-                Err(stream_err) => {
-                    // A shutdown request aborts the in-flight provider call and
-                    // surfaces here as an error. Treat it as cancellation — don't
-                    // fall back or retry — so the loop saves one checkpoint and
-                    // exits cleanly without claiming completion.
-                    if self.is_cancelled() {
-                        return Err(crate::errors::AgentError::for_current_shutdown().into());
-                    }
-
-                    // Detect "Assistant response prefill incompatible" 400s for
-                    // FailureMode classification.
-                    if stream_err
-                        .to_string()
-                        .to_lowercase()
-                        .contains("prefill incompatible")
-                    {
-                        self.note_prefill_400();
-                    }
-
-                    // A terminal 4xx (e.g. 401 from a missing/invalid API key)
-                    // fails identically over the non-streaming endpoint —
-                    // re-issuing it would just double-hit the provider and bury
-                    // the remediation hint under a fallback error. Only fall
-                    // back for transport/streaming-level failures where a
-                    // non-streaming retry could plausibly succeed.
-                    // A context-window overflow is equally identical over the
-                    // non-streaming endpoint (same payload); surface it to the
-                    // loop's compression recovery instead of re-sending it.
-                    let context_overflow = crate::errors::is_context_overflow_error(&stream_err);
-                    if is_terminal_api_client_error(&stream_err) || context_overflow {
-                        warn!(
-                            "Streaming request failed with {} ({}); not falling back to non-streaming",
-                            if context_overflow {
-                                "context-window overflow"
-                            } else {
-                                "terminal client error"
-                            },
-                            stream_err
-                        );
-                        self.log_turn_end_event(
-                            "assistant_step",
-                            false,
-                            false,
-                            turn_start.elapsed().as_millis() as u64,
-                            Some(stream_err.to_string()),
-                            serde_json::json!({
-                                "message_count": self.messages.len(),
-                                "estimated_message_tokens": self.estimate_messages_tokens(),
-                            }),
-                        );
-                        return Err(stream_err);
-                    }
-
-                    warn!(
-                        "Streaming request failed ({}); retrying this step with non-streaming API",
-                        stream_err
-                    );
-
-                    let response = self
-                        .await_nonstreaming_llm(self.client.chat_with_meta(
-                            request_messages,
-                            self.api_tools(),
-                            ThinkingMode::Enabled,
-                        ))
-                        .await
-                        .with_context(|| {
-                            format!(
-                                "Streaming failed: {}. Non-streaming fallback request also failed",
-                                stream_err
-                            )
-                        });
-                    let (response, fallback_meta) = match response {
-                        Ok((response, meta)) => (response, meta),
-                        Err(e) => {
-                            if self.is_cancelled() {
-                                return Err(
-                                    crate::errors::AgentError::for_current_shutdown().into()
-                                );
-                            }
-                            self.log_turn_end_event(
-                                "assistant_step",
-                                false,
-                                false,
-                                turn_start.elapsed().as_millis() as u64,
-                                Some(e.to_string()),
-                                serde_json::json!({
-                                    "message_count": self.messages.len(),
-                                    "estimated_message_tokens": self.estimate_messages_tokens(),
-                                }),
-                            );
-                            return Err(e);
-                        }
-                    };
-
-                    // The fallback is a NON-streaming response: its usage never
-                    // passes through the SSE usage arm, so record it here.
-                    self.record_nonstreaming_usage(
-                        fallback_meta
-                            .accounted_usage
-                            .as_ref()
-                            .unwrap_or(&response.usage),
-                    );
-
-                    let choice = response
-                        .choices
-                        .into_iter()
-                        .next()
-                        .context("No response from model")?;
-
-                    let message = choice.message;
-                    let content = message.content.text().to_string();
-                    let reasoning = message.reasoning_content.clone();
-
-                    if self.effective_native_fc() && message.tool_calls.is_some() {
-                        native_tool_calls = message.tool_calls.clone();
-                        info!(
-                            "Received {} native tool calls from fallback API",
-                            native_tool_calls.as_ref().map(|t| t.len()).unwrap_or(0)
-                        );
-                    }
-
-                    debug!(
-                        "Fallback model response content ({} chars): {}",
-                        content.len(),
-                        content
-                    );
-                    if content.is_empty() {
-                        warn!("Fallback model returned empty content!");
-                    }
-                    if let Some(ref r) = reasoning {
-                        cli_println!("{} {}", "Thinking:".dimmed(), r.dimmed());
-                        debug!("Fallback reasoning ({} chars): {}", r.len(), r);
-                    }
-
-                    chat_metadata = Some(fallback_meta);
-                    (content, reasoning)
-                }
-            }
-        } else {
-            let response = self
-                .await_nonstreaming_llm(self.client.chat_with_meta(
-                    request_messages,
-                    self.api_tools(),
-                    ThinkingMode::Enabled,
-                ))
-                .await;
-            let (response, sync_meta) = match response {
-                Ok((response, meta)) => (response, meta),
-                Err(e) => {
-                    if self.is_cancelled() {
-                        return Err(crate::errors::AgentError::for_current_shutdown().into());
-                    }
-                    if e.to_string()
-                        .to_lowercase()
-                        .contains("prefill incompatible")
-                    {
-                        self.note_prefill_400();
-                    }
-                    self.log_turn_end_event(
-                        "assistant_step",
-                        false,
-                        false,
-                        turn_start.elapsed().as_millis() as u64,
-                        Some(e.to_string()),
-                        serde_json::json!({
-                            "message_count": self.messages.len(),
-                            "estimated_message_tokens": self.estimate_messages_tokens(),
-                        }),
-                    );
-                    return Err(e);
-                }
-            };
-
-            // A non-streaming response never produces a `StreamChunk::Usage`
-            // event, so accumulate its usage into the session totals here.
-            self.record_nonstreaming_usage(
-                sync_meta
-                    .accounted_usage
-                    .as_ref()
-                    .unwrap_or(&response.usage),
-            );
-
-            let choice = response
-                .choices
-                .into_iter()
-                .next()
-                .context("No response from model")?;
-
-            let message = choice.message;
-            let content = message.content.text().to_string();
-            let reasoning = message.reasoning_content.clone();
-
-            if self.effective_native_fc() && message.tool_calls.is_some() {
-                native_tool_calls = message.tool_calls.clone();
-                info!(
-                    "Received {} native tool calls from API",
-                    native_tool_calls.as_ref().map(|t| t.len()).unwrap_or(0)
-                );
-            }
-
-            debug!(
-                "Raw model response content ({} chars): {}",
-                content.len(),
-                content
-            );
-
-            if self.config.debug.should_log_responses() {
-                cli_println!("{}", "=== DEBUG: Raw Model Response ===".bright_magenta());
-                cli_println!("{}", content);
-                cli_println!("{}", "=== END DEBUG ===".bright_magenta());
-            }
-
-            if content.is_empty() {
-                warn!("Model returned empty content!");
-            }
-
-            if let Some(ref r) = reasoning {
-                cli_println!("{} {}", "Thinking:".dimmed(), r.dimmed());
-                debug!("Reasoning content ({} chars): {}", r.len(), r);
-            }
-
-            chat_metadata = Some(sync_meta);
-            (content, reasoning)
-        };
-
-        // A response cut off by the completion budget (finish_reason ==
-        // "length") whose only output is a reasoning trace — no answer text —
-        // is a TRUNCATED turn, not a deliverable. The reasoning is a partial
-        // trace, and feeding it through the promotion below would store the
-        // truncated reasoning as the final answer (2026-09-21 review, P2:
-        // on the streamed path the length-truncated reasoning was promoted
-        // to content and accepted by the earlier completion gates, bypassing
-        // execution's length rejection). Fail typed here — same contract as
-        // the non-streaming client's `reasoning_budget_exhausted` — so the
-        // two paths share one semantic: reasoning-only + length is
-        // `ReasoningBudgetExhausted`, never a completed turn.
-        if chat_metadata
-            .as_ref()
-            .and_then(|m| m.finish_reason.as_deref())
-            == Some("length")
-            && content.trim().is_empty()
-            && reasoning.as_ref().is_some_and(|r| !r.trim().is_empty())
-        {
-            let reasoning_chars = reasoning.as_ref().map(|r| r.trim().len()).unwrap_or(0);
-            return Err(
-                crate::errors::ApiError::ReasoningBudgetExhausted { reasoning_chars }.into(),
-            );
-        }
+        let StepCompletion {
+            content,
+            reasoning,
+            native_tool_calls: step_native_tool_calls,
+            text_fallback_tool_calls,
+            chat_metadata,
+            streamed_call_elapsed_ms,
+        } = self
+            .request_step_completion_with_reasoning_recovery(request_messages, turn_start)
+            .await?;
+        let mut native_tool_calls = step_native_tool_calls;
 
         // Tag-free abliterated models: the qwen3 reasoning parser can
         // classify the ENTIRE response as reasoning_content, leaving content
@@ -848,6 +559,472 @@ impl Agent {
             }),
         );
         Ok(response)
+    }
+
+    /// Main-turn model call with the bounded reasoning-budget recovery.
+    ///
+    /// When the model spends the whole completion budget on hidden reasoning
+    /// (`finish_reason=length`, empty answer — `ReasoningBudgetExhausted`), the
+    /// SAME request is re-sent ONCE with reasoning stepped down one level
+    /// (`ThinkingMode::StepDown`: every effort pin lowered, or thinking
+    /// disabled where nothing can be lowered). `max_tokens` is never raised.
+    /// The retry is announced (tracing warn, console line, and a
+    /// `turn_decision` progress event that reaches stream-json); if it also
+    /// exhausts, the turn fails with the same typed error, whose message names
+    /// the retry and the effort it ran at.
+    ///
+    /// Both call shapes reach this: the streamed path (typed in
+    /// `request_step_completion`) and the non-streaming `chat_with_meta` path
+    /// (typed by the client, including the streaming→non-streaming fallback).
+    /// An error that already carries a `retry` note (the client's own
+    /// unpinned-config recovery ran) is not retried again. Side calls (audit,
+    /// synthesis, compaction) do not come through here.
+    async fn request_step_completion_with_reasoning_recovery(
+        &mut self,
+        request_messages: Vec<crate::api::types::Message>,
+        turn_start: std::time::Instant,
+    ) -> Result<StepCompletion> {
+        let first_err = match self
+            .request_step_completion(request_messages.clone(), ThinkingMode::Enabled, turn_start)
+            .await
+        {
+            Ok(completion) => return Ok(completion),
+            Err(e) => e,
+        };
+        let Some((reasoning_chars, None)) = crate::errors::reasoning_budget_exhaustion(&first_err)
+        else {
+            return Err(first_err);
+        };
+        if self.is_cancelled() {
+            return Err(first_err);
+        }
+
+        let step = match self.begin_reasoning_step_down(reasoning_chars, "turn") {
+            Ok(step) => step,
+            Err(no_retry) => return Err(no_retry),
+        };
+
+        match self
+            .request_step_completion(request_messages, ThinkingMode::StepDown, turn_start)
+            .await
+        {
+            Ok(completion) => Ok(completion),
+            Err(retry_err) => {
+                if crate::errors::reasoning_budget_exhaustion(&retry_err).is_none() {
+                    return Err(retry_err);
+                }
+                Err(self.reasoning_step_down_failed(reasoning_chars, &step))
+            }
+        }
+    }
+
+    /// Start the one bounded reasoning step-down retry after a
+    /// `ReasoningBudgetExhausted` (`what` names the call: "turn" / "planning
+    /// turn"). Announces it — tracing warn, console line and a
+    /// `turn_decision` progress event (`reasoning_budget_retry`, reaches
+    /// stream-json) — and returns the step to retry with. When nothing can be
+    /// lowered or disabled, returns the typed error instead, saying no retry
+    /// was possible.
+    pub(super) fn begin_reasoning_step_down(
+        &self,
+        reasoning_chars: usize,
+        what: &str,
+    ) -> std::result::Result<crate::api::client::ReasoningStepDown, anyhow::Error> {
+        let Some(step) = self.reasoning_step_down_plan() else {
+            let note =
+                "no retry: no reasoning effort left to lower and no thinking toggle to disable";
+            warn!("completion budget exhausted by hidden reasoning; {note}");
+            self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+                decision: "reasoning_budget_exhausted".to_string(),
+                detail: note.to_string(),
+            });
+            return Err(crate::errors::ApiError::ReasoningBudgetExhausted {
+                reasoning_chars,
+                retry: Some(note.to_string()),
+            }
+            .into());
+        };
+        let detail = format!(
+            "model spent the whole completion budget on hidden reasoning \
+             ({reasoning_chars} reasoning chars, empty answer, finish_reason=length); \
+             retrying this {what} once with {}",
+            step.describe()
+        );
+        warn!("{detail}");
+        cli_println!("{} {}", "⚠".yellow(), detail);
+        self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+            decision: "reasoning_budget_retry".to_string(),
+            detail,
+        });
+        Ok(step)
+    }
+
+    /// The typed error for a step-down retry that exhausted again: the
+    /// ORIGINAL error variant, its message naming the retry and its effort.
+    /// Also emitted as a `reasoning_budget_retry_failed` progress event.
+    pub(super) fn reasoning_step_down_failed(
+        &self,
+        reasoning_chars: usize,
+        step: &crate::api::client::ReasoningStepDown,
+    ) -> anyhow::Error {
+        let note = format!("retried once with {}, also exhausted", step.describe());
+        warn!("completion budget exhausted by hidden reasoning; {note}");
+        self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+            decision: "reasoning_budget_retry_failed".to_string(),
+            detail: note.clone(),
+        });
+        crate::errors::ApiError::ReasoningBudgetExhausted {
+            reasoning_chars,
+            retry: Some(note),
+        }
+        .into()
+    }
+
+    /// What `ThinkingMode::StepDown` will do to this session's requests:
+    /// the step-down applied to the session `extra_body` exactly as the client
+    /// applies it to the merged request body (extra_body keys are copied into
+    /// the body verbatim).
+    fn reasoning_step_down_plan(&self) -> Option<crate::api::client::ReasoningStepDown> {
+        let mut probe =
+            serde_json::Value::Object(self.config.extra_body.clone().unwrap_or_default());
+        crate::api::client::apply_reasoning_step_down(&mut probe, &self.config.model)
+    }
+
+    /// One model call for the main turn (streaming with non-streaming
+    /// fallback, or non-streaming), typed-failing a reasoning-only
+    /// `finish_reason=length` response as `ReasoningBudgetExhausted`.
+    async fn request_step_completion(
+        &mut self,
+        request_messages: Vec<crate::api::types::Message>,
+        thinking: ThinkingMode,
+        turn_start: std::time::Instant,
+    ) -> Result<StepCompletion> {
+        let mut native_tool_calls: Option<Vec<crate::api::types::ToolCall>> = None;
+        let mut text_fallback_tool_calls: Option<Vec<crate::api::types::ToolCall>> = None;
+        // Captured per-call metadata (request body, finish_reason, tokens,
+        // elapsed_ms) — populated by whichever branch makes the actual call.
+        // Stays `None` only if all branches return early via `?`.
+        #[allow(unused_assignments)]
+        let mut chat_metadata: Option<crate::api::types::ChatMetadata> = None;
+        // Whole-call wall time of a SUCCESSFUL streamed call (send → stream
+        // end). `ChatMetadata::elapsed_ms` on the streamed path is only
+        // time-to-headers, so the zero-content long-call check needs its own
+        // clock. `None` for the non-streaming path, whose client already
+        // types a long empty call as `ZeroContentLongCall`.
+        let mut streamed_call_elapsed_ms: Option<u64> = None;
+        // `force_non_streaming` latches after a streamed turn came back empty: the
+        // streaming path is the one that produced nothing, so the retry uses the
+        // path that did not rather than repeating the failing request.
+        let (content, reasoning) = if self.config.agent.streaming && !self.force_non_streaming {
+            let mut local_meta = crate::api::types::ChatMetadata::default();
+            let stream_call_started = std::time::Instant::now();
+            match self
+                .chat_streaming(
+                    request_messages.clone(),
+                    self.api_tools(),
+                    thinking,
+                    Some(&mut local_meta),
+                )
+                .await
+            {
+                Ok((content, reasoning, stream_tool_calls)) => {
+                    chat_metadata = Some(local_meta);
+                    streamed_call_elapsed_ms =
+                        Some(stream_call_started.elapsed().as_millis() as u64);
+                    if self.effective_native_fc() {
+                        let has_native = stream_tool_calls
+                            .as_ref()
+                            .map(|t| !t.is_empty())
+                            .unwrap_or(false);
+
+                        if has_native {
+                            native_tool_calls = stream_tool_calls.clone();
+                            info!(
+                                "Received {} native tool calls from stream",
+                                native_tool_calls.as_ref().map(|t| t.len()).unwrap_or(0)
+                            );
+                        } else if !content.is_empty() {
+                            // Fallback: sglang returns tool_calls:[] but puts
+                            // Qwen3-format calls in content. Route through the
+                            // unified extractor so this path matches the agent
+                            // and SWL runtime parsers exactly.
+                            let parsed_calls =
+                                crate::api::tool_calling::extract_tool_calls_from_text(&content);
+                            if !parsed_calls.is_empty() {
+                                info!(
+                                    "Native FC returned empty tool_calls; parsed {} from content (sglang fallback)",
+                                    parsed_calls.len()
+                                );
+                                // Preserve native/message-history invariants:
+                                // text-fallback calls are dispatched from text,
+                                // but must NOT be stored as assistant.tool_calls
+                                // because their results are emitted as XML/user
+                                // messages rather than role=tool messages.
+                                text_fallback_tool_calls = Some(parsed_calls);
+                            }
+                        }
+                    }
+                    (content, reasoning)
+                }
+                Err(stream_err) => {
+                    // A shutdown request aborts the in-flight provider call and
+                    // surfaces here as an error. Treat it as cancellation — don't
+                    // fall back or retry — so the loop saves one checkpoint and
+                    // exits cleanly without claiming completion.
+                    if self.is_cancelled() {
+                        return Err(crate::errors::AgentError::for_current_shutdown().into());
+                    }
+
+                    // Detect "Assistant response prefill incompatible" 400s for
+                    // FailureMode classification.
+                    if stream_err
+                        .to_string()
+                        .to_lowercase()
+                        .contains("prefill incompatible")
+                    {
+                        self.note_prefill_400();
+                    }
+
+                    // A terminal 4xx (e.g. 401 from a missing/invalid API key)
+                    // fails identically over the non-streaming endpoint —
+                    // re-issuing it would just double-hit the provider and bury
+                    // the remediation hint under a fallback error. Only fall
+                    // back for transport/streaming-level failures where a
+                    // non-streaming retry could plausibly succeed.
+                    // A context-window overflow is equally identical over the
+                    // non-streaming endpoint (same payload); surface it to the
+                    // loop's compression recovery instead of re-sending it.
+                    let context_overflow = crate::errors::is_context_overflow_error(&stream_err);
+                    if is_terminal_api_client_error(&stream_err) || context_overflow {
+                        warn!(
+                            "Streaming request failed with {} ({}); not falling back to non-streaming",
+                            if context_overflow {
+                                "context-window overflow"
+                            } else {
+                                "terminal client error"
+                            },
+                            stream_err
+                        );
+                        self.log_turn_end_event(
+                            "assistant_step",
+                            false,
+                            false,
+                            turn_start.elapsed().as_millis() as u64,
+                            Some(stream_err.to_string()),
+                            serde_json::json!({
+                                "message_count": self.messages.len(),
+                                "estimated_message_tokens": self.estimate_messages_tokens(),
+                            }),
+                        );
+                        return Err(stream_err);
+                    }
+
+                    warn!(
+                        "Streaming request failed ({}); retrying this step with non-streaming API",
+                        stream_err
+                    );
+
+                    let response = self
+                        .await_nonstreaming_llm(self.client.chat_with_meta(
+                            request_messages,
+                            self.api_tools(),
+                            thinking,
+                        ))
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "Streaming failed: {}. Non-streaming fallback request also failed",
+                                stream_err
+                            )
+                        });
+                    let (response, fallback_meta) = match response {
+                        Ok((response, meta)) => (response, meta),
+                        Err(e) => {
+                            if self.is_cancelled() {
+                                return Err(
+                                    crate::errors::AgentError::for_current_shutdown().into()
+                                );
+                            }
+                            self.log_turn_end_event(
+                                "assistant_step",
+                                false,
+                                false,
+                                turn_start.elapsed().as_millis() as u64,
+                                Some(e.to_string()),
+                                serde_json::json!({
+                                    "message_count": self.messages.len(),
+                                    "estimated_message_tokens": self.estimate_messages_tokens(),
+                                }),
+                            );
+                            return Err(e);
+                        }
+                    };
+
+                    // The fallback is a NON-streaming response: its usage never
+                    // passes through the SSE usage arm, so record it here.
+                    self.record_nonstreaming_usage(
+                        fallback_meta
+                            .accounted_usage
+                            .as_ref()
+                            .unwrap_or(&response.usage),
+                    );
+
+                    let choice = response
+                        .choices
+                        .into_iter()
+                        .next()
+                        .context("No response from model")?;
+
+                    let message = choice.message;
+                    let content = message.content.text().to_string();
+                    let reasoning = message.reasoning_content.clone();
+
+                    if self.effective_native_fc() && message.tool_calls.is_some() {
+                        native_tool_calls = message.tool_calls.clone();
+                        info!(
+                            "Received {} native tool calls from fallback API",
+                            native_tool_calls.as_ref().map(|t| t.len()).unwrap_or(0)
+                        );
+                    }
+
+                    debug!(
+                        "Fallback model response content ({} chars): {}",
+                        content.len(),
+                        content
+                    );
+                    if content.is_empty() {
+                        warn!("Fallback model returned empty content!");
+                    }
+                    if let Some(ref r) = reasoning {
+                        cli_println!("{} {}", "Thinking:".dimmed(), r.dimmed());
+                        debug!("Fallback reasoning ({} chars): {}", r.len(), r);
+                    }
+
+                    chat_metadata = Some(fallback_meta);
+                    (content, reasoning)
+                }
+            }
+        } else {
+            let response = self
+                .await_nonstreaming_llm(self.client.chat_with_meta(
+                    request_messages,
+                    self.api_tools(),
+                    thinking,
+                ))
+                .await;
+            let (response, sync_meta) = match response {
+                Ok((response, meta)) => (response, meta),
+                Err(e) => {
+                    if self.is_cancelled() {
+                        return Err(crate::errors::AgentError::for_current_shutdown().into());
+                    }
+                    if e.to_string()
+                        .to_lowercase()
+                        .contains("prefill incompatible")
+                    {
+                        self.note_prefill_400();
+                    }
+                    self.log_turn_end_event(
+                        "assistant_step",
+                        false,
+                        false,
+                        turn_start.elapsed().as_millis() as u64,
+                        Some(e.to_string()),
+                        serde_json::json!({
+                            "message_count": self.messages.len(),
+                            "estimated_message_tokens": self.estimate_messages_tokens(),
+                        }),
+                    );
+                    return Err(e);
+                }
+            };
+
+            // A non-streaming response never produces a `StreamChunk::Usage`
+            // event, so accumulate its usage into the session totals here.
+            self.record_nonstreaming_usage(
+                sync_meta
+                    .accounted_usage
+                    .as_ref()
+                    .unwrap_or(&response.usage),
+            );
+
+            let choice = response
+                .choices
+                .into_iter()
+                .next()
+                .context("No response from model")?;
+
+            let message = choice.message;
+            let content = message.content.text().to_string();
+            let reasoning = message.reasoning_content.clone();
+
+            if self.effective_native_fc() && message.tool_calls.is_some() {
+                native_tool_calls = message.tool_calls.clone();
+                info!(
+                    "Received {} native tool calls from API",
+                    native_tool_calls.as_ref().map(|t| t.len()).unwrap_or(0)
+                );
+            }
+
+            debug!(
+                "Raw model response content ({} chars): {}",
+                content.len(),
+                content
+            );
+
+            if self.config.debug.should_log_responses() {
+                cli_println!("{}", "=== DEBUG: Raw Model Response ===".bright_magenta());
+                cli_println!("{}", content);
+                cli_println!("{}", "=== END DEBUG ===".bright_magenta());
+            }
+
+            if content.is_empty() {
+                warn!("Model returned empty content!");
+            }
+
+            if let Some(ref r) = reasoning {
+                cli_println!("{} {}", "Thinking:".dimmed(), r.dimmed());
+                debug!("Reasoning content ({} chars): {}", r.len(), r);
+            }
+
+            chat_metadata = Some(sync_meta);
+            (content, reasoning)
+        };
+
+        // A response cut off by the completion budget (finish_reason ==
+        // "length") whose only output is a reasoning trace — no answer text —
+        // is a TRUNCATED turn, not a deliverable. The reasoning is a partial
+        // trace, and feeding it through the promotion below would store the
+        // truncated reasoning as the final answer (2026-09-21 review, P2:
+        // on the streamed path the length-truncated reasoning was promoted
+        // to content and accepted by the earlier completion gates, bypassing
+        // execution's length rejection). Fail typed here — same contract as
+        // the non-streaming client's `reasoning_budget_exhausted` — so the
+        // two paths share one semantic: reasoning-only + length is
+        // `ReasoningBudgetExhausted`, never a completed turn.
+        if chat_metadata
+            .as_ref()
+            .and_then(|m| m.finish_reason.as_deref())
+            == Some("length")
+            && content.trim().is_empty()
+            && reasoning.as_ref().is_some_and(|r| !r.trim().is_empty())
+        {
+            let reasoning_chars = reasoning.as_ref().map(|r| r.trim().len()).unwrap_or(0);
+            return Err(crate::errors::ApiError::ReasoningBudgetExhausted {
+                reasoning_chars,
+                retry: None,
+            }
+            .into());
+        }
+
+        Ok(StepCompletion {
+            content,
+            reasoning,
+            native_tool_calls,
+            text_fallback_tool_calls,
+            chat_metadata,
+            streamed_call_elapsed_ms,
+        })
     }
 }
 

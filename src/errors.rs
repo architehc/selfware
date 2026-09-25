@@ -150,8 +150,20 @@ pub enum ApiError {
     /// trace. Measured with hosted GLM 5.3 (2026-08-23): unbounded reasoning
     /// ate a 16k budget and returned zero answer content. Recovery: lower
     /// reasoning effort or raise max_tokens.
-    #[error("completion budget exhausted by hidden reasoning ({reasoning_chars} reasoning chars, empty answer, finish_reason=length) — lower reasoning effort or raise max_tokens")]
-    ReasoningBudgetExhausted { reasoning_chars: usize },
+    ///
+    /// `retry` records the bounded recovery that already ran (or why none
+    /// could): e.g. `"retried once with reasoning_effort xhigh -> medium, also
+    /// exhausted"`. `None` means no retry was attempted yet — the agent's main
+    /// turn uses that to decide whether its one step-down retry is still
+    /// available. It is part of the message so a failed run names the retry.
+    #[error(
+        "completion budget exhausted by hidden reasoning ({reasoning_chars} reasoning chars, empty answer, finish_reason=length{}) — lower reasoning effort or raise max_tokens",
+        reasoning_retry_note(.retry)
+    )]
+    ReasoningBudgetExhausted {
+        reasoning_chars: usize,
+        retry: Option<String>,
+    },
 
     /// The stream terminated having produced nothing at all: no content, no
     /// reasoning, no tool calls, and no `finish_reason` — and the caller did
@@ -586,6 +598,29 @@ pub enum ResourceError {
 
     #[error("Resource unavailable: {0}")]
     Unavailable(String),
+}
+
+/// Display suffix for [`ApiError::ReasoningBudgetExhausted`]: empty when no
+/// retry ran, `"; <what happened>"` otherwise.
+fn reasoning_retry_note(retry: &Option<String>) -> String {
+    match retry {
+        Some(note) if !note.trim().is_empty() => format!("; {}", note.trim()),
+        _ => String::new(),
+    }
+}
+
+/// If `e` (anywhere in its cause chain) is a
+/// [`ApiError::ReasoningBudgetExhausted`], return its `reasoning_chars` and
+/// `retry` note.
+pub fn reasoning_budget_exhaustion(e: &anyhow::Error) -> Option<(usize, Option<String>)> {
+    e.chain()
+        .find_map(|cause| match cause.downcast_ref::<ApiError>() {
+            Some(ApiError::ReasoningBudgetExhausted {
+                reasoning_chars,
+                retry,
+            }) => Some((*reasoning_chars, retry.clone())),
+            _ => None,
+        })
 }
 
 pub const EXIT_SUCCESS: u8 = 0;

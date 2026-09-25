@@ -217,6 +217,13 @@ pub(super) fn is_fatal_loop_error(error: &anyhow::Error) -> bool {
     if super::assistant_response::is_terminal_api_client_error(error) {
         return true;
     }
+    // Reasoning-budget exhaustion whose bounded step-down retry already ran
+    // (or could not run): ErrorRecovery re-sending the step would reopen the
+    // same trap at full effort. `retry: None` is still recoverable — the next
+    // turn gets its own single step-down retry.
+    if crate::errors::reasoning_budget_exhaustion(error).is_some_and(|(_, retry)| retry.is_some()) {
+        return true;
+    }
     if error
         .downcast_ref::<crate::safety::killswitch::KillswitchError>()
         .is_some()
@@ -1756,10 +1763,50 @@ impl Agent {
 
                     let has_tool_calls = {
                         let mut planning_attempt = 0u32;
+                        // One bounded reasoning step-down retry per planning
+                        // turn (same recovery as the execution turn): set once
+                        // a planning call exhausts its budget on hidden
+                        // reasoning, never re-armed.
+                        let mut planning_step_down: Option<crate::api::client::ReasoningStepDown> =
+                            None;
                         loop {
-                            match self.plan().await {
+                            let thinking = if planning_step_down.is_some() {
+                                crate::api::ThinkingMode::StepDown
+                            } else {
+                                crate::api::ThinkingMode::Enabled
+                            };
+                            match self.plan_with_thinking(thinking).await {
                                 Ok(has_tool_calls) => break has_tool_calls,
                                 Err(e) => {
+                                    // Reasoning-budget exhaustion is not a
+                                    // transient failure: re-sending the same
+                                    // request burns the budget again. Retry
+                                    // ONCE with reasoning stepped down; a
+                                    // second exhaustion (or no lower setting)
+                                    // is terminal, typed, and names the retry.
+                                    let e = match crate::errors::reasoning_budget_exhaustion(&e) {
+                                        Some((reasoning_chars, None)) if !self.is_cancelled() => {
+                                            match &planning_step_down {
+                                                None => match self.begin_reasoning_step_down(
+                                                    reasoning_chars,
+                                                    "planning turn",
+                                                ) {
+                                                    Ok(step) => {
+                                                        planning_step_down = Some(step);
+                                                        continue;
+                                                    }
+                                                    Err(no_retry) => no_retry,
+                                                },
+                                                Some(step) => self.reasoning_step_down_failed(
+                                                    reasoning_chars,
+                                                    step,
+                                                ),
+                                            }
+                                        }
+                                        _ => e,
+                                    };
+                                    let reasoning_exhausted =
+                                        crate::errors::reasoning_budget_exhaustion(&e).is_some();
                                     // Persist resumable state before we risk giving up,
                                     // so the task can be resumed even if planning
                                     // ultimately fails on the first turn.
@@ -1783,6 +1830,7 @@ impl Agent {
                                     if self.is_cancelled()
                                         || planning_attempt >= MAX_PLANNING_RETRIES
                                         || terminal_client_error
+                                        || reasoning_exhausted
                                         || is_fatal_loop_error(&e)
                                     {
                                         if mode == LoopMode::NewTask {

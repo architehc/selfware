@@ -42,6 +42,7 @@ fn empty_stream_is_distinct_from_reasoning_starvation() {
     let empty = ApiError::EmptyStream.to_string();
     let starved = ApiError::ReasoningBudgetExhausted {
         reasoning_chars: 796,
+        retry: None,
     }
     .to_string();
     assert_ne!(empty, starved);
