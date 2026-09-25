@@ -206,6 +206,7 @@ impl Agent {
                                         ),
                                         &|path| compressor.file_finding(path),
                                         true,
+                                        Some(self.path_key_root.as_path()),
                                     )
                                     .is_some();
                             }

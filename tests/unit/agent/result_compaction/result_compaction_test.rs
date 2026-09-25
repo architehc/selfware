@@ -739,8 +739,9 @@ fn old_stubs_are_slimmed_before_a_recent_read_is_stubbed() {
         .map(|i| estimate_content_tokens(messages[i].content.text()))
         .sum();
     let budget = estimate_messages_tokens(&messages) - stub_tokens / 2;
-    let report = compact_tool_results_to_budget_opts(&mut messages, budget, 2, 500, &finding, true)
-        .expect("compacted");
+    let report =
+        compact_tool_results_to_budget_opts(&mut messages, budget, 2, 500, &finding, true, None)
+            .expect("compacted");
     // Every old stub is slimmed before any further read is stubbed, and
     // the only read stubbed is an older one, never the two recent reads.
     assert_eq!(report.slimmed.len(), stubs_before, "{report:?}");
@@ -786,7 +787,7 @@ fn a_soft_pass_never_touches_results_the_model_has_not_seen() {
         .map(|m| m.content.text().to_string())
         .collect();
     assert!(
-        compact_tool_results_to_budget_opts(&mut messages, budget, 2, 200, &|_| None, true)
+        compact_tool_results_to_budget_opts(&mut messages, budget, 2, 200, &|_| None, true, None)
             .is_none(),
         "nothing the soft pass may touch"
     );

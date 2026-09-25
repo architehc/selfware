@@ -802,19 +802,25 @@ pub(crate) fn compact_tool_results_to_budget(
         stub_tokens,
         finding,
         false,
+        None,
     )
 }
 
 /// Key of a `file_read` call for supersession: normalized path and the
 /// line range (`None` = whole file).
-/// A chunked whole read (or its stub) counts as the lines it showed.
-fn read_key(r: &PairedResult, messages: &[Message]) -> Option<(String, Option<(usize, usize)>)> {
+/// A chunked whole read (or its stub) counts as the lines it showed. The
+/// path is keyed against `root` (the agent's workspace root; `None` =
+/// lexical only), never the process cwd.
+fn read_key(
+    r: &PairedResult,
+    messages: &[Message],
+    root: Option<&std::path::Path>,
+) -> Option<(String, Option<(usize, usize)>)> {
     if r.name != "file_read" {
         return None;
     }
     let args_v: Value = serde_json::from_str(&r.args).unwrap_or_default();
-    let root = super::current_project_root();
-    let path = super::context::canonical_workspace_path(&arg_path(&args_v)?, Some(&root));
+    let path = super::context::canonical_workspace_path(&arg_path(&args_v)?, root);
     let payload = open_envelope(messages[r.idx].content.text(), r.xml)
         .and_then(|env| serde_json::from_str::<Value>(&env.payload).ok());
     let range = shown_range(&args_v, payload.as_ref()).or_else(|| {
@@ -927,6 +933,7 @@ pub(crate) fn compact_tool_results_to_budget_opts(
     stub_tokens: usize,
     finding: &dyn Fn(&str) -> Option<String>,
     protect_unseen: bool,
+    root: Option<&std::path::Path>,
 ) -> Option<ResultCompactionReport> {
     let before = estimate_messages_tokens(messages);
     if before <= max_tokens {
@@ -953,7 +960,10 @@ pub(crate) fn compact_tool_results_to_budget_opts(
     let touchable = |pos: usize| -> bool {
         !protect_unseen || last_assistant.is_some_and(|a| results[pos].idx < a)
     };
-    let keys: Vec<_> = results.iter().map(|r| read_key(r, messages)).collect();
+    let keys: Vec<_> = results
+        .iter()
+        .map(|r| read_key(r, messages, root))
+        .collect();
     let covered_later = |pos: usize| -> bool {
         let Some((path, range)) = &keys[pos] else {
             return false;

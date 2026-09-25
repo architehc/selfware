@@ -661,7 +661,7 @@ async fn test_edit_to_already_read_file_satisfies_files_guard() {
     // After the file has been read, the same edit is exempt (regression: the
     // guard used to discard this write on the doable parse_port task).
     agent.file_tracker.read_state.insert(
-        super::super::FileTracker::key("src/main.rs"),
+        agent.file_tracker.key("src/main.rs"),
         super::super::FileReadState::default(),
     );
     assert!(
@@ -686,7 +686,7 @@ async fn test_files_guard_sees_every_multi_edit_and_patch_target() {
     let config = test_config(format!("{}/v1", server.url()));
     let mut agent = Agent::new(config).await.unwrap();
     agent.file_tracker.read_state.insert(
-        super::super::FileTracker::key("src/a.rs"),
+        agent.file_tracker.key("src/a.rs"),
         super::super::FileReadState::default(),
     );
 
@@ -875,7 +875,7 @@ async fn test_writes_target_only_read_files_ignores_non_file_shell() {
     let mut agent = Agent::new(config).await.unwrap();
 
     agent.file_tracker.read_state.insert(
-        super::super::FileTracker::key("src/main.rs"),
+        agent.file_tracker.key("src/main.rs"),
         super::super::FileReadState::default(),
     );
 

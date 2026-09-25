@@ -655,14 +655,20 @@ struct FileTracker {
     stale_files: HashSet<String>,
     /// Per-file read state used to detect redundant unchanged rereads
     read_state: HashMap<String, FileReadState>,
+    /// The agent's workspace root, fixed when the agent is built: every key
+    /// is computed against it, never against the process cwd (which other
+    /// code — and concurrently running tests — may change between a record
+    /// and its lookup).
+    root: std::path::PathBuf,
 }
 
 impl FileTracker {
-    fn new() -> Self {
+    fn new(root: std::path::PathBuf) -> Self {
         Self {
             context_files: Vec::new(),
             stale_files: HashSet::new(),
             read_state: HashMap::new(),
+            root,
         }
     }
 
@@ -671,9 +677,8 @@ impl FileTracker {
     /// (`sub/../a.rs`, `<root>/a.rs`) invalidates what was recorded for
     /// `a.rs` (external review 2026-09-25). The stale set keeps the paths as
     /// written (the run summary and the context-file refresh show them).
-    fn key(path: &str) -> String {
-        let root = current_project_root();
-        context::canonical_absolute_path(path, Some(root.as_path()))
+    fn key(&self, path: &str) -> String {
+        context::canonical_absolute_path(path, Some(self.root.as_path()))
     }
 
     fn mark_stale(&mut self, path: &str) {
@@ -684,15 +689,18 @@ impl FileTracker {
 
     fn mark_written(&mut self, path: &str) {
         // Remove read state so next read gets a fresh baseline
-        self.read_state.remove(&Self::key(path));
+        let key = self.key(path);
+        self.read_state.remove(&key);
         self.mark_stale(path);
     }
 
     fn remove_deleted(&mut self, path: &str) {
-        let key = Self::key(path);
+        let key = self.key(path);
         self.read_state.remove(&key);
         self.clear_stale(path);
-        self.context_files.retain(|p| Self::key(p) != key);
+        let root = self.root.clone();
+        self.context_files
+            .retain(|p| context::canonical_absolute_path(p, Some(root.as_path())) != key);
     }
 
     /// Whether any path in the stale set names the same file as `path`.
@@ -700,22 +708,25 @@ impl FileTracker {
         if self.stale_files.contains(path) {
             return true;
         }
-        let key = Self::key(path);
-        self.stale_files.iter().any(|p| Self::key(p) == key)
+        let key = self.key(path);
+        self.stale_files.iter().any(|p| self.key(p) == key)
     }
 
     /// Drop every stale-set entry naming the same file as `path`.
     fn clear_stale(&mut self, path: &str) {
-        let key = Self::key(path);
-        self.stale_files.retain(|p| Self::key(p) != key);
+        let key = self.key(path);
+        let root = self.root.clone();
+        self.stale_files
+            .retain(|p| context::canonical_absolute_path(p, Some(root.as_path())) != key);
     }
 
     fn read_state_of(&self, path: &str) -> Option<&FileReadState> {
-        self.read_state.get(&Self::key(path))
+        self.read_state.get(&self.key(path))
     }
 
     fn read_state_of_mut(&mut self, path: &str) -> Option<&mut FileReadState> {
-        self.read_state.get_mut(&Self::key(path))
+        let key = self.key(path);
+        self.read_state.get_mut(&key)
     }
 }
 
@@ -969,6 +980,10 @@ pub struct Agent {
     /// paths are unknown (shell and VCS commands, formatters, package
     /// tools): it may have changed any file.
     last_opaque_mutation_sequence: usize,
+    /// The workspace root every path key of this agent is computed against,
+    /// fixed at construction (`tools.workspace_root()`), never the process
+    /// cwd.
+    path_key_root: std::path::PathBuf,
     /// Per-path exemption budget for evicted re-reads (see
     /// [`EvictedRereadBudget`]).
     evicted_reread_budget: std::collections::HashMap<String, EvictedRereadBudget>,
@@ -1704,8 +1719,12 @@ To call a tool, use this EXACT XML structure:
         // Create compressor with the full conversation budget, not output budget.
         // The old value (max_tokens=16384) triggered compression at ~12K tokens,
         // evicting file content after just a few tool calls.
-        let compressor =
+        let mut compressor =
             ContextCompressor::with_content_ratio(max_context_tokens, compressor_content_ratio);
+        // One fixed root for every path key this agent computes (ledger,
+        // re-read tracker, unchanged-note records, context map, stubs).
+        let path_key_root = tools.workspace_root().path();
+        compressor.set_key_root(path_key_root.clone());
         let governor = ConcurrencyGovernor::shared_from_config(&config.concurrency);
 
         let tool_schema_in_prompt = !config.agent.native_function_calling;
@@ -1734,7 +1753,8 @@ To call a tool, use this EXACT XML structure:
             required_task_tools: std::collections::BTreeSet::new(),
             verification_gate,
             error_analyzer,
-            file_tracker: FileTracker::new(),
+            file_tracker: FileTracker::new(path_key_root.clone()),
+            path_key_root,
             task_state_notes: VecDeque::new(),
             last_checkpoint_persisted_at: Instant::now(),
             last_checkpoint_tool_calls: 0,

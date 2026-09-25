@@ -114,6 +114,10 @@ pub struct ContextCompressor {
     /// summaries left the history above the threshold and ran again the
     /// next turn).
     summary_backoff: Option<usize>,
+    /// Root the ledger's path keys are computed against: the agent's own
+    /// workspace root (`Agent::new` sets it). A standalone compressor falls
+    /// back to the current project root.
+    key_root: Option<std::path::PathBuf>,
     /// Progress that must outlive every trim/compaction (see [`WorkLedger`]).
     /// Behind a mutex so the `&self` compression paths can record what they
     /// are about to drop before dropping it.
@@ -132,6 +136,7 @@ impl ContextCompressor {
             compression_threshold: (token_budget as f32 * content_ratio) as usize,
             min_messages_to_keep: 6,
             summary_backoff: None,
+            key_root: None,
             ledger: Mutex::new(WorkLedger::new()),
         }
     }
@@ -150,8 +155,20 @@ impl ContextCompressor {
     /// into the work ledger. Idempotent; called before every trim/compaction
     /// so nothing is dropped unrecorded.
     pub fn observe_work(&self, messages: &[Message]) {
-        let root = super::current_project_root();
+        let root = self.key_root();
         self.with_ledger(|l| l.observe(messages, Some(root.as_path())));
+    }
+
+    /// Fix the root the ledger's path keys are computed against.
+    pub fn set_key_root(&mut self, root: std::path::PathBuf) {
+        self.key_root = Some(root);
+    }
+
+    /// The root for path keys (see `key_root`).
+    pub fn key_root(&self) -> std::path::PathBuf {
+        self.key_root
+            .clone()
+            .unwrap_or_else(super::current_project_root)
     }
 
     /// Start a new model turn for the ledger (resets it on a task change).
@@ -172,7 +189,7 @@ impl ContextCompressor {
         max_tokens: usize,
         messages: &[Message],
     ) -> Option<String> {
-        let root = super::current_project_root();
+        let root = self.key_root();
         let presence = ContextPresence::from_messages(messages, &|p| {
             WorkLedger::normalize_path(p, Some(root.as_path()))
         });
@@ -182,7 +199,7 @@ impl ContextCompressor {
     /// The ledger's recorded finding for a file (stub text for in-place
     /// result compaction).
     pub fn file_finding(&self, path: &str) -> Option<String> {
-        let root = super::current_project_root();
+        let root = self.key_root();
         let key = WorkLedger::normalize_path(path, Some(root.as_path()));
         self.with_ledger(|l| l.file_finding(&key))
     }

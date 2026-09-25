@@ -7346,9 +7346,10 @@ async fn numbered_file_read_flows_through_xml_note_and_raw_mode_key() {
     assert!(raw_text.contains("tokenize(input)"), "{raw_text}");
 }
 
-#[test]
-fn file_read_range_key_follows_the_effective_numbering_default() {
-    let key = |a: &str| Agent::file_read_range_key(a).unwrap();
+#[tokio::test]
+async fn file_read_range_key_follows_the_effective_numbering_default() {
+    let agent = reread_agent().await;
+    let key = |a: &str| agent.file_read_range_key(a).unwrap();
     // Whole-file reads default to raw; ranged reads default to numbered.
     assert_eq!(
         key(r#"{"path":"a.rs"}"#),
@@ -7587,7 +7588,7 @@ async fn unchanged_reread_note_survives_an_edit_of_another_file() {
     assert!(text.contains("pub fn lex"), "{text}");
 
     // An edit naming this file by its absolute path counts as this path.
-    let root = crate::agent::current_project_root();
+    let root = agent.path_key_root.clone();
     let abs = serde_json::json!({
         "path": root.join("src/lexer.rs").to_string_lossy(),
         "old_str": "x", "new_str": "x"
@@ -7669,12 +7670,70 @@ async fn c24_whole_read_too_large_for_the_window_arrives_as_a_first_chunk() {
 }
 
 #[tokio::test]
+async fn path_keys_do_not_move_when_the_process_cwd_changes() {
+    // Merge flake 2026-09-25: keys went through the process-global root, and
+    // tests that set_current_dir concurrently moved it between a record and
+    // its lookup. Keys now use the agent's own root, fixed at construction.
+    let mut agent = reread_agent().await;
+    let args = r#"{"path":"src/lexer.rs"}"#;
+    let key_before = agent.file_read_range_key(args).unwrap();
+    let tracker_before = agent.file_tracker.key("src/lexer.rs");
+    agent
+        .push_tool_result_message(
+            true,
+            "r1",
+            "file_read",
+            args,
+            true,
+            &read_result_json(LEXER_SRC),
+        )
+        .await;
+    agent.compressor.observe_work(&agent.messages);
+    let ledger_before: Vec<String> = agent
+        .compressor
+        .work_ledger()
+        .files()
+        .iter()
+        .map(|f| f.path.clone())
+        .collect();
+
+    let elsewhere = tempfile::tempdir().unwrap();
+    let _cwd = crate::test_support::CwdGuard::enter(elsewhere.path());
+    assert_eq!(agent.file_read_range_key(args).unwrap(), key_before);
+    assert_eq!(agent.file_tracker.key("src/lexer.rs"), tracker_before);
+    assert!(!agent.prior_read_evicted_from_context("src/lexer.rs"));
+    agent
+        .push_tool_result_message(
+            true,
+            "r2",
+            "file_read",
+            args,
+            true,
+            &read_result_json(LEXER_SRC),
+        )
+        .await;
+    assert!(
+        last_text(&agent).contains("Unchanged since turn"),
+        "the record made before the cwd change still matches"
+    );
+    agent.compressor.observe_work(&agent.messages);
+    let ledger_after: Vec<String> = agent
+        .compressor
+        .work_ledger()
+        .files()
+        .iter()
+        .map(|f| f.path.clone())
+        .collect();
+    assert_eq!(ledger_after, ledger_before, "one ledger identity");
+}
+
+#[tokio::test]
 async fn path_aliases_share_one_key_in_the_reread_tracker_and_the_note() {
     // External review 2026-09-25 (Rule 5 sweep of the ledger alias bug):
     // every path-keyed map agrees that `./a/../src/lexer.rs`,
     // `src/lexer.rs` and `<root>/src/lexer.rs` are one file.
     let mut agent = reread_agent().await;
-    let root = crate::agent::current_project_root();
+    let root = agent.path_key_root.clone();
     let abs = root.join("src/lexer.rs").to_string_lossy().into_owned();
 
     // Unchanged note: an identical re-read through an alias.
@@ -7703,7 +7762,7 @@ async fn path_aliases_share_one_key_in_the_reread_tracker_and_the_note() {
     // Re-read tracker: state recorded under one path, a write through an
     // alias clears it and marks the file stale.
     agent.file_tracker.read_state.insert(
-        crate::agent::FileTracker::key("src/lexer.rs"),
+        agent.file_tracker.key("src/lexer.rs"),
         FileReadState {
             content_hash: 1,
             total_lines: 3,

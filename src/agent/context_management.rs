@@ -1182,6 +1182,7 @@ impl Agent {
             rc::stub_token_budget(self.max_context_tokens),
             &|path| compressor.file_finding(path),
             protect_unseen,
+            Some(self.path_key_root.as_path()),
         )?;
         let messages = self.messages.len();
         let reason = format!("{why}; {}", report.describe());
@@ -1410,8 +1411,8 @@ impl Agent {
         // One entry per file: the map's tree entries are root-relative, and
         // `./a/../b.rs` or `<root>/b.rs` must land on `b.rs`'s entry, not a
         // second one.
-        let root = super::current_project_root();
-        let key = super::context::canonical_workspace_path(path, Some(root.as_path()));
+        let key =
+            super::context::canonical_workspace_path(path, Some(self.path_key_root.as_path()));
         let p = Path::new(&key);
         // Estimate before loading.
         let estimate = self

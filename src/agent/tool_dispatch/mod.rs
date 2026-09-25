@@ -936,8 +936,8 @@ impl Agent {
     }
 
     /// Ledger-normalized key of a path, for per-path mutation tracking.
-    fn mutation_path_key(path: &str) -> String {
-        Self::canonical_path_key(path)
+    fn mutation_path_key(&self, path: &str) -> String {
+        self.canonical_path_key(path)
     }
 
     /// The one canonical key for a path in the internal path-keyed records
@@ -945,9 +945,8 @@ impl Agent {
     /// read-result fingerprints, the unchanged-note records and the
     /// mutation tracking all agree that `./a/../b.rs`, `b.rs` and
     /// `<root>/b.rs` are one file.
-    pub(super) fn canonical_path_key(path: &str) -> String {
-        let root = super::current_project_root();
-        super::context::canonical_absolute_path(path, Some(root.as_path()))
+    pub(super) fn canonical_path_key(&self, path: &str) -> String {
+        super::context::canonical_absolute_path(path, Some(self.path_key_root.as_path()))
     }
 
     /// Record which paths the mutation just counted touched: named paths
@@ -960,7 +959,7 @@ impl Agent {
             return;
         }
         for path in paths {
-            let key = Self::mutation_path_key(&path.to_string_lossy());
+            let key = self.mutation_path_key(&path.to_string_lossy());
             self.path_mutation_sequences
                 .insert(key, self.mutation_sequence);
         }
@@ -973,12 +972,12 @@ impl Agent {
             return true;
         }
         self.path_mutation_sequences
-            .get(&Self::mutation_path_key(path))
+            .get(&self.mutation_path_key(path))
             .is_some_and(|&seq| seq > mutation_sequence)
     }
 
     /// The `path` of a `file_read` call, or `None` for any other tool.
-    fn file_read_path(tool_name: &str, args_str: &str) -> Option<String> {
+    fn file_read_path(&self, tool_name: &str, args_str: &str) -> Option<String> {
         if tool_name != "file_read" {
             return None;
         }
@@ -986,7 +985,7 @@ impl Agent {
             .ok()?
             .get("path")?
             .as_str()
-            .map(Self::canonical_path_key)
+            .map(|p| self.canonical_path_key(p))
     }
 
     fn message_fingerprint(message: &crate::api::types::Message) -> u64 {
@@ -999,7 +998,7 @@ impl Agent {
     /// Record which message carries the latest successful `file_read`
     /// result for its path. Call right after that message is pushed.
     pub(super) fn record_file_read_result_message(&mut self, tool_name: &str, args_str: &str) {
-        let Some(path) = Self::file_read_path(tool_name, args_str) else {
+        let Some(path) = self.file_read_path(tool_name, args_str) else {
             return;
         };
         let Some(message) = self.messages.last() else {
@@ -1017,7 +1016,7 @@ impl Agent {
     pub(super) fn prior_read_evicted_from_context(&self, path: &str) -> bool {
         let Some(&fingerprint) = self
             .read_result_fingerprints
-            .get(&Self::canonical_path_key(path))
+            .get(&self.canonical_path_key(path))
         else {
             return false;
         };
@@ -1030,7 +1029,7 @@ impl Agent {
     /// Key for one exact `file_read` request: the path (canonical field or
     /// one of the aliases the tool accepts, `./` stripped) plus the
     /// `line_range` (absent = whole file).
-    fn file_read_range_key(args_str: &str) -> Option<String> {
+    fn file_read_range_key(&self, args_str: &str) -> Option<String> {
         let args = serde_json::from_str::<Value>(args_str).ok()?;
         let path = ["path", "file_path", "file", "filepath"]
             .iter()
@@ -1039,7 +1038,7 @@ impl Agent {
         if path.is_empty() {
             return None;
         }
-        let path = Self::canonical_path_key(path);
+        let path = self.canonical_path_key(path);
         let range = match args.get("line_range") {
             None | Some(Value::Null) => "whole".to_string(),
             Some(range) => range.to_string(),
@@ -1075,7 +1074,7 @@ impl Agent {
     /// so an identical later re-read can be answered with a short note while
     /// this message is still in the history.
     fn record_delivered_read_result(&mut self, args_str: &str, raw_result: &str) {
-        let Some(key) = Self::file_read_range_key(args_str) else {
+        let Some(key) = self.file_read_range_key(args_str) else {
             return;
         };
         let Some(content) = Self::file_read_result_content(raw_result) else {
@@ -1110,7 +1109,7 @@ impl Agent {
     /// "unchanged since turn N" would be false. An edit of another file
     /// does not withhold it. Anything else returns the full content.
     pub(super) fn unchanged_reread_note(&self, args_str: &str, raw_result: &str) -> Option<String> {
-        let key = Self::file_read_range_key(args_str)?;
+        let key = self.file_read_range_key(args_str)?;
         let record = self.delivered_read_results.get(&key)?;
         let path_part = key.split('\u{1f}').next().unwrap_or(key.as_str());
         if self.path_mutated_since(path_part, record.mutation_sequence) {
@@ -1198,7 +1197,7 @@ impl Agent {
         args_str: &str,
         counter: impl Fn(&mut super::EvictedRereadBudget) -> &mut u32,
     ) -> bool {
-        let Some(path) = Self::file_read_path(tool_name, args_str) else {
+        let Some(path) = self.file_read_path(tool_name, args_str) else {
             return false;
         };
         if !self.prior_read_evicted_from_context(&path) {
@@ -1631,7 +1630,7 @@ impl Agent {
                     }
                 } else {
                     self.file_tracker.read_state.insert(
-                        FileTracker::key(&path_str),
+                        self.file_tracker.key(&path_str),
                         FileReadState {
                             content_hash,
                             total_lines,
@@ -4300,7 +4299,7 @@ impl Agent {
                 // A spilled or chunked result is not the content the call
                 // asked for: never an "unchanged" reference for a re-read.
                 if spilled || chunked.is_some() {
-                    if let Some(key) = Self::file_read_range_key(args_str) {
+                    if let Some(key) = self.file_read_range_key(args_str) {
                         self.delivered_read_results.remove(&key);
                     }
                 } else {
