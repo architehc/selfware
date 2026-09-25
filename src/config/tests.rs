@@ -2936,6 +2936,35 @@ strict_permissions = true
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn test_config_load_strict_permissions_accepts_placeholder_api_key() {
+    // A keyless endpoint (`api_key = "EMPTY"`, the SGLang/vLLM convention) or
+    // an env-reference holds no secret on disk: strict mode must not reject
+    // it as a plaintext key. A real key still fails (test above).
+    let _env_guard = clear_selfware_env_vars();
+    use std::os::unix::fs::PermissionsExt;
+
+    for placeholder in ["EMPTY", "none", "${SELFWARE_API_KEY}"] {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("keyless.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "endpoint = \"http://localhost:8000/v1\"\napi_key = \"{placeholder}\"\n\n[safety]\nstrict_permissions = true\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let result = Config::load(Some(config_path.to_str().unwrap()));
+        assert!(
+            result.is_ok(),
+            "{placeholder}: placeholder key must load in strict mode: {:?}",
+            result.err()
+        );
+    }
+}
+
 #[test]
 fn test_config_validate_rejects_invalid_glob_pattern() {
     let mut config = Config::default();

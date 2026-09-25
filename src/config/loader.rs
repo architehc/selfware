@@ -64,7 +64,6 @@ fn config_warning(message: &str) {
 /// env-reference such as `${VAR}`, `$VAR` or `env:VAR`. The loader never
 /// expands env references inside the file (keys come from `SELFWARE_API_KEY`
 /// / the keyring instead), so such a literal is not a secret on disk.
-#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn is_placeholder_credential(value: &str) -> bool {
     let v = value.trim();
     if v.is_empty() {
@@ -701,7 +700,14 @@ impl Config {
         // Track whether the API key originated from the config file so we can
         // distinguish it from env-var / keyring sources after the override
         // cascade below.
-        let plaintext_key_in_config = config.api_key.is_some() && loaded_from_path.is_some();
+        // A placeholder (`EMPTY`, `none`, `${VAR}`, ...) is not a secret on
+        // disk: keyless endpoints (SGLang/vLLM) need no plaintext-key warning
+        // and must not trip strict mode — same rule as the permission check.
+        let plaintext_key_in_config = config
+            .api_key
+            .as_ref()
+            .is_some_and(|k| !is_placeholder_credential(k.expose()))
+            && loaded_from_path.is_some();
 
         // Override with environment variables
         if let Ok(endpoint) = std::env::var("SELFWARE_ENDPOINT") {
