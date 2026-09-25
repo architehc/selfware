@@ -285,7 +285,7 @@ pub fn ts_fallback_args() -> Vec<String> {
         "--module",
         "esnext",
         "--moduleResolution",
-        "node",
+        "bundler",
         "--jsx",
         "preserve",
         "--esModuleInterop",
