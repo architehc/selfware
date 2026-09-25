@@ -5,8 +5,6 @@ use tracing::{debug, info, warn};
 
 use super::*;
 use crate::checkpoint::{capture_git_state, CheckpointManager, TaskCheckpoint, TaskStatus};
-#[cfg(feature = "self-improvement")]
-use crate::cognitive::metrics::{MetricsStore, PerformanceSnapshot};
 #[cfg(feature = "resilience")]
 use crate::self_healing::ErrorOccurrence;
 
@@ -842,39 +840,14 @@ impl Agent {
         reached_tool_interval || reached_time_interval
     }
 
-    /// Mark current task as completed
+    /// Mark current task as completed.
+    ///
+    /// The performance snapshot and the improvement-engine save are NOT
+    /// written here: this is only the success path, and writing them here
+    /// left every failed, timed-out and interrupted run out of the
+    /// statistics. `Agent::record_terminal_telemetry` writes them once for
+    /// every terminal outcome.
     pub(super) fn complete_checkpoint(&mut self) -> Result<()> {
-        // Collect metrics before moving the borrow
-        #[cfg(feature = "self-improvement")]
-        if let Some(ref checkpoint) = self.current_checkpoint {
-            let errors_total = checkpoint.errors.len();
-            let errors_recovered = checkpoint.errors.iter().filter(|e| e.recovered).count();
-            let tool_calls = checkpoint.tool_calls.len();
-            let iterations = checkpoint.current_iteration;
-            let tokens = checkpoint.estimated_tokens;
-            let task_succeeded = true; // we're in complete_checkpoint
-
-            let snapshot = PerformanceSnapshot::from_checkpoint_data(
-                iterations,
-                tool_calls,
-                errors_total,
-                errors_recovered,
-                errors_total == 0, // first-try verification = no errors
-                tokens,
-                task_succeeded,
-            );
-
-            let metrics_store = MetricsStore::new();
-            if let Err(e) = metrics_store.record(&snapshot) {
-                warn!("Failed to record performance metrics: {}", e);
-            } else {
-                info!(
-                    "Recorded performance snapshot ({} tool calls, {} errors)",
-                    tool_calls, errors_total
-                );
-            }
-        }
-
         let final_step = self.loop_control.current_step();
         let final_iter = self.loop_control.current_iteration();
         if let Some(ref mut checkpoint) = self.current_checkpoint {
@@ -1135,20 +1108,12 @@ impl Agent {
 
         // Save global episodic memory — using tokio::fs for async I/O
         // to avoid blocking the Tokio executor on synchronous filesystem I/O.
-        let data_dir = dirs::data_local_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("selfware");
+        // (The improvement engine is saved for every terminal outcome by
+        // `record_terminal_telemetry`, not only here on completion.)
+        let data_dir = self.learning_data_dir();
 
         // Serialize in the main thread (cheap), write to disk asynchronously (slow I/O)
         let memory_content = serde_json::to_string_pretty(&self.cognitive_state.episodic_memory)?;
-
-        let engine_path = data_dir.join("improvement_engine.json");
-        let engine_save_result = self.self_improvement.save(&engine_path);
-        if let Err(e) = &engine_save_result {
-            warn!("Failed to save improvement engine state: {}", e);
-        } else {
-            info!("Saved self-improvement engine state");
-        }
 
         let memory_path = data_dir.join("global_episodic_memory.json");
         let content = memory_content;

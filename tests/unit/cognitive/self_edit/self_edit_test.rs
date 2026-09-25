@@ -149,8 +149,8 @@ fn test_build_improvement_prompt() {
 
 #[test]
 fn test_evaluate_effectiveness() {
-    let before = PerformanceSnapshot::from_checkpoint_data(10, 20, 5, 2, false, 10000, false);
-    let after = PerformanceSnapshot::from_checkpoint_data(5, 10, 2, 2, true, 5000, true);
+    let before = aggregate_snapshot(1, 0.0, 10.0, 20.0, 0.4, Some(0.0), 3.0);
+    let after = aggregate_snapshot(2, 1.0, 5.0, 10.0, 1.0, Some(1.0), 0.0);
     let score = SelfEditOrchestrator::evaluate(&before, &after);
     assert!(score > 0.0);
 }
@@ -663,37 +663,70 @@ fn test_rewrite_fallback_skips_comment_only_markers() {
     );
 }
 
+fn aggregate_snapshot(
+    timestamp: u64,
+    success: f64,
+    turns: f64,
+    tool_calls: f64,
+    recovery: f64,
+    first_verification: Option<f64>,
+    unrecovered: f64,
+) -> PerformanceSnapshot {
+    PerformanceSnapshot {
+        timestamp,
+        schema_version: crate::cognitive::metrics::PERFORMANCE_SNAPSHOT_SCHEMA,
+        outcome: None,
+        failure_mode: None,
+        runs: 1,
+        task_success_rate: success,
+        avg_loop_turns: turns,
+        avg_tool_calls: tool_calls,
+        error_recovery_rate: recovery,
+        first_verification_pass_rate: first_verification,
+        avg_llm_total_tokens: 5000.0,
+        final_verification_pass_rate: first_verification,
+        verification_not_run_rate: if first_verification.is_some() {
+            0.0
+        } else {
+            1.0
+        },
+        unrecovered_errors_per_run: unrecovered,
+        label: None,
+    }
+}
+
+/// Runs whose verification never ran carry no first-verification rate, so
+/// they must not produce a "verification is low" target (the old
+/// success-derived 1.0 hid them; a 0.0 default would invent the opposite).
+#[test]
+fn introspection_raises_no_verification_target_without_measured_verification() {
+    let orchestrator = SelfEditOrchestrator::new(PathBuf::from("/tmp/selfware_test"));
+    let snapshots: Vec<PerformanceSnapshot> = (0..10)
+        .map(|_| aggregate_snapshot(1, 1.0, 5.0, 4.0, 1.0, None, 0.0))
+        .collect();
+    let targets = orchestrator.introspect_performance_from_snapshots(&snapshots);
+    assert!(!targets
+        .iter()
+        .any(|t| t.category == ImprovementCategory::VerificationLogic));
+
+    let failing: Vec<PerformanceSnapshot> = (0..10)
+        .map(|_| aggregate_snapshot(1, 1.0, 5.0, 4.0, 1.0, Some(0.0), 0.0))
+        .collect();
+    let targets = orchestrator.introspect_performance_from_snapshots(&failing);
+    assert!(targets
+        .iter()
+        .any(|t| t.category == ImprovementCategory::VerificationLogic));
+}
+
 #[test]
 fn test_introspect_performance_from_snapshots_detects_regression() {
     let orchestrator = SelfEditOrchestrator::new(PathBuf::from("/tmp/selfware_test"));
     let mut snapshots = Vec::new();
     for _ in 0..5 {
-        snapshots.push(PerformanceSnapshot {
-            timestamp: 1,
-            task_success_rate: 0.95,
-            avg_iterations: 5.0,
-            avg_tool_calls: 8.0,
-            error_recovery_rate: 0.9,
-            first_try_verification_rate: 0.85,
-            avg_tokens: 5000.0,
-            test_pass_rate: 0.95,
-            compilation_errors_per_task: 0.1,
-            label: None,
-        });
+        snapshots.push(aggregate_snapshot(1, 0.95, 5.0, 8.0, 0.9, Some(0.85), 0.1));
     }
     for _ in 0..5 {
-        snapshots.push(PerformanceSnapshot {
-            timestamp: 2,
-            task_success_rate: 0.7,
-            avg_iterations: 8.0,
-            avg_tool_calls: 18.0,
-            error_recovery_rate: 0.5,
-            first_try_verification_rate: 0.35,
-            avg_tokens: 9000.0,
-            test_pass_rate: 0.7,
-            compilation_errors_per_task: 2.1,
-            label: None,
-        });
+        snapshots.push(aggregate_snapshot(2, 0.7, 8.0, 18.0, 0.5, Some(0.35), 2.1));
     }
 
     let targets = orchestrator.introspect_performance_from_snapshots(&snapshots);
@@ -751,12 +784,8 @@ fn test_improvement_record_serialization_roundtrip() {
         target_id: "imp-42".to_string(),
         category: ImprovementCategory::ToolPipeline,
         description: "test record".to_string(),
-        before_metrics: Some(PerformanceSnapshot::from_checkpoint_data(
-            5, 10, 1, 1, true, 5000, true,
-        )),
-        after_metrics: Some(PerformanceSnapshot::from_checkpoint_data(
-            3, 6, 0, 0, true, 3000, true,
-        )),
+        before_metrics: Some(aggregate_snapshot(1, 1.0, 5.0, 10.0, 1.0, Some(1.0), 0.0)),
+        after_metrics: Some(aggregate_snapshot(2, 1.0, 3.0, 6.0, 1.0, Some(1.0), 0.0)),
         git_commits: vec!["abc".to_string(), "def".to_string()],
         verified: true,
         rolled_back: false,

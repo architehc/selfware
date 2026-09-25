@@ -4454,3 +4454,157 @@ fn gate_verdict_counts_only_checks_that_ran() {
     ]);
     assert_eq!(gate_verdict_from_checks_that_ran(&failed), Some((false, 1)));
 }
+
+// =========================================================================
+// Terminal-outcome telemetry (2026-09-25 statistical audit, items 1-3)
+// =========================================================================
+
+#[cfg(feature = "self-improvement")]
+fn read_snapshots(dir: &std::path::Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(dir.join("metrics").join("snapshots.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("snapshot line is JSON"))
+        .collect()
+}
+
+/// A completed run writes exactly one snapshot whose token and turn fields
+/// are the terminal result's own counters, and whose verification — which
+/// never ran — is recorded as not run instead of a 100% pass rate.
+#[cfg(feature = "self-improvement")]
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn completed_run_writes_one_snapshot_with_terminal_counters_and_not_run_checks() {
+    let server = MockLlmServer::builder()
+        .with_usage(1200, 300, 1500)
+        .with_response("Analyzed.")
+        .with_response("Complete.")
+        .build()
+        .await;
+    let config = mock_agent_config(format!("{}/v1", server.url()), false);
+    let mut agent = Agent::new(config).await.unwrap();
+    let data = tempfile::tempdir().unwrap();
+    agent.learning_data_dir = Some(data.path().to_path_buf());
+
+    let result = agent.run_task("Do a simple task").await;
+    assert!(result.is_ok(), "{:?}", result.err());
+
+    let snapshots = read_snapshots(data.path());
+    assert_eq!(snapshots.len(), 1, "one snapshot per terminal outcome");
+    let s = &snapshots[0];
+    assert_eq!(s["outcome"], "completed");
+    assert_eq!(s["failure_mode"], "NO_CHANGES");
+    assert_eq!(s["task_success_rate"], 1.0);
+    // Same counters as SessionResult.usage.total / num_turns.
+    let total = agent.cumulative_token_usage().total;
+    assert!(
+        total >= 1500,
+        "the mock billed at least one call, got {total}"
+    );
+    assert_eq!(s["avg_llm_total_tokens"].as_f64(), Some(total as f64));
+    assert_eq!(
+        s["avg_loop_turns"].as_f64(),
+        Some(agent.current_iteration() as f64)
+    );
+    // Nothing verified the run: not run, never a pass.
+    assert!(s["final_verification_pass_rate"].is_null());
+    assert!(s["first_verification_pass_rate"].is_null());
+    assert_eq!(s["verification_not_run_rate"], 1.0);
+    let engine: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(data.path().join("improvement_engine.json"))
+            .expect("the learning state is persisted"),
+    )
+    .unwrap();
+    let prompt_records = engine["prompt_optimizer"]["records"].as_array().unwrap();
+    assert_eq!(
+        prompt_records.last().unwrap()["tokens_used"].as_u64(),
+        Some(total as u64),
+        "the prompt record carries the measured token total, not 0"
+    );
+    server.stop().await;
+}
+
+/// A failed run (terminal 401 at planning) used to write NO snapshot and
+/// never persist the learning engine, so saved statistics were 100% success.
+#[cfg(feature = "self-improvement")]
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn failed_run_writes_a_failure_snapshot_and_persists_learning() {
+    let server = MockLlmServer::builder()
+        .with_default_response(MockResponse::Error {
+            status: 401,
+            body: r#"{"error":"No cookie auth credentials found"}"#.to_string(),
+        })
+        .build()
+        .await;
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.retry = crate::config::RetrySettings {
+        max_retries: 0,
+        base_delay_ms: 1,
+        max_delay_ms: 1,
+    };
+    let mut agent = Agent::new(config).await.unwrap();
+    let data = tempfile::tempdir().unwrap();
+    agent.learning_data_dir = Some(data.path().to_path_buf());
+
+    assert!(agent.run_task("Do a simple task").await.is_err());
+
+    let snapshots = read_snapshots(data.path());
+    assert_eq!(snapshots.len(), 1, "the failure is in the denominator");
+    let s = &snapshots[0];
+    assert_eq!(s["outcome"], "failed");
+    assert_eq!(s["task_success_rate"], 0.0);
+    // Planning failed before any verdict was classified; the counter-based
+    // fallback would call this MAX_ITERATIONS, which it is not.
+    assert_eq!(s["failure_mode"], "UNKNOWN", "{s}");
+    let engine: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(data.path().join("improvement_engine.json"))
+            .expect("failed runs persist the improvement engine too"),
+    )
+    .unwrap();
+    let records = engine["error_learner"]["records"].as_array().unwrap();
+    assert!(
+        records.iter().any(|r| r["action"] == "task_execution"
+            && r["message"].as_str().is_some_and(|m| m.contains("401"))),
+        "the real failure reaches the error learner: {records:?}"
+    );
+    server.stop().await;
+}
+
+/// Interruption is a terminal outcome too: one snapshot, outcome
+/// `interrupted`, no success credit.
+#[cfg(feature = "self-improvement")]
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn interrupted_run_writes_an_interrupted_snapshot() {
+    let server = MockLlmServer::builder()
+        .with_response("Analyzed.")
+        .with_response("Complete.")
+        .build()
+        .await;
+    let config = mock_agent_config(format!("{}/v1", server.url()), false);
+    let mut agent = Agent::new(config).await.unwrap();
+    let data = tempfile::tempdir().unwrap();
+    agent.learning_data_dir = Some(data.path().to_path_buf());
+    agent
+        .cancelled
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    assert!(agent.run_task("Do a simple task").await.is_err());
+
+    let snapshots = read_snapshots(data.path());
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0]["outcome"], "interrupted");
+    assert_eq!(snapshots[0]["task_success_rate"], 0.0);
+    server.stop().await;
+}

@@ -828,6 +828,15 @@ pub struct Agent {
     /// error into the loop's failure branch, which finalizes again; this
     /// latch keeps that to one terminal event per run. Reset at run start.
     failure_mode_finalized: bool,
+    /// Whether this run's terminal outcome has been written to the learning
+    /// stores (one performance snapshot + the improvement engine save). An
+    /// auto-continue chain nests a run inside a run; the innermost exit
+    /// records and the outer ones see the latch. Reset at run start.
+    terminal_telemetry_recorded: bool,
+    /// Directory for the persisted learning state (`improvement_engine.json`,
+    /// `metrics/snapshots.jsonl`, episodic memory). `None` = the platform
+    /// data dir + `selfware`; tests point it at a temp dir.
+    learning_data_dir: Option<std::path::PathBuf>,
     /// Chat session store for save/resume/list/delete
     chat_store: ChatStore,
     /// Cancellation token set by Ctrl+C while a task is running
@@ -1782,6 +1791,8 @@ To call a tool, use this EXACT XML structure:
             last_assistant_response: String::new(),
             terminal_event_emitted: false,
             failure_mode_finalized: false,
+            terminal_telemetry_recorded: false,
+            learning_data_dir: None,
             chat_store,
             cancelled: Arc::new(AtomicBool::new(false)),
             pending_messages: VecDeque::new(),

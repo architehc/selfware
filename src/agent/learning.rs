@@ -114,6 +114,8 @@ impl Agent {
             task_type,
             outcome,
             Self::outcome_quality(outcome),
+            // Same counter as `SessionResult.usage.total` (synced above).
+            self.cumulative_token_usage.total,
         );
         self.self_improvement.record_task(outcome.is_positive());
 
@@ -128,6 +130,119 @@ impl Agent {
         }
 
         self.self_improvement.end_session(None);
+    }
+
+    /// Where the persisted learning state lives: the test override, else the
+    /// platform data dir + `selfware` (the path `Agent::new` loads from).
+    pub(super) fn learning_data_dir(&self) -> std::path::PathBuf {
+        self.learning_data_dir.clone().unwrap_or_else(|| {
+            dirs::data_local_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join("selfware")
+        })
+    }
+
+    /// Measured facts about the run that just ended, from the counters the
+    /// terminal result reports: `loop_turns` is `SessionResult.num_turns`
+    /// (`current_iteration`), `llm_total_tokens` is `SessionResult.usage.total`
+    /// (the API-usage accumulator, after draining pending usage).
+    #[cfg(feature = "self-improvement")]
+    pub(super) fn terminal_run_stats(
+        &mut self,
+        result: &Result<()>,
+    ) -> crate::cognitive::metrics::TerminalRunStats {
+        self.sync_api_usage();
+        let verdict = self.last_run_failure_mode.clone();
+        let outcome = classify_terminal_outcome(result, self.is_cancelled(), verdict.as_ref());
+        let failure_mode = match (&verdict, result) {
+            (Some(fm), _) => Some(fm.kind.tag().to_string()),
+            // Stopped from outside before any verdict: nothing to classify.
+            (None, _) if outcome == crate::cognitive::metrics::TerminalOutcome::Interrupted => None,
+            // An error that bypassed the loop's classification (planning
+            // failure, a fatal loop error). Not re-classified here: for a
+            // reason it does not recognise `FailureMode::classify` falls back
+            // to the iteration-cap counters, which named a 401 at planning
+            // `MAX_ITERATIONS`. `UNKNOWN` is the honest tag.
+            (None, Err(_)) => Some(super::failure_mode::FailureKind::Unknown.tag().to_string()),
+            (None, Ok(())) => None,
+        };
+        let (tool_calls, errors_total, errors_recovered, first_verification_passed) = self
+            .current_checkpoint
+            .as_ref()
+            .map(|cp| {
+                let first_verification = cp
+                    .tool_calls
+                    .iter()
+                    .find(|tc| {
+                        super::tool_dispatch::tool_call_is_verification(
+                            &tc.tool_name,
+                            &tc.arguments,
+                        )
+                    })
+                    .map(|tc| tc.success);
+                (
+                    cp.tool_calls.len(),
+                    cp.errors.len(),
+                    cp.errors.iter().filter(|e| e.recovered).count(),
+                    first_verification,
+                )
+            })
+            .unwrap_or((0, 0, 0, None));
+        // The gate's own report is also verification evidence: when it ran
+        // but no verification-shaped tool call did, the first check the run
+        // saw is unknown, yet the final verdict still exists.
+        let final_verification_passed = self
+            .credited_verification_summary()
+            .map(|(passed, _)| passed);
+        crate::cognitive::metrics::TerminalRunStats {
+            outcome,
+            failure_mode,
+            loop_turns: self.loop_control.current_iteration(),
+            tool_calls,
+            errors_total,
+            errors_recovered,
+            first_verification_passed,
+            final_verification_passed,
+            llm_total_tokens: self.cumulative_token_usage.total as u64,
+        }
+    }
+
+    /// Write the run's terminal outcome to the learning stores, once per run:
+    /// one performance snapshot (with the real outcome and failure-mode tag)
+    /// and the improvement-engine state. Called on EVERY exit of the
+    /// execution loop; before this, only `complete_checkpoint` wrote either,
+    /// so failed, timed-out and interrupted runs vanished from the statistics
+    /// (val083: 8 of 13 runs had a snapshot, all 100% success).
+    #[cfg_attr(not(feature = "self-improvement"), allow(unused_variables))]
+    pub(super) fn record_terminal_telemetry(&mut self, result: &Result<()>) {
+        if self.terminal_telemetry_recorded {
+            return;
+        }
+        self.terminal_telemetry_recorded = true;
+        let data_dir = self.learning_data_dir();
+
+        #[cfg(feature = "self-improvement")]
+        {
+            let stats = self.terminal_run_stats(result);
+            let snapshot =
+                crate::cognitive::metrics::PerformanceSnapshot::from_terminal_run(&stats);
+            let store = crate::cognitive::metrics::MetricsStore::with_path(
+                data_dir.join("metrics").join("snapshots.jsonl"),
+            );
+            match store.record(&snapshot) {
+                Ok(()) => info!(
+                    "Recorded performance snapshot ({:?}, {} turns, {} LLM tokens)",
+                    stats.outcome, stats.loop_turns, stats.llm_total_tokens
+                ),
+                Err(e) => tracing::warn!("Failed to record performance metrics: {}", e),
+            }
+        }
+
+        let engine_path = data_dir.join("improvement_engine.json");
+        match self.self_improvement.save(&engine_path) {
+            Ok(()) => info!("Saved self-improvement engine state"),
+            Err(e) => tracing::warn!("Failed to save improvement engine state: {}", e),
+        }
     }
 
     pub(super) fn build_learning_hint(&self, task_prompt: &str) -> Option<String> {
@@ -297,3 +412,132 @@ impl Agent {
 #[cfg(test)]
 #[path = "../../tests/unit/agent/learning/learning_test.rs"]
 mod tests;
+
+/// How the run ended, for the performance snapshot. `result` is the loop's
+/// final result (a failure verdict on an `Ok` exit has already been turned
+/// into an error by `failure_verdict_as_error`).
+#[cfg(feature = "self-improvement")]
+pub(super) fn classify_terminal_outcome(
+    result: &Result<()>,
+    cancelled: bool,
+    verdict: Option<&super::failure_mode::FailureMode>,
+) -> crate::cognitive::metrics::TerminalOutcome {
+    use super::failure_mode::FailureKind;
+    use crate::cognitive::metrics::TerminalOutcome;
+    use crate::errors::AgentError;
+
+    let err = match result {
+        Ok(()) => {
+            return match verdict {
+                Some(fm) if !fm.kind.is_nonfailure() => TerminalOutcome::Failed,
+                _ => TerminalOutcome::Completed,
+            }
+        }
+        Err(e) => e,
+    };
+    for cause in err.chain() {
+        if let Some(agent_error) = cause.downcast_ref::<AgentError>() {
+            match agent_error {
+                // The internal run timeout cancels with this reason.
+                AgentError::CancelledWithReason(reason) if reason == "timeout" => {
+                    return TerminalOutcome::Timeout
+                }
+                AgentError::Cancelled
+                | AgentError::Terminated(_)
+                | AgentError::CancelledWithReason(_) => return TerminalOutcome::Interrupted,
+                _ => {}
+            }
+        }
+        if cause
+            .downcast_ref::<crate::api::client::WallClockBudgetExceeded>()
+            .is_some()
+            || cause
+                .downcast_ref::<crate::api::client::CallTimeBudgetExceeded>()
+                .is_some()
+        {
+            return TerminalOutcome::Timeout;
+        }
+        if cause
+            .downcast_ref::<crate::api::client::UsageBudgetExceeded>()
+            .is_some()
+        {
+            return TerminalOutcome::BudgetStop;
+        }
+    }
+    match verdict.map(|fm| &fm.kind) {
+        Some(FailureKind::Timeout | FailureKind::CallTimeCap) => TerminalOutcome::Timeout,
+        Some(FailureKind::BudgetExhausted) => TerminalOutcome::BudgetStop,
+        _ if cancelled => TerminalOutcome::Interrupted,
+        _ => TerminalOutcome::Failed,
+    }
+}
+
+#[cfg(all(test, feature = "self-improvement"))]
+mod terminal_outcome_tests {
+    use super::*;
+    use crate::cognitive::metrics::TerminalOutcome;
+
+    fn verdict(
+        kind: super::super::failure_mode::FailureKind,
+    ) -> super::super::failure_mode::FailureMode {
+        super::super::failure_mode::FailureMode {
+            kind,
+            evidence: String::new(),
+            advice: String::new(),
+            restored_files: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn every_terminal_disposition_maps_to_its_own_outcome() {
+        use super::super::failure_mode::FailureKind;
+        use crate::errors::AgentError;
+        let ok: Result<()> = Ok(());
+        assert_eq!(
+            classify_terminal_outcome(&ok, false, Some(&verdict(FailureKind::NoChange))),
+            TerminalOutcome::Completed
+        );
+        let failed: Result<()> = Err(anyhow::anyhow!("Agent failed: Max iterations exceeded"));
+        assert_eq!(
+            classify_terminal_outcome(&failed, false, Some(&verdict(FailureKind::MaxIterations))),
+            TerminalOutcome::Failed
+        );
+        let wall: Result<()> = Err(anyhow::anyhow!("Wall-clock timeout: 600s >= 600s"));
+        assert_eq!(
+            classify_terminal_outcome(&wall, false, Some(&verdict(FailureKind::Timeout))),
+            TerminalOutcome::Timeout
+        );
+        let budget: Result<()> = Err(anyhow::anyhow!("Token budget exhausted: 10 >= 5 tokens"));
+        assert_eq!(
+            classify_terminal_outcome(&budget, false, Some(&verdict(FailureKind::BudgetExhausted))),
+            TerminalOutcome::BudgetStop
+        );
+        let user: Result<()> = Err(AgentError::Cancelled.into());
+        assert_eq!(
+            classify_terminal_outcome(&user, true, None),
+            TerminalOutcome::Interrupted
+        );
+        let sigterm: Result<()> = Err(AgentError::Terminated("SIGTERM".into()).into());
+        assert_eq!(
+            classify_terminal_outcome(&sigterm, true, None),
+            TerminalOutcome::Interrupted
+        );
+        let run_timeout: Result<()> = Err(AgentError::CancelledWithReason("timeout".into()).into());
+        assert_eq!(
+            classify_terminal_outcome(&run_timeout, true, None),
+            TerminalOutcome::Timeout
+        );
+        // A deep abort that surfaced as an untyped error while the shutdown
+        // latch is set is still an interruption.
+        let deep: Result<()> = Err(anyhow::anyhow!("request aborted"));
+        assert_eq!(
+            classify_terminal_outcome(&deep, true, None),
+            TerminalOutcome::Interrupted
+        );
+        let planning: Result<()> = Err(anyhow::anyhow!("401 Unauthorized"));
+        assert_eq!(
+            classify_terminal_outcome(&planning, false, None),
+            TerminalOutcome::Failed
+        );
+    }
+}

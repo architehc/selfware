@@ -242,16 +242,16 @@ impl SelfEditOrchestrator {
             set.iter().map(f).sum::<f64>() / set.len() as f64
         };
 
-        let recent_comp_errors = avg(recent, |s| s.compilation_errors_per_task);
-        if recent_comp_errors >= 1.0 {
+        let recent_unrecovered = avg(recent, |s| s.unrecovered_errors_per_run);
+        if recent_unrecovered >= 1.0 {
             targets.push(
                 ImprovementTarget::new(
                     ImprovementCategory::CodeQuality,
                     format!(
-                        "Reduce compilation errors (recent avg {:.2} per task)",
-                        recent_comp_errors
+                        "Reduce unrecovered errors (recent avg {:.2} per task)",
+                        recent_unrecovered
                     ),
-                    "Performance introspection detected repeated compile failures across recent tasks.",
+                    "Performance introspection detected repeated unrecovered errors across recent tasks.",
                     ImprovementSource::ErrorPattern,
                 )
                 .with_file("src/agent/execution.rs")
@@ -287,9 +287,15 @@ impl SelfEditOrchestrator {
             );
         }
 
-        let recent_verify = avg(recent, |s| s.first_try_verification_rate);
-        let prev_verify = previous.map(|set| avg(set, |s| s.first_try_verification_rate));
-        if recent_verify <= 0.5 || prev_verify.is_some_and(|prev| recent_verify + 0.15 < prev) {
+        // Only runs whose verification RAN carry a first-verification rate;
+        // with none measured there is no evidence either way, so no target.
+        let measured_verify = |set: &[PerformanceSnapshot]| -> Option<f64> {
+            PerformanceSnapshot::average(set).and_then(|a| a.first_verification_pass_rate)
+        };
+        let prev_verify = previous.and_then(measured_verify);
+        if let Some(recent_verify) = measured_verify(recent).filter(|&recent_verify| {
+            recent_verify <= 0.5 || prev_verify.is_some_and(|prev| recent_verify + 0.15 < prev)
+        }) {
             let rationale = if let Some(prev) = prev_verify {
                 format!(
                     "First-try verification dropped from {:.0}% to {:.0}%.",

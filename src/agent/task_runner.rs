@@ -818,6 +818,7 @@ impl Agent {
         // Arm the single-terminal-event guard for this run.
         self.terminal_event_emitted = false;
         self.failure_mode_finalized = false;
+        self.terminal_telemetry_recorded = false;
         self.last_run_failure_mode = None;
         // Capture the set of paths already dirty relative to HEAD so the
         // completion gate can exclude pre-existing uncommitted changes.
@@ -1356,6 +1357,7 @@ impl Agent {
         // Arm the single-terminal-event guard for this resumed run.
         self.terminal_event_emitted = false;
         self.failure_mode_finalized = false;
+        self.terminal_telemetry_recorded = false;
         let task_description = self
             .current_checkpoint
             .as_ref()
@@ -1646,6 +1648,10 @@ impl Agent {
                 });
             }
         }
+        // Every exit of the loop — completion, failure, budget stop, timeout,
+        // interruption — reaches this line, so the learning stores see every
+        // terminal outcome, not only the completions.
+        self.record_terminal_telemetry(&result);
         result
     }
 

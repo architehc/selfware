@@ -296,7 +296,7 @@ fn test_self_improvement_engine_new() {
 #[test]
 fn test_self_improvement_engine_record_prompt() {
     let engine = SelfImprovementEngine::new();
-    engine.record_prompt("test prompt", "code", Outcome::Success, 0.9);
+    engine.record_prompt("test prompt", "code", Outcome::Success, 0.9, 0);
 
     let stats = engine.get_stats();
     assert!(stats.prompt_stats.is_some());
@@ -371,7 +371,7 @@ fn test_self_improvement_engine_session() {
 fn test_self_improvement_engine_disable_learning() {
     let mut engine = SelfImprovementEngine::new();
     engine.set_learning_enabled(false);
-    engine.record_prompt("test", "code", Outcome::Success, 1.0);
+    engine.record_prompt("test", "code", Outcome::Success, 1.0, 0);
 
     let stats = engine.get_stats();
     // Stats should still be accessible but empty
@@ -381,7 +381,7 @@ fn test_self_improvement_engine_disable_learning() {
 #[test]
 fn test_self_improvement_engine_save_load_roundtrip() {
     let engine = SelfImprovementEngine::new();
-    engine.record_prompt("test prompt", "code", Outcome::Success, 0.9);
+    engine.record_prompt("test prompt", "code", Outcome::Success, 0.9, 0);
     engine.record_tool("file_read", "reading config", Outcome::Success, 100, None);
     engine.record_error("file not found", "io_error", "loading", "file_read", None);
     engine.start_session("s1");

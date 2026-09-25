@@ -1448,15 +1448,25 @@ impl SelfImprovementEngine {
         self.learning_enabled = enabled;
     }
 
-    /// Record a prompt outcome
-    pub fn record_prompt(&self, prompt: &str, task_type: &str, outcome: Outcome, quality: f32) {
+    /// Record a prompt outcome. `tokens_used` is the task's measured LLM
+    /// token total (input + output); it used to be left at 0, so every
+    /// `TaskPromptStats::avg_tokens` read 0.
+    pub fn record_prompt(
+        &self,
+        prompt: &str,
+        task_type: &str,
+        outcome: Outcome,
+        quality: f32,
+        tokens_used: usize,
+    ) {
         if !self.learning_enabled {
             return;
         }
         if let Ok(mut optimizer) = self.prompt_optimizer.write() {
             optimizer.record(
                 PromptRecord::new(prompt.to_string(), task_type.to_string(), outcome)
-                    .with_quality(quality),
+                    .with_quality(quality)
+                    .with_tokens(tokens_used),
             );
         }
     }

@@ -22,9 +22,15 @@ fn test_self_improvement_engine_mixed_workload_stats() {
     let engine = SelfImprovementEngine::new();
 
     // Record several prompts with varying outcomes
-    engine.record_prompt("fix the bug in main.rs", "code_fix", Outcome::Success, 0.95);
-    engine.record_prompt("refactor loop", "refactor", Outcome::Partial, 0.6);
-    engine.record_prompt("deploy", "ops", Outcome::Failure, 0.1);
+    engine.record_prompt(
+        "fix the bug in main.rs",
+        "code_fix",
+        Outcome::Success,
+        0.95,
+        0,
+    );
+    engine.record_prompt("refactor loop", "refactor", Outcome::Partial, 0.6, 0);
+    engine.record_prompt("deploy", "ops", Outcome::Failure, 0.1, 0);
 
     // Record tool usage
     engine.record_tool("file_read", "reading source", Outcome::Success, 42, None);
@@ -72,7 +78,7 @@ fn test_self_improvement_engine_toggle_learning() {
 
     // Disable learning
     engine.set_learning_enabled(false);
-    engine.record_prompt("ignored prompt", "code", Outcome::Success, 1.0);
+    engine.record_prompt("ignored prompt", "code", Outcome::Success, 1.0, 0);
 
     let stats = engine.get_stats();
     let prompt_stats = stats.prompt_stats.unwrap();
@@ -83,7 +89,7 @@ fn test_self_improvement_engine_toggle_learning() {
 
     // Re-enable learning
     engine.set_learning_enabled(true);
-    engine.record_prompt("recorded prompt", "code", Outcome::Success, 0.8);
+    engine.record_prompt("recorded prompt", "code", Outcome::Success, 0.8, 0);
 
     let stats = engine.get_stats();
     let prompt_stats = stats.prompt_stats.unwrap();
