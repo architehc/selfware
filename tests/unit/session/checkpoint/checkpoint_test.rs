@@ -2960,3 +2960,52 @@ fn workspace_fingerprint_tracks_written_file_contents() {
         vec!["lib.rs changed".to_string()]
     );
 }
+
+#[test]
+fn prune_counts_orphan_backups_toward_the_cap() {
+    // A `<task>.json.bak` whose primary was deleted externally is still a
+    // recoverable checkpoint, so it is kept while under the cap — but it
+    // must count toward the cap, or orphans accumulate forever.
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+
+    // Under the cap: one orphan survives a save.
+    std::fs::write(dir.path().join("lonely.json.bak"), "{}").unwrap();
+    let cp = TaskCheckpoint::new("first".to_string(), "First".to_string());
+    manager.save(&cp).unwrap();
+    assert!(dir.path().join("lonely.json.bak").exists());
+
+    // Over the cap: MAX + 5 older orphans; a save prunes back to the cap.
+    for i in 0..(MAX_CHECKPOINT_FILES + 5) {
+        let path = dir.path().join(format!("orphan_{i}.json.bak"));
+        std::fs::write(&path, "{}").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+    }
+    let cp = TaskCheckpoint::new("trigger".to_string(), "Trigger".to_string());
+    manager.save(&cp).unwrap();
+
+    let names: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    let primaries = names.iter().filter(|n| n.ends_with(".json")).count();
+    let orphans = names
+        .iter()
+        .filter_map(|n| n.strip_suffix(".json.bak"))
+        .filter(|task| !names.contains(&format!("{task}.json")))
+        .count();
+    assert!(
+        primaries + orphans <= MAX_CHECKPOINT_FILES + 1,
+        "retention must count orphan backups: {primaries} primaries + {orphans} orphans"
+    );
+    // The fresh checkpoints are the newest and survive.
+    assert!(dir.path().join("trigger.json").exists());
+    assert!(dir.path().join("first.json").exists());
+}

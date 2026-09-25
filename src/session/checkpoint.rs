@@ -1716,8 +1716,9 @@ impl CheckpointManager {
     }
 
     /// Best-effort retention pruning: keep at most [`MAX_CHECKPOINT_FILES`]
-    /// checkpoint `.json` files (by mtime, most recent first) and delete the
-    /// rest along with their matching `.delta.jsonl` and `.json.bak` files.
+    /// checkpoints (by mtime, most recent first) and delete the rest along
+    /// with their matching `.delta.jsonl` and `.json.bak` files. A backup
+    /// whose primary is gone counts as a checkpoint of its own.
     ///
     /// This is best-effort — any delete errors are logged and swallowed so a
     /// pruning failure never fails a `save`.
@@ -1736,11 +1737,28 @@ impl CheckpointManager {
             }
         };
 
-        // Collect (path, mtime) for .json files (excluding .bak and .tmp).
+        // Collect (primary path, mtime) per checkpoint: every `.json` primary,
+        // plus every ORPHAN `<task>.json.bak` whose primary is gone (deleted
+        // externally). An orphan backup is still a recoverable checkpoint —
+        // `load` falls back to it — so it is not deleted on sight, but it
+        // counts toward the retention cap by its own mtime; otherwise it
+        // would never be pruned.
         let mut json_files: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
-            // Only consider .json files (not .json.bak, .json.tmp.*, .delta.jsonl).
+            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if let Some(task) = name.strip_suffix(".json.bak") {
+                let primary = self.checkpoints_dir.join(format!("{task}.json"));
+                if !primary.exists() {
+                    let mtime = entry
+                        .metadata()
+                        .and_then(|m| m.modified())
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                    json_files.push((primary, mtime));
+                }
+                continue;
+            }
+            // Only consider .json files (not .json.tmp.*, .delta.jsonl).
             if path.extension().and_then(|s| s.to_str()) != Some("json") {
                 continue;
             }
@@ -1775,9 +1793,13 @@ impl CheckpointManager {
                 .and_then(|s| s.to_str())
                 .unwrap_or_default();
 
-            // Delete the checkpoint file.
-            if let Err(e) = fs::remove_file(path) {
-                tracing::warn!("prune_old_checkpoints: failed to delete {:?}: {}", path, e);
+            // Delete the checkpoint file (absent for an orphan backup).
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    tracing::warn!("prune_old_checkpoints: failed to delete {:?}: {}", path, e)
+                }
             }
 
             // Delete matching delta log.
