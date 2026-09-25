@@ -384,20 +384,62 @@ fn at_line_start(content: &str, pos: usize) -> bool {
     strip_wrappers(&content[line_start..pos]).is_empty()
 }
 
+/// Byte ranges (relative to `text`) of the argument VALUES a call carries as
+/// raw text: Qwen3 `<parameter=k>VALUE</parameter>` (any dialect) and Kimi
+/// `<|open|>argument …<|sep|>VALUE<|close|>argument`. A value ends at the
+/// first closer, exactly as the family parsers read it. A value that
+/// crosses another value opener (`<parameter…`, `<|open|>argument`) is not
+/// one value: it ran from an unclosed example into a later call's structure,
+/// so it is never returned. JSON arguments need no entry: a JSON string
+/// cannot hold a raw newline, so nothing inside one is ever at line start.
+fn payload_values(text: &str) -> Vec<std::ops::Range<usize>> {
+    static PARAM_OPEN: OnceLock<Regex> = OnceLock::new();
+    static KIMI_ARG_OPEN: OnceLock<Regex> = OnceLock::new();
+    let param_open = PARAM_OPEN.get_or_init(|| {
+        Regex::new(QWEN3_PARAMETER_OPEN).expect("Invalid Qwen3 parameter open regex")
+    });
+    let kimi_open = KIMI_ARG_OPEN.get_or_init(|| {
+        Regex::new(r#"<\|open\|>argument\s+key="[^"]+"[^<]*?<\|sep\|>"#)
+            .expect("Invalid Kimi argument open regex")
+    });
+    let mut values = Vec::new();
+    for (open, close, reopen) in [
+        (param_open, "</parameter>", "<parameter"),
+        (kimi_open, "<|close|>argument", "<|open|>argument"),
+    ] {
+        for m in open.find_iter(text) {
+            let Some(len) = text[m.end()..].find(close) else {
+                continue;
+            };
+            let value = m.end()..m.end() + len;
+            if !text[value.clone()].contains(reopen) {
+                values.push(value);
+            }
+        }
+    }
+    values
+}
+
 /// Where a match at `span` runs into ANOTHER call: the first line-start
 /// [`TOOL_CALL_OPENERS`] token inside the match that follows real payload
 /// (not just the match's own opening tokens — `<tool_call>` directly
 /// followed by `<function=x>` is one head). A lazy match that runs past such
 /// an opener started at a prose example and swallowed the next real call.
+///
+/// An opener inside one of the call's own argument values (see
+/// [`payload_values`]) is payload, not structure: a `file_write` of XML or
+/// of docs about the tool syntax is still one call.
 fn inner_call_opener(content: &str, span: &std::ops::Range<usize>) -> Option<usize> {
     static FUNCTION_TAG: OnceLock<Regex> = OnceLock::new();
     let function_tag = FUNCTION_TAG
         .get_or_init(|| Regex::new(r"<function=[^<>\s]*>?").expect("Invalid function tag regex"));
     let text = &content[span.clone()];
+    let values = payload_values(text);
     let mut inner: Vec<usize> = TOOL_CALL_OPENERS
         .iter()
         .flat_map(|opener| text.match_indices(opener).map(|(p, _)| p))
         .filter(|&p| p > 0 && at_line_start(content, span.start + p))
+        .filter(|&p| !in_spans(p, &values))
         .collect();
     inner.sort_unstable();
     inner.into_iter().find(|&p| {
@@ -637,7 +679,29 @@ const GENERIC_WRAPPER_FAMILY: usize = 8;
 /// the intended call; the Qwen3 `<tool_call>` family would otherwise claim the
 /// same text and read `<parameter=name>X</name>…</parameter>` as one `name`
 /// value, dispatching the non-tool `tool` (0.8.4 runs/review turn_0049).
-fn resolve_overlaps(mut candidates: Vec<Candidate>) -> Vec<Candidate> {
+///
+/// First, a candidate that lies wholly inside an argument value of another
+/// parsed call (see [`payload_values`]) is that call's payload — a
+/// `file_write` of docs that quote a complete call — and never a call.
+fn resolve_overlaps(content: &str, candidates: Vec<Candidate>) -> Vec<Candidate> {
+    let values: Vec<std::ops::Range<usize>> = candidates
+        .iter()
+        .filter(|c| c.result.is_ok())
+        .flat_map(|c| {
+            let start = c.span.start;
+            payload_values(&content[c.span.clone()])
+                .into_iter()
+                .map(move |v| start + v.start..start + v.end)
+        })
+        .collect();
+    let mut candidates: Vec<Candidate> = candidates
+        .into_iter()
+        .filter(|c| {
+            !values
+                .iter()
+                .any(|v| v.start <= c.span.start && c.span.end <= v.end)
+        })
+        .collect();
     candidates.sort_by_key(|c| (c.family != GENERIC_WRAPPER_FAMILY, c.family, c.span.start));
     let mut kept: Vec<Candidate> = Vec::new();
     for candidate in candidates {
@@ -935,7 +999,7 @@ pub fn parse_tool_calls(content: &str) -> ParseResult {
         );
     }
 
-    let kept = resolve_overlaps(collect_candidates(content));
+    let kept = resolve_overlaps(content, collect_candidates(content));
     let claimed: Vec<std::ops::Range<usize>> = kept.iter().map(|c| c.span.clone()).collect();
 
     // Parser errors (e.g. invalid JSON inside <tool_call>) and regions no

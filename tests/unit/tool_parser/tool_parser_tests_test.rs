@@ -1921,3 +1921,93 @@ fn m1_prose_example_of_the_mismatched_shape_is_not_a_call() {
         )],
     );
 }
+
+// ---------------------------------------------------------------------------
+// N6 follow-up: the "a match must not run into another call's opener" rule
+// is about STRUCTURE, never PAYLOAD. A real call whose parameter value holds
+// a line-start `<tool>` / `<function=` (a file_write of XML, docs about the
+// tool syntax) executed before N6 and must execute again.
+// ---------------------------------------------------------------------------
+
+/// Docs about the tool syntax: a complete line-start `<tool>` call and a
+/// line-start `<function=` opener. No `</parameter>` or `</function>`: the
+/// Qwen3 value and the bare-function body end at the FIRST such closer in
+/// every parser version, so no Qwen3 call can carry them.
+const DOC_WITH_TOOL_SYNTAX: &str = "# Tool syntax\n\nWrite calls as:\n\n<tool>\n<name>file_read</name>\n<arguments>{\"path\": \"a.rs\"}</arguments>\n</tool>\n\nor open one with\n<function=file_read>\nand close it the same way.";
+
+fn assert_single_doc_write(result: &ParseResult, what: &str) {
+    assert_eq!(names(result)[0], "file_write", "{what}");
+    assert!(
+        result.rejections.is_empty(),
+        "{what}: {:?}",
+        result.rejections
+    );
+    let content = result.tool_calls[0].arguments["content"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        content.contains("<tool>\n<name>file_read"),
+        "{what}: {content}"
+    );
+}
+
+#[test]
+fn n6_payload_column0_tool_in_qwen_parameter_value_executes() {
+    let xml_payload = "<config>\n<tool>\n  <id>7</id>\n</tool>\n</config>";
+    let call = format!(
+        "<function=file_write>\n<parameter=path>tools.xml</parameter>\n<parameter=content>\n{xml_payload}\n</parameter>\n</function>"
+    );
+    let result = parse_tool_calls(&call);
+    assert_eq!(names(&result), vec!["file_write"]);
+    assert!(result.rejections.is_empty(), "{:?}", result.rejections);
+    assert_eq!(
+        result.tool_calls[0].arguments["content"].as_str(),
+        Some(xml_payload)
+    );
+}
+
+#[test]
+fn n6_payload_column0_tool_syntax_docs_in_every_value_form_executes() {
+    let docs = DOC_WITH_TOOL_SYNTAX;
+    let bare = format!(
+        "<function=file_write>\n<parameter=path>docs/tools.md</parameter>\n<parameter=content>\n{docs}\n</parameter>\n</function>"
+    );
+    let wrapped = format!("<tool_call>\n{bare}\n</tool_call>");
+    let kimi = format!(
+        "<|open|>call tool=\"file_write\" index=\"1\"<|sep|><|open|>argument key=\"path\" type=\"string\"<|sep|>docs/tools.md<|close|>argument<|open|>argument key=\"content\" type=\"string\"<|sep|>\n{docs}\n<|close|>argument<|close|>call"
+    );
+    for (what, call) in [("bare", bare), ("tool_call", wrapped), ("kimi", kimi)] {
+        let result = parse_tool_calls(&call);
+        assert_single_doc_write(&result, what);
+        assert_eq!(result.tool_calls.len(), 1, "{what}: {:?}", names(&result));
+        // ...and after prose, followed by a second real call.
+        let batch = format!(
+            "Writing the docs now.\n\n{call}\n\n<tool>\n<name>file_read</name>\n<arguments>{{\"path\": \"b.rs\"}}</arguments>\n</tool>"
+        );
+        let result = parse_tool_calls(&batch);
+        assert_single_doc_write(&result, what);
+        assert_eq!(names(&result), vec!["file_write", "file_read"], "{what}");
+    }
+}
+
+#[test]
+fn n6_payload_json_string_escaped_newline_opener_executes() {
+    // A JSON string cannot carry a raw newline, so an escaped `\n<tool>` is
+    // never at line start (control: this held at fee2ff1e too).
+    let call = "<tool>\n<name>file_write</name>\n<arguments>{\"path\": \"a.xml\", \"content\": \"<a>\\n<tool>\\n</tool>\\n<function=x>\\n</a>\"}</arguments>\n</tool>";
+    let result = parse_tool_calls(call);
+    assert_eq!(names(&result), vec!["file_write"]);
+    assert!(result.rejections.is_empty(), "{:?}", result.rejections);
+}
+
+#[test]
+fn n6_unclosed_parameter_example_still_cannot_swallow_the_real_call() {
+    // The example's value would run to the real call's </parameter>, but it
+    // crosses the real call's own <parameter=…> tag: structure, not payload.
+    let content = "The model may emit <function=x><parameter=p>v here.\n<function=file_read>\n<parameter=path>a.rs</parameter>\n</function>";
+    assert_only_real_file_read(&parse_tool_calls(content), "unclosed parameter example");
+    let content = "Example: <tool_call><function=x><parameter=p>v\n<tool_call>\n<function=file_read>\n<parameter=path>a.rs</parameter>\n</function>\n</tool_call>";
+    assert_only_real_file_read(&parse_tool_calls(content), "unclosed tool_call example");
+    let content = "Example: <|open|>call tool=\"x\" index=\"0\"<|sep|><|open|>argument key=\"p\"<|sep|>v\n<|open|>call tool=\"file_read\" index=\"1\"<|sep|><|open|>argument key=\"path\" type=\"string\"<|sep|>a.rs<|close|>argument<|close|>call";
+    assert_only_real_file_read(&parse_tool_calls(content), "unclosed kimi example");
+}
