@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-09-24
+
+Fixes from long-running validation against llm.selfware.design (SGLang,
+qwen38-flash-next behind an ngrok gateway).
+
+### Fixed
+- **Side model calls are bounded and streamed.** The requirements audit,
+  synthesis, step reflection and compaction summaries now stream, run without
+  tools or thinking, use low reasoning effort and have explicit token and time
+  caps (audit: 8,192 tokens / 180 s). Previously the audit ran non-streaming with
+  the session's `xhigh` / 65k settings; a gateway cut it at 300 s and it was
+  retried identically while the cut requests kept generating server-side for
+  20–34 minutes (14% of wall time in a 14-run suite).
+- **Gateway timeouts are typed.** A 502/503/504 from a proxy (e.g. ngrok
+  `ERR_NGROK_3004`) or arriving after a long wait is `GatewayTimeout` and is not
+  re-sent unchanged; side calls retry once with half the budget.
+- **Honest audit status.** When the requirements audit cannot run, stdout,
+  stream-json, the JSON result, the run summary and the banner say
+  "requirements audit: NOT PERFORMED — <reason>" instead of a clean pass.
+- **Rust syntax checks use the crate's edition.** `rustfmt --check` now receives
+  `--edition` from rustfmt.toml / Cargo.toml / the workspace, so valid `async fn`
+  code is no longer rejected as Rust 2015 (false VERIFICATION_FAILED). FIM now
+  refuses to write code rustfmt cannot parse.
+- **Trust filter keeps legitimate source.** Tool results are sanitised per
+  logical content line instead of per serialised JSON line, so one match no
+  longer removes a whole file read; exfiltration-shaped matches in plain code
+  lines of workspace source files are annotated rather than removed (web, MCP
+  and shell output stay strict).
+- **Tool parser** accepts `<parameter name="key">`, `name='key'` and whitespace
+  variants of the Qwen parameter syntax.
+- **Small context windows:** a bounded work ledger (files read, line ranges,
+  findings, deliverables) survives trimming and compaction and is sent at the end
+  of each request, so the agent stops re-reading files after every trim.
+  Compaction summaries include per-file findings.
+- **Stable system prompt:** per-turn content (project tree, hints, RAG, progress
+  banners) moved out of the system message to the end of the request, keeping the
+  prompt prefix byte-stable between turns (needed for server prefix caching).
+
+### Documentation
+- README leads with the zero-config quick start against the keyless default
+  endpoint; "What's new in 0.8", exit codes, and recommended settings for
+  llm.selfware.design. New `docs/serving-sglang.md` with measured SGLang flags
+  (`--tool-call-parser qwen3_coder`, metrics, concurrency, chunked prefill, prefix
+  caching for hybrid models).
+
 ## [0.8.0] - 2026-09-23
 
 Long-task reliability, honest status, and safety hardening, driven by end-to-end
