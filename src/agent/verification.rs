@@ -2487,11 +2487,11 @@ impl Agent {
                     // W8b bound: after N consecutive readback rejections the
                     // harness reads the artifacts itself instead of asking a
                     // (N+1)th time — the audit ledger's step-aside pattern.
-                    // Deadline step-aside: no correction round fits, so the
+                    // Limit (deadline/budget) step-aside: no correction round fits, so the
                     // harness reads the artifacts back itself right away.
                     let rejections = self.consecutive_artifact_readback_rejections();
                     if rejections < ARTIFACT_READBACK_REJECTION_BOUND
-                        && self.completion_gate_deadline_step_aside().is_none()
+                        && self.completion_gate_step_aside().is_none()
                     {
                         return Some(artifact_readback_guidance(&readback.missing_paths));
                     }
@@ -2530,11 +2530,11 @@ impl Agent {
         let skip_min_steps_for_read_only = is_read_only;
 
         // The min-steps floor is pacing ("do not rush"), not a check of the
-        // result: inside the deadline window it steps aside (the result
+        // result: inside the deadline or budget window it steps aside (the result
         // gates below still apply).
         if step_count < min_steps
             && !skip_min_steps_for_read_only
-            && self.completion_gate_deadline_step_aside().is_none()
+            && self.completion_gate_step_aside().is_none()
         {
             // Tailor the message: don't mention cargo for non-Rust tasks
             let verification_hint = if self.should_skip_cargo_verification().await {
@@ -2891,13 +2891,11 @@ impl Agent {
         }
         self.requirements_audit_done
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        // Deadline step-aside: the audit is itself a model call and can bounce
-        // the answer for a correction round; neither fits inside the deadline
+        // Limit (deadline/budget) step-aside: the audit is itself a model call and can bounce
+        // the answer for a correction round; neither fits inside the limit
         // window. Recorded NOT PERFORMED, so the banner warns (rule 3).
-        if let Some(why) = self.completion_gate_deadline_step_aside() {
-            self.record_requirements_audit(RequirementsAuditStatus::NotPerformed(format!(
-                "deadline: {why}"
-            )));
+        if let Some(why) = self.completion_gate_step_aside() {
+            self.record_requirements_audit(RequirementsAuditStatus::NotPerformed(why.to_string()));
             return None;
         }
         self.client

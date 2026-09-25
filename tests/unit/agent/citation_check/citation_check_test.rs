@@ -1007,7 +1007,7 @@ async fn gate_rejection_inside_the_deadline_reserve_accepts_the_draft_with_a_war
     assert_eq!(agent.check_completion_gate().await, None);
 
     let status = agent.grounding_status().expect("status recorded");
-    assert!(status.not_corrected_deadline);
+    assert_eq!(status.not_corrected.as_deref(), Some("deadline"));
     assert_eq!((status.total, status.problem_count()), (2, 1));
     assert_eq!(status.correction_rounds, 0, "no round was fed back");
     assert_eq!(status.problems.len(), 1);
@@ -1020,7 +1020,7 @@ async fn gate_rejection_inside_the_deadline_reserve_accepts_the_draft_with_a_war
     // The serialized grounding object carries the flag with the counts and
     // problems (the headless result adds `note` from `warning_note`).
     let g = serde_json::to_value(&status).unwrap();
-    assert_eq!(g["not_corrected_deadline"], true);
+    assert_eq!(g["not_corrected"], "deadline");
     assert_eq!(g["wrong_line"], 1);
     assert_eq!(g["problems"].as_array().map(Vec::len), Some(1));
 
@@ -1051,14 +1051,14 @@ async fn gate_rejection_outside_the_deadline_reserve_still_runs_a_correction_rou
     let directive = agent.citation_gate(true).expect("still blocks");
     assert!(directive.contains("CITATION CHECK"), "{directive}");
     let status = agent.grounding_status().unwrap();
-    assert!(!status.not_corrected_deadline);
+    assert_eq!(status.not_corrected, None);
     assert!(!status
         .warning_note()
         .unwrap()
         .contains("not corrected: deadline"));
     assert!(serde_json::to_value(&status)
         .unwrap()
-        .get("not_corrected_deadline")
+        .get("not_corrected")
         .is_none());
     // The rejected draft is kept for the deadline path and the partial.
     let state = agent.citation_gate.lock().unwrap();
@@ -1073,6 +1073,32 @@ async fn gate_without_a_wall_budget_never_steps_aside_for_time() {
     let ws = workspace();
     let mut agent = gate_agent(ws.path()).await;
     agent.task_start_time = std::time::Instant::now() - std::time::Duration::from_secs(100_000);
+    answer(&mut agent, 1, WRONG_ANSWER);
+    assert!(agent.citation_gate(true).is_some());
+}
+
+/// The same step-aside inside the TOKEN budget reserve: accepted with ⚠️
+/// and "citations not corrected: budget"; outside it, a correction round.
+#[tokio::test]
+async fn gate_rejection_inside_the_token_budget_reserve_accepts_with_the_budget_note() {
+    let ws = workspace();
+    let mut agent = gate_agent(ws.path()).await;
+    agent.config.agent.max_budget_tokens = Some(3_000_000);
+    agent.wrap_up.lock().unwrap().max_turn_tokens = 95_000; // reserve 190k
+    agent.client.ensure_budget_floor(2_850_000, 0.0); // 150k left
+    answer(&mut agent, 1, WRONG_ANSWER);
+    assert_eq!(agent.citation_gate(true), None);
+    let status = agent.grounding_status().unwrap();
+    assert_eq!(status.not_corrected.as_deref(), Some("budget"));
+    assert_eq!(
+        status.warning_note().as_deref(),
+        Some("citations: 1 of 2 could not be verified (1 wrong); citations not corrected: budget")
+    );
+
+    let mut agent = gate_agent(ws.path()).await;
+    agent.config.agent.max_budget_tokens = Some(3_000_000);
+    agent.wrap_up.lock().unwrap().max_turn_tokens = 95_000;
+    agent.client.ensure_budget_floor(1_000_000, 0.0);
     answer(&mut agent, 1, WRONG_ANSWER);
     assert!(agent.citation_gate(true).is_some());
 }

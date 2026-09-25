@@ -44,11 +44,11 @@ async fn wrap_up_fires_once_when_remaining_time_drops_below_the_measured_reserve
         .record_call_elapsed_for_test(Duration::from_millis(164_446));
 
     backdate(&mut agent, 500); // 400 s left > 329 s
-    agent.maybe_inject_deadline_wrap_up();
+    agent.maybe_inject_wrap_up();
     assert_eq!(directive_count(&agent), 0, "too early");
 
     backdate(&mut agent, 580); // 320 s left <= 329 s
-    agent.maybe_inject_deadline_wrap_up();
+    agent.maybe_inject_wrap_up();
     assert_eq!(directive_count(&agent), 1);
     let text = agent.messages.last().unwrap().content.text_all();
     assert!(
@@ -59,7 +59,7 @@ async fn wrap_up_fires_once_when_remaining_time_drops_below_the_measured_reserve
     assert!(text.contains("UNFINISHED"), "{text}");
 
     backdate(&mut agent, 700);
-    agent.maybe_inject_deadline_wrap_up();
+    agent.maybe_inject_wrap_up();
     assert_eq!(directive_count(&agent), 1, "fires once per task");
     server.stop().await;
 }
@@ -76,10 +76,10 @@ async fn wrap_up_uses_the_measurement_not_a_fixed_fraction() {
         .client
         .record_call_elapsed_for_test(Duration::from_millis(2_000));
     backdate(&mut agent, 580);
-    agent.maybe_inject_deadline_wrap_up();
+    agent.maybe_inject_wrap_up();
     assert_eq!(directive_count(&agent), 0);
     backdate(&mut agent, 875); // 25 s left <= 30 s floor
-    agent.maybe_inject_deadline_wrap_up();
+    agent.maybe_inject_wrap_up();
     assert_eq!(directive_count(&agent), 1);
     server.stop().await;
 }
@@ -90,7 +90,7 @@ async fn wrap_up_is_silent_without_a_wall_budget() {
     let config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
     let mut agent = Agent::new(config).await.unwrap();
     backdate(&mut agent, 100_000);
-    agent.maybe_inject_deadline_wrap_up();
+    agent.maybe_inject_wrap_up();
     assert_eq!(directive_count(&agent), 0);
     server.stop().await;
 }
@@ -524,26 +524,26 @@ async fn rejected_draft_is_taken_only_when_one_call_no_longer_fits() {
     set_rejected_draft(&agent, &draft);
 
     backdate(&mut agent, 525); // 375 s left: one call still fits
-    assert_eq!(agent.take_rejected_draft_at_deadline(), None);
+    assert_eq!(agent.take_rejected_draft_at_limit(), None);
 
     // A draft judged before a later edit is never accepted.
     agent.mutation_sequence += 1;
     backdate(&mut agent, 761); // 139 s left < 232 s
-    assert_eq!(agent.take_rejected_draft_at_deadline(), None);
+    assert_eq!(agent.take_rejected_draft_at_limit(), None);
     agent.mutation_sequence -= 1;
 
-    let taken = agent.take_rejected_draft_at_deadline().expect("taken");
+    let taken = agent.take_rejected_draft_at_limit().expect("taken");
     assert_eq!(taken, draft.trim());
     assert_eq!(agent.last_assistant_response, draft.trim());
     let status = agent.grounding_status().expect("status");
-    assert!(status.not_corrected_deadline);
+    assert_eq!(status.not_corrected.as_deref(), Some("deadline"));
     assert_eq!(status.problem_count(), 11);
     assert!(status
         .warning_note()
         .unwrap()
         .ends_with("citations not corrected: deadline"));
     // Taken once.
-    assert_eq!(agent.take_rejected_draft_at_deadline(), None);
+    assert_eq!(agent.take_rejected_draft_at_limit(), None);
     server.stop().await;
 }
 
@@ -599,5 +599,234 @@ async fn deadline_with_a_pending_rejected_draft_completes_with_it_and_a_warning(
     assert!(banner.starts_with("⚠️"), "{banner}");
     assert!(!banner.contains('✅'), "{banner}");
     assert!(agent.partial_progress(&result).is_none());
+    server.stop().await;
+}
+
+// ── budget wrap-up (tokens / cost), one latch shared with the deadline ────
+
+fn budget_directive_count(agent: &Agent) -> usize {
+    agent
+        .messages
+        .iter()
+        .filter(|m| m.content.text_all().contains("BUDGET WRAP-UP"))
+        .count()
+}
+
+fn any_wrap_up_count(agent: &Agent) -> usize {
+    directive_count(agent) + budget_directive_count(agent)
+}
+
+#[test]
+fn token_reserve_is_measured_from_the_largest_turn_with_floor_and_cap() {
+    // Replay of b2_163840: ~95k-token turns under a 3M budget → 190k.
+    assert_eq!(token_wrap_up_reserve(95_000, 3_000_000), 190_000);
+    // Nothing measured / small turns: the floor.
+    assert_eq!(
+        token_wrap_up_reserve(0, 3_000_000),
+        TOKEN_WRAP_UP_RESERVE_FLOOR
+    );
+    assert_eq!(token_wrap_up_reserve(5_000, 3_000_000), 40_000);
+    // Small budgets: the cap (half the budget) wins over the floor.
+    assert_eq!(token_wrap_up_reserve(0, 60_000), 30_000);
+    assert!(token_round_no_fit(190_000, 95_000, 3_000_000).is_some());
+    assert!(token_round_no_fit(190_001, 95_000, 3_000_000).is_none());
+    // Cost: 2x the most expensive turn, capped; never without a measurement.
+    assert!((cost_wrap_up_reserve(0.25, 10.0) - 0.5).abs() < 1e-9);
+    assert!((cost_wrap_up_reserve(4.0, 10.0) - 5.0).abs() < 1e-9);
+    assert_eq!(cost_round_no_fit(0.01, 0.0, 10.0), None);
+    assert!(cost_round_no_fit(0.5, 0.25, 10.0).is_some());
+    assert!(cost_round_no_fit(0.51, 0.25, 10.0).is_none());
+}
+
+/// Tokens approach the cap: each turn uses 40k tokens against a 200k
+/// budget (reserve 80k). The wrap-up fires once, at 120k spent, the next
+/// answer lands inside the budget and the run succeeds.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn tokens_approaching_the_cap_get_one_budget_wrap_up_and_the_answer_lands() {
+    let _state = crate::test_support::ExecGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    let mut builder = MockLlmServer::builder().with_usage(39_000, 1_000, 40_000);
+    for n in 0..3 {
+        let path = dir.path().join(format!("f{n}.rs"));
+        std::fs::write(&path, format!("fn f{n}() {{}}\n")).unwrap();
+        builder = builder.with_response(format!(
+            "<tool>\n<name>file_read</name>\n<arguments>{}</arguments>\n</tool>",
+            serde_json::json!({ "path": path.to_string_lossy() })
+        ));
+    }
+    let server = builder
+        .with_response(
+            "Final answer: f0, f1 and f2 are empty stubs; nothing else was checked (UNFINISHED).",
+        )
+        .build()
+        .await;
+    let mut config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
+    config.agent.max_budget_tokens = Some(200_000);
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.task_is_read_only = true;
+    agent.current_checkpoint = Some(TaskCheckpoint::new(
+        "budget-ok".to_string(),
+        "Review the three files and report findings. Do not edit files.".to_string(),
+    ));
+
+    let result = agent.continue_execution().await;
+    assert!(result.is_ok(), "answered inside the budget: {result:?}");
+    assert_eq!(budget_directive_count(&agent), 1, "exactly one wrap-up");
+    assert_eq!(directive_count(&agent), 0);
+    assert_eq!(agent.wrap_up_issued(), Some(WrapUpCause::TokenBudget));
+    let bodies = server.captured_request_bodies().await;
+    assert_eq!(bodies.len(), 4, "3 exploring turns + the answer");
+    assert!(
+        !bodies[2].contains("BUDGET WRAP-UP"),
+        "not before the reserve"
+    );
+    assert!(
+        bodies[3].contains("BUDGET WRAP-UP"),
+        "the directive reached the model"
+    );
+    assert!(agent.partial_progress(&result).is_none());
+    server.stop().await;
+}
+
+/// The cap is crossed before an answer: BUDGET_EXHAUSTED, a failure, with
+/// the labelled partial carrying the write-up so far.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn crossing_the_token_cap_is_budget_exhausted_with_the_partial() {
+    let _state = crate::test_support::ExecGuard::hold();
+    let server = MockLlmServer::builder()
+        .with_usage(150_000, 10_000, 160_000)
+        .with_response(
+            "<tool>\n<name>file_read</name>\n<arguments>{\"path\": \"x.rs\"}</arguments>\n</tool>",
+        )
+        .build()
+        .await;
+    let mut config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
+    config.agent.max_budget_tokens = Some(200_000);
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.task_is_read_only = true;
+    agent.current_checkpoint = Some(TaskCheckpoint::new(
+        "budget-over".to_string(),
+        "Review src/agent and report findings. Do not edit files.".to_string(),
+    ));
+    for turn in b2_163840().turns {
+        agent.messages.push(Message::assistant(turn));
+    }
+    // 100k already spent this run (seeded like a resumed segment).
+    agent.cumulative_token_usage.total = 100_000;
+    agent.client.ensure_budget_floor(100_000, 0.0);
+
+    let result = agent.continue_execution().await;
+    assert!(result.is_err(), "{result:?}");
+    let fm = agent.last_run_failure_mode().expect("classified");
+    assert_eq!(fm.kind, FailureKind::BudgetExhausted, "{fm:?}");
+    assert_ne!(crate::errors::process_exit_code(&result, None), 0);
+    let partial = agent.partial_progress(&result).expect("partial carried");
+    let text = partial.last_assistant_text.expect("write-up carried");
+    assert!(text.contains("Area 4"));
+    assert_no_tool_markup(&text);
+    server.stop().await;
+}
+
+/// Deadline and token reserves crossed together: exactly one injection, the
+/// deadline recorded (it is checked first); later turns inject nothing.
+#[tokio::test]
+async fn deadline_and_budget_reserves_together_inject_exactly_once() {
+    let server = MockLlmServer::builder().with_response("x").build().await;
+    let mut config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
+    config.agent.max_wall_secs = Some(900);
+    config.agent.max_budget_tokens = Some(3_000_000);
+    let mut agent = Agent::new(config).await.unwrap();
+    agent
+        .client
+        .record_call_elapsed_for_test(Duration::from_secs(100)); // reserve 200 s
+    agent.wrap_up.lock().unwrap().max_turn_tokens = 95_000; // reserve 190k
+    agent.client.ensure_budget_floor(2_900_000, 0.0); // 100k left
+    backdate(&mut agent, 800); // 100 s left
+    agent.maybe_inject_wrap_up();
+    agent.maybe_inject_wrap_up();
+    assert_eq!(any_wrap_up_count(&agent), 1);
+    assert_eq!(agent.wrap_up_issued(), Some(WrapUpCause::Deadline));
+    server.stop().await;
+}
+
+/// Budget first, deadline later in the same task: still one injection.
+#[tokio::test]
+async fn budget_wrap_up_blocks_a_later_deadline_wrap_up() {
+    let server = MockLlmServer::builder().with_response("x").build().await;
+    let mut config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
+    config.agent.max_wall_secs = Some(900);
+    config.agent.max_budget_tokens = Some(3_000_000);
+    let mut agent = Agent::new(config).await.unwrap();
+    agent
+        .client
+        .record_call_elapsed_for_test(Duration::from_secs(100));
+    agent.wrap_up.lock().unwrap().max_turn_tokens = 95_000;
+    agent.client.ensure_budget_floor(2_850_000, 0.0); // 150k left <= 190k
+    backdate(&mut agent, 100); // plenty of time
+    agent.maybe_inject_wrap_up();
+    assert_eq!(agent.wrap_up_issued(), Some(WrapUpCause::TokenBudget));
+    let text = agent.messages.last().unwrap().content.text_all();
+    assert!(
+        text.contains("150000 tokens of the token budget remain")
+            && text.contains("largest turn in this run used 95000 tokens"),
+        "{text}"
+    );
+    backdate(&mut agent, 850); // now inside the deadline reserve too
+    agent.maybe_inject_wrap_up();
+    assert_eq!(any_wrap_up_count(&agent), 1);
+    server.stop().await;
+}
+
+/// The per-turn maximum is measured from the ledger between loop turns;
+/// the first observation is only the baseline (a resumed total is not one
+/// turn).
+#[tokio::test]
+async fn turn_usage_is_measured_between_loop_turns() {
+    let server = MockLlmServer::builder().with_response("x").build().await;
+    let config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
+    let agent = Agent::new(config).await.unwrap();
+    agent.client.ensure_budget_floor(1_000_000, 0.0); // resumed segment
+    agent.observe_turn_usage();
+    assert_eq!(agent.wrap_up.lock().unwrap().max_turn_tokens, 0);
+    agent.client.ensure_budget_floor(1_090_000, 0.0);
+    agent.observe_turn_usage();
+    agent.client.ensure_budget_floor(1_150_000, 0.0);
+    agent.observe_turn_usage();
+    assert_eq!(agent.wrap_up.lock().unwrap().max_turn_tokens, 90_000);
+    server.stop().await;
+}
+
+/// A citation-rejected draft is taken when one more turn no longer fits
+/// the TOKEN budget; the note says "budget".
+#[tokio::test]
+async fn rejected_draft_is_taken_when_one_turn_no_longer_fits_the_budget() {
+    let server = MockLlmServer::builder().with_response("x").build().await;
+    let mut config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
+    config.agent.max_budget_tokens = Some(3_000_000);
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.wrap_up.lock().unwrap().max_turn_tokens = 95_000;
+    let draft = b2_350000().draft;
+    set_rejected_draft(&agent, &draft);
+    agent.client.ensure_budget_floor(2_850_000, 0.0); // 150k left: a turn fits
+    assert_eq!(agent.take_rejected_draft_at_limit(), None);
+    agent.client.ensure_budget_floor(2_920_000, 0.0); // 80k left < 95k
+    assert_eq!(
+        agent.take_rejected_draft_at_limit().as_deref(),
+        Some(draft.trim())
+    );
+    let status = agent.grounding_status().unwrap();
+    assert_eq!(status.not_corrected.as_deref(), Some("budget"));
+    assert!(status
+        .warning_note()
+        .unwrap()
+        .ends_with("citations not corrected: budget"));
     server.stop().await;
 }

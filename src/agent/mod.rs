@@ -894,9 +894,10 @@ pub struct Agent {
     commit_mode_65_fired: std::sync::atomic::AtomicBool,
     commit_mode_85_fired: std::sync::atomic::AtomicBool,
     /// Deadline wrap-up latch: the "write the final answer now" directive
-    /// fires at most once per task, when the remaining wall budget drops to
-    /// the reserve measured from this run's model-call latency.
-    deadline_wrap_up_fired: std::sync::atomic::AtomicBool,
+    /// fires at most once per task, when the remaining wall, token or cost
+    /// budget drops to its measured reserve — one latch for every limit,
+    /// with the triggering limit recorded (see `deadline::WrapUpState`).
+    wrap_up: std::sync::Mutex<deadline::WrapUpState>,
     /// Audit finding ledger (loop 13a): adversarial-audit findings persist
     /// until closed with evidence; the LLM auditor fires at most once per task.
     audit_findings: std::sync::Mutex<Vec<verification::AuditFinding>>,
@@ -1740,7 +1741,7 @@ To call a tool, use this EXACT XML structure:
             last_green_verification: None,
             commit_mode_65_fired: std::sync::atomic::AtomicBool::new(false),
             commit_mode_85_fired: std::sync::atomic::AtomicBool::new(false),
-            deadline_wrap_up_fired: std::sync::atomic::AtomicBool::new(false),
+            wrap_up: std::sync::Mutex::new(Default::default()),
             audit_findings: std::sync::Mutex::new(Vec::new()),
             audit_rejected_attempts: std::sync::atomic::AtomicUsize::new(0),
             output_key_check_done: std::sync::atomic::AtomicBool::new(false),

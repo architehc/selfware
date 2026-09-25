@@ -782,8 +782,7 @@ impl Agent {
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.commit_mode_85_fired
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        self.deadline_wrap_up_fired
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+        *self.wrap_up.lock().unwrap_or_else(|e| e.into_inner()) = Default::default();
         self.audit_findings
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1785,16 +1784,17 @@ impl Agent {
             self.maybe_inject_verification_deadline_directive();
             // Wall-clock commit-mode bands (65% / 85%), each once per task.
             self.maybe_inject_commit_mode_directive();
-            // Deadline wrap-up (once): remaining wall time below the reserve
-            // measured from this run's own model-call latency.
-            self.maybe_inject_deadline_wrap_up();
-            // Deadline acceptance: a citation-rejected draft is pending and
-            // not even one more model call fits — finish with that draft (⚠️,
-            // "citations not corrected: deadline") instead of starting a call
-            // the deadline will cut off (val083 b2_350000: no report at all).
-            if let Some(draft) = self.take_rejected_draft_at_deadline() {
+            // Wrap-up (once, whichever limit first): remaining wall time,
+            // tokens or cost below the reserve measured from this run's own
+            // call latency / per-turn usage.
+            self.maybe_inject_wrap_up();
+            // Limit acceptance: a citation-rejected draft is pending and not
+            // even one more turn fits the deadline or the budget — finish
+            // with that draft (⚠️, "citations not corrected: …") instead of
+            // starting a turn the limit will cut off (val083 b2_350000).
+            if let Some(draft) = self.take_rejected_draft_at_limit() {
                 // The draft never reached the requirements audit (the citation
-                // gate runs first). Inside the deadline window the audit steps
+                // gate runs first). Inside the limit window the audit steps
                 // aside without a model call and records NOT PERFORMED; any
                 // other return is a hard budget stop, enforced just below.
                 let read_only = self.current_task_is_read_only();

@@ -233,11 +233,11 @@ pub struct GroundingStatus {
     /// are expected to be grounded in checkable citations. Not serialized.
     #[serde(skip)]
     pub read_only: bool,
-    /// The gate stepped aside at the wall-clock deadline: the wrong
-    /// citations above were accepted WITHOUT a correction round (see
+    /// The gate stepped aside for a limit (`"deadline"` or `"budget"`): the
+    /// wrong citations above were accepted WITHOUT a correction round (see
     /// [`super::deadline`]). Serialized only when set.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub not_corrected_deadline: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_corrected: Option<String>,
 }
 
 impl GroundingStatus {
@@ -262,7 +262,7 @@ impl GroundingStatus {
                 .map(CheckedCitation::describe)
                 .collect(),
             read_only: false,
-            not_corrected_deadline: false,
+            not_corrected: None,
         }
     }
 
@@ -341,9 +341,9 @@ impl GroundingStatus {
     pub fn warning_note(&self) -> Option<String> {
         if self.problem_count() > 0 {
             let mut note = self.unverified_note();
-            if self.not_corrected_deadline {
-                note.push_str("; ");
-                note.push_str(super::deadline::CITATIONS_NOT_CORRECTED_DEADLINE);
+            if let Some(word) = &self.not_corrected {
+                note.push_str("; citations not corrected: ");
+                note.push_str(word);
             }
             Some(note)
         } else if self.none_checkable() {
@@ -1354,12 +1354,13 @@ impl super::Agent {
         }
 
         let problems = report.problem_count();
-        // Deadline step-aside: inside the wrap-up reserve (or when one more
-        // model call no longer fits), a correction round would end in a
-        // timeout with no answer at all. Accept this draft with the wrong
-        // count and the "not corrected: deadline" note instead (rule 3).
-        let deadline_step_aside = if problems > 0 && state.last_rejected_step != Some(step) {
-            self.completion_gate_deadline_step_aside()
+        // Limit step-aside: inside the deadline or budget reserve (or when
+        // one more turn no longer fits), a correction round would end in a
+        // TIMEOUT / BUDGET_EXHAUSTED with no answer at all. Accept this draft
+        // with the wrong count and the "citations not corrected: deadline" /
+        // "…: budget" note instead (rule 3).
+        let limit_step_aside = if problems > 0 && state.last_rejected_step != Some(step) {
+            self.completion_gate_step_aside()
         } else {
             None
         };
@@ -1369,7 +1370,7 @@ impl super::Agent {
             // Same turn, re-evaluated content: same round, no new spend.
             let round = state.rejections;
             (Some(correction_directive(&report, round)), None)
-        } else if let Some(why) = &deadline_step_aside {
+        } else if let Some(why) = &limit_step_aside {
             tracing::warn!(
                 "citation check: {problems} of {} citations wrong, but a correction round no \
                  longer fits ({why}) — accepting the draft with the count reported",
@@ -1378,9 +1379,10 @@ impl super::Agent {
             (
                 None,
                 Some(format!(
-                    "{problems} of {} wrong — {} ({why}); completing with this warning",
+                    "{problems} of {} wrong — {} ({}); completing with this warning",
                     report.total,
-                    super::deadline::CITATIONS_NOT_CORRECTED_DEADLINE
+                    super::deadline::citations_not_corrected_note(why.cause),
+                    why.detail
                 )),
             )
         } else if state.rejections < CITATION_GATE_REJECTION_BOUND {
@@ -1411,7 +1413,9 @@ impl super::Agent {
         };
         let mut status = GroundingStatus::from_report(&report, state.rejections, checked_files);
         status.read_only = is_read_only;
-        status.not_corrected_deadline = deadline_step_aside.is_some();
+        status.not_corrected = limit_step_aside
+            .as_ref()
+            .map(|w| w.cause.note_word().to_string());
         if result.is_some() {
             state.rejected_draft = Some(RejectedDraft {
                 text: answer.clone(),

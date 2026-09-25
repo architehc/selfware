@@ -1,5 +1,7 @@
-//! Deadline wrap-up for wall-clock budgets, and the labelled partial result
-//! a run carries when it still hits the deadline without a final answer.
+//! Wrap-up for the wall-clock, token and cost budgets (one latch, whichever
+//! limit's measured reserve is reached first), the completion-gate
+//! step-aside inside those reserves, and the labelled partial result a run
+//! carries when it still hits a limit without a final answer.
 //!
 //! Evidence (external review 2026-09-25, live replay on llm.selfware.design):
 //! two read-only reviews with a 15-minute budget both ended TIMEOUT with no
@@ -14,7 +16,6 @@ use super::failure_mode::FailureKind;
 use super::Agent;
 use crate::api::types::Message;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::Ordering;
 
 /// Multiplier on the slowest model call measured so far this run.
 ///
@@ -63,10 +64,6 @@ pub(crate) fn wrap_up_reserve_secs(slowest_call_ms: u64, max_wall_secs: u64) -> 
     measured.max(WRAP_UP_RESERVE_FLOOR_SECS).min(cap)
 }
 
-/// Note a completion gate's status carries when it stepped aside at the
-/// deadline instead of feeding its rejection back for a correction round.
-pub const CITATIONS_NOT_CORRECTED_DEADLINE: &str = "citations not corrected: deadline";
-
 /// Why a completion-gate correction round no longer fits the wall budget,
 /// or `None` when it does.
 ///
@@ -108,6 +105,150 @@ pub(crate) fn correction_round_no_fit(
 /// [`correction_round_no_fit`] — used to finish WITHOUT another model call.
 pub(crate) fn one_call_no_fit(remaining_secs: u64, slowest_call_ms: u64) -> bool {
     slowest_call_ms > 0 && remaining_secs.saturating_mul(1000) < slowest_call_ms
+}
+
+/// Which limit put the run into its last answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WrapUpCause {
+    /// The wall-clock budget (`max_wall_secs`).
+    Deadline,
+    /// The token budget (`max_budget_tokens`).
+    TokenBudget,
+    /// The cost budget (`max_cost_usd`).
+    CostBudget,
+}
+
+impl WrapUpCause {
+    /// Short name for logs and progress events.
+    pub fn label(self) -> &'static str {
+        match self {
+            WrapUpCause::Deadline => "deadline",
+            WrapUpCause::TokenBudget => "token_budget",
+            WrapUpCause::CostBudget => "cost_budget",
+        }
+    }
+
+    /// The word the "citations not corrected: …" note uses.
+    pub fn note_word(self) -> &'static str {
+        match self {
+            WrapUpCause::Deadline => "deadline",
+            WrapUpCause::TokenBudget | WrapUpCause::CostBudget => "budget",
+        }
+    }
+}
+
+/// `citations not corrected: deadline` / `citations not corrected: budget`
+/// — the note a completion gate's status carries when it stepped aside for
+/// a limit instead of feeding its rejection back for a correction round.
+pub fn citations_not_corrected_note(cause: WrapUpCause) -> String {
+    format!("citations not corrected: {}", cause.note_word())
+}
+
+/// A limit inside whose reserve a completion gate steps aside.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepAside {
+    pub cause: WrapUpCause,
+    /// Measured numbers, e.g. `139s of the wall budget left <= reserve 450s`.
+    pub detail: String,
+}
+
+impl std::fmt::Display for StepAside {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.cause.note_word(), self.detail)
+    }
+}
+
+/// Per-task wrap-up latch and the per-turn usage it is measured from.
+#[derive(Debug, Default)]
+pub(crate) struct WrapUpState {
+    /// The ONE wrap-up of this task and the limit that triggered it; the
+    /// deadline and the budgets share it so they never both inject.
+    pub issued: Option<WrapUpCause>,
+    /// (accounted total tokens, cost) at the previous loop turn; `None`
+    /// until the first observation (the baseline).
+    pub last_seen: Option<(usize, f64)>,
+    /// Largest token use of one loop turn this run (every call of the turn:
+    /// the whole prompt is re-sent each call, plus the completion).
+    pub max_turn_tokens: usize,
+    /// Largest cost of one loop turn this run (0 while no cost is reported).
+    pub max_turn_cost: f64,
+}
+
+/// Multiplier on the largest measured turn for the budget reserve — same
+/// reasoning as [`WRAP_UP_LATENCY_MARGIN`]: one answer-writing turn plus one
+/// correction round a completion gate can bounce it into.
+pub(crate) const BUDGET_WRAP_UP_TURN_MARGIN: usize = 2;
+
+/// Lower bound on the token reserve.
+///
+/// Why 40,000: before a turn completes there is no measurement, and every
+/// turn re-sends at least the system prompt, tool schemas and task. That
+/// base measured 20,638 prompt tokens on the first request of val083
+/// b2_350000 (the `llm_request_sent` event), so no turn costs less than
+/// ~20k; two turns (answer + correction) is ~40k.
+pub(crate) const TOKEN_WRAP_UP_RESERVE_FLOOR: usize = 40_000;
+
+/// Token reserve: `2 × largest turn`, at least the floor, at most half the
+/// token budget (same cap reasoning as [`WRAP_UP_RESERVE_CAP_DIVISOR`]: a
+/// larger reserve would wrap up before half the budget was spent exploring).
+pub(crate) fn token_wrap_up_reserve(max_turn_tokens: usize, max_budget_tokens: usize) -> usize {
+    max_turn_tokens
+        .saturating_mul(BUDGET_WRAP_UP_TURN_MARGIN)
+        .max(TOKEN_WRAP_UP_RESERVE_FLOOR)
+        .min(max_budget_tokens / WRAP_UP_RESERVE_CAP_DIVISOR as usize)
+}
+
+/// Cost reserve: `2 × most expensive turn`, at most half the cost budget.
+/// No floor: endpoints that report no cost give nothing to measure, and a
+/// guessed price would be an estimate (rule 4) — with no measured cost the
+/// cost reserve is 0 and only the token/wall reserves apply.
+pub(crate) fn cost_wrap_up_reserve(max_turn_cost: f64, max_cost_usd: f64) -> f64 {
+    (max_turn_cost * BUDGET_WRAP_UP_TURN_MARGIN as f64)
+        .min(max_cost_usd / WRAP_UP_RESERVE_CAP_DIVISOR as f64)
+}
+
+/// Why a correction round no longer fits the token budget: tokens left at
+/// or below the reserve, or below one largest turn.
+pub(crate) fn token_round_no_fit(
+    remaining_tokens: usize,
+    max_turn_tokens: usize,
+    max_budget_tokens: usize,
+) -> Option<String> {
+    let reserve = token_wrap_up_reserve(max_turn_tokens, max_budget_tokens);
+    if remaining_tokens <= reserve {
+        return Some(format!(
+            "{remaining_tokens} tokens of the budget left <= reserve {reserve} \
+             ({BUDGET_WRAP_UP_TURN_MARGIN}x largest turn {max_turn_tokens}, floor \
+             {TOKEN_WRAP_UP_RESERVE_FLOOR}, cap 1/{WRAP_UP_RESERVE_CAP_DIVISOR} of \
+             {max_budget_tokens})"
+        ));
+    }
+    if max_turn_tokens > 0 && remaining_tokens < max_turn_tokens {
+        return Some(format!(
+            "{remaining_tokens} tokens of the budget left < largest turn {max_turn_tokens}"
+        ));
+    }
+    None
+}
+
+/// Why a correction round no longer fits the cost budget (see
+/// [`cost_wrap_up_reserve`]); never fires without a measured turn cost.
+pub(crate) fn cost_round_no_fit(
+    remaining_usd: f64,
+    max_turn_cost: f64,
+    max_cost_usd: f64,
+) -> Option<String> {
+    if max_turn_cost <= 0.0 {
+        return None;
+    }
+    let reserve = cost_wrap_up_reserve(max_turn_cost, max_cost_usd);
+    if remaining_usd <= reserve || remaining_usd < max_turn_cost {
+        return Some(format!(
+            "${remaining_usd:.4} of the cost budget left <= reserve ${reserve:.4} \
+             ({BUDGET_WRAP_UP_TURN_MARGIN}x largest turn ${max_turn_cost:.4})"
+        ));
+    }
+    None
 }
 
 /// Minimum prose length (chars, tool-call markup stripped) for an assistant
@@ -217,87 +358,232 @@ impl PartialProgress {
 }
 
 impl Agent {
-    /// One-time deadline wrap-up: when the remaining wall budget drops to
-    /// the reserve measured from this run's own model-call latency (see
-    /// [`wrap_up_reserve_secs`]), tell the model to stop exploring and write
-    /// the final answer now, labelling unfinished areas. No-op without a
-    /// wall budget. A call already in flight when the reserve is crossed is
-    /// left alone; the directive lands on the next turn. Latch reset in
-    /// `run_task`.
-    pub(super) fn maybe_inject_deadline_wrap_up(&mut self) {
-        let Some(max_wall) = self.config.agent.max_wall_secs.filter(|&s| s > 0) else {
+    /// Fold the usage of the turn that just ended into this run's per-turn
+    /// maxima ([`WrapUpState`]). Called once per loop turn, before the
+    /// wrap-up checks. The first call after a reset only records the
+    /// baseline (a resumed run's seeded total is not one turn).
+    pub(super) fn observe_turn_usage(&self) {
+        let usage = self.client.accounted_usage();
+        let cost = usage.cost.unwrap_or(0.0);
+        let mut state = self.wrap_up.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((last_tokens, last_cost)) = state.last_seen {
+            let turn_tokens = usage.total_tokens.saturating_sub(last_tokens);
+            let turn_cost = (cost - last_cost).max(0.0);
+            state.max_turn_tokens = state.max_turn_tokens.max(turn_tokens);
+            if turn_cost > state.max_turn_cost {
+                state.max_turn_cost = turn_cost;
+            }
+        }
+        state.last_seen = Some((usage.total_tokens, cost));
+    }
+
+    /// The limit whose reserve this run is inside, if any: the wall-clock
+    /// deadline first (a timeout loses the in-flight answer outright), then
+    /// the token budget, then the cost budget. `None` while every configured
+    /// limit is outside its reserve.
+    fn limit_in_reserve(&self) -> Option<StepAside> {
+        if let Some(max_wall) = self.config.agent.max_wall_secs.filter(|&s| s > 0) {
+            let remaining = max_wall.saturating_sub(self.budget_elapsed_secs());
+            if let Some(detail) = correction_round_no_fit(
+                remaining,
+                self.client.call_latency_stats().max_ms,
+                max_wall,
+            ) {
+                return Some(StepAside {
+                    cause: WrapUpCause::Deadline,
+                    detail,
+                });
+            }
+        }
+        let usage = self.client.accounted_usage();
+        let (max_turn_tokens, max_turn_cost) = {
+            let s = self.wrap_up.lock().unwrap_or_else(|e| e.into_inner());
+            (s.max_turn_tokens, s.max_turn_cost)
+        };
+        if let Some(max_tokens) = self.config.agent.max_budget_tokens.filter(|&b| b > 0) {
+            let remaining = max_tokens.saturating_sub(usage.total_tokens);
+            if let Some(detail) = token_round_no_fit(remaining, max_turn_tokens, max_tokens) {
+                return Some(StepAside {
+                    cause: WrapUpCause::TokenBudget,
+                    detail,
+                });
+            }
+        }
+        if let Some(max_cost) = self.config.agent.max_cost_usd.filter(|&c| c > 0.0) {
+            let remaining = (max_cost - usage.cost.unwrap_or(0.0)).max(0.0);
+            if let Some(detail) = cost_round_no_fit(remaining, max_turn_cost, max_cost) {
+                return Some(StepAside {
+                    cause: WrapUpCause::CostBudget,
+                    detail,
+                });
+            }
+        }
+        None
+    }
+
+    /// One-time wrap-up, whichever limit comes first: when the remaining
+    /// wall time drops to the reserve measured from this run's call latency
+    /// ([`wrap_up_reserve_secs`]), or the remaining token / cost budget to
+    /// the reserve measured from this run's per-turn usage
+    /// ([`token_wrap_up_reserve`], [`cost_wrap_up_reserve`]), tell the model
+    /// to stop exploring and write the final answer now, labelling
+    /// unfinished areas. ONE latch for all limits (reason recorded), so the
+    /// deadline and the budget can never both inject. A call already in
+    /// flight is left alone; the directive lands on the next turn. Latch
+    /// reset in `run_task`.
+    pub(super) fn maybe_inject_wrap_up(&mut self) {
+        self.observe_turn_usage();
+        if self.wrap_up_issued().is_some() {
+            return;
+        }
+        let Some(window) = self.limit_in_reserve() else {
             return;
         };
-        if self.deadline_wrap_up_fired.load(Ordering::Relaxed) {
-            return;
-        }
-        let remaining = max_wall.saturating_sub(self.budget_elapsed_secs());
-        let stats = self.client.call_latency_stats();
-        let reserve = wrap_up_reserve_secs(stats.max_ms, max_wall);
-        if remaining > reserve {
-            return;
-        }
-        self.deadline_wrap_up_fired.store(true, Ordering::Relaxed);
-        let measured = if stats.call_count > 0 {
-            format!(
-                "the slowest model call in this run took {}s",
-                stats.max_ms.div_ceil(1000)
-            )
-        } else {
-            "no model call has been timed yet".to_string()
+        self.wrap_up
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .issued = Some(window.cause);
+        let (headline, room) = match window.cause {
+            WrapUpCause::Deadline => {
+                let stats = self.client.call_latency_stats();
+                let max_wall = self.config.agent.max_wall_secs.unwrap_or(0);
+                let remaining = max_wall.saturating_sub(self.budget_elapsed_secs());
+                let measured = if stats.call_count > 0 {
+                    format!(
+                        "the slowest model call in this run took {}s",
+                        stats.max_ms.div_ceil(1000)
+                    )
+                } else {
+                    "no model call has been timed yet".to_string()
+                };
+                (
+                    "DEADLINE WRAP-UP",
+                    format!(
+                        "about {remaining}s of the wall-clock budget remain and {measured} — \
+                         there is time for roughly one more answer"
+                    ),
+                )
+            }
+            WrapUpCause::TokenBudget | WrapUpCause::CostBudget => {
+                let usage = self.client.accounted_usage();
+                let s = self.wrap_up.lock().unwrap_or_else(|e| e.into_inner());
+                let left = if window.cause == WrapUpCause::TokenBudget {
+                    format!(
+                        "about {} tokens of the token budget remain and the largest turn in this \
+                         run used {} tokens",
+                        self.config
+                            .agent
+                            .max_budget_tokens
+                            .unwrap_or(0)
+                            .saturating_sub(usage.total_tokens),
+                        s.max_turn_tokens
+                    )
+                } else {
+                    format!(
+                        "about ${:.4} of the cost budget remain and the largest turn in this run \
+                         cost ${:.4}",
+                        (self.config.agent.max_cost_usd.unwrap_or(0.0) - usage.cost.unwrap_or(0.0))
+                            .max(0.0),
+                        s.max_turn_cost
+                    )
+                };
+                (
+                    "BUDGET WRAP-UP",
+                    format!("{left} — there is room for roughly one more answer"),
+                )
+            }
         };
         tracing::info!(
-            remaining_secs = remaining,
-            reserve_secs = reserve,
-            slowest_call_ms = stats.max_ms,
-            "deadline wrap-up directive injected"
+            cause = window.cause.label(),
+            detail = %window.detail,
+            "wrap-up directive injected"
         );
         self.messages.push(Message::user(format!(
             "<selfware_system_directive>\n\
-             DEADLINE WRAP-UP: about {remaining}s of the wall-clock budget remain and \
-             {measured} — there is time for roughly one more answer. Stop exploring: do not \
-             start new reads, searches or approaches. Write your FINAL ANSWER NOW from what \
-             you already have. Label every area you did not finish as UNFINISHED (not \
-             checked), and do not present unchecked areas as reviewed.\n\
+             {headline}: {room}. Stop exploring: do not start new reads, searches or \
+             approaches. Write your FINAL ANSWER NOW from what you already have. Label every \
+             area you did not finish as UNFINISHED (not checked), and do not present \
+             unchecked areas as reviewed.\n\
              </selfware_system_directive>"
         )));
+        let decision = match window.cause {
+            WrapUpCause::Deadline => "deadline_wrap_up",
+            WrapUpCause::TokenBudget | WrapUpCause::CostBudget => "budget_wrap_up",
+        };
         self.emit_progress(super::progress::ProgressEvent::TurnDecision {
-            decision: "deadline_wrap_up".to_string(),
-            detail: format!(
-                "{remaining}s left <= reserve {reserve}s ({}x slowest call {}ms, floor {}s, cap 1/{} of {}s)",
-                WRAP_UP_LATENCY_MARGIN,
-                stats.max_ms,
-                WRAP_UP_RESERVE_FLOOR_SECS,
-                WRAP_UP_RESERVE_CAP_DIVISOR,
-                max_wall
-            ),
+            decision: decision.to_string(),
+            detail: window.detail,
         });
     }
 
-    /// Why a completion-gate correction round no longer fits this run's
-    /// wall budget (see [`correction_round_no_fit`]); `None` without a wall
-    /// budget or while a round still fits.
-    pub(super) fn completion_gate_deadline_step_aside(&self) -> Option<String> {
-        let max_wall = self.config.agent.max_wall_secs.filter(|&s| s > 0)?;
-        let remaining = max_wall.saturating_sub(self.budget_elapsed_secs());
-        correction_round_no_fit(remaining, self.client.call_latency_stats().max_ms, max_wall)
+    /// Which limit's wrap-up was issued this task, if any.
+    pub fn wrap_up_issued(&self) -> Option<WrapUpCause> {
+        self.wrap_up
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .issued
     }
 
-    /// Deadline acceptance of a citation-rejected draft: when a correction
-    /// round is still pending and not even one more model call fits
-    /// ([`one_call_no_fit`]), take the draft the gate rejected as the final
-    /// answer instead of starting a call the deadline will cut off. The
-    /// grounding status keeps the wrong counts and problems and gains the
-    /// "not corrected: deadline" note, so the banner is ⚠️ and the outcome
-    /// is not green (rule 3). Never accepts a draft judged before a later
-    /// edit. Returns the accepted text.
-    pub(super) fn take_rejected_draft_at_deadline(&mut self) -> Option<String> {
-        let max_wall = self.config.agent.max_wall_secs.filter(|&s| s > 0)?;
-        let remaining = max_wall.saturating_sub(self.budget_elapsed_secs());
-        let slowest_ms = self.client.call_latency_stats().max_ms;
-        if !one_call_no_fit(remaining, slowest_ms) {
-            return None;
+    /// Why a completion-gate correction round no longer fits this run's
+    /// wall, token or cost budget (see [`correction_round_no_fit`],
+    /// [`token_round_no_fit`], [`cost_round_no_fit`]); `None` while a round
+    /// still fits every configured limit.
+    pub(super) fn completion_gate_step_aside(&self) -> Option<StepAside> {
+        self.limit_in_reserve()
+    }
+
+    /// Whether not even one more turn fits any configured limit: time left
+    /// below the slowest call, or tokens / cost left below the largest turn.
+    fn one_turn_no_fit(&self) -> Option<(WrapUpCause, String)> {
+        if let Some(max_wall) = self.config.agent.max_wall_secs.filter(|&s| s > 0) {
+            let remaining = max_wall.saturating_sub(self.budget_elapsed_secs());
+            let slowest_ms = self.client.call_latency_stats().max_ms;
+            if one_call_no_fit(remaining, slowest_ms) {
+                return Some((
+                    WrapUpCause::Deadline,
+                    format!(
+                        "{remaining}s left < slowest call {}s",
+                        slowest_ms.div_ceil(1000)
+                    ),
+                ));
+            }
         }
+        let usage = self.client.accounted_usage();
+        let (max_turn_tokens, max_turn_cost) = {
+            let s = self.wrap_up.lock().unwrap_or_else(|e| e.into_inner());
+            (s.max_turn_tokens, s.max_turn_cost)
+        };
+        if let Some(max_tokens) = self.config.agent.max_budget_tokens.filter(|&b| b > 0) {
+            let remaining = max_tokens.saturating_sub(usage.total_tokens);
+            if max_turn_tokens > 0 && remaining < max_turn_tokens {
+                return Some((
+                    WrapUpCause::TokenBudget,
+                    format!("{remaining} tokens left < largest turn {max_turn_tokens} tokens"),
+                ));
+            }
+        }
+        if let Some(max_cost) = self.config.agent.max_cost_usd.filter(|&c| c > 0.0) {
+            let remaining = (max_cost - usage.cost.unwrap_or(0.0)).max(0.0);
+            if max_turn_cost > 0.0 && remaining < max_turn_cost {
+                return Some((
+                    WrapUpCause::CostBudget,
+                    format!("${remaining:.4} left < largest turn ${max_turn_cost:.4}"),
+                ));
+            }
+        }
+        None
+    }
+
+    /// Limit acceptance of a citation-rejected draft: when a correction
+    /// round is still pending and not even one more turn fits the deadline
+    /// or the token / cost budget, take the draft the gate rejected as the
+    /// final answer instead of starting a turn the limit will cut off. The
+    /// grounding status keeps the wrong counts and problems and gains the
+    /// "citations not corrected: deadline|budget" note, so the banner is ⚠️
+    /// and the outcome is not green (rule 3). Never accepts a draft judged
+    /// before a later edit. Returns the accepted text.
+    pub(super) fn take_rejected_draft_at_limit(&mut self) -> Option<String> {
+        let (cause, why) = self.one_turn_no_fit()?;
         let draft = {
             let mut state = self.citation_gate.lock().unwrap_or_else(|e| e.into_inner());
             let fresh = state.rejected_draft.as_ref().is_some_and(|d| {
@@ -307,28 +593,25 @@ impl Agent {
                 return None;
             }
             let mut draft = state.rejected_draft.take()?;
-            draft.status.not_corrected_deadline = true;
+            draft.status.not_corrected = Some(cause.note_word().to_string());
             state.status = Some(draft.status.clone());
             draft
         };
         let text = draft.text.trim().to_string();
+        let note = citations_not_corrected_note(cause);
         tracing::warn!(
-            remaining_secs = remaining,
-            slowest_call_ms = slowest_ms,
-            "deadline: accepting the citation-rejected draft — one more model call does not fit"
+            cause = cause.label(),
+            "{why}: accepting the citation-rejected draft — one more turn does not fit"
         );
         crate::output::citation_check(&format!(
-            "{} of {} wrong — {CITATIONS_NOT_CORRECTED_DEADLINE} ({remaining}s left < slowest call \
-             {}s); completing with this warning",
+            "{} of {} wrong — {note} ({why}); completing with this warning",
             draft.status.problem_count(),
             draft.status.total,
-            slowest_ms.div_ceil(1000)
         ));
         self.emit_progress(super::progress::ProgressEvent::TurnDecision {
-            decision: "deadline_accept_draft".to_string(),
+            decision: format!("{}_accept_draft", cause.note_word()),
             detail: format!(
-                "{remaining}s left < slowest call {slowest_ms}ms: accepting the draft the citation \
-                 gate rejected ({}); {CITATIONS_NOT_CORRECTED_DEADLINE}",
+                "{why}: accepting the draft the citation gate rejected ({}); {note}",
                 draft.status.grounding_line()
             ),
         });
