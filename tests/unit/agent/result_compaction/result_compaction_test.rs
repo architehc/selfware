@@ -17,20 +17,37 @@ use crate::token_count::estimate_content_tokens;
 // verification.rs at 136k chars (~35k tokens).
 
 /// A Rust source file of roughly `target_tokens` tokens (measured): a
-/// `pub fn` every 12 lines, `#[test]` fns in the second half.
+/// `pub fn` every 12 lines, `#[test]` fns in the second half — the header
+/// plus the fewest items that measure at least `target_tokens`.
+///
+/// Found with the same galloping search as the result cut (identical output
+/// to appending one item and re-measuring the whole file each time, which
+/// was quadratic: 44 s of the 45 s the 35k-token fixture took).
 fn rust_source(stem: &str, target_tokens: usize) -> String {
-    let mut out = String::from("use std::collections::HashMap;\n\n");
-    let mut i = 0usize;
-    while estimate_content_tokens(&out) < target_tokens {
-        out.push_str(&format!(
+    let item = |i: usize| {
+        format!(
             "/// Doc for {stem}_{i}.\npub fn {stem}_{i}(input: &str) -> usize {{\n    let mut \
              total = 0usize;\n    for (n, ch) in input.chars().enumerate() {{\n        if \
              ch.is_alphanumeric() {{\n            total += n % 7;\n        }}\n    }}\n    \
              total + {i}\n}}\n\n"
-        ));
-        i += 1;
+        )
+    };
+    let with_items = |n: usize| -> String {
+        let mut out = String::from("use std::collections::HashMap;\n\n");
+        for i in 0..n {
+            out.push_str(&item(i));
+        }
+        out
+    };
+    if estimate_content_tokens(&with_items(0)) >= target_tokens {
+        return with_items(0);
     }
-    out
+    // The most items still under the target, then one more.
+    let per_item = estimate_content_tokens(&item(0)).max(1);
+    let below = largest_fitting(target_tokens, target_tokens / per_item, &mut |n| {
+        estimate_content_tokens(&with_items(n)) < target_tokens
+    });
+    with_items(below + 1)
 }
 
 fn native_call(id: &str, name: &str, args: serde_json::Value) -> Message {
@@ -1085,4 +1102,115 @@ fn an_unchanged_note_whose_earlier_result_was_compacted_stops_pointing_at_it() {
     let mut messages = supersession_history(note.clone());
     compact_supersession(&mut messages, 500);
     assert_eq!(payload_of(&messages[7]), note);
+}
+
+// ---------------------------------------------------------------------------
+// The result cut measures only around an estimate
+// ---------------------------------------------------------------------------
+//
+// External reviews (2026-09-25): the cut's binary search re-tokenized the
+// whole candidate prefix at every step. The search now starts at an
+// arithmetic estimate and gallops; the cut must be the one a bisection of
+// the whole range finds, never over the budget.
+
+fn candidates_measured(f: impl FnOnce()) -> usize {
+    CANDIDATES_MEASURED.with(|c| c.set(0));
+    f();
+    CANDIDATES_MEASURED.with(|c| c.get())
+}
+
+#[test]
+fn the_galloping_search_finds_what_a_bisection_finds() {
+    for upper in 0..40usize {
+        for answer in 0..=upper {
+            for start in 0..=upper + 3 {
+                let mut calls = 0usize;
+                let got = largest_fitting(upper, start, &mut |k| {
+                    assert!(k > 0 && k <= upper, "probe {k} outside 1..={upper}");
+                    calls += 1;
+                    k <= answer
+                });
+                assert_eq!(got, answer, "upper {upper} answer {answer} start {start}");
+                assert_eq!(got, bisect_fitting(upper, &mut |k| k <= answer));
+                if start == answer {
+                    assert!(calls <= 2, "an exact estimate costs <= 2 calls: {calls}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_c24_read_cut_is_the_exact_search_cut_with_a_few_measurements() {
+    let source = rust_source("ctx", 5_500);
+    let payload = read_payload(&source);
+    let args = r#"{"path":"src/agent/context.rs"}"#;
+    for budget in [300, 700, 1_500, 2_500, 4_000] {
+        let mut fast = String::new();
+        let fast_calls = candidates_measured(|| {
+            fast = truncate_result("file_read", args, &payload, budget);
+        });
+        let mut exact = String::new();
+        let exact_calls = candidates_measured(|| {
+            exact = truncate_result_bisect("file_read", args, &payload, budget);
+        });
+        assert_eq!(fast, exact, "same cut at {budget}");
+        assert!(
+            estimate_content_tokens(&fast) <= budget,
+            "never over {budget}"
+        );
+        assert!(
+            fast_calls <= 6 && fast_calls < exact_calls,
+            "{budget}: {fast_calls} whole candidates measured (bisection: {exact_calls})"
+        );
+    }
+}
+
+#[test]
+fn the_cut_measures_a_bounded_number_of_candidates_whatever_the_read_size() {
+    // No repeated full-prefix tokenization: the number of whole candidates
+    // measured does not grow with the read (the bisection's grows with
+    // log2 of its line count), so the work is linear in the read.
+    let args = r#"{"path":"src/agent/verification.rs"}"#;
+    let mut counts = Vec::new();
+    for tokens in [5_500, 35_000] {
+        let payload = read_payload(&rust_source("v", tokens));
+        let budget = tokens / 2;
+        let mut cut = String::new();
+        let calls = candidates_measured(|| {
+            cut = truncate_result("file_read", args, &payload, budget);
+        });
+        let mut exact = String::new();
+        let exact_calls = candidates_measured(|| {
+            exact = truncate_result_bisect("file_read", args, &payload, budget);
+        });
+        assert_eq!(cut, exact, "{tokens}: same cut");
+        assert!(estimate_content_tokens(&cut) <= budget);
+        assert!(calls <= 6, "{tokens}: {calls} candidates measured");
+        assert!(
+            calls < exact_calls,
+            "{tokens}: {calls} measured, bisection {exact_calls}"
+        );
+        eprintln!("{tokens}-token read: {calls} candidates measured (bisection {exact_calls})");
+        counts.push(calls);
+    }
+    assert!(counts[1] <= counts[0] + 2, "{counts:?}");
+}
+
+#[test]
+fn rust_source_matches_the_append_and_measure_loop() {
+    for target in [800, 5_500] {
+        let mut out = String::from("use std::collections::HashMap;\n\n");
+        let mut i = 0usize;
+        while estimate_content_tokens(&out) < target {
+            out.push_str(&format!(
+                "/// Doc for s_{i}.\npub fn s_{i}(input: &str) -> usize {{\n    let mut \
+                 total = 0usize;\n    for (n, ch) in input.chars().enumerate() {{\n        if \
+                 ch.is_alphanumeric() {{\n            total += n % 7;\n        }}\n    }}\n    \
+                 total + {i}\n}}\n\n"
+            ));
+            i += 1;
+        }
+        assert_eq!(rust_source("s", target), out, "{target}");
+    }
 }

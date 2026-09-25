@@ -460,6 +460,136 @@ fn fit_symbols(mut stub: Value, symbols: &[(usize, String)], max_tokens: usize) 
     }
 }
 
+/// The largest `k` in `0..=upper` for which `fits(k)` holds, for a
+/// monotone `fits` (`fits(0)` is assumed, never called), starting from the
+/// estimate `start`: gallop from `start` until the boundary is bracketed,
+/// then bisect inside the bracket. The answer is the one bisecting all of
+/// `0..=upper` gives, but in O(log |start - answer|) calls instead of
+/// O(log upper) — and every call measures a whole candidate (a
+/// 35k-token read's cut re-tokenized ~70-140k chars per bisection step).
+fn largest_fitting(upper: usize, start: usize, fits: &mut dyn FnMut(usize) -> bool) -> usize {
+    let start = start.min(upper);
+    let (mut lo, mut hi);
+    if start == 0 || fits(start) {
+        (lo, hi) = (start, upper);
+        let mut step = 1usize;
+        while lo < hi {
+            let probe = lo.saturating_add(step).min(hi);
+            if fits(probe) {
+                lo = probe;
+                step = step.saturating_mul(2);
+            } else {
+                hi = probe - 1;
+                break;
+            }
+        }
+    } else {
+        (lo, hi) = (0, start - 1);
+        let mut step = 1usize;
+        while lo < hi {
+            let probe = (hi + 1).saturating_sub(step);
+            if probe == 0 {
+                break;
+            }
+            if fits(probe) {
+                lo = probe;
+                break;
+            }
+            hi = probe - 1;
+            step = step.saturating_mul(2);
+        }
+    }
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if fits(mid) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
+}
+
+/// The plain bisection [`largest_fitting`] must agree with (tests).
+#[cfg(test)]
+fn bisect_fitting(upper: usize, fits: &mut dyn FnMut(usize) -> bool) -> usize {
+    let (mut lo, mut hi) = (0usize, upper);
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if fits(mid) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Whole candidates measured by the prefix searches (tests only).
+    static CANDIDATES_MEASURED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// [`estimate_content_tokens`] of one whole search candidate (counted in
+/// tests).
+fn measure_candidate(text: &str) -> usize {
+    #[cfg(test)]
+    CANDIDATES_MEASURED.with(|c| c.set(c.get() + 1));
+    estimate_content_tokens(text)
+}
+
+/// The largest `k` in `0..=upper` whose candidate built from the first `k`
+/// of `lines` measures at most `budget` (`measure(k)` = measured tokens of
+/// that candidate, monotone in `k`): the same `k` a bisection of the whole
+/// range finds, with few measurements.
+///
+/// The start is estimated, not measured: the wrapper (`k = 0`) is measured
+/// once, the lines are costed at `tokens_per_byte` (the content's measured
+/// rate), and one measured candidate at that estimate corrects the rate
+/// (JSON escaping, numbering and calibration make the wrapped rate differ)
+/// before [`largest_fitting`] gallops from the corrected estimate. Every
+/// measurement is memoized.
+fn largest_fitting_prefix(
+    lines: &[&str],
+    upper: usize,
+    budget: usize,
+    tokens_per_byte: f64,
+    measure: &mut dyn FnMut(usize) -> usize,
+) -> usize {
+    let upper = upper.min(lines.len());
+    let mut prefix_bytes = Vec::with_capacity(upper + 1);
+    prefix_bytes.push(0usize);
+    for line in &lines[..upper] {
+        prefix_bytes.push(prefix_bytes.last().copied().unwrap_or(0) + line.len() + 1);
+    }
+    let fixed = measure(0);
+    let estimate = |rate: f64| -> usize {
+        let room = budget.saturating_sub(fixed) as f64;
+        prefix_bytes
+            .iter()
+            .rposition(|&b| b as f64 * rate <= room)
+            .unwrap_or(0)
+    };
+    let mut memo: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    let mut measured = |k: usize, measure: &mut dyn FnMut(usize) -> usize| -> usize {
+        *memo.entry(k).or_insert_with(|| measure(k))
+    };
+    let first = estimate(tokens_per_byte);
+    let start = if first > 0 {
+        let tokens = measured(first, measure);
+        let rate = tokens.saturating_sub(fixed) as f64 / prefix_bytes[first].max(1) as f64;
+        if rate > 0.0 {
+            estimate(rate)
+        } else {
+            first
+        }
+    } else {
+        first
+    };
+    largest_fitting(upper, start, &mut |k| measured(k, measure) <= budget)
+}
+
 /// The longest char prefix of `text` measuring at most `max_tokens`.
 fn head_within(text: &str, max_tokens: usize) -> String {
     if max_tokens == 0 {
@@ -470,16 +600,11 @@ fn head_within(text: &str, max_tokens: usize) -> String {
     }
     let chars: Vec<char> = text.chars().collect();
     let guess = chars.len() * max_tokens / estimate_content_tokens(text).max(1);
-    let (mut lo, mut hi) = (0usize, chars.len().min(guess * 5 / 4 + 16));
-    while lo < hi {
-        let mid = (lo + hi).div_ceil(2);
+    let upper = chars.len().min(guess * 5 / 4 + 16);
+    let lo = largest_fitting(upper, guess, &mut |mid| {
         let candidate: String = chars[..mid].iter().collect();
-        if estimate_content_tokens(&candidate) <= max_tokens {
-            lo = mid;
-        } else {
-            hi = mid - 1;
-        }
-    }
+        measure_candidate(&candidate) <= max_tokens
+    });
     chars[..lo].iter().collect()
 }
 
@@ -487,6 +612,29 @@ fn head_within(text: &str, max_tokens: usize) -> String {
 /// `file_read` keeps whole leading lines and names the lines that are and
 /// are not shown; anything else keeps a measured head.
 pub(crate) fn truncate_result(name: &str, args: &str, payload: &str, max_tokens: usize) -> String {
+    truncate_result_with(name, args, payload, max_tokens, false)
+}
+
+/// [`truncate_result`] with the plain bisection it must agree with (tests).
+#[cfg(test)]
+pub(crate) fn truncate_result_bisect(
+    name: &str,
+    args: &str,
+    payload: &str,
+    max_tokens: usize,
+) -> String {
+    truncate_result_with(name, args, payload, max_tokens, true)
+}
+
+fn truncate_result_with(
+    name: &str,
+    args: &str,
+    payload: &str,
+    max_tokens: usize,
+    bisect: bool,
+) -> String {
+    #[cfg(not(test))]
+    let _ = bisect;
     let args_v: Value = serde_json::from_str(args).unwrap_or_default();
     let parsed = serde_json::from_str::<Value>(payload).ok();
     if name == "file_read" {
@@ -523,20 +671,33 @@ pub(crate) fn truncate_result(name: &str, args: &str, payload: &str, max_tokens:
                 })
                 .to_string()
             };
-            // Largest whole-line prefix that fits (binary search, measured),
-            // bounded above by a proportional guess so the search measures
-            // short strings.
+            // Largest whole-line prefix that fits (measured), bounded above
+            // by a proportional guess so the search measures short strings.
+            // The search starts at an arithmetic estimate (the wrapper
+            // measured once, the lines at the content's measured tokens per
+            // byte) and measures only around it; the cut is the one a
+            // bisection of the whole range finds.
             let total_tokens = estimate_content_tokens(content).max(1);
             let guess = lines.len() * max_tokens / total_tokens;
-            let (mut lo, mut hi) = (0usize, lines.len().min(guess * 5 / 4 + 8));
-            while lo < hi {
-                let mid = (lo + hi).div_ceil(2);
-                if estimate_content_tokens(&build(mid)) <= max_tokens {
-                    lo = mid;
+            let upper = lines.len().min(guess * 5 / 4 + 8);
+            #[cfg(test)]
+            if bisect {
+                let lo = bisect_fitting(upper, &mut |keep| {
+                    measure_candidate(&build(keep)) <= max_tokens
+                });
+                return if lo > 0 {
+                    build(lo)
                 } else {
-                    hi = mid - 1;
-                }
+                    build_stub(name, args, payload, max_tokens, None)
+                };
             }
+            let lo = largest_fitting_prefix(
+                &lines,
+                upper,
+                max_tokens,
+                total_tokens as f64 / content.len().max(1) as f64,
+                &mut |keep| measure_candidate(&build(keep)),
+            );
             if lo > 0 {
                 return build(lo);
             }
@@ -653,15 +814,16 @@ pub(crate) fn chunk_whole_read(payload: &str, room: usize) -> Option<String> {
     // The largest whole-line prefix that fits next to a full-share index
     // (binary search, measured) ...
     let reserve = fit_symbols(&all_symbols);
-    let (mut lo, mut hi) = (0usize, lines.len() - 1);
-    while lo < hi {
-        let mid = (lo + hi).div_ceil(2);
-        if estimate_content_tokens(&build(mid, &all_symbols, reserve).to_string()) <= room {
-            lo = mid;
-        } else {
-            hi = mid - 1;
-        }
-    }
+    // Started at an arithmetic estimate (see `truncate_result`); the same
+    // prefix a bisection of the whole range finds.
+    let raw_lines: Vec<&str> = lines.iter().map(|l| l.trim_end_matches('\n')).collect();
+    let lo = largest_fitting_prefix(
+        &raw_lines,
+        lines.len() - 1,
+        room,
+        estimate_content_tokens(&raw).max(1) as f64 / raw.len().max(1) as f64,
+        &mut |mid| measure_candidate(&build(mid, &all_symbols, reserve).to_string()),
+    );
     if lo == 0 {
         return None;
     }
