@@ -922,6 +922,27 @@ pub(crate) fn shell_command_is_observational(command: &str) -> bool {
         return false;
     }
 
+    // `tsc --noEmit` type-checks without writing. Plain `tsc` emits JS, so
+    // only the no-emit form is read-only, and never together with the flags
+    // that still write build info (`--build`/`-b`, `--incremental`,
+    // `--tsBuildInfoFile`, `--generateTrace`). Counting it as a mutation
+    // bumped the mutation sequence on every type-check (2026-09-25 audit:
+    // `tsc --noEmit` at steps 6, 8 and 17 of one run).
+    let tsc_args = match words.as_slice() {
+        ["tsc", rest @ ..] | ["npx", "tsc", rest @ ..] => Some(rest),
+        _ => None,
+    };
+    if let Some(rest) = tsc_args {
+        let writes_build_info = rest.iter().any(|word| {
+            matches!(*word, "-b" | "--build" | "--incremental")
+                || word.starts_with("--tsbuildinfofile")
+                || word.starts_with("--generatetrace")
+        });
+        if rest.contains(&"--noemit") && !writes_build_info {
+            return true;
+        }
+    }
+
     if words.first().copied() == Some("wmctrl") {
         let has_mutating = words[1..].iter().any(|word| {
             word.starts_with("-r")

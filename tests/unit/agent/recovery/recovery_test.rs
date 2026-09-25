@@ -422,11 +422,10 @@ async fn val083_post_edit_reverification_is_not_a_repeat() {
         blocked.is_empty(),
         "no turn of the recorded run is a loop: {blocked:?}"
     );
-    // The recorded run: tsc at turns 6 and 8 (each counted as a mutation by
-    // the shell classifier) left the last pass at #3, turn 11's edit moved
-    // the tree to #4. Here turn 14's tsc also ran (#5), and turn 17's
-    // `npx tsc` is counted the same way (#6); `npm test` is not.
-    assert_eq!(agent.mutation_sequence, 6);
+    // `tsc --noEmit` / `npx tsc --noEmit` are read-only checks, so only the
+    // real edits advance the sequence: the initial write (#1) and turn 11's
+    // edit (#2). The recorded 0.8.2 run counted every tsc as a mutation (#6).
+    assert_eq!(agent.mutation_sequence, 2);
 }
 
 #[tokio::test]
@@ -437,8 +436,8 @@ async fn val083_same_check_same_revision_is_still_a_loop() {
     replay_val083(&mut agent);
     // After the replay, tsc has run once since turn 11's edit (turn 14). Two
     // more runs with no edit in between are the true loop: same call, same
-    // state — even though the shell classifier counts each tsc as a mutation
-    // and advances `mutation_sequence`.
+    // state. `tsc --noEmit` writes nothing, so it does not advance the
+    // mutation sequence either.
     let fixture: serde_json::Value = serde_json::from_str(VAL083_TS_GUARD_SEQUENCE).unwrap();
     let tsc = vec![val083_call(&fixture["turns"][0]["calls"][0])];
     let args: serde_json::Value = serde_json::from_str(&tsc[0].1).unwrap();
@@ -449,9 +448,8 @@ async fn val083_same_check_same_revision_is_still_a_loop() {
     let before = agent.mutation_sequence;
     agent.note_tool_call_lifecycle("shell_exec", &args, &tsc[0].1, true, r#"{"exit_code":0}"#);
     assert_eq!(
-        agent.mutation_sequence,
-        before + 1,
-        "precondition: the classifier counts tsc as a mutation"
+        agent.mutation_sequence, before,
+        "a no-emit type-check is not a mutation"
     );
     let msg = agent
         .detect_repetition(&tsc)

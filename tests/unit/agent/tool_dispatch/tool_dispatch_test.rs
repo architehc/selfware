@@ -7813,3 +7813,26 @@ async fn file_read_retry_probe_never_reveals_outside_paths() {
     }
     server.stop().await;
 }
+
+#[test]
+fn tsc_no_emit_is_observational_but_emitting_tsc_is_not() {
+    // A type-check that writes nothing must not advance the mutation
+    // sequence (2026-09-25 audit); an emitting or build-info-writing tsc must.
+    assert!(shell_command_is_observational("tsc --noEmit"));
+    assert!(shell_command_is_observational(
+        "npx tsc --noEmit -p tsconfig.json"
+    ));
+    assert!(shell_command_is_observational(
+        "tsc --noEmit --strict src/a.ts"
+    ));
+    assert!(!shell_command_is_observational("tsc"));
+    assert!(!shell_command_is_observational("npx tsc -p tsconfig.json"));
+    assert!(!shell_command_is_observational(
+        "tsc --noEmit --incremental"
+    ));
+    assert!(!shell_command_is_observational("tsc -b --noEmit"));
+    assert!(!shell_command_is_observational("tsc --noEmit > out.txt"));
+    assert!(!shell_command_is_observational(
+        "tsc --noEmit && rm -rf dist"
+    ));
+}
