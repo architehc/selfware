@@ -5,10 +5,13 @@
 endpoint = "https://llm.selfware.design/v1"
 api_key = "EMPTY"
 model = "qwen38-flash-next"
-max_tokens = 65536
-# Cap context length at 350k tokens to avoid the 60s gateway/reverse-proxy timeout cliff
-# during prompt prefill on 1M context windows.
-context_length = 350000
+# max_tokens and context_length are deliberately NOT set here: the built-in
+# qwen38 profile supplies the values measured against this endpoint
+# (context_length 163,840, max_tokens 24,576, agent.max_call_secs 600; see
+# docs/model-playbook.md). Explicit values here override the profile — the
+# earlier 350,000 window let prompts grow past what the server serves
+# (174,897 prompt tokens observed against 163,840) and the reads that fell
+# off were lost server-side. Set them only if you have measured otherwise.
 
 [extra_body.chat_template_kwargs]
 enable_thinking = true

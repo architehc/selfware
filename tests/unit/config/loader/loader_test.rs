@@ -3405,3 +3405,18 @@ fn test_config_load_qwen38_max_call_secs_scales_with_explicit_max_tokens() {
     assert_eq!(config3.max_tokens, 24_576);
     assert_eq!(config3.agent.max_call_secs, Some(600));
 }
+
+#[test]
+fn tracked_llm_selfware_design_config_uses_the_measured_qwen38_profile() {
+    // The tracked endpoint config must not pin context_length / max_tokens:
+    // explicit values override the profile measured against this endpoint
+    // (a 350,000 window let prompts outgrow what the server serves).
+    let _guard = clear_env();
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("selfware-llm-selfware-design.toml");
+    let config = Config::load(Some(path.to_str().unwrap())).unwrap();
+    assert_eq!(config.model, "qwen38-flash-next");
+    assert_eq!(config.context_length, 163_840, "profile context_length");
+    assert_eq!(config.max_tokens, 24_576, "profile max_tokens");
+    assert_eq!(config.agent.max_call_secs, Some(600), "profile call cap");
+}
