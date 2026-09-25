@@ -103,6 +103,12 @@ impl Agent {
     ) {
         if success && tool_call_is_mutating(name, args) {
             self.note_mutating_tool_call();
+            // A check that the classifier counts as mutating (`tsc`) does
+            // not change what the repetition guard is looking at; see
+            // `repetition_guard_revision`.
+            if !tool_call_is_verification(name, args_str) {
+                self.repetition_guard_revision += 1;
+            }
             self.note_mutated_paths(name, args);
             if tool_call_writes_file(name) {
                 self.has_written_any_file = true;

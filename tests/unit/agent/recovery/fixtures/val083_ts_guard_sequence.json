@@ -1,0 +1,123 @@
+{
+  "source": "val083 ts run (batch 9a051775), audit 2026-09-25 section 4: evidence.json verification_sequence; reasons dropped, calls verbatim. Starting sequence from stderr.txt: step 4 file_multi_edit is the only mutation before turn 6 (mutating_tools_so_far=1)",
+  "mutation_sequence_before_turn_6": 1,
+  "turns": [
+    {
+      "turn": 6,
+      "decision": "executed_tools",
+      "calls": [
+        {
+          "name": "shell_exec",
+          "command": "tsc --noEmit --strict --target ES2020 --moduleResolution node src/inventory.ts src/format.ts",
+          "paths": null
+        }
+      ]
+    },
+    {
+      "turn": 8,
+      "decision": "executed_tools",
+      "calls": [
+        {
+          "name": "shell_exec",
+          "command": "tsc --noEmit --strict --target ES2020 --moduleResolution node src/inventory.ts src/format.ts",
+          "paths": null
+        }
+      ]
+    },
+    {
+      "turn": 9,
+      "decision": "refused",
+      "calls": []
+    },
+    {
+      "turn": 10,
+      "decision": "executed_tools",
+      "calls": [
+        {
+          "name": "grep_search",
+          "command": null,
+          "paths": "src"
+        }
+      ]
+    },
+    {
+      "turn": 11,
+      "decision": "executed_tools",
+      "calls": [
+        {
+          "name": "file_multi_edit",
+          "command": null,
+          "paths": [
+            "src/format.ts",
+            "src/inventory.ts"
+          ]
+        }
+      ]
+    },
+    {
+      "turn": 12,
+      "decision": "executed_tools",
+      "calls": [
+        {
+          "name": "file_read",
+          "command": null,
+          "paths": "src/format.ts"
+        }
+      ]
+    },
+    {
+      "turn": 13,
+      "decision": "executed_tools",
+      "calls": [
+        {
+          "name": "file_read",
+          "command": null,
+          "paths": "src/inventory.ts"
+        }
+      ]
+    },
+    {
+      "turn": 14,
+      "decision": "stopped_before_dispatch",
+      "calls": [
+        {
+          "name": "shell_exec",
+          "command": "tsc --noEmit --strict --target ES2020 --moduleResolution node src/inventory.ts src/format.ts",
+          "paths": null
+        }
+      ]
+    },
+    {
+      "turn": 15,
+      "decision": "refused",
+      "calls": []
+    },
+    {
+      "turn": 16,
+      "decision": "executed_tools",
+      "calls": [
+        {
+          "name": "shell_exec",
+          "command": "npm test",
+          "paths": null
+        }
+      ]
+    },
+    {
+      "turn": 17,
+      "decision": "executed_tools",
+      "calls": [
+        {
+          "name": "shell_exec",
+          "command": "npx tsc --noEmit --strict --target ES2020 --moduleResolution node src/inventory.ts src/format.ts",
+          "paths": null
+        }
+      ]
+    },
+    {
+      "turn": 18,
+      "decision": "final_answer",
+      "calls": []
+    }
+  ]
+}

@@ -843,6 +843,14 @@ pub struct Agent {
     recent_tool_calls: VecDeque<(String, u64)>,
     /// Recent per-step tool batches for oscillation detection.
     recent_tool_batches: VecDeque<Vec<(String, u64)>>,
+    /// Workspace revision as the repetition guard sees it: advanced by every
+    /// successful mutation EXCEPT one made by a verification call itself.
+    ///
+    /// `mutation_sequence` cannot serve: the shell classifier counts
+    /// `tsc --noEmit` as a mutation (val083 ts: steps 6, 8, 17 each bumped
+    /// it), so a check re-run with no edit in between would read as a new
+    /// revision every time and a true loop would never be caught.
+    repetition_guard_revision: usize,
     /// Per-turn progress signals (outcome + call signatures) for the
     /// adaptive iteration-budget check — recorded per executed batch.
     recent_turn_progress: VecDeque<loop_control::TurnProgress>,
@@ -1776,6 +1784,7 @@ To call a tool, use this EXACT XML structure:
             self_healing,
             recent_tool_calls: VecDeque::new(),
             recent_tool_batches: VecDeque::new(),
+            repetition_guard_revision: 0,
             recent_turn_progress: VecDeque::new(),
             redo_stack: Vec::new(),
             recent_failed_tool_attempts: VecDeque::new(),
@@ -3346,6 +3355,7 @@ To call a tool, use this EXACT XML structure:
         self.seen_read_targets.clear();
         self.recent_tool_calls.clear();
         self.recent_tool_batches.clear();
+        self.repetition_guard_revision = 0;
         self.recent_turn_progress.clear();
         self.recent_failed_tool_attempts.clear();
         self.escalated_edit_args_hashes.clear();

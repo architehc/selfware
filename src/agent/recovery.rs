@@ -899,7 +899,18 @@ Try ONE of these strategies:\
     }
 
     /// Track tool calls and detect repetition loops.
-    /// Returns `Some(message)` if the same tool+args has been called too many times recently.
+    /// Returns `Some(message)` if the same call has been made too many times
+    /// recently against the same workspace revision.
+    ///
+    /// A loop is the same call on the same state. Observing and verifying
+    /// calls (reads, searches, type-checks, tests) are fingerprinted together
+    /// with the revision they observe (`repetition_guard_revision`), so
+    /// re-running the same check after an edit is new work, not a repeat.
+    /// Without that, the required post-edit re-verification was blocked here
+    /// and the completion gate then refused the stale pass (val083 ts run,
+    /// turns 6/8/11/14/15). Mutating calls keep the plain fingerprint: an edit
+    /// re-applied with the same arguments advances the revision each time but
+    /// is still a loop.
     pub(super) fn detect_repetition(
         &mut self,
         tool_calls: &[super::execution::CollectedToolCall],
@@ -907,11 +918,10 @@ Try ONE of these strategies:\
         const MAX_REPEATS: usize = 3;
         const WINDOW_SIZE: usize = 10;
 
+        let revision = self.repetition_guard_revision;
         let batch_signatures: Vec<_> = tool_calls
             .iter()
-            .map(|(name, args_str, _)| {
-                (name.clone(), super::tool_dispatch::hash_tool_args(args_str))
-            })
+            .map(|(name, args_str, _)| repetition_signature(name, args_str, revision))
             .collect();
 
         for sig in &batch_signatures {
@@ -1187,6 +1197,32 @@ fn _extract_quoted_string(content: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The repetition guard's fingerprint for one call: tool name plus argument
+/// hash, with the observed revision folded in for calls that only observe
+/// state.
+///
+/// A call that observes or verifies answers a question about the tree at
+/// `revision`; the same call at a later revision asks a new question. Every
+/// other call keeps the plain `(name, args)` fingerprint: an edit advances
+/// the revision on every run, so folding the revision in would hide a true
+/// re-apply loop. A verification the shell classifier also counts as
+/// mutating (`tsc`) is still an observer here: it does not advance
+/// `revision` (see `repetition_guard_revision`), so re-running it with no
+/// edit in between keeps the same fingerprint.
+pub(super) fn repetition_signature(name: &str, args_str: &str, revision: usize) -> (String, u64) {
+    use std::hash::{Hash, Hasher};
+    let args_hash = super::tool_dispatch::hash_tool_args(args_str);
+    let observes = super::tool_dispatch::tool_call_is_observational(name, args_str)
+        || super::tool_dispatch::tool_call_is_verification(name, args_str);
+    if !observes {
+        return (name.to_string(), args_hash);
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    args_hash.hash(&mut hasher);
+    revision.hash(&mut hasher);
+    (name.to_string(), hasher.finish())
 }
 
 #[cfg(test)]

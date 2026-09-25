@@ -348,3 +348,159 @@ fn empty_response_nudge_matches_what_the_response_was() {
         "{empty}"
     );
 }
+
+// =========================================================================
+// Repetition guard vs. revisions (audit 2026-09-25 §4, val083 ts run)
+// =========================================================================
+
+const VAL083_TS_GUARD_SEQUENCE: &str = include_str!("fixtures/val083_ts_guard_sequence.json");
+
+/// The recorded call of one turn, rebuilt as a collected tool call.
+fn val083_call(call: &serde_json::Value) -> crate::agent::execution::CollectedToolCall {
+    let name = call["name"].as_str().unwrap().to_string();
+    let args = match name.as_str() {
+        "shell_exec" => serde_json::json!({ "command": call["command"] }),
+        "file_read" => serde_json::json!({ "path": call["paths"] }),
+        "grep_search" => {
+            serde_json::json!({ "pattern": "describe|lowStock", "path": call["paths"] })
+        }
+        "file_multi_edit" => serde_json::json!({
+            "edits": call["paths"].as_array().unwrap().iter()
+                .map(|p| serde_json::json!({ "path": p, "old_str": "a", "new_str": "b" }))
+                .collect::<Vec<_>>()
+        }),
+        other => panic!("unexpected tool in fixture: {other}"),
+    };
+    (name, args.to_string(), None)
+}
+
+/// Replay the val083 ts turn sequence through the repetition guard the way
+/// the dispatcher does: guard first, then (when not blocked) the lifecycle
+/// accounting that advances `mutation_sequence` on a landed edit. Returns the
+/// turns the guard blocked.
+fn replay_val083(agent: &mut crate::agent::Agent) -> Vec<u64> {
+    let fixture: serde_json::Value = serde_json::from_str(VAL083_TS_GUARD_SEQUENCE).unwrap();
+    for _ in 0..fixture["mutation_sequence_before_turn_6"].as_u64().unwrap() {
+        agent.note_mutating_tool_call();
+    }
+    let mut blocked = Vec::new();
+    for turn in fixture["turns"].as_array().unwrap() {
+        let calls: Vec<_> = turn["calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(val083_call)
+            .collect();
+        if calls.is_empty() {
+            continue;
+        }
+        if agent.detect_repetition(&calls).is_some() {
+            blocked.push(turn["turn"].as_u64().unwrap());
+            continue;
+        }
+        for (name, args_str, _) in &calls {
+            let args: serde_json::Value = serde_json::from_str(args_str).unwrap();
+            agent.note_tool_call_lifecycle(name, &args, args_str, true, r#"{"exit_code":0}"#);
+        }
+    }
+    blocked
+}
+
+#[tokio::test]
+async fn val083_post_edit_reverification_is_not_a_repeat() {
+    let mut agent = crate::agent::Agent::new(crate::config::Config::default())
+        .await
+        .unwrap();
+    let blocked = replay_val083(&mut agent);
+    // Recorded run: turn 14 (the same tsc after turn 11's edit) was blocked
+    // before dispatch. With the revision in the fingerprint it runs.
+    assert!(
+        !blocked.contains(&14),
+        "post-edit tsc re-run was blocked as a repeat: {blocked:?}"
+    );
+    assert!(
+        blocked.is_empty(),
+        "no turn of the recorded run is a loop: {blocked:?}"
+    );
+    // The recorded run: tsc at turns 6 and 8 (each counted as a mutation by
+    // the shell classifier) left the last pass at #3, turn 11's edit moved
+    // the tree to #4. Here turn 14's tsc also ran (#5), and turn 17's
+    // `npx tsc` is counted the same way (#6); `npm test` is not.
+    assert_eq!(agent.mutation_sequence, 6);
+}
+
+#[tokio::test]
+async fn val083_same_check_same_revision_is_still_a_loop() {
+    let mut agent = crate::agent::Agent::new(crate::config::Config::default())
+        .await
+        .unwrap();
+    replay_val083(&mut agent);
+    // After the replay, tsc has run once since turn 11's edit (turn 14). Two
+    // more runs with no edit in between are the true loop: same call, same
+    // state — even though the shell classifier counts each tsc as a mutation
+    // and advances `mutation_sequence`.
+    let fixture: serde_json::Value = serde_json::from_str(VAL083_TS_GUARD_SEQUENCE).unwrap();
+    let tsc = vec![val083_call(&fixture["turns"][0]["calls"][0])];
+    let args: serde_json::Value = serde_json::from_str(&tsc[0].1).unwrap();
+    assert!(
+        agent.detect_repetition(&tsc).is_none(),
+        "2nd run, same state"
+    );
+    let before = agent.mutation_sequence;
+    agent.note_tool_call_lifecycle("shell_exec", &args, &tsc[0].1, true, r#"{"exit_code":0}"#);
+    assert_eq!(
+        agent.mutation_sequence,
+        before + 1,
+        "precondition: the classifier counts tsc as a mutation"
+    );
+    let msg = agent
+        .detect_repetition(&tsc)
+        .expect("3rd identical tsc with no edit in between must be caught");
+    assert!(msg.contains("STUCK LOOP DETECTED"));
+}
+
+#[tokio::test]
+async fn reapplied_identical_write_is_a_loop_even_though_it_advances_the_revision() {
+    let mut agent = crate::agent::Agent::new(crate::config::Config::default())
+        .await
+        .unwrap();
+    let write: Vec<crate::agent::execution::CollectedToolCall> = vec![(
+        "file_write".to_string(),
+        r#"{"path":"src/format.ts","content":"same"}"#.to_string(),
+        None,
+    )];
+    let args: serde_json::Value = serde_json::from_str(&write[0].1).unwrap();
+    for _ in 0..2 {
+        assert!(agent.detect_repetition(&write).is_none());
+        agent.note_tool_call_lifecycle("file_write", &args, &write[0].1, true, "ok");
+    }
+    assert!(
+        agent.detect_repetition(&write).is_some(),
+        "the same write three times is a loop regardless of the revision it bumps"
+    );
+}
+
+#[test]
+fn repetition_signature_folds_revision_only_for_non_mutating_observers() {
+    let tsc = r#"{"command":"tsc --noEmit --strict src/inventory.ts"}"#;
+    assert_ne!(
+        repetition_signature("shell_exec", tsc, 3),
+        repetition_signature("shell_exec", tsc, 4),
+        "a verification at a new revision is a new fingerprint"
+    );
+    assert_eq!(
+        repetition_signature("shell_exec", tsc, 4),
+        repetition_signature("shell_exec", tsc, 4)
+    );
+    let read = r#"{"path":"src/format.ts"}"#;
+    assert_ne!(
+        repetition_signature("file_read", read, 3),
+        repetition_signature("file_read", read, 4)
+    );
+    let edit = r#"{"path":"a","old_str":"x","new_str":"y"}"#;
+    assert_eq!(
+        repetition_signature("file_edit", edit, 3),
+        repetition_signature("file_edit", edit, 4),
+        "mutating calls keep the plain fingerprint"
+    );
+}
