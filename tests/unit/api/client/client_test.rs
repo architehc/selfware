@@ -453,7 +453,7 @@ async fn retry_after_past_wall_deadline_never_posts_again() {
             drain_request(&mut socket).await;
             let body = "rate limited";
             let response = format!(
-                "HTTP/1.1 429 Too Many Requests\r\nContent-Type: text/plain\r\nRetry-After: 3\r\nContent-Length: {}\r\n\r\n{}",
+                "HTTP/1.1 429 Too Many Requests\r\nContent-Type: text/plain\r\nRetry-After: 3\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
                 body.len(),
                 body
             );
@@ -613,7 +613,7 @@ async fn profile_max_retries_zero_fails_fast_on_both_paths() {
             drain_request(&mut socket).await;
             let body = "server error";
             let response = format!(
-                "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
                 body.len(),
                 body
             );
