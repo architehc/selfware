@@ -1337,8 +1337,9 @@ fn emit_structured_result(
     run_result: &Result<()>,
     duration_ms: u64,
     answer: Option<String>,
+    baseline: &headless::PatchBaseline,
 ) -> Option<String> {
-    let result = build_session_result(agent, run_result, duration_ms, answer);
+    let result = build_session_result(agent, run_result, duration_ms, answer, baseline);
     headless::emit_result(&result, agent.grounding_status().as_ref())
 }
 
@@ -1362,6 +1363,7 @@ async fn run_resumed_agent(
     }
     let answer_capture = headless::AnswerCapture::new();
     agent = agent.with_event_emitter(std::sync::Arc::new(answer_capture.emitter()));
+    let baseline = patch_baseline_for(output_format);
     let run_result = agent.continue_execution().await;
     finish_resumed_run(
         &agent,
@@ -1370,6 +1372,7 @@ async fn run_resumed_agent(
         answer_capture.take(),
         quiet,
         output_format,
+        &baseline,
     );
     run_result
 }
@@ -1384,12 +1387,24 @@ fn finish_resumed_run(
     answer: Option<String>,
     quiet: bool,
     output_format: HeadlessOutputFormat,
+    baseline: &headless::PatchBaseline,
 ) -> Option<String> {
     print_resume_run_summary(agent, run_result, quiet, output_format);
     if is_structured_format(output_format) {
-        emit_structured_result(agent, run_result, duration_ms, answer)
+        emit_structured_result(agent, run_result, duration_ms, answer, baseline)
     } else {
         None
+    }
+}
+
+/// The task-start working-tree snapshot the structured result's patch is
+/// measured against. Only json / stream-json report a patch, so text runs
+/// skip the git work.
+fn patch_baseline_for(output_format: HeadlessOutputFormat) -> headless::PatchBaseline {
+    if is_structured_format(output_format) {
+        headless::PatchBaseline::capture()
+    } else {
+        headless::PatchBaseline::none()
     }
 }
 
@@ -2160,6 +2175,7 @@ pub async fn run() -> Result<()> {
         // capture emitter is attached before the run starts.
         let answer_capture = headless::AnswerCapture::new();
         agent = agent.with_event_emitter(std::sync::Arc::new(answer_capture.emitter()));
+        let baseline = patch_baseline_for(cli.output_format);
         let run_result = agent.run_task(&actual_prompt).await;
         let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -2180,7 +2196,13 @@ pub async fn run() -> Result<()> {
         }
 
         if is_structured {
-            emit_structured_result(&agent, &run_result, duration_ms, answer_capture.take());
+            emit_structured_result(
+                &agent,
+                &run_result,
+                duration_ms,
+                answer_capture.take(),
+                &baseline,
+            );
         } else if !cli.quiet
             && run_result.is_ok()
             && earns_task_complete_banner(&agent)
@@ -2253,6 +2275,7 @@ fn build_session_result(
     run_result: &Result<()>,
     duration_ms: u64,
     answer: Option<String>,
+    baseline: &headless::PatchBaseline,
 ) -> headless::SessionResult {
     // The process exits with this same code (src/main.rs), so the structured
     // record never disagrees with `$?` (130 on interrupt, 143 on SIGTERM, ...).
@@ -2277,7 +2300,9 @@ fn build_session_result(
     let num_turns = agent.turns_run();
     // A capture failure must NOT masquerade as a clean empty patch (0 bytes),
     // which would fool automated success metrics. Surface it instead.
-    let (patch, patch_capture_error) = match headless::capture_patch() {
+    // Measured from the task-start tree so pre-existing workspace edits are
+    // not reported as this run's patch.
+    let (patch, patch_capture_error) = match headless::capture_patch_since(baseline.tree()) {
         Ok(p) => (p, None),
         Err(e) => {
             eprintln!("warning: patch capture failed: {e}");
@@ -2286,6 +2311,13 @@ fn build_session_result(
     };
     let patch_bytes = patch.len();
     let patch_lines = patch.lines().count();
+    let files_changed = headless::patch_file_count(&patch);
+    let patch_baseline = if baseline.tree().is_some() {
+        headless::PATCH_BASELINE_TASK_START
+    } else {
+        headless::PATCH_BASELINE_HEAD
+    }
+    .to_string();
     let usage = agent.cumulative_token_usage().clone();
     let model = agent.model().to_string();
     // Prefer the agent's own failure mode; otherwise report a patch-capture
@@ -2323,6 +2355,8 @@ fn build_session_result(
         duration_ms,
         failure_mode,
         artifact_dir,
+        files_changed,
+        patch_baseline,
         answer,
         requirements_audit: agent.requirements_audit_status().map(|a| a.label()),
         partial: agent.partial_progress(run_result),
@@ -3118,6 +3152,7 @@ async fn handle_command(
             // the `-p` headless path for why this uses the event channel).
             let answer_capture = headless::AnswerCapture::new();
             agent = agent.with_event_emitter(std::sync::Arc::new(answer_capture.emitter()));
+            let baseline = patch_baseline_for(output_format);
             let run_result = agent.run_task(&task).await;
             let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -3136,7 +3171,13 @@ async fn handle_command(
             }
 
             if is_structured {
-                emit_structured_result(&agent, &run_result, duration_ms, answer_capture.take());
+                emit_structured_result(
+                    &agent,
+                    &run_result,
+                    duration_ms,
+                    answer_capture.take(),
+                    &baseline,
+                );
             } else if !quiet
                 && run_result.is_ok()
                 && earns_task_complete_banner(&agent)

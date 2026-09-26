@@ -49,6 +49,9 @@ pub struct SessionResult {
     /// same number as `turns` in the text run summary. Counts the whole
     /// task in this process, across in-process auto-continue segments.
     pub num_turns: usize,
+    /// Size of THIS run's patch: the diff between the working tree at task
+    /// start and at the end (see `patch_baseline`), so edits that were
+    /// already in the workspace are not counted.
     pub patch_bytes: usize,
     pub patch_lines: usize,
     pub usage: TokenUsage,
@@ -56,6 +59,16 @@ pub struct SessionResult {
     pub duration_ms: u64,
     pub failure_mode: Option<String>,
     pub artifact_dir: Option<PathBuf>,
+    /// Files in this run's patch (the `diff --git` entries counted in
+    /// `patch_bytes`).
+    #[serde(default)]
+    pub files_changed: usize,
+    /// What the patch is measured against: `task_start` (the working tree
+    /// when this run began — the patch is the run's own delta) or `head`
+    /// (no task-start snapshot could be taken; the patch is the whole
+    /// working tree vs `HEAD` and may include edits that predate the run).
+    #[serde(default)]
+    pub patch_baseline: String,
     /// What the agent concluded: the final assistant response, trimmed.
     ///
     /// `None` when the run ended without a text answer (never started, failed
@@ -322,8 +335,6 @@ impl EventEmitter for AnswerCaptureEmitter {
     }
 }
 
-/// Capture `git diff` from the current working directory, including newly
-/// added files and excluding selfware-internal scratch directories.
 /// Whether the repository in the current directory has a resolvable `HEAD`
 /// (i.e. at least one commit). Used to tell a legitimately-empty repo (no HEAD)
 /// from a genuine seeding failure.
@@ -338,14 +349,20 @@ fn head_exists() -> bool {
         .unwrap_or(false)
 }
 
-pub fn capture_patch() -> anyhow::Result<String> {
-    // Stage changes into a *temporary* git index so we never mutate the user's
-    // real `.git/index`. `GIT_INDEX_FILE` redirects `git add`/`git diff` at a
-    // throwaway index. We use a temp *directory* (not a pre-created temp file)
-    // because git rejects a zero-byte existing index file; the index file path
-    // inside the temp dir does not pre-exist, so git creates a fresh index.
-    // The TempDir auto-deletes the index on drop, keeping the user's real index
-    // (`git status` / `.git/index`) exactly as the user had it.
+/// The git empty-tree object: the diff base of a repository with no commits.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// Record the whole working tree (tracked edits AND untracked, non-ignored
+/// files) as a git tree object and return its id, without touching the
+/// user's real `.git/index`.
+///
+/// Changes are staged into a *temporary* index (`GIT_INDEX_FILE` redirects
+/// `git add`/`git write-tree` at a throwaway index). A temp *directory* is
+/// used (not a pre-created temp file) because git rejects a zero-byte
+/// existing index file; the index file inside the dir does not pre-exist, so
+/// git creates a fresh one. The `TempDir` deletes it on drop, leaving the
+/// user's index (`git status` / `.git/index`) exactly as it was.
+fn snapshot_worktree_tree() -> anyhow::Result<String> {
     let tmp_index_dir = tempfile::Builder::new()
         .prefix("selfware-index-")
         .tempdir()
@@ -354,8 +371,8 @@ pub fn capture_patch() -> anyhow::Result<String> {
 
     // Seed the temporary index from HEAD before staging. Without this the index
     // starts EMPTY, so `git add -A` — which skips paths matched by `.gitignore`
-    // — never re-adds tracked-but-ignored files, and `git diff --cached HEAD`
-    // then reports every one of them as a spurious deletion (the giant phantom
+    // — never re-adds tracked-but-ignored files, and a diff against HEAD then
+    // reports every one of them as a spurious deletion (the giant phantom
     // patch: files that exist and are committed, reported as removed). Seeding
     // from HEAD makes those files present in the temp index, so an unchanged
     // tracked-ignored file stays unchanged and only real working-tree edits
@@ -370,8 +387,7 @@ pub fn capture_patch() -> anyhow::Result<String> {
     // If seeding failed while a HEAD actually exists, the index would start
     // empty and every tracked-but-.gitignore'd file would show as a phantom
     // deletion — refuse rather than emit a bogus patch. A repo with no commits
-    // legitimately has no HEAD; there the empty index is correct and the
-    // diff-vs-HEAD below fails cleanly on its own.
+    // legitimately has no HEAD; there the empty index is correct.
     let seed_ok = matches!(read_tree, Ok(ref s) if s.success());
     if !seed_ok && head_exists() {
         anyhow::bail!("git read-tree HEAD failed while seeding the patch index");
@@ -388,25 +404,117 @@ pub fn capture_patch() -> anyhow::Result<String> {
         anyhow::bail!("git add -A failed while staging the patch");
     }
 
-    // A freshly `git init`-ed repo has no HEAD: `git diff --cached HEAD`
-    // fails there and a fully-successful headless task would be reported as
-    // patch_capture_failed. Diff against the standard empty-tree object
-    // instead, so a brand-new repo reports its staged files as additions (or
-    // an empty patch when nothing exists) rather than erroring. A genuine
-    // diff failure with a real HEAD still bails below.
-    let diff_base = if head_exists() {
-        "HEAD"
-    } else {
-        "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-    };
     let out = std::process::Command::new("git")
         .sanitized_env()
         .env("GIT_INDEX_FILE", &tmp_index)
+        .args(["write-tree"])
+        .output()
+        .map_err(|e| anyhow::anyhow!("running git write-tree: {}", e))?;
+    // The tree id is owned before the temp index is dropped & cleaned up.
+    drop(tmp_index_dir);
+    if !out.status.success() {
+        anyhow::bail!(
+            "git write-tree failed (status={:?}): {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let tree = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if tree.is_empty() {
+        anyhow::bail!("git write-tree printed no tree id");
+    }
+    Ok(tree)
+}
+
+/// The working tree as it stood when a headless run started, so the final
+/// `patch_bytes`/`patch_lines`/`files_changed` measure only what THIS run
+/// changed.
+///
+/// Without it the patch was measured against `HEAD`: uncommitted edits
+/// already in the workspace (another session's work, the user's own WIP)
+/// were reported as this run's patch — a read-only question showed
+/// `"patch_bytes": 8204, "patch_lines": 177` (0.9.1 field report).
+#[derive(Debug, Clone, Default)]
+pub struct PatchBaseline {
+    /// Tree id of the task-start working tree; `None` when it could not be
+    /// recorded (not a git repository, git failure).
+    tree: Option<String>,
+}
+
+impl PatchBaseline {
+    /// Snapshot the current working tree. A failure is not fatal: the result
+    /// then falls back to diffing against `HEAD` and says so in
+    /// `patch_baseline`.
+    pub fn capture() -> Self {
+        match snapshot_worktree_tree() {
+            Ok(tree) => Self { tree: Some(tree) },
+            Err(e) => {
+                tracing::debug!("task-start patch baseline not recorded: {e}");
+                Self { tree: None }
+            }
+        }
+    }
+
+    /// No baseline: the patch is measured against `HEAD`.
+    pub fn none() -> Self {
+        Self { tree: None }
+    }
+
+    /// The recorded task-start tree id, if any.
+    pub fn tree(&self) -> Option<&str> {
+        self.tree.as_deref()
+    }
+}
+
+/// `SessionResult.patch_baseline` value when the patch is this run's delta
+/// from the task-start working tree.
+pub const PATCH_BASELINE_TASK_START: &str = "task_start";
+/// `SessionResult.patch_baseline` value when no task-start snapshot exists
+/// and the patch is the whole working tree measured against `HEAD` (it may
+/// include edits that predate the run).
+pub const PATCH_BASELINE_HEAD: &str = "head";
+
+/// Number of files a unified git patch touches (one `diff --git` header per
+/// file; content lines are always prefixed and base85 binary data contains
+/// no spaces, so the header cannot be mistaken).
+pub fn patch_file_count(patch: &str) -> usize {
+    patch
+        .lines()
+        .filter(|l| l.starts_with("diff --git "))
+        .count()
+}
+
+/// Capture `git diff` from the current working directory against `HEAD`,
+/// including newly added files and excluding selfware-internal scratch
+/// directories. See [`capture_patch_since`] for the per-run delta.
+#[cfg(test)]
+pub fn capture_patch() -> anyhow::Result<String> {
+    capture_patch_since(None)
+}
+
+/// Capture the working-tree patch relative to `baseline_tree` (a tree id from
+/// [`PatchBaseline`]), or relative to `HEAD` when `None`.
+///
+/// Both sides are whole-tree snapshots, so edits already present at the
+/// baseline cancel out and only the run's own changes (including new files,
+/// deletions and commits the run made) remain.
+pub fn capture_patch_since(baseline_tree: Option<&str>) -> anyhow::Result<String> {
+    let end_tree = snapshot_worktree_tree()?;
+    // A freshly `git init`-ed repo has no HEAD: diff against the standard
+    // empty-tree object instead, so a brand-new repo reports its files as
+    // additions (or an empty patch when nothing exists) rather than erroring.
+    let diff_base = match baseline_tree {
+        Some(tree) => tree,
+        None if head_exists() => "HEAD",
+        None => EMPTY_TREE,
+    };
+    let out = std::process::Command::new("git")
+        .sanitized_env()
         .args([
             "diff",
-            "--cached",
             "--binary",
             diff_base,
+            end_tree.as_str(),
             "--",
             ".",
             ":(exclude).selfware/**",
@@ -419,10 +527,6 @@ pub fn capture_patch() -> anyhow::Result<String> {
         ])
         .output()
         .map_err(|e| anyhow::anyhow!("running git diff: {}", e))?;
-
-    // `out.stdout` is owned (into memory) before the temp index is dropped &
-    // cleaned up below, so the captured patch survives the cleanup.
-    drop(tmp_index_dir);
 
     if !out.status.success() {
         anyhow::bail!(

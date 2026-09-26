@@ -2445,7 +2445,13 @@ async fn session_result_exit_status_matches_process_exit_code() {
             &run_result,
             crate::shutdown_reason(),
         ));
-        let result = build_session_result(&agent, &run_result, 5, None);
+        let result = build_session_result(
+            &agent,
+            &run_result,
+            5,
+            None,
+            &headless::PatchBaseline::none(),
+        );
         assert_eq!(result.exit_status, expected, "{:?}", run_result);
         assert_eq!(result.exit_status, expected_process);
     }
@@ -2498,14 +2504,29 @@ async fn resumed_run_emits_the_fresh_run_result_object() {
             &run_result,
             crate::shutdown_reason(),
         ));
-        let line = finish_resumed_run(&agent, &run_result, 7, None, false, format)
-            .expect("a structured resume must emit the result object");
+        let line = finish_resumed_run(
+            &agent,
+            &run_result,
+            7,
+            None,
+            false,
+            format,
+            &headless::PatchBaseline::none(),
+        )
+        .expect("a structured resume must emit the result object");
         let v: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["exit_status"], serde_json::json!(returned_code), "{line}");
         assert_eq!(returned_code, 143);
 
         // Same object shape as the fresh-run emitter.
-        let fresh = emit_structured_result(&agent, &run_result, 7, None).unwrap();
+        let fresh = emit_structured_result(
+            &agent,
+            &run_result,
+            7,
+            None,
+            &headless::PatchBaseline::none(),
+        )
+        .unwrap();
         let fresh: serde_json::Value = serde_json::from_str(&fresh).unwrap();
         let keys = |v: &serde_json::Value| {
             let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
@@ -2517,7 +2538,16 @@ async fn resumed_run_emits_the_fresh_run_result_object() {
 
     // Text output keeps the human summary and emits no JSON object.
     let ok: Result<()> = Ok(());
-    assert!(finish_resumed_run(&agent, &ok, 1, None, true, HeadlessOutputFormat::Text).is_none());
+    assert!(finish_resumed_run(
+        &agent,
+        &ok,
+        1,
+        None,
+        true,
+        HeadlessOutputFormat::Text,
+        &headless::PatchBaseline::none()
+    )
+    .is_none());
     server.stop().await;
 }
 

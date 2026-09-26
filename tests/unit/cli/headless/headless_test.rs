@@ -50,6 +50,8 @@ fn test_session_result_round_trip() {
         duration_ms: 30000,
         failure_mode: None,
         artifact_dir: Some(PathBuf::from("/tmp/artifacts")),
+        files_changed: 0,
+        patch_baseline: String::new(),
         answer: None,
         requirements_audit: None,
         partial: None,
@@ -85,6 +87,8 @@ fn test_session_result_with_failure_mode() {
         duration_ms: 5000,
         failure_mode: Some("timeout".to_string()),
         artifact_dir: None,
+        files_changed: 0,
+        patch_baseline: String::new(),
         answer: None,
         requirements_audit: None,
         partial: None,
@@ -111,6 +115,8 @@ fn test_session_result_json_fields() {
         duration_ms: 60000,
         failure_mode: Some("loop_guard".to_string()),
         artifact_dir: Some(PathBuf::from("/out")),
+        files_changed: 0,
+        patch_baseline: String::new(),
         answer: None,
         requirements_audit: None,
         partial: None,
@@ -362,6 +368,8 @@ fn test_emit_result_does_not_panic() {
         duration_ms: 0,
         failure_mode: None,
         artifact_dir: None,
+        files_changed: 0,
+        patch_baseline: String::new(),
         answer: None,
         requirements_audit: None,
         partial: None,
@@ -387,6 +395,8 @@ fn test_session_result_serializes_final_answer() {
         duration_ms: 12000,
         failure_mode: None,
         artifact_dir: None,
+        files_changed: 0,
+        patch_baseline: String::new(),
         answer: Some("Fixed the lint and verified with cargo test.".to_string()),
         requirements_audit: None,
         partial: None,
@@ -420,6 +430,8 @@ fn test_session_result_omits_answer_when_none() {
         duration_ms: 1,
         failure_mode: None,
         artifact_dir: None,
+        files_changed: 0,
+        patch_baseline: String::new(),
         answer: None,
         requirements_audit: None,
         partial: None,
@@ -1023,6 +1035,8 @@ fn cost_field_is_omitted_when_provider_reported_no_pricing() {
         duration_ms: 1,
         failure_mode: None,
         artifact_dir: None,
+        files_changed: 0,
+        patch_baseline: String::new(),
         answer: None,
         requirements_audit: None,
         partial: None,
@@ -1053,6 +1067,8 @@ fn cost_field_is_present_when_provider_priced_usage() {
         duration_ms: 1,
         failure_mode: None,
         artifact_dir: None,
+        files_changed: 0,
+        patch_baseline: String::new(),
         answer: None,
         requirements_audit: None,
         partial: None,
@@ -1279,6 +1295,8 @@ fn grounding_result() -> SessionResult {
         duration_ms: 1,
         failure_mode: None,
         artifact_dir: None,
+        files_changed: 0,
+        patch_baseline: String::new(),
         answer: Some("review".to_string()),
         requirements_audit: None,
         partial: None,
@@ -1388,4 +1406,84 @@ fn timeout_result_keeps_its_failure_keys_and_appends_the_labelled_partial() {
     // Round-trips for consumers.
     let de: SessionResult = serde_json::from_str(&json).unwrap();
     assert_eq!(de.partial, result.partial);
+}
+
+/// 0.9.1 field report: a read-only question reported `"patch_bytes": 8204,
+/// "patch_lines": 177` — another session's uncommitted edits, measured
+/// against HEAD. The patch is now the delta from the task-start working
+/// tree: edits (and untracked files) already present when the run began
+/// are not counted; the run's own edits — including further edits to an
+/// already-dirty file — are.
+#[test]
+fn capture_patch_since_reports_only_the_runs_own_changes() {
+    let tmp_dir = match make_temp_git_repo("selfware_cp_baseline") {
+        Some(d) => d,
+        None => {
+            eprintln!("Skipping: git not available");
+            return;
+        }
+    };
+    let _cleanup = TempDirCleanup(tmp_dir.clone());
+    let _guard = crate::test_support::CwdGuard::hold();
+    let original_dir = std::env::current_dir().unwrap();
+
+    // Pre-existing WIP from "another session": a tracked edit + a new file.
+    std::fs::write(tmp_dir.join("file.txt"), "line1\nline2\nwip-edit\n").unwrap();
+    std::fs::write(tmp_dir.join("wip.txt"), "someone else's work\n").unwrap();
+
+    std::env::set_current_dir(&tmp_dir).unwrap();
+    let baseline = PatchBaseline::capture();
+    // A read-only run: nothing changes.
+    let unchanged = capture_patch_since(baseline.tree());
+    // Against HEAD (the old measurement) the WIP shows up.
+    let vs_head = capture_patch();
+    // The run edits: a new file and a further edit to the dirty file.
+    std::fs::write(tmp_dir.join("run.txt"), "made by this run\n").unwrap();
+    std::fs::write(
+        tmp_dir.join("file.txt"),
+        "line1\nline2\nwip-edit\nrun-edit\n",
+    )
+    .unwrap();
+    let after_run = capture_patch_since(baseline.tree());
+    std::env::set_current_dir(&original_dir).unwrap();
+
+    assert!(baseline.tree().is_some(), "baseline tree must be recorded");
+    let unchanged = unchanged.unwrap();
+    assert!(
+        unchanged.is_empty(),
+        "read-only run over a dirty workspace must report an empty patch: {unchanged}"
+    );
+    let vs_head = vs_head.unwrap();
+    assert!(vs_head.contains("wip.txt"), "{vs_head}");
+    assert_eq!(patch_file_count(&vs_head), 2, "{vs_head}");
+
+    let after_run = after_run.unwrap();
+    assert!(after_run.contains("made by this run"), "{after_run}");
+    assert!(after_run.contains("+run-edit"), "{after_run}");
+    assert!(
+        !after_run.contains("wip.txt") && !after_run.contains("+wip-edit"),
+        "pre-existing edits must not be attributed to the run: {after_run}"
+    );
+    assert_eq!(patch_file_count(&after_run), 2, "{after_run}");
+}
+
+#[test]
+fn patch_baseline_none_measures_against_head() {
+    assert!(PatchBaseline::none().tree().is_none());
+    assert_eq!(patch_file_count(""), 0);
+    let patch = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-diff --git no\n+ok\n";
+    assert_eq!(patch_file_count(patch), 1);
+}
+
+/// `files_changed` and `patch_baseline` are additive: a result
+/// written before they existed still deserializes.
+#[test]
+fn session_result_new_fields_default_when_absent() {
+    let old = r#"{"session_id":"s","exit_status":0,"stop_reason":"NO_CHANGES","num_turns":3,
+        "patch_bytes":0,"patch_lines":0,"usage":{"input":1,"output":1,"total":2},
+        "model":"m","duration_ms":1,"failure_mode":null,"artifact_dir":null}"#;
+    let de: SessionResult = serde_json::from_str(old).unwrap();
+    assert_eq!(de.stop_reason, "NO_CHANGES");
+    assert_eq!(de.files_changed, 0);
+    assert!(de.patch_baseline.is_empty());
 }
