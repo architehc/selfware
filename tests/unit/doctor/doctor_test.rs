@@ -54,6 +54,8 @@ fn test_health_determination() {
             fix_hint: None,
         }],
         health: OverallHealth::Healthy,
+        languages: vec![],
+        skipped_other_languages: 0,
     };
     assert_eq!(report.health, OverallHealth::Healthy);
     assert_eq!(report.exit_code(), 0);
@@ -69,6 +71,8 @@ fn test_health_determination() {
             fix_hint: Some("install it".into()),
         }],
         health: OverallHealth::Broken,
+        languages: vec![],
+        skipped_other_languages: 0,
     };
     assert_eq!(report.health, OverallHealth::Broken);
     assert_eq!(report.exit_code(), 1);
@@ -266,5 +270,55 @@ async fn test_run_doctor_completes() {
     assert!(rustc.is_some());
     assert_eq!(rustc.unwrap().status, CheckStatus::Ok);
     // MSRV check present
-    assert!(report.checks.iter().any(|c| c.name == "rustc MSRV"));
+    assert!(report.checks.iter().any(|c| c.name == MSRV_CHECK_NAME));
+}
+
+fn check(name: &str, category: Category) -> DoctorCheck {
+    DoctorCheck {
+        name: name.to_string(),
+        category,
+        status: CheckStatus::Warning,
+        version: None,
+        message: String::new(),
+        fix_hint: None,
+    }
+}
+
+#[test]
+fn project_languages_come_from_manifests() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(detect_project_languages(dir.path()).is_empty());
+    std::fs::write(dir.path().join("Cargo.toml"), "").unwrap();
+    std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+    assert_eq!(
+        detect_project_languages(dir.path()),
+        vec![ProjectLanguage::Rust, ProjectLanguage::Node]
+    );
+}
+
+#[test]
+fn rust_workspace_skips_other_language_tools_unless_all() {
+    // 0.9.1 field finding: 17 WARN lines for Go/Node/linters on a Rust repo.
+    let checks = vec![
+        check("rustc", Category::Core),
+        check("node", Category::Languages),
+        check("python", Category::Languages),
+        check("go", Category::Languages),
+        check("cargo-clippy", Category::RustTools),
+        check("ruff", Category::PythonTools),
+        check("eslint", Category::NodeTools),
+        check("gofmt", Category::GoTools),
+        check("cargo-audit", Category::Security),
+        check("safety", Category::Security),
+        check("docker", Category::ContainerTools),
+    ];
+    let (kept, skipped) =
+        scope_checks_to_languages(checks.clone(), &[ProjectLanguage::Rust], false);
+    let names: Vec<&str> = kept.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["rustc", "cargo-clippy", "cargo-audit", "docker"]);
+    assert_eq!(skipped, 7);
+    // --all keeps everything.
+    let (kept, skipped) = scope_checks_to_languages(checks, &[ProjectLanguage::Rust], true);
+    assert_eq!(kept.len(), 11);
+    assert_eq!(skipped, 0);
 }

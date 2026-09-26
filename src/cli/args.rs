@@ -279,7 +279,11 @@ pub(crate) enum Commands {
 
     /// Check system dependencies and tool availability
     #[command(display_order = 6)]
-    Doctor,
+    Doctor {
+        /// Also check optional tools for languages not used in this workspace
+        #[arg(long)]
+        all: bool,
+    },
 
     /// Diagnose the configured LLM backend and model setup
     #[command(display_order = 7)]

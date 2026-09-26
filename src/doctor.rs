@@ -109,6 +109,97 @@ impl fmt::Display for OverallHealth {
 pub struct DoctorReport {
     pub checks: Vec<DoctorCheck>,
     pub health: OverallHealth,
+    /// Languages detected in the workspace (drive which optional
+    /// toolchains are checked).
+    pub languages: Vec<ProjectLanguage>,
+    /// Optional checks for languages NOT detected in the workspace, left
+    /// out of `checks` (and of the health verdict) unless `--all`.
+    pub skipped_other_languages: usize,
+}
+
+/// A language whose optional toolchain doctor can check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectLanguage {
+    Rust,
+    Python,
+    Node,
+    Go,
+}
+
+impl fmt::Display for ProjectLanguage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            ProjectLanguage::Rust => "Rust",
+            ProjectLanguage::Python => "Python",
+            ProjectLanguage::Node => "Node",
+            ProjectLanguage::Go => "Go",
+        })
+    }
+}
+
+/// Languages present in the workspace at `root`, from their manifest files
+/// at the top level (Cargo.toml, pyproject.toml / setup.py /
+/// requirements.txt / Pipfile, package.json, go.mod).
+pub fn detect_project_languages(root: &Path) -> Vec<ProjectLanguage> {
+    let has = |names: &[&str]| names.iter().any(|n| root.join(n).is_file());
+    let mut out = Vec::new();
+    if has(&["Cargo.toml"]) {
+        out.push(ProjectLanguage::Rust);
+    }
+    if has(&["pyproject.toml", "setup.py", "requirements.txt", "Pipfile"]) {
+        out.push(ProjectLanguage::Python);
+    }
+    if has(&["package.json"]) {
+        out.push(ProjectLanguage::Node);
+    }
+    if has(&["go.mod"]) {
+        out.push(ProjectLanguage::Go);
+    }
+    out
+}
+
+/// The language an OPTIONAL check belongs to, or `None` for checks every
+/// workspace gets (core, platform, config, containers, browser, ...).
+pub fn check_language(check: &DoctorCheck) -> Option<ProjectLanguage> {
+    match check.category {
+        Category::RustTools => Some(ProjectLanguage::Rust),
+        Category::PythonTools => Some(ProjectLanguage::Python),
+        Category::NodeTools => Some(ProjectLanguage::Node),
+        Category::GoTools => Some(ProjectLanguage::Go),
+        Category::Languages => match check.name.as_str() {
+            "node" | "npm" => Some(ProjectLanguage::Node),
+            "python" | "pip" => Some(ProjectLanguage::Python),
+            "go" => Some(ProjectLanguage::Go),
+            _ => None,
+        },
+        Category::Security => match check.name.as_str() {
+            "cargo-audit" => Some(ProjectLanguage::Rust),
+            "safety" => Some(ProjectLanguage::Python),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Keep the checks relevant to `languages` (every check when `all`);
+/// returns the kept checks and how many language-specific ones were left
+/// out. A Rust workspace used to get 17 WARN lines for Go/Node/Python
+/// linters it never uses (0.9.1 field finding).
+pub fn scope_checks_to_languages(
+    checks: Vec<DoctorCheck>,
+    languages: &[ProjectLanguage],
+    all: bool,
+) -> (Vec<DoctorCheck>, usize) {
+    if all {
+        return (checks, 0);
+    }
+    let before = checks.len();
+    let kept: Vec<DoctorCheck> = checks
+        .into_iter()
+        .filter(|c| check_language(c).is_none_or(|l| languages.contains(&l)))
+        .collect();
+    let skipped = before - kept.len();
+    (kept, skipped)
 }
 
 // ---------------------------------------------------------------------------
@@ -453,12 +544,16 @@ fn windows_gui_note() -> DoctorCheck {
 // Rust MSRV check
 // ---------------------------------------------------------------------------
 
+/// Name of the MSRV check: what it compares, spelled out. It was
+/// "rustc MSRV (1.96.0)" — the installed version, which read as the MSRV.
+pub const MSRV_CHECK_NAME: &str = "rustc vs selfware MSRV (minimum supported Rust)";
+
 /// Check that the installed `rustc` meets the project MSRV.
 async fn check_msrv() -> DoctorCheck {
     let output = run_cmd("rustc", &["--version"]).await;
     match output {
         None => DoctorCheck {
-            name: "rustc MSRV".to_string(),
+            name: MSRV_CHECK_NAME.to_string(),
             category: Category::Core,
             status: CheckStatus::Missing,
             version: None,
@@ -470,15 +565,17 @@ async fn check_msrv() -> DoctorCheck {
         },
         Some(out) => match extract_version(&out) {
             Some(v) if version_at_least(&v, MSRV) => DoctorCheck {
-                name: "rustc MSRV".to_string(),
+                name: MSRV_CHECK_NAME.to_string(),
                 category: Category::Core,
                 status: CheckStatus::Ok,
-                version: Some(v.clone()),
+                // Shown as "(installed >= required)": the bare installed
+                // version next to "MSRV" read as if it WERE the MSRV.
+                version: Some(format!("{v} >= {MSRV}")),
                 message: format!("rustc {} satisfies MSRV >= {}", v, MSRV),
                 fix_hint: None,
             },
             Some(v) => DoctorCheck {
-                name: "rustc MSRV".to_string(),
+                name: MSRV_CHECK_NAME.to_string(),
                 category: Category::Core,
                 status: CheckStatus::Warning,
                 version: Some(v.clone()),
@@ -489,7 +586,7 @@ async fn check_msrv() -> DoctorCheck {
                 )),
             },
             None => DoctorCheck {
-                name: "rustc MSRV".to_string(),
+                name: MSRV_CHECK_NAME.to_string(),
                 category: Category::Core,
                 status: CheckStatus::Warning,
                 version: None,
@@ -643,23 +740,27 @@ pub fn config_checks(config: &crate::config::Config) -> Vec<DoctorCheck> {
             let shadows_global = path.file_name() == Some(std::ffi::OsStr::new("selfware.toml"))
                 && home_config.as_ref().map(|h| h.is_file()).unwrap_or(false)
                 && Some(path) != home_config.as_deref();
+            let shown = if shadows_global {
+                format!(
+                    "{} (shadowing {})",
+                    crate::config::display_config_path(path),
+                    home_config
+                        .as_deref()
+                        .map(crate::config::display_config_path)
+                        .unwrap_or_default()
+                )
+            } else {
+                crate::config::display_config_path(path)
+            };
+            // The path rides in `version` so the [PASS] line shows it: this
+            // row is the ONE place doctor names the config file (the
+            // loader's startup line is suppressed for doctor).
             out.push(DoctorCheck {
                 name: "config file".to_string(),
                 category: Category::Configuration,
                 status: CheckStatus::Ok,
-                version: None,
-                message: if shadows_global {
-                    format!(
-                        "{} (shadowing {})",
-                        crate::config::display_config_path(path),
-                        home_config
-                            .as_deref()
-                            .map(crate::config::display_config_path)
-                            .unwrap_or_default()
-                    )
-                } else {
-                    crate::config::display_config_path(path)
-                },
+                version: Some(shown.clone()),
+                message: shown,
                 fix_hint: None,
             });
         }
@@ -667,7 +768,7 @@ pub fn config_checks(config: &crate::config::Config) -> Vec<DoctorCheck> {
             name: "config file".to_string(),
             category: Category::Configuration,
             status: CheckStatus::Ok,
-            version: None,
+            version: Some("none found — built-in defaults".to_string()),
             message: "none found — using built-in defaults".to_string(),
             fix_hint: Some(
                 "Run `selfware init` to create a config, or write ~/.config/selfware/config.toml."
@@ -855,8 +956,17 @@ fn ck(
     Box::pin(check_tool(name, category, required, programs, version_args))
 }
 
-/// Run all diagnostic checks and return a report.
+/// Run the diagnostic checks for the current workspace: optional
+/// toolchains only for the languages detected in it (see
+/// [`run_doctor_scoped`]).
 pub async fn run_doctor(config_path: Option<&str>) -> DoctorReport {
+    run_doctor_scoped(config_path, false).await
+}
+
+/// Run all diagnostic checks and return a report. With `all = false`,
+/// optional checks for languages not detected in the current directory are
+/// left out and counted in `skipped_other_languages`.
+pub async fn run_doctor_scoped(config_path: Option<&str>, all: bool) -> DoctorReport {
     // We group checks by category and run each category in parallel.
     // Within each category, checks also run in parallel via join_all.
     // All futures are boxed via `ck()` so they share a single type.
@@ -1168,6 +1278,11 @@ pub async fn run_doctor(config_path: Option<&str>) -> DoctorReport {
     checks.extend(browser_results);
     checks.extend(security_results);
 
+    let languages = std::env::current_dir()
+        .map(|d| detect_project_languages(&d))
+        .unwrap_or_default();
+    let (checks, skipped_other_languages) = scope_checks_to_languages(checks, &languages, all);
+
     // Determine overall health.
     let has_missing = checks.iter().any(|c| c.status == CheckStatus::Missing);
     let has_warning = checks.iter().any(|c| c.status == CheckStatus::Warning);
@@ -1179,7 +1294,12 @@ pub async fn run_doctor(config_path: Option<&str>) -> DoctorReport {
         OverallHealth::Healthy
     };
 
-    DoctorReport { checks, health }
+    DoctorReport {
+        checks,
+        health,
+        languages,
+        skipped_other_languages,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1251,6 +1371,27 @@ impl DoctorReport {
                     println!("         {} {}", "How to fix:".bold().cyan(), hint);
                 }
             }
+        }
+
+        if self.skipped_other_languages > 0 {
+            let project = if self.languages.is_empty() {
+                "none detected".to_string()
+            } else {
+                self.languages
+                    .iter()
+                    .map(|l| l.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            println!();
+            println!(
+                "  {}",
+                format!(
+                    "{} optional tools for other languages not checked (workspace languages: {}); use `selfware doctor --all`",
+                    self.skipped_other_languages, project
+                )
+                .dimmed()
+            );
         }
 
         println!();
