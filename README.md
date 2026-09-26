@@ -417,6 +417,63 @@ selfware --tui
 
 ---
 
+## What's New in 0.9
+
+0.9 makes long tasks on slow or small-context models finish, and makes the
+agent's own reports trustworthy. Most fixes come from measured runs against
+llm.selfware.design. The full list is in [CHANGELOG.md](CHANGELOG.md); the
+highlights:
+
+- **Deadline and budget wrap-up.** Before the wall clock or the token/cost
+  budget runs out, the agent is told once to write its answer now, with
+  unfinished areas marked. The timing is predicted one turn ahead from this
+  run's measured call and decode times. Near the limit, correction rounds step
+  aside and the draft is accepted with ⚠️. A run that still overruns fails
+  honestly but carries a labelled partial result. In the validation runs, the
+  163k/350k/65k reviews went from "no report" to a finished report.
+- **Progress survives compaction.** Old large tool results are compacted in
+  place to stubs (path, range, key symbols with line numbers, findings), and
+  the work ledger says which content is no longer in context. Superseded reads
+  and old stubs shrink first, a summary runs only when it can actually help,
+  and on small windows oversized reads arrive as a first chunk plus an outline.
+- **Line-numbered ranged reads.** `file_read` with `line_range` returns
+  numbered lines, so citations come from real line numbers. Whole-file reads
+  stay raw.
+- **Citations are checked.** Every `path:line` citation in a review or report
+  (prose forms too) is verified against the workspace, without leaving it.
+  Wrong ones get up to two correction rounds, and the result says how many
+  were verified.
+- **Robust tool parsing.** Mixed-format batches are fully parsed, generic
+  `<function=tool>` wrappers are unwrapped, quoted examples are never executed,
+  and malformed calls are reported to the model instead of silently dropped. A
+  run that keeps failing the tool protocol stops with `TOOL_PROTOCOL_STALL`
+  instead of spinning.
+- **Honest verification and statistics.** Checks that could not run are shown
+  as "not run" and earn no credit. Post-edit verification covers multi-file
+  edits and patches. Self-improvement statistics now include failed runs and
+  use measured counters.
+- **Slow endpoints.** Background model calls are streamed and bounded, and a
+  waiting status appears every 15 s. The qwen38 per-call cap is sized from the
+  measured decode rate. When hidden reasoning uses up the whole budget, the
+  call is retried once at a lower reasoning effort.
+- **Nightly live-endpoint CI job.** It fails, rather than skips, when the
+  endpoint is unreachable.
+
+### Behaviour changes to know when upgrading
+
+- **`selfware-llm-selfware-design.toml` no longer pins limits.** The measured
+  qwen38 profile applies: 163,840 context, 24,576 max tokens, a 1,628 s
+  per-call cap and the default 400 iterations.
+- **Missing or unconfigured QA tools no longer block completion.** They are
+  reported as "not run". Formatter and linter stages run only when the project
+  configures them.
+- **Near a deadline or budget, soft gates accept the draft with ⚠️.** These
+  are the citation gate, the requirements audit, the min-steps floor and the
+  artifact readback. Correctness gates (failing tests, verification after a
+  write) still block.
+- **A `tsc --noEmit` type-check is no longer counted as a file change.**
+- **Complete tool calls quoted in code blocks are not executed.**
+
 ## What's New in 0.8
 
 0.8 is about long-task reliability, honest status, and safety hardening. The

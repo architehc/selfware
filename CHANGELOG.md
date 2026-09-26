@@ -5,6 +5,178 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-09-25
+
+Long tasks on slow or small-context models now finish, and the agent's own
+reports can be trusted. The fixes come from four rounds of measured runs against
+llm.selfware.design (qwen38-flash-next), several external reviews, and a
+forensic pass over recorded run telemetry. In the release-gate runs, the
+163k/350k/65k read-only reviews went from ending with no report to producing a
+finished report.
+
+### Added
+- **Deadline and budget wrap-up.** When the time left, or the token/cost budget
+  left, falls below what the final answer is predicted to need, the agent is told
+  once to write its answer now and mark unfinished parts. The prediction runs one
+  turn ahead and uses this run's measured call times, decode speed and draft
+  size.
+  - Near the limit, the citation gate and the requirements audit accept the
+    draft with ⚠️ ("citations not corrected: deadline" or "…: budget") instead
+    of starting another correction round.
+  - A run that still times out or exhausts its budget fails as before (non-zero
+    exit), but carries a partial labelled "PARTIAL — NOT A COMPLETED REVIEW",
+    with the draft answer and the work ledger.
+- **Progress through compaction.**
+  - Old large tool results are compacted in place into stubs: path, range, key
+    symbols with line numbers, and findings. Superseded reads and old stubs
+    shrink first. The work ledger tags each file as in context, partly in
+    context, or not in context.
+  - A summary runs only when it can bring the history under the threshold; a
+    summary that doesn't gets rejected instead of rerunning every turn.
+  - On small windows, a whole-file read that cannot fit arrives as its first
+    chunk with an outline.
+  - Measured on the endpoint: long_review's identical re-reads went from 10 to
+    1, and c24's summary time from 470 s to 139 s.
+- **Line-numbered ranged reads.** `file_read` with `line_range` returns numbered
+  lines. Whole-file reads stay raw; `line_numbers` overrides either default.
+  Edit tools strip pasted number prefixes only when that is the only way to
+  match.
+- **Reasoning step-down retry.** When hidden reasoning uses up the whole
+  completion budget, the request is retried once at a lower effort, or with
+  thinking off. `max_tokens` is never raised.
+- **Tool-protocol stall stop.** If 6 of a run's last 8 dispatching turns fail
+  the tool protocol, the run stops with `TOOL_PROTOCOL_STALL` instead of
+  spinning until killed. No healthy validation run went above 2 in any window.
+- **Honest self-improvement statistics.** Every terminal outcome writes one
+  performance snapshot, with the real result. Checks that did not run are
+  recorded as not run and never count as passes. Token and turn counts use the
+  same counters as the final result. Only real failures reach the error
+  learner, and polluted records are dropped on load.
+- **Pre-commit gate runs rustdoc.** It uses the same `cargo doc -D warnings`
+  as CI, so private doc links fail locally. `scripts/install-hooks.sh`
+  installs the full gate, including from a worktree.
+- **Nightly live-endpoint CI job**, plus `scripts/live_endpoint_check.sh`. An
+  unreachable endpoint fails the job instead of skipping it.
+
+### Fixed
+- **Citations.**
+  - Citation checks stay inside the workspace and the file-tool path policy,
+    including symlinks.
+  - Prose citations such as "(line N)" are checked.
+  - A review with no checkable citation gets ⚠️ instead of ✅, and the counts
+    are now correct.
+  - Deliverables written with `patch_apply` are checked too.
+- **Tool parsing.**
+  - All format families are parsed in mixed batches, and unparseable calls are
+    reported to the model instead of dropped.
+  - A tool-call example quoted in prose or code no longer swallows the real
+    call.
+  - Generic `<function=tool>` wrappers are unwrapped.
+- **More tool-call shapes.** The generic wrapper accepts mismatched slot
+  closers, and markup inside a call's own payload no longer ends the call.
+  Across 1,139 recorded turns, rejections fell from 88 to 43, and no prose
+  became a call.
+- **Compaction.**
+  - Only a later result that actually delivered the same lines can supersede
+    an earlier read, so failed reads, stubs, notes and truncated heads no
+    longer destroy the only copy.
+  - Path keys follow the agent's current workspace root, including across
+    worktree switches, and never the process cwd.
+  - The work ledger rebuilt on resume keeps the reads that compaction had
+    stubbed.
+  - The result-cut search measures only around an estimated line.
+- **Drafts and forecasts.** An accepted answer retires a kept rejected draft,
+  so an old draft is never delivered over a newer answer. A small early draft
+  no longer shrinks the answer forecast.
+- **Resume state.** Guard counters and forecast measurements survive resume.
+- **Guards.** A check re-run after an edit is no longer a "repeat", while real
+  loops are still caught. `tsc --noEmit` is not counted as a file change.
+- **Requirements audit.** The auditor gets a bounded diff of the changed files,
+  and findings it marks as uncertain are labelled and non-blocking.
+- **Secret redaction.** One secret predicate now covers the credential
+  classifier, `config show`, the MCP `selfware://config` export, `{:?}` output,
+  turn artifacts and request logs. `headers`/`env` values and names such as
+  `API_KEY` in any case were leaking to MCP clients before.
+- **Tool-result spills** are written under the agent's workspace root, not the
+  process cwd.
+- **JSON-only stdout.** Structured output stays JSON-only on resume,
+  `--continue` and `--autocontinue`.
+- **No-tests output.** A runner that found no tests (vitest, jest, mocha,
+  `node --test`, ava, and targeted tests in every language) is reported as not
+  run.
+- **Answer truncation.** Only real reasoning blocks are stripped, so a quoted
+  thinking marker no longer cuts the answer short.
+- **Verification.**
+  - Missing or unconfigured tools and stages count as "not run": no credit, no
+    block.
+  - `file_multi_edit` and `patch_apply` edits are verified.
+  - The run summary counts only checks that actually ran.
+- **Work ledger.** Edits invalidate the old coverage, and path aliases like
+  `sub/../x.rs` map to one entry.
+- **Compaction** goes through the bounded, streamed side call. Background calls
+  now show the waiting status, and compaction emits events.
+- **Stop labels.** A per-call cap stop is `CALL_TIME_CAP`, not MAX_ITERATIONS.
+- **Resume.**
+  - `resume`, `--continue` and `--autocontinue` emit the final JSON result.
+  - Resume restores every usage counter, not just the total.
+- **Run summary** shows the final audit state instead of the first verdict.
+- **Config.**
+  - `config show` lists `agent.max_call_secs` and the concurrency fields.
+  - Placeholder keys (`EMPTY`, `${VAR}`) no longer produce plaintext-key or
+    permission warnings.
+- **Checkpoints.** Orphan checkpoint backups count toward the retention cap.
+- **Scripts and commands.**
+  - The SWE-bench scripts use `SELFWARE_ENDPOINT`.
+  - Commands that need `bench-harness` fail with the rebuild command instead of
+    exiting 0.
+
+### Changed
+- `selfware-llm-selfware-design.toml` no longer pins `max_tokens` or
+  `context_length`, so the measured qwen38 profile applies: 163,840 context and
+  24,576 max tokens.
+- The qwen38 `agent.max_call_secs` is now 1,628 s: a full 24,576-token call at
+  the slowest measured decode rate, 15.1 tok/s. An explicit `max_tokens` scales
+  it. The tracked config no longer pins `max_iterations = 100`: long reviews
+  measured 91–136 turns, so the default of 400 applies.
+
+### Review notes (AGENTS.md rule 2)
+These changes loosen or change checks:
+- The per-call cap was raised from 600 s to 1,628 s. The previous value assumed
+  about 42 tok/s; under load the endpoint measured 15–20 tok/s.
+- The wrap-up window cap went from half to two-thirds of the wall budget.
+- Near the deadline or a budget, the citation gate, the requirements audit, the
+  min-steps floor and the artifact readback step aside. Correctness gates
+  (failing tests, mutation and verification) still block.
+- Missing or unconfigured QA tools and "no tests collected" no longer block.
+  Prettier, black, flake8, mypy and bandit run only when the project
+  configures them.
+- A summary that doesn't reach the threshold is now rejected. On small windows,
+  whole-file reads arrive chunked.
+- The config permission and plaintext-key warnings fire only for real
+  credentials.
+- Complete tool calls quoted in code are no longer executed.
+- Findings the requirements auditor marks as uncertain no longer block. They
+  are labelled as unverified.
+- The `max_iterations` cap in the tracked endpoint config goes from 100 to 400.
+- Every `headers` value is now redacted, including non-secret ones such as
+  `Content-Type`; one test now expects `<redacted>` for it.
+- A Rust repo with zero tests shows the targeted test check as "not run".
+- Test changes (no assertion removed):
+  - Parser tests: one now expects an unwrap instead of a rejection, and one
+    fixture's shape changed.
+  - Two recovery tests: quoted `<think>` markers are now kept.
+  - Ledger wording.
+  - A compaction event now reports `kept` instead of `hard_fallback`.
+  - The stub-idempotency test now allows a final slimming step.
+  - Mechanical canonical-key setups.
+  - Two repetition-guard tests now expect 2 mutations instead of 6, because
+    `tsc --noEmit` is no longer counted as a mutation.
+  - Three forecast tests changed their expected answer size to
+    max(draft, floor).
+  - One parser fixture was made malformed again, because its shape now parses.
+  - The stats tests were rewritten onto the new snapshot constructor, keeping
+    every assertion.
+
 ## [0.8.2] - 2026-09-24
 
 Second round of fixes from long-running validation against llm.selfware.design.
