@@ -118,6 +118,24 @@ static TOKENIZER: Lazy<TokenizerState> =
 static TOKEN_CACHE: Lazy<RwLock<HashMap<u64, usize>>> =
     Lazy::new(|| RwLock::new(HashMap::with_capacity(256)));
 
+/// Fetch (once, then from the HF cache) and load `repo`'s `tokenizer.json`.
+///
+/// `Tokenizer::from_pretrained` goes through hf-hub with its terminal
+/// progress bar on, so the first REPL start drew an unexplained
+/// "tokenizer.json [████] 6.71 MiB" bar over the welcome screen (UX field
+/// test, 0.9.2). Same download and cache, without the bar.
+fn load_hf_tokenizer_quietly(repo: &str) -> Result<Tokenizer, String> {
+    let api = hf_hub::api::sync::ApiBuilder::from_env()
+        .with_progress(false)
+        .build()
+        .map_err(|e| e.to_string())?;
+    let path = api
+        .model(repo.to_string())
+        .get("tokenizer.json")
+        .map_err(|e| e.to_string())?;
+    Tokenizer::from_file(path).map_err(|e| e.to_string())
+}
+
 enum TokenizerState {
     /// HuggingFace tokenizer matched to the configured model family.
     Hf(Box<Tokenizer>),
@@ -142,7 +160,7 @@ impl TokenizerState {
         // family prefix.
         if let Some(model) = model {
             if let Some(repo) = hf_tokenizer_repo(model) {
-                match Tokenizer::from_pretrained(repo, None) {
+                match load_hf_tokenizer_quietly(repo) {
                     Ok(tokenizer) => {
                         debug!("Loaded HF tokenizer '{}' for model '{}'", repo, model);
                         return TokenizerState::Hf(Box::new(tokenizer));

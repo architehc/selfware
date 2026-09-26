@@ -4416,6 +4416,7 @@ dependencies = [
  "git2",
  "glob",
  "hex",
+ "hf-hub",
  "hmac",
  "hnsw_rs",
  "image",

@@ -111,6 +111,9 @@ openssl = { version = "0.10", features = ["vendored"], optional = true }  # For 
 redis = { version = "0.27", optional = true, features = ["aio", "tokio-comp"] }  # Redis backend for workflow state
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }  # For visual stuck-loop detection
 tokenizers = { version = "0.22.2", features = ["hf-hub", "http"] }
+# Same hf-hub the tokenizers crate uses; called directly so the one-time
+# tokenizer download runs without hf-hub's own terminal progress bar.
+hf-hub = { version = "0.4.3", default-features = false, features = ["ureq"] }
 tracing-appender = "0.2.4"
 opentelemetry = "0.21.0"
 opentelemetry_sdk = { version = "0.21.0", features = ["rt-tokio"] }
