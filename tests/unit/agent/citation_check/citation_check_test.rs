@@ -1500,3 +1500,47 @@ async fn exact_response_task_without_citations_is_not_none_checkable() {
     assert_eq!(agent.citation_gate(true), None);
     assert!(agent.grounding_status().unwrap().code_report);
 }
+
+/// Maintainer decision (0.9.2): an uncited answer to a workspace question
+/// that did not ask for citations is informational (ℹ️), not a warning; the
+/// same answer when citations/review were requested stays ⚠️.
+#[test]
+fn uncited_workspace_answer_is_info_unless_citations_were_requested() {
+    let unrequested = GroundingStatus {
+        total: 0,
+        code_report: true,
+        citations_requested: false,
+        ..Default::default()
+    };
+    assert!(!unrequested.none_checkable());
+    assert_eq!(unrequested.warning_note(), None);
+    let info = unrequested.info_note().expect("informational note");
+    assert!(info.contains("none were requested"), "{info}");
+
+    let requested = GroundingStatus {
+        citations_requested: true,
+        ..unrequested.clone()
+    };
+    assert!(requested.none_checkable());
+    assert!(requested.warning_note().is_some());
+    assert_eq!(requested.info_note(), None);
+}
+
+#[test]
+fn citation_requests_are_detected_from_the_task_wording() {
+    use crate::agent::task_policy::task_requests_citations;
+    for asks in [
+        "Explain the parser. Cite file:line for each claim.",
+        "Review src/agent and report findings.",
+        "Audit the config loader",
+        "List the handlers with line numbers",
+    ] {
+        assert!(task_requests_citations(asks), "{asks}");
+    }
+    for plain in [
+        "Summarize what GNU Radio flowgraphs and Python scripts exist in this workspace in 3 bullet points.",
+        "What does the --max-words option do?",
+    ] {
+        assert!(!task_requests_citations(plain), "{plain}");
+    }
+}

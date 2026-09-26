@@ -200,6 +200,24 @@ fn prohibition_has_exception(rest: &str) -> bool {
 /// Deliberately lexical, like the classifiers it sits beside. The
 /// false-positive direction is cheap and safe (the run reads a file first); the
 /// false-negative direction preserves the single-request chat fast path.
+/// Whether the task explicitly asks for citations or a review/audit — the
+/// cases where an answer without path:line citations fails the request.
+pub(crate) fn task_requests_citations(task_context: &str) -> bool {
+    let lower = task_context.to_lowercase();
+    const ASKS: &[&str] = &[
+        "cite",
+        "citation",
+        "file:line",
+        "path:line",
+        "line number",
+        "with line",
+        "review",
+        "audit",
+        "with references",
+    ];
+    ASKS.iter().any(|w| lower.contains(w))
+}
+
 pub(crate) fn task_references_project_code(task_context: &str, project_name: &str) -> bool {
     let lower = task_context.to_lowercase();
     let project = project_name.trim().to_lowercase();

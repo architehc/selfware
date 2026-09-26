@@ -565,6 +565,19 @@ impl FailureMode {
                 "⚠️ Task completed ({}) — {CITATIONS_NONE_CHECKABLE_NOTE}; the answer was not checked against the files",
                 self.kind.tag()
             )
+        } else if self.kind.is_nonfailure()
+            && self
+                .evidence
+                .contains(crate::agent::citation_check::CITATIONS_NOT_CHECKED_INFO)
+            && !self.evidence.contains(VERIFICATION_FAILED_NOTE)
+            && !self.evidence.contains(VERIFICATION_NOT_PERFORMED_NOTE)
+        {
+            // Nobody asked for citations and the answer has none: stated
+            // plainly, not a warning, and not a clean ✅ either (0.9.2).
+            format!(
+                "ℹ️ Completed ({}) — the answer was not checked against the files (no citations were requested)",
+                self.kind.tag()
+            )
         } else if self.kind.is_success() && self.evidence.contains(VERIFICATION_NOT_PERFORMED_NOTE)
         {
             // Edits landed, but no check ever ran on them — no clean ✅.
@@ -746,7 +759,8 @@ pub(crate) fn with_citation_status(
     base: FailureMode,
     grounding: Option<&crate::agent::citation_check::GroundingStatus>,
 ) -> FailureMode {
-    match grounding.and_then(|g| g.warning_note()) {
+    let note = grounding.and_then(|g| g.warning_note().or_else(|| g.info_note()));
+    match note {
         Some(note) if base.kind.is_nonfailure() => FailureMode {
             evidence: format!("{}; {}", base.evidence, note),
             ..base

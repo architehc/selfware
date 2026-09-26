@@ -958,3 +958,19 @@ fn banner_evidence_omits_the_citation_note_but_the_field_keeps_it() {
     // Evidence without a citation note is shown unchanged.
     assert_eq!(banner_evidence("a; b"), "a; b");
 }
+
+#[test]
+fn uncited_unrequested_answer_renders_an_info_banner_not_a_warning() {
+    let grounding = crate::agent::citation_check::GroundingStatus {
+        total: 0,
+        code_report: true,
+        citations_requested: false,
+        ..Default::default()
+    };
+    let mode = with_citation_status(verdict(FailureKind::NoChange), Some(&grounding));
+    let banner = mode.cli_banner();
+    assert!(banner.starts_with("ℹ️"), "{banner}");
+    assert!(!banner.contains("⚠️"), "{banner}");
+    assert!(!mode.is_clean_success(), "not a clean ✅ either");
+    assert!(mode.kind.is_nonfailure());
+}

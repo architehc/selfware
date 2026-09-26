@@ -189,6 +189,10 @@ impl CheckedCitation {
 /// Wording of the "no checkable citation" warning (banner, summary, JSON).
 pub(crate) const CITATIONS_NONE_CHECKABLE: &str = "citations: none checkable";
 
+/// Marker of the informational (ℹ️) note on an uncited, unrequested answer
+/// (see `GroundingStatus::info_note`).
+pub(crate) const CITATIONS_NOT_CHECKED_INFO: &str = "answer not checked against the files";
+
 /// Source label for citations taken from the final answer text.
 pub(crate) const ANSWER_SOURCE: &str = "final answer";
 
@@ -287,6 +291,13 @@ pub struct GroundingStatus {
     /// rendered "⚠️ … citations: none checkable"). Not serialized.
     #[serde(skip)]
     pub code_report: bool,
+    /// The task asked for citations or a review/audit ("cite file:line",
+    /// "review …"): an uncited answer then fails that request (⚠️). When
+    /// nobody asked, an uncited answer about the workspace is only an
+    /// informational note (ℹ️, `info_note`) — maintainer decision, 0.9.2.
+    /// Not serialized.
+    #[serde(skip)]
+    pub citations_requested: bool,
     /// The gate stepped aside for a limit (`"deadline"` or `"budget"`): the
     /// wrong citations above were accepted WITHOUT a correction round (see
     /// [`super::deadline`]). Serialized only when set.
@@ -317,6 +328,7 @@ impl GroundingStatus {
                 .map(CheckedCitation::describe)
                 .collect(),
             code_report: false,
+            citations_requested: false,
             not_corrected: None,
         }
     }
@@ -386,7 +398,25 @@ impl GroundingStatus {
     /// it was checked against the files — not even that a cited line
     /// exists — so it must not read as grounded (0.8.2 live validation D4).
     pub fn none_checkable(&self) -> bool {
-        self.code_report && self.checkable_count() == 0
+        self.code_report
+            && self.checkable_count() == 0
+            && (self.citations_requested || self.total > 0)
+    }
+
+    /// A code-report answer with no path:line citations when the task did
+    /// not ask for any: nothing was checked against the files, which is
+    /// stated (ℹ️) but is not a warning (see `citations_requested`).
+    pub fn uncited_unrequested(&self) -> bool {
+        self.code_report && self.total == 0 && !self.citations_requested
+    }
+
+    /// The informational note for `uncited_unrequested`, or `None`.
+    pub fn info_note(&self) -> Option<String> {
+        self.uncited_unrequested().then(|| {
+            format!(
+                "{CITATIONS_NOT_CHECKED_INFO}: no path:line citations in the answer (none were requested)"
+            )
+        })
     }
 
     /// `citations: none checkable: ...` — see [`Self::none_checkable`].
@@ -465,7 +495,7 @@ impl GroundingStatus {
     /// (AGENTS.md rule 3).
     pub fn grounding_line(&self) -> String {
         if self.total == 0 {
-            let lead = if self.code_report {
+            let lead = if self.none_checkable() {
                 format!("Grounding: {CITATIONS_NONE_CHECKABLE} — ")
             } else {
                 "Grounding: ".to_string()
@@ -1645,6 +1675,8 @@ impl super::Agent {
         let mut status = GroundingStatus::from_report(&report, state.rejections, checked_files);
         // Held to the report standard only when the task is a report about
         // this workspace's code (see `GroundingStatus::code_report`).
+        status.citations_requested =
+            super::task_policy::task_requests_citations(self.task_context_for_classification());
         status.code_report = is_read_only
             && (report.total > 0 || {
                 let project_name = root
