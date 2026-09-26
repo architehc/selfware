@@ -417,8 +417,9 @@ impl Agent {
         // stdout output. The state is used for the post-task summary line.
         let _sticky: Option<crate::ui::sticky_bar::StickyBar> = None;
 
-        // Start loading spinner with a random phrase while waiting for first token
-        let initial_phrase = crate::ui::loading_phrases::random_phrase();
+        // Start the spinner with an honest waiting label (no invented
+        // activity) until the first token arrives.
+        let initial_phrase = crate::ui::loading_phrases::waiting_label();
         let tui_active = crate::output::is_tui_active();
         // In JSON or quiet mode, streamed prose must NOT be printed to stdout —
         // it would pollute the machine-readable output stream. The text is still
@@ -576,22 +577,33 @@ impl Agent {
                 break;
             }
 
-            // Rotate loading phrase every 3 seconds while spinner is active
-            if tui_active {
-                if tui_spinner_active
-                    && phrase_rotation.elapsed() > tokio::time::Duration::from_secs(3)
-                {
-                    let new_phrase = crate::ui::loading_phrases::random_phrase();
-                    self.emit_event(AgentEvent::SpinnerUpdate {
-                        message: new_phrase.to_string(),
-                    });
-                    phrase_rotation = tokio::time::Instant::now();
+            // Refresh the spinner every 2 seconds while it is active with what
+            // was actually observed (phase + tokens so far) — e.g. a long
+            // reasoning block shows "Model reasoning · ~1.2K tokens".
+            let spinner_live = if tui_active {
+                tui_spinner_active
+            } else {
+                spinner.is_some()
+            };
+            if spinner_live && phrase_rotation.elapsed() > tokio::time::Duration::from_secs(2) {
+                let phase = super::llm_wait::LlmWaitPhase::classify(
+                    &content,
+                    &reasoning,
+                    tool_calls.len(),
+                    in_reasoning || suppressed_tag_idx.is_some_and(|i| i >= 2),
+                );
+                let (tokens, source) = super::llm_wait::tokens_so_far(
+                    captured_completion_tokens,
+                    &content,
+                    &reasoning,
+                );
+                let text = super::llm_wait::live_spinner_status(phase, tokens, source);
+                if tui_active {
+                    self.emit_event(AgentEvent::SpinnerUpdate { message: text });
+                } else if let Some(ref s) = spinner {
+                    s.set_message(&text);
                 }
-            } else if let Some(ref s) = spinner {
-                if phrase_rotation.elapsed() > tokio::time::Duration::from_secs(3) {
-                    s.set_message(crate::ui::loading_phrases::random_phrase());
-                    phrase_rotation = tokio::time::Instant::now();
-                }
+                phrase_rotation = tokio::time::Instant::now();
             }
 
             // NOTE: Do not call bar.update() during streaming — cursor

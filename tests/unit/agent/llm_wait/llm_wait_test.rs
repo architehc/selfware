@@ -207,5 +207,16 @@ fn spinner_status_shows_phase_and_elapsed() {
         spinner_status("Thinking", &ev2, true).as_deref(),
         Some("Thinking — reasoning 90s, 1200 tokens")
     );
+    // An estimated count is marked approximate.
+    let ev3 = ProgressEvent::LlmWaiting {
+        elapsed_secs: 30,
+        phase: "reasoning".into(),
+        tokens_so_far: 800,
+        tokens_source: "estimate".into(),
+    };
+    assert_eq!(
+        spinner_status("Thinking", &ev3, true).as_deref(),
+        Some("Thinking — reasoning 30s, ~800 tokens")
+    );
     assert!(spinner_status("x", &ProgressEvent::LlmRequestSent { tokens: 1 }, true).is_none());
 }

@@ -1,119 +1,25 @@
-//! Loading Phrases for LLM Response
+//! Spinner label shown while waiting for the model.
 //!
-//! Witty phrases shown while waiting for the LLM to respond.
-//! Rotated periodically to keep the user entertained.
+//! This used to rotate ~100 "witty" phrases, many of which claimed concrete
+//! work that was not happening ("Formatting with rustfmt...", "Benchmarking
+//! solutions...", "Reviewing the codebase...") — shown even during read-only
+//! tasks. A waiting spinner may only say what is actually known: the agent is
+//! waiting on the model. Anything more specific (phase, tokens so far) comes
+//! from the measured heartbeat in `agent::llm_wait`, never from invented copy.
 
-use rand::prelude::IndexedRandom;
+/// The honest spinner label while a model call is in flight and nothing more
+/// specific has been observed yet.
+pub const WAITING_LABEL: &str = "Waiting for the model";
 
-/// Witty loading phrases shown while waiting for LLM response
-pub const LOADING_PHRASES: &[&str] = &[
-    "Thinking deeply...",
-    "Analyzing code patterns...",
-    "Consulting the documentation...",
-    "Tending the garden of ideas...",
-    "Connecting the dots...",
-    "Weighing the options...",
-    "Searching for the right approach...",
-    "Exploring possibilities...",
-    "Crafting a thoughtful response...",
-    "Reviewing the codebase...",
-    "Processing your request...",
-    "Considering edge cases...",
-    "Building mental model...",
-    "Reading between the lines...",
-    "Synthesizing knowledge...",
-    "Checking the map...",
-    "Navigating the code...",
-    "Forging a solution...",
-    "Untangling dependencies...",
-    "Tracing the execution path...",
-    "Contemplating architecture...",
-    "Polishing the approach...",
-    "Aligning the stars...",
-    "Gathering context...",
-    "Calibrating response...",
-    "Sifting through patterns...",
-    "Computing possibilities...",
-    "Brewing something good...",
-    "Channeling best practices...",
-    "Mining for insights...",
-    "Piecing together the puzzle...",
-    "Consulting the oracle...",
-    "Pondering the question...",
-    "Warming up the neurons...",
-    "Dusting off the algorithms...",
-    "Sharpening the tools...",
-    "Loading wisdom modules...",
-    "Parsing the intent...",
-    "Optimizing the approach...",
-    "Running thought experiments...",
-    "Compiling ideas...",
-    "Debugging my thoughts...",
-    "Refactoring my response...",
-    "Testing hypotheses...",
-    "Benchmarking solutions...",
-    "Profiling the problem space...",
-    "Iterating on the design...",
-    "Reviewing pull requests of the mind...",
-    "Rebasing my understanding...",
-    "Merging knowledge branches...",
-    "Resolving cognitive conflicts...",
-    "Deploying thought pipeline...",
-    "Spinning up inference...",
-    "Hydrating the context...",
-    "Indexing relevant knowledge...",
-    "Querying the knowledge graph...",
-    "Traversing the syntax tree...",
-    "Evaluating type constraints...",
-    "Checking invariants...",
-    "Verifying assumptions...",
-    "Rust-ling up an answer...",
-    "Borrowing some wisdom...",
-    "Lifetime-checking the response...",
-    "Unwrapping the solution...",
-    "Pattern matching on the problem...",
-    "Trait-implementing a response...",
-    "Async-awaiting brilliance...",
-    "Zero-cost abstracting...",
-    "Cargo-building thoughts...",
-    "Clippy-checking the approach...",
-    "Formatting with rustfmt...",
-    "Growing the solution organically...",
-    "Composting old ideas...",
-    "Pruning unnecessary complexity...",
-    "Watering the seeds of thought...",
-    "Harvesting insights...",
-    "Cultivating understanding...",
-    "Grafting ideas together...",
-    "Letting ideas photosynthesize...",
-    "Nurturing the code garden...",
-    "Planting the right abstractions...",
-    "Weeding out bugs...",
-    "Cross-pollinating concepts...",
-    "Composing the symphony...",
-    "Tuning the frequencies...",
-    "Harmonizing components...",
-    "Orchestrating the solution...",
-    "Finding the right rhythm...",
-    "Improvising elegantly...",
-    "Building the bridge...",
-    "Laying the foundation...",
-    "Raising the scaffolding...",
-    "Painting the big picture...",
-    "Sketching the blueprint...",
-    "Measuring twice...",
-    "Cutting once...",
-    "Hammering out the details...",
-    "Sanding the rough edges...",
-    "Applying the finishing touches...",
-    "Connecting the dots...",
-];
+/// Every static label the waiting spinner may show. Kept as a list so the
+/// honesty test can check all of them; dynamic text is built only from
+/// measured phase/token data in `agent::llm_wait::live_spinner_status`.
+pub const WAITING_LABELS: &[&str] = &[WAITING_LABEL];
 
-/// Get a random loading phrase
-pub fn random_phrase() -> &'static str {
-    LOADING_PHRASES
-        .choose(&mut rand::rng())
-        .unwrap_or(&"Thinking...")
+/// The label to show while waiting for the model. Kept as a function so
+/// callers do not depend on the constant's name.
+pub fn waiting_label() -> &'static str {
+    WAITING_LABEL
 }
 
 #[cfg(test)]

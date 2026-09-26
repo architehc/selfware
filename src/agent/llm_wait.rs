@@ -216,6 +216,7 @@ pub(crate) fn spinner_status(
             elapsed_secs,
             phase,
             tokens_so_far,
+            tokens_source,
             ..
         } => {
             let mut text = format!("{} — {}", base, phase);
@@ -223,12 +224,56 @@ pub(crate) fn spinner_status(
                 text.push_str(&format!(" {}s", elapsed_secs));
             }
             if *tokens_so_far > 0 {
-                text.push_str(&format!(", {} tokens", tokens_so_far));
+                // An estimated count is marked as such (Rule 4): only a
+                // provider-reported usage figure is shown bare.
+                let approx = if tokens_source == "usage" { "" } else { "~" };
+                text.push_str(&format!(", {}{} tokens", approx, tokens_so_far));
             }
             Some(text)
         }
         _ => None,
     }
+}
+
+/// Spinner text refreshed between heartbeats while a streaming call is still
+/// silent to the user (prefill or a reasoning block). Built only from what
+/// was observed — the phase `classify` derived from the stream and the token
+/// count from `tokens_so_far` — never from invented activity copy:
+///
+/// - prefill: `"Waiting for the model"`
+/// - reasoning: `"Model reasoning · ~1.2K tokens"`
+/// - streaming: `"Model responding · 340 tokens"`
+///
+/// Estimated counts carry a `~`; provider-reported usage is shown bare.
+pub(crate) fn live_spinner_status(
+    phase: LlmWaitPhase,
+    tokens_so_far: usize,
+    source: LlmWaitTokenSource,
+) -> String {
+    let head = match phase {
+        LlmWaitPhase::Prefill | LlmWaitPhase::AwaitingResponse => {
+            crate::ui::loading_phrases::WAITING_LABEL.to_string()
+        }
+        LlmWaitPhase::Reasoning => "Model reasoning".to_string(),
+        LlmWaitPhase::Streaming => "Model responding".to_string(),
+        LlmWaitPhase::SideCall(purpose) => format!(
+            "{} ({})",
+            crate::ui::loading_phrases::WAITING_LABEL,
+            purpose
+        ),
+    };
+    if tokens_so_far == 0 || source == LlmWaitTokenSource::None {
+        return head;
+    }
+    let approx = if source == LlmWaitTokenSource::Usage {
+        ""
+    } else {
+        "~"
+    };
+    format!(
+        "{head} · {approx}{} tokens",
+        crate::ui::task_display::format_tokens(tokens_so_far as u64)
+    )
 }
 
 /// One step of a heartbeat-aware receive loop.
