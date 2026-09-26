@@ -559,3 +559,17 @@ async fn failed_vision_call_tells_the_model_the_image_was_not_seen() {
     let hint = agent.build_error_recovery_hint("file_read", "No such file");
     assert!(!hint.contains("NOT analysed"), "{hint}");
 }
+
+#[tokio::test]
+async fn shell_path_policy_refusal_names_the_legitimate_routes() {
+    // UX field test (0.9.0): `ls /opt/homebrew/bin` was refused 18 times while
+    // the model probed the boundary. The hint must name the allowed routes and
+    // the config key, and discourage going around the policy.
+    let agent = Agent::new(Config::default()).await.unwrap();
+    let err = "Safety check failed: Safety error: Path not in allowed list: /opt/homebrew/bin";
+    let hint = agent.build_error_recovery_hint("shell_exec", err);
+    assert!(hint.contains("command -v"), "{hint}");
+    assert!(hint.contains("absolute"), "{hint}");
+    assert!(hint.contains("[safety] allowed_paths"), "{hint}");
+    assert!(hint.contains("interpreter"), "{hint}");
+}

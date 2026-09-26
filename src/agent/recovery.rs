@@ -545,6 +545,23 @@ impl Agent {
         // said the plot "shows a smooth sine" — the plot had cusps. Say so
         // plainly, so the answer reports the gap instead of inventing the
         // picture (AGENTS.md rule 3).
+        // Shell operands follow the same allowed_paths as the file tools (a
+        // deliberate policy). Name the legitimate routes so the model stops
+        // probing the boundary (UX field test: 18 blocks and ~7 minutes) and
+        // does not route around it through an interpreter.
+        if matches!(tool_name, "shell_exec" | "pty_shell")
+            && (error_lower.contains("not in allowed list")
+                || error_lower.contains("outside working directory"))
+        {
+            return "That path is outside this workspace's allowed paths, and shell commands \
+                    follow the same policy as the file tools. To locate a program, use \
+                    `which <name>` or `command -v <name>`; running a program by its absolute \
+                    path is allowed. Do not read the path through another tool or an \
+                    interpreter to get around the policy. If the task needs it, say so: the \
+                    user can add a glob to [safety] allowed_paths."
+                .to_string();
+        }
+
         if tool_name.starts_with("vision_") {
             return "The image was NOT analysed. Do not describe, characterise or vouch for its \
                     contents. Verify the underlying data another way (e.g. check the numbers \

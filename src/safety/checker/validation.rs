@@ -2322,7 +2322,17 @@ impl SafetyChecker {
                 }
             }
         }
-        self.check_path(&expanded)
+        // Report the path as the command wrote it: check_path canonicalizes,
+        // so a refused `/opt/homebrew/bin` surfaced as its resolved Cellar
+        // path, which the operator never typed (UX field test, 0.9.0).
+        self.check_path(&expanded).map_err(|err| match err {
+            SelfwareError::Safety(SafetyError::PathNotAllowed { .. }) => {
+                SelfwareError::Safety(SafetyError::PathNotAllowed {
+                    path: candidate.to_string(),
+                })
+            }
+            other => other,
+        })
     }
 
     /// Scan content for hardcoded secrets

@@ -313,7 +313,9 @@ pub enum SafetyError {
     #[error("Path contains encoding-evasion sequence: {reason}")]
     PathInvalidEncoding { reason: String },
 
-    #[error("Path not in allowed list: {path}")]
+    #[error(
+        "Path not in allowed list: {path} (outside [safety] allowed_paths; add a matching glob there to allow it)"
+    )]
     PathNotAllowed { path: String },
 
     #[error("Path '{path}' is outside working directory and no allowed_paths configured")]

@@ -4542,3 +4542,42 @@ fn test_exec_redirection_only_builtin() {
     assert!(shell_verdict(&checker, "exec 2>/dev/null cat /etc/shadow").is_err());
     assert!(shell_verdict(&checker, "exec cat /etc/hosts").is_err());
 }
+
+#[cfg(unix)]
+#[test]
+fn shell_path_refusal_reports_the_path_as_typed() {
+    // UX field test (0.9.0): a refused `ls /opt/homebrew/bin` surfaced as its
+    // symlink-resolved Cellar path, which the operator never typed. The
+    // refusal must name the operand as written, and say how to allow it.
+    let (_ws, checker) = workspace_shell_checker();
+    // No dot-prefixed component: tempfile's default `.tmpXXXX` name trips the
+    // separate hidden-dotfile rule first.
+    let outside = tempfile::Builder::new()
+        .prefix("outside-ws")
+        .tempdir()
+        .unwrap();
+    let real = outside.path().join("real-bin");
+    std::fs::create_dir_all(&real).unwrap();
+    let link = outside.path().join("linked-bin");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let typed = link.to_string_lossy().to_string();
+    let err = shell_verdict(&checker, &format!("ls {typed}")).unwrap_err();
+    let message = err.to_string();
+    assert!(
+        matches!(
+            err,
+            crate::errors::SelfwareError::Safety(
+                crate::errors::SafetyError::PathNotAllowed { .. }
+                    | crate::errors::SafetyError::PathOutsideWorkspace { .. }
+            )
+        ),
+        "outside read must stay refused (policy unchanged): {message}"
+    );
+    if let crate::errors::SelfwareError::Safety(crate::errors::SafetyError::PathNotAllowed {
+        ref path,
+    }) = err
+    {
+        assert_eq!(path, &typed, "report the operand as typed: {message}");
+        assert!(message.contains("[safety] allowed_paths"), "{message}");
+    }
+}
