@@ -867,6 +867,17 @@ fn in_spans(pos: usize, spans: &[std::ops::Range<usize>]) -> bool {
 /// Openers of a tool-call region in any supported syntax.
 const TOOL_CALL_OPENERS: &[&str] = &["<tool_call>", "<tool>", "<function=", "<|open|>call "];
 
+/// Whether streamed text has started a tool call in ANY supported syntax
+/// (the parser's own openers, plus the `<tool` prefix and Kimi's
+/// `<|open|>tools` section). One definition for every "is a call in
+/// flight?" question, so Kimi and bare-Qwen calls are not mistaken for
+/// prose (review, 0.9.1).
+pub(crate) fn text_opens_tool_call(text: &str) -> bool {
+    text.contains("<tool")
+        || text.contains("<|open|>tools")
+        || TOOL_CALL_OPENERS.iter().any(|o| text.contains(o))
+}
+
 /// Wrapper tokens that carry no call on their own (a stray `</tool_call>`
 /// after a parsed call, a `<tool_call>` directly around a parsed call).
 const TOOL_CALL_WRAPPERS: &[&str] = &[

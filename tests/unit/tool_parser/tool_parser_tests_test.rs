@@ -2056,3 +2056,20 @@ fn c6_tradeoff_unclosed_fence_no_longer_quotes_a_line_start_example_call() {
     let mid = "```\nlet s = \"<tool_call>{\\\"name\\\":\\\"file_read\\\"}\";";
     assert!(parse_tool_calls(mid).tool_calls.is_empty());
 }
+
+#[test]
+fn text_opens_tool_call_covers_every_supported_syntax() {
+    use crate::tool_parser::text_opens_tool_call;
+    for opened in [
+        "<tool_call>{\"name\":\"file_write\"",
+        "<tool>\n<name>file_write</name>",
+        "<function=file_write>\n<parameter=content>",
+        "<|open|>tools<|sep|><|open|>call tool=\"file_write\"",
+        "<|open|>call tool=\"file_write\"",
+    ] {
+        assert!(text_opens_tool_call(opened), "{opened}");
+    }
+    assert!(!text_opens_tool_call(
+        "Plain analysis of the function signature."
+    ));
+}

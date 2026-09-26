@@ -562,7 +562,11 @@ impl Agent {
             // Runaway-monologue cutoff: checked per chunk, before processing.
             if is_runaway_monologue(
                 content.len() + reasoning.len(),
-                !tool_calls.is_empty() || content.contains("<tool"),
+                // Any supported call syntax counts as in flight: the old
+                // `contains("<tool")` missed Kimi `<|open|>call` and bare
+                // Qwen `<function=`, so a long file_write in those formats
+                // was cut mid-call and lost (review, 0.9.1).
+                !tool_calls.is_empty() || crate::tool_parser::text_opens_tool_call(&content),
                 self.task_requires_mutation_now(),
             ) {
                 let streamed = content.len() + reasoning.len();

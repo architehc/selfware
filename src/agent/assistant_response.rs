@@ -1352,10 +1352,7 @@ pub(super) fn resolve_step_token_counts(
 /// parser reads it: a monologue that quotes the syntax is never promoted.
 fn reasoning_carries_tool_markup(reasoning: &str) -> bool {
     let r = crate::tool_parser::outside_markdown_code(reasoning);
-    r.contains("<tool")
-        || r.contains("<function=")
-        || r.contains("<|open|>call")
-        || r.contains("<tool_call>")
+    crate::tool_parser::text_opens_tool_call(&r)
 }
 
 #[cfg(test)]
