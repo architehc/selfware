@@ -132,10 +132,10 @@ fn redact_all(value: &mut serde_json::Value) {
 /// consumes it. Views handed to third parties must pass through this
 /// instead:
 ///
-/// - every value under a secret-named key ([`is_secret_key_name`]: every
+/// - every value under a secret-named key (`is_secret_key_name`: every
 ///   `api_key`, `Authorization`, `API_KEY`, `*_token`, …) is replaced with
 ///   [`REDACTED_SECRET_MARKER`];
-/// - every value inside an `env` or `headers` map ([`is_secret_map_name`])
+/// - every value inside an `env` or `headers` map (`is_secret_map_name`)
 ///   is replaced as well.
 ///
 /// This is exactly what the config credential classifier counts as a
