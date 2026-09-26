@@ -533,10 +533,11 @@ async fn test_git_push_execute() {
         "branch": "test-branch"
     });
     let result = tool.execute(args).await;
-    // Should return Ok with success: false (remote doesn't exist)
-    assert!(result.is_ok());
-    let output = result.unwrap();
-    assert_eq!(output["success"], false);
+    // An unconfigured remote is refused before `git push` runs (git would
+    // otherwise treat the bare name as a local path — review, 0.9.2). This
+    // used to assert Ok{success:false} from the failed push itself.
+    let err = result.expect_err("unconfigured remote must be refused");
+    assert!(err.to_string().contains("not a configured remote"), "{err}");
 }
 
 #[tokio::test]
@@ -567,10 +568,92 @@ async fn test_git_push_execute_allows_non_protected_branch() {
         "branch": "some-other-branch"
     });
     let result = tool.execute(args).await;
-    // Not blocked by protected_branches; fails later since the remote
-    // doesn't exist, same as the un-configured case above.
-    assert!(result.is_ok());
-    assert_eq!(result.unwrap()["success"], false);
+    // Not blocked by protected_branches; refused later because the remote
+    // is not configured, same as the un-configured case above.
+    let err = result.expect_err("unconfigured remote must be refused");
+    assert!(!err.to_string().contains("protected branch"), "{err}");
+    assert!(err.to_string().contains("not a configured remote"), "{err}");
+}
+
+/// `branch` is a refspec to git: `+HEAD:main` force-pushed main past the
+/// `force` block and the protected-branch check (review, 0.9.2). The tool
+/// refuses before spawning anything.
+#[tokio::test]
+async fn test_git_push_execute_refuses_refspec_shaped_branch() {
+    let safety_config = crate::config::SafetyConfig {
+        protected_branches: vec!["main".to_string()],
+        ..Default::default()
+    };
+    let tool = GitPush::with_safety_config(safety_config);
+    for branch in [
+        "+HEAD:main",
+        "+main",
+        "HEAD:main",
+        ":main",
+        "x:y",
+        "--delete",
+    ] {
+        let err = tool
+            .execute(serde_json::json!({"remote": "origin", "branch": branch}))
+            .await
+            .expect_err("refspec-shaped branch must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not a refspec") || msg.contains("not an option"),
+            "{branch}: {msg}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_git_push_execute_refuses_location_remote() {
+    let tool = GitPush::new();
+    for remote in [
+        "git://evil/x",
+        "u@h:r",
+        "/tmp/x.git",
+        "../x",
+        "--receive-pack=sh",
+    ] {
+        let err = tool
+            .execute(serde_json::json!({"remote": remote, "branch": "feature-x"}))
+            .await
+            .expect_err("location remote must be refused");
+        assert!(
+            err.to_string().contains("configured remote"),
+            "{remote}: {err}"
+        );
+    }
+}
+
+#[test]
+fn test_normalize_push_branch() {
+    assert_eq!(normalize_push_branch("feature/x").unwrap(), "feature/x");
+    assert_eq!(normalize_push_branch("refs/heads/main").unwrap(), "main");
+    for bad in [
+        "",
+        "HEAD",
+        "+main",
+        "a:b",
+        "-x",
+        "a..b",
+        "a b",
+        "x.lock",
+        ".hidden",
+        "a/",
+        "a@{1}",
+        "refs/tags/v1",
+    ] {
+        assert!(normalize_push_branch(bad).is_err(), "{bad:?}");
+    }
+}
+
+#[test]
+fn test_ensure_configured_remote() {
+    let configured = vec!["origin".to_string(), "upstream".to_string()];
+    assert!(ensure_configured_remote("origin", &configured).is_ok());
+    assert!(ensure_configured_remote("evil", &configured).is_err());
+    assert!(ensure_configured_remote("origin", &[]).is_err());
 }
 
 // Tests for validate_tag_name function

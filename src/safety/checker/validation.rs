@@ -669,16 +669,17 @@ impl SafetyChecker {
                     .or_else(|| args.get("url"))
                     .and_then(|v| v.as_str())
                 {
-                    if remote.starts_with("http://")
-                        || remote.starts_with("https://")
-                        || remote.starts_with("ssh://")
-                        || remote.starts_with("git@")
-                        || remote.starts_with("file://")
-                    {
+                    // Any location git would accept instead of a remote name
+                    // — URL (incl. git://), scp-style user@host:repo, or a
+                    // local path — is the same exfil channel (review, 0.9.2:
+                    // git://, scp-style and paths used to pass). The tool also
+                    // requires the name to be a configured remote.
+                    if crate::tools::git::validate_push_remote_syntax(remote).is_err() {
                         return Err(SelfwareError::Safety(
                             SafetyError::DangerousCommandPattern {
                                 description: format!(
-                                    "git push to an explicit URL remote (workspace exfil): {remote}"
+                                    "git push to an explicit URL, host or path remote \
+                                     (workspace exfil): {remote}"
                                 ),
                             },
                         ));
@@ -688,20 +689,35 @@ impl SafetyChecker {
                 // when omitted the tool pushes whatever branch is currently
                 // checked out, which GitPush::execute() itself re-checks
                 // after resolving it (see src/tools/git.rs).
-                if let Some(branch) = args.get("branch").and_then(|v| v.as_str()) {
-                    // Normalize ref-qualified names: `refs/heads/main` used to
-                    // slip past the exact-string compare and push to protected
-                    // main (red-team wave-11 finding).
-                    let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
+                if let Some(raw) = args
+                    .get("branch")
+                    .and_then(|v| v.as_str())
+                    .filter(|b| !b.is_empty())
+                {
+                    // The branch is read by git as a refspec: `+HEAD:main`
+                    // force-pushes main, `x:main` writes main, `:main` deletes
+                    // it — none of which the plain-name compare below saw
+                    // (review, 0.9.2). Only plain branch names pass; a leading
+                    // `refs/heads/` is normalised away (red-team wave-11).
+                    let branch = match crate::tools::git::normalize_push_branch(raw) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            return Err(SelfwareError::Safety(
+                                SafetyError::DangerousCommandPattern {
+                                    description: format!("git_push refspec-shaped branch: {e}"),
+                                },
+                            ))
+                        }
+                    };
                     if self
                         .config
                         .protected_branches
                         .iter()
-                        .any(|b| b == branch)
+                        .any(|b| b == &branch)
                     {
                         return Err(SelfwareError::Safety(
                             SafetyError::BlockedProtectedBranchPush {
-                                branch: branch.to_string(),
+                                branch,
                                 protected: self.config.protected_branches.clone(),
                             },
                         ));
@@ -5272,6 +5288,11 @@ fn git_push_protected_branch_target(cmd: &str, protected_branches: &[String]) ->
             None => (candidate, None),
         };
         for name in [Some(local), remote].into_iter().flatten() {
+            // `+main` (forced refspec) and `refs/heads/main` name the same
+            // branch; the bare compare used to miss both (review, 0.9.2 —
+            // sibling of the git_push tool's refspec bypass).
+            let name = name.strip_prefix('+').unwrap_or(name);
+            let name = name.strip_prefix("refs/heads/").unwrap_or(name);
             if protected_branches.iter().any(|b| b == name) {
                 return Some(name.to_string());
             }

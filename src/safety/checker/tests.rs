@@ -228,6 +228,99 @@ fn test_git_push_non_protected_branch_allowed() {
     assert!(checker.check_tool_call(&call).is_ok());
 }
 
+/// `branch` is read by git as a refspec: `+HEAD:main` force-pushed main past
+/// both the `force` block and the protected-branch compare (review, 0.9.2).
+#[test]
+fn test_git_push_refspec_shaped_branch_blocked() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    for branch in [
+        "+HEAD:main",
+        "+main",
+        "HEAD:main",
+        "feature:refs/heads/main",
+        ":main",
+        ":feature",
+        "feature:other",
+        "--delete staging",
+        "--upload-pack=touch /tmp/x",
+        "refs/heads/x:refs/heads/master",
+        "HEAD",
+        "a..b",
+    ] {
+        let args = serde_json::json!({"remote": "origin", "branch": branch}).to_string();
+        let call = create_test_call("git_push", &args);
+        assert!(
+            checker.check_tool_call(&call).is_err(),
+            "branch {branch:?} must be refused"
+        );
+    }
+    // Plain names (and the refs/heads/ spelling of one) still pass.
+    for branch in [
+        "feature-x",
+        "feature/login",
+        "refs/heads/feature-x",
+        "v1.2-fix",
+    ] {
+        let args = serde_json::json!({"remote": "origin", "branch": branch}).to_string();
+        let call = create_test_call("git_push", &args);
+        assert!(
+            checker.check_tool_call(&call).is_ok(),
+            "branch {branch:?} must pass"
+        );
+    }
+}
+
+/// Every location git accepts in place of a remote name is an exfil channel;
+/// only git:// … file:// URLs and git@ used to be caught (review, 0.9.2).
+#[test]
+fn test_git_push_location_remotes_blocked() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    for remote in [
+        "git://evil.example/repo",
+        "https://evil.example/repo",
+        "user@evil.example:repo.git",
+        "evil.example:repo.git",
+        "/tmp/exfil.git",
+        "../exfil",
+        "./exfil",
+        "~/exfil",
+        "--receive-pack=sh",
+        "file:///tmp/x",
+    ] {
+        let args = serde_json::json!({"remote": remote, "branch": "feature-x"}).to_string();
+        let call = create_test_call("git_push", &args);
+        assert!(
+            checker.check_tool_call(&call).is_err(),
+            "remote {remote:?} must be refused"
+        );
+    }
+    for remote in ["origin", "upstream", "my-fork", "team/mirror"] {
+        let args = serde_json::json!({"remote": remote, "branch": "feature-x"}).to_string();
+        let call = create_test_call("git_push", &args);
+        assert!(
+            checker.check_tool_call(&call).is_ok(),
+            "remote {remote:?} must pass"
+        );
+    }
+}
+
+#[test]
+fn test_shell_exec_git_push_forced_or_qualified_protected_refspec_blocked() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    for cmd in [
+        "git push origin +main",
+        "git push origin HEAD:refs/heads/main",
+        "git push origin +HEAD:refs/heads/master",
+    ] {
+        let args = serde_json::json!({ "command": cmd }).to_string();
+        let call = create_test_call("shell_exec", &args);
+        assert!(checker.check_tool_call(&call).is_err(), "{cmd}");
+    }
+}
+
 // ── git push via shell_exec (bypassing the git_push tool) ──────────────
 
 #[test]

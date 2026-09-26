@@ -37,6 +37,91 @@ fn validate_tag_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate and normalise a model-supplied `git_push` `branch`.
+///
+/// The branch reaches git after `--`, so it cannot become a flag, but git
+/// still reads it as a *refspec*: `+HEAD:main` force-pushes HEAD onto `main`
+/// (bypassing both the `force` block and the protected-branch compare, which
+/// only saw the literal string), `feature:main` writes `main`, and `:main`
+/// deletes it. A branch must therefore be a plain branch name: a leading
+/// `refs/heads/` is stripped, then `+`, `:` and everything
+/// `git check-ref-format --branch` rejects are refused. The caller pushes the
+/// explicit refspec `refs/heads/<b>:refs/heads/<b>`, so the protected-branch
+/// check sees the real destination (review, 0.9.2).
+pub(crate) fn normalize_push_branch(raw: &str) -> Result<String> {
+    let b = raw.strip_prefix("refs/heads/").unwrap_or(raw);
+    if b.is_empty() {
+        anyhow::bail!("git_push `branch` must not be empty");
+    }
+    if b.starts_with('-') {
+        anyhow::bail!("git_push `branch` must be a name, not an option: {raw:?}");
+    }
+    if b.contains('+') || b.contains(':') {
+        anyhow::bail!(
+            "git_push `branch` must be a plain branch name, not a refspec: {raw:?} \
+             ('+' forces and ':' picks the destination; use `force`, which is blocked, \
+             or check out the branch you mean to push)"
+        );
+    }
+    let bad_char =
+        |c: char| c.is_control() || matches!(c, ' ' | '~' | '^' | '?' | '*' | '[' | '\\');
+    if b.chars().any(bad_char)
+        || b.contains("..")
+        || b.contains("@{")
+        || b == "@"
+        || b.contains("//")
+        || b.ends_with('/')
+        || b.ends_with('.')
+        || b.split('/')
+            .any(|c| c.starts_with('.') || c.ends_with(".lock"))
+        || b.starts_with("refs/")
+        || b == "HEAD"
+    {
+        anyhow::bail!("git_push `branch` is not a valid branch name: {raw:?}");
+    }
+    Ok(b.to_string())
+}
+
+/// Syntactic check on a model-supplied `git_push` `remote`.
+///
+/// Only a *named* remote (`origin`, `upstream`) may be pushed to. Anything
+/// git would treat as a location instead — a URL (`https://`, `ssh://`,
+/// `git://`, `file://`), scp-style `user@host:repo`, or a local path
+/// (`/tmp/x`, `./x`, `../x`, `~/x`) — ships the workspace to an arbitrary
+/// destination and is refused. The tool additionally requires the name to be
+/// one listed by `git remote` ([`ensure_configured_remote`]), because git
+/// falls back to treating an unknown bare name as a path.
+pub(crate) fn validate_push_remote_syntax(remote: &str) -> Result<()> {
+    let bad = remote.is_empty()
+        || remote.starts_with('-')
+        || remote.starts_with('/')
+        || remote.starts_with('.')
+        || remote.starts_with('~')
+        || remote.contains("://")
+        || remote.contains(':')
+        || remote.contains('@')
+        || remote.contains('\\')
+        || remote.chars().any(|c| c.is_control() || c.is_whitespace());
+    if bad {
+        anyhow::bail!(
+            "git_push `remote` must be the name of a configured remote (e.g. origin), \
+             not a URL, host or path: {remote:?}"
+        );
+    }
+    Ok(())
+}
+
+/// Require `remote` to be one of the remotes `git remote` lists.
+pub(crate) fn ensure_configured_remote(remote: &str, configured: &[String]) -> Result<()> {
+    if configured.iter().any(|r| r == remote) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "git_push `remote` {remote:?} is not a configured remote (configured: {configured:?}); \
+         add it with `git remote add` first"
+    )
+}
+
 /// Counter for unique temp file names within the same process.
 static COMMIT_MSG_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -641,15 +726,20 @@ impl Tool for GitPush {
             anyhow::bail!("Force push is blocked by the safety checker.");
         }
 
+        // Refuse refspec/flag/URL-shaped operands before anything is spawned.
+        validate_push_remote_syntax(remote)?;
+        let explicit_branch = args
+            .get("branch")
+            .and_then(|v| v.as_str())
+            .map(normalize_push_branch)
+            .transpose()?;
+
         // Validate cwd is within allowed paths
         validate_git_path(".", self.safety_config.as_ref())?;
 
         // Determine branch
-        let branch = if let Some(b) = args.get("branch").and_then(|v| v.as_str()) {
-            // Normalize ref-qualified names: `refs/heads/main` must not slip
-            // past the protected-branch compare (same fix as the checker's
-            // git_push arm — red-team wave-11 finding).
-            b.strip_prefix("refs/heads/").unwrap_or(b).to_string()
+        let branch = if let Some(b) = explicit_branch {
+            b
         } else {
             let mut cmd = tokio::process::Command::new("git");
             crate::safety::process_env::sanitize_command_env(&mut cmd);
@@ -663,7 +753,10 @@ impl Tool for GitPush {
                 let err = String::from_utf8_lossy(&output.stderr);
                 anyhow::bail!("Failed to detect current branch: {}", err.trim());
             }
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
+            let current = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            // A detached HEAD reports "HEAD"; that is not a branch to push.
+            normalize_push_branch(&current)
+                .with_context(|| format!("current checkout {current:?} is not a pushable branch"))?
         };
 
         if let Some(ref safety_config) = self.safety_config {
@@ -681,6 +774,27 @@ impl Tool for GitPush {
             }
         }
 
+        // Only push to a remote the user configured: git treats an unknown
+        // bare name as a local path.
+        let mut remotes_cmd = tokio::process::Command::new("git");
+        crate::safety::process_env::sanitize_command_env(&mut remotes_cmd);
+        remotes_cmd.in_workspace_root();
+        let remotes_out = remotes_cmd
+            .arg("remote")
+            .output()
+            .await
+            .context("Failed to list git remotes")?;
+        if !remotes_out.status.success() {
+            let err = String::from_utf8_lossy(&remotes_out.stderr);
+            anyhow::bail!("Failed to list git remotes: {}", err.trim());
+        }
+        let configured: Vec<String> = String::from_utf8_lossy(&remotes_out.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+        ensure_configured_remote(remote, &configured)?;
+
         let mut cmd = tokio::process::Command::new("git");
         crate::safety::process_env::sanitize_command_env(&mut cmd);
         cmd.in_workspace_root();
@@ -689,7 +803,12 @@ impl Tool for GitPush {
         if let Ok(v) = std::env::var("SSH_AUTH_SOCK") {
             cmd.env("SSH_AUTH_SOCK", v);
         }
-        cmd.arg("push").arg("--").arg(remote).arg(&branch);
+        // Explicit refspec: the destination is exactly the validated branch
+        // the protected-branch check above compared against.
+        cmd.arg("push")
+            .arg("--")
+            .arg(remote)
+            .arg(format!("refs/heads/{branch}:refs/heads/{branch}"));
         // Kill the child if the timeout below drops the output future —
         // a "timed-out" push must not keep running and still land on the
         // remote after we've reported the timeout.
