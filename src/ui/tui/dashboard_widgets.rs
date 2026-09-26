@@ -8,7 +8,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph},
     Frame,
 };
 use std::sync::{Arc, Mutex};
@@ -59,7 +59,9 @@ pub enum TuiEvent {
     /// User queued a message during generation
     InputQueued { message: String, position: usize },
     /// Permission requested for tool execution
-    PermissionRequested { tool_name: String, reason: String },
+    PermissionRequested {
+        prompt: crate::safety::confirm_view::PermissionPrompt,
+    },
     /// Mode change requested (e.g., user selected "Yolo" from permission prompt)
     ModeChangeRequested { mode: crate::config::ExecutionMode },
 }
@@ -273,11 +275,11 @@ impl DashboardState {
                     &format!("Queued ({}): {}", position, message),
                 );
             }
-            TuiEvent::PermissionRequested { tool_name, reason } => {
-                self.status_message = format!("Permission needed: {}", tool_name);
+            TuiEvent::PermissionRequested { prompt } => {
+                self.status_message = format!("Permission needed: {}", prompt.tool_name);
                 self.log(
                     LogLevel::Warning,
-                    &format!("Permission requested for {}: {}", tool_name, reason),
+                    &format!("Permission requested: {}", prompt.summary()),
                 );
             }
             TuiEvent::ModeChangeRequested { mode } => {
@@ -631,14 +633,159 @@ pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
     frame.render_widget(list, inner);
 }
 
+/// Hard-wrap `text` into rows of at most `width` display columns.
+///
+/// Explicit (not ratatui's word wrap) so the modal's computed height matches
+/// what is drawn exactly: the footer can never be pushed out of the box.
+fn wrap_to_width(text: &str, width: u16) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+    let width = usize::from(width.max(1));
+    let mut rows = Vec::new();
+    let mut row = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let w = ch.width().unwrap_or(0);
+        if used + w > width && !row.is_empty() {
+            rows.push(std::mem::take(&mut row));
+            used = 0;
+        }
+        row.push(ch);
+        used += w;
+    }
+    rows.push(row);
+    rows
+}
+
+fn display_width(text: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(text)
+}
+
+fn risk_style(risk: crate::safety::confirm_view::RiskTag) -> Style {
+    use crate::safety::confirm_view::RiskTag;
+    let color = match risk {
+        RiskTag::Reads => TuiPalette::BLOOM,
+        RiskTag::RunsCommand | RiskTag::WritesWorkspace => TuiPalette::AMBER,
+        _ => TuiPalette::WILT,
+    };
+    Style::default().fg(color).add_modifier(Modifier::BOLD)
+}
+
+fn confirm_line_style(kind: crate::safety::confirm_view::LineKind) -> Style {
+    use crate::safety::confirm_view::LineKind;
+    match kind {
+        LineKind::Header => Style::default()
+            .fg(TuiPalette::PARCHMENT)
+            .add_modifier(Modifier::BOLD),
+        LineKind::Hunk => Style::default().fg(TuiPalette::SAGE),
+        LineKind::Added => Style::default().fg(TuiPalette::BLOOM),
+        LineKind::Removed => Style::default().fg(TuiPalette::WILT),
+        LineKind::Context => TuiPalette::muted_style(),
+        LineKind::Field => Style::default().fg(TuiPalette::PARCHMENT),
+        LineKind::Note => TuiPalette::muted_style().add_modifier(Modifier::ITALIC),
+    }
+}
+
+/// The modal's content, pre-wrapped to `width`: (top rows, footer rows).
+/// Top = tool + risk, why, blank, body. Footer = the standing options (only
+/// those this prompt offers), then the always-present `[y] allow` /
+/// `[n/Esc] deny` row LAST, so it is the bottom row of the box.
+fn permission_modal_rows(
+    prompt: &crate::safety::confirm_view::PermissionPrompt,
+    width: u16,
+) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
+    let key_style = Style::default()
+        .fg(TuiPalette::AMBER)
+        .add_modifier(Modifier::BOLD);
+    let mut top: Vec<Line<'static>> = Vec::new();
+
+    top.push(Line::from(vec![
+        Span::styled("Tool: ", TuiPalette::muted_style()),
+        Span::styled(
+            prompt.tool_name.clone(),
+            Style::default()
+                .fg(TuiPalette::PARCHMENT)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(prompt.risk.label(), risk_style(prompt.risk)),
+    ]));
+    if let Some(why) = &prompt.reason {
+        // Reason text may come from a safety gate that quotes a command:
+        // sanitize like every other displayed argument.
+        let why = crate::safety::confirm_view::sanitize_line(why, 600);
+        for (i, row) in wrap_to_width(&format!("Why: {}", why), width)
+            .into_iter()
+            .enumerate()
+        {
+            if i == 0 {
+                let rest = row.strip_prefix("Why: ").unwrap_or(&row).to_string();
+                top.push(Line::from(vec![
+                    Span::styled("Why: ", Style::default().fg(TuiPalette::AMBER)),
+                    Span::styled(rest, TuiPalette::muted_style()),
+                ]));
+            } else {
+                top.push(Line::from(Span::styled(row, TuiPalette::muted_style())));
+            }
+        }
+    }
+    if !prompt.body.is_empty() {
+        top.push(Line::from(""));
+        for line in &prompt.body {
+            for row in wrap_to_width(&line.text, width) {
+                top.push(Line::from(Span::styled(row, confirm_line_style(line.kind))));
+            }
+        }
+    }
+
+    let mut footer: Vec<Line<'static>> = Vec::new();
+    if prompt.allow_always {
+        let text = format!(" always allow {} (session)", prompt.tool_name);
+        footer.push(Line::from(vec![
+            Span::styled("[a]", key_style),
+            Span::raw(text),
+        ]));
+    }
+    if let Some(rule) = &prompt.shell_rule {
+        for (i, row) in wrap_to_width(&format!("[p] always allow {} (session)", rule), width)
+            .into_iter()
+            .enumerate()
+        {
+            if i == 0 {
+                let rest = row.strip_prefix("[p]").unwrap_or(&row).to_string();
+                footer.push(Line::from(vec![
+                    Span::styled("[p]", key_style),
+                    Span::raw(rest),
+                ]));
+            } else {
+                footer.push(Line::from(row));
+            }
+        }
+    }
+    footer.push(Line::from(vec![
+        Span::styled("[y]", key_style),
+        Span::raw(" allow   "),
+        Span::styled("[n/Esc]", key_style),
+        Span::raw(" deny"),
+    ]));
+    (top, footer)
+}
+
 /// Renders a blocking permission-confirmation modal over the dashboard.
 ///
-/// While this is shown, the main loop routes all key input to the
-/// yes/no/deny handler instead of chat/quit/pane navigation -- see
-/// `run_tui_dashboard_with_events` for the key-interception logic that
-/// pairs with this.
-pub fn render_permission_overlay(frame: &mut Frame, area: Rect, tool_name: &str, reason: &str) {
-    let modal_area = permission_modal_area(area);
+/// Sized to its content (not a fixed fraction of the screen): tool + risk
+/// tag, the reason, the same readable argument / diff view the CLI prints,
+/// and only the answers this prompt offers. When the terminal is too small
+/// the body is clipped — the footer with the choices never is.
+///
+/// While this is shown, the main loop routes all key input to
+/// `permission_key_answer` instead of chat/quit/pane navigation -- see
+/// `run_tui_dashboard_with_events`.
+pub fn render_permission_overlay(
+    frame: &mut Frame,
+    area: Rect,
+    prompt: &crate::safety::confirm_view::PermissionPrompt,
+) {
+    let modal_area = permission_modal_area(area, prompt);
     if modal_area.width < 4 || modal_area.height < 4 {
         return;
     }
@@ -662,87 +809,56 @@ pub fn render_permission_overlay(frame: &mut Frame, area: Rect, tool_name: &str,
         return;
     }
 
-    let tool_area = Rect::new(inner.x, inner.y, inner.width, 1);
+    let (top, footer) = permission_modal_rows(prompt, inner.width);
+    // Footer rows at the bottom (never clipped by the body); a spacer row
+    // above them when there is room; the top section gets the rest.
+    let footer_h = (footer.len() as u16).min(inner.height);
     let footer_area = Rect::new(
         inner.x,
-        inner.y + inner.height.saturating_sub(1),
+        inner.y + inner.height - footer_h,
         inner.width,
-        1,
+        footer_h,
     );
-    // Reserve the tool row, a spacer above the footer, and the footer itself.
-    // The details paragraph may be clipped by an exceptionally small terminal,
-    // but it can never overwrite the user's permission choices.
-    let details_area = Rect::new(
-        inner.x,
-        inner.y + 1,
-        inner.width,
-        inner.height.saturating_sub(3),
-    );
+    let top_h = inner.height.saturating_sub(footer_h + 1);
+    let top_area = Rect::new(inner.x, inner.y, inner.width, top_h);
 
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("Tool: ", TuiPalette::muted_style()),
-            Span::styled(
-                tool_name,
-                Style::default()
-                    .fg(TuiPalette::PARCHMENT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ])),
-        tool_area,
-    );
-
-    frame.render_widget(
-        Paragraph::new(reason)
-            .style(TuiPalette::muted_style())
-            .wrap(Wrap { trim: false }),
-        details_area,
-    );
-
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                "[y]",
-                Style::default()
-                    .fg(TuiPalette::AMBER)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" allow   "),
-            Span::styled(
-                "[n/Esc]",
-                Style::default()
-                    .fg(TuiPalette::AMBER)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" deny"),
-        ])),
-        footer_area,
-    );
+    frame.render_widget(Paragraph::new(top), top_area);
+    frame.render_widget(Paragraph::new(footer), footer_area);
 }
 
-fn permission_modal_area(area: Rect) -> Rect {
+/// Content-sized modal rectangle, centred and clamped to `area`.
+fn permission_modal_area(
+    area: Rect,
+    prompt: &crate::safety::confirm_view::PermissionPrompt,
+) -> Rect {
     let max_width = area.width.saturating_sub(2);
     let max_height = area.height.saturating_sub(2);
 
-    let min_width = 40.min(max_width);
-    let max_preferred_width = 120.min(max_width);
-    let width = area
-        .width
-        .saturating_mul(4)
-        .checked_div(5)
-        .unwrap_or_default()
-        .max(min_width)
-        .min(max_preferred_width);
+    // Natural width: the widest unwrapped content line (+2 for borders).
+    let (top, footer) = permission_modal_rows(prompt, u16::MAX);
+    let natural = top
+        .iter()
+        .chain(footer.iter())
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| display_width(&span.content))
+                .sum::<usize>()
+        })
+        .max()
+        .unwrap_or(0)
+        .saturating_add(2);
+    let natural = u16::try_from(natural).unwrap_or(u16::MAX);
+    let width = natural.clamp(40.min(max_width), 120.min(max_width));
 
-    let min_height = 8.min(max_height);
-    let max_preferred_height = 24.min(max_height);
-    let height = area
-        .height
-        .saturating_mul(3)
-        .checked_div(5)
-        .unwrap_or_default()
-        .max(min_height)
-        .min(max_preferred_height);
+    // Height from the content wrapped at the chosen inner width: top rows +
+    // spacer + footer rows + 2 borders.
+    let inner_width = width.saturating_sub(2).max(1);
+    let (top, footer) = permission_modal_rows(prompt, inner_width);
+    let rows = top.len() + 1 + footer.len() + 2;
+    let height = u16::try_from(rows)
+        .unwrap_or(u16::MAX)
+        .clamp(6.min(max_height), max_height);
 
     Rect::new(
         area.x + area.width.saturating_sub(width) / 2,

@@ -2952,26 +2952,32 @@ async fn tui_permission_response_denies_when_no_channel_wired() {
     let mut agent = Agent::new(config).await.unwrap();
 
     // No channel wired at all -- must fail closed, not auto-approve.
-    assert!(!agent.await_tui_permission_response().await);
+    assert_eq!(
+        agent.await_tui_permission_response().await,
+        crate::safety::confirm_view::PermissionAnswer::Deny
+    );
     server.stop().await;
 }
 
 #[cfg(feature = "tui")]
 #[tokio::test]
 async fn tui_permission_response_relays_user_answer() {
+    use crate::safety::confirm_view::PermissionAnswer;
     let server = MockLlmServer::builder().with_response("done").build().await;
     let config = test_config(format!("{}/v1", server.url()));
     let mut agent = Agent::new(config).await.unwrap();
 
-    let (tx, rx) = std::sync::mpsc::channel();
-    agent = agent.with_permission_channel(rx);
-    tx.send(true).unwrap();
-    assert!(agent.await_tui_permission_response().await);
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    agent = agent.with_permission_channel(rx);
-    tx.send(false).unwrap();
-    assert!(!agent.await_tui_permission_response().await);
+    for answer in [
+        PermissionAnswer::Once,
+        PermissionAnswer::Deny,
+        PermissionAnswer::AlwaysTool,
+        PermissionAnswer::ShellRule,
+    ] {
+        let (tx, rx) = std::sync::mpsc::channel();
+        agent = agent.with_permission_channel(rx);
+        tx.send(answer).unwrap();
+        assert_eq!(agent.await_tui_permission_response().await, answer);
+    }
 
     server.stop().await;
 }
@@ -2983,11 +2989,14 @@ async fn tui_permission_response_denies_when_sender_dropped() {
     let config = test_config(format!("{}/v1", server.url()));
     let mut agent = Agent::new(config).await.unwrap();
 
-    let (tx, rx) = std::sync::mpsc::channel::<bool>();
+    let (tx, rx) = std::sync::mpsc::channel::<crate::safety::confirm_view::PermissionAnswer>();
     agent = agent.with_permission_channel(rx);
     drop(tx); // simulate the TUI thread exiting without answering
 
-    assert!(!agent.await_tui_permission_response().await);
+    assert_eq!(
+        agent.await_tui_permission_response().await,
+        crate::safety::confirm_view::PermissionAnswer::Deny
+    );
     server.stop().await;
 }
 
@@ -8277,5 +8286,64 @@ async fn normal_mode_confirm_gate_honours_session_shell_prefix_rule() {
             .expect_err("must still prompt");
         assert!(crate::errors::is_confirmation_error(&err), "{cmd}: {err:?}");
     }
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn confirm_decisions_apply_only_offered_standing_answers() {
+    use crate::safety::permissions::ShellAllowRule;
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut config = test_config(format!("{}/v1", server.url()));
+    config.execution_mode = crate::config::ExecutionMode::Normal;
+    let mut agent = Agent::new(config).await.unwrap();
+
+    // Safety-gate prompt (no standing answers): only `y` runs.
+    assert!(agent.apply_confirm_decision("shell_exec", ConfirmDecision::ExecuteOnce, false, None));
+    for decision in [
+        ConfirmDecision::AlwaysAllow,
+        ConfirmDecision::AllowShellRule,
+        ConfirmDecision::EnableYolo,
+        ConfirmDecision::Skip,
+    ] {
+        assert!(
+            !agent.apply_confirm_decision(
+                "shell_exec",
+                decision,
+                false,
+                Some(ShellAllowRule::for_command("cargo test --lib"))
+            ),
+            "{decision:?} must not run on a safety-gate prompt"
+        );
+    }
+    assert!(!agent.permission_store.is_authorized("shell_exec", None));
+    assert_eq!(
+        agent.config.execution_mode,
+        crate::config::ExecutionMode::Normal
+    );
+
+    // `p` without an offered rule is a skip.
+    assert!(!agent.apply_confirm_decision(
+        "shell_exec",
+        ConfirmDecision::AllowShellRule,
+        true,
+        None
+    ));
+
+    // Offered `p` records the rule, not a tool-wide grant.
+    assert!(agent.apply_confirm_decision(
+        "shell_exec",
+        ConfirmDecision::AllowShellRule,
+        true,
+        Some(ShellAllowRule::for_command("cargo test --lib"))
+    ));
+    assert!(agent.permission_store.shell_rule_allows(
+        "shell_exec",
+        &serde_json::json!({"command": "cargo test --lib foo"})
+    ));
+    assert!(!agent.permission_store.is_authorized("shell_exec", None));
+
+    // Offered `a` records the tool grant.
+    assert!(agent.apply_confirm_decision("file_edit", ConfirmDecision::AlwaysAllow, true, None));
+    assert!(agent.permission_store.is_authorized("file_edit", None));
     server.stop().await;
 }

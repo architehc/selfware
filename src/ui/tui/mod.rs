@@ -421,7 +421,7 @@ fn truncate_for_display(input: &str, max_chars: usize) -> String {
 /// replay through exactly the same path as live events.
 fn apply_agent_event(
     app: &mut App,
-    pending_permission: &mut Option<(String, String)>,
+    pending_permission: &mut Option<crate::safety::confirm_view::PermissionPrompt>,
     event: &TuiEvent,
 ) {
     // Connect agent responses to the chat pane
@@ -481,13 +481,37 @@ fn apply_agent_event(
             let status = if *success { "completed" } else { "failed" };
             app.add_tool_message(name, &format!("{} ({}ms)", status, duration_ms));
         }
-        TuiEvent::PermissionRequested { tool_name, reason } => {
-            *pending_permission = Some((tool_name.clone(), reason.clone()));
+        TuiEvent::PermissionRequested { prompt } => {
+            *pending_permission = Some(prompt.clone());
         }
         TuiEvent::AssistantDelta { text } => {
             app.append_streaming(text);
         }
         _ => {}
+    }
+}
+
+/// Map a key press on the permission modal to an answer. `None` keeps the
+/// modal open: unrelated keys, and standing answers the prompt did not offer
+/// (`a` without `allow_always`, `p` without a shell rule) — an un-offered
+/// option must never be silently taken as a yes.
+pub(crate) fn permission_key_answer(
+    prompt: &crate::safety::confirm_view::PermissionPrompt,
+    code: KeyCode,
+) -> Option<crate::safety::confirm_view::PermissionAnswer> {
+    use crate::safety::confirm_view::PermissionAnswer;
+    match code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => Some(PermissionAnswer::Once),
+        KeyCode::Char('a') | KeyCode::Char('A') if prompt.allow_always => {
+            Some(PermissionAnswer::AlwaysTool)
+        }
+        KeyCode::Char('p') | KeyCode::Char('P') if prompt.shell_rule.is_some() => {
+            Some(PermissionAnswer::ShellRule)
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Enter => {
+            Some(PermissionAnswer::Deny)
+        }
+        _ => None,
     }
 }
 
@@ -505,7 +529,7 @@ pub fn run_tui_dashboard_with_events(
     shared_state: SharedDashboardState,
     event_rx: std::sync::mpsc::Receiver<TuiEvent>,
     user_input_tx: std::sync::mpsc::Sender<String>,
-    permission_response_tx: std::sync::mpsc::Sender<bool>,
+    permission_response_tx: std::sync::mpsc::Sender<crate::safety::confirm_view::PermissionAnswer>,
     cancel_token: std::sync::Arc<AtomicBool>,
 ) -> Result<()> {
     let mut terminal = TuiTerminal::new()?;
@@ -515,7 +539,7 @@ pub fn run_tui_dashboard_with_events(
     // Set while a tool's `AgentEvent::PermissionRequested` is awaiting a
     // y/n answer. While this is `Some`, normal key handling is suspended
     // and a modal is rendered instead (see the permission-modal block below).
-    let mut pending_permission: Option<(String, String)> = None;
+    let mut pending_permission: Option<crate::safety::confirm_view::PermissionPrompt> = None;
     let mut show_help = false;
     let mut paused = false;
     // Display events received while `paused` are held here and replayed on
@@ -680,8 +704,8 @@ pub fn run_tui_dashboard_with_events(
                     render_pause_indicator(frame, area);
                 }
 
-                if let Some((tool_name, reason)) = &pending_permission {
-                    render_permission_overlay(frame, area, tool_name, reason);
+                if let Some(prompt) = &pending_permission {
+                    render_permission_overlay(frame, area, prompt);
                 }
             })?;
             last_draw = Instant::now();
@@ -694,24 +718,29 @@ pub fn run_tui_dashboard_with_events(
 
             // A permission modal takes over all key input until answered --
             // it must never fall through to chat input, quit handling, etc.
-            if let Some((tool_name, reason)) = pending_permission.take() {
-                match key.code {
-                    KeyCode::Char('y') | KeyCode::Char('Y') => {
-                        let _ = permission_response_tx.send(true);
+            if let Some(prompt) = pending_permission.take() {
+                use crate::safety::confirm_view::PermissionAnswer;
+                match permission_key_answer(&prompt, key.code) {
+                    Some(answer) => {
+                        let _ = permission_response_tx.send(answer);
+                        let (level, verb) = match answer {
+                            PermissionAnswer::Deny => (LogLevel::Warning, "Denied"),
+                            PermissionAnswer::Once => (LogLevel::Info, "Allowed once"),
+                            PermissionAnswer::AlwaysTool => {
+                                (LogLevel::Info, "Always allowed (session)")
+                            }
+                            PermissionAnswer::ShellRule => {
+                                (LogLevel::Info, "Shell rule added (session)")
+                            }
+                        };
                         with_dashboard_state(&shared_state, |state| {
-                            state.log(LogLevel::Info, &format!("Allowed: {}", tool_name));
+                            state.log(level, &format!("{}: {}", verb, prompt.tool_name));
                         });
                     }
-                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Enter => {
-                        let _ = permission_response_tx.send(false);
-                        with_dashboard_state(&shared_state, |state| {
-                            state.log(LogLevel::Warning, &format!("Denied: {}", tool_name));
-                        });
-                    }
-                    _ => {
-                        // Any other key: keep the modal open, don't consume
-                        // a decision yet.
-                        pending_permission = Some((tool_name, reason));
+                    None => {
+                        // Any other key (or an option this prompt did not
+                        // offer): keep the modal open, no decision yet.
+                        pending_permission = Some(prompt);
                     }
                 }
                 continue;

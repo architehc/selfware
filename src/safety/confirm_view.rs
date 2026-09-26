@@ -427,6 +427,55 @@ pub fn file_write_target(tool_name: &str, args_str: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Front-end neutral prompt / answer
+// ---------------------------------------------------------------------------
+
+/// A tool-permission request, as an interactive front end (the TUI modal)
+/// renders it. Built by the dispatcher from the same pieces the CLI prompt
+/// prints, so both front ends show the same content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionPrompt {
+    /// The tool awaiting approval.
+    pub tool_name: String,
+    /// Short risk tag (`[installs packages]`, …).
+    pub risk: RiskTag,
+    /// Why the call needs confirmation.
+    pub reason: Option<String>,
+    /// Readable, bounded arguments / diff ([`render_tool_call`]).
+    pub body: Vec<ConfirmLine>,
+    /// Whether "always allow this tool (session)" is offered.
+    pub allow_always: bool,
+    /// The offered session shell rule, described (e.g. "commands starting
+    /// with `cargo test`"), if any.
+    pub shell_rule: Option<String>,
+}
+
+impl PermissionPrompt {
+    /// One-line summary for logs / status lines.
+    pub fn summary(&self) -> String {
+        let head = self
+            .body
+            .first()
+            .map(|line| format!(" — {}", sanitize_line(&line.text, 80)))
+            .unwrap_or_default();
+        format!("{} {}{}", self.tool_name, self.risk.label(), head)
+    }
+}
+
+/// An interactive front end's answer to a [`PermissionPrompt`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionAnswer {
+    /// Do not run the call.
+    Deny,
+    /// Run this call once.
+    Once,
+    /// Run it and allow this tool for the rest of the session.
+    AlwaysTool,
+    /// Run it and add the offered shell rule for the session.
+    ShellRule,
+}
+
+// ---------------------------------------------------------------------------
 // Risk tags
 // ---------------------------------------------------------------------------
 

@@ -3494,13 +3494,19 @@ impl Agent {
             .await
     }
 
-    /// Interactive (CLI or TUI) yes/no confirmation prompt for a single tool
-    /// call. Assumes the caller has already decided confirmation is required.
+    /// Interactive (CLI or TUI) confirmation prompt for a single tool call.
+    /// Assumes the caller has already decided confirmation is required.
     ///
     /// `reason` is why the call needs confirmation when a safety gate (not
     /// the plain per-tool policy) asked for it; it is shown to the operator,
     /// who otherwise saw only "Execute?" with no explanation (UX field test:
     /// a `-y` run stopped on this prompt and waited ~14 minutes).
+    ///
+    /// Standing answers (`a` = always allow the tool, `p` = session shell
+    /// rule, `yolo`) are offered only on a plain policy prompt. A safety-gate
+    /// prompt (`reason` set — the YOLO floor) never consults grants or rules,
+    /// so offering them there would promise something that does not happen:
+    /// it is "y = once / N = skip" only, and any other answer skips.
     async fn prompt_tool_confirmation(
         &mut self,
         name: &str,
@@ -3515,18 +3521,11 @@ impl Agent {
             .and_then(|path| existing_file_for_prompt(&path));
         let body =
             crate::safety::confirm_view::render_tool_call(name, args_str, existing.as_deref());
-        let body_text = body
-            .iter()
-            .map(|line| line.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
         let args_value: serde_json::Value =
             serde_json::from_str(args_str).unwrap_or(serde_json::Value::Null);
         let risk = crate::safety::confirm_view::classify_risk(name, &args_value);
-        // `p` (session shell rule) is offered only on a plain policy prompt
-        // for an eligible `shell_exec` call — never on a safety-gate prompt
-        // (`reason` set), where a rule would not be consulted anyway.
-        let shell_rule = if reason.is_none() {
+        let standing_answers = reason.is_none();
+        let shell_rule = if standing_answers {
             crate::safety::permissions::shell_rule_command(name, &args_value)
                 .map(|cmd| crate::safety::permissions::ShellAllowRule::for_command(&cmd))
         } else {
@@ -3538,20 +3537,36 @@ impl Agent {
         // owns) or auto-approving.
         if self.has_tui_renderer() {
             use super::tui_events::AgentEvent;
+            use crate::safety::confirm_view::{PermissionAnswer, PermissionPrompt};
             self.emit_event(AgentEvent::PermissionRequested {
-                tool_name: name.to_string(),
-                reason: match reason {
-                    Some(why) => format!("{}\n{}\n{}", risk.label(), why, body_text),
-                    None => format!("{}\n{}", risk.label(), body_text),
+                prompt: PermissionPrompt {
+                    tool_name: name.to_string(),
+                    risk,
+                    reason: Some(match reason {
+                        Some(why) => why.to_string(),
+                        None => format!(
+                            "{} mode asks before calls that are not read-only",
+                            self.config.execution_mode
+                        ),
+                    }),
+                    body,
+                    allow_always: standing_answers,
+                    shell_rule: shell_rule.as_ref().map(|rule| rule.describe()),
                 },
             });
-            let approved = self.await_tui_permission_response().await;
-            if !approved {
-                let denial = "Tool execution denied via TUI permission prompt";
-                self.record_failed_tool_attempt(name, args_str, "operator_denied", denial);
-                self.push_tool_skip_message(name, call_id, use_native_fc, denial);
+            let decision = match self.await_tui_permission_response().await {
+                PermissionAnswer::Once => ConfirmDecision::ExecuteOnce,
+                PermissionAnswer::AlwaysTool => ConfirmDecision::AlwaysAllow,
+                PermissionAnswer::ShellRule => ConfirmDecision::AllowShellRule,
+                PermissionAnswer::Deny => ConfirmDecision::Skip,
+            };
+            if self.apply_confirm_decision(name, decision, standing_answers, shell_rule) {
+                return Ok(true);
             }
-            return Ok(approved);
+            let denial = "Tool execution denied via TUI permission prompt";
+            self.record_failed_tool_attempt(name, args_str, "operator_denied", denial);
+            self.push_tool_skip_message(name, call_id, use_native_fc, denial);
+            return Ok(false);
         }
 
         if !self.is_interactive() {
@@ -3602,12 +3617,13 @@ impl Agent {
                 .dimmed()
             );
         }
-        match &shell_rule {
-            Some(rule) => cli_prompt!(
+        match (&shell_rule, standing_answers) {
+            (Some(rule), _) => cli_prompt!(
                 "\x1b[0m\x1b[1m\x1b[97mExecute? [y = once / a = always allow this tool (session) / p = always allow {} (session) / N = skip / type \"yolo\" to disable confirmations]: \x1b[0m",
                 rule.describe()
             ),
-            None => cli_prompt!("\x1b[0m\x1b[1m\x1b[97mExecute? [y = once / a = always allow this tool (session) / N = skip / type \"yolo\" to disable confirmations]: \x1b[0m"),
+            (None, true) => cli_prompt!("\x1b[0m\x1b[1m\x1b[97mExecute? [y = once / a = always allow this tool (session) / N = skip / type \"yolo\" to disable confirmations]: \x1b[0m"),
+            (None, false) => cli_prompt!("\x1b[0m\x1b[1m\x1b[97mExecute? [y = once / N = skip]: \x1b[0m"),
         }
 
         let response = super::execution::read_line_pausing_esc_bounded(
@@ -3636,43 +3652,9 @@ impl Agent {
         }
         let response = response.map(|line| line.unwrap_or_default());
         if let Ok(response) = response {
-            match parse_confirm_response(&response) {
-                ConfirmDecision::ExecuteOnce => return Ok(true),
-                ConfirmDecision::AlwaysAllow => {
-                    // Session-scoped grant: `needs_confirmation`/`normal_mode_
-                    // needs_confirmation` consult the permission store first,
-                    // so future calls of this tool skip the prompt.
-                    self.permission_store
-                        .add(crate::safety::permissions::PermissionGrant::session(name));
-                    cli_println!(
-                        "{} '{}' allowed for the rest of this session",
-                        "✓".bright_green(),
-                        name.bright_cyan()
-                    );
-                    return Ok(true);
-                }
-                ConfirmDecision::AllowShellRule => {
-                    if let Some(rule) = shell_rule {
-                        let what = rule.describe();
-                        self.permission_store.add_shell_rule(rule);
-                        cli_println!(
-                            "{} shell_exec: {} allowed for the rest of this session",
-                            "✓".bright_green(),
-                            what
-                        );
-                        return Ok(true);
-                    }
-                    // `p` was not offered for this call: fail closed (skip).
-                }
-                ConfirmDecision::EnableYolo => {
-                    self.set_execution_mode(crate::config::ExecutionMode::Yolo);
-                    cli_println!(
-                        "{} Confirmations disabled for the rest of this session (YOLO)",
-                        "⚡".bright_yellow()
-                    );
-                    return Ok(true);
-                }
-                ConfirmDecision::Skip => {}
+            let decision = parse_confirm_response(&response);
+            if self.apply_confirm_decision(name, decision, standing_answers, shell_rule) {
+                return Ok(true);
             }
         }
 
@@ -3681,6 +3663,56 @@ impl Agent {
         cli_println!("{} {}", "⏭️".bright_yellow(), skip_msg);
         self.push_tool_skip_message(name, call_id, use_native_fc, skip_msg);
         Ok(false)
+    }
+
+    /// Apply an operator's answer (CLI or TUI). Returns whether the call may
+    /// run. A standing answer that was not offered (`standing_answers` false,
+    /// or `p` without a shell rule) is a skip — fail closed.
+    fn apply_confirm_decision(
+        &mut self,
+        name: &str,
+        decision: ConfirmDecision,
+        standing_answers: bool,
+        shell_rule: Option<crate::safety::permissions::ShellAllowRule>,
+    ) -> bool {
+        match decision {
+            ConfirmDecision::ExecuteOnce => true,
+            ConfirmDecision::AlwaysAllow if standing_answers => {
+                // Session-scoped grant: the Normal/AutoEdit policy consults
+                // the permission store first, so future calls of this tool
+                // skip the prompt.
+                self.permission_store
+                    .add(crate::safety::permissions::PermissionGrant::session(name));
+                cli_println!(
+                    "{} '{}' allowed for the rest of this session",
+                    "✓".bright_green(),
+                    name.bright_cyan()
+                );
+                true
+            }
+            ConfirmDecision::AllowShellRule if standing_answers => {
+                let Some(rule) = shell_rule else {
+                    return false; // `p` was not offered for this call
+                };
+                let what = rule.describe();
+                self.permission_store.add_shell_rule(rule);
+                cli_println!(
+                    "{} shell_exec: {} allowed for the rest of this session",
+                    "✓".bright_green(),
+                    what
+                );
+                true
+            }
+            ConfirmDecision::EnableYolo if standing_answers => {
+                self.set_execution_mode(crate::config::ExecutionMode::Yolo);
+                cli_println!(
+                    "{} Confirmations disabled for the rest of this session (YOLO)",
+                    "⚡".bright_yellow()
+                );
+                true
+            }
+            _ => false,
+        }
     }
 
     pub(super) async fn parse_tool_args(

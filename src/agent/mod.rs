@@ -824,7 +824,13 @@ pub struct Agent {
     /// Wrapped in `Arc<Mutex<..>>` (rather than held directly) so `Agent`
     /// stays `Sync` -- some call sites `tokio::spawn` futures that hold
     /// `&Agent` across an await point.
-    permission_response_rx: Option<Arc<std::sync::Mutex<std::sync::mpsc::Receiver<bool>>>>,
+    permission_response_rx: Option<
+        Arc<
+            std::sync::Mutex<
+                std::sync::mpsc::Receiver<crate::safety::confirm_view::PermissionAnswer>,
+            >,
+        >,
+    >,
     /// Structured progress emitter (stderr / TUI / future Prometheus, etc).
     /// Defaults to a no-op; set to a `StderrProgressEmitter` for headless runs.
     progress_emitter: Arc<dyn progress::ProgressEmitter>,
@@ -1999,7 +2005,10 @@ To call a tool, use this EXACT XML structure:
     /// Wire up the channel the TUI uses to answer permission prompts
     /// (see `AgentEvent::PermissionRequested` / `await_tui_permission_response`).
     #[cfg(feature = "tui")]
-    pub fn with_permission_channel(mut self, rx: std::sync::mpsc::Receiver<bool>) -> Self {
+    pub fn with_permission_channel(
+        mut self,
+        rx: std::sync::mpsc::Receiver<crate::safety::confirm_view::PermissionAnswer>,
+    ) -> Self {
         self.permission_response_rx = Some(Arc::new(std::sync::Mutex::new(rx)));
         self
     }
@@ -2013,13 +2022,16 @@ To call a tool, use this EXACT XML structure:
     /// (TUI exited / shutting down) the denial is logged explicitly so
     /// callers can distinguish a shutdown-induced denial from an actual
     /// user denial.
-    async fn await_tui_permission_response(&mut self) -> bool {
+    async fn await_tui_permission_response(
+        &mut self,
+    ) -> crate::safety::confirm_view::PermissionAnswer {
+        use crate::safety::confirm_view::PermissionAnswer;
         let Some(rx) = self.permission_response_rx.clone() else {
             warn!(
                 "TUI permission prompt requested but no response channel is \
                  wired up; denying tool call (fail-closed)"
             );
-            return false;
+            return PermissionAnswer::Deny;
         };
         let result = tokio::task::spawn_blocking(move || {
             rx.lock()
@@ -2029,7 +2041,7 @@ To call a tool, use this EXACT XML structure:
         .await;
 
         match result {
-            Ok(Ok(approved)) => approved,
+            Ok(Ok(answer)) => answer,
             // Channel disconnected: TUI thread exited while a prompt was
             // pending.  Log explicitly so the agent/user knows the denial
             // is due to shutdown, not a genuine user rejection.
@@ -2039,7 +2051,7 @@ To call a tool, use this EXACT XML structure:
                      response channel disconnected (TUI thread exited). \
                      Denying tool call — this is NOT a user denial."
                 );
-                false
+                PermissionAnswer::Deny
             }
             Err(_) => {
                 warn!(
@@ -2047,7 +2059,7 @@ To call a tool, use this EXACT XML structure:
                      shutdown; denying tool call (fail-closed, not a user \
                      denial)"
                 );
-                false
+                PermissionAnswer::Deny
             }
         }
     }

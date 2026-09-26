@@ -412,3 +412,41 @@ fn parse_step_status_reads_the_step_number_only() {
     assert_eq!(parse_step_status("Step 3 failed: boom"), None);
     assert_eq!(parse_step_status("Planning"), None);
 }
+
+#[test]
+fn permission_keys_map_only_to_offered_answers() {
+    use crate::safety::confirm_view::{PermissionAnswer, PermissionPrompt, RiskTag};
+    let mut prompt = PermissionPrompt {
+        tool_name: "shell_exec".to_string(),
+        risk: RiskTag::RunsCommand,
+        reason: None,
+        body: vec![],
+        allow_always: true,
+        shell_rule: Some("commands starting with `cargo test`".to_string()),
+    };
+    assert_eq!(
+        permission_key_answer(&prompt, KeyCode::Char('y')),
+        Some(PermissionAnswer::Once)
+    );
+    assert_eq!(
+        permission_key_answer(&prompt, KeyCode::Char('a')),
+        Some(PermissionAnswer::AlwaysTool)
+    );
+    assert_eq!(
+        permission_key_answer(&prompt, KeyCode::Char('p')),
+        Some(PermissionAnswer::ShellRule)
+    );
+    for key in [KeyCode::Char('n'), KeyCode::Esc, KeyCode::Enter] {
+        assert_eq!(
+            permission_key_answer(&prompt, key),
+            Some(PermissionAnswer::Deny)
+        );
+    }
+    assert_eq!(permission_key_answer(&prompt, KeyCode::Char('x')), None);
+
+    // Un-offered standing answers keep the modal open — never a silent yes.
+    prompt.allow_always = false;
+    prompt.shell_rule = None;
+    assert_eq!(permission_key_answer(&prompt, KeyCode::Char('a')), None);
+    assert_eq!(permission_key_answer(&prompt, KeyCode::Char('p')), None);
+}

@@ -8,28 +8,58 @@ fn buffer_row(terminal: &Terminal<TestBackend>, y: u16) -> String {
         .collect()
 }
 
+fn prompt(
+    tool: &str,
+    reason: &str,
+    body: Vec<crate::safety::confirm_view::ConfirmLine>,
+) -> crate::safety::confirm_view::PermissionPrompt {
+    crate::safety::confirm_view::PermissionPrompt {
+        tool_name: tool.to_string(),
+        risk: crate::safety::confirm_view::RiskTag::WritesWorkspace,
+        reason: Some(reason.to_string()),
+        body,
+        allow_always: true,
+        shell_rule: None,
+    }
+}
+
+fn inner_of(modal: Rect) -> Rect {
+    Rect::new(
+        modal.x + 1,
+        modal.y + 1,
+        modal.width.saturating_sub(2),
+        modal.height.saturating_sub(2),
+    )
+}
+
+fn all_rows(terminal: &Terminal<TestBackend>) -> String {
+    let h = terminal.backend().buffer().area().height;
+    (0..h)
+        .map(|y| buffer_row(terminal, y))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[test]
 fn permission_overlay_wraps_details_and_keeps_footer_visible() {
     let backend = TestBackend::new(150, 50);
     let mut terminal = Terminal::new(backend).unwrap();
     let reason = "Write a file at /workspace/a/very/deep/project/path/that/needs/to/remain/visible/configuration.json with arguments: { content: this permission explanation is deliberately long enough to wrap onto another line }";
+    let p = prompt("file_write", reason, vec![]);
 
     terminal
         .draw(|frame| {
-            render_permission_overlay(frame, frame.area(), "file_write", reason);
+            render_permission_overlay(frame, frame.area(), &p);
         })
         .unwrap();
 
-    let modal = permission_modal_area(Rect::new(0, 0, 150, 50));
+    let modal = permission_modal_area(Rect::new(0, 0, 150, 50), &p);
     assert!(modal.width > 60, "modal should expand on a wide terminal");
-    assert!(modal.height > 8, "modal should expand on a tall terminal");
+    // Sized to content (0.9.2): NOT a fixed 60% of a tall terminal. Rows:
+    // tool, 2 wrapped Why rows, spacer, [a] row, [y]/[n] row + 2 borders.
+    assert_eq!(modal.height, 8, "modal height must follow its content");
 
-    let inner = Rect::new(
-        modal.x + 1,
-        modal.y + 1,
-        modal.width.saturating_sub(2),
-        modal.height.saturating_sub(2),
-    );
+    let inner = inner_of(modal);
     let rendered_details = ((inner.y + 1)..(inner.y + inner.height.saturating_sub(2)))
         .filter(|&y| !buffer_row(&terminal, y).trim().is_empty())
         .count();
@@ -38,42 +68,107 @@ fn permission_overlay_wraps_details_and_keeps_footer_visible() {
     let footer = buffer_row(&terminal, inner.y + inner.height - 1);
     assert!(footer.contains("[y] allow"));
     assert!(footer.contains("[n/Esc] deny"));
+    let screen = all_rows(&terminal);
+    assert!(screen.contains("Why: Write a file"));
+    assert!(screen.contains("[writes workspace]"));
 }
 
 #[test]
 fn permission_overlay_clears_background_and_preserves_footer_when_compact() {
     let backend = TestBackend::new(40, 12);
     let mut terminal = Terminal::new(backend).unwrap();
+    // A body far larger than the terminal: it is clipped, the choices never are.
+    let body = crate::safety::confirm_view::render_tool_call(
+        "shell_exec",
+        &serde_json::json!({"command": "x ".repeat(400)}).to_string(),
+        None,
+    );
+    let p = prompt(
+        "shell",
+        "Run a deliberately long command with several arguments that must wrap cleanly",
+        body,
+    );
 
     terminal
         .draw(|frame| {
             let background = vec![Line::from("X".repeat(40)); 12];
             frame.render_widget(Paragraph::new(background), frame.area());
-            render_permission_overlay(
-                frame,
-                frame.area(),
-                "shell",
-                "Run a deliberately long command with several arguments that must wrap cleanly",
-            );
+            render_permission_overlay(frame, frame.area(), &p);
         })
         .unwrap();
 
-    let modal = permission_modal_area(Rect::new(0, 0, 40, 12));
-    let inner = Rect::new(
-        modal.x + 1,
-        modal.y + 1,
-        modal.width.saturating_sub(2),
-        modal.height.saturating_sub(2),
+    let modal = permission_modal_area(Rect::new(0, 0, 40, 12), &p);
+    assert!(
+        modal.height <= 10 && modal.width <= 38,
+        "clamped to the terminal"
     );
-    let spacer_y = inner.y + inner.height - 2;
+    let inner = inner_of(modal);
+    // Footer = [a] row + [y]/[n] row; the spacer sits above them.
+    let spacer_y = inner.y + inner.height - 3;
     assert_eq!(
         terminal.backend().buffer()[(inner.x, spacer_y)].symbol(),
         " "
     );
+    assert!(buffer_row(&terminal, inner.y + inner.height - 2).contains("[a] always allow"));
 
     let footer = buffer_row(&terminal, inner.y + inner.height - 1);
     assert!(footer.contains("[y] allow"));
     assert!(footer.contains("[n/Esc] deny"));
+}
+
+#[test]
+fn permission_overlay_shows_readable_diff_not_raw_json_and_is_content_sized() {
+    let args = serde_json::json!({
+        "path": "slug.py",
+        "old_str": "def slug(s):\n",
+        "new_str": "def slug(s, *, stage=None):\n",
+    })
+    .to_string();
+    let body = crate::safety::confirm_view::render_tool_call("file_edit", &args, None);
+    let p = prompt(
+        "file_edit",
+        "normal mode asks before calls that are not read-only",
+        body,
+    );
+    let backend = TestBackend::new(160, 60);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| render_permission_overlay(frame, frame.area(), &p))
+        .unwrap();
+    let screen = all_rows(&terminal);
+    assert!(screen.contains("slug.py  +1 −1 lines"));
+    assert!(screen.contains("-def slug(s):"));
+    assert!(screen.contains("+def slug(s, *, stage=None):"));
+    assert!(!screen.contains("\"old_str\""), "no raw JSON in the modal");
+    let modal = permission_modal_area(Rect::new(0, 0, 160, 60), &p);
+    // tool, why, blank, header, -, +, spacer, [a], [y] + borders = 11
+    assert_eq!(modal.height, 11);
+    assert!(modal.width < 100, "narrow content ⇒ narrow modal");
+}
+
+#[test]
+fn permission_overlay_offers_only_the_options_the_prompt_allows() {
+    let mut p = prompt("shell_exec", "why", vec![]);
+    p.allow_always = false;
+    p.shell_rule = None;
+    let backend = TestBackend::new(120, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| render_permission_overlay(frame, frame.area(), &p))
+        .unwrap();
+    let screen = all_rows(&terminal);
+    assert!(!screen.contains("[a]") && !screen.contains("[p]"));
+
+    p.allow_always = true;
+    p.shell_rule = Some("commands starting with `cargo test`".to_string());
+    let backend = TestBackend::new(120, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| render_permission_overlay(frame, frame.area(), &p))
+        .unwrap();
+    let screen = all_rows(&terminal);
+    assert!(screen.contains("[a] always allow shell_exec (session)"));
+    assert!(screen.contains("[p] always allow commands starting with `cargo test` (session)"));
 }
 
 #[test]

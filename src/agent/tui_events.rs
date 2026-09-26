@@ -62,8 +62,7 @@ pub enum AgentEvent {
     },
     /// Permission requested for tool execution
     PermissionRequested {
-        tool_name: String,
-        reason: String,
+        prompt: crate::safety::confirm_view::PermissionPrompt,
     },
     /// Mode change requested (e.g., user selected "Yolo" from permission prompt)
     ModeChangeRequested {
@@ -163,9 +162,7 @@ impl EventEmitter for TuiEmitter {
             AgentEvent::InputQueued { message, position } => {
                 TuiEvent::InputQueued { message, position }
             }
-            AgentEvent::PermissionRequested { tool_name, reason } => {
-                TuiEvent::PermissionRequested { tool_name, reason }
-            }
+            AgentEvent::PermissionRequested { prompt } => TuiEvent::PermissionRequested { prompt },
             AgentEvent::ModeChangeRequested { mode } => TuiEvent::ModeChangeRequested { mode },
         };
         let _ = self.tx.send(tui_event);
