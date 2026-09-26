@@ -1275,6 +1275,7 @@ fn test_server_capacity_satisfied_model_stays_silent() {
     // All three capabilities satisfy the model → zero warnings.
     let info = ServerInfo {
         context_length: Some(131072),
+        context_source: Some("max_model_len"),
         max_streams: Some(64),
         tool_call_parser: Some("qwen".to_string()),
     };
@@ -1318,4 +1319,60 @@ fn test_thinking_disable_advice_only_on_endpoint_rejection() {
     assert_eq!(thinking_disable_advice(Some(false), Some(false)), None);
     assert_eq!(thinking_disable_advice(Some(false), Some(true)), None);
     assert_eq!(thinking_disable_advice(Some(false), None), None);
+}
+
+// ── 0.9.1 field findings: labelled sources, framed box ─────────────────
+
+#[test]
+fn server_info_records_which_key_gave_the_token_figure() {
+    let info = parse_server_info(r#"{"max_total_num_tokens": 735153, "max_model_len": 1000000}"#);
+    assert_eq!(info.context_length, Some(735153));
+    assert_eq!(info.context_source, Some("max_total_num_tokens"));
+    let info = parse_server_info(r#"{"max_model_len": 4096}"#);
+    assert_eq!(info.context_source, Some("max_model_len"));
+    assert_eq!(parse_server_info("{}").context_source, None);
+}
+
+#[test]
+fn server_capacity_detail_names_the_kv_pool_source() {
+    let info = parse_server_info(r#"{"max_total_num_tokens": 735153}"#);
+    let config = Config {
+        context_length: 32768,
+        ..Config::default()
+    };
+    let rows = server_capacity_checks(&info, &config);
+    let detail = &rows
+        .iter()
+        .find(|(n, _, _, _)| n == "server context window (get_server_info)")
+        .unwrap()
+        .2;
+    assert!(detail.contains("max_total_num_tokens"), "{detail}");
+    assert!(detail.contains("KV-cache pool"), "{detail}");
+}
+
+#[test]
+fn recommendations_box_has_straight_borders_for_long_rows() {
+    let checks = vec![
+        (CheckStatus::Warn, "a long warning ".repeat(6)),
+        (
+            CheckStatus::Info,
+            format!("{SERVER_OPERATOR} --enable-torch-compile may raise throughput"),
+        ),
+    ];
+    let lines = recommendations_box(
+        "sglang",
+        "some/very-long-model-name-NVFP4",
+        "1000000 tokens",
+        &checks,
+    );
+    let widths: Vec<usize> = lines
+        .iter()
+        .map(|l| crate::ui::components::visible_width(l))
+        .collect();
+    assert!(
+        widths.windows(2).all(|w| w[0] == w[1]),
+        "{widths:?}\n{}",
+        lines.join("\n")
+    );
+    assert!(lines.iter().any(|l| l.contains("Context (from /models)")));
 }

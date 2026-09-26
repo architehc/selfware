@@ -114,6 +114,11 @@ pub(crate) struct ServerInfo {
     /// Server context window in tokens
     /// (`max_total_num_tokens` / `max_model_len` / `context_length`).
     pub context_length: Option<u64>,
+    /// Which `/get_server_info` key `context_length` came from. SGLang's
+    /// `max_total_num_tokens` is the KV-cache token POOL shared by all
+    /// requests, not the per-request window `/models` reports — the two
+    /// disagree (0.9.1: 735,153 vs 1,000,000 on one screen, unlabelled).
+    pub context_source: Option<&'static str>,
     /// Concurrent request/stream limit
     /// (`max_running_requests` / `max_streams` / `max_concurrent_requests`).
     pub max_streams: Option<u64>,
@@ -1389,11 +1394,14 @@ fn parse_server_info(body: &str) -> ServerInfo {
     let Some(obj) = json.as_object() else {
         return ServerInfo::default();
     };
+    const CONTEXT_KEYS: [&str; 3] = ["max_total_num_tokens", "max_model_len", "context_length"];
+    let context_source = CONTEXT_KEYS
+        .iter()
+        .copied()
+        .find(|k| obj.get(*k).and_then(|v| v.as_u64()).is_some());
     ServerInfo {
-        context_length: first_u64(
-            obj,
-            &["max_total_num_tokens", "max_model_len", "context_length"],
-        ),
+        context_length: first_u64(obj, &CONTEXT_KEYS),
+        context_source,
         max_streams: first_u64(
             obj,
             &[
@@ -1435,6 +1443,18 @@ fn effective_native_fc(config: &Config) -> bool {
         })
 }
 
+/// Name where a `/get_server_info` token figure came from, so it cannot be
+/// confused with the `/models` context length shown in Step 2.
+pub(crate) fn server_context_source_label(key: Option<&str>) -> String {
+    match key {
+        Some("max_total_num_tokens") => {
+            "(get_server_info max_total_num_tokens: KV-cache pool shared by all requests, not the per-request window)".to_string()
+        }
+        Some(k) => format!("(get_server_info {k})"),
+        None => "(get_server_info)".to_string(),
+    }
+}
+
 /// Compare `/get_server_info` capabilities against the configured model's
 /// needs. Pure: returns typed check rows only for demands the config
 /// actually has, so a report stays silent when the server satisfies the
@@ -1448,12 +1468,13 @@ fn server_capacity_checks(
     // Server context window vs configured context_length.
     if let Some(server_ctx) = info.context_length {
         let server_ctx = server_ctx as usize;
+        let source = server_context_source_label(info.context_source);
         if server_ctx < config.context_length {
             rows.push((
                 "server context window (get_server_info)".to_string(),
                 DoctorCheckStatus::Warning,
                 format!(
-                    "server context window {server_ctx} < configured context_length {}",
+                    "server {server_ctx} tokens {source} < configured context_length {}",
                     config.context_length
                 ),
                 Some(
@@ -1467,7 +1488,7 @@ fn server_capacity_checks(
                 "server context window (get_server_info)".to_string(),
                 DoctorCheckStatus::Ok,
                 format!(
-                    "server context window {server_ctx} >= configured context_length {}",
+                    "server {server_ctx} tokens {source} >= configured context_length {}",
                     config.context_length
                 ),
                 None,
@@ -1772,14 +1793,14 @@ fn analyse_model(det: &DetectionResult, config: &Config) {
             model.id.bright_white()
         );
         println!(
-            "  {} Selfware config context_length: {} tokens",
+            "  {} Selfware context_length (config): {} tokens",
             ">>".green(),
             config.context_length.to_string().bright_white()
         );
 
         if let Some(ctx) = model.max_model_len {
             println!(
-                "  {} Context length: {} tokens",
+                "  {} Backend context length (from /models): {} tokens",
                 ">>".green(),
                 ctx.to_string().bright_white()
             );
@@ -2092,91 +2113,46 @@ fn assess_capabilities(model_name: &str) {
         ModelAssessment {
             quality: "Excellent",
             summary: "Excellent for code generation, tool use, and visual processing",
-            strengths: vec![
-                "Complex multi-step coding tasks",
-                "Tool calling and function use",
-                "Visual / multimodal processing (with vision endpoint)",
-                "Long-context reasoning",
-            ],
-            limitations: vec!["Requires significant VRAM (may need quantisation or multi-GPU)"],
         }
     } else if lower.contains("qwen3-coder") || lower.contains("qwen3.5-coder") {
         ModelAssessment {
             quality: "Very Good",
             summary: "Optimized for coding tasks",
-            strengths: vec![
-                "Code generation and editing",
-                "Code review and refactoring",
-                "Test generation",
-                "Tool calling for code-related tools",
-            ],
-            limitations: vec![
-                "May be less capable on non-code reasoning tasks",
-                "Visual processing depends on model variant",
-            ],
         }
     } else if is_model_small(&lower) {
         ModelAssessment {
             quality: "Limited",
             summary: "May struggle with complex multi-step tasks",
-            strengths: vec![
-                "Simple single-step tasks",
-                "Fast response times",
-                "Low resource usage",
-            ],
-            limitations: vec![
-                "Complex multi-tool workflows may fail",
-                "Long code generation quality decreases",
-                "Tool calling may be unreliable",
-                "Context window may be limited",
-            ],
         }
     } else if lower.contains("qwen") {
         ModelAssessment {
             quality: "Good",
             summary: "Qwen model — generally good for selfware tasks",
-            strengths: vec![
-                "Code generation and editing",
-                "Tool calling support",
-                "Multi-language understanding",
-            ],
-            limitations: vec!["Performance depends on model size and quantisation"],
         }
     } else {
         ModelAssessment {
             quality: "Unknown",
             summary: "Unknown model — capabilities not assessed",
-            strengths: vec![],
-            limitations: vec!["Run the connection test (Step 5) to verify basic functionality"],
         }
     };
 
+    // Everything in this step is inferred from the model NAME — nothing is
+    // measured here (Steps 5 and 7 measure). Say so on screen; the old
+    // "Quality tier: Good" + generic Strengths/Limitations read as a
+    // measured verdict (0.9.1 field finding).
     println!(
-        "  {} Quality tier: {}",
-        ">>".green(),
-        assessment.quality.bright_yellow().bold()
+        "  {} {} {}",
+        "--".dimmed(),
+        "Heuristic from the model name only (not measured):".dimmed(),
+        assessment.summary
     );
-    println!("  {} {}", ">>".green(), assessment.summary);
-
-    if !assessment.strengths.is_empty() {
-        println!("  {} {}", ">>".green(), "Strengths:".bold());
-        for s in &assessment.strengths {
-            println!("     {} {}", "+".green(), s);
-        }
-    }
-    if !assessment.limitations.is_empty() {
-        println!("  {} {}", ">>".yellow(), "Limitations:".bold());
-        for l in &assessment.limitations {
-            println!("     {} {}", "-".yellow(), l);
-        }
-    }
 
     // Feature compatibility
     println!();
     println!(
         "  {} {}",
         ">>".green(),
-        "Selfware feature compatibility:".bold()
+        "Expected feature support (name heuristic; Steps 5 and 7 measure tools/streaming):".bold()
     );
 
     let features = [
@@ -2207,8 +2183,6 @@ fn assess_capabilities(model_name: &str) {
 struct ModelAssessment {
     quality: &'static str,
     summary: &'static str,
-    strengths: Vec<&'static str>,
-    limitations: Vec<&'static str>,
 }
 
 fn is_model_small(lower: &str) -> bool {
@@ -2458,12 +2432,11 @@ fn print_recommendations(
     // Collect recommendations
     let mut checks: Vec<(CheckStatus, String)> = Vec::new();
 
-    // Context length check
+    // Context length: only what needs action (Step 2 already printed the
+    // numbers and the "sufficient / within capacity" confirmations).
     if let Some(info) = model_info {
         if let Some(ctx) = info.max_model_len {
-            if ctx >= MIN_RECOMMENDED_CONTEXT {
-                checks.push((CheckStatus::Ok, "Context length is sufficient".to_string()));
-            } else {
+            if ctx < MIN_RECOMMENDED_CONTEXT {
                 checks.push((
                     CheckStatus::Warn,
                     format!(
@@ -2479,14 +2452,6 @@ fn print_recommendations(
                         CheckStatus::Info,
                         format!(
                             "Raise selfware context_length from {} to {} to use the full backend window",
-                            config.context_length, ctx
-                        ),
-                    ));
-                } else {
-                    checks.push((
-                        CheckStatus::Ok,
-                        format!(
-                            "Configured context_length ({}) operates within backend capacity ({}) (operational margin)",
                             config.context_length, ctx
                         ),
                     ));
@@ -2532,7 +2497,7 @@ fn print_recommendations(
         Backend::Sglang => {
             checks.push((
                 CheckStatus::Info,
-                "Consider enabling --enable-torch-compile for better throughput".to_string(),
+                format!("{SERVER_OPERATOR} --enable-torch-compile may raise throughput"),
             ));
             if is_qwen_model(model_name) {
                 match configured_enable_thinking(config) {
@@ -2557,96 +2522,81 @@ fn print_recommendations(
             {
                 checks.push((
                     CheckStatus::Info,
-                    "For visual tasks, add --served-model-name".to_string(),
+                    format!("{SERVER_OPERATOR} for visual tasks, add --served-model-name"),
                 ));
             }
         }
         Backend::Vllm => {
             checks.push((
                 CheckStatus::Info,
-                "Consider --enable-prefix-caching for repeated prompts".to_string(),
+                format!("{SERVER_OPERATOR} --enable-prefix-caching helps repeated prompts"),
             ));
         }
         Backend::Ollama if is_qwen_model(model_name) => {
             checks.push((
                 CheckStatus::Info,
-                "Set OLLAMA_NUM_PARALLEL=1 for best single-request throughput".to_string(),
+                format!(
+                    "{SERVER_OPERATOR} OLLAMA_NUM_PARALLEL=1 for best single-request throughput"
+                ),
             ));
         }
         Backend::LlamaCpp => {
             checks.push((
                 CheckStatus::Info,
-                "Consider --mlock to prevent model from swapping to disk".to_string(),
+                format!("{SERVER_OPERATOR} --mlock keeps the model from swapping to disk"),
             ));
         }
         _ => {}
     }
 
-    // Print the box
-    let width = 52;
-    let border_top = format!(
-        "{}{}{}",
-        "+-".cyan(),
-        " LLM Configuration Recommendations ".cyan().bold(),
-        "-+".cyan()
-    );
-    let border_bot = format!(
-        "{}",
-        "+-----------------------------------------------------+".cyan()
-    );
-
-    println!("{}", border_top);
-    println!(
-        "{}",
-        "|                                                     |".cyan()
-    );
-    println!(
-        "{} Backend: {:<width$}{}",
-        "|".cyan(),
-        backend_str,
-        "|".cyan(),
-        width = width - 11
-    );
-    println!(
-        "{} Model: {:<width$}{}",
-        "|".cyan(),
-        truncate_str(model_display, width - 10),
-        "|".cyan(),
-        width = width - 9
-    );
-    println!(
-        "{} Context: {:<width$}{}",
-        "|".cyan(),
-        ctx_str,
-        "|".cyan(),
-        width = width - 11
-    );
-    println!(
-        "{}",
-        "|                                                     |".cyan()
-    );
-
-    for (status, msg) in &checks {
-        let (icon, colored_msg) = match status {
-            CheckStatus::Ok => ("ok".green().to_string(), msg.green().to_string()),
-            CheckStatus::Warn => ("!!".yellow().to_string(), msg.yellow().to_string()),
-            CheckStatus::Info => (">>".cyan().to_string(), msg.cyan().to_string()),
-        };
-        println!(
-            "{} {} {:<width$}{}",
-            "|".cyan(),
-            icon,
-            colored_msg,
-            "|".cyan(),
-            width = width - 6
-        );
+    for line in recommendations_box(&backend_str, model_display, &ctx_str, &checks) {
+        println!("{line}");
     }
+}
 
-    println!(
-        "{}",
-        "|                                                     |".cyan()
-    );
-    println!("{}", border_bot);
+/// Prefix for advice that only the person running the inference SERVER can
+/// act on (launch flags / env of sglang, vLLM, llama.cpp, Ollama) — not a
+/// selfware setting.
+pub(crate) const SERVER_OPERATOR: &str = "[server operator]";
+
+/// Step 6 box, framed by display width (`frame_box`): the hand-padded ASCII
+/// box had ragged right borders whenever a message or model name was
+/// longer than its fixed 52 columns (0.9.1 field finding).
+fn recommendations_box(
+    backend: &str,
+    model: &str,
+    ctx: &str,
+    checks: &[(CheckStatus, String)],
+) -> Vec<String> {
+    let mut rows = vec![
+        format!("Backend: {backend}"),
+        format!("Model: {model}"),
+        format!("Context (from /models): {ctx}"),
+    ];
+    if !checks.is_empty() {
+        rows.push(crate::ui::components::FRAME_SEPARATOR.to_string());
+    }
+    for (status, msg) in checks {
+        let row = match status {
+            CheckStatus::Ok => format!("{} {}", "ok".green(), msg.green()),
+            CheckStatus::Warn => format!("{} {}", "!!".yellow(), msg.yellow()),
+            CheckStatus::Info => format!("{} {}", ">>".cyan(), msg.cyan()),
+        };
+        rows.push(row);
+    }
+    let colour = colored::control::SHOULD_COLORIZE.should_colorize();
+    let (border, reset) = if colour {
+        ("\x1b[36m", "\x1b[0m")
+    } else {
+        ("", "")
+    };
+    crate::ui::components::frame_box(
+        "LLM Configuration Recommendations",
+        &rows,
+        52,
+        border,
+        reset,
+    )
 }
 
 #[derive(Debug)]
