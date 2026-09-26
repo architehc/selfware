@@ -341,3 +341,42 @@ fn w8a_workspace_refresh_note_names_files_and_demands_reread() {
         "the overflow is counted, not hidden"
     );
 }
+
+#[test]
+fn resume_warns_when_the_backend_differs_from_the_checkpoint() {
+    // Review (0.9.1): checkpoints recorded no backend identity, so a task
+    // started on one model resumed under another with history and cost
+    // silently carried over.
+    use crate::session::checkpoint::endpoint_identity;
+    let mut cp = crate::checkpoint::TaskCheckpoint::new("t".into(), "task".into());
+    let mut config = crate::config::Config {
+        endpoint: "https://llm.selfware.design/v1".into(),
+        model: "qwen38-flash-next".into(),
+        ..crate::config::Config::default()
+    };
+    // Legacy checkpoint (no identity): nothing to compare, no warning.
+    assert!(super::backend_mismatch_warning(&cp, &config).is_none());
+    cp.run_endpoint = Some(endpoint_identity(&config.endpoint));
+    cp.run_model = Some(config.model.clone());
+    assert!(super::backend_mismatch_warning(&cp, &config).is_none());
+    // Trailing slash is the same endpoint.
+    config.endpoint = "https://llm.selfware.design/v1/".into();
+    assert!(super::backend_mismatch_warning(&cp, &config).is_none());
+    config.model = "glm-5.2".into();
+    let w = super::backend_mismatch_warning(&cp, &config).expect("model differs");
+    assert!(w.contains("model qwen38-flash-next -> glm-5.2"), "{w}");
+    config.endpoint = "https://openrouter.ai/api/v1".into();
+    let w = super::backend_mismatch_warning(&cp, &config).expect("both differ");
+    assert!(
+        w.contains("endpoint https://llm.selfware.design/v1 -> https://openrouter.ai/api/v1"),
+        "{w}"
+    );
+}
+
+#[test]
+fn endpoint_identity_never_stores_userinfo_or_query() {
+    use crate::session::checkpoint::endpoint_identity;
+    let id = endpoint_identity("https://user:s3cret@api.example.com:8443/v1/?key=abc");
+    assert_eq!(id, "https://api.example.com:8443/v1");
+    assert!(!id.contains("s3cret") && !id.contains("abc"), "{id}");
+}

@@ -709,6 +709,32 @@ pub struct TaskCheckpoint {
     /// outside a git repository -- the gate then counts no committed paths.
     #[serde(default)]
     pub task_start_head: Option<String>,
+    /// Which backend produced this task: the endpoint (scheme, host, port
+    /// and path only; userinfo and query are never stored) and the model, set
+    /// once at task creation. Resuming under a different endpoint or model
+    /// used to mix two runs silently (history and cost carried over); resume
+    /// now warns on a mismatch (review, 0.9.1). `None` on older checkpoints.
+    #[serde(default)]
+    pub run_endpoint: Option<String>,
+    #[serde(default)]
+    pub run_model: Option<String>,
+}
+
+/// The endpoint as a checkpoint may store it: scheme, host, port and path,
+/// with any userinfo or query (which can carry credentials) dropped.
+pub fn endpoint_identity(endpoint: &str) -> String {
+    match url::Url::parse(endpoint) {
+        Ok(url) => {
+            let host = url.host_str().unwrap_or_default();
+            let port = url.port().map(|p| format!(":{p}")).unwrap_or_default();
+            format!(
+                "{}://{host}{port}{}",
+                url.scheme(),
+                url.path().trim_end_matches('/')
+            )
+        }
+        Err(_) => "<unparsable endpoint>".to_string(),
+    }
 }
 
 impl TaskCheckpoint {
@@ -775,6 +801,8 @@ impl TaskCheckpoint {
             .then_some(self.max_cost_usd)
             .flatten();
         if self.task_start_head != base.task_start_head
+            || self.run_endpoint != base.run_endpoint
+            || self.run_model != base.run_model
             || self.task_description != base.task_description
             || self.project_root != base.project_root
             || self.created_at != base.created_at
@@ -1055,6 +1083,8 @@ impl TaskCheckpoint {
                 .and_then(|cwd| cwd.canonicalize().ok())
                 .map(|cwd| cwd.to_string_lossy().into_owned()),
             task_start_head: None,
+            run_endpoint: None,
+            run_model: None,
         }
     }
 

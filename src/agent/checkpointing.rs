@@ -8,6 +8,35 @@ use crate::checkpoint::{capture_git_state, CheckpointManager, TaskCheckpoint, Ta
 #[cfg(feature = "resilience")]
 use crate::self_healing::ErrorOccurrence;
 
+/// Why resuming this checkpoint under `config` mixes two backends, or `None`
+/// when the endpoint and model match (or the checkpoint predates recording
+/// them). History and cumulative cost carry over across a resume, so a
+/// silent switch would attribute one model's work and pricing to another.
+pub(crate) fn backend_mismatch_warning(
+    checkpoint: &crate::session::checkpoint::TaskCheckpoint,
+    config: &Config,
+) -> Option<String> {
+    let mut diffs = Vec::new();
+    if let Some(saved) = &checkpoint.run_endpoint {
+        let now = crate::session::checkpoint::endpoint_identity(&config.endpoint);
+        if *saved != now {
+            diffs.push(format!("endpoint {saved} -> {now}"));
+        }
+    }
+    if let Some(saved) = &checkpoint.run_model {
+        if *saved != config.model {
+            diffs.push(format!("model {saved} -> {}", config.model));
+        }
+    }
+    (!diffs.is_empty()).then(|| {
+        format!(
+            "this task was started on a different backend ({}); its history and \
+             cumulative cost carry over into this run",
+            diffs.join(", ")
+        )
+    })
+}
+
 impl Agent {
     /// Re-apply today's source policy to persisted tool data. User-authored
     /// instructions are not a sanitization target: legacy XML results require
@@ -237,6 +266,9 @@ impl Agent {
             "   Current step: {}, Status: {:?}",
             checkpoint.current_step, checkpoint.status
         ));
+        if let Some(warning) = backend_mismatch_warning(&checkpoint, &config) {
+            chrome(format!("   {} {}", "⚠️".bright_yellow(), warning));
+        }
 
         // Restore the hard budget caps persisted at checkpoint time, unless the
         // resume command re-passed a flag (CLI override wins). Without this a

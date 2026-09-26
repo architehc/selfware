@@ -937,6 +937,10 @@ impl Agent {
             // the task's. Captured before any tool runs.
             checkpoint.task_start_head =
                 crate::checkpoint::capture_head_sha(&crate::tools::workspace_root::current_path());
+            checkpoint.run_endpoint = Some(crate::session::checkpoint::endpoint_identity(
+                &self.config.endpoint,
+            ));
+            checkpoint.run_model = Some(self.config.model.clone());
             self.current_checkpoint = Some(checkpoint);
         }
         self.log_task_start_event(task);
