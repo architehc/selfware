@@ -103,22 +103,305 @@ fn pattern_matches(pattern: &str, value: &str) -> bool {
     pattern == value
 }
 
+/// Characters that make a shell command more than "program + arguments":
+/// separators, pipes, redirections, substitutions, subshells, escapes and
+/// line breaks. A command containing any of them is never matched by a
+/// PREFIX rule — only by an exact rule created from that identical command.
+/// Scanned on the raw text, quotes included (conservative: a `;` inside
+/// quotes also disqualifies).
+pub const SHELL_RULE_METACHARS: &[char] = &[
+    ';', '&', '|', '$', '`', '<', '>', '(', ')', '\\', '\n', '\r', '\0',
+];
+
+/// Programs for which no prefix rule is ever offered — a prefix would grant
+/// "anything": wrappers that run another command, shells, deletion /
+/// permission / network tools. The operator can still allow the EXACT
+/// command.
+pub const SHELL_RULE_EXACT_ONLY_PROGRAMS: &[&str] = &[
+    "sudo",
+    "su",
+    "doas",
+    "env",
+    "eval",
+    "exec",
+    "xargs",
+    "nohup",
+    "time",
+    "timeout",
+    "nice",
+    "ionice",
+    "command",
+    "builtin",
+    "source",
+    ".",
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "dash",
+    "ksh",
+    "csh",
+    "tcsh",
+    "rm",
+    "rmdir",
+    "dd",
+    "mkfs",
+    "shred",
+    "chmod",
+    "chown",
+    "chgrp",
+    "mv",
+    "curl",
+    "wget",
+    "ssh",
+    "scp",
+    "sftp",
+    "rsync",
+    "nc",
+    "ncat",
+    "osascript",
+    "open",
+    "kill",
+    "killall",
+    "pkill",
+    "crontab",
+    "launchctl",
+    "systemctl",
+    "find",
+];
+
+/// Interpreters: a prefix is offered only for the `-m <module>` form
+/// (`python3 -m unittest`); `python3 script.py` / `node -e …` are exact-only.
+pub const SHELL_RULE_INTERPRETERS: &[&str] = &[
+    "python",
+    "python2",
+    "python3",
+    "py",
+    "node",
+    "deno",
+    "bun",
+    "ruby",
+    "perl",
+    "php",
+    "lua",
+    "rscript",
+    "pwsh",
+    "powershell",
+];
+
+/// Multi-purpose tools whose bare name must never be the whole prefix — it
+/// would allow every subcommand (`git push`, `npm publish`, `docker run`…).
+pub const SHELL_RULE_NEEDS_SUBCOMMAND: &[&str] = &[
+    "git",
+    "cargo",
+    "npm",
+    "npx",
+    "pnpm",
+    "pnpx",
+    "yarn",
+    "bun",
+    "bunx",
+    "pip",
+    "pip3",
+    "pipx",
+    "uv",
+    "uvx",
+    "poetry",
+    "pdm",
+    "conda",
+    "docker",
+    "podman",
+    "kubectl",
+    "helm",
+    "gh",
+    "brew",
+    "apt",
+    "apt-get",
+    "dnf",
+    "yum",
+    "go",
+    "make",
+    "gradle",
+    "mvn",
+    "dotnet",
+    "terraform",
+    "aws",
+    "gcloud",
+    "az",
+    "heroku",
+    "fly",
+    "vercel",
+];
+
+/// Maximum tokens in a derived command prefix.
+pub const SHELL_RULE_MAX_PREFIX_TOKENS: usize = 3;
+
+/// A session-scoped allowance for `shell_exec` commands, created by the `p`
+/// answer at the confirmation prompt.
+///
+/// - [`ShellAllowRule::Prefix`] — the first 1–3 plain tokens of a command
+///   (e.g. `python3 -m unittest`). It matches a later command only when that
+///   command contains NO shell metacharacter ([`SHELL_RULE_METACHARS`]) and
+///   its leading whitespace-separated tokens equal the prefix exactly.
+/// - [`ShellAllowRule::Exact`] — one full command, matched only by the
+///   identical (trimmed) command. Offered when no safe prefix exists: the
+///   command has metacharacters, starts with an env assignment, or its
+///   program is a wrapper/shell/destructive tool
+///   ([`SHELL_RULE_EXACT_ONLY_PROGRAMS`]), an interpreter run of a script,
+///   or a multi-purpose tool with no plain subcommand
+///   ([`SHELL_RULE_NEEDS_SUBCOMMAND`]).
+///
+/// Neither kind matches a call that sets `env` — environment variables such
+/// as `LD_PRELOAD` / `PYTHONPATH` change what the same command line runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShellAllowRule {
+    /// Commands whose leading tokens are exactly these.
+    Prefix(Vec<String>),
+    /// Exactly this command.
+    Exact(String),
+}
+
+fn plain_prefix_token(token: &str) -> bool {
+    !token.is_empty()
+        && token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '@' | '+' | ','))
+}
+
+impl ShellAllowRule {
+    /// The rule the prompt offers for `command`: a safe prefix when one
+    /// exists, otherwise the exact command.
+    pub fn for_command(command: &str) -> Self {
+        let trimmed = command.trim();
+        let exact = || ShellAllowRule::Exact(trimmed.to_string());
+        if trimmed.contains(SHELL_RULE_METACHARS) {
+            return exact();
+        }
+        let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+        let Some(first) = tokens.first() else {
+            return exact();
+        };
+        // `NAME=value cmd` changes the environment; paths to programs
+        // (`./x`, `/usr/bin/x`) and odd names are exact-only too.
+        if !plain_prefix_token(first) {
+            return exact();
+        }
+        let program = first.to_ascii_lowercase();
+        if SHELL_RULE_EXACT_ONLY_PROGRAMS.contains(&program.as_str()) {
+            return exact();
+        }
+        if SHELL_RULE_INTERPRETERS.contains(&program.as_str()) {
+            return match (tokens.get(1), tokens.get(2)) {
+                (Some(&"-m"), Some(module)) if plain_prefix_token(module) => {
+                    ShellAllowRule::Prefix(tokens[..3].iter().map(|t| t.to_string()).collect())
+                }
+                _ => exact(),
+            };
+        }
+        let prefix: Vec<String> = tokens
+            .iter()
+            .take(SHELL_RULE_MAX_PREFIX_TOKENS)
+            .take_while(|t| plain_prefix_token(t))
+            .map(|t| t.to_string())
+            .collect();
+        // A bare multi-purpose tool (`git`, `cargo`, `npm`, …) as the whole
+        // prefix would allow every subcommand (push, publish, …).
+        if prefix.len() == 1 && SHELL_RULE_NEEDS_SUBCOMMAND.contains(&program.as_str()) {
+            return exact();
+        }
+        ShellAllowRule::Prefix(prefix)
+    }
+
+    /// Whether this rule allows `command`.
+    pub fn matches(&self, command: &str) -> bool {
+        let trimmed = command.trim();
+        match self {
+            ShellAllowRule::Exact(rule) => trimmed == rule,
+            ShellAllowRule::Prefix(prefix) => {
+                if prefix.is_empty() || trimmed.contains(SHELL_RULE_METACHARS) {
+                    return false;
+                }
+                let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+                tokens.len() >= prefix.len()
+                    && tokens
+                        .iter()
+                        .zip(prefix.iter())
+                        .all(|(t, p)| *t == p.as_str())
+            }
+        }
+    }
+
+    /// Prompt / log wording, e.g. "commands starting with `cargo test`".
+    pub fn describe(&self) -> String {
+        match self {
+            ShellAllowRule::Prefix(prefix) => {
+                format!("commands starting with `{}`", prefix.join(" "))
+            }
+            ShellAllowRule::Exact(_) => "this exact command".to_string(),
+        }
+    }
+}
+
+/// The command of a `shell_exec` call when the call is eligible for a shell
+/// rule: `command` (or its `cmd` alias) present and non-empty, and no `env`
+/// overrides.
+pub fn shell_rule_command(tool_name: &str, args: &serde_json::Value) -> Option<String> {
+    if tool_name != "shell_exec" {
+        return None;
+    }
+    match args.get("env") {
+        None | Some(serde_json::Value::Null) => {}
+        Some(serde_json::Value::Object(map)) if map.is_empty() => {}
+        Some(_) => return None,
+    }
+    let command = args
+        .get("command")
+        .or_else(|| args.get("cmd"))
+        .and_then(|v| v.as_str())?;
+    if command.trim().is_empty() {
+        return None;
+    }
+    Some(command.to_string())
+}
+
 /// Store for managing permission grants.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PermissionStore {
     grants: Vec<PermissionGrant>,
+    /// Session-only `shell_exec` rules (`p` at the prompt). Never loaded
+    /// from or written to configuration.
+    #[serde(skip)]
+    shell_rules: Vec<ShellAllowRule>,
 }
 
 impl PermissionStore {
     pub fn new() -> Self {
-        Self { grants: Vec::new() }
+        Self::default()
     }
 
     /// Create a store from configuration grants.
     pub fn from_config(grants: &[PermissionGrant]) -> Self {
         Self {
             grants: grants.to_vec(),
+            shell_rules: Vec::new(),
         }
+    }
+
+    /// Add a session-scoped `shell_exec` rule.
+    pub fn add_shell_rule(&mut self, rule: ShellAllowRule) {
+        info!("Shell rule granted for this session: {:?}", rule);
+        if !self.shell_rules.contains(&rule) {
+            self.shell_rules.push(rule);
+        }
+    }
+
+    /// Whether a session shell rule allows this call (see
+    /// [`shell_rule_command`] for eligibility).
+    pub fn shell_rule_allows(&self, tool_name: &str, args: &serde_json::Value) -> bool {
+        let Some(command) = shell_rule_command(tool_name, args) else {
+            return false;
+        };
+        self.shell_rules.iter().any(|rule| rule.matches(&command))
     }
 
     /// Add a new grant.
@@ -142,9 +425,10 @@ impl PermissionStore {
         self.grants.iter().filter(|g| !g.is_expired()).count()
     }
 
-    /// Clear all grants.
+    /// Clear all grants (and session shell rules).
     pub fn clear(&mut self) {
         self.grants.clear();
+        self.shell_rules.clear();
     }
 }
 

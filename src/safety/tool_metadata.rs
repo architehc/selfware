@@ -607,10 +607,12 @@ pub fn verification_call_auto_allowed(tool_name: &str, args: &Value) -> bool {
 ///
 /// Order:
 /// 1. a session/config permission grant for the tool → no prompt;
-/// 2. tools listed in `safety.require_confirmation` → prompt;
-/// 3. plain-form verification calls ([`verification_call_auto_allowed`])
+/// 2. a session shell rule (`p` at the prompt) matching this `shell_exec`
+///    call → no prompt (see [`crate::safety::permissions::ShellAllowRule`]);
+/// 3. tools listed in `safety.require_confirmation` → prompt;
+/// 4. plain-form verification calls ([`verification_call_auto_allowed`])
 ///    → no prompt;
-/// 4. otherwise the metadata rule: explicitly classified read-only +
+/// 5. otherwise the metadata rule: explicitly classified read-only +
 ///    Low-risk tools run, everything else (writes, shell, network, installs,
 ///    git mutations, unclassified tools) prompts.
 pub fn normal_mode_call_needs_confirmation(
@@ -620,6 +622,9 @@ pub fn normal_mode_call_needs_confirmation(
     grants: &crate::safety::permissions::PermissionStore,
 ) -> bool {
     if grants.is_authorized(tool_name, None) {
+        return false;
+    }
+    if grants.shell_rule_allows(tool_name, args) {
         return false;
     }
     if require_confirmation.iter().any(|t| t == tool_name) {

@@ -666,6 +666,10 @@ pub(crate) fn make_is_mutation_imperative(lower: &str) -> bool {
 pub(crate) enum ConfirmDecision {
     ExecuteOnce,
     AlwaysAllow,
+    /// `p`: allow the offered `shell_exec` rule (prefix or exact command)
+    /// for the session. Only meaningful when the prompt offered one; the
+    /// prompt treats it as a skip otherwise.
+    AllowShellRule,
     EnableYolo,
     Skip,
 }
@@ -674,6 +678,7 @@ pub(crate) fn parse_confirm_response(response: &str) -> ConfirmDecision {
     match response.trim().to_lowercase().as_str() {
         "y" | "yes" => ConfirmDecision::ExecuteOnce,
         "a" | "always" => ConfirmDecision::AlwaysAllow,
+        "p" | "prefix" => ConfirmDecision::AllowShellRule,
         "yolo" => ConfirmDecision::EnableYolo,
         _ => ConfirmDecision::Skip,
     }

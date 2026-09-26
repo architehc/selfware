@@ -432,3 +432,31 @@ fn test_normal_mode_call_policy_respects_require_confirmation_and_grants() {
         &store
     ));
 }
+
+#[test]
+fn test_normal_mode_shell_rule_allows_only_matching_shell_calls() {
+    let mut store = crate::safety::permissions::PermissionStore::new();
+    store.add_shell_rule(crate::safety::permissions::ShellAllowRule::for_command(
+        "python3 -m unittest tests.test_slug",
+    ));
+    let needs = |cmd: &str| {
+        normal_mode_call_needs_confirmation(
+            "shell_exec",
+            &serde_json::json!({ "command": cmd }),
+            &[],
+            &store,
+        )
+    };
+    assert!(!needs("python3 -m unittest"));
+    assert!(!needs("python3 -m unittest tests.test_other"));
+    assert!(needs("python3 -m unittest; rm -rf ~"));
+    assert!(needs("python3 -m unittest && git push"));
+    assert!(needs("pip3 install -r dev.requirements.txt"));
+    // The rule never leaks to other tools.
+    assert!(normal_mode_call_needs_confirmation(
+        "pty_shell",
+        &serde_json::json!({"action": "send", "command": "python3 -m unittest"}),
+        &[],
+        &store
+    ));
+}

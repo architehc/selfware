@@ -3520,10 +3520,18 @@ impl Agent {
             .map(|line| line.text.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        let risk = crate::safety::confirm_view::classify_risk(
-            name,
-            &serde_json::from_str(args_str).unwrap_or(serde_json::Value::Null),
-        );
+        let args_value: serde_json::Value =
+            serde_json::from_str(args_str).unwrap_or(serde_json::Value::Null);
+        let risk = crate::safety::confirm_view::classify_risk(name, &args_value);
+        // `p` (session shell rule) is offered only on a plain policy prompt
+        // for an eligible `shell_exec` call — never on a safety-gate prompt
+        // (`reason` set), where a rule would not be consulted anyway.
+        let shell_rule = if reason.is_none() {
+            crate::safety::permissions::shell_rule_command(name, &args_value)
+                .map(|cmd| crate::safety::permissions::ShellAllowRule::for_command(&cmd))
+        } else {
+            None
+        };
 
         // When TUI is active, route the confirmation through the TUI's own
         // permission modal instead of writing to stdout/stdin (which the TUI
@@ -3594,7 +3602,13 @@ impl Agent {
                 .dimmed()
             );
         }
-        cli_prompt!("\x1b[0m\x1b[1m\x1b[97mExecute? [y = once / a = always allow this tool (session) / N = skip / type \"yolo\" to disable confirmations]: \x1b[0m");
+        match &shell_rule {
+            Some(rule) => cli_prompt!(
+                "\x1b[0m\x1b[1m\x1b[97mExecute? [y = once / a = always allow this tool (session) / p = always allow {} (session) / N = skip / type \"yolo\" to disable confirmations]: \x1b[0m",
+                rule.describe()
+            ),
+            None => cli_prompt!("\x1b[0m\x1b[1m\x1b[97mExecute? [y = once / a = always allow this tool (session) / N = skip / type \"yolo\" to disable confirmations]: \x1b[0m"),
+        }
 
         let response = super::execution::read_line_pausing_esc_bounded(
             &self.esc_paused,
@@ -3636,6 +3650,19 @@ impl Agent {
                         name.bright_cyan()
                     );
                     return Ok(true);
+                }
+                ConfirmDecision::AllowShellRule => {
+                    if let Some(rule) = shell_rule {
+                        let what = rule.describe();
+                        self.permission_store.add_shell_rule(rule);
+                        cli_println!(
+                            "{} shell_exec: {} allowed for the rest of this session",
+                            "✓".bright_green(),
+                            what
+                        );
+                        return Ok(true);
+                    }
+                    // `p` was not offered for this call: fail closed (skip).
                 }
                 ConfirmDecision::EnableYolo => {
                     self.set_execution_mode(crate::config::ExecutionMode::Yolo);

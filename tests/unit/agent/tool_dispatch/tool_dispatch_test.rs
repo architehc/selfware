@@ -36,6 +36,16 @@ fn confirm_response_always_allow_is_tool_scoped_session_grant() {
     );
     // Nearby keystrokes must not be misread as always-allow.
     assert_ne!(parse_confirm_response("al"), ConfirmDecision::AlwaysAllow);
+    // `p` = the offered session shell rule; nothing else maps to it.
+    assert_eq!(parse_confirm_response("p"), ConfirmDecision::AllowShellRule);
+    assert_eq!(
+        parse_confirm_response(" P "),
+        ConfirmDecision::AllowShellRule
+    );
+    assert_ne!(
+        parse_confirm_response("pa"),
+        ConfirmDecision::AllowShellRule
+    );
     assert_eq!(parse_confirm_response("y"), ConfirmDecision::ExecuteOnce);
     assert_eq!(parse_confirm_response("yolo"), ConfirmDecision::EnableYolo);
 }
@@ -8229,6 +8239,43 @@ async fn auto_edit_is_never_stricter_than_normal_for_read_only_tools() {
             .confirm_tool_execution(tool, "{}", "call_test", false)
             .await
             .unwrap_or_else(|e| panic!("{tool}: {e}")));
+    }
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn normal_mode_confirm_gate_honours_session_shell_prefix_rule() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut config = test_config(format!("{}/v1", server.url()));
+    config.execution_mode = crate::config::ExecutionMode::Normal;
+    let mut agent = Agent::new(config).await.unwrap();
+    agent
+        .permission_store
+        .add_shell_rule(crate::safety::permissions::ShellAllowRule::for_command(
+            "python3 -m unittest tests.test_slug",
+        ));
+
+    assert!(agent
+        .confirm_tool_execution(
+            "shell_exec",
+            r#"{"command":"python3 -m unittest -v"}"#,
+            "call_a",
+            false
+        )
+        .await
+        .expect("a matching plain command must not prompt"));
+
+    for cmd in [
+        r#"{"command":"python3 -m unittest; rm -rf ~"}"#,
+        r#"{"command":"python3 -m unittest | sh"}"#,
+        r#"{"command":"python3 -m unittest","env":{"PYTHONPATH":"/tmp/x"}}"#,
+        r#"{"command":"python3 fix.py"}"#,
+    ] {
+        let err = agent
+            .confirm_tool_execution("shell_exec", cmd, "call_b", false)
+            .await
+            .expect_err("must still prompt");
+        assert!(crate::errors::is_confirmation_error(&err), "{cmd}: {err:?}");
     }
     server.stop().await;
 }
