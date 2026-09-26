@@ -2680,6 +2680,15 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
     Ok(())
 }
 
+/// URL the `status` command probes: `{endpoint}/models`, which every
+/// OpenAI-compatible server (SGLang, vLLM, llama.cpp, OpenRouter) routes.
+/// The bare `/v1` base has no route on SGLang, so probing it reported a
+/// false "Endpoint not found (404)" for a healthy endpoint (UX field test,
+/// 0.9.0). Same convention as llm-doctor's backend detection.
+fn status_probe_url(endpoint: &str) -> String {
+    format!("{}/models", endpoint.trim_end_matches('/'))
+}
+
 /// How long a tool-confirmation prompt waits in a non-REPL run (`-p`, `run`,
 /// `improve`, `batch`) before failing closed. Long enough for someone
 /// watching to read the reason and answer; short enough that an unattended
@@ -3439,7 +3448,7 @@ async fn handle_command(
                 .build();
             let probe_res = match probe_client {
                 Ok(c) => {
-                    let mut req = c.get(&config.endpoint);
+                    let mut req = c.get(status_probe_url(&config.endpoint));
                     if let Some(ref key) = config.api_key {
                         req = req.bearer_auth(key);
                     }

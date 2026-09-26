@@ -2597,3 +2597,17 @@ fn stream_line_tracking_ends_open_lines_before_a_log_line() {
         "empty text changes nothing"
     );
 }
+
+#[test]
+fn status_probes_the_models_route_not_the_bare_base() {
+    // UX field test (0.9.0): `status` probed the bare `/v1` URL, which SGLang
+    // does not route, and reported a false 404 for a healthy endpoint.
+    assert_eq!(
+        status_probe_url("https://llm.selfware.design/v1"),
+        "https://llm.selfware.design/v1/models"
+    );
+    assert_eq!(
+        status_probe_url("http://localhost:8000/v1/"),
+        "http://localhost:8000/v1/models"
+    );
+}
