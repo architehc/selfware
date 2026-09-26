@@ -708,6 +708,77 @@ pub fn get_exit_code(e: &anyhow::Error) -> u8 {
     EXIT_ERROR
 }
 
+/// How a run ended, as reported in `SessionResult.outcome` and the text run
+/// summary's `outcome:` line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunEnd {
+    /// The run finished without error (exit 0), with or without edits.
+    Completed,
+    /// The run failed (error, budget/timeout stop, failure verdict).
+    Failed,
+    /// The user interrupted the run (Ctrl-C / Esc / cancel; exit 130).
+    Interrupted,
+    /// The process was told to stop (SIGTERM; exit 143).
+    Terminated,
+}
+
+impl RunEnd {
+    /// Classify a finished run from its result and the process-wide
+    /// shutdown latch. A user interrupt is its own outcome, never a failure;
+    /// a wall-clock timeout stop is a failure.
+    pub fn classify(
+        run_result: &anyhow::Result<()>,
+        shutdown: Option<crate::ShutdownReason>,
+    ) -> Self {
+        match run_result {
+            Ok(()) => match shutdown {
+                None => RunEnd::Completed,
+                Some(crate::ShutdownReason::UserInterrupt) => RunEnd::Interrupted,
+                Some(crate::ShutdownReason::SignalTerminate) => RunEnd::Terminated,
+                Some(crate::ShutdownReason::Timeout) => RunEnd::Failed,
+            },
+            Err(e) => Self::classify_error(e),
+        }
+    }
+
+    /// [`RunEnd::classify`] for a run that returned `e`: a typed user
+    /// cancellation is `Interrupted`, SIGTERM is `Terminated`, anything else
+    /// (including the internal wall-clock timeout) is `Failed`. Walks the
+    /// whole cause chain, like [`get_exit_code`].
+    pub fn classify_error(e: &anyhow::Error) -> Self {
+        for cause in e.chain() {
+            let agent_err = cause.downcast_ref::<AgentError>().or_else(|| {
+                match cause.downcast_ref::<SelfwareError>() {
+                    Some(SelfwareError::Agent(a)) => Some(a),
+                    _ => None,
+                }
+            });
+            match agent_err {
+                Some(AgentError::Cancelled) => return RunEnd::Interrupted,
+                Some(AgentError::Terminated(_)) => return RunEnd::Terminated,
+                _ => {}
+            }
+            if matches!(
+                cause.downcast_ref::<SelfwareError>(),
+                Some(SelfwareError::Interrupted)
+            ) {
+                return RunEnd::Interrupted;
+            }
+        }
+        RunEnd::Failed
+    }
+
+    /// The JSON / summary label.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RunEnd::Completed => "completed",
+            RunEnd::Failed => "failed",
+            RunEnd::Interrupted => "interrupted",
+            RunEnd::Terminated => "terminated",
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "../tests/unit/errors/errors_test.rs"]
 mod tests;

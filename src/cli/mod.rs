@@ -1436,14 +1436,13 @@ fn print_resume_run_summary(
     {
         return;
     }
-    let failure = run_result
-        .as_ref()
-        .err()
-        .map(|e| crate::observability::telemetry::redact_secrets(&e.to_string()));
     println!(
         "{}",
-        render_run_summary(&agent.chain_run_summary(), failure.as_deref())
+        render_text_run_summary(&agent.chain_run_summary(), run_result)
     );
+    if let Err(e) = run_result {
+        report_text_run_error(agent, e);
+    }
 }
 
 /// Canonical, absolute identity of the current workspace, used by
@@ -2180,13 +2179,9 @@ pub async fn run() -> Result<()> {
         let duration_ms = start.elapsed().as_millis() as u64;
 
         if !cli.quiet && !is_structured {
-            let failure = run_result
-                .as_ref()
-                .err()
-                .map(|e| crate::observability::telemetry::redact_secrets(&e.to_string()));
             println!(
                 "{}",
-                render_run_summary(&agent.run_summary(), failure.as_deref())
+                render_text_run_summary(&agent.run_summary(), &run_result)
             );
             // A wall-clock TIMEOUT without a final answer: show what was
             // gathered, labelled PARTIAL — the run still fails below.
@@ -2214,13 +2209,7 @@ pub async fn run() -> Result<()> {
         }
         if let Err(e) = &run_result {
             if !cli.quiet && !is_structured {
-                // Defense-in-depth: upstream error bodies can echo the API
-                // key (redacted at the source in http_status_error) — scrub
-                // again before printing.
-                eprintln!(
-                    "✗ Task failed: {}",
-                    crate::observability::telemetry::redact_secrets(&e.to_string())
-                );
+                report_text_run_error(&agent, e);
             }
         }
         return run_result;
@@ -2298,6 +2287,9 @@ fn build_session_result(
     // and reset on auto-continue, so it disagreed with the event stream
     // (1 vs 3 step_started in a 0.9.1 field run).
     let num_turns = agent.turns_run();
+    let outcome = crate::errors::RunEnd::classify(run_result, crate::shutdown_reason())
+        .as_str()
+        .to_string();
     // A capture failure must NOT masquerade as a clean empty patch (0 bytes),
     // which would fool automated success metrics. Surface it instead.
     // Measured from the task-start tree so pre-existing workspace edits are
@@ -2355,6 +2347,7 @@ fn build_session_result(
         duration_ms,
         failure_mode,
         artifact_dir,
+        outcome,
         files_changed,
         patch_baseline,
         answer,
@@ -3157,13 +3150,9 @@ async fn handle_command(
             let duration_ms = start.elapsed().as_millis() as u64;
 
             if !quiet && !is_structured {
-                let failure = run_result
-                    .as_ref()
-                    .err()
-                    .map(|e| crate::observability::telemetry::redact_secrets(&e.to_string()));
                 println!(
                     "{}",
-                    render_run_summary(&agent.run_summary(), failure.as_deref())
+                    render_text_run_summary(&agent.run_summary(), &run_result)
                 );
                 if let Some(partial) = agent.partial_progress(&run_result) {
                     println!("{}", partial.render());
@@ -3189,11 +3178,7 @@ async fn handle_command(
             }
             if let Err(e) = &run_result {
                 if !quiet && !is_structured {
-                    // Same scrub as the prompt path above (review, 0.9.1).
-                    eprintln!(
-                        "✗ Task failed: {}",
-                        crate::observability::telemetry::redact_secrets(&e.to_string())
-                    );
+                    report_text_run_error(&agent, e);
                 }
             }
             run_result?;
@@ -6711,6 +6696,81 @@ pub(crate) fn journal_title(input: &str, max_chars: usize) -> String {
 /// lines a user actually reads after a run — outcome, iterations, files
 /// changed, verification, tokens/cost. Printed for completed AND failed
 /// runs (a bare `✗ Task failed: MAX_ITERATIONS` explained nothing).
+/// The line(s) a text-mode `run` / `-p` / resume prints on stderr after the
+/// run summary when the run returned an error: `✗ Task failed: …` for a
+/// failure, or — for a user interrupt / SIGTERM — a plain note plus the
+/// resume hint the REPL prints on `/quit` (a saved checkpoint is what makes
+/// the run resumable). The caller then marks the failure reported so the
+/// process edge (`src/main.rs`) does not print it again as `Error: …`.
+fn render_run_end_notice(
+    end: crate::errors::RunEnd,
+    error: &str,
+    resume_id: Option<&str>,
+) -> String {
+    use crate::errors::RunEnd;
+    let what = match end {
+        RunEnd::Interrupted => "Task interrupted",
+        RunEnd::Terminated => "Task terminated (SIGTERM)",
+        RunEnd::Failed | RunEnd::Completed => return format!("✗ Task failed: {error}"),
+    };
+    match resume_id {
+        Some(id) => {
+            format!("{what}. Resume later with:\n  selfware resume {id}\n  selfware --continue")
+        }
+        None => format!("{what}."),
+    }
+}
+
+/// The last line `main` prints for an error that reached the process edge,
+/// or `None` when the CLI already reported the run's end (see
+/// [`crate::mark_failure_reported`]). A user interrupt reads
+/// `Interrupted: …`, not `Error: …`. Scrubbed of credentials either way.
+pub fn process_exit_message(e: &anyhow::Error, already_reported: bool) -> Option<String> {
+    use crate::errors::RunEnd;
+    if already_reported {
+        return None;
+    }
+    let redact = crate::observability::telemetry::redact_secrets;
+    Some(match RunEnd::classify_error(e) {
+        RunEnd::Interrupted => format!("Interrupted: {}", redact(&e.to_string())),
+        RunEnd::Terminated => format!("Terminated: {}", redact(&e.to_string())),
+        RunEnd::Failed | RunEnd::Completed => format!("Error: {}", redact(&format!("{e:?}"))),
+    })
+}
+
+/// The text run summary for a finished run, its outcome classified from the
+/// result (a user interrupt reads `outcome: interrupted`, not `failed`).
+fn render_text_run_summary(summary: &crate::agent::RunSummary, run_result: &Result<()>) -> String {
+    let end = crate::errors::RunEnd::classify(run_result, crate::shutdown_reason());
+    let reason = run_result
+        .as_ref()
+        .err()
+        .map(|e| crate::observability::telemetry::redact_secrets(&e.to_string()));
+    render_run_summary_for(summary, end, reason.as_deref())
+}
+
+/// Print the text-mode end of a run that returned an error (see
+/// [`render_run_end_notice`]) and mark it reported.
+fn report_text_run_error(agent: &Agent, e: &anyhow::Error) {
+    let end = crate::errors::RunEnd::classify_error(e);
+    let resume_id = agent
+        .current_checkpoint
+        .as_ref()
+        .map(|c| c.task_id.as_str())
+        .filter(|_| {
+            matches!(
+                end,
+                crate::errors::RunEnd::Interrupted | crate::errors::RunEnd::Terminated
+            )
+        });
+    // Defense-in-depth: upstream error bodies can echo the API key
+    // (redacted at the source in http_status_error) — scrub again before
+    // printing. `{e:#}` keeps the cause chain `main` used to print.
+    let error = crate::observability::telemetry::redact_secrets(&format!("{e:#}"));
+    eprintln!("{}", render_run_end_notice(end, &error, resume_id));
+    crate::mark_failure_reported();
+}
+
 /// Whether a finished run gets the green "Task complete." line: exactly when
 /// its classified outcome earns a clean ✅ (`FailureMode::is_clean_success`).
 /// One decision, so the line can never be green under a ⚠️ or ❌ banner
@@ -6722,8 +6782,34 @@ fn earns_task_complete_banner(agent: &crate::agent::Agent) -> bool {
 }
 
 fn render_run_summary(summary: &crate::agent::RunSummary, failure: Option<&str>) -> String {
+    let end = if failure.is_some() {
+        crate::errors::RunEnd::Failed
+    } else {
+        crate::errors::RunEnd::Completed
+    };
+    render_run_summary_for(summary, end, failure)
+}
+
+/// [`render_run_summary`] for a classified run end: a user interrupt reads
+/// `outcome: interrupted — …` (and SIGTERM `outcome: terminated — …`),
+/// never `outcome: failed` — stopping a run is not a failure of the run.
+fn render_run_summary_for(
+    summary: &crate::agent::RunSummary,
+    end: crate::errors::RunEnd,
+    reason: Option<&str>,
+) -> String {
+    use crate::errors::RunEnd;
     let mut lines = vec!["── Run summary ──".to_string()];
+    let stopped = matches!(end, RunEnd::Interrupted | RunEnd::Terminated);
+    let failure = match end {
+        RunEnd::Failed => Some(reason.unwrap_or("unknown error")),
+        _ => None,
+    };
     match failure {
+        _ if stopped => lines.push(match reason {
+            Some(reason) => format!("outcome: {} — {reason}", end.as_str()),
+            None => format!("outcome: {}", end.as_str()),
+        }),
         Some(reason) => lines.push(format!("outcome: failed — {reason}")),
         // Never print a bare "completed" over failed checks (AGENTS.md rule 3).
         None if matches!(summary.verification, Some((false, _))) => lines

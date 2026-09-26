@@ -50,6 +50,7 @@ fn test_session_result_round_trip() {
         duration_ms: 30000,
         failure_mode: None,
         artifact_dir: Some(PathBuf::from("/tmp/artifacts")),
+        outcome: String::new(),
         files_changed: 0,
         patch_baseline: String::new(),
         answer: None,
@@ -87,6 +88,7 @@ fn test_session_result_with_failure_mode() {
         duration_ms: 5000,
         failure_mode: Some("timeout".to_string()),
         artifact_dir: None,
+        outcome: String::new(),
         files_changed: 0,
         patch_baseline: String::new(),
         answer: None,
@@ -115,6 +117,7 @@ fn test_session_result_json_fields() {
         duration_ms: 60000,
         failure_mode: Some("loop_guard".to_string()),
         artifact_dir: Some(PathBuf::from("/out")),
+        outcome: String::new(),
         files_changed: 0,
         patch_baseline: String::new(),
         answer: None,
@@ -368,6 +371,7 @@ fn test_emit_result_does_not_panic() {
         duration_ms: 0,
         failure_mode: None,
         artifact_dir: None,
+        outcome: String::new(),
         files_changed: 0,
         patch_baseline: String::new(),
         answer: None,
@@ -395,6 +399,7 @@ fn test_session_result_serializes_final_answer() {
         duration_ms: 12000,
         failure_mode: None,
         artifact_dir: None,
+        outcome: String::new(),
         files_changed: 0,
         patch_baseline: String::new(),
         answer: Some("Fixed the lint and verified with cargo test.".to_string()),
@@ -430,6 +435,7 @@ fn test_session_result_omits_answer_when_none() {
         duration_ms: 1,
         failure_mode: None,
         artifact_dir: None,
+        outcome: String::new(),
         files_changed: 0,
         patch_baseline: String::new(),
         answer: None,
@@ -1035,6 +1041,7 @@ fn cost_field_is_omitted_when_provider_reported_no_pricing() {
         duration_ms: 1,
         failure_mode: None,
         artifact_dir: None,
+        outcome: String::new(),
         files_changed: 0,
         patch_baseline: String::new(),
         answer: None,
@@ -1067,6 +1074,7 @@ fn cost_field_is_present_when_provider_priced_usage() {
         duration_ms: 1,
         failure_mode: None,
         artifact_dir: None,
+        outcome: String::new(),
         files_changed: 0,
         patch_baseline: String::new(),
         answer: None,
@@ -1295,6 +1303,7 @@ fn grounding_result() -> SessionResult {
         duration_ms: 1,
         failure_mode: None,
         artifact_dir: None,
+        outcome: String::new(),
         files_changed: 0,
         patch_baseline: String::new(),
         answer: Some("review".to_string()),
@@ -1475,7 +1484,7 @@ fn patch_baseline_none_measures_against_head() {
     assert_eq!(patch_file_count(patch), 1);
 }
 
-/// `files_changed` and `patch_baseline` are additive: a result
+/// `outcome`, `files_changed` and `patch_baseline` are additive: a result
 /// written before they existed still deserializes.
 #[test]
 fn session_result_new_fields_default_when_absent() {
@@ -1484,6 +1493,7 @@ fn session_result_new_fields_default_when_absent() {
         "model":"m","duration_ms":1,"failure_mode":null,"artifact_dir":null}"#;
     let de: SessionResult = serde_json::from_str(old).unwrap();
     assert_eq!(de.stop_reason, "NO_CHANGES");
+    assert!(de.outcome.is_empty());
     assert_eq!(de.files_changed, 0);
     assert!(de.patch_baseline.is_empty());
 }

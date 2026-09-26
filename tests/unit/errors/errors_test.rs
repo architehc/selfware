@@ -517,3 +517,55 @@ fn process_exit_code_reports_the_shutdown_signal_on_ok() {
         130
     );
 }
+
+/// A user interrupt is its own outcome, never `failed`; SIGTERM is
+/// `terminated`; the internal wall-clock timeout and ordinary errors fail.
+#[test]
+fn run_end_classifies_interrupt_terminate_and_failure() {
+    use crate::ShutdownReason;
+    let ok: anyhow::Result<()> = Ok(());
+    assert_eq!(RunEnd::classify(&ok, None), RunEnd::Completed);
+    assert_eq!(
+        RunEnd::classify(&ok, Some(ShutdownReason::UserInterrupt)),
+        RunEnd::Interrupted
+    );
+    assert_eq!(
+        RunEnd::classify(&ok, Some(ShutdownReason::SignalTerminate)),
+        RunEnd::Terminated
+    );
+    assert_eq!(
+        RunEnd::classify(&ok, Some(ShutdownReason::Timeout)),
+        RunEnd::Failed
+    );
+
+    let cases: Vec<(anyhow::Error, RunEnd)> = vec![
+        (AgentError::Cancelled.into(), RunEnd::Interrupted),
+        (
+            anyhow::Error::from(AgentError::Cancelled).context("while running"),
+            RunEnd::Interrupted,
+        ),
+        (
+            SelfwareError::Agent(AgentError::Cancelled).into(),
+            RunEnd::Interrupted,
+        ),
+        (SelfwareError::Interrupted.into(), RunEnd::Interrupted),
+        (
+            AgentError::Terminated("SIGTERM".into()).into(),
+            RunEnd::Terminated,
+        ),
+        (
+            AgentError::CancelledWithReason("timeout".into()).into(),
+            RunEnd::Failed,
+        ),
+        (anyhow::anyhow!("something broke"), RunEnd::Failed),
+    ];
+    for (e, expected) in cases {
+        let label = format!("{e:#}");
+        let result: anyhow::Result<()> = Err(e);
+        assert_eq!(RunEnd::classify(&result, None), expected, "{label}");
+    }
+    assert_eq!(RunEnd::Completed.as_str(), "completed");
+    assert_eq!(RunEnd::Failed.as_str(), "failed");
+    assert_eq!(RunEnd::Interrupted.as_str(), "interrupted");
+    assert_eq!(RunEnd::Terminated.as_str(), "terminated");
+}

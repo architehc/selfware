@@ -217,6 +217,21 @@ pub fn is_repl_waiting_for_input() -> bool {
     REPL_WAITING_FOR_INPUT.load(Ordering::SeqCst)
 }
 
+static FAILURE_REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// Record that the CLI already told the user how the run ended (the
+/// `✗ Task failed: …` line, or the interrupted outcome with its resume
+/// hint), so `main` does not print the same error a second time as
+/// `Error: …` at the process edge. The exit code is unaffected.
+pub fn mark_failure_reported() {
+    FAILURE_REPORTED.store(true, Ordering::SeqCst);
+}
+
+/// Whether [`mark_failure_reported`] was called in this process.
+pub fn failure_reported() -> bool {
+    FAILURE_REPORTED.load(Ordering::SeqCst)
+}
+
 /// RAII guard that marks the REPL or interactive prompt as waiting for user input while held.
 pub struct ReplInputWaitGuard;
 

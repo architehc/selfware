@@ -2454,6 +2454,14 @@ async fn session_result_exit_status_matches_process_exit_code() {
         );
         assert_eq!(result.exit_status, expected, "{:?}", run_result);
         assert_eq!(result.exit_status, expected_process);
+        // `outcome` names the same end without parsing `stop_reason`: a
+        // user cancel (130) is `interrupted`, never `failed`.
+        let expected_outcome = match expected {
+            130 => "interrupted",
+            143 => "terminated",
+            _ => "failed",
+        };
+        assert_eq!(result.outcome, expected_outcome, "{:?}", run_result);
     }
     server.stop().await;
 }
@@ -2545,7 +2553,7 @@ async fn resumed_run_emits_the_fresh_run_result_object() {
         None,
         true,
         HeadlessOutputFormat::Text,
-        &headless::PatchBaseline::none()
+        &headless::PatchBaseline::none(),
     )
     .is_none());
     server.stop().await;
@@ -2671,4 +2679,80 @@ fn run_summary_says_cost_is_not_reported_instead_of_billing_incomplete() {
     );
     assert!(!report.contains("billing incomplete"), "{report}");
     assert!(!report.contains('$'), "no invented cost: {report}");
+}
+
+/// Ctrl-C during `selfware -y run` (0.9.1) printed "outcome: failed — Task
+/// cancelled by user", then "✗ Task failed: …", then main's "Error: …". An
+/// interrupt reads `outcome: interrupted`, prints the resume hint the REPL
+/// `/quit` prints, and nothing labels it a failure or an error.
+#[test]
+fn interrupted_run_reads_interrupted_with_resume_hint() {
+    use crate::errors::RunEnd;
+    let summary = sample_summary();
+    let rendered = render_run_summary_for(
+        &summary,
+        RunEnd::Interrupted,
+        Some("Task cancelled by user"),
+    );
+    assert!(
+        rendered
+            .lines()
+            .any(|l| l == "outcome: interrupted — Task cancelled by user"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("failed"), "{rendered}");
+    assert!(
+        rendered.contains("iterations: 12/30 · turns: 13"),
+        "{rendered}"
+    );
+
+    let notice = render_run_end_notice(
+        RunEnd::Interrupted,
+        "Task cancelled by user",
+        Some("task-abc"),
+    );
+    assert_eq!(
+        notice,
+        "Task interrupted. Resume later with:\n  selfware resume task-abc\n  selfware --continue"
+    );
+    assert!(!notice.contains('✗'), "{notice}");
+    // No checkpoint → no hint pointing at nothing.
+    assert_eq!(
+        render_run_end_notice(RunEnd::Interrupted, "x", None),
+        "Task interrupted."
+    );
+    assert!(render_run_end_notice(RunEnd::Terminated, "x", Some("t"))
+        .starts_with("Task terminated (SIGTERM). Resume later with:"));
+    // A real failure keeps the ✗ line.
+    assert_eq!(
+        render_run_end_notice(RunEnd::Failed, "boom", Some("t")),
+        "✗ Task failed: boom"
+    );
+    // The legacy entry point is unchanged for failures.
+    let failed = render_run_summary(&summary, Some("boom"));
+    assert!(
+        failed.lines().any(|l| l == "outcome: failed — boom"),
+        "{failed}"
+    );
+}
+
+/// Every failed `selfware run` printed "✗ Task failed: …" AND main's
+/// "Error: …". Once the CLI reported the end, the process edge stays quiet;
+/// otherwise it prints one scrubbed line, `Interrupted:` for a user cancel.
+#[test]
+fn process_exit_message_prints_once_and_never_calls_a_cancel_an_error() {
+    let cancel: anyhow::Error = crate::errors::AgentError::Cancelled.into();
+    assert!(process_exit_message(&cancel, true).is_none());
+    let line = process_exit_message(&cancel, false).unwrap();
+    assert!(line.starts_with("Interrupted: "), "{line}");
+    assert!(!line.contains("Error"), "{line}");
+
+    let failure = anyhow::anyhow!("upstream said: using api key sk-abc12345defghijk");
+    assert!(process_exit_message(&failure, true).is_none());
+    let line = process_exit_message(&failure, false).unwrap();
+    assert!(line.starts_with("Error: "), "{line}");
+    assert!(
+        !line.contains("sk-abc12345defghijk"),
+        "credential must be scrubbed: {line}"
+    );
 }

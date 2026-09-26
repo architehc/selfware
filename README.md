@@ -577,14 +577,17 @@ For scripts and CI, `--output-format json` prints one result object at the end
 of a headless run, and `--output-format stream-json` prints JSON lines as it
 goes (`step_started`, `tool_call_started`, `tool_call_completed`,
 `task_completed`, `task_failed`, ...). The result object carries the outcome:
-`exit_status` (the process exit code: `0` on success, `1` on a general error, `130` on interrupt, `143` on SIGTERM, ...), `stop_reason`, `failure_mode`,
+`exit_status` (the process exit code: `0` on success, `1` on a general error, `130` on interrupt, `143` on SIGTERM, ...),
+`outcome` (`completed`, `failed`, `interrupted` or `terminated` — read this
+rather than `stop_reason`, which is a classification tag: `NO_CHANGES` is a
+successful answer that edited nothing), `stop_reason`, `failure_mode`,
 `num_turns` (agent-loop turns: one per `step_started` event, the `turns` of
 the text run summary), `usage`, `patch_bytes` / `patch_lines` /
 `files_changed` (this run's own changes: the diff from the working tree at
 task start, so edits already in the workspace are not counted;
 `patch_baseline` is `task_start`, or `head` when no start snapshot could be
-taken), and the final `answer` when there is one. Logs stay on
-stderr, so stdout is pure JSON.
+taken), and the final `answer` when there is one. Logs stay on stderr, so
+stdout is pure JSON.
 
 ---
 

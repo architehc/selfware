@@ -43,6 +43,11 @@ pub fn headless_mode_block_reason(mode: ExecutionMode, stdin_is_terminal: bool) 
 pub struct SessionResult {
     pub session_id: String,
     pub exit_status: i32,
+    /// The run's terminal classification tag: the failure-mode tag on an
+    /// `Ok` exit (`REAL_EDIT`, or `NO_CHANGES` for a run that answered
+    /// without editing — NOT a failure), `completed` when unclassified, or
+    /// `error: <message>` on an error exit. Kept for compatibility; read
+    /// `outcome` for success/failure.
     pub stop_reason: String,
     /// Agent-loop turns this run executed: one per `step_started` event in
     /// `stream-json` (the planning turn's tool batch included), and the
@@ -59,6 +64,13 @@ pub struct SessionResult {
     pub duration_ms: u64,
     pub failure_mode: Option<String>,
     pub artifact_dir: Option<PathBuf>,
+    /// How the run ended, for consumers that must not parse `stop_reason`:
+    /// `completed` (exit 0 — including an answer with no edits, whose
+    /// `stop_reason` is `NO_CHANGES`), `failed`, `interrupted` (user
+    /// Ctrl-C / cancel, exit 130) or `terminated` (SIGTERM, exit 143).
+    /// Defaults to empty when reading a result written before 0.9.2.
+    #[serde(default)]
+    pub outcome: String,
     /// Files in this run's patch (the `diff --git` entries counted in
     /// `patch_bytes`).
     #[serde(default)]
