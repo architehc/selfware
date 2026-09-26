@@ -573,3 +573,22 @@ async fn shell_path_policy_refusal_names_the_legitimate_routes() {
     assert!(hint.contains("[safety] allowed_paths"), "{hint}");
     assert!(hint.contains("interpreter"), "{hint}");
 }
+
+#[test]
+fn leading_reasoning_unclosed_detects_only_an_open_leading_block() {
+    use crate::agent::recovery::leading_reasoning_unclosed;
+    assert!(leading_reasoning_unclosed(
+        "<think>still weighing the options"
+    ));
+    assert!(leading_reasoning_unclosed(
+        "  <think>a</think>\n<think>second, open"
+    ));
+    assert!(leading_reasoning_unclosed("<|channel>thought still going"));
+    assert!(!leading_reasoning_unclosed(
+        "<think>done</think>The answer is 4."
+    ));
+    assert!(!leading_reasoning_unclosed(
+        "The answer quotes `<think>` literally."
+    ));
+    assert!(!leading_reasoning_unclosed(""));
+}

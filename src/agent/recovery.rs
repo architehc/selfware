@@ -194,6 +194,26 @@ fn reasoning_block_at(text: &str) -> Option<(&'static str, &'static str)> {
         .find(|(open, _)| text.starts_with(open))
 }
 
+/// Whether `content` opens with a reasoning block (after any closed leading
+/// blocks) that never closes. For a reply cut off by the output-length limit
+/// this means the visible text may be reasoning rather than an answer: a
+/// leading unclosed `<think>` is kept as answer text (Qwen3.5 writes its
+/// answer after it), so the two cannot be told apart once truncated.
+pub(super) fn leading_reasoning_unclosed(content: &str) -> bool {
+    let mut rest = content;
+    loop {
+        let trimmed = rest.trim_start();
+        let Some((open, close)) = reasoning_block_at(trimmed) else {
+            return false;
+        };
+        let body = &trimmed[open.len()..];
+        match body.find(close) {
+            Some(end) => rest = &body[end + close.len()..],
+            None => return true,
+        }
+    }
+}
+
 /// Strip reasoning blocks (`<think>…</think>`, gemma
 /// `<|channel>thought…<channel|>`) from content, removing only blocks the
 /// model actually opened as reasoning:

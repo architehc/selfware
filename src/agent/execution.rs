@@ -1692,6 +1692,7 @@ impl Agent {
             // explicit truncation note (Rule 3), never silently and never in a
             // loop.
             let mut content = content;
+            let mut truncated_inside_reasoning = false;
             if truncated_by_length {
                 if self.length_truncation_retries < MAX_LENGTH_TRUNCATION_RETRIES {
                     self.length_truncation_retries += 1;
@@ -1707,10 +1708,19 @@ impl Agent {
                     return Ok(false);
                 }
                 tracing::warn!("Final answer still length-truncated after retries — accepting with a truncation note");
-                content.push_str(
-                    "\n\n[NOTE: this answer was cut off at the model's output length limit and \
-                     may be incomplete.]",
-                );
+                if super::recovery::leading_reasoning_unclosed(&content) {
+                    // Cut off inside an unclosed reasoning block: the visible
+                    // text may be the model's reasoning, not an answer. Say so
+                    // FIRST (review finding, 0.9.1); the text itself is kept
+                    // because Qwen3.5 writes real answers after an unclosed
+                    // `<think>`.
+                    truncated_inside_reasoning = true;
+                } else {
+                    content.push_str(
+                        "\n\n[NOTE: this answer was cut off at the model's output length limit and \
+                         may be incomplete.]",
+                    );
+                }
             }
 
             // Fire Stop hooks before completing
@@ -1721,9 +1731,16 @@ impl Agent {
             // includes raw <think>...</think> tags from models like Qwen3.5 that
             // emit inline thinking. Without stripping, "Final answer:" shows the
             // think block content instead of the actual response.
-            let clean_content = super::recovery::strip_think_blocks(&content)
+            let mut clean_content = super::recovery::strip_think_blocks(&content)
                 .trim()
                 .to_string();
+            if truncated_inside_reasoning {
+                clean_content = format!(
+                    "[NOTE: the model's output was cut off at its length limit before its \
+                     reasoning block closed — the text below may be reasoning, not a finished \
+                     answer.]\n\n{clean_content}"
+                );
+            }
             output::final_answer(&clean_content);
             // Refine the artifact decision: this turn ended in a final answer.
             self.record_final_answer(&artifact_ctx, &clean_content)

@@ -516,3 +516,44 @@ fn rescue_command_that_cannot_run_is_recognised() {
         r#"{"exit_code":0,"stdout":"Tests passed","stderr":""}"#
     ));
 }
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn truncated_inside_reasoning_is_labelled_as_possibly_reasoning() {
+    // Review finding (0.9.1): a reply cut off at the length limit inside an
+    // unclosed `<think>` block was delivered as the answer. It must be
+    // labelled FIRST as possibly reasoning (the text is kept: Qwen3.5 writes
+    // real answers after an unclosed `<think>`).
+    let cwd = crate::test_support::CwdGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    cwd.switch_to(dir.path());
+    let cut = "<think>The three parser options differ in how they buffer tokens and \
+               report rejections; option one keeps";
+    let server = MockLlmServer::builder()
+        .with_finished_response(cut, None, "length")
+        .with_finished_response(cut, None, "length")
+        .with_finished_response(cut, None, "length")
+        .build()
+        .await;
+    let config = artifact_config(&format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+    for _ in 0..2 {
+        assert!(!agent.execute_step_internal(false).await.unwrap());
+    }
+    assert!(agent.execute_step_internal(false).await.unwrap());
+    let answer = &agent.last_assistant_response;
+    assert!(
+        answer.starts_with("[NOTE: the model's output was cut off at its length limit before its reasoning block closed"),
+        "{answer}"
+    );
+    assert!(
+        !answer.contains("<think>"),
+        "no raw reasoning marker: {answer}"
+    );
+    // The stream moves `<think>` text to the reasoning channel, so the answer
+    // is the honest note alone — no reasoning is passed off as the answer.
+    server.stop().await;
+}
