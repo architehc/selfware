@@ -148,6 +148,39 @@ pub(super) fn is_incomplete_action_response(content: &str) -> bool {
         return true;
     }
 
+    // A reply whose LAST line announces moving on to the next stage/step is
+    // a progress note, not an answer (0.9.0 known issue: a long review's
+    // "**Stage 1 findings** … Now moving to **Stage 2: …**." was accepted as
+    // the final answer). Only the final non-empty line is checked, with
+    // markdown emphasis stripped, so an answer that merely mentions next
+    // steps ("Next steps: run the tests.") is not caught.
+    if let Some(last) = lower.lines().rev().map(str::trim).find(|l| !l.is_empty()) {
+        let last = last.trim_matches(|c: char| matches!(c, '*' | '_' | '#' | '>' | '-' | ' '));
+        let last = last.replace(['*', '_'], "");
+        const MOVE_ON: &[&str] = &[
+            "now moving to",
+            "moving on to",
+            "moving to stage",
+            "moving to the next",
+            "proceeding to",
+            "now proceeding",
+            "next, i'll",
+            "next i'll",
+            "next, i will",
+            "next i will",
+            "now let me",
+            "let me now",
+            "now on to",
+            "on to stage",
+            "now for stage",
+            "continuing with stage",
+            "next up:",
+        ];
+        if last.chars().count() < 160 && MOVE_ON.iter().any(|p| last.starts_with(p)) {
+            return true;
+        }
+    }
+
     let strong_prefixes = [
         "i need to ",
         "first i need to ",

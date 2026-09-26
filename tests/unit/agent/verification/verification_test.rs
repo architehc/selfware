@@ -4266,3 +4266,27 @@ mod audit_evidence_tests {
         server.stop().await;
     }
 }
+
+#[test]
+fn a_reply_ending_by_moving_on_to_the_next_stage_is_not_final() {
+    // 0.9.0 known issue (val090 long_review turn 27, exact reply): a Stage-1
+    // progress note ending "Now moving to **Stage 2: …**." was accepted as the
+    // final answer of a six-stage review.
+    let note = include_str!("fixtures/val090_stage1_progress_note.md");
+    assert!(is_incomplete_action_response(note));
+    for trailing in [
+        "Findings above.\n\nMoving on to stage 3: the ledger.",
+        "Stage 2 done.\n\n---\n\n**Next, I'll review the compaction path.**",
+        "Summary of part one.\n\nProceeding to the parser module.",
+    ] {
+        assert!(is_incomplete_action_response(trailing), "{trailing}");
+    }
+    // Answers that merely mention next steps or conclude are final.
+    for answer in [
+        "All six stages reviewed; no confirmed bugs.\n\nNext steps: run the full test suite.",
+        "The parser is correct.\n\nMoving forward, the team should add a fuzz test.",
+        "No confirmed bugs in any stage. The implementation and tests are consistent.",
+    ] {
+        assert!(!is_incomplete_action_response(answer), "{answer}");
+    }
+}
