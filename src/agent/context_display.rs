@@ -123,7 +123,7 @@ pub(crate) fn layout_status_bar(
 
 impl Agent {
     /// `context_usage_label` for the current conversation.
-    pub(super) fn context_usage_text(&self) -> String {
+    pub(crate) fn context_usage_text(&self) -> String {
         context_usage_label(
             self.total_tokens_used(),
             self.memory.context_window(),

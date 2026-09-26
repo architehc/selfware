@@ -1079,28 +1079,14 @@ pub fn run_tui_dashboard_with_events(
                                     );
                                 }
                                 "/ctx" => {
-                                    let ctx_msg = with_dashboard_state(&shared_state, |state| {
-                                        let tokens = state.tokens_used;
-                                        // Context window estimate (128K tokens typical)
-                                        let context_limit: u64 = 128_000;
-                                        let usage_pct =
-                                            (tokens as f64 / context_limit as f64) * 100.0;
-                                        format!(
-                                            "Context usage:\n  \
-                                                 Tokens used:    {} / {} ({:.1}%)\n  \
-                                                 Remaining:      ~{} tokens\n  \
-                                                 Messages:       {}",
-                                            tokens,
-                                            context_limit,
-                                            usage_pct,
-                                            context_limit.saturating_sub(tokens),
-                                            app.messages.len()
-                                        )
-                                    });
-                                    app.add_system_message(&ctx_msg);
-                                    with_dashboard_state(&shared_state, |state| {
-                                        state.log(LogLevel::Info, "Displayed context usage");
-                                    });
+                                    // The agent loop owns the measured
+                                    // context (conversation tokens of the
+                                    // model's window + compaction threshold).
+                                    // This handler used to divide the
+                                    // session's cumulative token count by a
+                                    // hard-coded 128K (0.9.1 field test).
+                                    let _ = user_input_tx.send("/ctx".to_string());
+                                    app.add_system_message("Context usage → log panel");
                                 }
                                 "/diff" => {
                                     app.add_system_message("Running git diff --stat...");

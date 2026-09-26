@@ -2527,6 +2527,12 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
                     ));
                     continue;
                 }
+                if input == "/ctx" {
+                    // The REPL's measured label: current conversation tokens
+                    // of the model's window, plus the compaction threshold.
+                    log_line(agent.context_usage_text());
+                    continue;
+                }
                 if input == "/cost" {
                     // Session scope (every task), same fold as the REPL's
                     // /cost and /quit — the run summary is per task.

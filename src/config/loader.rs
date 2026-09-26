@@ -52,11 +52,28 @@ use super::Config;
 /// `init_tracing()` installs a subscriber iff RUST_LOG / SELFWARE_LOG_LEVEL is
 /// set; without this check, runs with logging enabled see every warning twice
 /// (subscriber output plus the stderr fallback).
+///
+/// Each distinct message is emitted once per process: some commands load the
+/// config twice (`doctor` re-loads it for its own checks), which printed
+/// every warning twice (UX field test, 0.9.1).
 fn config_warning(message: &str) {
+    if !first_time_for_config_warning(message) {
+        return;
+    }
     warn!("{}", message);
     if std::env::var_os("RUST_LOG").is_none() && std::env::var_os("SELFWARE_LOG_LEVEL").is_none() {
         eprintln!("Config warning: {}", message);
     }
+}
+
+/// Whether `message` has not been emitted yet in this process (and record it).
+fn first_time_for_config_warning(message: &str) -> bool {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    SEEN.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(message.to_string())
 }
 
 /// True when a credential-bearing config string is really a placeholder:
