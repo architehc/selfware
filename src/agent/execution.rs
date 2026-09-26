@@ -2512,19 +2512,23 @@ mod tests;
 #[path = "../../tests/unit/agent/execution/turn_artifact_decision_test.rs"]
 mod turn_artifact_decision_tests;
 
-/// Whether an auto-run verification command's tool result shows the command
-/// could not run at all: the shell's "command not found" exit (127), or a
-/// spawn failure for a missing program (`os error 2`). A command that ran and
-/// failed (any other exit) is a real verification failure, not this.
 /// Length-truncated final answers sent back for a complete, shorter rewrite
 /// before one is accepted with an explicit truncation note.
 const MAX_LENGTH_TRUNCATION_RETRIES: u32 = 2;
 
+/// Whether an auto-run verification command's tool result shows the command
+/// could not run at all: the shell's "command not found" (127) or "found but
+/// not executable" (126) exit — the same pair the verification ledger treats
+/// as "no check ran" — or a spawn failure for a missing (`os error 2`) or
+/// non-executable (`os error 13`) program. A command that ran and failed (any
+/// other exit) is a real verification failure, not this.
 pub(super) fn rescue_command_could_not_run(tool_result: &str) -> bool {
     let text = tool_result.to_ascii_lowercase();
-    text.contains("\"exit_code\":127")
-        || text.contains("\"exit_code\": 127")
-        || text.contains("exit code 127")
-        || text.contains("command not found")
+    ["126", "127"].iter().any(|code| {
+        text.contains(&format!("\"exit_code\":{code}"))
+            || text.contains(&format!("\"exit_code\": {code}"))
+            || text.contains(&format!("exit code {code}"))
+    }) || text.contains("command not found")
         || (text.contains("no such file or directory") && text.contains("os error 2"))
+        || (text.contains("permission denied") && text.contains("os error 13"))
 }

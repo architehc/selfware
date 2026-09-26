@@ -563,6 +563,17 @@ async fn truncated_reply_is_not_accepted_as_a_repeated_completion() {
 #[test]
 fn rescue_command_that_cannot_run_is_recognised() {
     use crate::agent::execution::rescue_command_could_not_run;
+    // Review C3 (0.9.1): 126 = found but not executable; ran no check either.
+    assert!(rescue_command_could_not_run(
+        r#"{"exit_code":126,"stdout":"","stderr":"sh: ./run_tests.sh: Permission denied"}"#
+    ));
+    assert!(rescue_command_could_not_run(
+        "Failed to spawn ./check: Permission denied (os error 13)"
+    ));
+    // A test that ran and reports a permission failure is still a real failure.
+    assert!(!rescue_command_could_not_run(
+        r#"{"exit_code":1,"stdout":"test_perms FAILED: permission denied","stderr":""}"#
+    ));
     // val090 ts_notsc: `npm test` with no npm installed.
     assert!(rescue_command_could_not_run(
         r#"{"exit_code":127,"stdout":"","stderr":"sh: npm: command not found"}"#
