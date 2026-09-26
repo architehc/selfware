@@ -6849,14 +6849,11 @@ fn render_run_summary_for(
             .as_ref()
             .is_some_and(|g| g.warning_note().is_some()) =>
         {
-            let note = summary
-                .grounding
-                .as_ref()
-                .and_then(|g| g.warning_note())
-                .unwrap_or_default();
-            lines.push(format!(
-                "outcome: completed — {note} (answer not fully grounded)"
-            ))
+            // The citation result itself is printed once, in the grounding
+            // block below — the outcome only names the verdict.
+            lines.push(
+                "outcome: completed — answer not fully grounded (see citations below)".to_string(),
+            )
         }
         None => lines.push("outcome: completed".to_string()),
     }
@@ -6935,13 +6932,20 @@ fn render_run_summary_for(
     if let Some(audit) = &summary.requirements_audit {
         lines.push(format!("requirements audit: {}", audit.label()));
     }
+    // The citation result appears ONCE: the warning note when the answer is
+    // not fully grounded (it carries the unverified count, the breakdown and
+    // why it was not corrected), otherwise the "Grounding:" line. Printing
+    // both, plus the note in the outcome line and the banner evidence, said
+    // the same thing four times (0.9.1).
     if let Some(grounding) = &summary.grounding {
-        lines.push(grounding.grounding_line());
-        if let Some(note) = grounding.warning_note() {
-            lines.push(note);
-            for problem in grounding.problems.iter().take(5) {
-                lines.push(format!("  - {problem}"));
+        match grounding.warning_note() {
+            Some(note) => {
+                lines.push(note);
+                for problem in grounding.problems.iter().take(5) {
+                    lines.push(format!("  - {problem}"));
+                }
             }
+            None => lines.push(grounding.grounding_line()),
         }
     }
     let cost = summary

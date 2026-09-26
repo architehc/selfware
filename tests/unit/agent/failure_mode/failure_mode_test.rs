@@ -921,3 +921,40 @@ async fn token_and_wall_clock_stops_keep_their_labels() {
     );
     assert_eq!(wall.kind, FailureKind::Timeout);
 }
+
+/// 0.9.1: the end of a run stated the citation result four times (banner
+/// evidence, summary outcome, Grounding line, note). The banner keeps the
+/// verdict in its header and drops the note from its evidence line; the
+/// evidence FIELD (JSON, failure_mode.json) keeps it.
+#[test]
+fn banner_evidence_omits_the_citation_note_but_the_field_keeps_it() {
+    let status = crate::agent::citation_check::GroundingStatus {
+        total: 5,
+        verified: 1,
+        wrong_line: 3,
+        unverifiable: 1,
+        ..Default::default()
+    };
+    let note = status.warning_note().expect("unverified citations warn");
+    let base = FailureMode {
+        restored_files: Vec::new(),
+        kind: FailureKind::NoChange,
+        evidence: "completed naturally with 0 mutating tool calls".to_string(),
+        advice: "-".to_string(),
+    };
+    let fm = with_citation_status(base, Some(&status));
+    assert!(fm.evidence.ends_with(&note), "{}", fm.evidence);
+    let banner = fm.cli_banner();
+    assert!(banner.starts_with("⚠️"), "{banner}");
+    assert!(
+        banner.contains("some citations could not be verified"),
+        "{banner}"
+    );
+    assert!(!banner.contains(&note), "{banner}");
+    assert!(
+        banner.contains("evidence: completed naturally with 0 mutating tool calls\n"),
+        "{banner}"
+    );
+    // Evidence without a citation note is shown unchanged.
+    assert_eq!(banner_evidence("a; b"), "a; b");
+}

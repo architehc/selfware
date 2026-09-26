@@ -1280,17 +1280,25 @@ fn render_run_summary_names_unverified_citations() {
         "no bare completion over unverified citations: {rendered}"
     );
     assert!(
-        rendered.contains(
-            "outcome: completed — citations: 10 of 50 could not be verified (3 wrong, 7 not checkable) (answer not fully grounded)"
-        ),
+        rendered
+            .lines()
+            .any(|l| l == "outcome: completed — answer not fully grounded (see citations below)"),
         "{rendered}"
     );
-    assert!(
-        rendered.contains(
-            "Grounding: 50 checked: 40 verified, 0 location-only (line exists, content not checked), 3 wrong, 7 not checkable"
-        ),
+    // The citation result is stated exactly ONCE in the summary (0.9.1: the
+    // outcome line, the Grounding line and the note repeated it).
+    let note = "citations: 10 of 50 could not be verified (3 wrong, 7 not checkable)";
+    assert_eq!(
+        rendered.lines().filter(|l| l.contains(note)).count(),
+        1,
         "{rendered}"
     );
+    assert_eq!(
+        rendered.matches("could not be verified").count(),
+        1,
+        "{rendered}"
+    );
+    assert!(!rendered.contains("Grounding:"), "{rendered}");
     assert!(
         rendered.contains("  - `x` cited at a.rs:9 but found at src/a.rs:40"),
         "{rendered}"

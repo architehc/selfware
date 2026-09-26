@@ -524,7 +524,7 @@ impl FailureMode {
         format!(
             "{}\n   evidence: {}\n   advice: {}",
             self.banner_header(),
-            self.evidence,
+            banner_evidence(&self.evidence),
             self.advice
         )
     }
@@ -718,6 +718,19 @@ pub(crate) fn with_audit_status(
             }
         }
         _ => base,
+    }
+}
+
+/// The evidence as the text banner shows it: without the citation note that
+/// [`with_citation_status`] appends (always last, as `; citations…`). The
+/// banner header already names the citation verdict, and the run summary
+/// prints the note itself once — the banner repeating it made the same
+/// result appear four times at the end of a run (0.9.1). The `evidence`
+/// field (JSON result, failure_mode.json, failure hint) keeps the note.
+pub(crate) fn banner_evidence(evidence: &str) -> &str {
+    match evidence.find("; citations") {
+        Some(at) => &evidence[..at],
+        None => evidence,
     }
 }
 
