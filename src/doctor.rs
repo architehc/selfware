@@ -747,7 +747,13 @@ pub fn config_checks(config: &crate::config::Config) -> Vec<DoctorCheck> {
         || endpoint_lower.starts_with("http://192.168.")
         || endpoint_lower.starts_with("http://10.")
         || endpoint_lower.starts_with("http://172.");
-    if config.api_key.is_none() && !looks_local {
+    // The shipped default endpoint is keyless: `selfware doctor` on a fresh
+    // install (no config, no key) must not FAIL on the endpoint we ship.
+    let is_keyless_default = endpoint_lower.trim_end_matches('/')
+        == crate::config::default_endpoint()
+            .to_lowercase()
+            .trim_end_matches('/');
+    if config.api_key.is_none() && !looks_local && !is_keyless_default {
         out.push(DoctorCheck {
             name: "api_key".to_string(),
             category: Category::Configuration,
@@ -767,6 +773,8 @@ pub fn config_checks(config: &crate::config::Config) -> Vec<DoctorCheck> {
             version: None,
             message: if config.api_key.is_some() {
                 "api_key present".to_string()
+            } else if is_keyless_default {
+                "api_key not set (the default endpoint is keyless — OK)".to_string()
             } else {
                 "api_key not set (endpoint is local — OK)".to_string()
             },

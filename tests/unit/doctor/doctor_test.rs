@@ -184,6 +184,25 @@ fn test_config_checks_remote_no_api_key_fails() {
     assert!(api_check.fix_hint.is_some());
 }
 
+#[test]
+fn test_config_checks_default_keyless_endpoint_without_key_passes() {
+    // The shipped default endpoint is keyless, so a fresh install with no
+    // api_key must not FAIL the doctor (it used to exit 1 on its own default).
+    let cfg = crate::config::Config {
+        endpoint: format!("{}/", crate::config::default_endpoint()),
+        api_key: None,
+        ..crate::config::Config::default()
+    };
+    let checks = config_checks(&cfg);
+    let api_check = checks.iter().find(|c| c.name == "api_key").unwrap();
+    assert_eq!(api_check.status, CheckStatus::Ok);
+    assert!(
+        api_check.message.contains("keyless"),
+        "{}",
+        api_check.message
+    );
+}
+
 #[cfg(feature = "log-analysis")]
 #[test]
 fn analyze_log_file_counts_errors_and_anomalies() {
