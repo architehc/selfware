@@ -46,6 +46,11 @@ impl SelfwareCompleter {
             .iter()
             .filter_map(|cmd| {
                 let clean_cmd = cmd.strip_prefix('/').unwrap_or(cmd);
+                // Aliases (/exit, /q, /context, /timeline, exit, quit) are
+                // accepted but only offered when typed out exactly.
+                if !super::command_registry::offered_in_menu(cmd, prefix) {
+                    return None;
+                }
                 let base_score = self
                     .matcher
                     .fuzzy_match(cmd, prefix)

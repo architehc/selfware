@@ -87,7 +87,12 @@ fn test_command_description() {
         completer.command_description("/memory"),
         "Show memory hierarchy status"
     );
-    assert_eq!(completer.command_description("/clear"), "Clear the screen");
+    // `/clear` clears the CONVERSATION (the REPL handler keeps only the
+    // system prompt); "Clear the screen" was wrong (that is Ctrl+L).
+    assert_eq!(
+        completer.command_description("/clear"),
+        "Clear the conversation"
+    );
     assert_eq!(
         completer.command_description("/tools"),
         "List available tools"
@@ -240,4 +245,31 @@ fn test_q_and_slash_q_suggest_quit_before_queue() {
         bare_quit_idx.is_some() && (bare_queue_idx.is_none() || bare_quit_idx < bare_queue_idx),
         "quit or /quit should rank before /queue for 'q'"
     );
+}
+
+#[test]
+fn slash_menu_does_not_list_aliases_next_to_their_canonical_command() {
+    let commands = crate::input::command_registry::command_names();
+    let mut completer = SelfwareCompleter::new(vec![], commands);
+    let values: Vec<String> = completer
+        .complete("/", 1)
+        .into_iter()
+        .map(|s| s.value)
+        .collect();
+    for alias in ["/exit", "/q", "/context", "/timeline", "exit", "quit"] {
+        assert!(
+            !values.iter().any(|v| v == alias),
+            "{alias} listed: {values:?}"
+        );
+    }
+    for canonical in ["/quit", "/ctx", "/restore"] {
+        assert!(values.iter().any(|v| v == canonical), "{canonical} missing");
+    }
+    // Typed out exactly, an alias is still offered (so Enter submits it).
+    let exact: Vec<String> = completer
+        .complete("/q", 2)
+        .into_iter()
+        .map(|s| s.value)
+        .collect();
+    assert_eq!(exact.first().map(String::as_str), Some("/q"));
 }

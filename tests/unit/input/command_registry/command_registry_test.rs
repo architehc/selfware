@@ -642,3 +642,21 @@ fn shared_exit_predicate_rejects_lookalikes() {
         assert!(!is_exit_command(cmd), "{cmd} must NOT be an exit command");
     }
 }
+
+#[test]
+fn menu_hides_aliases_but_they_stay_accepted() {
+    for alias in MENU_HIDDEN_ALIASES {
+        assert!(!offered_in_menu(alias, "/"), "{alias} offered for '/'");
+        assert!(offered_in_menu(alias, alias), "{alias} typed exactly");
+        assert!(is_known_command(alias), "{alias} must still be accepted");
+    }
+    for canonical in ["/quit", "/ctx", "/restore"] {
+        assert!(offered_in_menu(canonical, "/"), "{canonical} missing");
+    }
+    assert!(is_exit_command("exit") && is_exit_command("/q"));
+}
+
+#[test]
+fn mode_is_described_as_cycling() {
+    assert!(command_description("/mode").unwrap().starts_with("Cycle"));
+}

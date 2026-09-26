@@ -70,27 +70,34 @@ impl Agent {
             crate::config::ExecutionMode::Daemon => "[DAEMON]",
         };
 
+        // Compact welcome (0.9.1 field finding: two greetings plus the
+        // full-screen /ctx panel printed before the user typed anything):
+        // one greeting, the model/context/dir line, three hints. The big
+        // context panel stays behind /ctx.
         println!(
-            "{} {}",
-            "🦊 Selfware Interactive Mode".bright_cyan(),
-            mode_indicator.bright_yellow()
+            "{} {} {}",
+            "🦊 Selfware".bright_cyan(),
+            mode_indicator.bright_yellow(),
+            helpers::welcome_greeting(&whoami::username().unwrap_or_default()).dimmed()
         );
         self.show_startup_context();
-        // Show context stats on startup (like /ctx)
-        self.show_context_stats();
         // Discover user skills so /skills can list them and /<name> injects them.
         let skill_registry = crate::skills::SkillRegistry::discover();
-        if !skill_registry.is_empty() {
-            println!(
-                "  {} skill(s) available — /skills to list",
+        let skills_hint = if skill_registry.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " · {} for {} skill(s)",
+                "/skills".bright_cyan(),
                 skill_registry.len()
-            );
-        }
+            )
+        };
         println!(
-            "  Type {} for commands, {} for context, {} to quit",
+            "  {} commands · {} context details · {} to exit{}",
             "/help".bright_cyan(),
             "/ctx".bright_cyan(),
-            "exit".bright_cyan(),
+            "/quit".bright_cyan(),
+            skills_hint,
         );
 
         let mut consecutive_errors = 0;
@@ -281,202 +288,6 @@ impl Agent {
             }
 
             if input == "/help" {
-                // Framed by display width: the hand-padded box misaligned
-                // around emoji (UX field test, 0.9.0).
-                let rows: Vec<String> = vec![
-                    crate::ui::components::FRAME_SEPARATOR.to_string(),
-                    format!("{} /help              Show this help", "📖".bright_white()),
-                    format!("{} /status            Agent status", "📊".bright_white()),
-                    format!(
-                        "{} /stats             Detailed session stats",
-                        "📈".bright_white()
-                    ),
-                    format!(
-                        "{} /mode              Cycle execution mode",
-                        "🔄".bright_white()
-                    ),
-                    crate::ui::components::FRAME_SEPARATOR.to_string(),
-                    format!(
-                        "{} /ctx               Context window stats",
-                        "📊".bright_white()
-                    ),
-                    format!(
-                        "{} /ctx clear         Clear all context",
-                        "🧹".bright_white()
-                    ),
-                    format!(
-                        "{} /ctx load <ext>    Load files (.rs,.toml)",
-                        "📂".bright_white()
-                    ),
-                    format!(
-                        "{} /ctx reload        Reload loaded files",
-                        "🔄".bright_white()
-                    ),
-                    format!(
-                        "{} /ctx copy          Copy sources to clip",
-                        "📋".bright_white()
-                    ),
-                    format!(
-                        "{} /compress          Compress context",
-                        "🗜️ ".bright_white()
-                    ),
-                    format!(
-                        "{} /scan <path>       Index folder for RAG search",
-                        "🔍".bright_white()
-                    ),
-                    crate::ui::components::FRAME_SEPARATOR.to_string(),
-                    format!(
-                        "{} /memory           Memory statistics",
-                        "🧠".bright_white()
-                    ),
-                    format!(
-                        "{} /dream            Memory consolidation",
-                        "🌙".bright_white()
-                    ),
-                    format!(
-                        "{} /clear            Clear conversation",
-                        "🧹".bright_white()
-                    ),
-                    format!(
-                        "{} /tools             List available tools",
-                        "🔧".bright_white()
-                    ),
-                    crate::ui::components::FRAME_SEPARATOR.to_string(),
-                    format!("{} /diff              Git diff --stat", "📊".bright_white()),
-                    format!(
-                        "{} /git               Git status --short",
-                        "📋".bright_white()
-                    ),
-                    format!(
-                        "{} /undo              Undo last file edit",
-                        "↩ ".bright_white()
-                    ),
-                    format!(
-                        "{} /worktree enter    Create and enter worktree",
-                        "🌳".bright_white()
-                    ),
-                    format!(
-                        "{} /worktree exit     Exit current worktree",
-                        "🌲".bright_white()
-                    ),
-                    format!(
-                        "{} /worktree list     List all worktrees",
-                        "📋".bright_white()
-                    ),
-                    format!(
-                        "{} /cost              Token usage & cost",
-                        "💰".bright_white()
-                    ),
-                    format!(
-                        "{} /model             Model configuration",
-                        "🤖".bright_white()
-                    ),
-                    format!(
-                        "{} /compact           Compress context (auto)",
-                        "📦".bright_white()
-                    ),
-                    format!(
-                        "{} /compact micro     Fast local compression",
-                        "📦".bright_white()
-                    ),
-                    format!(
-                        "{} /compact auto      LLM summarization",
-                        "📦".bright_white()
-                    ),
-                    format!(
-                        "{} /compact full      Nuclear + file re-inject",
-                        "📦".bright_white()
-                    ),
-                    format!(
-                        "{} /compact stats     Show compression stats",
-                        "📦".bright_white()
-                    ),
-                    format!(
-                        "{} /verbose           Toggle verbose mode",
-                        "📢".bright_white()
-                    ),
-                    format!(
-                        "{} /config            Show current config",
-                        "⚙ ".bright_white()
-                    ),
-                    crate::ui::components::FRAME_SEPARATOR.to_string(),
-                    format!(
-                        "{} /analyze <path>    Analyze codebase",
-                        "🔍".bright_white()
-                    ),
-                    format!(
-                        "{} /review <file>     Review code file",
-                        "👁️ ".bright_white()
-                    ),
-                    format!(
-                        "{} /plan <task>       Create task plan",
-                        "📝".bright_white()
-                    ),
-                    format!(
-                        "{} /swarm <task>      Run task with dev swarm",
-                        "🐝".bright_white()
-                    ),
-                    format!(
-                        "{} /queue <msg>       Queue message for later",
-                        "📨".bright_white()
-                    ),
-                    crate::ui::components::FRAME_SEPARATOR.to_string(),
-                    crate::ui::components::FRAME_SEPARATOR.to_string(),
-                    format!(
-                        "{} /vim               Toggle vim/emacs mode",
-                        "⌨ ".bright_white()
-                    ),
-                    format!(
-                        "{} /copy              Copy last response",
-                        "📋".bright_white()
-                    ),
-                    format!(
-                        "{} /restore           List/restore checkpoints",
-                        "⏪".bright_white()
-                    ),
-                    format!(
-                        "{} /chat save <n>     Save chat session",
-                        "💾".bright_white()
-                    ),
-                    format!(
-                        "{} /chat resume <n>   Resume saved chat",
-                        "▶ ".bright_white()
-                    ),
-                    format!(
-                        "{} /chat list         List saved chats",
-                        "📋".bright_white()
-                    ),
-                    format!(
-                        "{} /theme <name>      Switch color theme",
-                        "🎨".bright_white()
-                    ),
-                    format!(
-                        "{} !<cmd>             Run shell command",
-                        "💲".bright_white()
-                    ),
-                    crate::ui::components::FRAME_SEPARATOR.to_string(),
-                    format!(
-                        "{} @file              Reference file in message",
-                        "📎".bright_white()
-                    ),
-                    format!(
-                        "{} exit               Exit interactive mode",
-                        "🚪".bright_white()
-                    ),
-                    crate::ui::components::FRAME_SEPARATOR.to_string(),
-                    format!("{}", "⌨  KEYBOARD SHORTCUTS".bright_cyan()),
-                    crate::ui::components::FRAME_SEPARATOR.to_string(),
-                    "ESC           Interrupt running task".to_string(),
-                    "Ctrl+C        Interrupt running task".to_string(),
-                    "Ctrl+C ×2     Exit (double-tap at prompt)".to_string(),
-                    "Ctrl+J        Insert newline (multi-line)".to_string(),
-                    "Ctrl+Y        Toggle YOLO mode".to_string(),
-                    "Shift+Tab     Toggle Auto-Edit mode".to_string(),
-                    "Ctrl+X        Open external editor ($EDITOR)".to_string(),
-                    "Ctrl+L        Clear screen".to_string(),
-                    "Ctrl+R        Reverse history search".to_string(),
-                    "Tab           Autocomplete / cycle suggestions".to_string(),
-                ];
                 let colour = colored::control::SHOULD_COLORIZE.should_colorize();
                 let (border, reset) = if colour {
                     ("\x1b[96m", "\x1b[0m")
@@ -485,19 +296,14 @@ impl Agent {
                 };
                 println!();
                 for line in crate::ui::components::frame_box(
-                    "🦊 SELFWARE COMMANDS",
-                    &rows,
+                    "SELFWARE COMMANDS",
+                    &helpers::repl_help_rows(),
                     54,
                     border,
                     reset,
                 ) {
                     println!("{line}");
                 }
-                println!();
-                println!(
-                    "  {} Use @path/to/file to include file content in your message",
-                    "💡".bright_yellow()
-                );
                 println!();
                 continue;
             }
@@ -2724,7 +2530,7 @@ impl Agent {
         use std::io::{self, Write};
 
         println!("{}", "🦊 Selfware Workshop (Basic Mode)".bright_cyan());
-        println!("Type 'exit' to quit, '/help' for commands");
+        println!("Type /help for commands, /quit to exit");
 
         // Detect if stdin is a TTY or piped
         use std::io::IsTerminal;
@@ -2790,7 +2596,7 @@ impl Agent {
                 println!("  /queue list     - Show queued messages");
                 println!("  /queue clear    - Clear all queued messages");
                 println!("  /queue drop <n> - Remove message by index");
-                println!("  exit            - Exit interactive mode");
+                println!("  /quit           - Exit interactive mode (also /exit, /q, exit)");
                 println!();
                 println!("{}", crate::cli::slash_help_text());
                 continue;

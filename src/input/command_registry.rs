@@ -60,7 +60,7 @@ pub static COMMANDS: &[CommandEntry] = &[
     },
     CommandEntry {
         name: "/mode",
-        description: "Switch execution mode (normal/autoedit/yolo/daemon)",
+        description: "Cycle execution mode (normal/auto-edit/yolo/daemon)",
         category: CommandCategory::General,
     },
     CommandEntry {
@@ -126,7 +126,7 @@ pub static COMMANDS: &[CommandEntry] = &[
     },
     CommandEntry {
         name: "/compress",
-        description: "Compress context to free token budget",
+        description: "Run the in-task context compressor now",
         category: CommandCategory::Context,
     },
     CommandEntry {
@@ -142,7 +142,7 @@ pub static COMMANDS: &[CommandEntry] = &[
     // Display
     CommandEntry {
         name: "/compact",
-        description: "Compress context (auto mode)",
+        description: "Compact context (LLM summary; local fallback)",
         category: CommandCategory::Context,
     },
     CommandEntry {
@@ -157,7 +157,7 @@ pub static COMMANDS: &[CommandEntry] = &[
     },
     CommandEntry {
         name: "/compact full",
-        description: "Full compression with file re-injection",
+        description: "Summarize and re-inject recent files",
         category: CommandCategory::Context,
     },
     CommandEntry {
@@ -167,12 +167,12 @@ pub static COMMANDS: &[CommandEntry] = &[
     },
     CommandEntry {
         name: "/verbose",
-        description: "Switch to verbose output mode",
+        description: "Toggle verbose output",
         category: CommandCategory::Display,
     },
     CommandEntry {
         name: "/clear",
-        description: "Clear the screen",
+        description: "Clear the conversation",
         category: CommandCategory::Display,
     },
     CommandEntry {
@@ -350,7 +350,7 @@ pub static COMMANDS: &[CommandEntry] = &[
     },
     CommandEntry {
         name: "/vim",
-        description: "Switch to vim input mode",
+        description: "Toggle vim/emacs input mode",
         category: CommandCategory::General,
     },
     // Learning / Code Education
@@ -391,6 +391,19 @@ pub static EXIT_SLASH_COMMANDS: &[&str] = &["/exit", "/quit", "/q"];
 /// bridge had no `/q`, so `/q` there was dispatched to the agent as a task).
 pub fn is_exit_command(input: &str) -> bool {
     EXIT_COMMANDS.contains(&input) || EXIT_SLASH_COMMANDS.contains(&input)
+}
+
+/// Aliases that stay ACCEPTED (dispatch, highlighting, completion of the
+/// exact word) but are not OFFERED in the slash menu: each duplicates a
+/// canonical entry that is listed (0.9.1: the menu showed /quit /exit /q,
+/// /ctx /context and /restore /timeline side by side, plus the bare words
+/// `exit`/`quit`).
+pub static MENU_HIDDEN_ALIASES: &[&str] = &["/exit", "/q", "/context", "/timeline", "exit", "quit"];
+
+/// Whether the menu should offer `name` for what the user typed: hidden
+/// aliases only when typed out exactly (so `/q` + Enter still submits).
+pub fn offered_in_menu(name: &str, typed: &str) -> bool {
+    !MENU_HIDDEN_ALIASES.contains(&name) || name == typed
 }
 
 /// Get all command names (for completions and highlighting)

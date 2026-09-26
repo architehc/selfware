@@ -3003,9 +3003,8 @@ async fn handle_command(
     match command {
         Commands::Chat => {
             crate::safety::killswitch::check_killswitch(None)?;
-            if !quiet {
-                println!("{}", ui::components::render_welcome(ctx));
-            }
+            // The REPL prints the one (compact) welcome itself; the workshop
+            // banner + greeting here made two greetings back to back.
             let mut agent = Agent::new(config).await?;
             // Resume named session if --resume-session was provided
             if let Some(ref session_name) = resume_session {

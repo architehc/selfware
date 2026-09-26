@@ -9,6 +9,136 @@ use crate::agent::{PendingMessage, PendingMessageOrigin};
 /// loops — see [`crate::input::command_registry::is_exit_command`]).
 pub(crate) use crate::input::command_registry::is_exit_command;
 
+/// The single REPL greeting line.
+pub(crate) fn welcome_greeting(owner: &str) -> String {
+    if owner.trim().is_empty() {
+        "— welcome back".to_string()
+    } else {
+        format!("— welcome back, {}", owner.trim())
+    }
+}
+
+/// Rows of the REPL `/help` box: titled sections, one command per row, no
+/// emoji (VS16 emoji like 🗜️ 👁️ render 1 or 2 cells depending on the
+/// terminal and broke the border), no trailing empty separators. Wording
+/// matches the slash menu (`command_registry`).
+pub(crate) fn repl_help_rows() -> Vec<String> {
+    use colored::Colorize;
+    const SEP: &str = crate::ui::components::FRAME_SEPARATOR;
+    let sections: &[(&str, &[&str])] = &[
+        (
+            "Session",
+            &[
+                "/help               Show this help",
+                "/status             Agent status",
+                "/stats              Detailed session stats",
+                "/mode               Cycle execution mode (normal/auto-edit/yolo/daemon)",
+                "/model              Show or switch the model",
+                "/cost               Token usage and cost",
+                "/config             Show current config",
+                "/permissions        Approval mode and how to change it",
+                "/verbose            Toggle verbose output",
+                "/bug                Copy-pasteable issue blurb",
+                "/quit               Exit (also /exit, /q, exit)",
+            ],
+        ),
+        (
+            "Context",
+            &[
+                "/ctx                Context window details",
+                "/ctx clear          Clear loaded context",
+                "/ctx load <glob>    Load files (e.g. *.rs)",
+                "/ctx reload         Reload loaded files",
+                "/ctx copy           Copy sources to clipboard",
+                "/scan <path>        Index a folder for RAG search",
+                "/compress           Run the in-task context compressor now",
+                "/compact            Compact context (LLM summary; local fallback)",
+                "/compact micro      Fast local compaction (no API call)",
+                "/compact auto       LLM summarization",
+                "/compact full       Summarize and re-inject recent files",
+                "/compact stats      Compression statistics",
+            ],
+        ),
+        (
+            "Memory & tools",
+            &[
+                "/memory             Memory statistics",
+                "/dream              Memory consolidation",
+                "/clear              Clear the conversation",
+                "/tools              List available tools",
+                "/skills             List discovered skills (/<name> runs one)",
+                "/last               Last tool execution",
+                "/debug              Tool history and recent errors",
+            ],
+        ),
+        (
+            "Git & edits",
+            &[
+                "/diff               git diff --stat",
+                "/git                git status --short",
+                "/undo, /redo        Revert / reapply the last file edit",
+                "/worktree enter     Create and enter a worktree",
+                "/worktree exit      Exit the current worktree",
+                "/worktree list      List worktrees",
+            ],
+        ),
+        (
+            "Tasks",
+            &[
+                "/analyze <path>     Analyze a codebase",
+                "/review <file>      Review a file",
+                "/explain <path>     Explain code in a file",
+                "/plan <task>        Plan with read-only tools",
+                "/execute, /modify   Run / discard the plan",
+                "/swarm <task>       Run a task with the dev swarm",
+                "/queue <msg>        Queue a message for later",
+            ],
+        ),
+        (
+            "Chats & checkpoints",
+            &[
+                "/copy               Copy the last response",
+                "/restore            List / restore checkpoints (also /timeline)",
+                "/chat save <n>      Save this chat",
+                "/chat resume <n>    Resume a saved chat",
+                "/chat list          List saved chats",
+            ],
+        ),
+        (
+            "Input",
+            &[
+                "/vim                Toggle vim/emacs input mode",
+                "/theme <name>       Switch color theme",
+                "!<cmd>              Run a shell command",
+                "@path               Attach a file to your message",
+            ],
+        ),
+        (
+            "Keyboard shortcuts",
+            &[
+                "ESC / Ctrl+C        Interrupt the running task",
+                "Ctrl+C x2           Exit (double-tap at prompt)",
+                "Ctrl+J              Insert newline (multi-line)",
+                "Ctrl+Y              Toggle YOLO mode",
+                "Shift+Tab           Cycle execution mode",
+                "Ctrl+X              Open external editor ($EDITOR)",
+                "Ctrl+L              Clear screen",
+                "Ctrl+R              Reverse history search",
+                "Tab                 Autocomplete",
+            ],
+        ),
+    ];
+    let mut rows = Vec::new();
+    for (i, (title, cmds)) in sections.iter().enumerate() {
+        if i > 0 {
+            rows.push(SEP.to_string());
+        }
+        rows.push(title.bright_cyan().bold().to_string());
+        rows.extend(cmds.iter().map(|c| c.to_string()));
+    }
+    rows
+}
+
 /// True when REPL input looks like a slash command (`/word` optionally
 /// followed by arguments) rather than plain chat or an absolute path.
 /// `/mode yolo` and `/analyze` are commands; `/tmp/foo.rs` and `/` are not
@@ -745,6 +875,52 @@ pub(crate) fn spawn_esc_listener(
 mod tests {
     use super::*;
     use crate::agent::{PendingMessage, PendingMessageOrigin};
+
+    #[test]
+    fn help_rows_have_titled_sections_and_no_trailing_or_double_separator() {
+        let rows = repl_help_rows();
+        let sep = crate::ui::components::FRAME_SEPARATOR;
+        assert_ne!(rows.first().map(String::as_str), Some(sep));
+        assert_ne!(rows.last().map(String::as_str), Some(sep));
+        for pair in rows.windows(2) {
+            assert!(
+                !(pair[0] == sep && pair[1] == sep),
+                "double separator in /help"
+            );
+        }
+        // Every separator is followed by a section title (no command row).
+        for (i, r) in rows.iter().enumerate() {
+            if r == sep {
+                assert!(!rows[i + 1].contains('/') || rows[i + 1].contains("Git"));
+            }
+        }
+        let all = rows.join("\n");
+        assert!(
+            !all.contains("Nuclear"),
+            "neutral wording for /compact full"
+        );
+        assert!(all.contains("Cycle execution mode"));
+        assert!(all.contains("/quit"));
+        // No variation-selector emoji (width differs per terminal).
+        assert!(!all.contains('\u{FE0F}'));
+    }
+
+    #[test]
+    fn help_box_borders_line_up() {
+        let lines =
+            crate::ui::components::frame_box("SELFWARE COMMANDS", &repl_help_rows(), 54, "", "");
+        let widths: Vec<usize> = lines
+            .iter()
+            .map(|l| crate::ui::components::visible_width(l))
+            .collect();
+        assert!(widths.windows(2).all(|w| w[0] == w[1]), "{widths:?}");
+    }
+
+    #[test]
+    fn welcome_is_one_greeting() {
+        assert_eq!(welcome_greeting("ivo"), "— welcome back, ivo");
+        assert_eq!(welcome_greeting(" "), "— welcome back");
+    }
     use std::time::Instant;
 
     // ── is_exit_command ──────────────────────────────────────────────
