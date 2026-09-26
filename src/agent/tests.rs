@@ -2127,3 +2127,58 @@ fn test_headless_confirmation_denial_error_is_typed() {
     assert!(msg.contains("shell_exec"), "got: {msg}");
     assert!(msg.contains("--yolo"), "got: {msg}");
 }
+
+/// 0.9.1 field report: `"num_turns": 1` in the JSON result while the
+/// stream-json events of the same kind of run showed 3
+/// step_started/step_completed pairs. `num_turns` was the iteration-budget
+/// counter, which the planning turn's tool batch does not consume. The
+/// reported turn count is now counted where `StepStarted` is emitted, so it
+/// equals the events a consumer saw, and the run summary shows the same
+/// number as `turns`.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn turns_run_equals_step_started_events() {
+    use std::sync::Arc;
+    let read = |path: &str| {
+        format!(
+            "<tool>\n<name>file_read</name>\n<arguments>{{\"path\":\"{path}\"}}</arguments>\n</tool>"
+        )
+    };
+    for responses in [
+        vec![read("./Cargo.toml"), "Done.".to_string()],
+        vec![
+            read("./Cargo.toml"),
+            read("./README.md"),
+            "Done, the crate is selfware.".to_string(),
+        ],
+    ] {
+        let mut builder = MockLlmServer::builder();
+        for r in &responses {
+            builder = builder.with_response(r.clone());
+        }
+        let server = builder.build().await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let recorder = Arc::new(super::progress::RecordingProgressEmitter::new());
+        let mut agent = Agent::new(config)
+            .await
+            .unwrap()
+            .with_progress_emitter(recorder.clone());
+        let result = agent.run_task("What crate is this? Read Cargo.toml").await;
+        assert!(result.is_ok(), "{:?}", result.err());
+        let started = recorder
+            .kinds()
+            .iter()
+            .filter(|k| **k == "step_started")
+            .count();
+        assert_eq!(started, responses.len(), "one step per scripted turn");
+        assert_eq!(agent.turns_run(), started);
+        assert_eq!(agent.run_summary().turns, started);
+        // The budget counter skips the planning turn's batch: it is the
+        // number that used to be reported (and disagreed with the events).
+        assert_eq!(agent.current_iteration(), started - 1);
+        server.stop().await;
+    }
+}

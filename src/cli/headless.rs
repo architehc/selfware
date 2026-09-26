@@ -44,6 +44,10 @@ pub struct SessionResult {
     pub session_id: String,
     pub exit_status: i32,
     pub stop_reason: String,
+    /// Agent-loop turns this run executed: one per `step_started` event in
+    /// `stream-json` (the planning turn's tool batch included), and the
+    /// same number as `turns` in the text run summary. Counts the whole
+    /// task in this process, across in-process auto-continue segments.
     pub num_turns: usize,
     pub patch_bytes: usize,
     pub patch_lines: usize,

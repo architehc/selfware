@@ -3166,9 +3166,18 @@ To call a tool, use this EXACT XML structure:
         self.last_run_failure_mode.as_ref()
     }
 
-    /// Current loop iteration count (number of turns through the agent loop).
+    /// Current segment's iteration-budget counter (the `N` of the run
+    /// summary's `iterations: N/max`). The planning turn does not consume a
+    /// slot, so this can be lower than [`Self::turns_run`].
     pub fn current_iteration(&self) -> usize {
         self.loop_control.current_iteration()
+    }
+
+    /// Agent-loop turns executed this task — one per `step_started` event.
+    /// This is `num_turns` in the headless result and `turns` in the run
+    /// summary.
+    pub fn turns_run(&self) -> usize {
+        self.loop_control.turns_run()
     }
 
     /// The model name configured for this agent.

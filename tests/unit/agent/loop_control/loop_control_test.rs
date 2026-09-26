@@ -727,3 +727,19 @@ fn reset_budget_for_resume_mirrors_manual_resume() {
         Some(AgentState::Executing { .. })
     ));
 }
+
+/// `turns_run` (the headless `num_turns`) counts the whole task: an
+/// in-process continuation resets the per-segment iteration budget but not
+/// the turn count; a new task starts from zero.
+#[test]
+fn turns_run_survives_continuation_and_resets_per_task() {
+    let mut loop_ctrl = AgentLoop::new(10);
+    loop_ctrl.record_turn();
+    loop_ctrl.record_turn();
+    assert_eq!(loop_ctrl.turns_run(), 2);
+    loop_ctrl.reset_budget_for_resume();
+    loop_ctrl.record_turn();
+    assert_eq!(loop_ctrl.turns_run(), 3);
+    loop_ctrl.reset_for_task();
+    assert_eq!(loop_ctrl.turns_run(), 0);
+}

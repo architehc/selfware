@@ -968,6 +968,9 @@ impl Agent {
     async fn execute_step_internal_inner(&mut self, use_last_message: bool) -> Result<bool> {
         // Emit a structured progress event at the top of every loop iteration.
         // Step is 1-based; tool count is the registry's current size.
+        // Counted here, next to the event, so `num_turns` always equals the
+        // number of `step_started` events a stream-json consumer saw.
+        self.loop_control.record_turn();
         self.emit_progress(super::progress::ProgressEvent::StepStarted {
             step: self.loop_control.current_step().saturating_add(1),
             model: self.config.model.clone(),

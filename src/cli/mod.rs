@@ -2270,7 +2270,11 @@ fn build_session_result(
             crate::observability::telemetry::redact_secrets(&e.to_string())
         ),
     };
-    let num_turns = agent.current_iteration();
+    // One per `step_started` event (see `SessionResult::num_turns`). The
+    // iteration counter used before skipped the planning turn's tool batch
+    // and reset on auto-continue, so it disagreed with the event stream
+    // (1 vs 3 step_started in a 0.9.1 field run).
+    let num_turns = agent.turns_run();
     // A capture failure must NOT masquerade as a clean empty patch (0 bytes),
     // which would fool automated success metrics. Surface it instead.
     let (patch, patch_capture_error) = match headless::capture_patch() {
@@ -6734,9 +6738,12 @@ fn render_run_summary(summary: &crate::agent::RunSummary, failure: Option<&str>)
     } else {
         ""
     };
+    // `turns` is the headless result's `num_turns` (one per step_started
+    // event); `iterations` is the budget counter, which the planning turn
+    // does not consume — so the two can differ by one.
     lines.push(format!(
-        "iterations: {}/{}{}",
-        summary.iterations, summary.max_iterations, extension_note
+        "iterations: {}/{}{} · turns: {}",
+        summary.iterations, summary.max_iterations, extension_note, summary.turns
     ));
     if summary.files_changed.is_empty() {
         lines.push("files changed: none".to_string());

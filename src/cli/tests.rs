@@ -1193,6 +1193,7 @@ fn journal_title_empty_prompt_is_honest_placeholder() {
 fn sample_summary() -> crate::agent::RunSummary {
     crate::agent::RunSummary {
         iterations: 12,
+        turns: 13,
         max_iterations: 30,
         budget_extended: false,
         files_changed: vec![
@@ -1219,6 +1220,11 @@ fn render_run_summary_completed_run() {
     let rendered = render_run_summary(&sample_summary(), None);
     assert!(rendered.contains("outcome: completed"), "{rendered}");
     assert!(rendered.contains("iterations: 12/30"), "{rendered}");
+    // `turns` = the headless `num_turns` (one per step_started event).
+    assert!(
+        rendered.contains("iterations: 12/30 · turns: 13"),
+        "{rendered}"
+    );
     assert!(
         rendered.contains("files changed: 4 (src/a.rs, src/b.rs, src/c.rs, +1 more)"),
         "{rendered}"

@@ -453,6 +453,10 @@ impl RequirementsAuditStatus {
 pub struct RunSummary {
     /// Iterations consumed (loop counter after the final turn).
     pub iterations: usize,
+    /// Agent-loop turns executed (one per `step_started` event) — the
+    /// headless result's `num_turns`. Can exceed `iterations`: the planning
+    /// turn's tool batch runs without consuming an iteration slot.
+    pub turns: usize,
     /// The iteration cap, including any adaptive extension.
     pub max_iterations: usize,
     /// At least one adaptive budget extension fired this run.
@@ -503,6 +507,7 @@ impl Agent {
         let task_usage = self.current_task_usage();
         RunSummary {
             iterations: self.loop_control.current_iteration(),
+            turns: self.loop_control.turns_run(),
             max_iterations: self.loop_control.max_iterations(),
             budget_extended: self.loop_control.extension_was_used(),
             files_changed,

@@ -84,6 +84,12 @@ pub struct AgentLoop {
     prior_iterations: usize,
     current_step: usize,
     iteration: usize,
+    /// Agent-loop turns executed this task: one per `StepStarted` progress
+    /// event (the planning turn's tool batch included, which consumes no
+    /// iteration slot). Unlike `iteration` it is not reset by in-process
+    /// continuations, so it is the task's whole turn count — the value the
+    /// headless result reports as `num_turns`.
+    turns_run: usize,
 }
 
 /// One executed tool batch distilled to its progress signal, for the
@@ -180,7 +186,19 @@ impl AgentLoop {
             prior_iterations: 0,
             current_step: 0,
             iteration: 0,
+            turns_run: 0,
         }
+    }
+
+    /// Count one executed agent-loop turn (called where `StepStarted` is
+    /// emitted, so the count always equals the `step_started` events).
+    pub fn record_turn(&mut self) {
+        self.turns_run += 1;
+    }
+
+    /// Agent-loop turns executed this task (see the `turns_run` field).
+    pub fn turns_run(&self) -> usize {
+        self.turns_run
     }
 
     /// Grant one adaptive budget extension: +25% of the ORIGINAL cap (at
@@ -451,6 +469,7 @@ impl AgentLoop {
         self.current_step = 0;
         self.iteration = 0;
         self.prior_iterations = 0;
+        self.turns_run = 0;
         // A new task gets a fresh budget: extensions are per-task.
         self.max_iterations = self.original_max;
         self.extensions_granted = 0;
