@@ -3439,49 +3439,61 @@ impl Agent {
             .verify_change(&paths, &format!("{}:{}", tool_name, path))
             .await
         {
-            Ok(report) => match self.absorb_post_edit_report(tool_name, path, &report) {
-                PostEditVerdict::NoChecks => {
-                    info!(
+            Ok(report) => {
+                // A report with checks replaced the gate's `last_results`
+                // (an empty one may be the early "nothing to check" return,
+                // which leaves the previous report in place): remember which
+                // tree it describes.
+                if !report.checks.is_empty() {
+                    self.post_edit_report_mutation_sequence = Some(self.mutation_sequence);
+                }
+                match self.absorb_post_edit_report(tool_name, path, &report) {
+                    PostEditVerdict::NoChecks => {
+                        info!(
                         "Verification after {} on {} ran no applicable checks — not crediting as verified",
                         tool_name, path
                     );
-                    spinner.stop_success("No applicable verification checks");
-                    None
-                }
-                PostEditVerdict::NotRun(note) => {
-                    info!(
-                        "Verification after {} on {}: no check could run — no credit recorded",
-                        tool_name, path
-                    );
-                    spinner.stop_success("Verification not run (no applicable verifier)");
-                    // Shown to the user as a report (not the green
-                    // "Verification passed" line): nothing was verified.
-                    crate::output::verification_report(&format!("{}", report), false);
-                    Some(note)
-                }
-                PostEditVerdict::Passed(note) => {
-                    spinner.stop_success("Verification passed");
-                    self.cognitive_state.episodic_memory.what_worked(
-                        tool_name,
-                        &format!("{} on {} passed verification", tool_name, path),
-                    );
-                    // A pass with caveats (not-run checks, fallback options)
-                    // prints the full report so the caveats are visible.
-                    if crate::output::is_verbose() || note.is_some() {
-                        crate::output::verification_report(&format!("{}", report), note.is_none());
+                        spinner.stop_success("No applicable verification checks");
+                        None
                     }
-                    note
+                    PostEditVerdict::NotRun(note) => {
+                        info!(
+                            "Verification after {} on {}: no check could run — no credit recorded",
+                            tool_name, path
+                        );
+                        spinner.stop_success("Verification not run (no applicable verifier)");
+                        // Shown to the user as a report (not the green
+                        // "Verification passed" line): nothing was verified.
+                        crate::output::verification_report(&format!("{}", report), false);
+                        Some(note)
+                    }
+                    PostEditVerdict::Passed(note) => {
+                        spinner.stop_success("Verification passed");
+                        self.cognitive_state.episodic_memory.what_worked(
+                            tool_name,
+                            &format!("{} on {} passed verification", tool_name, path),
+                        );
+                        // A pass with caveats (not-run checks, fallback options)
+                        // prints the full report so the caveats are visible.
+                        if crate::output::is_verbose() || note.is_some() {
+                            crate::output::verification_report(
+                                &format!("{}", report),
+                                note.is_none(),
+                            );
+                        }
+                        note
+                    }
+                    PostEditVerdict::Failed(note) => {
+                        spinner.stop_error("Verification failed");
+                        self.cognitive_state.episodic_memory.what_failed(
+                            tool_name,
+                            &format!("{} on {} failed verification", tool_name, path),
+                        );
+                        crate::output::verification_report(&format!("{}", report), false);
+                        Some(note)
+                    }
                 }
-                PostEditVerdict::Failed(note) => {
-                    spinner.stop_error("Verification failed");
-                    self.cognitive_state.episodic_memory.what_failed(
-                        tool_name,
-                        &format!("{} on {} failed verification", tool_name, path),
-                    );
-                    crate::output::verification_report(&format!("{}", report), false);
-                    Some(note)
-                }
-            },
+            }
             Err(e) => {
                 spinner.stop_error("Verification failed to run");
                 warn!("Verification failed to run: {}", e);
@@ -3499,6 +3511,91 @@ impl Agent {
                     },
                 });
                 None
+            }
+        }
+    }
+
+    /// The verification gate's report, when it was taken during THIS task.
+    /// A report left over from an earlier task in the same session describes
+    /// another task's tree and earns (or costs) this task nothing.
+    pub(super) fn task_gate_report(
+        &self,
+    ) -> Option<&crate::testing::verification::VerificationReport> {
+        self.post_edit_report_mutation_sequence?;
+        self.verification_gate.last_results()
+    }
+
+    /// Re-run a STALE failing post-edit verification once on the final tree.
+    ///
+    /// Failure mode (0.9.2 validation, python-slugify): the post-edit `test`
+    /// stage failed because pytest/unidecode were not installed yet; the
+    /// model then installed them (a mutation — the sequence moved on) and
+    /// ran the whole suite green (132 passed, exit 0). The failing report
+    /// still sat in `verification_gate.last_results()`, and the run summary
+    /// folds that report into its verdict regardless of which tree it
+    /// described, so the run ended VERIFICATION_FAILED, exit 1, on a tree
+    /// whose checks pass.
+    ///
+    /// Only a report that (a) has a check that RAN and failed and (b) was
+    /// taken before the latest mutation is re-run — a failure at the current
+    /// revision already describes the final tree. The re-run goes through
+    /// the normal gate and ledger (`absorb_post_edit_report`), so a pass
+    /// clears only the same checks' failures and a check that does not run
+    /// again earns no credit (AGENTS.md rule 3); a failing re-run stands as a
+    /// failure of the final tree. Returns the re-run's verdict (`true` =
+    /// passed), `None` when nothing was re-run.
+    pub(super) async fn recheck_stale_post_edit_failure(&mut self) -> Option<bool> {
+        let report_sequence = self.post_edit_report_mutation_sequence?;
+        if report_sequence >= self.mutation_sequence {
+            return None;
+        }
+        let report = self.verification_gate.last_results()?;
+        if !report.checks.iter().any(|c| !c.not_run && !c.passed) {
+            return None;
+        }
+        let paths = report.affected_files.clone();
+        if paths.is_empty() {
+            return None;
+        }
+        let label = paths.join(", ");
+        info!(
+            "Post-edit verification of {} failed at mutation #{} but the tree moved on to #{} — \
+             re-running it once on the final tree",
+            label, report_sequence, self.mutation_sequence
+        );
+        let spinner = crate::ui::spinner::TerminalSpinner::start(
+            "Re-checking verification on the final tree...",
+        );
+        let fresh = match self
+            .verification_gate
+            .verify_change(&paths, &format!("final-tree re-check:{label}"))
+            .await
+        {
+            Ok(fresh) => fresh,
+            Err(e) => {
+                // The stale failure stands: nothing proved the final tree.
+                spinner.stop_error("Final-tree re-check could not run");
+                warn!("Final-tree verification re-check failed to run: {}", e);
+                return None;
+            }
+        };
+        if !fresh.checks.is_empty() {
+            self.post_edit_report_mutation_sequence = Some(self.mutation_sequence);
+        }
+        match self.absorb_post_edit_report("final_tree_recheck", &label, &fresh) {
+            PostEditVerdict::Passed(_) => {
+                spinner.stop_success("Final-tree re-check passed");
+                Some(true)
+            }
+            PostEditVerdict::NoChecks | PostEditVerdict::NotRun(_) => {
+                spinner.stop_success("Final-tree re-check: no check could run");
+                crate::output::verification_report(&format!("{}", fresh), false);
+                None
+            }
+            PostEditVerdict::Failed(_) => {
+                spinner.stop_error("Final-tree re-check failed");
+                crate::output::verification_report(&format!("{}", fresh), false);
+                Some(false)
             }
         }
     }

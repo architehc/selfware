@@ -588,7 +588,9 @@ impl Agent {
     /// Previously this read `verification_gate.last_results()` alone, so a
     /// run whose gate credited a shell `cargo test` said "verification: not
     /// performed". Sources:
-    /// - the verification gate's last report (when one ran),
+    /// - the verification gate's last report, when one ran during THIS task
+    ///   (a stale failing one is re-run on the final tree before the verdict:
+    ///   [`Agent::recheck_stale_post_edit_failure`]),
     /// - every verification-shaped tool call in the checkpoint
     ///   (`tool_call_is_verification`: `cargo_test`, shell `cargo test`,
     ///   `pytest`, ...), passing or failing,
@@ -604,14 +606,18 @@ impl Agent {
     /// the gate's checks that ran (not-run ones earn nothing and are not
     /// named), then each verification command the run executed. A shell
     /// command is shown shortened in backticks.
+    ///
+    /// Every counted check is named: a name that occurs more than once is
+    /// rendered `name ×n`, so the names always add up to the count in
+    /// [`Self::credited_verification_summary`] (0.9.2 validation: "5 checks"
+    /// listed 4 names because the two `type_check` runs were deduplicated).
     pub(super) fn verification_check_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = Vec::new();
-        let mut push = |name: String| {
-            if !names.contains(&name) {
-                names.push(name);
-            }
+        let mut counted: Vec<(String, usize)> = Vec::new();
+        let mut push = |name: String| match counted.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, times)) => *times += 1,
+            None => counted.push((name, 1)),
         };
-        if let Some(report) = self.verification_gate.last_results() {
+        if let Some(report) = self.task_gate_report() {
             for check in report.checks.iter().filter(|c| !c.not_run) {
                 push(check.check_type.as_str().to_string());
             }
@@ -637,7 +643,16 @@ impl Agent {
                 });
             }
         }
-        names
+        counted
+            .into_iter()
+            .map(|(name, times)| {
+                if times > 1 {
+                    format!("{name} ×{times}")
+                } else {
+                    name
+                }
+            })
+            .collect()
     }
 
     /// (succeeded, failed) vision tool calls this run, from the checkpoint's
@@ -681,8 +696,7 @@ impl Agent {
             })
             .unwrap_or((0, 0));
         let gate = self
-            .verification_gate
-            .last_results()
+            .task_gate_report()
             .and_then(gate_verdict_from_checks_that_ran);
         credited_verification_verdict(
             gate,
@@ -3061,6 +3075,18 @@ impl Agent {
             }
         }
         self.failure_mode_finalized = true;
+        // A post-edit failure recorded before the tree moved on (e.g. before
+        // the model installed the test runner) must not decide the verdict
+        // of the final tree: re-run it once so the verdict reads the final
+        // tree's result. Only for runs whose verdict folds the credited
+        // verification in (natural completion, partial); a hard failure is
+        // classified by its own cause and is not delayed by a re-run.
+        // Boxed: the re-check embeds the whole post-edit verification
+        // future, and inlining it into every caller of this function
+        // overflowed the test thread's stack on the deepest run paths.
+        if !matches!(outcome, RunOutcome::Failed { .. }) {
+            Box::pin(self.recheck_stale_post_edit_failure()).await;
+        }
         let mode = FailureMode::classify(self, outcome);
         self.last_run_failure_mode = Some(mode.clone());
         // Wire the classified verdict/advice into the recovery path: set it

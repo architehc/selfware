@@ -1212,6 +1212,16 @@ pub struct Agent {
     /// it only records that no check this environment can run is being
     /// demanded at that revision (0.8.2 validation D9b).
     last_not_run_verification_mutation_sequence: usize,
+    /// Mutation sequence at which the verification gate's CURRENT report
+    /// (`verification_gate.last_results()`) was taken during THIS task;
+    /// `None` when no post-edit report has run since the task started. The
+    /// report says nothing about a later tree (an install, a shell edit) or
+    /// about another task: a stale failing report is re-run on the final
+    /// tree before the verdict (`recheck_stale_post_edit_failure`) instead
+    /// of deciding it (0.9.2 validation: python-slugify ended
+    /// VERIFICATION_FAILED on a pre-install `test` failure while the final
+    /// tree's 132 tests passed).
+    post_edit_report_mutation_sequence: Option<usize>,
     /// Three-layer context compression orchestrator
     compression_orchestrator: CompressionOrchestrator,
     /// Lifetime count of successful mutating tool calls (file_write/file_edit/file_delete/etc.)
@@ -1951,6 +1961,7 @@ To call a tool, use this EXACT XML structure:
             task_verification_root: Some(crate::tools::workspace_root::current_path()),
             last_failed_verification_mutation_sequence: 0,
             last_not_run_verification_mutation_sequence: 0,
+            post_edit_report_mutation_sequence: None,
             compression_orchestrator: CompressionOrchestrator::new(),
             mutating_tool_call_count: 0,
             total_tool_call_count: 0,
@@ -3451,6 +3462,7 @@ To call a tool, use this EXACT XML structure:
         self.verification_failures.clear();
         self.last_failed_verification_mutation_sequence = 0;
         self.last_not_run_verification_mutation_sequence = 0;
+        self.post_edit_report_mutation_sequence = None;
         self.permanently_blocked_tool_calls.clear();
         self.prefill_400_count = 0;
         self.prefill_breaker_open = false;

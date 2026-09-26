@@ -178,6 +178,198 @@ async fn patch_apply_triggers_post_edit_verification_on_diff_targets() {
     );
 }
 
+/// A post-edit gate whose `test` stage passes only once `installed.marker`
+/// exists in `root` — a stand-in for "the test runner is installed".
+fn environment_dependent_post_edit_gate(
+    root: &std::path::Path,
+) -> crate::testing::verification::VerificationGate {
+    let config = crate::testing::verification::VerificationConfig {
+        exclude_patterns: Vec::new(),
+        post_edit_test_command: Some("test -f installed.marker".to_string()),
+        ..Default::default()
+    };
+    crate::testing::verification::VerificationGate::new(root, config)
+}
+
+/// The 0.9.2 python-slugify sequence up to the model's install: an edit, a
+/// post-edit `test` stage that fails because the runner is missing, then an
+/// install (a shell mutation — it advances the sequence).
+async fn agent_after_failed_post_edit_then_install(root: &std::path::Path) -> Agent {
+    let mut agent = Agent::new(crate::config::Config::default())
+        .await
+        .expect("agent should build");
+    agent.verification_gate = environment_dependent_post_edit_gate(root);
+    agent.task_verification_root = Some(root.to_path_buf());
+    // The model's edit of tests/test_legacy.py (a .txt stands in so no
+    // language syntax check runs — the `test` stage alone decides).
+    agent.note_mutating_tool_call();
+    let mut cp = crate::checkpoint::TaskCheckpoint::new("t-recheck".into(), "task".into());
+    cp.log_tool_call(crate::checkpoint::ToolCallLog {
+        timestamp: Utc::now(),
+        tool_name: "file_write".into(),
+        arguments: r#"{"path":"test_legacy.txt"}"#.into(),
+        result: Some("ok".into()),
+        success: true,
+        duration_ms: Some(1),
+    });
+    agent.current_checkpoint = Some(cp);
+    let nudge = agent
+        .maybe_verify_file_change("file_write", &json!({"path": "test_legacy.txt"}))
+        .await;
+    assert!(
+        nudge.is_some_and(|n| n.contains("verification_failed")),
+        "the post-edit test stage fails while the runner is missing"
+    );
+    // `python3 -m pip install pytest` is a mutation by the shell classifier,
+    // so the failure above is now a result about an EARLIER tree.
+    assert!(super::super::tool_dispatch::tool_call_is_mutating(
+        "shell_exec",
+        &json!({"command": "python3 -m pip install pytest"})
+    ));
+    agent.note_mutating_tool_call();
+    agent
+}
+
+fn natural_completion_verdict(agent: &Agent) -> crate::agent::failure_mode::FailureMode {
+    crate::agent::failure_mode::FailureMode::classify(
+        agent,
+        crate::agent::failure_mode::RunOutcome::NaturalCompletion,
+    )
+}
+
+#[tokio::test]
+async fn stale_post_edit_failure_is_rechecked_on_the_final_tree_after_an_install() {
+    // 0.9.2 validation (python-slugify): the post-edit `test` stage failed
+    // before pytest was installed; after the install the suite passed, yet
+    // the run ended VERIFICATION_FAILED because the stale failing gate report
+    // still decided the verdict.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut agent = agent_after_failed_post_edit_then_install(tmp.path()).await;
+    assert_eq!(
+        agent.credited_verification_summary(),
+        Some((false, 1)),
+        "before the re-check the stale report still reads as failed"
+    );
+    std::fs::write(tmp.path().join("installed.marker"), "").unwrap();
+
+    assert_eq!(
+        agent.recheck_stale_post_edit_failure().await,
+        Some(true),
+        "the stale failure is re-run once on the final tree and passes"
+    );
+    assert_eq!(agent.credited_verification_summary(), Some((true, 1)));
+    let mode = natural_completion_verdict(&agent);
+    assert_ne!(
+        mode.kind,
+        crate::agent::failure_mode::FailureKind::VerificationFailed,
+        "a final tree whose re-run check passes is not VERIFICATION_FAILED: {}",
+        mode.evidence
+    );
+    assert_eq!(
+        agent.recheck_stale_post_edit_failure().await,
+        None,
+        "a report taken at the current revision is not re-run again"
+    );
+}
+
+#[tokio::test]
+async fn genuinely_failing_final_tree_still_fails_after_the_recheck() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut agent = agent_after_failed_post_edit_then_install(tmp.path()).await;
+    // No marker: the install did not fix it — the final tree really fails.
+    assert_eq!(agent.recheck_stale_post_edit_failure().await, Some(false));
+    assert_eq!(agent.credited_verification_summary(), Some((false, 1)));
+    assert!(
+        agent
+            .verification_failures
+            .blocking(tmp.path(), agent.mutation_sequence)
+            .is_some(),
+        "the re-run failure is a current-revision failure of the final tree"
+    );
+    assert_eq!(
+        natural_completion_verdict(&agent).kind,
+        crate::agent::failure_mode::FailureKind::VerificationFailed
+    );
+}
+
+#[tokio::test]
+async fn failure_at_the_current_revision_is_not_rerun() {
+    // Nothing changed since the failing report: it already describes the
+    // final tree, so no re-run (and no chance for a flake to launder it).
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut agent = Agent::new(crate::config::Config::default())
+        .await
+        .expect("agent should build");
+    agent.verification_gate = environment_dependent_post_edit_gate(tmp.path());
+    agent.task_verification_root = Some(tmp.path().to_path_buf());
+    agent.note_mutating_tool_call();
+    agent
+        .maybe_verify_file_change("file_write", &json!({"path": "a.txt"}))
+        .await;
+    std::fs::write(tmp.path().join("installed.marker"), "").unwrap();
+    assert_eq!(agent.recheck_stale_post_edit_failure().await, None);
+    assert_eq!(agent.credited_verification_summary(), Some((false, 1)));
+}
+
+#[tokio::test]
+async fn previous_tasks_gate_report_does_not_count_for_the_next_task() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut agent = Agent::new(crate::config::Config::default())
+        .await
+        .expect("agent should build");
+    agent.verification_gate = environment_dependent_post_edit_gate(tmp.path());
+    agent.task_verification_root = Some(tmp.path().to_path_buf());
+    agent.note_mutating_tool_call();
+    agent
+        .maybe_verify_file_change("file_write", &json!({"path": "a.txt"}))
+        .await;
+    assert_eq!(agent.credited_verification_summary(), Some((false, 1)));
+    agent.reset_failure_mode_counters();
+    assert_eq!(
+        agent.credited_verification_summary(),
+        None,
+        "the gate report of an earlier task verifies nothing about this one"
+    );
+    assert!(agent.verification_check_names().is_empty());
+}
+
+#[tokio::test]
+async fn verification_check_names_add_up_to_the_counted_checks() {
+    // 0.9.2 validation: "5 checks: type_check, test, `…unittest…`,
+    // `…pytest…`" — two type_check runs were counted but named once.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut agent = agent_after_failed_post_edit_then_install(tmp.path()).await;
+    let cp = agent.current_checkpoint.as_mut().unwrap();
+    for success in [false, true] {
+        cp.log_tool_call(crate::checkpoint::ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "shell_exec".into(),
+            arguments: r#"{"command":"python3 -m pytest tests/ -q"}"#.into(),
+            result: Some("132 passed".into()),
+            success,
+            duration_ms: Some(1),
+        });
+    }
+    let (_, count) = agent.credited_verification_summary().unwrap();
+    let names = agent.verification_check_names();
+    assert_eq!(
+        names,
+        vec![
+            "test".to_string(),
+            "`python3 -m pytest tests/ -q` ×2".to_string()
+        ]
+    );
+    let named: usize = names
+        .iter()
+        .map(|n| {
+            n.rsplit_once(" ×")
+                .and_then(|(_, k)| k.parse().ok())
+                .unwrap_or(1)
+        })
+        .sum();
+    assert_eq!(named, count, "every counted check is named");
+}
+
 #[tokio::test]
 async fn cargo_failure_in_python_only_workspace_is_no_runner_and_unittest_flow_completes() {
     // Finding 1 reproduction, driven through the REAL recording path

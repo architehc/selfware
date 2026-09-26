@@ -4747,3 +4747,49 @@ async fn planning_fast_path_answer_is_kept_in_the_completed_checkpoint() {
     );
     server.stop().await;
 }
+
+/// `finalize_failure_mode` re-runs a stale failing post-edit check before it
+/// classifies (0.9.2 validation, python-slugify: a pre-install `test` stage
+/// failure decided VERIFICATION_FAILED on a tree whose suite passed). Both
+/// directions: the re-run's pass lifts the stale failure, a re-run failure
+/// still fails the run.
+#[tokio::test]
+async fn finalize_rechecks_a_stale_post_edit_failure_before_classifying() {
+    for installed in [true, false] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut agent = Agent::new(Config::default()).await.unwrap();
+        agent.verification_gate = crate::testing::verification::VerificationGate::new(
+            tmp.path(),
+            crate::testing::verification::VerificationConfig {
+                exclude_patterns: Vec::new(),
+                post_edit_test_command: Some("test -f installed.marker".to_string()),
+                ..Default::default()
+            },
+        );
+        agent.task_verification_root = Some(tmp.path().to_path_buf());
+        agent.note_mutating_tool_call();
+        agent
+            .maybe_verify_file_change("file_write", &serde_json::json!({"path": "a.txt"}))
+            .await;
+        // The install: a mutation after the failing report.
+        agent.note_mutating_tool_call();
+        if installed {
+            std::fs::write(tmp.path().join("installed.marker"), "").unwrap();
+        }
+        let mode = agent
+            .finalize_failure_mode(RunOutcome::NaturalCompletion)
+            .await;
+        assert_eq!(
+            mode.kind == FailureKind::VerificationFailed,
+            !installed,
+            "installed={installed}: {} ({})",
+            mode.kind.tag(),
+            mode.evidence
+        );
+        assert_eq!(
+            agent.run_summary().verification,
+            Some((installed, 1)),
+            "the summary reads the final tree's re-run"
+        );
+    }
+}
