@@ -417,6 +417,45 @@ selfware --tui
 
 ---
 
+## What's New in 0.9.1
+
+0.9.1 is a user-experience and honesty release. It follows a hands-on UX field
+test against llm.selfware.design and three rounds of external review. The full
+list is in [CHANGELOG.md](CHANGELOG.md); the highlights:
+
+- **Unattended runs never hang.** In `-p`/`run`/batch mode a tool confirmation
+  says why it is asking and fails closed after 120 s instead of waiting
+  forever.
+- **Banners say what was actually checked.** An edit with no verification
+  shows ⚠️ "verification NOT PERFORMED", not ✅. A review whose citations are
+  mostly uncheckable is ⚠️. The run summary names the checks it counted, and
+  says when no image was actually seen.
+- **No invented numbers.** Progress shows "Step N · elapsed", not a fake
+  total. Cost is provider-reported or plainly "not reported".
+- **Truncated or unfinished answers are not shipped as finished.** Length-cut
+  replies, replies cut inside reasoning, and "now moving to Stage 2…" notes
+  keep the run going or are labelled.
+- **Budgets are enforced honestly.** An exhausted budget, including one used up
+  before a resume, ends as a timeout with a partial, not "Completed". The
+  wrap-up nudge arrives while the answer still fits.
+- **Parsing and streaming.** An unclosed code fence no longer hides tool calls,
+  and long Kimi/Qwen-format writes are no longer cut mid-call.
+- **Security.** Streamed provider errors and error prints are scrubbed of
+  secrets, loopback checks parse addresses (`127.attacker.com` is not local),
+  and spill file names cannot escape their directory.
+- **Nicer terminal.** Frames align with emoji, output no longer staircases,
+  `--help` wraps cleanly, `status` probes `/models`, and `doctor` passes on a
+  fresh keyless install.
+
+### Behaviour changes to know when upgrading
+
+- **Unattended runs skip an unanswered confirmation after 120 s.** The tool
+  call does not run.
+- **An edit run with no verification check is ⚠️, not ✅.** The exit code is
+  still 0.
+- **`shell_exec` accepts a workspace-relative `cwd`.** `..` is still refused.
+- **Resuming a task under a different endpoint or model prints a warning.**
+
 ## What's New in 0.9
 
 0.9 makes long tasks on slow or small-context models finish, and makes the

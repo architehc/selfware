@@ -5,6 +5,136 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-09-26
+
+A user-experience and honesty release. The fixes come from a hands-on UX field
+test against llm.selfware.design (terminal output, prompts and interaction
+points), three rounds of external review of the fix series, and a sweep of the
+review's "never attempted" list.
+
+### Fixed
+- **Unattended runs no longer hang on a confirmation.** In `-p`, `run`,
+  `improve` and batch runs, a tool confirmation shows why it is being asked,
+  and after 120 s without an answer the call is skipped (fail closed) instead
+  of waiting forever.
+- **Truncated answers are never shipped as finished.**
+  - A reply cut off inside its reasoning block is labelled as possibly
+    reasoning, not presented as the answer.
+  - Two more acceptance paths (read-only force-finalize, repeated identical
+    replies) now route length-cut replies through the bounded rewrite
+    retries.
+  - Force-finalize emits only an answer that was never truncated.
+- **A stage progress note is not a final answer.** A reply ending "Now moving
+  to Stage 2…" keeps the loop running (a 0.9.0 known issue).
+- **Paging a file by line range counts as progress** for the read-loop guard,
+  so reading a large file in chunks is no longer flagged as re-reading. The
+  c24 scenario itself still does not finish (see Known issues).
+- **Honest outcome banners (Rule 3).**
+  - An edit run where no verification check ran shows "⚠️ … edits landed, but
+    verification NOT PERFORMED" instead of ✅. The exit code is still 0.
+  - The green "Task complete." line appears only when the outcome banner is ✅.
+  - A review answer whose citations are mostly uncheckable (more without a
+    checkable symbol than verified) gets ⚠️.
+  - The run summary names the checks it counted, and says when vision tools
+    failed and no image was actually seen.
+- **No invented numbers.** Open-ended runs show "Step N · elapsed" instead of a
+  made-up step total and percentage. `/cost` and the summary use the
+  provider-reported cost, or say "cost: not reported by this endpoint".
+- **Deadlines and budgets.**
+  - A run whose budget is already exhausted, including one resumed after an
+    earlier session used the time, now fails as a timeout or budget stop with
+    the PARTIAL label. It no longer completes with exit 0 via the
+    rejected-draft path.
+  - When not even the final answer fits, the rejected-draft path records the
+    requirements audit as NOT PERFORMED instead of spending up to 180 s on it.
+  - The wrap-up nudge fires in time when the forecast need is larger than the
+    capped window but still fits the budget.
+- **Tool parsing and streaming.**
+  - An unclosed code fence no longer hides the tool calls after it.
+  - A Kimi (`<|open|>call`) or bare-Qwen (`<function=…>`) `file_write` longer
+    than 32,000 characters is no longer cut mid-call as a runaway monologue.
+  - Malformed tool markup that only the detector recognises counts toward
+    `TOOL_PROTOCOL_STALL`, so a read-only run cannot spin on it until the
+    iteration cap.
+- **Verification that cannot run.** A verifier that exits 126 or cannot be
+  executed (os error 13) ends the rescue loop like exit 127. The verification
+  ledger and the rescue share one "command never ran" rule.
+- **Security.**
+  - Mid-stream provider errors are scrubbed of secrets at the source, and so
+    are both error-print edges (`selfware run` and the process-level `Error:`
+    line).
+  - The netcat exfiltration guard no longer treats the hostname
+    `127.attacker.com` as loopback. All local and loopback checks now parse
+    the URL or address instead of matching substrings.
+  - Tool-result spill file names keep only `[A-Za-z0-9_-]` from the tool name
+    and provider call id, plus a hash of the full id, so they cannot leave the
+    spill directory or overwrite each other.
+- **Doctor and status.**
+  - `selfware doctor` on a fresh install no longer FAILs on the keyless
+    default endpoint. It shares the loader's local and keyless checks, so a
+    host like `localhost.evil.com` is no longer treated as local.
+  - `selfware status` probes `{endpoint}/models`, not the bare base URL (which
+    returned a false 404 on SGLang).
+- **Checkpoints** record the endpoint (without credentials) and model a task
+  ran on. Resuming under a different backend prints a warning.
+- **A failed summary call backs off** until the history has grown, instead of
+  being retried and paid for on every step.
+- **Terminal output.**
+  - Boxes align by display width, so emoji and wide glyphs no longer break
+    frames.
+  - Task output no longer staircases after the ESC listener enables raw mode.
+  - `--help` wraps at word boundaries and reads as user help.
+  - The gate-blocked line shows the gate's reason and a full first sentence.
+  - Structured event lines are `--verbose` diagnostics and never split a
+    streamed line.
+- **Tools.**
+  - `shell_exec` accepts a workspace-relative `cwd` (`..` is still refused),
+    and a failed run's summary names its cause.
+  - Path-policy refusals name the typed path and how to allow it.
+  - Browser screenshots and PDFs default to the workspace, not the process
+    cwd.
+
+### Known issues
+- The 24k-window editing scenario (c24) still does not finish. In the 0.9.1
+  live rerun (llm.selfware.design, 549 s) it no longer stops with
+  READ_LOOP_NO_EDIT. It reaches MAX_ITERATIONS (40/40) with no edit: on a 24k
+  window, compaction keeps evicting the file being documented, and the model
+  re-reads it (whole-file reads of `context.rs`: 19).
+- The live stream can show a stray `</tool_call>` closing tag, and Kimi
+  `<|open|>` markup is echoed in the live display. This is display only; the
+  recorded content is intact.
+- A failed `selfware run` prints its error twice: `✗ Task failed: …`, then the
+  process-level `Error: …` line. Both are redacted.
+- The protocol-stall stop's false-positive rate for detector-only turns is not
+  yet measured (see the review notes).
+
+### Review notes (AGENTS.md rule 2)
+These changes loosen or change checks or tests:
+- Unattended runs (`-p`, `run`, `improve`, batch) skip an unanswered tool
+  confirmation after 120 s instead of waiting indefinitely. This fails closed:
+  the call does not run.
+- A review answer with more uncheckable than verified citations is labelled
+  ⚠️. This is a policy threshold (majority), not a measurement.
+- Resuming under a different backend warns and does not refuse.
+- An unclosed code fence is now fail-open: a line-start example call after it
+  is parsed as a real call. The old behaviour silently hid every later call.
+  A test pins this trade-off.
+- The protocol-stall window gained a second input (detector-only turns). Its
+  6-of-8 calibration predates that input, so the false-positive rate for those
+  turns is not yet measured.
+- Test changes:
+  - The gate-line tests pin a 200-character cap instead of 120.
+  - The resume-emitter test asserts no text-mode emitter unless `--verbose`.
+  - The shell `cwd` rejection test was replaced by resolve and traversal
+    tests.
+  - An unverified-edit outcome expects the NOT PERFORMED note and no ✅
+    (stricter).
+  - The CLI banner test moved into the failure-mode tests, with more cases.
+  - The pre-audit budget stop also asserts NOT PERFORMED (stricter).
+  - Five global-counter telemetry tests relax exact counts to "strictly
+    increasing" or ">= own increments", with maintainer sign-off. They were
+    racing parallel tests.
+
 ## [0.9.0] - 2026-09-25
 
 Long tasks on slow or small-context models now finish, and the agent's own
