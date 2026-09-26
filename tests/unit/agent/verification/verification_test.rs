@@ -2512,12 +2512,16 @@ mod requirements_audit_tests {
 
     #[tokio::test]
     async fn audit_reported_usage_enforces_hard_budget_and_is_counted_once() {
+        // The budget leaves room for the forecast final answer (so the audit
+        // is allowed to start; review C4 made a 1-token budget step aside
+        // before the call), and the audit's reported usage then exceeds it.
         let server = MockLlmServer::builder()
             .with_response("AUDIT: ALL ADDRESSED")
+            .with_usage(39_000, 1_000, 40_000)
             .build()
             .await;
         let mut agent = build_agent(&server, LONG_MUTATION_INSTRUCTION).await;
-        agent.config.agent.max_budget_tokens = Some(1);
+        agent.config.agent.max_budget_tokens = Some(20_000);
         agent.client = agent.client.rebuild(&agent.config).unwrap();
         let directive = agent
             .maybe_requirements_audit(false)

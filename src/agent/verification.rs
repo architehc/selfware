@@ -2924,17 +2924,19 @@ impl Agent {
         }
         self.requirements_audit_done
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        // A hard budget stop that already holds outranks the step-aside
+        // below: it must surface as the stop, not as a skipped audit.
+        self.client
+            .ensure_budget_floor(self.cumulative_token_usage.total, self.cumulative_cost_usd);
+        if let Some(stop) = self.client.budget_stop() {
+            return Some(stop.to_string());
+        }
         // Limit (deadline/budget) step-aside: the audit is itself a model call and can bounce
         // the answer for a correction round; neither fits inside the limit
         // window. Recorded NOT PERFORMED, so the banner warns (rule 3).
         if let Some(why) = self.completion_gate_step_aside() {
             self.record_requirements_audit(RequirementsAuditStatus::NotPerformed(why.to_string()));
             return None;
-        }
-        self.client
-            .ensure_budget_floor(self.cumulative_token_usage.total, self.cumulative_cost_usd);
-        if let Some(stop) = self.client.budget_stop() {
-            return Some(stop.to_string());
         }
         let directive = self.requirements_audit(instruction).await;
         // The advisory audit cannot approve completion after spending the hard cap.

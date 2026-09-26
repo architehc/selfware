@@ -302,6 +302,38 @@ async fn requirements_audit_steps_aside_inside_the_deadline_window() {
     server.stop().await;
 }
 
+/// Review C4 (0.9.1): the capped window (2/3 of the budget) and the uncapped
+/// "one more turn does not fit" check disagreed when the forecast answer is
+/// longer than the cap. The draft-at-limit path then ran the audit model
+/// call in time it had just declared unaffordable. The gate now also steps
+/// aside whenever not even the final answer fits.
+#[tokio::test]
+async fn requirements_audit_steps_aside_when_the_answer_alone_exceeds_the_capped_window() {
+    let server = MockLlmServer::builder()
+        .with_response("must not be requested")
+        .build()
+        .await;
+    let mut config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
+    config.agent.max_wall_secs = Some(450); // cap = 300 s
+    let mut agent = Agent::new(config).await.unwrap();
+    record_slow_endpoint(&agent); // answer ~347 s, window min(372, 300) = 300 s
+    agent.current_checkpoint = Some(TaskCheckpoint::new(
+        "audit-answer-over-cap".to_string(),
+        "Implement the CSV exporter: write every record with its id, name, created_at and \
+         amount columns, quote fields that contain commas, keep the header row, add tests \
+         for the quoting and the header, and make sure the existing importer still passes."
+            .to_string(),
+    ));
+    backdate(&mut agent, 130); // 320 s left: outside the capped window, < answer
+    let aside = agent.completion_gate_step_aside().expect("must step aside");
+    assert!(aside.to_string().contains("deadline"), "{aside}");
+    assert_eq!(agent.maybe_requirements_audit(false).await, None);
+    let status = agent.requirements_audit_status().expect("recorded");
+    assert!(status.is_not_performed(), "{status:?}");
+    assert!(server.captured_request_bodies().await.is_empty());
+    server.stop().await;
+}
+
 /// Rule-5 sweep: the min-steps floor is pacing, not a result check — it
 /// steps aside inside the deadline window and applies outside it.
 #[tokio::test]
