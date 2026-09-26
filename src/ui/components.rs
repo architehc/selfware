@@ -59,6 +59,93 @@ impl WorkshopContext {
     }
 }
 
+/// Display width of `s` as a terminal shows it: ANSI escape sequences take
+/// no columns, wide and emoji characters take two.
+pub fn visible_width(s: &str) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    let mut plain = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // CSI: ESC [ … final byte in @..~
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for f in chars.by_ref() {
+                    if ('@'..='~').contains(&f) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        plain.push(c);
+    }
+    UnicodeWidthStr::width(plain.as_str())
+}
+
+/// A `frame_box` row that renders as a horizontal divider (`├───┤`).
+pub const FRAME_SEPARATOR: &str = "\u{0}--separator--";
+
+/// Frame `rows` in a box whose right border lines up whatever the rows hold
+/// (colour codes, emoji, wide glyphs): every row is padded by its DISPLAY
+/// width. Hand-padded boxes broke as soon as a value or glyph changed width
+/// (UX field test, 0.9.0). The box grows to its widest row; `min_inner` is
+/// the minimum inner width. `border`/`reset` colour the frame.
+pub fn frame_box(
+    title: &str,
+    rows: &[String],
+    min_inner: usize,
+    border: &str,
+    reset: &str,
+) -> Vec<String> {
+    let title_part = if title.is_empty() {
+        String::new()
+    } else {
+        format!(" {title} ")
+    };
+    let inner = rows
+        .iter()
+        .map(|r| visible_width(r) + 2)
+        .chain([min_inner, visible_width(&title_part) + 4])
+        .max()
+        .unwrap_or(min_inner);
+    let fill = inner.saturating_sub(visible_width(&title_part));
+    let left = fill / 2;
+    // Glyphs switch to ASCII (+ - |) in ASCII mode, like the rest of the UI.
+    let (h, v) = (Glyphs::horiz(), Glyphs::vert());
+    let mut out = Vec::with_capacity(rows.len() + 2);
+    out.push(format!(
+        "{border}{}{}{title_part}{border}{}{}{reset}",
+        Glyphs::corner_tl(),
+        h.repeat(left),
+        h.repeat(fill - left),
+        Glyphs::corner_tr()
+    ));
+    for row in rows {
+        if row == FRAME_SEPARATOR {
+            out.push(format!(
+                "{border}{}{}{}{reset}",
+                Glyphs::tee_left(),
+                h.repeat(inner),
+                Glyphs::tee_right()
+            ));
+            continue;
+        }
+        let pad = inner.saturating_sub(visible_width(row) + 1);
+        out.push(format!(
+            "{border}{v}{reset} {row}{}{border}{v}{reset}",
+            " ".repeat(pad)
+        ));
+    }
+    out.push(format!(
+        "{border}{}{}{}{reset}",
+        Glyphs::corner_bl(),
+        h.repeat(inner),
+        Glyphs::corner_br()
+    ));
+    out
+}
+
 /// Render the workshop header
 pub fn render_header(ctx: &WorkshopContext) -> String {
     let hosting = if ctx.is_local_model {
@@ -75,41 +162,26 @@ pub fn render_header(ctx: &WorkshopContext) -> String {
         ExecutionMode::Daemon => format!("[{}]", "DAEMON".tool_name()),
     };
 
-    let width = 65;
-    let top_border = format!(
-        "{}{}{}",
-        Glyphs::corner_tl(),
-        Glyphs::horiz().repeat(width - 2),
-        Glyphs::corner_tr()
-    );
-    let bottom_border = format!(
-        "{}{}{}",
-        Glyphs::corner_bl(),
-        Glyphs::horiz().repeat(width - 2),
-        Glyphs::corner_br()
-    );
-
-    format!(
-        r#"
-{}
-{}  {} SELFWARE WORKSHOP {}                              {}
-{}  {} Tending: {}
-{}  {} · {} tasks completed
-{}
-"#,
-        top_border.muted(),
-        Glyphs::vert().muted(),
-        Glyphs::gear(),
-        mode_str,
-        Glyphs::vert().muted(),
-        Glyphs::vert().muted(),
-        Glyphs::sprout(),
-        ctx.project_name.as_str().emphasis(),
-        Glyphs::vert().muted(),
-        hosting,
-        ctx.tasks_completed.to_string().garden_healthy(),
-        bottom_border.muted(),
-    )
+    let rows = vec![
+        format!("{} SELFWARE WORKSHOP {}", Glyphs::gear(), mode_str),
+        format!(
+            "{} Tending: {}",
+            Glyphs::sprout(),
+            ctx.project_name.as_str().emphasis()
+        ),
+        format!(
+            "{} · {} tasks completed",
+            hosting,
+            ctx.tasks_completed.to_string().garden_healthy()
+        ),
+    ];
+    let border = if colored::control::SHOULD_COLORIZE.should_colorize() {
+        "\x1b[2m"
+    } else {
+        ""
+    };
+    let reset = if border.is_empty() { "" } else { "\x1b[0m" };
+    format!("\n{}\n", frame_box("", &rows, 63, border, reset).join("\n"))
 }
 
 /// Render a minimal status line

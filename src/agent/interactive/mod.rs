@@ -280,253 +280,218 @@ impl Agent {
             }
 
             if input == "/help" {
+                // Framed by display width: the hand-padded box misaligned
+                // around emoji (UX field test, 0.9.0).
+                let rows: Vec<String> = vec![
+                    crate::ui::components::FRAME_SEPARATOR.to_string(),
+                    format!("{} /help              Show this help", "📖".bright_white()),
+                    format!("{} /status            Agent status", "📊".bright_white()),
+                    format!(
+                        "{} /stats             Detailed session stats",
+                        "📈".bright_white()
+                    ),
+                    format!(
+                        "{} /mode              Cycle execution mode",
+                        "🔄".bright_white()
+                    ),
+                    crate::ui::components::FRAME_SEPARATOR.to_string(),
+                    format!(
+                        "{} /ctx               Context window stats",
+                        "📊".bright_white()
+                    ),
+                    format!(
+                        "{} /ctx clear         Clear all context",
+                        "🧹".bright_white()
+                    ),
+                    format!(
+                        "{} /ctx load <ext>    Load files (.rs,.toml)",
+                        "📂".bright_white()
+                    ),
+                    format!(
+                        "{} /ctx reload        Reload loaded files",
+                        "🔄".bright_white()
+                    ),
+                    format!(
+                        "{} /ctx copy          Copy sources to clip",
+                        "📋".bright_white()
+                    ),
+                    format!(
+                        "{} /compress          Compress context",
+                        "🗜️ ".bright_white()
+                    ),
+                    format!(
+                        "{} /scan <path>       Index folder for RAG search",
+                        "🔍".bright_white()
+                    ),
+                    crate::ui::components::FRAME_SEPARATOR.to_string(),
+                    format!(
+                        "{} /memory           Memory statistics",
+                        "🧠".bright_white()
+                    ),
+                    format!(
+                        "{} /dream            Memory consolidation",
+                        "🌙".bright_white()
+                    ),
+                    format!(
+                        "{} /clear            Clear conversation",
+                        "🧹".bright_white()
+                    ),
+                    format!(
+                        "{} /tools             List available tools",
+                        "🔧".bright_white()
+                    ),
+                    crate::ui::components::FRAME_SEPARATOR.to_string(),
+                    format!("{} /diff              Git diff --stat", "📊".bright_white()),
+                    format!(
+                        "{} /git               Git status --short",
+                        "📋".bright_white()
+                    ),
+                    format!(
+                        "{} /undo              Undo last file edit",
+                        "↩ ".bright_white()
+                    ),
+                    format!(
+                        "{} /worktree enter    Create and enter worktree",
+                        "🌳".bright_white()
+                    ),
+                    format!(
+                        "{} /worktree exit     Exit current worktree",
+                        "🌲".bright_white()
+                    ),
+                    format!(
+                        "{} /worktree list     List all worktrees",
+                        "📋".bright_white()
+                    ),
+                    format!(
+                        "{} /cost              Token usage & cost",
+                        "💰".bright_white()
+                    ),
+                    format!(
+                        "{} /model             Model configuration",
+                        "🤖".bright_white()
+                    ),
+                    format!(
+                        "{} /compact           Compress context (auto)",
+                        "📦".bright_white()
+                    ),
+                    format!(
+                        "{} /compact micro     Fast local compression",
+                        "📦".bright_white()
+                    ),
+                    format!(
+                        "{} /compact auto      LLM summarization",
+                        "📦".bright_white()
+                    ),
+                    format!(
+                        "{} /compact full      Nuclear + file re-inject",
+                        "📦".bright_white()
+                    ),
+                    format!(
+                        "{} /compact stats     Show compression stats",
+                        "📦".bright_white()
+                    ),
+                    format!(
+                        "{} /verbose           Toggle verbose mode",
+                        "📢".bright_white()
+                    ),
+                    format!(
+                        "{} /config            Show current config",
+                        "⚙ ".bright_white()
+                    ),
+                    crate::ui::components::FRAME_SEPARATOR.to_string(),
+                    format!(
+                        "{} /analyze <path>    Analyze codebase",
+                        "🔍".bright_white()
+                    ),
+                    format!(
+                        "{} /review <file>     Review code file",
+                        "👁️ ".bright_white()
+                    ),
+                    format!(
+                        "{} /plan <task>       Create task plan",
+                        "📝".bright_white()
+                    ),
+                    format!(
+                        "{} /swarm <task>      Run task with dev swarm",
+                        "🐝".bright_white()
+                    ),
+                    format!(
+                        "{} /queue <msg>       Queue message for later",
+                        "📨".bright_white()
+                    ),
+                    crate::ui::components::FRAME_SEPARATOR.to_string(),
+                    crate::ui::components::FRAME_SEPARATOR.to_string(),
+                    format!(
+                        "{} /vim               Toggle vim/emacs mode",
+                        "⌨ ".bright_white()
+                    ),
+                    format!(
+                        "{} /copy              Copy last response",
+                        "📋".bright_white()
+                    ),
+                    format!(
+                        "{} /restore           List/restore checkpoints",
+                        "⏪".bright_white()
+                    ),
+                    format!(
+                        "{} /chat save <n>     Save chat session",
+                        "💾".bright_white()
+                    ),
+                    format!(
+                        "{} /chat resume <n>   Resume saved chat",
+                        "▶ ".bright_white()
+                    ),
+                    format!(
+                        "{} /chat list         List saved chats",
+                        "📋".bright_white()
+                    ),
+                    format!(
+                        "{} /theme <name>      Switch color theme",
+                        "🎨".bright_white()
+                    ),
+                    format!(
+                        "{} !<cmd>             Run shell command",
+                        "💲".bright_white()
+                    ),
+                    crate::ui::components::FRAME_SEPARATOR.to_string(),
+                    format!(
+                        "{} @file              Reference file in message",
+                        "📎".bright_white()
+                    ),
+                    format!(
+                        "{} exit               Exit interactive mode",
+                        "🚪".bright_white()
+                    ),
+                    crate::ui::components::FRAME_SEPARATOR.to_string(),
+                    format!("{}", "⌨  KEYBOARD SHORTCUTS".bright_cyan()),
+                    crate::ui::components::FRAME_SEPARATOR.to_string(),
+                    "ESC           Interrupt running task".to_string(),
+                    "Ctrl+C        Interrupt running task".to_string(),
+                    "Ctrl+C ×2     Exit (double-tap at prompt)".to_string(),
+                    "Ctrl+J        Insert newline (multi-line)".to_string(),
+                    "Ctrl+Y        Toggle YOLO mode".to_string(),
+                    "Shift+Tab     Toggle Auto-Edit mode".to_string(),
+                    "Ctrl+X        Open external editor ($EDITOR)".to_string(),
+                    "Ctrl+L        Clear screen".to_string(),
+                    "Ctrl+R        Reverse history search".to_string(),
+                    "Tab           Autocomplete / cycle suggestions".to_string(),
+                ];
+                let colour = colored::control::SHOULD_COLORIZE.should_colorize();
+                let (border, reset) = if colour {
+                    ("\x1b[96m", "\x1b[0m")
+                } else {
+                    ("", "")
+                };
                 println!();
-                println!(
-                    "{}",
-                    "╭──────────────────────────────────────────────────────╮".bright_cyan()
-                );
-                println!(
-                    "{}",
-                    "│                 🦊 SELFWARE COMMANDS                 │".bright_cyan()
-                );
-                println!(
-                    "{}",
-                    "├──────────────────────────────────────────────────────┤".bright_cyan()
-                );
-                println!(
-                    "│  {} /help              Show this help               │",
-                    "📖".bright_white()
-                );
-                println!(
-                    "│  {} /status            Agent status                 │",
-                    "📊".bright_white()
-                );
-                println!(
-                    "│  {} /stats             Detailed session stats       │",
-                    "📈".bright_white()
-                );
-                println!(
-                    "│  {} /mode              Cycle execution mode         │",
-                    "🔄".bright_white()
-                );
-                println!(
-                    "{}",
-                    "├──────────────────────────────────────────────────────┤".bright_cyan()
-                );
-                println!(
-                    "│  {} /ctx               Context window stats         │",
-                    "📊".bright_white()
-                );
-                println!(
-                    "│  {} /ctx clear         Clear all context            │",
-                    "🗑️ ".bright_white()
-                );
-                println!(
-                    "│  {} /ctx load <ext>    Load files (.rs,.toml)       │",
-                    "📂".bright_white()
-                );
-                println!(
-                    "│  {} /ctx reload        Reload loaded files          │",
-                    "🔄".bright_white()
-                );
-                println!(
-                    "│  {} /ctx copy          Copy sources to clip         │",
-                    "📋".bright_white()
-                );
-                println!(
-                    "│  {} /compress          Compress context             │",
-                    "🗜️ ".bright_white()
-                );
-                println!(
-                    "│  {} /scan <path>       Index folder for RAG search  │",
-                    "🔍".bright_white()
-                );
-                println!(
-                    "{}",
-                    "├─────────────────────────────────────────────────┤".bright_cyan()
-                );
-                println!(
-                    "│  {} /memory           Memory statistics        │",
-                    "🧠".bright_white()
-                );
-                println!(
-                    "│  {} /dream            Memory consolidation     │",
-                    "🌙".bright_white()
-                );
-                println!(
-                    "│  {} /clear            Clear conversation       │",
-                    "🗑️ ".bright_white()
-                );
-                println!(
-                    "│  {} /tools             List available tools       │",
-                    "🔧".bright_white()
-                );
-                println!(
-                    "{}",
-                    "├──────────────────────────────────────────────────────┤".bright_cyan()
-                );
-                println!(
-                    "│  {} /diff              Git diff --stat              │",
-                    "📊".bright_white()
-                );
-                println!(
-                    "│  {} /git               Git status --short           │",
-                    "📋".bright_white()
-                );
-                println!(
-                    "│  {} /undo              Undo last file edit          │",
-                    "↩ ".bright_white()
-                );
-                println!(
-                    "│  {} /worktree enter    Create and enter worktree    │",
-                    "🌳".bright_white()
-                );
-                println!(
-                    "│  {} /worktree exit     Exit current worktree        │",
-                    "🌲".bright_white()
-                );
-                println!(
-                    "│  {} /worktree list     List all worktrees           │",
-                    "📋".bright_white()
-                );
-                println!(
-                    "│  {} /cost              Token usage & cost           │",
-                    "💰".bright_white()
-                );
-                println!(
-                    "│  {} /model             Model configuration          │",
-                    "🤖".bright_white()
-                );
-                println!(
-                    "│  {} /compact           Compress context (auto)      │",
-                    "📦".bright_white()
-                );
-                println!(
-                    "│  {} /compact micro     Fast local compression       │",
-                    "📦".bright_white()
-                );
-                println!(
-                    "│  {} /compact auto      LLM summarization            │",
-                    "📦".bright_white()
-                );
-                println!(
-                    "│  {} /compact full      Nuclear + file re-inject     │",
-                    "📦".bright_white()
-                );
-                println!(
-                    "│  {} /compact stats     Show compression stats       │",
-                    "📦".bright_white()
-                );
-                println!(
-                    "│  {} /verbose           Toggle verbose mode          │",
-                    "📢".bright_white()
-                );
-                println!(
-                    "│  {} /config            Show current config          │",
-                    "⚙ ".bright_white()
-                );
-                println!(
-                    "{}",
-                    "├──────────────────────────────────────────────────────┤".bright_cyan()
-                );
-                println!(
-                    "│  {} /analyze <path>    Analyze codebase             │",
-                    "🔍".bright_white()
-                );
-                println!(
-                    "│  {} /review <file>     Review code file             │",
-                    "👁️ ".bright_white()
-                );
-                println!(
-                    "│  {} /plan <task>       Create task plan             │",
-                    "📝".bright_white()
-                );
-                println!(
-                    "│  {} /swarm <task>      Run task with dev swarm      │",
-                    "🐝".bright_white()
-                );
-                println!(
-                    "│  {} /queue <msg>       Queue message for later      │",
-                    "📨".bright_white()
-                );
-                println!(
-                    "{}",
-                    "├──────────────────────────────────────────────────────┤".bright_cyan()
-                );
-                println!(
-                    "{}",
-                    "├──────────────────────────────────────────────────────┤".bright_cyan()
-                );
-                println!(
-                    "│  {} /vim               Toggle vim/emacs mode        │",
-                    "⌨ ".bright_white()
-                );
-                println!(
-                    "│  {} /copy              Copy last response           │",
-                    "📋".bright_white()
-                );
-                println!(
-                    "│  {} /restore           List/restore checkpoints     │",
-                    "⏪".bright_white()
-                );
-                println!(
-                    "│  {} /chat save <n>     Save chat session            │",
-                    "💾".bright_white()
-                );
-                println!(
-                    "│  {} /chat resume <n>   Resume saved chat            │",
-                    "▶ ".bright_white()
-                );
-                println!(
-                    "│  {} /chat list         List saved chats             │",
-                    "📋".bright_white()
-                );
-                println!(
-                    "│  {} /theme <name>      Switch color theme           │",
-                    "🎨".bright_white()
-                );
-                println!(
-                    "│  {} !<cmd>             Run shell command            │",
-                    "💲".bright_white()
-                );
-                println!(
-                    "{}",
-                    "├──────────────────────────────────────────────────────┤".bright_cyan()
-                );
-                println!(
-                    "│  {} @file              Reference file in message    │",
-                    "📎".bright_white()
-                );
-                println!(
-                    "│  {} exit               Exit interactive mode        │",
-                    "🚪".bright_white()
-                );
-                println!(
-                    "{}",
-                    "├──────────────────────────────────────────────────────┤".bright_cyan()
-                );
-                println!(
-                    "{}",
-                    "│             ⌨  KEYBOARD SHORTCUTS                   │".bright_cyan()
-                );
-                println!(
-                    "{}",
-                    "├──────────────────────────────────────────────────────┤".bright_cyan()
-                );
-                println!("│  ESC           Interrupt running task               │");
-                println!("│  Ctrl+C        Interrupt running task               │");
-                println!("│  Ctrl+C ×2     Exit (double-tap at prompt)          │");
-                println!("│  Ctrl+J        Insert newline (multi-line)          │");
-                println!("│  Ctrl+Y        Toggle YOLO mode                     │");
-                println!("│  Shift+Tab     Toggle Auto-Edit mode                │");
-                println!("│  Ctrl+X        Open external editor ($EDITOR)       │");
-                println!("│  Ctrl+L        Clear screen                         │");
-                println!("│  Ctrl+R        Reverse history search               │");
-                println!("│  Tab           Autocomplete / cycle suggestions     │");
-                println!(
-                    "{}",
-                    "╰──────────────────────────────────────────────────────╯".bright_cyan()
-                );
+                for line in crate::ui::components::frame_box(
+                    "🦊 SELFWARE COMMANDS",
+                    &rows,
+                    54,
+                    border,
+                    reset,
+                ) {
+                    println!("{line}");
+                }
                 println!();
                 println!(
                     "  {} Use @path/to/file to include file content in your message",

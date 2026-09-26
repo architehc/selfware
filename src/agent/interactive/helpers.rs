@@ -411,9 +411,39 @@ impl InputEventSource for CrosstermEventSource {
 
     fn set_raw_mode(&mut self, enable: bool) -> std::io::Result<()> {
         if enable {
-            crossterm::terminal::enable_raw_mode()
+            crossterm::terminal::enable_raw_mode()?;
+            keep_output_newlines();
+            Ok(())
         } else {
             crossterm::terminal::disable_raw_mode()
+        }
+    }
+}
+
+/// Re-enable output post-processing (`OPOST | ONLCR`) after crossterm's raw
+/// mode, which turns it off along with input processing. Without it every
+/// plain `\n` printed while the ESC listener runs moves down without
+/// returning to column 0, so task output "staircases" across the terminal
+/// (UX field test, 0.9.0). Input stays raw: keys are still read one at a
+/// time and Ctrl+C still arrives as a key event. Termios is per terminal
+/// device, so setting it on stdout covers the tty crossterm reads from.
+/// `disable_raw_mode` restores the saved original settings as before.
+fn keep_output_newlines() {
+    #[cfg(unix)]
+    {
+        use std::io::IsTerminal;
+        if !std::io::stdout().is_terminal() {
+            return;
+        }
+        // SAFETY: tcgetattr/tcsetattr on the process's own stdout fd with a
+        // zero-initialised termios that tcgetattr fills before it is read.
+        unsafe {
+            let fd = libc::STDOUT_FILENO;
+            let mut term: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(fd, &mut term) == 0 {
+                term.c_oflag |= libc::OPOST | libc::ONLCR;
+                let _ = libc::tcsetattr(fd, libc::TCSANOW, &term);
+            }
         }
     }
 }

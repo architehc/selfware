@@ -389,6 +389,20 @@ impl Glyphs {
             "─"
         }
     }
+    pub fn tee_left() -> &'static str {
+        if is_ascii_mode() {
+            "+"
+        } else {
+            "├"
+        }
+    }
+    pub fn tee_right() -> &'static str {
+        if is_ascii_mode() {
+            "+"
+        } else {
+            "┤"
+        }
+    }
     pub fn vert() -> &'static str {
         if is_ascii_mode() {
             "|"

@@ -250,3 +250,36 @@ fn test_render_box_long_content() {
     assert!(boxed.contains("Long"));
     assert!(boxed.contains(&long_content));
 }
+
+#[test]
+fn frame_box_right_border_lines_up_whatever_the_rows_hold() {
+    // UX field test (0.9.0): the banner, /stats and /help boxes were padded
+    // by hand, so emoji, colour codes and wider values pushed the right
+    // border out of line. Every framed line must have the same display width.
+    let rows = vec![
+        "plain ascii row".to_string(),
+        "\u{1b}[1m\u{1b}[38;5;130m◈ CONTEXT\u{1b}[0m".to_string(),
+        "📖 /help   Show this help".to_string(),
+        "🧹 /ctx clear   Clear all context".to_string(),
+        FRAME_SEPARATOR.to_string(),
+        format!("    Tokens Used     {:>8} / {:<8}", 1_234_567, 163_840),
+        String::new(),
+    ];
+    let lines = frame_box("🦊 SELFWARE COMMANDS", &rows, 20, "\u{1b}[96m", "\u{1b}[0m");
+    assert_eq!(lines.len(), rows.len() + 2);
+    let widths: Vec<usize> = lines.iter().map(|l| visible_width(l)).collect();
+    assert!(
+        widths.iter().all(|w| *w == widths[0]),
+        "every line must be equally wide: {widths:?}\n{}",
+        lines.join("\n")
+    );
+    // The box grows to its widest row rather than overflowing.
+    assert!(widths[0] >= visible_width(&rows[5]) + 4);
+}
+
+#[test]
+fn visible_width_ignores_ansi_and_counts_wide_glyphs() {
+    assert_eq!(visible_width("abc"), 3);
+    assert_eq!(visible_width("\u{1b}[1;32mabc\u{1b}[0m"), 3);
+    assert_eq!(visible_width("🦊"), 2);
+}

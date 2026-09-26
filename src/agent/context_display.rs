@@ -458,155 +458,82 @@ impl Agent {
             "NEW"
         };
 
-        println!();
-        println!(
-            "  {}┌─────────────────────── {} SESSION STATS {} ───────────────────────┐{}",
-            patina, rust, patina, reset
-        );
-        println!(
-            "  {}│{}                                                                    {}│{}",
-            patina, reset, patina, reset
-        );
-        println!(
-            "  {}│{}  {bold}{}◈ CONTEXT{}{:<48}    {}│{}",
-            patina, reset, rust, reset, "", patina, reset
-        );
-        println!(
-            "  {}│{}     Tokens Used     {:>8} / {:<8}  ({:.1}%)                  {}│{}",
-            patina, reset, tokens, window, used_pct, patina, reset
-        );
-        println!(
-            "  {}│{}     Messages        {:>8}  (user: {}, assistant: {})        {}│{}",
-            patina, reset, messages, user_msgs, assistant_msgs, patina, reset
-        );
-        println!(
-            "  {}│{}     Tool Calls      {:>8}                                    {}│{}",
-            patina, reset, tool_calls, patina, reset
-        );
-        println!(
-            "  {}│{}                                                                    {}│{}",
-            patina, reset, patina, reset
-        );
-        println!(
-            "  {}│{}  {bold}{}⊡ MEMORY{}{:<49}    {}│{}",
-            patina, reset, sand, reset, "", patina, reset
-        );
-        println!(
-            "  {}│{}     Entries         {:>8}                                    {}│{}",
-            patina,
-            reset,
-            self.memory.len(),
-            patina,
-            reset
-        );
-        println!(
-            "  {}│{}     Files Loaded    {:>8}                                    {}│{}",
-            patina,
-            reset,
-            self.file_tracker.context_files.len(),
-            patina,
-            reset
-        );
-        println!(
-            "  {}│{}     Session         {:>8}                                    {}│{}",
-            patina, reset, session_indicator, patina, reset
-        );
-        println!(
-            "  {}│{}                                                                    {}│{}",
-            patina, reset, patina, reset
-        );
-        // Tool cache stats
+        // Rows are framed by `frame_box`, which pads each row by its display
+        // width — the hand-padded box broke whenever a value or glyph
+        // changed width (UX field test, 0.9.0).
         let tc_stats = self.cache_manager.tool_cache.stats().await;
-        println!(
-            "  {}│{}  {bold}{}◇ TOOL CACHE{}{:<44}    {}│{}",
-            patina, reset, sand, reset, "", patina, reset
-        );
-        println!(
-            "  {}│{}     Entries         {:>8} / {:<8}                          {}│{}",
-            patina, reset, tc_stats.entries, tc_stats.max_entries, patina, reset
-        );
-        println!(
-            "  {}│{}     TTL             {:>8}s                                   {}│{}",
-            patina, reset, tc_stats.default_ttl_secs, patina, reset
-        );
-        println!(
-            "  {}│{}                                                                    {}│{}",
-            patina, reset, patina, reset
-        );
-
-        // Local-first coordinator stats
         let lf_stats = self.cache_manager.local_first.stats();
-        println!(
-            "  {}│{}  {bold}{}◆ LOCAL-FIRST{}{:<43}    {}│{}",
-            patina, reset, sand, reset, "", patina, reset
-        );
-        println!(
-            "  {}│{}     Cache Entries   {:>8}  (hit rate: {:.1}%)                 {}│{}",
-            patina,
-            reset,
-            lf_stats.cache_stats.entry_count,
-            lf_stats.cache_stats.hit_rate * 100.0,
-            patina,
-            reset
-        );
-        println!(
-            "  {}│{}     Bandwidth Saved {:>8} bytes                              {}│{}",
-            patina, reset, lf_stats.bandwidth_saved_bytes, patina, reset
-        );
-        println!(
-            "  {}│{}     Status          {:>8}                                    {}│{}",
-            patina, reset, lf_stats.offline_status, patina, reset
-        );
-        println!(
-            "  {}│{}                                                                    {}│{}",
-            patina, reset, patina, reset
-        );
-
-        // Concurrency governor stats
         let gov_stats = self.governor.stats();
-        println!(
-            "  {}│{}  {bold}{}⊘ CONCURRENCY{}{:<43}    {}│{}",
-            patina, reset, sand, reset, "", patina, reset
-        );
-        println!(
-            "  {}│{}     Streams         {:>8} / {:<8}                          {}│{}",
-            patina, reset, gov_stats.streams_available, gov_stats.streams_max, patina, reset
-        );
-        println!(
-            "  {}│{}     Tools           {:>8} / {:<8}                          {}│{}",
-            patina, reset, gov_stats.tools_available, gov_stats.tools_max, patina, reset
-        );
-        println!(
-            "  {}│{}     Global          {:>8} / {:<8}                          {}│{}",
-            patina, reset, gov_stats.global_available, gov_stats.global_max, patina, reset
-        );
-        println!(
-            "  {}│{}                                                                    {}│{}",
-            patina, reset, patina, reset
-        );
-
-        println!(
-            "  {}│{}  {bold}{}≋ MODE{}{:<50}    {}│{}",
-            patina, reset, worn, reset, "", patina, reset
-        );
         let mode_str = match self.execution_mode() {
             crate::config::ExecutionMode::Normal => "NORMAL - Confirm all tools",
             crate::config::ExecutionMode::AutoEdit => "AUTO-EDIT - Auto-approve file ops",
             crate::config::ExecutionMode::Yolo => "YOLO - Execute without confirmation",
             crate::config::ExecutionMode::Daemon => "DAEMON - Permanent auto-execute",
         };
-        println!(
-            "  {}│{}     {}                                            {}│{}",
-            patina, reset, mode_str, patina, reset
-        );
-        println!(
-            "  {}│{}                                                                    {}│{}",
-            patina, reset, patina, reset
-        );
-        println!(
-            "  {}└────────────────────────────────────────────────────────────────────┘{}",
-            patina, reset
-        );
+        let heading = |colour: &str, label: &str| format!("{bold}{colour}{label}{reset}");
+        let rows = vec![
+            String::new(),
+            heading(rust, "◈ CONTEXT"),
+            format!(
+                "    Tokens Used     {:>8} / {:<8}  ({:.1}%)",
+                tokens, window, used_pct
+            ),
+            format!(
+                "    Messages        {:>8}  (user: {}, assistant: {})",
+                messages, user_msgs, assistant_msgs
+            ),
+            format!("    Tool Calls      {:>8}", tool_calls),
+            String::new(),
+            heading(sand, "⊡ MEMORY"),
+            format!("    Entries         {:>8}", self.memory.len()),
+            format!(
+                "    Files Loaded    {:>8}",
+                self.file_tracker.context_files.len()
+            ),
+            format!("    Session         {:>8}", session_indicator),
+            String::new(),
+            heading(sand, "◇ TOOL CACHE"),
+            format!(
+                "    Entries         {:>8} / {:<8}",
+                tc_stats.entries, tc_stats.max_entries
+            ),
+            format!("    TTL             {:>8}s", tc_stats.default_ttl_secs),
+            String::new(),
+            heading(sand, "◆ LOCAL-FIRST"),
+            format!(
+                "    Cache Entries   {:>8}  (hit rate: {:.1}%)",
+                lf_stats.cache_stats.entry_count,
+                lf_stats.cache_stats.hit_rate * 100.0
+            ),
+            format!(
+                "    Bandwidth Saved {:>8} bytes",
+                lf_stats.bandwidth_saved_bytes
+            ),
+            format!("    Status          {:>8}", lf_stats.offline_status),
+            String::new(),
+            heading(sand, "⊘ CONCURRENCY"),
+            format!(
+                "    Streams         {:>8} / {:<8}",
+                gov_stats.streams_available, gov_stats.streams_max
+            ),
+            format!(
+                "    Tools           {:>8} / {:<8}",
+                gov_stats.tools_available, gov_stats.tools_max
+            ),
+            format!(
+                "    Global          {:>8} / {:<8}",
+                gov_stats.global_available, gov_stats.global_max
+            ),
+            String::new(),
+            heading(worn, "≋ MODE"),
+            format!("    {}", mode_str),
+            String::new(),
+        ];
+        let title = format!("{rust}SESSION STATS{patina}");
+        println!();
+        for line in crate::ui::components::frame_box(&title, &rows, 68, patina, reset) {
+            println!("  {line}");
+        }
         println!();
     }
 }
