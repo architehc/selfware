@@ -37,13 +37,19 @@ pub(crate) struct Cli {
     #[arg(short = 'C', long, value_name = "DIR", global = true)]
     pub(crate) workdir: Option<String>,
 
-    /// Quiet mode (minimal output)
-    #[arg(short, long, global = true)]
-    pub(crate) quiet: bool,
-
     /// Execution mode: normal (ask), auto-edit, yolo, daemon
-    #[arg(short = 'm', long, value_enum, global = true)]
+    #[arg(
+        short = 'm',
+        long,
+        value_enum,
+        global = true,
+        help_heading = "Mode & safety"
+    )]
     pub(crate) mode: Option<ExecutionMode>,
+
+    /// Quiet mode (minimal output)
+    #[arg(short, long, global = true, help_heading = "Output")]
+    pub(crate) quiet: bool,
 
     /// Model override for this session (overrides the config `model` key)
     // Long-only on purpose: `-m` stays --mode for existing scripts.
@@ -51,85 +57,98 @@ pub(crate) struct Cli {
     pub(crate) model: Option<String>,
 
     /// Shortcut for --mode=yolo
-    #[arg(short = 'y', long, global = true)]
+    #[arg(short = 'y', long, global = true, help_heading = "Mode & safety")]
     pub(crate) yolo: bool,
 
     /// Shortcut for --mode=daemon (run forever)
-    #[arg(long)]
+    #[arg(long, help_heading = "Mode & safety")]
     pub(crate) daemon: bool,
 
     /// Disable colored output
-    #[arg(long)]
+    #[arg(long, help_heading = "Output")]
     pub(crate) no_color: bool,
 
-    /// Launch full TUI dashboard mode (requires --features tui)
-    /// This is the default when no subcommand is specified
-    #[arg(long)]
+    /// Full-screen TUI dashboard (the default when no subcommand or -p is given)
+    // Needs the `tui` cargo feature, which is on by default; without it the
+    // flag errors with a rebuild hint (see `run` in cli/mod.rs).
+    #[arg(long, help_heading = "Output")]
     pub(crate) tui: bool,
 
-    /// Use classic CLI mode instead of TUI (overrides default TUI)
-    #[arg(long)]
+    /// Line-based chat instead of the full-screen TUI
+    #[arg(long, help_heading = "Output")]
     pub(crate) no_tui: bool,
 
     /// Color theme: amber (default), ocean, minimal, high-contrast
-    #[arg(long, value_enum, default_value = "amber")]
+    #[arg(long, value_enum, default_value = "amber", help_heading = "Output")]
     pub(crate) theme: Theme,
 
     /// Compact output mode (less visual chrome, more dense)
-    #[arg(long)]
+    #[arg(long, help_heading = "Output")]
     pub(crate) compact: bool,
 
     /// Verbose mode (detailed tool output and debug info)
-    #[arg(short = 'v', long, global = true)]
+    #[arg(short = 'v', long, global = true, help_heading = "Output")]
     pub(crate) verbose: bool,
 
     /// Always display token usage after each response
-    #[arg(long)]
+    #[arg(long, help_heading = "Output")]
     pub(crate) show_tokens: bool,
 
     /// Use ASCII-only output (no emoji or extended Unicode)
-    #[arg(long)]
+    #[arg(long, help_heading = "Output")]
     pub(crate) ascii: bool,
 
     /// Plan mode: agent proposes tool calls without executing them
-    #[arg(long)]
+    #[arg(long, help_heading = "Mode & safety")]
     pub(crate) plan: bool,
 
+    /// Maximum number of agent loop iterations (hard limit)
+    #[arg(long, global = true, help_heading = "Limits")]
+    pub(crate) max_turns: Option<usize>,
+
+    /// Maximum total prompt+completion tokens before stopping
+    #[arg(long, global = true, help_heading = "Limits")]
+    pub(crate) max_budget_tokens: Option<usize>,
+
+    /// Maximum wall-clock seconds before stopping
+    #[arg(long, global = true, help_heading = "Limits")]
+    pub(crate) max_wall_secs: Option<u64>,
+
+    /// Maximum provider-reported USD cost before stopping (e.g. OpenRouter usage.cost)
+    #[arg(long, global = true, help_heading = "Limits")]
+    pub(crate) max_cost_usd: Option<f64>,
+
     /// Resume a named chat session (alias for `selfware chat --resume <name>`)
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", help_heading = "Session")]
     pub(crate) resume_session: Option<String>,
 
     /// Resume the most recent journal entry and continue it
     // `claude -c` parity; long-only so `-c` stays --config for existing scripts.
-    #[arg(long = "continue")]
+    #[arg(long = "continue", help_heading = "Session")]
     pub(crate) continue_flag: bool,
 
-    /// Auto-resume the most recent INCOMPLETE task at startup, so a long
-    /// task interrupted mid-run (crash/restart) picks up from its
-    /// checkpoint. A task that FAILED by hitting its iteration cap (typed
-    /// "Max iterations exceeded" stop) also qualifies — chaining it is how a
-    /// productive long run gets its next segment — while every other
-    /// failure (crashes, safety stops, guard aborts, the exhausted-chain
-    /// AUTO_CONTINUE_LIMIT stop) stays explicit-`resume`-only. Implicit and
-    /// conservative: an explicit task or resume argument (a subcommand,
-    /// `-p` prompt, `--continue`, `--resume-session`) always wins and
-    /// suppresses auto-resume; if no eligible checkpoint exists, startup
-    /// proceeds normally.
-    #[arg(long)]
+    /// Resume the most recent unfinished task from its checkpoint at startup.
+    /// An explicit task, `-p`, `--continue` or `--resume-session` wins.
+    // Eligibility: an INCOMPLETE task, or one that FAILED by hitting its
+    // iteration cap (typed "Max iterations exceeded" stop) — chaining it is
+    // how a productive long run gets its next segment. Every other failure
+    // (crashes, safety stops, guard aborts, the exhausted-chain
+    // AUTO_CONTINUE_LIMIT stop) stays explicit-`resume`-only. With no
+    // eligible checkpoint, startup proceeds normally.
+    #[arg(long, help_heading = "Session")]
     pub(crate) autocontinue: bool,
 
-    /// Multi-chat: assign each task to role-matched idle swarm agents by trust.
-    ///
-    /// Only meaningful with `multi-chat`. The coordinator's assignment gates
-    /// execution — a task that cannot be assigned makes no LLM calls — but
-    /// execution itself is the same single-completion-per-agent fan-out as
-    /// plain multi-chat; there are no separate worker agents and no
-    /// restricted tool set. Other subcommands ignore this flag (with a note).
-    #[arg(long, global = true)]
+    /// multi-chat only: assign each task to a role-matched idle agent by trust
+    // The coordinator's assignment gates execution — a task that cannot be
+    // assigned makes no LLM calls — but execution itself is the same
+    // single-completion-per-agent fan-out as plain multi-chat; there are no
+    // separate worker agents and no restricted tool set. Other subcommands
+    // ignore this flag (with a note).
+    #[arg(long, global = true, help_heading = "Advanced")]
     pub(crate) coordinator: bool,
 
     /// Validate the configuration file and exit without running the agent
-    #[arg(long)]
+    #[arg(long, help_heading = "Advanced")]
     pub(crate) validate_config: bool,
 
     /// Enable debug-channel output. With no value, enables every channel
@@ -141,29 +160,20 @@ pub(crate) struct Cli {
         num_args = 0..=1,
         require_equals = true,
         default_missing_value = "",
+        help_heading = "Advanced",
     )]
     pub(crate) debug: Option<String>,
 
     /// Output format for headless mode: text, json, or stream-json (may also follow a subcommand)
     // `global` so it may follow a subcommand too (e.g. `runs list --output-format json`).
-    #[arg(long, value_enum, default_value = "text", global = true)]
+    #[arg(
+        long,
+        value_enum,
+        default_value = "text",
+        global = true,
+        help_heading = "Output"
+    )]
     pub(crate) output_format: HeadlessOutputFormat,
-
-    /// Maximum number of agent loop iterations (hard limit)
-    #[arg(long, global = true)]
-    pub(crate) max_turns: Option<usize>,
-
-    /// Maximum total prompt+completion tokens before stopping
-    #[arg(long, global = true)]
-    pub(crate) max_budget_tokens: Option<usize>,
-
-    /// Maximum wall-clock seconds before stopping
-    #[arg(long, global = true)]
-    pub(crate) max_wall_secs: Option<u64>,
-
-    /// Maximum provider-reported USD cost before stopping (e.g. OpenRouter usage.cost)
-    #[arg(long, global = true)]
-    pub(crate) max_cost_usd: Option<f64>,
 
     /// Configuration profile to apply (e.g. `architect`, `swarm-8`, `batch-16`,
     /// `batch-32`, `visual`, `quick`).  Overrides `max_tokens` and
@@ -298,7 +308,7 @@ pub(crate) enum Commands {
     /// SELFWARE_API_KEY to be sent to the endpoint the config selects. Only trust
     /// repositories whose selfware.toml you have reviewed. Records the config's
     /// canonical path in ~/.selfware/trusted_repos.
-    #[command(display_order = 10)]
+    #[command(display_order = 27)]
     Trust {
         /// Path to the config to trust (default: ./selfware.toml).
         #[arg(default_value = "selfware.toml")]
@@ -372,7 +382,7 @@ pub(crate) enum Commands {
     },
 
     /// Auto-detect and configure endpoint settings
-    #[command(alias = "ac", display_order = 10)]
+    #[command(alias = "ac", display_order = 25)]
     AutoConfig {
         /// API endpoint URL to test (e.g., http://127.0.0.1:1234/v1)
         #[arg(short, long)]
@@ -396,7 +406,7 @@ pub(crate) enum Commands {
     },
 
     /// Zero-config auto-setup: scan local LLM servers, detect models, generate config
-    #[command(alias = "up", display_order = 10)]
+    #[command(alias = "up", display_order = 26)]
     Unpack {
         /// Just scan without writing config
         #[arg(long)]
@@ -412,7 +422,7 @@ pub(crate) enum Commands {
     /// Without a TASK, starts an interactive session. With a TASK, runs a
     /// single fan-out across the role agents, prints the aggregated results,
     /// and exits (headless one-shot); `-p <task> multi-chat` is equivalent.
-    #[command(alias = "m", display_order = 10)]
+    #[command(alias = "m", display_order = 16)]
     MultiChat {
         /// Run one fan-out for this task and exit instead of starting an
         /// interactive session.
@@ -423,7 +433,7 @@ pub(crate) enum Commands {
     },
 
     /// Analyze a codebase
-    #[command(alias = "a", display_order = 10)]
+    #[command(alias = "a", display_order = 13)]
     Analyze {
         /// Path to analyze
         #[arg(default_value = ".")]
@@ -431,7 +441,7 @@ pub(crate) enum Commands {
     },
 
     /// Render the codebase as an ecosystem visualization
-    #[command(display_order = 10)]
+    #[command(display_order = 15)]
     Garden {
         /// Path to visualize
         #[arg(default_value = ".")]
@@ -439,7 +449,7 @@ pub(crate) enum Commands {
     },
 
     /// Explore the workspace as a code knowledge graph
-    #[command(display_order = 10)]
+    #[command(display_order = 14)]
     Graph {
         /// Workspace path to index
         #[arg(default_value = ".")]
@@ -476,7 +486,7 @@ pub(crate) enum Commands {
 
     /// Launch dashboard mode explicitly
     #[cfg(feature = "tui")]
-    #[command(display_order = 10)]
+    #[command(display_order = 23)]
     Dashboard,
 
     /// List journal entries from past tasks
@@ -484,14 +494,14 @@ pub(crate) enum Commands {
     Journal,
 
     /// View a specific journal entry
-    #[command(display_order = 10)]
+    #[command(display_order = 11)]
     JournalEntry {
         /// Entry ID
         task_id: String,
     },
 
     /// Remove a journal entry
-    #[command(display_order = 10)]
+    #[command(display_order = 12)]
     JournalDelete {
         /// Entry ID
         task_id: String,
@@ -540,18 +550,18 @@ pub(crate) enum Commands {
     },
 
     /// Manage MCP servers (`mcp list` shows the configured ones)
-    #[command(display_order = 10)]
+    #[command(display_order = 21)]
     Mcp {
         #[command(subcommand)]
         command: McpCommands,
     },
 
     /// Run as MCP server (stdio transport) so other AI tools can use Selfware's capabilities
-    #[command(display_order = 10)]
+    #[command(display_order = 22)]
     McpServer,
 
     /// Self-evolve: build the code graph and serve the evolution UI over HTTP
-    #[command(display_order = 10)]
+    #[command(display_order = 24)]
     SelfEvolve {
         /// Port for the evolve HTTP server
         #[arg(short, long, default_value_t = 7777)]
@@ -583,42 +593,42 @@ pub(crate) enum Commands {
     },
 
     /// Workflow commands (SWL and YAML)
-    #[command(alias = "w", display_order = 10)]
+    #[command(alias = "w", display_order = 17)]
     Workflow {
         #[command(subcommand)]
         command: WorkflowCommands,
     },
 
     /// Inspect or manipulate selfware configuration
-    #[command(display_order = 10)]
+    #[command(display_order = 9)]
     Config {
         #[command(subcommand)]
         command: ConfigCommands,
     },
 
     /// Inspect workflow state
-    #[command(alias = "st", display_order = 10)]
+    #[command(alias = "st", display_order = 18)]
     State {
         #[command(subcommand)]
         command: StateCommands,
     },
 
     /// Supervised run management (start, list, abort agent runs)
-    #[command(display_order = 10)]
+    #[command(display_order = 19)]
     Runs {
         #[command(subcommand)]
         command: RunsCommand,
     },
 
     /// Manage the fail-closed emergency killswitch
-    #[command(display_order = 10)]
+    #[command(display_order = 28)]
     Killswitch {
         #[command(subcommand)]
         command: KillswitchCommands,
     },
 
     /// Manage user and admitted skills
-    #[command(display_order = 10)]
+    #[command(display_order = 20)]
     Skill {
         #[command(subcommand)]
         command: SkillCommands,

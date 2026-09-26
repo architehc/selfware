@@ -2766,3 +2766,60 @@ fn process_exit_message_prints_once_and_never_calls_a_cancel_an_error() {
         "credential must be scrubbed: {line}"
     );
 }
+
+// ── --help layout (0.9.1: 30 subcommands + 26 options in flat lists) ──
+
+#[test]
+fn help_groups_options_under_headings_in_a_sensible_order() {
+    use clap::CommandFactory;
+    let help = Cli::command().render_help().to_string();
+    let pos = |h: &str| {
+        help.find(h)
+            .unwrap_or_else(|| panic!("missing heading {h:?} in:\n{help}"))
+    };
+    let order = [
+        pos("Mode & safety:"),
+        pos("Output:"),
+        pos("Limits:"),
+        pos("Session:"),
+        pos("Advanced:"),
+    ];
+    assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?}\n{help}");
+    // The --tui line is one accurate sentence (TUI is the default with no
+    // subcommand/-p; the `tui` feature is on by default).
+    assert!(
+        !help.contains("(requires --features tui) This is"),
+        "{help}"
+    );
+    // Developer internals of --autocontinue / --coordinator are comments now.
+    assert!(!help.contains("AUTO_CONTINUE_LIMIT"), "{help}");
+    assert!(!help.contains("restricted tool set"), "{help}");
+}
+
+#[test]
+fn help_lists_everyday_subcommands_first_and_keeps_all() {
+    use clap::CommandFactory;
+    let cmd = Cli::command();
+    let mut visible: Vec<(usize, String)> = cmd
+        .get_subcommands()
+        .filter(|c| !c.is_hide_set())
+        .map(|c| (c.get_display_order(), c.get_name().to_string()))
+        .collect();
+    visible.sort();
+    let names: Vec<&str> = visible.iter().map(|(_, n)| n.as_str()).collect();
+    assert_eq!(
+        &names[..7],
+        [
+            "init",
+            "chat",
+            "run",
+            "resume",
+            "status",
+            "doctor",
+            "llm-doctor"
+        ]
+    );
+    for kept in ["killswitch", "trust", "unpack", "auto-config", "mcp-server"] {
+        assert!(names.contains(&kept), "{kept} must stay listed: {names:?}");
+    }
+}
