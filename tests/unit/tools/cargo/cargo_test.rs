@@ -930,3 +930,37 @@ fn libtest_totals_none_without_summary_line() {
     assert_eq!(libtest_totals("running 3 tests\ntest a ... ok\n"), None);
     assert_eq!(libtest_totals(""), None);
 }
+
+#[tokio::test]
+async fn cargo_test_refuses_option_shaped_operands_before_spawning() {
+    // Review (0.9.2): `test_name`/`package` went straight into cargo's argv;
+    // "--config=target.<triple>.runner=sh" would run an arbitrary program,
+    // and Yolo/Daemon modes do not confirm the call.
+    let tool = CargoTest;
+    for (field, value) in [
+        (
+            "test_name",
+            "--config=target.x86_64-unknown-linux-gnu.runner=sh",
+        ),
+        ("test_name", "-Zunstable-options"),
+        ("package", "--manifest-path=/tmp/evil/Cargo.toml"),
+        ("package", "  -q"),
+    ] {
+        let err = tool
+            .execute(serde_json::json!({ field: value }))
+            .await
+            .expect_err("an option-shaped operand must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("must be a name, not an option"),
+            "{field}={value}: {msg}"
+        );
+    }
+}
+
+#[test]
+fn plain_names_are_accepted_as_cargo_test_operands() {
+    assert!(reject_flag_like_operand("test_name", Some("parser::tests::roundtrip")).is_ok());
+    assert!(reject_flag_like_operand("package", Some("hexyl")).is_ok());
+    assert!(reject_flag_like_operand("package", None).is_ok());
+}

@@ -211,11 +211,16 @@ impl Tool for CargoTest {
         cmd.in_workspace_root();
         cmd.arg("test");
 
-        if let Some(pkg) = args.get("package").and_then(|v| v.as_str()) {
+        let package = args.get("package").and_then(|v| v.as_str());
+        let test_name = args.get("test_name").and_then(|v| v.as_str());
+        reject_flag_like_operand("package", package)?;
+        reject_flag_like_operand("test_name", test_name)?;
+
+        if let Some(pkg) = package {
             cmd.arg("-p").arg(pkg);
         }
 
-        if let Some(name) = args.get("test_name").and_then(|v| v.as_str()) {
+        if let Some(name) = test_name {
             cmd.arg(name);
         }
 
@@ -1000,6 +1005,25 @@ fn parse_clippy_lint(message: &Value) -> Option<ClippyLint> {
         severity,
         suggestion,
     })
+}
+
+/// Refuse a model-supplied operand that cargo would parse as an option.
+///
+/// `package` and `test_name` go straight into cargo's argv, so a value such
+/// as `--config=target.x86_64-unknown-linux-gnu.runner=sh` would reconfigure
+/// cargo and run an arbitrary program. The permission layer confirms such
+/// calls in Normal/AutoEdit (0.9.2), but Yolo and Daemon run them unasked;
+/// the tool itself must never forward an option (review, 0.9.2).
+fn reject_flag_like_operand(field: &str, value: Option<&str>) -> Result<()> {
+    if let Some(v) = value {
+        if v.trim_start().starts_with('-') {
+            anyhow::bail!(
+                "cargo_test `{field}` must be a name, not an option: {v:?} starts with '-' \
+                 and would be parsed by cargo as a flag"
+            );
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
