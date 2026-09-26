@@ -245,7 +245,6 @@ impl StreamDisplayFilter {
     }
 
     /// Whether the stream is currently inside a tool-call region.
-    #[cfg(test)]
     pub(crate) fn inside_tool_call(&self) -> bool {
         self.inside.is_some_and(|i| !is_think_tag(i))
     }
@@ -369,6 +368,56 @@ pub(crate) fn stream_ended_truncated_without_terminal(
     !ended_with_done && !has_finish_reason && produced_output && !cancelled && !runaway_cut
 }
 
+/// Text-mode prose pipeline for one streamed response: echo gate (a
+/// word-for-word repeat of the last tool-free answer is not printed again),
+/// then the line renderer (Markdown styling, blank-line collapse). `shown`
+/// is every prose byte of this response that is on screen — printed now or
+/// already there — and goes to the answer ledger at the end.
+struct TextProse {
+    renderer: output::live::ProseRenderer,
+    echo: output::live::EchoGate,
+    shown: String,
+}
+
+impl TextProse {
+    fn new() -> Self {
+        Self {
+            renderer: output::live::ProseRenderer::new(output::markdown_styled()),
+            echo: output::live::EchoGate::new(output::live::echo_target()),
+            shown: String::new(),
+        }
+    }
+
+    fn push(&mut self, text: &str) -> String {
+        self.shown.push_str(text);
+        let pass = self.echo.push(text);
+        self.renderer.push(&pass)
+    }
+
+    fn finish(&mut self) -> String {
+        let pass = self.echo.finish();
+        let mut out = self.renderer.push(&pass);
+        out.push_str(&self.renderer.finish());
+        out
+    }
+}
+
+/// Print rendered prose lines to a (possibly raw-mode) terminal.
+fn print_prose(rendered: &str) {
+    use std::io::Write;
+    if rendered.is_empty() {
+        return;
+    }
+    // Replace \n with \r\n so every newline resets to col 0
+    let safe = rendered.replace('\n', "\r\n");
+    let _lock = output::OUTPUT_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    print!("{}", safe);
+    std::io::stdout().flush().ok();
+    output::note_streamed_text(&safe);
+}
+
 impl Agent {
     /// Extract function name from a tool_call XML block for clean display
     pub(super) fn extract_tool_name(xml: &str) -> Option<String> {
@@ -394,29 +443,27 @@ impl Agent {
         None
     }
 
-    /// Show filtered stream pieces: prose to the TUI or stdout, a closed
-    /// tool-call region as a TUI progress event only (text mode announces
-    /// each call once, with the dispatch line "Step N → tool arg"), inline
-    /// reasoning into the accumulated reasoning.
+    /// Route filtered stream pieces: prose to the TUI, or (text mode) into
+    /// `prose`, returning the rendered lines ready to print; a closed
+    /// tool-call region becomes a TUI progress event only (text mode
+    /// announces each call once, with the dispatch line "Step N → tool
+    /// arg"); inline reasoning goes into the accumulated reasoning.
     fn show_display_pieces(
         &self,
         pieces: Vec<DisplayPiece>,
         reasoning: &mut String,
-        suppress_stream_stdout: bool,
-    ) {
-        use std::io::Write;
+        prose: Option<&mut TextProse>,
+    ) -> String {
         let tui_active = crate::output::is_tui_active();
+        let mut rendered = String::new();
+        let mut prose = prose;
         for piece in pieces {
             match piece {
                 DisplayPiece::Text(text) => {
                     if tui_active {
                         self.emit_event(AgentEvent::AssistantDelta { text });
-                    } else if !suppress_stream_stdout {
-                        // Replace \n with \r\n so every newline resets to col 0
-                        let safe = text.replace('\n', "\r\n");
-                        print!("{}", safe);
-                        std::io::stdout().flush().ok();
-                        output::note_streamed_text(&safe);
+                    } else if let Some(p) = prose.as_deref_mut() {
+                        rendered.push_str(&p.push(&text));
                     }
                 }
                 DisplayPiece::ToolCall(Some(name)) if tui_active => {
@@ -433,6 +480,7 @@ impl Agent {
                 }
             }
         }
+        rendered
     }
 
     /// Check LLM cache for a matching previous request
@@ -733,6 +781,8 @@ impl Agent {
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut in_reasoning = false;
         let mut display_filter = StreamDisplayFilter::default();
+        // Text-mode prose pipeline (None in TUI / JSON / quiet mode).
+        let mut text_prose = (!tui_active && !suppress_stream_stdout).then(TextProse::new);
         let mut captured_logprobs: Option<serde_json::Value> = None;
         // How the loop below ended. `stream_ended_with_done` tracks the
         // [DONE] sentinel; `runaway_cut` tracks the deliberate monologue
@@ -848,16 +898,13 @@ impl Agent {
 
             match chunk {
                 StreamChunk::Content(text) => {
-                    // Stop spinner on first content — must complete
-                    // before we print anything to avoid interleaving
+                    // The TUI spinner stops on first content. The terminal
+                    // spinner stays until there is a rendered line to print
+                    // (below): a response that opens with a tool call keeps
+                    // its sign of life instead of going blank.
                     if tui_active && tui_spinner_active {
                         self.emit_event(AgentEvent::SpinnerStop);
                         tui_spinner_active = false;
-                    } else if let Some(s) = spinner.take() {
-                        // Drop stops the spinner task and prints final line
-                        drop(s);
-                        // Small delay to let the spinner task fully exit
-                        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
                     }
                     if in_reasoning {
                         in_reasoning = false;
@@ -870,8 +917,10 @@ impl Agent {
                         );
                         if tui_active {
                             self.emit_event(AgentEvent::ThinkingEnd);
-                        } else if !output::is_compact() && !suppress_stream_stdout {
-                            println!();
+                        } else if !suppress_stream_stdout {
+                            // End the inline reasoning line, if one is open
+                            // (no extra blank line).
+                            output::close_stream_line();
                         }
                     }
                     sticky_state.set_activity("Generating...");
@@ -881,7 +930,26 @@ impl Agent {
                     // Filter tool-call / reasoning markup from the display;
                     // `content` above keeps every byte for the parser.
                     let pieces = display_filter.push(&text);
-                    self.show_display_pieces(pieces, &mut reasoning, suppress_stream_stdout);
+                    let rendered =
+                        self.show_display_pieces(pieces, &mut reasoning, text_prose.as_mut());
+                    if !rendered.is_empty() {
+                        if let Some(s) = spinner.take() {
+                            // Drop stops the spinner task and clears its line;
+                            // let the task fully exit before printing.
+                            drop(s);
+                            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+                        }
+                        print_prose(&rendered);
+                    } else if spinner.is_none()
+                        && text_prose.is_some()
+                        && display_filter.inside_tool_call()
+                    {
+                        // A long tool call (a file_write body) streams with
+                        // nothing to print: show a sign of life, not silence.
+                        spinner = Some(crate::ui::spinner::TerminalSpinner::start(
+                            "Composing tool call…",
+                        ));
+                    }
                 }
                 StreamChunk::Reasoning(text) => {
                     // Stop spinner on first reasoning — unless (compact,
@@ -980,12 +1048,30 @@ impl Agent {
         // Flush the display filter: a held partial token that never became
         // markup is shown; an unclosed region stays hidden.
         let pieces = display_filter.finish();
-        self.show_display_pieces(pieces, &mut reasoning, suppress_stream_stdout);
-
-        // Trailing newline is DISPLAY output — suppress it in json/quiet mode.
-        if !tui_active && !suppress_stream_stdout && (!content.is_empty() || !reasoning.is_empty())
-        {
-            println!();
+        let mut rendered = self.show_display_pieces(pieces, &mut reasoning, text_prose.as_mut());
+        if let Some(prose) = text_prose.as_mut() {
+            rendered.push_str(&prose.finish());
+        }
+        if !rendered.is_empty() {
+            if let Some(s) = spinner.take() {
+                drop(s);
+                tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            }
+            print_prose(&rendered);
+        }
+        // Prose always ends its last line; only an inline reasoning line can
+        // still be open. (The old unconditional println! left a blank line
+        // after every response.)
+        if !tui_active && !suppress_stream_stdout {
+            output::close_stream_line();
+        }
+        // What reached the screen, for the final answer's print-once check
+        // and the next response's echo gate. A response with a tool call is
+        // narration, never an echo target.
+        if let Some(prose) = text_prose.take() {
+            let tool_free =
+                tool_calls.is_empty() && !crate::tool_parser::text_opens_tool_call(&content);
+            output::record_shown_prose(&prose.shown, tool_free);
         }
 
         // Terminal-indication guard, mirror of the producer (W2b). The

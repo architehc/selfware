@@ -11,6 +11,9 @@ use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
+pub(crate) mod live;
+pub(crate) use live::{record_shown_prose, reset_answer_ledger};
+
 /// Global output lock to prevent interleaving from concurrent tasks.
 /// All output functions should acquire this lock before printing.
 pub static OUTPUT_LOCK: Mutex<()> = Mutex::new(());
@@ -30,8 +33,8 @@ static QUIET_MODE: AtomicBool = AtomicBool::new(false);
 /// stdout (banners, "Final answer:", ANSI escapes) so only valid JSON goes out.
 static JSON_MODE: AtomicBool = AtomicBool::new(false);
 
-/// When true, assistant responses are streamed live to stdout token-by-token,
-/// so `final_answer` must not re-print the content (it would duplicate it).
+/// When true, assistant responses are streamed live to stdout (line by line,
+/// rendered); `final_answer` then prints only what was not shown yet.
 static STREAMING_MODE: AtomicBool = AtomicBool::new(false);
 
 /// When true, stdout is not a terminal (piped/captured) — strip ANSI and emoji.
@@ -176,6 +179,16 @@ pub(crate) fn note_streamed_text(text: &str) {
 pub(crate) fn note_streamed_text_on(flag: &AtomicBool, text: &str) {
     if !text.is_empty() {
         flag.store(!text.ends_with('\n'), Ordering::SeqCst);
+    }
+}
+
+/// End a streamed line that is still open (inline reasoning written without
+/// a trailing newline). Prints nothing otherwise, so no blank line appears.
+pub(crate) fn close_stream_line() {
+    if take_stream_line_open(&STREAM_LINE_OPEN) {
+        let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        print!("\r\n");
+        io::stdout().flush().ok();
     }
 }
 
@@ -1085,28 +1098,53 @@ pub(crate) fn citation_check(detail: &str) {
     io::stdout().flush().ok();
 }
 
-/// Print final answer
+/// Whether prose (streamed answers, the final answer) is rendered from
+/// Markdown to terminal styling: a terminal with colour allowed. Plain mode
+/// (non-tty), `--no-color` and `NO_COLOR` keep the raw text.
+pub(crate) fn markdown_styled() -> bool {
+    !is_plain_mode() && colored::control::SHOULD_COLORIZE.should_colorize()
+}
+
+/// Print final answer — exactly once.
+///
+/// Text mode streams prose live (rendered line by line, see
+/// [`live`]); what reached the screen is recorded in the answer ledger.
+/// Here only the part of `content` the user has NOT seen is printed: all of
+/// it when nothing was streamed (a cached response, a non-streaming call, a
+/// plan-mode summary), the tail when a note was appended to a streamed
+/// answer, nothing when the answer is already on screen. The old rule —
+/// "streaming mode never prints" — lost every answer that did not stream.
 pub(crate) fn final_answer(content: &str) {
     if should_suppress_output() {
         return;
     }
-    // In streaming mode the assistant response was already displayed live,
-    // token-by-token, on stdout; re-printing it here duplicates the final
-    // answer on screen. (JSON/quiet/TUI are already handled above.)
-    if is_streaming_mode() {
+    let Some(part) = live::unshown_part(content) else {
         return;
-    }
+    };
     let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if is_plain_mode() || is_json_mode() {
         // In plain/JSON mode, emit only the content with no prefix or
         // decoration so machine-readable output is not corrupted.
-        println!("{}", content);
-    } else if is_compact() {
-        print!("\r\x1b[2K{}\n", content);
+        println!("{}", part);
     } else {
-        print!("\r\x1b[2K{} {}\n", "Final answer:".bright_green(), content);
+        let rendered = live::render_prose(&part, markdown_styled());
+        let body = rendered.trim_end_matches('\n').replace('\n', "\r\n");
+        if is_compact() || is_streaming_mode() {
+            // Streaming mode: the answer reads like the prose streamed
+            // around it, without a label.
+            print!("\r\x1b[2K{}\r\n", body);
+        } else if body.contains('\n') {
+            print!(
+                "\r\x1b[2K{}\r\n{}\r\n",
+                "Final answer:".bright_green(),
+                body
+            );
+        } else {
+            print!("\r\x1b[2K{} {}\r\n", "Final answer:".bright_green(), body);
+        }
     }
     io::stdout().flush().ok();
+    live::record_shown_prose(content, false);
 }
 
 /// Display a color-coded diff for file edits/writes.

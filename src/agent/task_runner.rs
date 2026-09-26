@@ -851,6 +851,10 @@ impl Agent {
         // Reset loop state so queued tasks don't inherit the previous
         // task's iteration counter and hit the max-iterations limit.
         self.loop_control.reset_for_task();
+        // What the user saw belongs to the previous task: a new task's
+        // answer is never "already shown" (nor an echo) because an earlier
+        // task happened to say the same words.
+        crate::output::reset_answer_ledger();
         // A new task starts with no outstanding obligations. Debt is per-task:
         // carrying it across would attribute one task's unread code to another.
         self.task_verification_root = Some(self.tools.workspace_root().path());
