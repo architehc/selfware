@@ -2186,7 +2186,7 @@ pub async fn run() -> Result<()> {
             emit_structured_result(&agent, &run_result, duration_ms, answer_capture.take());
         } else if !cli.quiet
             && run_result.is_ok()
-            && !matches!(agent.run_summary().verification, Some((false, _)))
+            && earns_task_complete_banner(&agent.run_summary())
             && agent
                 .grounding_status()
                 .is_none_or(|g| g.warning_note().is_none())
@@ -3131,7 +3131,7 @@ async fn handle_command(
                 emit_structured_result(&agent, &run_result, duration_ms, answer_capture.take());
             } else if !quiet
                 && run_result.is_ok()
-                && !matches!(agent.run_summary().verification, Some((false, _)))
+                && earns_task_complete_banner(&agent.run_summary())
                 && agent
                     .grounding_status()
                     .is_none_or(|g| g.warning_note().is_none())
@@ -6671,6 +6671,16 @@ pub(crate) fn journal_title(input: &str, max_chars: usize) -> String {
 /// lines a user actually reads after a run — outcome, iterations, files
 /// changed, verification, tokens/cost. Printed for completed AND failed
 /// runs (a bare `✗ Task failed: MAX_ITERATIONS` explained nothing).
+/// Whether a finished run gets the green "Task complete." line: not when its
+/// verification failed, and not when files changed but no check ever ran on
+/// them (review C2, 0.9.1 — the failure-mode banner says "unverified" then).
+fn earns_task_complete_banner(summary: &crate::agent::RunSummary) -> bool {
+    match summary.verification {
+        Some((passed, _)) => passed,
+        None => summary.files_changed.is_empty(),
+    }
+}
+
 fn render_run_summary(summary: &crate::agent::RunSummary, failure: Option<&str>) -> String {
     let mut lines = vec!["── Run summary ──".to_string()];
     match failure {

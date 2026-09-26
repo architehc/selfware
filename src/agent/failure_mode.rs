@@ -96,6 +96,12 @@ pub enum FailureKind {
 pub(crate) const VERIFICATION_FAILED_NOTE: &str =
     "verification FAILED — no check the run ran passed on the final tree";
 
+/// Evidence note for a completed edit run on which no verification check ran
+/// (every stage was not runnable, or none applied); `cli_banner` keys its
+/// non-✅ header on it (review C2, 0.9.1).
+pub(crate) const VERIFICATION_NOT_PERFORMED_NOTE: &str =
+    "verification NOT PERFORMED — no check ran on the final tree";
+
 /// Evidence note for a completed run whose requirements audit could not run;
 /// `cli_banner` keys its non-clean header on it.
 pub(crate) const AUDIT_NOT_PERFORMED_NOTE: &str = "requirements audit NOT PERFORMED";
@@ -541,6 +547,13 @@ impl FailureMode {
                 "⚠️ Task completed ({}) — {CITATIONS_NONE_CHECKABLE_NOTE}; the answer was not checked against the files",
                 self.kind.tag()
             )
+        } else if self.kind.is_success() && self.evidence.contains(VERIFICATION_NOT_PERFORMED_NOTE)
+        {
+            // Edits landed, but no check ever ran on them — no clean ✅.
+            format!(
+                "⚠️ Task completed ({}) — edits landed, but {VERIFICATION_NOT_PERFORMED_NOTE}",
+                self.kind.tag()
+            )
         } else if self.kind.is_success() {
             format!("✅ Task completed successfully ({})", self.kind.tag())
         } else if matches!(self.kind, FailureKind::NoChange)
@@ -619,14 +632,26 @@ fn safety_blocked_share(agent: &Agent) -> Option<(usize, usize)> {
 ///   deliverable; a failing check is a finding about the workspace), but the
 ///   evidence names the failure so the banner is not ✅.
 ///
+/// - `Success` with no check at all (`None`) stays `Success` (exit 0) but
+///   carries `VERIFICATION_NOT_PERFORMED_NOTE`, so the banner is not ✅.
+///
 /// Failure verdicts pass through unchanged.
 pub(crate) fn with_verification_verdict(
     base: FailureMode,
     verification: Option<(bool, usize)>,
     read_only: bool,
 ) -> FailureMode {
-    let Some((false, checks)) = verification else {
-        return base;
+    let checks = match verification {
+        Some((false, checks)) => checks,
+        // Edits landed but no check ran: still a success (exit 0), but the
+        // evidence says so and the banner is not a clean ✅ (Rule 3).
+        None if base.kind == FailureKind::Success => {
+            return FailureMode {
+                evidence: format!("{}; {VERIFICATION_NOT_PERFORMED_NOTE}", base.evidence),
+                ..base
+            };
+        }
+        _ => return base,
     };
     match base.kind {
         FailureKind::Success => FailureMode {

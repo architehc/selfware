@@ -801,11 +801,26 @@ fn failed_verification_on_a_read_only_no_change_is_named_not_green() {
 
 #[test]
 fn passing_or_absent_verification_and_failure_verdicts_pass_through() {
-    for verification in [None, Some((true, 4))] {
-        let mode = with_verification_verdict(verdict(FailureKind::Success), verification, false);
-        assert_eq!(mode.kind, FailureKind::Success);
-        assert_eq!(mode.evidence, "base evidence");
-    }
+    let mode = with_verification_verdict(verdict(FailureKind::Success), Some((true, 4)), false);
+    assert_eq!(mode.kind, FailureKind::Success);
+    assert_eq!(mode.evidence, "base evidence");
+    assert!(mode.cli_banner().contains("✅"), "{}", mode.cli_banner());
+    // Review C2 (0.9.1): an edit run with NO check is still a success, but
+    // it is named as unverified and gets no ✅.
+    let mode = with_verification_verdict(verdict(FailureKind::Success), None, false);
+    assert_eq!(mode.kind, FailureKind::Success);
+    assert!(mode.kind.is_nonfailure());
+    assert!(
+        mode.evidence.contains(VERIFICATION_NOT_PERFORMED_NOTE),
+        "{}",
+        mode.evidence
+    );
+    let banner = mode.cli_banner();
+    assert!(!banner.contains("✅"), "{banner}");
+    assert!(banner.contains("NOT PERFORMED"), "{banner}");
+    // NoChange with no check is untouched (nothing to verify).
+    let mode = with_verification_verdict(verdict(FailureKind::NoChange), None, true);
+    assert_eq!(mode.evidence, "base evidence");
     let mode =
         with_verification_verdict(verdict(FailureKind::FakeComplete), Some((false, 2)), false);
     assert_eq!(mode.kind, FailureKind::FakeComplete);
