@@ -403,3 +403,12 @@ fn test_restore_terminal_state_no_panic() {
     // is not in raw mode (all operations are best-effort).
     restore_terminal_state();
 }
+
+#[test]
+fn parse_step_status_reads_the_step_number_only() {
+    assert_eq!(parse_step_status("Step 2"), Some(2));
+    // Legacy "N/M": M was the iteration cap, never shown as a total.
+    assert_eq!(parse_step_status("Step 2/400"), Some(2));
+    assert_eq!(parse_step_status("Step 3 failed: boom"), None);
+    assert_eq!(parse_step_status("Planning"), None);
+}

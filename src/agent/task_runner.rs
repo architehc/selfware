@@ -1964,12 +1964,10 @@ impl Agent {
             // converging run is distinguishable from a stalled one (the TUI had
             // no step signal — step/iteration never reached it). Reuses the
             // existing Status event path; a no-op when there is no TUI emitter.
+            // "Step N" only: max_iterations is a safety cap, not the task's
+            // total, so "Step 2/400" read as 0.5% done (TUI log pane, 0.9.1).
             self.emit_event(AgentEvent::Status {
-                message: format!(
-                    "Step {}/{}",
-                    self.loop_control.current_step(),
-                    self.loop_control.max_iterations()
-                ),
+                message: step_status_message(self.loop_control.current_step()),
             });
             // Hard limits: token budget, USD cost, and wall-clock timeout
             self.enforce_hard_budgets(task_description).await?;
@@ -3361,6 +3359,12 @@ where
         }
     }
     outcomes
+}
+
+/// The live step signal sent to the TUI (status bar, log pane, header).
+/// Carries the step number only — never the iteration cap as a denominator.
+pub(crate) fn step_status_message(step: usize) -> String {
+    format!("Step {step}")
 }
 
 #[cfg(test)]

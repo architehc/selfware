@@ -499,20 +499,23 @@ fn update_step_progress_drives_gauge_and_header() {
     // Idle: header has no step segment.
     assert!(!app.header_title().contains("step"));
 
-    // A live "Step 3/200" signal advances the gauge from nothing.
-    app.update_step_progress(3, 200);
+    // A live "Step 3" signal advances the counter from nothing.
+    app.update_step_progress(3);
     let p = app.task_progress.as_ref().expect("progress created");
     assert_eq!(p.current_step, 3);
-    assert_eq!(p.total_steps, Some(200));
+    // The iteration cap is not a task total: none is recorded.
+    assert_eq!(p.total_steps, None);
     assert_eq!(app.state, AppState::RunningTask);
     let title = app.header_title();
-    assert!(title.contains("step 3/200"), "header shows step: {title}");
+    assert!(title.contains("step 3 "), "header shows step: {title}");
+    assert!(!title.contains("step 3/"), "no cap as denominator: {title}");
     assert!(title.contains("glm-5.2"));
 
     // A later signal updates in place (no duplicate progress entry).
-    app.update_step_progress(4, 200);
+    app.update_step_progress(4);
     assert_eq!(app.task_progress.as_ref().unwrap().current_step, 4);
-    assert!(app.header_title().contains("step 4/200"));
+    assert!(app.header_title().contains("step 4 "));
+    assert!(!app.header_title().contains('/'));
 }
 
 #[test]

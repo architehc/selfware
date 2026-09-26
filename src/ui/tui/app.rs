@@ -230,21 +230,22 @@ impl App {
         self.state = AppState::RunningTask;
     }
 
-    /// Update just the step counters of the progress gauge from a live
-    /// "Step X/Y" signal, so the gauge advances during a run instead of being
-    /// frozen at its initial value. Creates the progress entry if a run is
-    /// active but none was set yet.
-    pub fn update_step_progress(&mut self, current_step: usize, total_steps: usize) {
+    /// Update the step counter from a live "Step N" signal, so the header
+    /// advances during a run instead of being frozen at its initial value.
+    /// No total is recorded: the agent's iteration cap is a safety limit,
+    /// not the task's length. Creates the progress entry if a run is active
+    /// but none was set yet.
+    pub fn update_step_progress(&mut self, current_step: usize) {
         match self.task_progress.as_mut() {
             Some(p) => {
                 p.current_step = current_step;
-                p.total_steps = Some(total_steps);
+                p.total_steps = None;
             }
             None => {
                 self.set_progress(TaskProgress {
                     description: "Processing...".into(),
                     current_step,
-                    total_steps: Some(total_steps),
+                    total_steps: None,
                     current_action: "Working".into(),
                     elapsed_secs: 0,
                 });

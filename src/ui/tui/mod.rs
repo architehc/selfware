@@ -467,18 +467,10 @@ fn apply_agent_event(
             // streamed prose so turns render as separate messages
             // instead of one ever-growing block.
             app.commit_streaming();
-            // Drive the progress gauge from "Step {cur}/{max}" so
-            // it advances during a run instead of sitting at 0.
-            if let Some(rest) = message.strip_prefix("Step ") {
-                if let Some(tok) = rest.split_whitespace().next() {
-                    if let Some((c, m)) = tok.split_once('/') {
-                        if let (Ok(cur), Ok(max)) =
-                            (c.trim().parse::<usize>(), m.trim().parse::<usize>())
-                        {
-                            app.update_step_progress(cur, max);
-                        }
-                    }
-                }
+            // Drive the header's step counter from "Step {cur}" so it
+            // advances during a run instead of sitting at 0.
+            if let Some(cur) = parse_step_status(message) {
+                app.update_step_progress(cur);
             }
         }
         TuiEvent::ToolCompleted {
@@ -1876,6 +1868,15 @@ fn render_pause_indicator(frame: &mut Frame, area: Rect) {
 }
 
 #[allow(clippy::items_after_test_module)]
+/// The step number in a live "Step N" status signal; `None` for any other
+/// "Step …" message (e.g. "Step 3 failed: …"). A legacy "Step N/M" form is
+/// accepted but its M — the iteration cap, not a task total — is dropped.
+pub(crate) fn parse_step_status(message: &str) -> Option<usize> {
+    let rest = message.strip_prefix("Step ")?.trim();
+    let num = rest.split_once('/').map_or(rest, |(cur, _)| cur);
+    num.trim().parse().ok()
+}
+
 #[cfg(test)]
 #[path = "../../../tests/unit/ui/tui/mod_test.rs"]
 mod tests;

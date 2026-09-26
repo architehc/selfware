@@ -4692,3 +4692,15 @@ async fn interrupted_run_writes_an_interrupted_snapshot() {
     );
     server.stop().await;
 }
+
+#[test]
+fn step_status_message_never_shows_the_iteration_cap() {
+    // 0.9.1 TUI log pane: "Step 2/400" — 400 was max_iterations.
+    assert_eq!(step_status_message(2), "Step 2");
+    assert!(!step_status_message(399).contains('/'));
+    #[cfg(feature = "tui")]
+    assert_eq!(
+        crate::ui::tui::parse_step_status(&step_status_message(7)),
+        Some(7)
+    );
+}
