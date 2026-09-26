@@ -1872,7 +1872,9 @@ impl Agent {
         // execution step is appended when it is actually taken. A fixed
         // plan/execute pair cannot represent a retry, an error recovery, or a
         // run that needed nine steps instead of one.
-        let mut progress = output::TaskProgress::new(&["Planning"]);
+        // Open-ended from the start: the run's total is unknown, so even the
+        // planning phase renders as "Planning · Ns elapsed", never "[1/1] 0%".
+        let mut progress = output::TaskProgress::open_ended(&["Planning"]);
         if mode == LoopMode::NewTask {
             progress.start_phase();
         }

@@ -1350,10 +1350,34 @@ impl TaskProgress {
         }
     }
 
+    /// A tracker whose total is unknown from the start: an agent run knows
+    /// only its first phase (planning) before the first turn, and every later
+    /// step is appended as it is taken. Renders "Planning · 3s elapsed"
+    /// instead of the "[1/1] Planning [░░░░] 0%" bar, whose 1/1 total and 0%
+    /// were invented (UX field test, 0.9.1 headless `-p` start).
+    pub(crate) fn open_ended(phase_names: &[&str]) -> Self {
+        Self {
+            open_ended: true,
+            ..Self::new(phase_names)
+        }
+    }
+
     /// The honest line for an open-ended run: the current phase and the time
     /// elapsed — no total, percentage or ETA (none of which is known).
+    /// Between phases (the last one just completed, the next not yet begun)
+    /// it names the phase that finished rather than claiming the run is done.
     pub(crate) fn open_ended_line(&self) -> String {
-        let name = self.current_phase_name().unwrap_or("Done");
+        let finished;
+        let name = match self.current_phase_name() {
+            Some(name) => name,
+            None => match self.phases.last() {
+                Some(last) => {
+                    finished = format!("{} done", last.name);
+                    finished.as_str()
+                }
+                None => "Waiting",
+            },
+        };
         let secs = self.start_time.elapsed().as_secs();
         let elapsed = if secs >= 60 {
             format!("{}m {:02}s", secs / 60, secs % 60)

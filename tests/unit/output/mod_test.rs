@@ -929,6 +929,31 @@ fn open_ended_progress_shows_step_and_elapsed_never_a_total() {
     assert!(!line.contains("ETA"), "no invented ETA: {line}");
 }
 
+#[test]
+fn planning_phase_is_open_ended_from_the_start() {
+    // 0.9.1 headless `-p` start printed "📊 [1/1] Planning [░░░░░░░░] 0%":
+    // a 1/1 total and a 0% fraction nobody measured. The run tracker is
+    // open-ended from construction, so planning renders as phase + elapsed.
+    let mut progress = TaskProgress::open_ended(&["Planning"]);
+    assert!(progress.is_open_ended());
+    progress.start_phase();
+    let line = progress.open_ended_line();
+    assert!(line.starts_with("Planning · "), "{line}");
+    assert!(line.ends_with(" elapsed"), "{line}");
+    for invented in ['%', '/', '[', '░'] {
+        assert!(!line.contains(invented), "no invented fraction: {line}");
+    }
+
+    // Planning finished, first step not yet begun: name what finished,
+    // never "Done" (the run is not done).
+    progress.complete_phase();
+    let line = progress.open_ended_line();
+    assert!(line.starts_with("Planning done · "), "{line}");
+
+    progress.begin_step(0);
+    assert!(progress.open_ended_line().starts_with("Step 1 · "));
+}
+
 // ---- cargo_test summary: counts summed over every test binary ----
 
 const THREE_BINARY_STDOUT: &str = "running 10 tests\n\ntest result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\nrunning 5 tests\n\ntest result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\nrunning 41 tests\n\ntest result: ok. 41 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s\n";
