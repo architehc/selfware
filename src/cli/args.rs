@@ -25,7 +25,7 @@ pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) command: Option<Commands>,
 
-    /// Headless mode: run prompt directly and exit (like qwen -p)
+    /// Headless mode: run a prompt directly and exit
     #[arg(short = 'p', long, value_name = "PROMPT")]
     pub(crate) prompt: Option<String>,
 
@@ -45,8 +45,8 @@ pub(crate) struct Cli {
     #[arg(short = 'm', long, value_enum, global = true)]
     pub(crate) mode: Option<ExecutionMode>,
 
-    /// Model override for this session (overrides the config `model` key;
-    /// long-only on purpose — `-m` stays --mode for existing scripts)
+    /// Model override for this session (overrides the config `model` key)
+    // Long-only on purpose: `-m` stays --mode for existing scripts.
     #[arg(long, value_name = "MODEL", global = true)]
     pub(crate) model: Option<String>,
 
@@ -99,8 +99,8 @@ pub(crate) struct Cli {
     #[arg(long, value_name = "NAME")]
     pub(crate) resume_session: Option<String>,
 
-    /// Resume the MOST RECENT journal entry and continue it (claude -c
-    /// parity; long-only so `-c` stays --config for existing scripts)
+    /// Resume the most recent journal entry and continue it
+    // `claude -c` parity; long-only so `-c` stays --config for existing scripts.
     #[arg(long = "continue")]
     pub(crate) continue_flag: bool,
 
@@ -144,8 +144,8 @@ pub(crate) struct Cli {
     )]
     pub(crate) debug: Option<String>,
 
-    /// Output format for headless mode: text, json, or stream-json.
-    /// `global` so it may follow a subcommand too (e.g. `runs list --output-format json`).
+    /// Output format for headless mode: text, json, or stream-json (may also follow a subcommand)
+    // `global` so it may follow a subcommand too (e.g. `runs list --output-format json`).
     #[arg(long, value_enum, default_value = "text", global = true)]
     pub(crate) output_format: HeadlessOutputFormat,
 
@@ -242,7 +242,7 @@ pub(crate) enum Commands {
     #[command(alias = "c", display_order = 2)]
     Chat,
 
-    /// Run a task headless and exit (aliases: `r`, `exec`)
+    /// Run a task headless and exit (short: `r`)
     #[command(alias = "r", visible_alias = "exec", display_order = 3)]
     Run {
         /// The task to run (omit when --preset is given)
@@ -288,8 +288,10 @@ pub(crate) enum Commands {
         check: bool,
     },
 
-    /// Trust this repository's checkout-local selfware.toml. Trusting ACTIVATES
-    /// all of its privileged settings, which are otherwise stripped for an
+    /// Trust this repository's selfware.toml (activates its privileged settings)
+    ///
+    /// Trusting ACTIVATES all of the checkout-local selfware.toml's privileged
+    /// settings, which are otherwise stripped for an
     /// untrusted repo: shell hooks, MCP subprocess servers, wildcard
     /// tool-permission grants, the post-edit command, yolo / destructive-shell,
     /// and safety-path/confirmation overrides — and it allows a globally-exported
