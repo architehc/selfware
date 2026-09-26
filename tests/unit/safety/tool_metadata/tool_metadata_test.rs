@@ -460,3 +460,28 @@ fn test_normal_mode_shell_rule_allows_only_matching_shell_calls() {
         &store
     ));
 }
+
+#[test]
+fn test_cargo_call_injects_flags() {
+    use serde_json::json;
+    assert!(!cargo_call_injects_flags("cargo_test", &json!({})));
+    assert!(!cargo_call_injects_flags(
+        "cargo_test",
+        &json!({"package": "selfware", "test_name": "a::b", "release": false})
+    ));
+    assert!(cargo_call_injects_flags(
+        "cargo_test",
+        &json!({"test_name": "--config=target.x.runner='sh -c id'"})
+    ));
+    assert!(cargo_call_injects_flags("cargo_fmt", &json!({"x": " -v"})));
+    assert!(cargo_call_injects_flags(
+        "cargo_check",
+        &json!({"x": ["a"]})
+    ));
+    assert!(cargo_call_injects_flags("cargo_clippy", &json!(null)));
+    // Not a cargo tool: not this guard's business.
+    assert!(!cargo_call_injects_flags(
+        "shell_exec",
+        &json!({"command": "-x"})
+    ));
+}

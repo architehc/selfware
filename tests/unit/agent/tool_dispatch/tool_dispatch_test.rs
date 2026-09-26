@@ -8347,3 +8347,38 @@ async fn confirm_decisions_apply_only_offered_standing_answers() {
     assert!(agent.permission_store.is_authorized("file_edit", None));
     server.stop().await;
 }
+
+#[tokio::test]
+async fn auto_edit_confirms_cargo_calls_whose_arguments_would_become_cargo_flags() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut config = test_config(format!("{}/v1", server.url()));
+    config.execution_mode = crate::config::ExecutionMode::AutoEdit;
+    let mut agent = Agent::new(config).await.unwrap();
+
+    // Plain form stays auto-approved (the headless edit → verify loop).
+    assert!(agent
+        .confirm_tool_execution("cargo_test", r#"{"test_name":"slug"}"#, "c1", false)
+        .await
+        .unwrap());
+    for (tool, args) in [
+        (
+            "cargo_test",
+            r#"{"test_name":"--config=target.aarch64-apple-darwin.runner='sh -c id'"}"#,
+        ),
+        (
+            "cargo_test",
+            r#"{"package":"--manifest-path=/tmp/x/Cargo.toml"}"#,
+        ),
+        ("cargo_check", r#"{"all_targets":["--x"]}"#),
+    ] {
+        let err = agent
+            .confirm_tool_execution(tool, args, "c2", false)
+            .await
+            .expect_err("flag-injecting cargo call must be confirmed");
+        assert!(
+            crate::errors::is_confirmation_error(&err),
+            "{tool}: {err:?}"
+        );
+    }
+    server.stop().await;
+}

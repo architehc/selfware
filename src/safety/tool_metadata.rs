@@ -583,24 +583,44 @@ pub fn verification_call_auto_allowed(tool_name: &str, args: &Value) -> bool {
     if !matches!(tool_name, "cargo_check" | "cargo_clippy" | "cargo_test") {
         return false;
     }
-    let Some(map) = args.as_object() else {
-        // Not a JSON object (unparseable arguments): not the plain form.
-        return false;
-    };
-    let strings_are_plain = map.values().all(|v| match v {
-        Value::String(s) => !s.trim_start().starts_with('-'),
-        Value::Bool(_) | Value::Null | Value::Number(_) => true,
-        _ => false,
-    });
-    if !strings_are_plain {
+    if cargo_call_injects_flags(tool_name, args) {
         return false;
     }
+    let Some(map) = args.as_object() else {
+        return false;
+    };
     // `fix` must be absent or literally false — `--fix` rewrites sources.
     tool_name != "cargo_clippy"
         || matches!(
             map.get("fix"),
             None | Some(Value::Null) | Some(Value::Bool(false))
         )
+}
+
+/// Whether a `cargo_*` tool call's arguments are NOT the plain form: not a
+/// JSON object, a nested value, or a string that starts with `-`.
+///
+/// The cargo tools pass `package` / `test_name` positionally, so a leading
+/// `-` turns the value into a cargo FLAG — `--config=target.<triple>.runner=…`
+/// runs an arbitrary program, `--manifest-path=` builds another tree. Such a
+/// call must be confirmed in every mode that otherwise auto-approves cargo
+/// tools (Normal's plain-verification allowance, AutoEdit's list).
+/// Non-cargo tools return `false`.
+pub fn cargo_call_injects_flags(tool_name: &str, args: &Value) -> bool {
+    if !matches!(
+        tool_name,
+        "cargo_check" | "cargo_clippy" | "cargo_test" | "cargo_fmt"
+    ) {
+        return false;
+    }
+    let Some(map) = args.as_object() else {
+        return true;
+    };
+    !map.values().all(|v| match v {
+        Value::String(s) => !s.trim_start().starts_with('-'),
+        Value::Bool(_) | Value::Null | Value::Number(_) => true,
+        _ => false,
+    })
 }
 
 /// Normal-mode confirmation decision for one concrete call (arguments known).

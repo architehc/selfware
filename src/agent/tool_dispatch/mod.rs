@@ -3476,10 +3476,16 @@ impl Agent {
                 )
             }
             crate::config::ExecutionMode::AutoEdit => {
-                self.needs_confirmation(name)
+                // AutoEdit's args-blind list approves every cargo_* call; a
+                // `-`-leading string argument would reach cargo as a FLAG
+                // (`--config=…runner=…` = arbitrary program), so such a call
+                // is confirmed like any other unlisted tool.
+                let args = args_for_policy();
+                (self.needs_confirmation(name)
+                    || crate::safety::tool_metadata::cargo_call_injects_flags(name, &args))
                     && crate::safety::tool_metadata::normal_mode_call_needs_confirmation(
                         name,
-                        &args_for_policy(),
+                        &args,
                         &self.config.safety.require_confirmation,
                         &self.permission_store,
                     )
