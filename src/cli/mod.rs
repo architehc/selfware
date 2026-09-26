@@ -1309,6 +1309,7 @@ pub(crate) fn autocontinue_should_run(
 /// resume looked silent (2026-09-22 long-horizon finding).
 fn resume_progress_emitter(
     quiet: bool,
+    verbose: bool,
     output_format: HeadlessOutputFormat,
 ) -> Option<std::sync::Arc<dyn crate::agent::progress::ProgressEmitter>> {
     use crate::agent::progress::ProgressEmitter;
@@ -1316,7 +1317,11 @@ fn resume_progress_emitter(
         HeadlessOutputFormat::StreamJson => {
             std::sync::Arc::new(headless::JsonlProgressEmitter::new())
         }
-        HeadlessOutputFormat::Text if !quiet => {
+        // Structured `kind=…` lines are diagnostics: `--verbose` only. By
+        // default the spinner (with the waiting status), the run summary and
+        // the failure banner carry what a user needs; the raw lines split
+        // the streamed answer mid-line (UX field test, 0.9.0).
+        HeadlessOutputFormat::Text if !quiet && verbose => {
             std::sync::Arc::new(crate::agent::progress::StderrProgressEmitter::new())
         }
         _ => return None,
@@ -1353,7 +1358,9 @@ async fn run_resumed_agent(
     output_format: HeadlessOutputFormat,
 ) -> Result<()> {
     let start = std::time::Instant::now();
-    if let Some(emitter) = resume_progress_emitter(quiet, output_format) {
+    if let Some(emitter) =
+        resume_progress_emitter(quiet, crate::output::is_verbose(), output_format)
+    {
         agent = agent.with_progress_emitter(emitter);
     }
     let answer_capture = headless::AnswerCapture::new();
@@ -2125,7 +2132,9 @@ pub async fn run() -> Result<()> {
             Vec::new();
         if is_stream_json {
             emitters.push(std::sync::Arc::new(headless::JsonlProgressEmitter::new()));
-        } else if !cli.quiet && !is_structured {
+        } else if !cli.quiet && !is_structured && crate::output::is_verbose() {
+            // Structured event lines are `--verbose` diagnostics (see
+            // `resume_progress_emitter`).
             emitters.push(std::sync::Arc::new(
                 crate::agent::progress::StderrProgressEmitter::new(),
             ));
@@ -3062,10 +3071,10 @@ async fn handle_command(
                 Vec::new();
             if is_stream_json {
                 emitters.push(std::sync::Arc::new(headless::JsonlProgressEmitter::new()));
-            } else if !quiet && !is_structured {
-                // Default-visible run events in headless text mode (same
-                // attachment the `-p` path already had) — a `run` dying at
-                // MAX_ITERATIONS previously explained nothing.
+            } else if !quiet && !is_structured && crate::output::is_verbose() {
+                // Structured event lines are `--verbose` diagnostics (see
+                // `resume_progress_emitter`); the run summary and failure
+                // banner explain a failed run by default.
                 emitters.push(std::sync::Arc::new(
                     crate::agent::progress::StderrProgressEmitter::new(),
                 ));

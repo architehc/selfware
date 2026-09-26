@@ -653,6 +653,7 @@ impl Agent {
                                                 fname.bright_cyan()
                                             );
                                             io::stdout().flush().ok();
+                                            output::note_streamed_text("...");
                                         }
                                     }
                                 }
@@ -688,6 +689,7 @@ impl Agent {
                                         let safe = before.replace('\n', "\r\n");
                                         print!("{}", safe);
                                         io::stdout().flush().ok();
+                                        output::note_streamed_text(&safe);
                                     }
                                 }
                                 display_buf.drain(..start_pos);
@@ -706,6 +708,7 @@ impl Agent {
                                         let safe = display_buf.replace('\n', "\r\n");
                                         print!("{}", safe);
                                         io::stdout().flush().ok();
+                                        output::note_streamed_text(&safe);
                                     }
                                 }
                                 display_buf.clear();
@@ -814,6 +817,7 @@ impl Agent {
                 let safe = display_buf.replace('\n', "\r\n");
                 print!("{}", safe);
                 io::stdout().flush().ok();
+                output::note_streamed_text(&safe);
             }
         }
 

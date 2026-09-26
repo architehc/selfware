@@ -1673,21 +1673,29 @@ fn autocontinue_explicit_task_or_resume_argument_wins() {
 #[test]
 fn resume_progress_emitter_mirrors_headless_wiring() {
     // Resumed runs get the same live progress wiring as fresh headless runs:
-    // stderr lines in plain text mode, JSONL on stdout for stream-json, and
-    // nothing for quiet / single-object json (machine-readable stdout stays
-    // clean).
-    assert!(resume_progress_emitter(false, HeadlessOutputFormat::Text).is_some());
+    // structured stderr lines in plain text mode only with --verbose (by
+    // default they split the streamed answer mid-line; UX field test 0.9.0),
+    // JSONL on stdout for stream-json, and nothing for quiet / single-object
+    // json (machine-readable stdout stays clean).
     assert!(
-        resume_progress_emitter(true, HeadlessOutputFormat::Text).is_none(),
+        resume_progress_emitter(false, false, HeadlessOutputFormat::Text).is_none(),
+        "plain text mode shows no structured event lines by default"
+    );
+    assert!(
+        resume_progress_emitter(false, true, HeadlessOutputFormat::Text).is_some(),
+        "--verbose attaches the structured stderr lines"
+    );
+    assert!(
+        resume_progress_emitter(true, true, HeadlessOutputFormat::Text).is_none(),
         "quiet stays silent"
     );
     assert!(
-        resume_progress_emitter(false, HeadlessOutputFormat::Json).is_none(),
+        resume_progress_emitter(false, false, HeadlessOutputFormat::Json).is_none(),
         "single-object json keeps stdout clean"
     );
-    assert!(resume_progress_emitter(false, HeadlessOutputFormat::StreamJson).is_some());
+    assert!(resume_progress_emitter(false, false, HeadlessOutputFormat::StreamJson).is_some());
     assert!(
-        resume_progress_emitter(true, HeadlessOutputFormat::StreamJson).is_some(),
+        resume_progress_emitter(true, false, HeadlessOutputFormat::StreamJson).is_some(),
         "stream-json emits even when quiet — stdout is the machine channel"
     );
 }
@@ -2565,4 +2573,27 @@ fn render_run_summary_names_checks_and_flags_unseen_images() {
     summary.vision_calls = Some((3, 0));
     let rendered = render_run_summary(&summary, None);
     assert!(!rendered.contains("visual check"), "{rendered}");
+}
+
+#[test]
+fn stream_line_tracking_ends_open_lines_before_a_log_line() {
+    // UX field test (0.9.0): `[HH:MM:SS] kind=llm_waiting …` landed in the
+    // middle of a streamed answer. A diagnostic line must first end an open
+    // streamed line. Uses a local flag: the process-wide one is shared with
+    // concurrently running streaming tests.
+    use std::sync::atomic::AtomicBool;
+    let flag = AtomicBool::new(false);
+    crate::output::note_streamed_text_on(&flag, "partial answer without newline");
+    assert!(
+        crate::output::take_stream_line_open(&flag),
+        "open line reported"
+    );
+    assert!(!crate::output::take_stream_line_open(&flag), "taken once");
+    crate::output::note_streamed_text_on(&flag, "a finished line\r\n");
+    assert!(!crate::output::take_stream_line_open(&flag), "closed line");
+    crate::output::note_streamed_text_on(&flag, "");
+    assert!(
+        !crate::output::take_stream_line_open(&flag),
+        "empty text changes nothing"
+    );
 }

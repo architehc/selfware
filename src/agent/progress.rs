@@ -366,6 +366,8 @@ impl ProgressEmitter for StderrProgressEmitter {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let _local = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        // Never split a streamed answer or a spinner line mid-way.
+        crate::output::prepare_line_for_log();
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(stderr, "{}", line);
         let _ = stderr.flush();

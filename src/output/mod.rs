@@ -162,6 +162,42 @@ pub(crate) fn is_compact() -> bool {
     COMPACT_MODE.load(Ordering::SeqCst)
 }
 
+/// A streamed answer or reasoning line is open on stdout (text written
+/// without a trailing newline). Diagnostic log lines check it so they never
+/// split a streamed line mid-way (UX field test, 0.9.0).
+static STREAM_LINE_OPEN: AtomicBool = AtomicBool::new(false);
+
+/// Record streamed text just written to stdout.
+pub(crate) fn note_streamed_text(text: &str) {
+    note_streamed_text_on(&STREAM_LINE_OPEN, text);
+}
+
+/// [`note_streamed_text`] against an explicit flag (pure, for tests).
+pub(crate) fn note_streamed_text_on(flag: &AtomicBool, text: &str) {
+    if !text.is_empty() {
+        flag.store(!text.ends_with('\n'), Ordering::SeqCst);
+    }
+}
+
+/// Take the open-line state: true when a streamed line was open (it is now
+/// considered closed by the caller's newline).
+pub(crate) fn take_stream_line_open(flag: &AtomicBool) -> bool {
+    flag.swap(false, Ordering::SeqCst)
+}
+
+/// Before a diagnostic line goes to the terminal: end an open streamed line,
+/// or clear a transient spinner line (it redraws on its next tick). Call
+/// while holding [`OUTPUT_LOCK`].
+pub(crate) fn prepare_line_for_log() {
+    let mut out = io::stdout().lock();
+    if take_stream_line_open(&STREAM_LINE_OPEN) {
+        let _ = out.write_all(b"\r\n");
+    } else {
+        let _ = out.write_all(b"\r\x1b[2K");
+    }
+    let _ = out.flush();
+}
+
 /// Check if verbose mode is enabled
 #[inline]
 pub(crate) fn is_verbose() -> bool {
@@ -752,6 +788,10 @@ pub(crate) fn thinking(text: &str, inline: bool) {
 
     // Replace \n with \r\n so newlines in thinking text reset to column 0
     let safe = text.replace('\n', "\r\n");
+    if inline {
+        // Inline reasoning streams without a trailing newline.
+        note_streamed_text(&safe);
+    }
     if is_plain_mode() {
         // Plain mode: no ANSI escape codes
         if inline {
