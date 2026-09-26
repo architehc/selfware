@@ -1257,7 +1257,8 @@ impl Agent {
         // trips, so the loop spins empty steps to MAX_ITERATIONS even though the
         // code compiles and tests pass (observed on multi-file tasks).
         // A reply cut off by the output-token limit (finish_reason == "length")
-        // is not a finished answer. The two early acceptance paths below used to
+        // is not a finished answer. The early acceptance paths below (gate,
+        // read-only, read-only force-finalize, repeated response) used to
         // return before the length check further down, so a report truncated
         // mid-sentence was accepted with exit 0 (val090 b2_163840 / b2_350000).
         let truncated_by_length = chat_metadata
@@ -1308,11 +1309,17 @@ impl Agent {
             // Track the LATEST substantial answer, not the longest ever seen — a
             // later corrected answer must not be discarded in favor of an earlier,
             // longer, wrong one (GATE-FORCE-FINALIZE).
-            if clean.len() >= 40 {
+            // A length-cut reply is neither tracked as the best answer nor
+            // force-finalized: it falls through to the bounded length retries
+            // below (review C1, 0.9.1 — this path shipped truncated text, exit 0).
+            if clean.len() >= 40 && !truncated_by_length {
                 self.last_assistant_response = clean.clone();
             }
             self.readonly_no_tool_streak += 1;
-            if self.readonly_no_tool_streak >= 6 && self.last_assistant_response.len() >= 40 {
+            if self.readonly_no_tool_streak >= 6
+                && !truncated_by_length
+                && self.last_assistant_response.len() >= 40
+            {
                 // Prefer to force-finalize only when the completion gate is
                 // satisfied — otherwise we would emit a capability-disclaimer or a
                 // response missing a required tool as the "final answer" (found and
@@ -1432,7 +1439,11 @@ impl Agent {
 
             // Detect repeated identical responses — the model is stuck producing
             // the same completion that keeps getting rejected by the gate.
-            if content == self.last_assistant_response && !content.is_empty() {
+            // Truncated repeats go to the length retries, not this acceptance.
+            if content == self.last_assistant_response
+                && !content.is_empty()
+                && !truncated_by_length
+            {
                 self.consecutive_no_action_prompts += 1;
                 if self.consecutive_no_action_prompts >= 5 {
                     // Model is repeating itself many times. Only accept if

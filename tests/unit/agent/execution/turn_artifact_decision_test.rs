@@ -498,6 +498,68 @@ async fn length_truncated_final_answer_is_never_accepted_silently() {
     server.stop().await;
 }
 
+/// Drive one truncated read-only turn with the given loop counters preset
+/// and return (completed?, last message sent to the model).
+async fn truncated_turn_with_counters(
+    readonly_streak: usize,
+    identical_prompts: usize,
+) -> (bool, String) {
+    let cwd = crate::test_support::CwdGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    cwd.switch_to(dir.path());
+    let truncated = "## Review\n\nArea 1: the parser handles mixed batches correctly and \
+                     reports rejections. Area 2: the compaction path keeps";
+    let server = MockLlmServer::builder()
+        .with_finished_response(truncated, None, "length")
+        .build()
+        .await;
+    let config = artifact_config(&format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.readonly_no_tool_streak = readonly_streak;
+    agent.consecutive_no_action_prompts = identical_prompts;
+    // An identical earlier reply, so the repeated-response path sees a match.
+    agent.last_assistant_response = truncated.to_string();
+    let done = agent.execute_step_internal(false).await.unwrap();
+    let last = agent
+        .messages
+        .last()
+        .map(|m| m.content.text_all())
+        .unwrap_or_default();
+    server.stop().await;
+    (done, last)
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn truncated_reply_is_not_force_finalized_by_the_read_only_streak() {
+    // Review C1 (0.9.1): the read-only force-finalize path (streak reaches 6)
+    // and the repeated-identical-response path both accepted a length-cut
+    // reply with exit 0 and no note, bypassing the length retries.
+    let (done, last) = truncated_turn_with_counters(5, 0).await;
+    assert!(!done, "a truncated turn must not force-finalize the task");
+    assert!(
+        last.contains("COMPLETE final answer"),
+        "expected the complete-rewrite directive, got: {last}"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn truncated_reply_is_not_accepted_as_a_repeated_completion() {
+    let (done, last) = truncated_turn_with_counters(0, 5).await;
+    assert!(!done, "a truncated repeat must not be accepted as final");
+    assert!(
+        last.contains("COMPLETE final answer"),
+        "expected the complete-rewrite directive, got: {last}"
+    );
+}
+
 #[test]
 fn rescue_command_that_cannot_run_is_recognised() {
     use crate::agent::execution::rescue_command_could_not_run;
