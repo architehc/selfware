@@ -13,6 +13,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use tokio::process::Command;
 
+use crate::tools::argv_guard::{reject_flag_like_operand, reject_flag_like_operands};
+
 use super::Tool;
 use crate::config::SafetyConfig;
 use crate::safety::process_env::SanitizedEnvExt;
@@ -95,6 +97,14 @@ impl Tool for NpmInstall {
                     .collect()
             })
             .unwrap_or_default();
+
+        // Package specs are positional: "--prefix=/outside", "--global" or
+        // "--registry=http://evil/" would become npm options (review, 0.9.2).
+        reject_flag_like_operands(
+            "npm_install",
+            "packages",
+            packages.iter().map(String::as_str),
+        )?;
 
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
@@ -223,6 +233,9 @@ impl Tool for NpmRun {
             .get("script")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("script is required"))?;
+        // `script` precedes the `--` terminator, so "--prefix=/x" or
+        // "--scripts-prepend-node-path" would be read as npm options.
+        reject_flag_like_operand("npm_run", "script", Some(script))?;
 
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
@@ -447,6 +460,15 @@ impl Tool for PipInstall {
             .unwrap_or_default();
 
         let requirements = args.get("requirements").and_then(|v| v.as_str());
+        // Requirement specs are positional: "--target=~/.ssh",
+        // "--index-url=http://evil/" or "--prefix=/x" would become pip
+        // options (review, 0.9.2).
+        reject_flag_like_operands(
+            "pip_install",
+            "packages",
+            packages.iter().map(String::as_str),
+        )?;
+        reject_flag_like_operand("pip_install", "requirements", requirements)?;
         let upgrade = args
             .get("upgrade")
             .and_then(|v| v.as_bool())
@@ -752,6 +774,14 @@ impl Tool for YarnInstall {
                     .collect()
             })
             .unwrap_or_default();
+
+        // "--cwd=/outside", "--global-folder=/x" or "--registry=..." would
+        // become yarn options (review, 0.9.2).
+        reject_flag_like_operands(
+            "yarn_install",
+            "packages",
+            packages.iter().map(String::as_str),
+        )?;
 
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 

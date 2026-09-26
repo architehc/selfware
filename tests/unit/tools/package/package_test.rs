@@ -424,3 +424,63 @@ async fn test_npm_run_path_policy() {
         "npm_run path outside the workspace must be refused, got: {err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Option-shaped package operands are refused before anything is spawned
+// (review, 0.9.2): "--prefix=/outside", "--global", "--target=~/.ssh",
+// "--index-url=http://evil/" or yarn "--cwd=/x" would become package-manager
+// options.
+// ---------------------------------------------------------------------------
+
+async fn assert_refused_as_option(tool: &dyn Tool, args: Value) {
+    let err = tool
+        .execute(args.clone())
+        .await
+        .expect_err("option-shaped operand must be refused");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("must be a name, not an option"),
+        "{} {args}: {msg}",
+        tool.name()
+    );
+}
+
+#[tokio::test]
+async fn package_managers_refuse_option_shaped_packages() {
+    for pkg in [
+        "--prefix=/outside",
+        "--global",
+        "-g",
+        " --registry=http://evil/",
+    ] {
+        assert_refused_as_option(
+            &NpmInstall::new(),
+            json!({"packages": ["left-pad", pkg], "path": "."}),
+        )
+        .await;
+    }
+    for pkg in [
+        "--target=/tmp/x",
+        "--index-url=http://evil/",
+        "-e.",
+        "--user",
+    ] {
+        assert_refused_as_option(&PipInstall::new(), json!({"packages": ["requests", pkg]})).await;
+    }
+    assert_refused_as_option(
+        &PipInstall::new(),
+        json!({"requirements": "--index-url=http://evil/"}),
+    )
+    .await;
+    for pkg in ["--cwd=/outside", "--global-folder=/x", "-W"] {
+        assert_refused_as_option(&YarnInstall::new(), json!({"packages": [pkg], "path": "."}))
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn npm_run_refuses_option_shaped_script() {
+    for script in ["--prefix=/outside", "-ws", "--workspaces"] {
+        assert_refused_as_option(&NpmRun::new(), json!({"script": script, "path": "."})).await;
+    }
+}
