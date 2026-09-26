@@ -85,23 +85,28 @@ pub(crate) async fn summarize_and_spill(
     let redacted = crate::safety::redact::redact_secrets(raw);
     let raw: &str = redacted.as_ref();
 
-    // Save the redacted result to disk
-    let spill_dir = std::path::Path::new(TOOL_RESULTS_DIR);
+    // Save the redacted result to disk, under the agent's workspace root
+    // (an entered worktree), not the process cwd. The model is told the
+    // workspace-relative path, which file_read resolves against the same root.
+    let spill_rel = std::path::Path::new(TOOL_RESULTS_DIR);
+    let spill_dir_buf = crate::tools::workspace_root::anchor_path(spill_rel);
+    let spill_dir = spill_dir_buf.as_path();
     let _ = tokio::fs::create_dir_all(spill_dir).await;
     // Keep the agent's scratch out of the user's repo: drop a .gitignore into
     // the project-local .selfware/ (the spill dir's parent).
     if let Some(selfware_dir) = spill_dir.parent() {
         crate::agent::turn_artifacts::ensure_selfware_gitignore(selfware_dir);
     }
-    let spill_file = spill_dir.join(format!(
+    let spill_name = format!(
         "{}_{}.json",
         tool_name,
         // Char-safe truncation: byte-slicing `&call_id[..12]` panics if a
         // non-ASCII tool_call_id from the API has a multi-byte char across byte 12
         // (found by GLM-5.2 reviewing tool_dispatch.rs; verified + fixed by Claude).
         call_id.chars().take(12).collect::<String>()
-    ));
-    let spill_path = spill_file.display().to_string();
+    );
+    let spill_file = spill_dir.join(&spill_name);
+    let spill_path = spill_rel.join(&spill_name).display().to_string();
     if let Err(e) = tokio::fs::write(&spill_file, raw).await {
         warn!("Failed to spill tool result to {}: {}", spill_path, e);
         // Fall back to aggressive truncation if disk write fails

@@ -1429,14 +1429,28 @@ async fn summarize_and_spill_redacts_secrets_on_disk() {
     );
     let call_id = "spillredacttest01";
 
-    let _summary = summarize_and_spill("shell_exec", call_id, &raw, 9999).await;
+    // Hermetic: run under an explicit workspace root (a temp dir), so a
+    // concurrent test changing the process cwd cannot move the spill (the
+    // MSRV CI leg failed exactly that way), and the spill must land under
+    // the agent's root, not the process cwd.
+    let ws = tempfile::tempdir().unwrap();
+    let root = crate::tools::workspace_root::WorkspaceRoot::fixed(ws.path().to_path_buf());
+    let summary = crate::tools::workspace_root::scope(
+        root,
+        summarize_and_spill("shell_exec", call_id, &raw, 9999),
+    )
+    .await;
 
-    let spill_file = std::path::Path::new(TOOL_RESULTS_DIR).join(format!(
+    let spill_file = ws.path().join(TOOL_RESULTS_DIR).join(format!(
         "shell_exec_{}.json",
         call_id.chars().take(12).collect::<String>()
     ));
     let on_disk = std::fs::read_to_string(&spill_file).expect("spill file should exist");
-    let _ = std::fs::remove_file(&spill_file);
+    // The model is pointed at the workspace-relative path.
+    assert!(
+        summary.contains(&format!("{TOOL_RESULTS_DIR}/shell_exec_")),
+        "{summary}"
+    );
 
     assert!(
         !on_disk.contains(&secret),
