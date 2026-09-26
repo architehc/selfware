@@ -309,3 +309,51 @@ async fn test_grep_search_denied_root_still_rejected() {
         err
     );
 }
+
+fn rg_args(cmd: &std::process::Command) -> Vec<String> {
+    cmd.get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect()
+}
+
+/// `{"pattern":"--pre=sh"}` used to reach rg as a bare positional, which rg
+/// parses as `--pre=sh` and then runs `sh <file>` for every searched file.
+/// The pattern must be bound to `--regexp=` and the path must follow `--`.
+#[test]
+fn rg_argv_binds_option_shaped_pattern_and_path() {
+    let cmd = build_rg_command("--pre=sh", "--help", true, Some("-x"), Some("--y"));
+    let args = rg_args(&cmd);
+    assert!(
+        !args.iter().any(|a| a == "--pre=sh"),
+        "pattern reached rg as a bare option: {args:?}"
+    );
+    assert!(args.contains(&"--regexp=--pre=sh".to_string()), "{args:?}");
+    assert!(args.contains(&"--glob=-x".to_string()), "{args:?}");
+    assert!(args.contains(&"--glob=!--y".to_string()), "{args:?}");
+    let dd = args.iter().position(|a| a == "--").expect("-- terminator");
+    assert_eq!(&args[dd + 1..], &["--help".to_string()], "{args:?}");
+    // Nothing option-shaped may follow the terminator except the path.
+    assert_eq!(dd, args.len() - 2);
+}
+
+/// Functional check (benign flag): a pattern that is also an rg flag
+/// (`--count`) is searched for literally rather than changing rg's output.
+#[tokio::test]
+async fn test_grep_search_option_shaped_pattern_is_searched_literally() {
+    let temp_dir = TempDir::new().unwrap();
+    fs::write(temp_dir.path().join("a.txt"), "x\nuse --count here\ny\n").unwrap();
+
+    let tool = GrepSearch::with_safety_config(permissive_safety_config());
+    let args = serde_json::json!({
+        "pattern": "--count",
+        "path": temp_dir.path().to_str().unwrap()
+    });
+    let result = tool.execute(args).await.unwrap();
+    let matches = result["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 1, "{result}");
+    assert_eq!(matches[0]["line"], 2);
+    assert!(matches[0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("use --count here"));
+}

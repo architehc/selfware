@@ -81,21 +81,22 @@ fn rg_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Run ripgrep and parse the `--json` output into a [`GrepSearchResult`].
+/// Build the ripgrep invocation for a search.
 ///
-/// `max_matches` caps the number of matches *returned* (after `offset`).  The
-/// total match count is tracked separately so pagination metadata is accurate.
-fn run_ripgrep(
+/// Every model-supplied string is bound so rg can never read it as an option:
+/// the pattern goes through `--regexp=<pattern>` and the globs through
+/// `--glob=<glob>` (the `=` form attaches the value to its flag, so a leading
+/// `-` stays part of the value), and the search root sits after a `--`
+/// terminator. Previously the pattern was a bare positional, so
+/// `{"pattern":"--pre=sh"}` made rg run `sh <file>` on every searched file —
+/// and grep_search runs without confirmation in every mode (review, 0.9.2).
+fn build_rg_command(
     pattern: &str,
     path: &str,
     case_insensitive: bool,
-    context_lines: usize,
-    max_matches: usize,
-    skip_offset: usize,
     include_pattern: Option<&str>,
     exclude_pattern: Option<&str>,
-    safety: Option<&SafetyConfig>,
-) -> Result<GrepSearchResult> {
+) -> std::process::Command {
     let mut cmd = std::process::Command::new("rg");
     cmd.sanitized_env();
     crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
@@ -119,19 +120,45 @@ fn run_ripgrep(
         .arg("-g")
         .arg("!dist/")
         .arg("-g")
-        .arg("!build/")
-        .arg(pattern)
-        .arg(path);
+        .arg("!build/");
 
     if case_insensitive {
         cmd.arg("-i");
     }
     if let Some(include) = include_pattern {
-        cmd.arg("--glob").arg(include);
+        cmd.arg(format!("--glob={}", include));
     }
     if let Some(exclude) = exclude_pattern {
-        cmd.arg("--glob").arg(format!("!{}", exclude));
+        cmd.arg(format!("--glob=!{}", exclude));
     }
+
+    // Pattern bound to its flag; path after the option terminator.
+    cmd.arg(format!("--regexp={}", pattern)).arg("--").arg(path);
+    cmd
+}
+
+/// Run ripgrep and parse the `--json` output into a [`GrepSearchResult`].
+///
+/// `max_matches` caps the number of matches *returned* (after `offset`).  The
+/// total match count is tracked separately so pagination metadata is accurate.
+fn run_ripgrep(
+    pattern: &str,
+    path: &str,
+    case_insensitive: bool,
+    context_lines: usize,
+    max_matches: usize,
+    skip_offset: usize,
+    include_pattern: Option<&str>,
+    exclude_pattern: Option<&str>,
+    safety: Option<&SafetyConfig>,
+) -> Result<GrepSearchResult> {
+    let mut cmd = build_rg_command(
+        pattern,
+        path,
+        case_insensitive,
+        include_pattern,
+        exclude_pattern,
+    );
 
     let output = cmd
         .stdout(std::process::Stdio::piped())

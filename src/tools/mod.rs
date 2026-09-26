@@ -24,6 +24,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 pub mod analyzer;
+pub mod argv_guard;
 pub mod browser;
 pub mod cargo;
 pub mod clarify;

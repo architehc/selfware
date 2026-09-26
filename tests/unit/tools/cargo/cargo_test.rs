@@ -960,7 +960,10 @@ async fn cargo_test_refuses_option_shaped_operands_before_spawning() {
 
 #[test]
 fn plain_names_are_accepted_as_cargo_test_operands() {
-    assert!(reject_flag_like_operand("test_name", Some("parser::tests::roundtrip")).is_ok());
-    assert!(reject_flag_like_operand("package", Some("hexyl")).is_ok());
-    assert!(reject_flag_like_operand("package", None).is_ok());
+    assert!(
+        reject_flag_like_operand("cargo_test", "test_name", Some("parser::tests::roundtrip"))
+            .is_ok()
+    );
+    assert!(reject_flag_like_operand("cargo_test", "package", Some("hexyl")).is_ok());
+    assert!(reject_flag_like_operand("cargo_test", "package", None).is_ok());
 }
