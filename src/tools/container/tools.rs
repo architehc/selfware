@@ -14,7 +14,19 @@ use super::validation::{
     is_valid_memory, is_valid_user, validate_port_mapping, validate_volume_spec,
 };
 use crate::safety::process_env::SanitizedEnvExt;
+use crate::tools::argv_guard::{reject_flag_like_operand, reject_flag_like_operands};
 use crate::tools::Tool;
+
+/// Validate a model-supplied build/compose path operand: it must not be
+/// option-shaped and must pass the same workspace path policy as `file_read`
+/// (a build context or compose project outside the workspace would let the
+/// runtime read — and bake into an image — files the agent may not touch).
+fn validate_container_path(tool: &str, field: &str, path: &str) -> Result<()> {
+    reject_flag_like_operand(tool, field, Some(path))?;
+    let safety = crate::tools::file::resolve_safety_config(None);
+    crate::tools::file::validate_tool_path(&crate::tools::workspace_root::anchor(path), &safety)
+        .with_context(|| format!("{tool} `{field}` is outside the allowed paths"))
+}
 
 /// Build the container-runtime isolation flags for a run request's `profile`
 /// (default: "hardened"). Pure and validated so it is unit-tested without a
@@ -190,6 +202,10 @@ impl Tool for ContainerRun {
             .get("image")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("image is required"))?;
+        // The image is a positional operand: `--privileged` or
+        // `--volume=/:/host` would become run flags and bypass the isolation
+        // profile and the volume validation below (review, 0.9.2).
+        reject_flag_like_operand("container_run", "image", Some(image))?;
 
         let runtime = get_runtime(args.get("runtime").and_then(|v| v.as_str())).await?;
         let mut cmd = Command::new(runtime.command());
@@ -365,6 +381,7 @@ impl Tool for ContainerStop {
             .get("container")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("container is required"))?;
+        reject_flag_like_operand("container_stop", "container", Some(container))?;
 
         let runtime = get_runtime(args.get("runtime").and_then(|v| v.as_str())).await?;
         let timeout = args.get("timeout").and_then(|v| v.as_u64()).unwrap_or(10);
@@ -563,6 +580,7 @@ impl Tool for ContainerLogs {
             .get("container")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("container is required"))?;
+        reject_flag_like_operand("container_logs", "container", Some(container))?;
 
         let runtime = get_runtime(args.get("runtime").and_then(|v| v.as_str())).await?;
         let tail = args.get("tail").and_then(|v| v.as_u64()).unwrap_or(100);
@@ -668,6 +686,8 @@ impl Tool for ContainerExec {
             .get("container")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("container is required"))?;
+        // `--privileged` / `--user=root` here would be parsed as exec flags.
+        reject_flag_like_operand("container_exec", "container", Some(container))?;
 
         let command: Vec<String> = args
             .get("command")
@@ -800,6 +820,10 @@ impl Tool for ContainerBuild {
             .ok_or_else(|| anyhow::anyhow!("tag is required"))?;
 
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        validate_container_path("container_build", "path", path)?;
+        if let Some(dockerfile) = args.get("dockerfile").and_then(|v| v.as_str()) {
+            validate_container_path("container_build", "dockerfile", dockerfile)?;
+        }
 
         let runtime = get_runtime(args.get("runtime").and_then(|v| v.as_str())).await?;
 
@@ -1011,6 +1035,7 @@ impl Tool for ContainerPull {
             .get("image")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("image is required"))?;
+        reject_flag_like_operand("container_pull", "image", Some(image))?;
 
         let runtime = get_runtime(args.get("runtime").and_then(|v| v.as_str())).await?;
 
@@ -1091,6 +1116,7 @@ impl Tool for ContainerRemove {
             .get("container")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("container is required"))?;
+        reject_flag_like_operand("container_remove", "container", Some(container))?;
 
         let runtime = get_runtime(args.get("runtime").and_then(|v| v.as_str())).await?;
 
@@ -1185,6 +1211,25 @@ impl Tool for ComposeUp {
 
     async fn execute(&self, args: Value) -> Result<Value> {
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        validate_container_path("compose_up", "path", path)?;
+        if let Some(file) = args.get("file").and_then(|v| v.as_str()) {
+            // `-f` resolves against the compose project directory (`path`).
+            let file_in_project = std::path::Path::new(&crate::tools::workspace_root::anchor(path))
+                .join(file)
+                .to_string_lossy()
+                .into_owned();
+            reject_flag_like_operand("compose_up", "file", Some(file))?;
+            validate_container_path("compose_up", "file", &file_in_project)?;
+        }
+        // Service names are positional operands after `up`: `--no-deps`-style
+        // or `--project-directory=/elsewhere` items would become flags.
+        if let Some(services) = args.get("services").and_then(|v| v.as_array()) {
+            reject_flag_like_operands(
+                "compose_up",
+                "services",
+                services.iter().filter_map(|v| v.as_str()),
+            )?;
+        }
 
         let runtime = get_runtime(args.get("runtime").and_then(|v| v.as_str())).await?;
 
@@ -1293,6 +1338,16 @@ impl Tool for ComposeDown {
 
     async fn execute(&self, args: Value) -> Result<Value> {
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        validate_container_path("compose_down", "path", path)?;
+        if let Some(file) = args.get("file").and_then(|v| v.as_str()) {
+            // `-f` resolves against the compose project directory (`path`).
+            let file_in_project = std::path::Path::new(&crate::tools::workspace_root::anchor(path))
+                .join(file)
+                .to_string_lossy()
+                .into_owned();
+            reject_flag_like_operand("compose_down", "file", Some(file))?;
+            validate_container_path("compose_down", "file", &file_in_project)?;
+        }
 
         let runtime = get_runtime(args.get("runtime").and_then(|v| v.as_str())).await?;
 

@@ -301,3 +301,101 @@ fn test_all_schemas_have_runtime_field() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Option-shaped positional operands are refused before any runtime is probed
+// or spawned (review, 0.9.2). `image: "--privileged"` used to yield a
+// privileged container and `image: "--volume=/:/host"` bypassed
+// validate_volume_spec and the Yolo volume guard.
+// ---------------------------------------------------------------------------
+
+async fn assert_refused_as_option(tool: &dyn Tool, args: serde_json::Value) {
+    let err = tool
+        .execute(args.clone())
+        .await
+        .expect_err("option-shaped operand must be refused");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("must be a name, not an option"),
+        "{} {args}: {msg}",
+        tool.name()
+    );
+}
+
+#[tokio::test]
+async fn container_run_refuses_option_shaped_image() {
+    for image in [
+        "--privileged",
+        "--volume=/:/host",
+        "-v/:/host",
+        " --pid=host",
+    ] {
+        assert_refused_as_option(&ContainerRun, serde_json::json!({ "image": image })).await;
+    }
+}
+
+#[tokio::test]
+async fn container_operand_tools_refuse_option_shaped_names() {
+    let exec_args = serde_json::json!({"container": "--privileged", "command": ["id"]});
+    assert_refused_as_option(&ContainerExec, exec_args).await;
+    assert_refused_as_option(
+        &ContainerExec,
+        serde_json::json!({"container": "--user=root", "command": ["id"]}),
+    )
+    .await;
+    assert_refused_as_option(&ContainerStop, serde_json::json!({"container": "-t0"})).await;
+    assert_refused_as_option(&ContainerLogs, serde_json::json!({"container": "--help"})).await;
+    assert_refused_as_option(
+        &ContainerRemove,
+        serde_json::json!({"container": "--force"}),
+    )
+    .await;
+    assert_refused_as_option(&ContainerPull, serde_json::json!({"image": "--all-tags"})).await;
+    assert_refused_as_option(
+        &ContainerBuild,
+        serde_json::json!({"tag": "t", "path": "--file=/etc/passwd"}),
+    )
+    .await;
+    assert_refused_as_option(
+        &ContainerBuild,
+        serde_json::json!({"tag": "t", "path": ".", "dockerfile": "-"}),
+    )
+    .await;
+    assert_refused_as_option(
+        &ComposeUp,
+        serde_json::json!({"path": ".", "services": ["web", "--project-directory=/"]}),
+    )
+    .await;
+    assert_refused_as_option(&ComposeUp, serde_json::json!({"path": ".", "file": "-"})).await;
+    assert_refused_as_option(&ComposeDown, serde_json::json!({"path": "--x"})).await;
+}
+
+#[tokio::test]
+async fn container_build_and_compose_refuse_paths_outside_policy() {
+    for (tool, args) in [
+        (
+            &ContainerBuild as &dyn Tool,
+            serde_json::json!({"tag": "t", "path": "/etc"}),
+        ),
+        (
+            &ContainerBuild as &dyn Tool,
+            serde_json::json!({"tag": "t", "path": ".", "dockerfile": "/etc/passwd"}),
+        ),
+        (&ComposeUp as &dyn Tool, serde_json::json!({"path": "/etc"})),
+        (
+            &ComposeDown as &dyn Tool,
+            serde_json::json!({"path": ".", "file": "/etc/passwd"}),
+        ),
+    ] {
+        let err = tool
+            .execute(args.clone())
+            .await
+            .expect_err("path outside policy must be refused");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("outside the allowed paths"),
+            "{} {args}: {msg}",
+            tool.name()
+        );
+    }
+}
