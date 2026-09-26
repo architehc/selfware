@@ -4,11 +4,11 @@
 
 // Feature-gated module - dead_code lint disabled at crate level
 
-use super::{wrap_chat_message, CommandPalette, StatusLine, TuiPalette};
+use super::{CommandPalette, StatusLine, TuiPalette};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
-    text::Span,
+    text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Frame,
 };
@@ -177,9 +177,15 @@ impl App {
     pub fn add_assistant_message(&mut self, content: &str) {
         // Receiving an assistant message means we reached the model.
         self.connected = true;
+        // Tool-call markup and reasoning blocks are not chat text: a bare
+        // `</tool_call>` used to appear as its own 🦊 message.
+        let visible = crate::agent::visible_response_text(content);
+        if visible.is_empty() {
+            return;
+        }
         self.messages.push(ChatMessage {
             role: MessageRole::Assistant,
-            content: content.into(),
+            content: visible,
             timestamp: chrono::Local::now().format("%H:%M").to_string(),
         });
     }
@@ -379,13 +385,12 @@ impl App {
         let inner_area = inner.inner(area);
         frame.render_widget(inner, area);
 
-        // Build message list with line wrapping
+        // Chronological, newest at the bottom (same as the dashboard chat
+        // pane — see `chat_rows_chronological`).
         let msg_width = inner_area.width as usize;
-        let items: Vec<ListItem> = self
-            .messages
+        let visible = self.messages.len().saturating_sub(self.scroll);
+        let entries: Vec<(String, String, Style)> = self.messages[..visible]
             .iter()
-            .rev()
-            .skip(self.scroll)
             .map(|msg| {
                 let style = match msg.role {
                     MessageRole::User => Style::default().fg(TuiPalette::AMBER),
@@ -393,18 +398,24 @@ impl App {
                     MessageRole::System => TuiPalette::muted_style(),
                     MessageRole::Tool => Style::default().fg(TuiPalette::COPPER),
                 };
-
                 let prefix = match msg.role {
                     MessageRole::User => "You",
                     MessageRole::Assistant => "🦊",
                     MessageRole::System => "📋",
                     MessageRole::Tool => "🔧",
                 };
-
-                let prefix_str = format!("{} {} ", msg.timestamp, prefix);
-                wrap_chat_message(&prefix_str, &msg.content, style, msg_width)
+                (
+                    format!("{} {} ", msg.timestamp, prefix),
+                    msg.content.clone(),
+                    style,
+                )
             })
             .collect();
+        let items: Vec<ListItem> =
+            super::chat_rows_chronological(&entries, msg_width, inner_area.height as usize)
+                .into_iter()
+                .map(|(row, style)| ListItem::new(Line::from(Span::styled(row, style))))
+                .collect();
 
         let messages = List::new(items);
         frame.render_widget(messages, inner_area);

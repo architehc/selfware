@@ -2728,9 +2728,15 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
                     format!("{}{}", input, render_attachments(&attachments))
                 };
                 // Run the task — this will emit events to the TUI through event_tx
-                if let Err(e) = agent.run_task(&task).await {
+                let run_result = agent.run_task(&task).await;
+                if let Err(e) = &run_result {
                     warn!("Agent failed to run task: {}", e);
                 }
+                // End-of-task outcome in the chat + logs, like the CLI's
+                // ✅/⚠️ banner and run summary (the TUI showed none).
+                let _ = bridge_event_tx.send(crate::ui::tui::TuiEvent::RunOutcome {
+                    summary: tui_run_outcome_text(&agent, &run_result),
+                });
             }
             _ => break,
         }
@@ -2755,6 +2761,26 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
     // TUI thread can never block shutdown indefinitely.
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), tui_handle).await;
     Ok(())
+}
+
+/// The TUI's end-of-task note: the failure-mode banner line (✅ / ⚠️ /
+/// failure tag — the same verdict the CLI prints) followed by the run
+/// summary. The banner line is omitted when the run ended before a
+/// verdict was classified (the summary's `outcome:` line still says so).
+#[cfg(feature = "tui")]
+fn tui_run_outcome_text(agent: &Agent, run_result: &Result<()>) -> String {
+    let failure = run_result
+        .as_ref()
+        .err()
+        .map(|e| crate::observability::telemetry::redact_secrets(&e.to_string()));
+    let summary = render_run_summary(&agent.run_summary(), failure.as_deref());
+    match agent
+        .last_run_failure_mode()
+        .and_then(|fm| fm.cli_banner().lines().next().map(str::to_string))
+    {
+        Some(banner) => format!("{banner}\n{summary}"),
+        None => summary,
+    }
 }
 
 /// URL the `status` command probes: `{endpoint}/models`, which every

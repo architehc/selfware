@@ -64,6 +64,10 @@ pub enum TuiEvent {
     },
     /// Mode change requested (e.g., user selected "Yolo" from permission prompt)
     ModeChangeRequested { mode: crate::config::ExecutionMode },
+    /// End-of-task outcome: the failure-mode banner line and the run
+    /// summary (the CLI prints the same after a task; the TUI showed
+    /// nothing).
+    RunOutcome { summary: String },
 }
 
 /// Coordinator status for UI display
@@ -90,8 +94,12 @@ pub struct DashboardState {
     pub tokens_used: u64,
     /// Session start time
     pub session_start: Instant,
-    /// Garden health percentage (0.0 - 1.0)
+    /// Garden health percentage (0.0 - 1.0): share of scanned files changed
+    /// in the last 90 days. Meaningful only when `garden_health_measured`.
     pub garden_health: f64,
+    /// Whether `garden_health` came from a scan (a `GardenHealthUpdate`).
+    /// Until then the panel says "not measured" instead of a default 100%.
+    pub garden_health_measured: bool,
     /// Active tools currently running
     pub active_tools: Vec<ActiveTool>,
     /// Recent log entries
@@ -111,6 +119,7 @@ impl Default for DashboardState {
             tokens_used: 0,
             session_start: Instant::now(),
             garden_health: 1.0,
+            garden_health_measured: false,
             active_tools: Vec::new(),
             logs: Vec::new(),
             // Not connected until the model actually responds — set true on the
@@ -242,6 +251,7 @@ impl DashboardState {
             }
             TuiEvent::GardenHealthUpdate { health } => {
                 self.garden_health = health.clamp(0.0, 1.0);
+                self.garden_health_measured = true;
             }
             TuiEvent::Log { level, message } => {
                 self.log(level, &message);
@@ -281,6 +291,16 @@ impl DashboardState {
                     LogLevel::Warning,
                     &format!("Permission requested: {}", prompt.summary()),
                 );
+            }
+            TuiEvent::RunOutcome { summary } => {
+                let level = if summary.starts_with('✅') {
+                    LogLevel::Success
+                } else {
+                    LogLevel::Warning
+                };
+                for line in summary.lines().filter(|l| !l.trim().is_empty()) {
+                    self.log(level, line);
+                }
             }
             TuiEvent::ModeChangeRequested { mode } => {
                 self.status_message = format!("Mode change: {:?}", mode);
@@ -457,6 +477,14 @@ pub fn render_garden_health(frame: &mut Frame, area: Rect, state: &DashboardStat
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    // Rule 3: never render a green 100% that nothing measured.
+    if !state.garden_health_measured {
+        let empty =
+            Paragraph::new("  not measured (no files scanned)").style(TuiPalette::muted_style());
+        frame.render_widget(empty, inner);
+        return;
+    }
+
     // Determine health stage
     let (stage, icon) = match (state.garden_health * 100.0) as u8 {
         0..=25 => ("Wilting", "🥀"),
@@ -481,7 +509,7 @@ pub fn render_garden_health(frame: &mut Frame, area: Rect, state: &DashboardStat
         .gauge_style(Style::default().fg(health_color))
         .ratio(state.garden_health)
         .label(format!(
-            "{} {} ({:.0}%)",
+            "{} {} — {:.0}% of files changed in the last 90 days",
             icon,
             stage,
             state.garden_health * 100.0

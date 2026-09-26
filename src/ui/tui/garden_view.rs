@@ -504,7 +504,7 @@ impl GardenView {
                     ]),
                     Line::from(""),
                     Line::from(vec![
-                        Span::styled("Health: ", TuiPalette::muted_style()),
+                        Span::styled("Changed ≤90 days: ", TuiPalette::muted_style()),
                         Span::styled(
                             health_pct,
                             if *health > 0.7 {

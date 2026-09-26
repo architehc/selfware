@@ -547,3 +547,15 @@ fn clear_chat_resets_task_progress_and_usage() {
     assert_eq!(app.messages.len(), 1);
     assert_eq!(app.scroll, 0);
 }
+
+#[test]
+fn stray_tool_markup_is_not_a_chat_message() {
+    // 0.9.1: a lone "</tool_call>" showed up as its own 🦊 message.
+    let mut app = App::new("m");
+    let before = app.messages.len();
+    app.add_assistant_message("</tool_call>");
+    app.add_assistant_message("<tool_call>{\"name\":\"x\"}</tool_call>");
+    assert_eq!(app.messages.len(), before);
+    app.add_assistant_message("Done.\n</tool_call>");
+    assert_eq!(app.messages.last().unwrap().content, "Done.");
+}

@@ -487,6 +487,10 @@ fn apply_agent_event(
         TuiEvent::AssistantDelta { text } => {
             app.append_streaming(text);
         }
+        TuiEvent::RunOutcome { summary } => {
+            app.commit_streaming();
+            app.add_system_message(summary);
+        }
         _ => {}
     }
 }
@@ -565,11 +569,17 @@ pub fn run_tui_dashboard_with_events(
     // Scan current directory for garden view
     let cwd = std::env::current_dir().unwrap_or_default();
     let garden = crate::ui::garden::scan_directory(&cwd);
+    let tended = garden.tended_fraction();
     with_dashboard_state(&shared_state, |state| {
         state.log(
             LogLevel::Info,
             &format!("Scanned garden: {} plants", garden.total_plants),
         );
+        // The Garden Health panel shows this MEASURED share (files changed
+        // in the last 90 days); without a scan it says "not measured".
+        if let Some(health) = tended {
+            state.process_event(TuiEvent::GardenHealthUpdate { health });
+        }
     });
     garden_view.set_garden(garden);
 
@@ -1406,8 +1416,9 @@ pub fn create_event_channel() -> (
 /// `prefix_str` (e.g. "12:00 🦊 "); every other segment/line is indented to
 /// match the prefix width. Returns one `String` per rendered terminal row.
 ///
-/// Kept separate from [`wrap_chat_message`] so the wrapping logic is unit
-/// testable without inspecting an opaque `ListItem`.
+/// Returns plain rows so the wrapping logic is unit testable without
+/// inspecting an opaque `ListItem`; [`chat_rows_chronological`] turns them
+/// into one list item per row.
 pub(crate) fn wrap_chat_message_lines(
     prefix_str: &str,
     content: &str,
@@ -1482,53 +1493,72 @@ pub(crate) fn wrap_chat_message_lines(
     lines
 }
 
-pub(crate) fn wrap_chat_message<'a>(
-    prefix_str: &str,
-    content: &str,
-    style: ratatui::style::Style,
-    width: usize,
-) -> ratatui::widgets::ListItem<'a> {
-    use ratatui::text::{Line, Span, Text};
-    use ratatui::widgets::ListItem;
-
-    let lines: Vec<Line> = wrap_chat_message_lines(prefix_str, content, width)
-        .into_iter()
-        .map(|s| Line::from(Span::styled(s, style)))
-        .collect();
-
-    ListItem::new(Text::from(lines))
-}
-
-/// Push the wrapped rows of one chat message onto `items`, one `ListItem`
-/// per row.
-///
-/// ratatui's `List` stops rendering at the first item that does not fit the
-/// remaining area, so a single multi-row item taller than the pane renders
-/// NOTHING at all — `/help` output or any long answer used to blank the
-/// chat pane. Per-row items always fill the pane; a message whose wrapped
-/// height exceeds the pane contributes its TAIL (the newest rows) instead
-/// of vanishing.
-fn push_wrapped_rows<'a>(
-    items: &mut Vec<ratatui::widgets::ListItem<'a>>,
-    prefix_str: &str,
-    content: &str,
-    style: Style,
+/// The visible chat rows, oldest at the top and NEWEST AT THE BOTTOM, like
+/// every chat UI: the last `height` wrapped rows of `entries` (given in
+/// chronological order). The pane used to list messages newest-first, so
+/// tool events sat above the user's own question (0.9.1 field finding).
+pub(crate) fn chat_rows_chronological<T: Clone>(
+    entries: &[(String, String, T)],
     width: usize,
     height: usize,
-) {
-    use ratatui::text::{Line, Span};
-    use ratatui::widgets::ListItem;
-
-    let rows = wrap_chat_message_lines(prefix_str, content, width);
-    let start = rows.len().saturating_sub(height);
-    for row in rows.into_iter().skip(start) {
-        items.push(ListItem::new(Line::from(Span::styled(row, style))));
+) -> Vec<(String, T)> {
+    let mut rows: Vec<(String, T)> = Vec::new();
+    // Walk newest → oldest and stop once the pane is full.
+    for (prefix, content, style) in entries.iter().rev() {
+        if rows.len() >= height {
+            break;
+        }
+        let wrapped = wrap_chat_message_lines(prefix, content, width);
+        for row in wrapped.into_iter().rev() {
+            rows.push((row, style.clone()));
+        }
     }
+    rows.truncate(height);
+    rows.reverse();
+    rows
+}
+
+/// Chat entries (prefix, content, style) of `app` in chronological order,
+/// minus the `app.scroll` newest ones, plus the live streaming answer last.
+fn chat_entries(app: &App) -> Vec<(String, String, Style)> {
+    let visible = app.messages.len().saturating_sub(app.scroll);
+    let mut entries: Vec<(String, String, Style)> = app.messages[..visible]
+        .iter()
+        .map(|msg| {
+            let style = match msg.role {
+                MessageRole::User => Style::default().fg(TuiPalette::AMBER),
+                MessageRole::Assistant => Style::default().fg(TuiPalette::GARDEN_GREEN),
+                MessageRole::System => TuiPalette::muted_style(),
+                MessageRole::Tool => Style::default().fg(TuiPalette::COPPER),
+            };
+            let prefix = match msg.role {
+                MessageRole::User => "You",
+                MessageRole::Assistant => "🦊",
+                MessageRole::System => "📋",
+                MessageRole::Tool => "🔧",
+            };
+            (
+                format!("{} {} ", msg.timestamp, prefix),
+                msg.content.clone(),
+                style,
+            )
+        })
+        .collect();
+    if app.scroll == 0 {
+        if let Some(live) = app.streaming_assistant.as_ref().filter(|s| !s.is_empty()) {
+            entries.push((
+                "🦊 ▌".to_string(),
+                live.clone(),
+                Style::default().fg(TuiPalette::GARDEN_GREEN),
+            ));
+        }
+    }
+    entries
 }
 
 /// Render a chat pane
 fn render_chat_pane(frame: &mut Frame, area: Rect, app: &App, focused: bool) {
-    use ratatui::text::Span;
+    use ratatui::text::{Line, Span};
     use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
     // Wipe the pane area first so stale cells from a previous frame (e.g. a
@@ -1560,43 +1590,17 @@ fn render_chat_pane(frame: &mut Frame, area: Rect, app: &App, focused: bool) {
         .split(inner);
 
     // Render messages with line wrapping — one ListItem per wrapped ROW (see
-    // push_wrapped_rows): a single multi-row item taller than the pane is
+    // chat_rows_chronological): a single multi-row item taller than the pane is
     // skipped by ratatui entirely, which used to blank the chat pane for
     // /help and long answers.
+    // Chronological, newest at the bottom (auto-scrolls as messages
+    // arrive); `app.scroll` hides the N newest to look back.
     let msg_width = chunks[0].width as usize;
     let msg_height = chunks[0].height as usize;
-    let mut items: Vec<ListItem> = Vec::new();
-    // Live streaming assistant response, shown as the newest line (the list is
-    // rendered newest-first) with a cursor marker while generating.
-    if let Some(live) = app.streaming_assistant.as_ref().filter(|s| !s.is_empty()) {
-        let style = Style::default().fg(TuiPalette::GARDEN_GREEN);
-        push_wrapped_rows(&mut items, "🦊 ▌", live, style, msg_width, msg_height);
-    }
-    for msg in app.messages.iter().rev().skip(app.scroll) {
-        let style = match msg.role {
-            MessageRole::User => Style::default().fg(TuiPalette::AMBER),
-            MessageRole::Assistant => Style::default().fg(TuiPalette::GARDEN_GREEN),
-            MessageRole::System => TuiPalette::muted_style(),
-            MessageRole::Tool => Style::default().fg(TuiPalette::COPPER),
-        };
-
-        let prefix = match msg.role {
-            MessageRole::User => "You",
-            MessageRole::Assistant => "🦊",
-            MessageRole::System => "📋",
-            MessageRole::Tool => "🔧",
-        };
-
-        let prefix_str = format!("{} {} ", msg.timestamp, prefix);
-        push_wrapped_rows(
-            &mut items,
-            &prefix_str,
-            &msg.content,
-            style,
-            msg_width,
-            msg_height,
-        );
-    }
+    let items: Vec<ListItem> = chat_rows_chronological(&chat_entries(app), msg_width, msg_height)
+        .into_iter()
+        .map(|(row, style)| ListItem::new(Line::from(Span::styled(row, style))))
+        .collect();
 
     let messages = List::new(items);
     frame.render_widget(messages, chunks[0]);

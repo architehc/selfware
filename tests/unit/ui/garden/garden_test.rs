@@ -568,3 +568,22 @@ fn test_digital_garden_clone() {
     assert_eq!(cloned.project_name, garden.project_name);
     assert_eq!(cloned.total_plants, garden.total_plants);
 }
+
+#[test]
+fn root_bed_has_a_name() {
+    // 0.9.1: the workspace root showed as an entry with an empty name.
+    assert_eq!(bed_display_name(""), "(root)");
+    assert_eq!(bed_display_name("."), "(root)");
+    assert_eq!(bed_display_name("src/ui"), "ui");
+    assert_eq!(GardenBed::new("").name, "(root)");
+}
+
+#[test]
+fn tended_fraction_is_measured_or_absent() {
+    let garden = DigitalGarden::new("p");
+    assert_eq!(
+        garden.tended_fraction(),
+        None,
+        "nothing scanned, nothing claimed"
+    );
+}

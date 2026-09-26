@@ -124,6 +124,7 @@ pub(crate) mod result_compaction;
 pub mod session_log;
 pub(crate) mod session_usage;
 mod streaming;
+pub(crate) use streaming::visible_response_text;
 pub(crate) mod task_policy;
 mod task_runner;
 mod tool_collect;

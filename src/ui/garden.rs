@@ -148,10 +148,7 @@ pub struct GardenBed {
 impl GardenBed {
     pub fn new(path: &str) -> Self {
         Self {
-            name: Path::new(path)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| path.to_string()),
+            name: bed_display_name(path),
             path: path.to_string(),
             plants: Vec::new(),
             total_lines: 0,
@@ -190,6 +187,17 @@ impl GardenBed {
             Glyphs::frost()
         }
     }
+}
+
+/// Display name of a bed (directory): its last path component, or
+/// `(root)` for the workspace root, which previously showed as an entry
+/// with an EMPTY name ("(7 plants)") in the TUI garden panel.
+pub fn bed_display_name(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .filter(|n| !n.is_empty() && n != ".")
+        .unwrap_or_else(|| "(root)".to_string())
 }
 
 /// The complete digital garden
@@ -522,6 +530,25 @@ pub fn render_plant(plant: &GardenPlant) -> String {
         plant.lines.to_string().muted(),
         plant.age_days.to_string().muted()
     )
+}
+
+impl DigitalGarden {
+    /// Measured share of scanned files modified in the last 90 days (the
+    /// same "not Wilting" rule each bed's `health_score` uses), or `None`
+    /// when nothing was scanned — so a panel never shows an unmeasured 100%.
+    pub fn tended_fraction(&self) -> Option<f64> {
+        let total: usize = self.beds.values().map(|b| b.plants.len()).sum();
+        if total == 0 {
+            return None;
+        }
+        let wilting: usize = self
+            .beds
+            .values()
+            .flat_map(|b| b.plants.iter())
+            .filter(|p| p.growth_stage == GrowthStage::Wilting)
+            .count();
+        Some(1.0 - wilting as f64 / total as f64)
+    }
 }
 
 /// Quick garden status for the status bar

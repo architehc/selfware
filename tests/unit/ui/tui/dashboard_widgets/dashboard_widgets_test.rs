@@ -414,3 +414,22 @@ fn test_truncate_for_display() {
     assert_eq!(truncate_for_display("hi", 10), "hi");
     assert_eq!(truncate_for_display("", 5), "");
 }
+
+#[test]
+fn garden_health_is_unmeasured_until_a_scan_reports_it() {
+    // Rule 3: the panel showed "Thriving (100%)" from a hard-coded default.
+    let mut state = DashboardState::default();
+    assert!(!state.garden_health_measured);
+    state.process_event(TuiEvent::GardenHealthUpdate { health: 0.4 });
+    assert!(state.garden_health_measured);
+}
+
+#[test]
+fn run_outcome_is_logged() {
+    let mut state = DashboardState::default();
+    let before = state.logs.len();
+    state.process_event(TuiEvent::RunOutcome {
+        summary: "✅ Task completed\n── Run summary ──\noutcome: completed".to_string(),
+    });
+    assert_eq!(state.logs.len(), before + 3);
+}

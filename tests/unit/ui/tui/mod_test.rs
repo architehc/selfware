@@ -450,3 +450,48 @@ fn permission_keys_map_only_to_offered_answers() {
     assert_eq!(permission_key_answer(&prompt, KeyCode::Char('a')), None);
     assert_eq!(permission_key_answer(&prompt, KeyCode::Char('p')), None);
 }
+
+// ── chat pane order (0.9.1: newest-first put tool events above the question) ──
+
+#[test]
+fn chat_rows_are_chronological_with_newest_at_the_bottom() {
+    let entries = vec![
+        ("You ".to_string(), "question".to_string(), 0u8),
+        ("🔧 ".to_string(), "[file_read] started".to_string(), 1u8),
+        ("🦊 ".to_string(), "answer".to_string(), 2u8),
+    ];
+    let rows = chat_rows_chronological(&entries, 40, 10);
+    let texts: Vec<&str> = rows.iter().map(|(r, _)| r.as_str()).collect();
+    assert_eq!(texts.len(), 3);
+    assert!(texts[0].contains("question"), "{texts:?}");
+    assert!(texts[2].contains("answer"), "{texts:?}");
+}
+
+#[test]
+fn chat_rows_keep_the_newest_when_the_pane_is_full() {
+    let entries: Vec<(String, String, u8)> = (0..20)
+        .map(|i| ("> ".to_string(), format!("msg {i}"), 0u8))
+        .collect();
+    let rows = chat_rows_chronological(&entries, 40, 5);
+    let texts: Vec<&str> = rows.iter().map(|(r, _)| r.as_str()).collect();
+    assert_eq!(texts.len(), 5);
+    assert!(
+        texts[0].contains("msg 15") && texts[4].contains("msg 19"),
+        "{texts:?}"
+    );
+}
+
+#[test]
+fn run_outcome_lands_in_the_chat_as_a_system_note() {
+    let mut app = App::new("m");
+    let mut pending = None;
+    apply_agent_event(
+        &mut app,
+        &mut pending,
+        &TuiEvent::RunOutcome {
+            summary: "⚠️ Task failed (TIMEOUT)\n── Run summary ──".to_string(),
+        },
+    );
+    let last = app.messages.last().expect("outcome message");
+    assert!(last.content.contains("Run summary"));
+}
