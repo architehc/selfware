@@ -865,7 +865,12 @@ pub(crate) fn safety_blocked(message: &str) {
     println!("{} {}", "🚫".bright_red(), message);
 }
 
-/// Print thinking/reasoning output
+/// Print thinking/reasoning output.
+///
+/// `inline`: streamed reasoning deltas — only the `--verbose` stream uses
+/// this now. A whole reasoning block (`inline == false`) prints in full under
+/// `--verbose`; otherwise as ONE line (first line, capped, plus its size) —
+/// a model's full chain of thought filled whole screens (0.9.1).
 pub(crate) fn thinking(text: &str, inline: bool) {
     // should_suppress_output() covers quiet + JSON + TUI. The TUI case is
     // critical: a raw stdout print here corrupts the rendered frame (reasoning
@@ -875,6 +880,17 @@ pub(crate) fn thinking(text: &str, inline: bool) {
     }
 
     let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    if !inline && !is_verbose() {
+        let line = live::reasoning_summary_line(text);
+        if is_plain_mode() {
+            print!("Thinking: {}\r\n", line);
+        } else {
+            print!("\r\x1b[2K{} {}\r\n", "Thinking:".dimmed(), line.dimmed());
+        }
+        io::stdout().flush().ok();
+        return;
+    }
 
     // Replace \n with \r\n so newlines in thinking text reset to column 0
     let safe = text.replace('\n', "\r\n");
@@ -897,15 +913,12 @@ pub(crate) fn thinking(text: &str, inline: bool) {
             print!("{}", safe.dimmed());
         }
         io::stdout().flush().ok();
-    } else if is_verbose() {
+    } else {
         print!(
             "\r\x1b[2K{} {}\r\n",
             "💭 Thinking:".bright_magenta(),
             safe.bright_black()
         );
-        io::stdout().flush().ok();
-    } else {
-        print!("\r\x1b[2K{} {}\r\n", "Thinking:".dimmed(), safe.dimmed());
         io::stdout().flush().ok();
     }
 }

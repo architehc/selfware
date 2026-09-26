@@ -483,6 +483,19 @@ impl Agent {
         rendered
     }
 
+    /// A reasoning block ended in default text mode. On a terminal the
+    /// indicator was transient (the spinner line); a non-tty log gets one
+    /// summary line instead, so it still records that reasoning happened.
+    fn end_reasoning_indicator(&self, block: &str) {
+        if output::is_plain_mode()
+            && !output::is_verbose()
+            && !output::is_compact()
+            && !block.trim().is_empty()
+        {
+            output::thinking(block, false);
+        }
+    }
+
     /// Check LLM cache for a matching previous request
     /// Returns cached response if found, None otherwise
     async fn check_llm_cache(
@@ -781,6 +794,15 @@ impl Agent {
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut in_reasoning = false;
         let mut display_filter = StreamDisplayFilter::default();
+        // Reasoning display state: running char count for the one-line
+        // indicator, where the current reasoning block starts (plain-mode
+        // summary line), the verbose stream's blank-line collapse, and
+        // whether the spinner currently shows the indicator (the waiting
+        // heartbeat must not overwrite it).
+        let mut reasoning_chars = 0usize;
+        let mut reasoning_block_start = 0usize;
+        let mut reasoning_collapser = output::live::BlankCollapser::default();
+        let mut reasoning_indicator_live = false;
         // Text-mode prose pipeline (None in TUI / JSON / quiet mode).
         let mut text_prose = (!tui_active && !suppress_stream_stdout).then(TextProse::new);
         let mut captured_logprobs: Option<serde_json::Value> = None;
@@ -835,7 +857,7 @@ impl Agent {
                                 event,
                                 initial_phrase,
                                 tui_active && tui_spinner_active,
-                                spinner.as_ref(),
+                                spinner.as_ref().filter(|_| !reasoning_indicator_live),
                             );
                             continue;
                         }
@@ -875,7 +897,7 @@ impl Agent {
                     &content,
                     &reasoning,
                     tool_calls.len(),
-                    in_reasoning || suppressed_tag_idx.is_some_and(|i| i >= 2),
+                    in_reasoning || display_filter.inside_think(),
                 );
                 let (tokens, source) = super::llm_wait::tokens_so_far(
                     captured_completion_tokens,
@@ -885,7 +907,8 @@ impl Agent {
                 let text = super::llm_wait::live_spinner_status(phase, tokens, source);
                 if tui_active {
                     self.emit_event(AgentEvent::SpinnerUpdate { message: text });
-                } else if let Some(ref s) = spinner {
+                } else if let Some(s) = spinner.as_ref().filter(|_| !reasoning_indicator_live) {
+                    // The "Thinking… (N chars)" indicator owns the line while live.
                     s.set_message(&text);
                 }
                 phrase_rotation = tokio::time::Instant::now();
@@ -921,6 +944,11 @@ impl Agent {
                             // End the inline reasoning line, if one is open
                             // (no extra blank line).
                             output::close_stream_line();
+                            self.end_reasoning_indicator(&reasoning[reasoning_block_start..]);
+                        }
+                        reasoning_indicator_live = false;
+                        if let Some(s) = spinner.as_ref() {
+                            s.set_message(initial_phrase);
                         }
                     }
                     sticky_state.set_activity("Generating...");
@@ -952,34 +980,58 @@ impl Agent {
                     }
                 }
                 StreamChunk::Reasoning(text) => {
-                    // Stop spinner on first reasoning — unless (compact,
-                    // non-TUI) the reasoning is not printed: then the spinner
-                    // is the only sign of life and keeps showing the
-                    // waiting heartbeat until content arrives.
+                    // TUI: the reasoning pane gets every delta. Text mode:
+                    // under --verbose the full reasoning streams (blank runs
+                    // collapsed); by default only a one-line indicator —
+                    // the spinner reads "Thinking… (1.2k chars)", updated in
+                    // place and cleared when the answer starts (a model's
+                    // whole self-debate filled screens, 0.9.1). Compact:
+                    // nothing (unchanged).
                     if tui_active && tui_spinner_active {
                         self.emit_event(AgentEvent::SpinnerStop);
                         tui_spinner_active = false;
-                    } else if !tui_active && !output::is_compact() {
-                        if let Some(s) = spinner.take() {
-                            drop(s);
-                        }
                     }
                     sticky_state
                         .is_thinking
                         .store(true, std::sync::atomic::Ordering::Relaxed);
                     sticky_state.set_activity("Thinking...");
+                    if !in_reasoning {
+                        reasoning_block_start = reasoning.len();
+                    }
+                    reasoning_chars += text.chars().count();
                     if tui_active {
-                        if !in_reasoning {
-                            in_reasoning = true;
-                        }
+                        in_reasoning = true;
                         self.emit_event(AgentEvent::ThinkingDelta { text: text.clone() });
-                    } else if !output::is_compact() {
+                    } else if output::is_compact() {
+                        // Not shown; the spinner keeps the waiting heartbeat.
+                    } else if suppress_stream_stdout {
+                        // JSON / quiet: nothing is shown (as before).
+                        drop(spinner.take());
+                    } else if output::is_verbose() {
+                        if let Some(s) = spinner.take() {
+                            drop(s);
+                            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+                        }
                         if !in_reasoning {
-                            in_reasoning = true;
+                            reasoning_collapser = output::live::BlankCollapser::default();
                             output::thinking_prefix();
                         }
-                        output::thinking(&text, true);
-                        io::stdout().flush().ok();
+                        in_reasoning = true;
+                        let shown = reasoning_collapser.push(&text);
+                        if !shown.is_empty() {
+                            output::thinking(&shown, true);
+                            io::stdout().flush().ok();
+                        }
+                    } else {
+                        in_reasoning = true;
+                        reasoning_indicator_live = true;
+                        let label = output::live::reasoning_indicator(reasoning_chars);
+                        match spinner.as_ref() {
+                            Some(s) => s.set_message(&label),
+                            None => {
+                                spinner = Some(crate::ui::spinner::TerminalSpinner::start(&label));
+                            }
+                        }
                     }
                     reasoning.push_str(&text);
                 }
@@ -1064,6 +1116,9 @@ impl Agent {
         // after every response.)
         if !tui_active && !suppress_stream_stdout {
             output::close_stream_line();
+            if in_reasoning {
+                self.end_reasoning_indicator(&reasoning[reasoning_block_start..]);
+            }
         }
         // What reached the screen, for the final answer's print-once check
         // and the next response's echo gate. A response with a tool call is

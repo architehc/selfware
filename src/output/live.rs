@@ -6,6 +6,10 @@
 //!   ANSI styling when `styled`, keeps the raw text otherwise (non-tty,
 //!   `--no-color`, `NO_COLOR`), and collapses blank-line runs to at most one
 //!   in both modes.
+//! - [`BlankCollapser`]: the same blank-line collapse for free-flowing
+//!   (verbose) reasoning text.
+//! - [`reasoning_indicator`]: the one-line "Thinking… (1.2k chars)" status
+//!   shown instead of the full reasoning outside `--verbose`.
 //! - [`AnswerLedger`] + [`EchoGate`]: what prose the user has already SEEN in
 //!   this task, so the final answer is printed exactly once — whether it was
 //!   streamed live, streamed twice (planning + execution), or never streamed
@@ -290,6 +294,84 @@ pub(crate) fn render_prose(text: &str, styled: bool) -> String {
     let mut out = r.push(text);
     out.push_str(&r.finish());
     out
+}
+
+/// Streaming blank-line collapse for free-flowing text (verbose reasoning):
+/// leading newlines are dropped, a run of newlines (with only spaces/tabs
+/// between) emits at most two — one blank line — and only once a visible
+/// character follows, so trailing newlines never leave a gap.
+#[derive(Debug, Default)]
+pub(crate) struct BlankCollapser {
+    started: bool,
+    newlines: usize,
+    pending_ws: String,
+}
+
+impl BlankCollapser {
+    pub(crate) fn push(&mut self, text: &str) -> String {
+        let mut out = String::new();
+        for ch in text.chars() {
+            match ch {
+                '\n' => {
+                    self.pending_ws.clear();
+                    if self.started {
+                        self.newlines += 1;
+                    }
+                }
+                ' ' | '\t' | '\r' => self.pending_ws.push(ch),
+                _ => {
+                    for _ in 0..self.newlines.min(2) {
+                        out.push('\n');
+                    }
+                    self.newlines = 0;
+                    if self.started {
+                        out.push_str(&self.pending_ws);
+                    }
+                    self.pending_ws.clear();
+                    out.push(ch);
+                    self.started = true;
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Compact character count: `842`, `1.2k`, `12k`.
+pub(crate) fn compact_count(n: usize) -> String {
+    if n < 1000 {
+        n.to_string()
+    } else if n < 10_000 {
+        format!("{:.1}k", n as f64 / 1000.0)
+    } else {
+        format!("{}k", n / 1000)
+    }
+}
+
+/// The one-line reasoning status shown outside `--verbose`.
+pub(crate) fn reasoning_indicator(chars: usize) -> String {
+    format!("Thinking… ({} chars)", compact_count(chars))
+}
+
+/// One-line summary of a finished reasoning block (non-streaming paths and
+/// non-tty logs): its first non-empty line, capped, plus its size.
+pub(crate) fn reasoning_summary_line(reasoning: &str) -> String {
+    let first = reasoning
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    let chars = reasoning.chars().count();
+    let mut head: String = first
+        .chars()
+        .take(80)
+        .collect::<String>()
+        .trim_end()
+        .to_string();
+    if first.chars().count() > 80 || reasoning.trim() != first {
+        head.push('…');
+    }
+    format!("{head} ({} chars)", compact_count(chars))
 }
 
 /// Whitespace-free form used to compare shown and final text: rendering,

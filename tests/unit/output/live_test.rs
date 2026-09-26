@@ -171,3 +171,40 @@ fn echo_gate_releases_everything_on_divergence() {
     assert_eq!(g.push("x"), "x");
     assert_eq!(g.finish(), "");
 }
+
+// --- Reasoning display (a whole screen of "Thinking: …" by default, 0.9.1) ---
+
+#[test]
+fn reasoning_indicator_is_one_compact_line() {
+    assert_eq!(reasoning_indicator(842), "Thinking… (842 chars)");
+    assert_eq!(reasoning_indicator(1234), "Thinking… (1.2k chars)");
+    assert_eq!(reasoning_indicator(12_345), "Thinking… (12k chars)");
+    assert!(!reasoning_indicator(5).contains('\n'));
+}
+
+#[test]
+fn reasoning_summary_line_is_the_first_line_capped() {
+    let long = format!("{}\nsecond line\n", "word ".repeat(40));
+    let line = reasoning_summary_line(&long);
+    assert!(!line.contains('\n'), "{line}");
+    assert!(line.starts_with("word word"), "{line}");
+    assert!(
+        line.contains('…') && line.ends_with("word… (213 chars)"),
+        "{line}"
+    );
+    assert_eq!(reasoning_summary_line("\n\nshort\n"), "short (8 chars)");
+}
+
+#[test]
+fn verbose_reasoning_blank_runs_collapse_across_chunks() {
+    let mut c = BlankCollapser::default();
+    let mut out = String::new();
+    for chunk in ["\n\n", "First.\n", "\n\n", "  \n", "\nSecond.", "\n\n\n"] {
+        out.push_str(&c.push(chunk));
+    }
+    // Leading and trailing newlines dropped, the run in between is one
+    // blank line.
+    assert_eq!(out, "First.\n\nSecond.");
+    let mut c = BlankCollapser::default();
+    assert_eq!(c.push("a\nb  c\n  d"), "a\nb  c\n  d");
+}
