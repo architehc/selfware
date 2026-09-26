@@ -243,6 +243,9 @@ impl Agent {
                             // A failed/timed-out summary side call may still have
                             // been billed: account what the client recorded.
                             self.sync_api_usage();
+                            // Back off until the history has grown, like a
+                            // rejected summary: no paid retry on every step.
+                            self.compressor.note_summary_failed(summarizable);
                             Some(format!("summary failed: {e}; original kept"))
                         }
                     }

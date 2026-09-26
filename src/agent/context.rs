@@ -114,6 +114,11 @@ pub struct ContextCompressor {
     /// summaries left the history above the threshold and ran again the
     /// next turn).
     summary_backoff: Option<usize>,
+    /// Why `summary_backoff` is set: the summary left the history above the
+    /// threshold, or the summary call itself FAILED (timeout / error). A
+    /// failing summarizer used to be retried on every step with no bound
+    /// (review, 0.9.1); it now backs off the same way.
+    summary_backoff_failed: bool,
     /// Roots the ledger's path keys are computed against: the agent's own
     /// workspace root (`Agent::new` sets it, a worktree switch moves it; see
     /// [`PathKeys`]). A standalone compressor falls back to the current
@@ -137,6 +142,7 @@ impl ContextCompressor {
             compression_threshold: (token_budget as f32 * content_ratio) as usize,
             min_messages_to_keep: 6,
             summary_backoff: None,
+            summary_backoff_failed: false,
             path_keys: None,
             ledger: Mutex::new(WorkLedger::new()),
         }
@@ -345,10 +351,14 @@ impl ContextCompressor {
         }
         if let Some(rejected_at) = self.summary_backoff {
             if s < rejected_at + MIN_SUMMARIZABLE_TOKENS {
+                let outcome = if self.summary_backoff_failed {
+                    "failed"
+                } else {
+                    "left the history above the threshold"
+                };
                 return Some(format!(
-                    "the last summary (of ~{rejected_at} tokens) left the history above the \
-                     threshold and the summarizable part has grown only to ~{s}; no summary \
-                     call made"
+                    "the last summary (of ~{rejected_at} tokens) {outcome} and the \
+                     summarizable part has grown only to ~{s}; no summary call made"
                 ));
             }
         }
@@ -359,11 +369,21 @@ impl ContextCompressor {
     /// the threshold (see [`Self::summary_skip_reason`]).
     pub fn note_summary_rejected(&mut self, summarizable_tokens: usize) {
         self.summary_backoff = Some(summarizable_tokens);
+        self.summary_backoff_failed = false;
+    }
+
+    /// Remember a summary call that FAILED (error or timeout): the same
+    /// growth-gated backoff as a rejected summary, so a summarizer that keeps
+    /// failing is not called again on every step.
+    pub fn note_summary_failed(&mut self, summarizable_tokens: usize) {
+        self.summary_backoff = Some(summarizable_tokens);
+        self.summary_backoff_failed = true;
     }
 
     /// A summary was accepted: the backoff no longer applies.
     pub fn note_summary_accepted(&mut self) {
         self.summary_backoff = None;
+        self.summary_backoff_failed = false;
     }
 
     /// Returns the (possibly) compressed messages and the token usage the

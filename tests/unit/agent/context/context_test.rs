@@ -1900,4 +1900,15 @@ fn a_summary_that_can_fit_is_allowed_and_a_rejected_one_is_not_repeated() {
     assert!(compressor.summary_skip_reason(&history, None).is_none());
     compressor.note_summary_accepted();
     assert!(compressor.summary_skip_reason(&history, None).is_none());
+    // Review (0.9.1): a FAILED summary call backs off the same way, and the
+    // skip reason says it failed.
+    let s = compressor
+        .summary_split(&history, None)
+        .unwrap()
+        .summarizable_tokens;
+    compressor.note_summary_failed(s);
+    let reason = compressor.summary_skip_reason(&history, None).unwrap();
+    assert!(reason.contains("failed"), "{reason}");
+    compressor.note_summary_accepted();
+    assert!(compressor.summary_skip_reason(&history, None).is_none());
 }
