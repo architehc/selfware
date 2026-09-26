@@ -240,48 +240,7 @@ impl LongRunningRunner {
             Ok(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
 
-                match project_type {
-                    ProjectType::Rust => {
-                        let passed: usize = stdout
-                            .lines()
-                            .filter_map(|l| l.split("passed").next())
-                            .filter_map(|l| l.split_whitespace().next_back())
-                            .filter_map(|n| n.parse::<usize>().ok())
-                            .sum();
-                        let failed: usize = stdout
-                            .lines()
-                            .filter_map(|l| l.split("failed").next())
-                            .filter_map(|l| l.split_whitespace().next_back())
-                            .filter_map(|n| n.parse::<usize>().ok())
-                            .sum();
-                        (passed, failed)
-                    }
-                    ProjectType::Python => {
-                        let passed = stdout.matches(" passed").count();
-                        let failed = stdout.matches(" failed").count();
-                        (passed, failed)
-                    }
-                    ProjectType::Go => {
-                        let passed = stdout.matches("--- PASS").count();
-                        let failed = stdout.matches("--- FAIL").count();
-                        (passed, failed)
-                    }
-                    ProjectType::Template => {
-                        let passed: usize = stdout
-                            .lines()
-                            .filter_map(|l| l.split("passed").next())
-                            .filter_map(|l| l.split_whitespace().next_back())
-                            .filter_map(|n| n.parse::<usize>().ok())
-                            .sum();
-                        let failed: usize = stdout
-                            .lines()
-                            .filter_map(|l| l.split("failed").next())
-                            .filter_map(|l| l.split_whitespace().next_back())
-                            .filter_map(|n| n.parse::<usize>().ok())
-                            .sum();
-                        (passed, failed)
-                    }
-                }
+                parse_test_counts(project_type, &stdout)
             }
             Err(_) => (0, 0),
         }
@@ -390,6 +349,57 @@ fn extract_outcome(output: &[u8]) -> String {
                 .to_string()
         })
         .unwrap_or_else(|| "none".to_string())
+}
+
+/// `(passed, failed)` from a project's test-runner stdout.
+///
+/// - Rust/Template (`cargo test`): summed over EVERY libtest `test result:`
+///   line (one per test binary). The previous per-line "last word before
+///   `passed`" scan also summed stray numbers from any line ending in one.
+/// - Python (`pytest -v`): the final `N passed, M failed` tally; falls back
+///   to counting per-test `PASSED`/`FAILED` lines. The previous
+///   `matches(" passed").count()` counted the summary line once (always 1).
+/// - Go (`go test -v`): `--- PASS` / `--- FAIL` lines.
+pub(crate) fn parse_test_counts(project_type: &ProjectType, stdout: &str) -> (usize, usize) {
+    match project_type {
+        ProjectType::Rust | ProjectType::Template => {
+            crate::tools::cargo::libtest_totals(stdout).map_or((0, 0), |t| (t.passed, t.failed))
+        }
+        ProjectType::Python => pytest_counts(stdout),
+        ProjectType::Go => (
+            stdout.matches("--- PASS").count(),
+            stdout.matches("--- FAIL").count(),
+        ),
+    }
+}
+
+/// pytest's closing tally (`=== 3 failed, 12 passed in 0.40s ===`), else
+/// per-test ` PASSED` / ` FAILED` lines from `-v` output.
+fn pytest_counts(stdout: &str) -> (usize, usize) {
+    let tally = stdout.lines().rev().find_map(|line| {
+        let l = line.trim().trim_matches('=').trim();
+        let mut passed = None;
+        let mut failed = None;
+        for part in l.split(',') {
+            let mut words = part.split_whitespace();
+            let (Some(n), Some(kind)) = (words.next(), words.next()) else {
+                continue;
+            };
+            let Ok(n) = n.parse::<usize>() else {
+                continue;
+            };
+            match kind {
+                "passed" => passed = Some(n),
+                "failed" | "error" | "errors" => *failed.get_or_insert(0) += n,
+                _ => {}
+            }
+        }
+        (passed.is_some() || failed.is_some()).then(|| (passed.unwrap_or(0), failed.unwrap_or(0)))
+    });
+    tally.unwrap_or_else(|| {
+        let per_test = |tag: &str| stdout.lines().filter(|l| l.contains(tag)).count();
+        (per_test(" PASSED"), per_test(" FAILED"))
+    })
 }
 
 #[cfg(test)]

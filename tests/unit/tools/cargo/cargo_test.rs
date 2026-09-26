@@ -878,3 +878,55 @@ fn no_tests_ran_serializes_for_the_dispatcher() {
     assert_eq!(value["no_tests_ran"], true);
     assert_eq!(value["message"], "No tests ran");
 }
+
+/// Realistic `cargo test` stdout for a crate with a lib, a bin and an
+/// integration-test file (hexyl, observed live on 0.9.1): three libtest
+/// summary lines, 10 + 5 + 41 = 56 tests.
+const MULTI_BINARY_CARGO_TEST: &str = "\
+running 10 tests
+test tests::unit_a ... ok
+test tests::unit_b ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+running 5 tests
+test tests::bin_a ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+running 41 tests
+test basic::can_print_simple_ascii_file ... ok
+
+test result: ok. 41 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.52s
+
+   Doc-tests hexyl
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+";
+
+#[test]
+fn libtest_totals_sums_every_test_binary() {
+    let t = libtest_totals(MULTI_BINARY_CARGO_TEST).expect("summary lines present");
+    assert_eq!(t.passed, 56);
+    assert_eq!(t.failed, 0);
+    assert_eq!(t.ignored, 2);
+    assert_eq!(t.binaries, 4);
+    assert_eq!(t.executed(), 56);
+    assert_eq!(libtest_summary_executed(MULTI_BINARY_CARGO_TEST), 56);
+}
+
+#[test]
+fn libtest_totals_sums_failures_across_binaries() {
+    let out = "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n\
+               test result: FAILED. 39 passed; 2 failed; 1 ignored; 0 measured; 0 filtered out\n";
+    let t = libtest_totals(out).unwrap();
+    assert_eq!((t.passed, t.failed, t.ignored, t.binaries), (49, 2, 1, 2));
+}
+
+#[test]
+fn libtest_totals_none_without_summary_line() {
+    assert_eq!(libtest_totals("running 3 tests\ntest a ... ok\n"), None);
+    assert_eq!(libtest_totals(""), None);
+}

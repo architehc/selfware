@@ -343,41 +343,13 @@ struct ContainerStats {
     peak_memory_bytes: u64,
 }
 
+/// `(passed, passed + failed + ignored)` summed over EVERY libtest
+/// `test result:` line — one per test binary. Reading only the last line
+/// (the pre-0.9.2 behaviour) counted just the final binary of a
+/// multi-target run.
 fn parse_test_counts(output: &str) -> (usize, usize) {
-    // Parse "test result: ok. X passed; Y failed; Z ignored"
-    for line in output.lines().rev() {
-        if line.contains("test result:") {
-            let mut passed = 0;
-            let mut failed = 0;
-            let mut ignored = 0;
-
-            for part in line.split(';') {
-                let part = part.trim();
-                if part.contains("passed") {
-                    passed = part
-                        .split_whitespace()
-                        .filter_map(|w| w.parse().ok())
-                        .next()
-                        .unwrap_or(0);
-                } else if part.contains("failed") {
-                    failed = part
-                        .split_whitespace()
-                        .filter_map(|w| w.parse().ok())
-                        .next()
-                        .unwrap_or(0);
-                } else if part.contains("ignored") {
-                    ignored = part
-                        .split_whitespace()
-                        .filter_map(|w| w.parse().ok())
-                        .next()
-                        .unwrap_or(0);
-                }
-            }
-
-            return (passed, passed + failed + ignored);
-        }
-    }
-    (0, 0)
+    crate::tools::cargo::libtest_totals(output)
+        .map_or((0, 0), |t| (t.passed, t.passed + t.failed + t.ignored))
 }
 
 fn parse_memory_string(mem: &str) -> u64 {

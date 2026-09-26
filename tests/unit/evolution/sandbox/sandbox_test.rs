@@ -107,14 +107,16 @@ fn test_parse_memory_string_no_slash() {
 
 #[test]
 fn test_parse_test_counts_multiple_result_lines() {
-    // Multiple test result lines — should use the last one (rev iteration)
+    // Multiple test result lines (one per test binary) — summed, not just the
+    // last one: `cargo test --all-features` runs lib + bins + integration
+    // tests and every binary's tests count.
     let output = "\
 test result: ok. 50 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 test result: ok. 100 passed; 2 failed; 3 ignored; 0 measured; 0 filtered out";
     let (passed, total) = parse_test_counts(output);
-    // Last line: 100 passed, 2 failed, 3 ignored
-    assert_eq!(passed, 100);
-    assert_eq!(total, 105);
+    // 50 + 100 passed, 2 failed, 3 ignored
+    assert_eq!(passed, 150);
+    assert_eq!(total, 155);
 }
 
 #[test]
@@ -293,4 +295,15 @@ fn explicit_destroy_then_drop_is_idempotent() {
         1,
         "docker rm -f must run exactly once; recorded: {invocations:?}"
     );
+}
+
+#[test]
+fn test_parse_test_counts_sums_every_test_binary() {
+    // lib + bin + integration: the old parser read only the LAST line (41).
+    let output = "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n\
+                  test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n\
+                  test result: FAILED. 41 passed; 1 failed; 2 ignored; 0 measured; 0 filtered out\n";
+    let (passed, total) = parse_test_counts(output);
+    assert_eq!(passed, 56);
+    assert_eq!(total, 59);
 }

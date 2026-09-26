@@ -2887,10 +2887,16 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 let stderr = String::from_utf8_lossy(&test_output.stderr);
                 let combined = format!("{}\n{}", stdout, stderr);
                 let has_test_summary = combined.lines().any(|l| l.contains("test result:"));
-                let summary = combined
-                    .lines()
-                    .find(|l| l.contains("test result:"))
-                    .map(|l| l.trim().to_string())
+                // Summed over every test binary: the FIRST `test result:`
+                // line is often a passing lib binary ("ok. 10 passed") while
+                // the failure sits in a later one.
+                let summary = crate::tools::cargo::libtest_totals(&combined)
+                    .map(|t| {
+                        format!(
+                            "{} passed; {} failed; {} ignored across {} test binaries",
+                            t.passed, t.failed, t.ignored, t.binaries
+                        )
+                    })
                     .unwrap_or_else(|| "unknown".to_string());
                 let names = failing_test_names(&combined);
                 let tail = tail_lines(&combined, 50);

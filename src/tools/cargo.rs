@@ -279,16 +279,29 @@ impl Tool for CargoTest {
             args.get("test_name").and_then(|v| v.as_str()),
         );
 
-        let result = CargoTestOutput {
-            success,
-            no_tests_ran,
-            message,
-            summary: TestSummary {
+        // libtest's own `test result:` lines, summed over every test binary,
+        // are authoritative for the counts; the per-test `... ok` lines are
+        // the fallback when no summary line was captured.
+        let summary = match libtest_totals(&stdout) {
+            Some(t) => TestSummary {
+                passed: t.passed,
+                failed: t.failed,
+                ignored: t.ignored,
+                total: t.passed + t.failed + t.ignored,
+            },
+            None => TestSummary {
                 passed,
                 failed,
                 ignored,
                 total: tests.len(),
             },
+        };
+
+        let result = CargoTestOutput {
+            success,
+            no_tests_ran,
+            message,
+            summary,
             tests,
             failures,
             stdout: stdout.chars().take(8000).collect(),
@@ -627,26 +640,62 @@ pub(crate) fn test_run_verdict(
     )
 }
 
+/// Counts summed over EVERY libtest `test result:` line in a `cargo test`
+/// run. One `cargo test` prints one such line per test binary (lib, each
+/// bin, each integration-test file, doctests); reading only the first one
+/// under-reports the run (0.9.1 showed "Tests: 10 passed" for a 10 lib +
+/// 5 bin + 41 integration = 56-test run).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LibtestTotals {
+    pub passed: usize,
+    pub failed: usize,
+    pub ignored: usize,
+    /// How many `test result:` lines (test binaries) were summed.
+    pub binaries: usize,
+}
+
+impl LibtestTotals {
+    /// Tests executed (`passed + failed`; ignored tests do not run).
+    pub fn executed(&self) -> usize {
+        self.passed + self.failed
+    }
+}
+
+/// Sum every libtest `test result:` line in `output`. `None` when the output
+/// contains no such line (nothing to report — never a guessed zero).
+pub fn libtest_totals(output: &str) -> Option<LibtestTotals> {
+    let mut totals = LibtestTotals::default();
+    for line in output.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("test result:") else {
+            continue;
+        };
+        let words: Vec<&str> = rest.split_whitespace().collect();
+        let mut counted = false;
+        for pair in words.windows(2) {
+            let Ok(n) = pair[0].parse::<usize>() else {
+                continue;
+            };
+            match pair[1].trim_end_matches([';', ',', '.']) {
+                "passed" => totals.passed += n,
+                "failed" => totals.failed += n,
+                "ignored" => totals.ignored += n,
+                _ => continue,
+            }
+            counted = true;
+        }
+        if counted {
+            totals.binaries += 1;
+        }
+    }
+    (totals.binaries > 0).then_some(totals)
+}
+
 /// Tests EXECUTED according to libtest's `test result:` summary lines
 /// (`passed + failed`, summed across every test binary). A backstop for
 /// output whose per-test `test x ... ok` lines were not captured, so a run
 /// that really executed tests is never reported as having run none.
 fn libtest_summary_executed(output: &str) -> usize {
-    output
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix("test result:"))
-        .map(|rest| {
-            let mut executed = 0usize;
-            let words: Vec<&str> = rest.split_whitespace().collect();
-            for pair in words.windows(2) {
-                let word = pair[1].trim_end_matches([';', ',', '.']);
-                if word == "passed" || word == "failed" {
-                    executed += pair[0].parse::<usize>().unwrap_or(0);
-                }
-            }
-            executed
-        })
-        .sum()
+    libtest_totals(output).map_or(0, |t| t.executed())
 }
 
 fn parse_test_output(stdout: &str, stderr: &str) -> (Vec<TestResult>, Vec<FailureDetail>) {

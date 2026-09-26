@@ -928,3 +928,77 @@ fn open_ended_progress_shows_step_and_elapsed_never_a_total() {
     }
     assert!(!line.contains("ETA"), "no invented ETA: {line}");
 }
+
+// ---- cargo_test summary: counts summed over every test binary ----
+
+const THREE_BINARY_STDOUT: &str = "running 10 tests\n\ntest result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\nrunning 5 tests\n\ntest result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\nrunning 41 tests\n\ntest result: ok. 41 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s\n";
+
+#[test]
+fn cargo_test_summary_counts_all_binaries_from_tool_json() {
+    // serde_json::Value serializes keys sorted, so `stdout` (whose FIRST
+    // `test result:` line says 10) precedes `summary` — the 0.9.1 bug read
+    // that first "10 passed".
+    let result = serde_json::json!({
+        "success": true,
+        "no_tests_ran": false,
+        "summary": {"passed": 56, "failed": 0, "ignored": 0, "total": 56},
+        "tests": [],
+        "failures": [],
+        "stdout": THREE_BINARY_STDOUT,
+        "stderr": "",
+        "exit_code": 0
+    });
+    let s = serde_json::to_string(&result).unwrap();
+    assert!(s.find("10 passed").unwrap() < s.find("\"summary\"").unwrap());
+    let args = serde_json::json!({});
+    assert_eq!(
+        semantic_summary("cargo_test", &args, Some(&s), true, 500),
+        "Tests: 56 passed"
+    );
+}
+
+#[test]
+fn cargo_test_summary_sums_plain_text_output() {
+    let args = serde_json::json!({});
+    assert_eq!(
+        semantic_summary("cargo_test", &args, Some(THREE_BINARY_STDOUT), true, 500),
+        "Tests: 56 passed"
+    );
+}
+
+#[test]
+fn cargo_test_summary_reports_failures_ignored_and_no_tests() {
+    let args = serde_json::json!({});
+    let failed = serde_json::json!({
+        "success": false,
+        "summary": {"passed": 53, "failed": 3, "ignored": 2, "total": 58},
+        "stdout": ""
+    })
+    .to_string();
+    assert_eq!(
+        semantic_summary("cargo_test", &args, Some(&failed), false, 500),
+        "Tests: 3 failed, 53 passed, 2 ignored"
+    );
+    let none_ran = serde_json::json!({
+        "success": false,
+        "no_tests_ran": true,
+        "summary": {"passed": 0, "failed": 0, "ignored": 0, "total": 0},
+        "stdout": ""
+    })
+    .to_string();
+    assert_eq!(
+        semantic_summary("cargo_test", &args, Some(&none_ran), false, 500),
+        "Tests: none ran"
+    );
+    // Build failure: no test results at all — no invented counts.
+    let build_err = serde_json::json!({
+        "success": false,
+        "summary": {"passed": 0, "failed": 0, "ignored": 0, "total": 0},
+        "stdout": ""
+    })
+    .to_string();
+    assert_eq!(
+        semantic_summary("cargo_test", &args, Some(&build_err), false, 500),
+        "Tests: failed (no test results reported)"
+    );
+}

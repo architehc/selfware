@@ -295,6 +295,64 @@ fn extract_pattern(args: &serde_json::Value) -> Option<&str> {
         .and_then(|v| v.as_str())
 }
 
+/// One-line `cargo_test` outcome built from the tool's structured `summary`
+/// (counts summed over every test binary), falling back to summing every
+/// libtest `test result:` line in plain-text output. Never reads just the
+/// first `N passed` it finds: the result JSON's keys are sorted, so `stdout`
+/// precedes `summary` and its FIRST `test result:` line belongs to only one
+/// binary (0.9.1 showed "Tests: 10 passed" for a 56-test run).
+fn cargo_test_summary(result: Option<&str>, success: bool) -> String {
+    let parsed: Option<serde_json::Value> = result.and_then(|s| serde_json::from_str(s).ok());
+    let no_tests_ran = parsed
+        .as_ref()
+        .and_then(|v| v.get("no_tests_ran"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if no_tests_ran {
+        return "Tests: none ran".to_string();
+    }
+    let from_summary = parsed.as_ref().and_then(|v| v.get("summary")).map(|s| {
+        let n = |k: &str| s.get(k).and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+        crate::tools::cargo::LibtestTotals {
+            passed: n("passed"),
+            failed: n("failed"),
+            ignored: n("ignored"),
+            binaries: 0,
+        }
+    });
+    let totals = from_summary.or_else(|| {
+        let text = parsed
+            .as_ref()
+            .and_then(|v| v.get("stdout"))
+            .and_then(|v| v.as_str())
+            .or(if parsed.is_none() { result } else { None })?;
+        crate::tools::cargo::libtest_totals(text)
+    });
+    let t = totals.unwrap_or_default();
+    if t.passed + t.failed + t.ignored == 0 {
+        // No counts available: say only what the exit status says.
+        return if success {
+            "Tests: passed (no counts reported)".to_string()
+        } else {
+            "Tests: failed (no test results reported)".to_string()
+        };
+    }
+    let mut parts = Vec::new();
+    if t.failed > 0 {
+        parts.push(format!("{} failed", t.failed));
+    }
+    parts.push(format!("{} passed", t.passed));
+    if t.ignored > 0 {
+        parts.push(format!("{} ignored", t.ignored));
+    }
+    if !success && t.failed == 0 {
+        // Non-zero exit without a reported test failure (e.g. a later test
+        // binary failed to build): the counts are real but not the verdict.
+        return format!("Tests: failed ({})", parts.join(", "));
+    }
+    format!("Tests: {}", parts.join(", "))
+}
+
 /// Generate a one-line semantic summary for a tool call
 pub(crate) fn semantic_summary(
     tool_name: &str,
@@ -386,21 +444,7 @@ pub(crate) fn semantic_summary(
         }
 
         // === Cargo / Build ===
-        "cargo_test" => {
-            if success {
-                let passed = result
-                    .and_then(|r| {
-                        r.find("passed").and_then(|idx| {
-                            let before = r[..idx].trim_end();
-                            before.rsplit_once(char::is_whitespace).map(|(_, n)| n)
-                        })
-                    })
-                    .unwrap_or("all");
-                format!("Tests: {} passed", passed)
-            } else {
-                "Tests: some failed".to_string()
-            }
-        }
+        "cargo_test" => cargo_test_summary(result, success),
         "cargo_check" => {
             if success {
                 "Cargo check passed".to_string()
