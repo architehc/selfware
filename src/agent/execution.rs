@@ -1209,7 +1209,16 @@ impl Agent {
         // intent" → ForceFallback, and since edits are done no fake-complete guard
         // trips, so the loop spins empty steps to MAX_ITERATIONS even though the
         // code compiles and tests pass (observed on multi-file tasks).
-        if tool_calls.is_empty() {
+        // A reply cut off by the output-token limit (finish_reason == "length")
+        // is not a finished answer. The two early acceptance paths below used to
+        // return before the length check further down, so a report truncated
+        // mid-sentence was accepted with exit 0 (val090 b2_163840 / b2_350000).
+        let truncated_by_length = chat_metadata
+            .as_ref()
+            .and_then(|m| m.finish_reason.as_deref())
+            == Some("length");
+
+        if tool_calls.is_empty() && !truncated_by_length {
             let clean = super::recovery::strip_think_blocks(&content)
                 .trim()
                 .to_string();
@@ -1242,7 +1251,7 @@ impl Agent {
             let looks_final = clean.len() >= 40
                 && !super::verification::is_incomplete_action_response(&content)
                 && !super::verification::is_confused_response(&content);
-            if looks_final && self.check_completion_gate().await.is_none() {
+            if looks_final && !truncated_by_length && self.check_completion_gate().await.is_none() {
                 info!("Read-only task: accepting substantial final answer");
                 output::final_answer(&clean);
                 self.record_final_answer(&artifact_ctx, &clean).await;
@@ -1543,6 +1552,35 @@ impl Agent {
                             self.tools.activate(&tool_name);
                             let batch: Vec<CollectedToolCall> = vec![(tool_name, tool_args, None)];
                             self.execute_tool_batch(batch).await?;
+                            // The rescue command may not exist on this host
+                            // (val090 ts_notsc: no node/npm, `npm test` exit 127
+                            // re-run ~20 times until the 1500 s kill). A verifier
+                            // that cannot run verifies nothing: record it as
+                            // not-run (no credit, the D9 waiver) and let the run
+                            // finish honestly instead of looping.
+                            let rescue_output = self
+                                .messages
+                                .last()
+                                .map(|m| m.content.text_all())
+                                .unwrap_or_default();
+                            if rescue_command_could_not_run(&rescue_output) {
+                                info!(
+                                    "Rescue `{}` could not run on this host — verification not run",
+                                    display_cmd
+                                );
+                                self.last_not_run_verification_mutation_sequence =
+                                    self.mutation_sequence;
+                                self.messages.push(crate::api::types::Message::user(format!(
+                                    "<selfware_system_directive>\n\
+                                     `{display_cmd}` could not run in this environment (the tool is \
+                                     not installed or not configured), so nothing was verified and no \
+                                     verification credit was recorded. Do not install tools to satisfy \
+                                     it. Give your final answer now and state that verification could \
+                                     not be run.\n\
+                                     </selfware_system_directive>"
+                                )));
+                                return Ok(false);
+                            }
                             self.messages.push(crate::api::types::Message::user(format!(
                                 "<selfware_system_directive>\n\
                                  `{display_cmd}` was run automatically. If it passed, give your final \
@@ -1601,20 +1639,31 @@ impl Agent {
             // A response cut off by the token limit (finish_reason == "length") is
             // incomplete — don't accept the truncated text as the final answer; ask
             // the model to finish.
-            if chat_metadata
-                .as_ref()
-                .and_then(|m| m.finish_reason.as_deref())
-                == Some("length")
-            {
-                info!("Rejected length-truncated response as final answer — asking to continue");
-                self.messages.push(crate::api::types::Message::user(
-                    "<selfware_system_directive>\n\
-                     Your previous response was cut off by the length limit before it \
-                     finished. Continue and complete your answer concisely.\n\
-                     </selfware_system_directive>"
-                        .to_string(),
-                ));
-                return Ok(false);
+            // Ask for the COMPLETE answer again, more concisely: a "continue"
+            // reply is only the tail and would then be accepted as the whole
+            // answer. Bounded: after the retries the answer is accepted with an
+            // explicit truncation note (Rule 3), never silently and never in a
+            // loop.
+            let mut content = content;
+            if truncated_by_length {
+                if self.length_truncation_retries < MAX_LENGTH_TRUNCATION_RETRIES {
+                    self.length_truncation_retries += 1;
+                    info!("Rejected length-truncated response as final answer — asking for a complete, shorter answer");
+                    self.messages.push(crate::api::types::Message::user(
+                        "<selfware_system_directive>\n\
+                         Your previous response was cut off by the output length limit before \
+                         it finished. Reply again with your COMPLETE final answer, more \
+                         concisely so it fits: keep every section, shorten the prose.\n\
+                         </selfware_system_directive>"
+                            .to_string(),
+                    ));
+                    return Ok(false);
+                }
+                tracing::warn!("Final answer still length-truncated after retries — accepting with a truncation note");
+                content.push_str(
+                    "\n\n[NOTE: this answer was cut off at the model's output length limit and \
+                     may be incomplete.]",
+                );
             }
 
             // Fire Stop hooks before completing
@@ -2387,3 +2436,20 @@ mod tests;
 #[cfg(test)]
 #[path = "../../tests/unit/agent/execution/turn_artifact_decision_test.rs"]
 mod turn_artifact_decision_tests;
+
+/// Whether an auto-run verification command's tool result shows the command
+/// could not run at all: the shell's "command not found" exit (127), or a
+/// spawn failure for a missing program (`os error 2`). A command that ran and
+/// failed (any other exit) is a real verification failure, not this.
+/// Length-truncated final answers sent back for a complete, shorter rewrite
+/// before one is accepted with an explicit truncation note.
+const MAX_LENGTH_TRUNCATION_RETRIES: u32 = 2;
+
+pub(super) fn rescue_command_could_not_run(tool_result: &str) -> bool {
+    let text = tool_result.to_ascii_lowercase();
+    text.contains("\"exit_code\":127")
+        || text.contains("\"exit_code\": 127")
+        || text.contains("exit code 127")
+        || text.contains("command not found")
+        || (text.contains("no such file or directory") && text.contains("os error 2"))
+}

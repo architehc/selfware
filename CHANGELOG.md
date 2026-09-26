@@ -99,6 +99,15 @@ finished report.
   `API_KEY` in any case were leaking to MCP clients before.
 - **Tool-result spills** are written under the agent's workspace root, not the
   process cwd.
+- **Truncated answers are never accepted silently.** A final answer cut off by
+  the output-token limit (`finish_reason: length`) was accepted with exit 0,
+  because two early acceptance paths returned before the length check. It is
+  now sent back twice for a complete, shorter rewrite. After that it is
+  accepted with an explicit "cut off at the output length limit" note.
+- **Verification that cannot run no longer loops.** When the automatic
+  verification rescue's command is not installed (exit 127, command not found),
+  verification is recorded as not run and the run finishes. It used to re-run
+  the missing command until the wall-clock kill.
 - **JSON-only stdout.** Structured output stays JSON-only on resume,
   `--continue` and `--autocontinue`.
 - **No-tests output.** A runner that found no tests (vitest, jest, mocha,
@@ -138,6 +147,15 @@ finished report.
   the slowest measured decode rate, 15.1 tok/s. An explicit `max_tokens` scales
   it. The tracked config no longer pins `max_iterations = 100`: long reviews
   measured 91–136 turns, so the default of 400 applies.
+
+### Known issues
+- A progress note such as "Now moving to Stage 2…" can be accepted as the
+  final answer of a multi-stage read-only task. Replay puts this at about 1 in
+  3 at the affected turn. Planned for 0.9.1.
+- The 24k-window editing scenario (c24) still does not finish: it stops with
+  READ_LOOP_NO_EDIT.
+- Each release-gate scenario ran once against llm.selfware.design. Treat
+  single outcomes as samples, not rates.
 
 ### Review notes (AGENTS.md rule 2)
 These changes loosen or change checks:

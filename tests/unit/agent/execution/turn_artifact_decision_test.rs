@@ -444,3 +444,75 @@ async fn malformed_native_call_is_reported_as_rejected() {
         .all(|m| m.tool_calls.as_ref().is_none_or(|c| c.is_empty())));
     assert_eq!(agent.protocol_stall.failed_in_window(), 1);
 }
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn length_truncated_final_answer_is_never_accepted_silently() {
+    // val090 b2_163840 / b2_350000: a report cut off at the output-token cap
+    // (finish_reason=length) was accepted as the final answer with exit 0,
+    // because the early acceptance paths returned before the length check.
+    // Now: twice it is sent back for a COMPLETE, shorter rewrite; the third
+    // truncated reply is accepted with an explicit truncation note.
+    let cwd = crate::test_support::CwdGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    cwd.switch_to(dir.path());
+    let truncated = "## Review\n\nArea 1: the parser handles mixed batches correctly and \
+                     reports rejections. Area 2: the compaction path keeps";
+    let server = MockLlmServer::builder()
+        .with_finished_response(truncated, None, "length")
+        .with_finished_response(truncated, None, "length")
+        .with_finished_response(truncated, None, "length")
+        .build()
+        .await;
+    let config = artifact_config(&format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+
+    for attempt in 1..=2 {
+        let done = agent.execute_step_internal(false).await.unwrap();
+        assert!(
+            !done,
+            "attempt {attempt}: a truncated answer must not complete the task"
+        );
+        let last = agent
+            .messages
+            .last()
+            .map(|m| m.content.text_all())
+            .unwrap_or_default();
+        assert!(
+            last.contains("COMPLETE final answer"),
+            "attempt {attempt}: expected a complete-rewrite directive, got: {last}"
+        );
+    }
+    let done = agent.execute_step_internal(false).await.unwrap();
+    assert!(done, "after the bounded retries the answer is accepted");
+    assert!(
+        agent
+            .last_assistant_response
+            .contains("cut off at the model's output length limit"),
+        "the accepted answer must carry the truncation note: {}",
+        agent.last_assistant_response
+    );
+    server.stop().await;
+}
+
+#[test]
+fn rescue_command_that_cannot_run_is_recognised() {
+    use crate::agent::execution::rescue_command_could_not_run;
+    // val090 ts_notsc: `npm test` with no npm installed.
+    assert!(rescue_command_could_not_run(
+        r#"{"exit_code":127,"stdout":"","stderr":"sh: npm: command not found"}"#
+    ));
+    assert!(rescue_command_could_not_run(
+        "Failed to run npm: No such file or directory (os error 2)"
+    ));
+    // A verifier that RAN and failed is a real failure, not "could not run".
+    assert!(!rescue_command_could_not_run(
+        r#"{"exit_code":1,"stdout":"FAIL src/a.test.ts","stderr":""}"#
+    ));
+    assert!(!rescue_command_could_not_run(
+        r#"{"exit_code":0,"stdout":"Tests passed","stderr":""}"#
+    ));
+}
