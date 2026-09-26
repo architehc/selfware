@@ -2911,6 +2911,23 @@ impl Agent {
     /// deliverable is prose, and the audit would add a model call for nothing).
     /// The latch is set BEFORE the audit call so no retry path can re-fire it.
     pub(super) async fn maybe_requirements_audit(&self, is_read_only: bool) -> Option<String> {
+        self.requirements_audit_unless(is_read_only, None).await
+    }
+
+    /// The requirements audit for the draft-at-limit acceptance: the caller
+    /// has already found that not even one more turn fits, so the audit's
+    /// model call (up to `REQUIREMENTS_AUDIT_CAP_SECS`) must not run either.
+    /// Recorded NOT PERFORMED with the measured reason (review C4, 0.9.1).
+    pub(super) async fn requirements_audit_at_limit(&self, is_read_only: bool) -> Option<String> {
+        self.requirements_audit_unless(is_read_only, self.answer_no_fit_step_aside())
+            .await
+    }
+
+    async fn requirements_audit_unless(
+        &self,
+        is_read_only: bool,
+        at_limit: Option<super::deadline::StepAside>,
+    ) -> Option<String> {
         if is_read_only
             || self
                 .requirements_audit_done
@@ -2925,16 +2942,20 @@ impl Agent {
         self.requirements_audit_done
             .store(true, std::sync::atomic::Ordering::Relaxed);
         // A hard budget stop that already holds outranks the step-aside
-        // below: it must surface as the stop, not as a skipped audit.
+        // below: it must surface as the stop, not as a skipped audit. The
+        // audit still did not run, so it is recorded NOT PERFORMED too (the
+        // structured result must not carry `requirements_audit: null`).
         self.client
             .ensure_budget_floor(self.cumulative_token_usage.total, self.cumulative_cost_usd);
         if let Some(stop) = self.client.budget_stop() {
-            return Some(stop.to_string());
+            let stop = stop.to_string();
+            self.record_requirements_audit(RequirementsAuditStatus::NotPerformed(stop.clone()));
+            return Some(stop);
         }
         // Limit (deadline/budget) step-aside: the audit is itself a model call and can bounce
         // the answer for a correction round; neither fits inside the limit
         // window. Recorded NOT PERFORMED, so the banner warns (rule 3).
-        if let Some(why) = self.completion_gate_step_aside() {
+        if let Some(why) = self.completion_gate_step_aside().or(at_limit) {
             self.record_requirements_audit(RequirementsAuditStatus::NotPerformed(why.to_string()));
             return None;
         }

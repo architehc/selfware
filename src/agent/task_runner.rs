@@ -1888,13 +1888,24 @@ impl Agent {
             // even one more turn fits the deadline or the budget — finish
             // with that draft (⚠️, "citations not corrected: …") instead of
             // starting a turn the limit will cut off (val083 b2_350000).
+            //
+            // An EXHAUSTED hard budget (tokens, cost, wall time on the agent's
+            // own clock, which includes time from earlier sessions on resume)
+            // is checked first. It fails as a timeout/budget stop with the
+            // PARTIAL label for every task class, never "Completed" with
+            // exit 0 (review D-b, 0.9.1).
+            self.enforce_hard_budgets(task_description).await?;
             if let Some(draft) = self.take_rejected_draft_at_limit() {
                 // The draft never reached the requirements audit (the citation
-                // gate runs first). Inside the limit window the audit steps
-                // aside without a model call and records NOT PERFORMED; any
-                // other return is a hard budget stop, enforced just below.
+                // gate runs first). No turn fits, so the audit steps aside
+                // without a model call and records NOT PERFORMED.
                 let read_only = self.current_task_is_read_only();
-                if self.maybe_requirements_audit(read_only).await.is_none() {
+                // Boxed: the run-loop future is already near the debug stack
+                // limit under auto-continue re-entry; the audit future is large.
+                if Box::pin(self.requirements_audit_at_limit(read_only))
+                    .await
+                    .is_none()
+                {
                     output::final_answer(&draft);
                     record_state_transition("Executing", "Completed");
                     if mode == LoopMode::NewTask {

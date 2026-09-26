@@ -503,17 +503,19 @@ impl Agent {
     /// inside the wrap-up window of the deadline, the token budget or the
     /// cost budget (a correction round is at least one more call before
     /// the answer). `None` while every configured limit still has room.
-    ///
-    /// Also steps aside when not even the final answer fits
-    /// (`one_turn_no_fit`). The window is capped at 2/3 of the budget, so
-    /// with a forecast answer longer than the cap the two checks disagreed:
-    /// the draft-at-limit path declared no turn affordable, then ran the
-    /// requirements audit's model call anyway (review C4, 0.9.1).
     pub(super) fn completion_gate_step_aside(&self) -> Option<StepAside> {
-        self.limit_in_reserve().or_else(|| {
-            self.one_turn_no_fit()
-                .map(|(cause, detail)| StepAside { cause, detail })
-        })
+        self.limit_in_reserve()
+    }
+
+    /// Why not even the final answer fits any more (`one_turn_no_fit`), as
+    /// a step-aside. Used ONLY where the caller has already concluded that
+    /// no turn fits (the draft-at-limit acceptance). It is uncapped, so it
+    /// must not feed `completion_gate_step_aside`: with a budget smaller
+    /// than one forecast answer it holds from the first step and would turn
+    /// off every correction round for the whole run (review of C4, 0.9.1).
+    pub(super) fn answer_no_fit_step_aside(&self) -> Option<StepAside> {
+        self.one_turn_no_fit()
+            .map(|(cause, detail)| StepAside { cause, detail })
     }
 
     /// Whether not even the final answer itself fits any configured limit

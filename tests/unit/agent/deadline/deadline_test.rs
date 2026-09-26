@@ -302,13 +302,13 @@ async fn requirements_audit_steps_aside_inside_the_deadline_window() {
     server.stop().await;
 }
 
-/// Review C4 (0.9.1): the capped window (2/3 of the budget) and the uncapped
-/// "one more turn does not fit" check disagreed when the forecast answer is
-/// longer than the cap. The draft-at-limit path then ran the audit model
-/// call in time it had just declared unaffordable. The gate now also steps
-/// aside whenever not even the final answer fits.
+/// Review C4 (0.9.1): the capped window (2/3 of the wall budget) and the
+/// uncapped "one more turn does not fit" check disagreed when the forecast
+/// answer is longer than the cap. The draft-at-limit path then ran the audit
+/// model call in time it had just declared unaffordable. That path now uses
+/// `requirements_audit_at_limit`, which steps aside on the uncapped check.
 #[tokio::test]
-async fn requirements_audit_steps_aside_when_the_answer_alone_exceeds_the_capped_window() {
+async fn requirements_audit_at_limit_steps_aside_when_the_answer_alone_exceeds_the_capped_window() {
     let server = MockLlmServer::builder()
         .with_response("must not be requested")
         .build()
@@ -325,12 +325,43 @@ async fn requirements_audit_steps_aside_when_the_answer_alone_exceeds_the_capped
             .to_string(),
     ));
     backdate(&mut agent, 130); // 320 s left: outside the capped window, < answer
-    let aside = agent.completion_gate_step_aside().expect("must step aside");
+                               // The shared gate step-aside stays capped (correction rounds still run).
+    assert!(agent.completion_gate_step_aside().is_none());
+    let aside = agent
+        .answer_no_fit_step_aside()
+        .expect("answer does not fit");
     assert!(aside.to_string().contains("deadline"), "{aside}");
-    assert_eq!(agent.maybe_requirements_audit(false).await, None);
+    assert_eq!(agent.requirements_audit_at_limit(false).await, None);
     let status = agent.requirements_audit_status().expect("recorded");
     assert!(status.is_not_performed(), "{status:?}");
+    assert!(
+        status.label().contains("forecast final answer"),
+        "{}",
+        status.label()
+    );
     assert!(server.captured_request_bodies().await.is_empty());
+    server.stop().await;
+}
+
+/// Review of C4 (0.9.1): widening the SHARED step-aside with the uncapped
+/// check turned off citation corrections, the min-steps floor and the
+/// artifact read-back for a whole run whose budget is smaller than one
+/// forecast answer. The shared step-aside must stay on the capped window.
+#[tokio::test]
+async fn shared_step_aside_stays_capped_when_the_budget_is_below_one_answer() {
+    let server = MockLlmServer::builder().with_response("x").build().await;
+    let mut config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
+    config.agent.max_wall_secs = Some(300); // answer ~347 s > whole budget; cap 200 s
+    let mut agent = Agent::new(config).await.unwrap();
+    record_slow_endpoint(&agent);
+    backdate(&mut agent, 5); // 295 s left: first step of the run
+    assert!(agent.answer_no_fit_step_aside().is_some());
+    assert!(
+        agent.completion_gate_step_aside().is_none(),
+        "correction rounds must still run early in the run"
+    );
+    backdate(&mut agent, 150); // 150 s left < 200 s cap: now inside the window
+    assert!(agent.completion_gate_step_aside().is_some());
     server.stop().await;
 }
 
@@ -663,6 +694,45 @@ async fn deadline_with_a_pending_rejected_draft_completes_with_it_and_a_warning(
     assert!(banner.starts_with("⚠️"), "{banner}");
     assert!(!banner.contains('✅'), "{banner}");
     assert!(agent.partial_progress(&result).is_none());
+    server.stop().await;
+}
+
+/// Review D-b (0.9.1): the same read-only replay with the wall budget
+/// already EXHAUSTED. That time came from an earlier session (resume), so
+/// the client's own clock still reads "plenty left". The draft-at-limit
+/// path used to complete with exit 0 ("Completed"). It now fails as the
+/// wall-clock timeout it is, with a partial, like every other task class.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn exhausted_budget_with_a_pending_rejected_draft_fails_as_a_timeout() {
+    let _state = crate::test_support::ExecGuard::hold();
+    let server = MockLlmServer::builder()
+        .with_response("must not be requested")
+        .build()
+        .await;
+    let mut config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
+    config.agent.max_wall_secs = Some(900);
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.task_is_read_only = true;
+    agent.current_checkpoint = Some(TaskCheckpoint::new(
+        "deadline-draft-exhausted".to_string(),
+        "Review src/agent and report findings. Do not edit files.".to_string(),
+    ));
+    agent.client.record_call_shape(153_934, 3_495, 231_163);
+    agent.prior_elapsed_secs = 905; // over the 900 s budget before this session
+    let run = b2_350000();
+    agent.messages.push(Message::assistant(run.draft.clone()));
+    set_rejected_draft(&agent, &run.draft);
+
+    let result = agent.continue_execution().await;
+    let err = result
+        .as_ref()
+        .expect_err("an exhausted budget is not a completion");
+    assert!(err.to_string().contains("Wall-clock timeout"), "{err}");
+    assert!(server.captured_request_bodies().await.is_empty());
     server.stop().await;
 }
 
