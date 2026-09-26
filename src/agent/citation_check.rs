@@ -16,6 +16,17 @@
 //! does not, the file is searched and the actual line is recorded as the
 //! suggested correction.
 //!
+//! Three tiers, never conflated (AGENTS.md rule 3):
+//! - **verified** — the named symbol was found within the cited range;
+//! - **location-only** — the file exists and the cited line/range lies inside
+//!   it, but nothing next to the citation names content to check, so the
+//!   content was NOT checked (a plain `(src/lib.rs:715)` next to prose);
+//! - **wrong** — missing file, range outside the file, or the named content
+//!   is elsewhere / nowhere in the file.
+//!
+//! Citations that cannot even be located (ambiguous bare name, unreadable
+//! file, outside the workspace/policy) are **not checkable**.
+//!
 //! The completion gate (`Agent::citation_gate`) feeds wrong citations back to
 //! the model for at most `CITATION_GATE_REJECTION_BOUND` correction rounds
 //! (the audit ledger's bounded step-aside pattern), then lets the run complete
@@ -87,12 +98,17 @@ pub enum CitationVerdict {
     WrongLine { file: String, actual_line: usize },
     /// The symbol does not occur anywhere in the resolved file.
     SymbolNotFound { file: String },
+    /// The file exists and the cited range lies inside it, but nothing next
+    /// to the citation names content to check: the LOCATION was checked,
+    /// the content was not. Never counted as verified.
+    LocationVerified { file: String },
     /// No file matches the cited path in the workspace.
     MissingFile,
     /// The cited range lies outside the file (or is malformed).
     OutOfRange { file: String, line_count: usize },
-    /// The file and range exist but nothing names a checkable symbol (or the
-    /// path is ambiguous / unreadable): neither confirmed nor refuted.
+    /// The citation could not be located at all: the path is ambiguous,
+    /// unreadable or outside the workspace/policy. Neither confirmed nor
+    /// refuted.
     Unverifiable { reason: String },
 }
 
@@ -138,7 +154,12 @@ impl CheckedCitation {
                 format!("{what} — outside {file}, which has {line_count} lines")
             }
             CitationVerdict::Verified { file } => format!("{what} — verified in {file}"),
-            CitationVerdict::Unverifiable { reason } => format!("{what} — unverifiable ({reason})"),
+            CitationVerdict::LocationVerified { file } => {
+                format!("{what} — line exists in {file}, content not checked")
+            }
+            CitationVerdict::Unverifiable { reason } => {
+                format!("{what} — not checkable ({reason})")
+            }
         };
         if self.source == ANSWER_SOURCE {
             body
@@ -158,12 +179,15 @@ pub(crate) const ANSWER_SOURCE: &str = "final answer";
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct CitationReport {
     pub total: usize,
+    /// Named content confirmed inside the cited range.
     pub verified: usize,
+    /// File and range exist; content not checked (nothing named).
+    pub location_verified: usize,
     pub wrong_line: Vec<CheckedCitation>,
     pub symbol_not_found: Vec<CheckedCitation>,
     pub missing_file: Vec<CheckedCitation>,
     pub out_of_range: Vec<CheckedCitation>,
-    /// File and range exist but no symbol was named (or path ambiguous).
+    /// Could not be located: ambiguous, unreadable or outside-policy path.
     pub unverifiable: usize,
 }
 
@@ -172,6 +196,7 @@ impl CitationReport {
         self.total += 1;
         match &checked.verdict {
             CitationVerdict::Verified { .. } => self.verified += 1,
+            CitationVerdict::LocationVerified { .. } => self.location_verified += 1,
             CitationVerdict::Unverifiable { .. } => self.unverifiable += 1,
             CitationVerdict::WrongLine { .. } => self.wrong_line.push(checked),
             CitationVerdict::SymbolNotFound { .. } => self.symbol_not_found.push(checked),
@@ -184,6 +209,7 @@ impl CitationReport {
     pub fn merge(&mut self, other: CitationReport) {
         self.total += other.total;
         self.verified += other.verified;
+        self.location_verified += other.location_verified;
         self.unverifiable += other.unverifiable;
         self.wrong_line.extend(other.wrong_line);
         self.symbol_not_found.extend(other.symbol_not_found);
@@ -214,9 +240,13 @@ impl CitationReport {
 pub struct GroundingStatus {
     /// Distinct citations checked (final answer + written deliverables).
     pub total: usize,
-    /// Symbol confirmed inside the cited range.
+    /// Named content (symbol) confirmed inside the cited range.
     pub verified: usize,
-    /// File and range exist, but no named symbol could be checked.
+    /// File exists and the cited range lies inside it, but nothing named
+    /// content to check: location checked, content NOT checked.
+    pub location_verified: usize,
+    /// Could not be located at all (ambiguous, unreadable or outside-policy
+    /// path): neither location nor content checked.
     pub unverifiable: usize,
     pub wrong_line: usize,
     pub symbol_not_found: usize,
@@ -249,6 +279,7 @@ impl GroundingStatus {
         GroundingStatus {
             total: report.total,
             verified: report.verified,
+            location_verified: report.location_verified,
             unverifiable: report.unverifiable,
             wrong_line: report.wrong_line.len(),
             symbol_not_found: report.symbol_not_found.len(),
@@ -271,35 +302,46 @@ impl GroundingStatus {
         self.wrong_line + self.symbol_not_found + self.missing_file + self.out_of_range
     }
 
-    /// Everything not positively verified (wrong + unverifiable).
+    /// Citations that failed even the location check or were shown wrong
+    /// (wrong + not checkable). Location-only citations are NOT counted:
+    /// their line exists, they are reported separately as location-only.
     pub fn unverified_count(&self) -> usize {
-        self.total.saturating_sub(self.verified)
+        self.total
+            .saturating_sub(self.verified)
+            .saturating_sub(self.location_verified)
     }
 
-    /// `citations: N of M could not be verified (W wrong, K without a
-    /// checkable symbol)` — the note the banner, run summary, JSON result
-    /// and failure-mode evidence carry when problems remain. N is
-    /// [`Self::unverified_count`] (everything not positively verified), so
-    /// the count and the words agree, and the breakdown matches
-    /// [`Self::grounding_line`].
+    /// `citations: N of M could not be verified (W wrong, K not checkable)`
+    /// plus `; L location-only (line exists, content not checked)` when any
+    /// — the note the banner, run summary, JSON result and failure-mode
+    /// evidence carry when a warning applies. N is
+    /// [`Self::unverified_count`], so the count and the words agree, and the
+    /// breakdown matches [`Self::grounding_line`].
     pub fn unverified_note(&self) -> String {
-        format!(
+        let mut note = format!(
             "citations: {} of {} could not be verified{}",
             self.unverified_count(),
             self.total,
             self.unverified_breakdown()
-        )
+        );
+        if self.location_verified > 0 {
+            note.push_str(&format!(
+                "; {} location-only (line exists, content not checked)",
+                self.location_verified
+            ));
+        }
+        note
     }
 
-    /// ` (W wrong, K without a checkable symbol)`, parts omitted when zero;
-    /// empty when everything verified.
+    /// ` (W wrong, K not checkable)`, parts omitted when zero; empty when
+    /// nothing failed.
     fn unverified_breakdown(&self) -> String {
         let mut parts = Vec::new();
         if self.problem_count() > 0 {
             parts.push(format!("{} wrong", self.problem_count()));
         }
         if self.unverifiable > 0 {
-            parts.push(format!("{} without a checkable symbol", self.unverifiable));
+            parts.push(format!("{} not checkable", self.unverifiable));
         }
         if parts.is_empty() {
             String::new()
@@ -308,15 +350,16 @@ impl GroundingStatus {
         }
     }
 
-    /// Citations actually checked against a named symbol or a range: the
-    /// verified ones plus the ones shown wrong.
+    /// Citations that passed at least the location check or were shown
+    /// wrong: verified + location-only + wrong. Only not-checkable
+    /// citations (ambiguous / unreadable / outside policy) are excluded.
     pub fn checkable_count(&self) -> usize {
-        self.verified + self.problem_count()
+        self.verified + self.location_verified + self.problem_count()
     }
 
     /// A review/report answer with no checkable citation at all: nothing in
-    /// it was checked against the files, so it must not read as grounded
-    /// (0.8.2 live validation D4).
+    /// it was checked against the files — not even that a cited line
+    /// exists — so it must not read as grounded (0.8.2 live validation D4).
     pub fn none_checkable(&self) -> bool {
         self.read_only && self.checkable_count() == 0
     }
@@ -327,7 +370,7 @@ impl GroundingStatus {
             "no path:line citations in the answer".to_string()
         } else {
             format!(
-                "{} of {} without a checkable symbol",
+                "{} of {} not checkable (ambiguous, unreadable or outside-policy path)",
                 self.unverifiable, self.total
             )
         };
@@ -338,7 +381,7 @@ impl GroundingStatus {
     /// failure-mode evidence carry, or `None` for a grounded answer: wrong
     /// citations first ([`Self::unverified_note`]), else "none checkable"
     /// for a review/report answer ([`Self::none_checkable_note`]), else the
-    /// unverified note when most citations were uncheckable
+    /// unverified note when most citations could not even be located
     /// ([`Self::mostly_uncheckable`]).
     pub fn warning_note(&self) -> Option<String> {
         if self.problem_count() > 0 {
@@ -357,20 +400,44 @@ impl GroundingStatus {
         }
     }
 
-    /// A review/report answer where MORE citations lack a checkable symbol
-    /// than were verified: one verified citation next to nineteen
-    /// uncheckable ones is not a grounded answer, yet it rendered a clean ✅
-    /// because only "none checkable" and "some wrong" warned (review, 0.9.1).
-    /// Majority rule: a clean badge needs at least as many verified as
-    /// unverifiable citations. Mutation tasks are not held to it, as with
+    /// A review/report answer where MORE citations failed even the location
+    /// check (not checkable: ambiguous / unreadable / outside-policy path)
+    /// than passed it (verified + location-only). One located citation next
+    /// to nineteen that could not be found is not a grounded answer (review,
+    /// 0.9.1).
+    ///
+    /// Location-only citations count on the passing side: their file exists
+    /// and the cited line is inside it. The 0.9.1 rule counted them against
+    /// the answer and put ⚠️ on an accurate 73-citation architecture
+    /// explanation (24 symbol-verified, 49 plain `file:line` next to prose,
+    /// 0 wrong). The Grounding line still names them location-only, never
+    /// verified. Mutation tasks are not held to this rule, as with
     /// [`Self::none_checkable`].
     pub fn mostly_uncheckable(&self) -> bool {
-        self.read_only && self.unverifiable > self.verified
+        self.read_only && self.unverifiable > self.verified + self.location_verified
+    }
+
+    /// `N checked: V verified, L location-only (line exists, content not
+    /// checked), W wrong[, K not checkable]` — the counts the gate marker and
+    /// the Grounding line share.
+    pub fn counts_line(&self) -> String {
+        let mut line = format!(
+            "{} checked: {} verified, {} location-only (line exists, content not checked), {} wrong",
+            self.total,
+            self.verified,
+            self.location_verified,
+            self.problem_count()
+        );
+        if self.unverifiable > 0 {
+            line.push_str(&format!(", {} not checkable", self.unverifiable));
+        }
+        line
     }
 
     /// The summary's "Grounding:" line. Names what was actually checked:
-    /// `verified` means the named symbol was found inside the cited range,
-    /// never more (AGENTS.md rule 3).
+    /// `verified` means the named content was found inside the cited range,
+    /// `location-only` means only that the cited line exists, never more
+    /// (AGENTS.md rule 3).
     pub fn grounding_line(&self) -> String {
         if self.total == 0 {
             let lead = if self.read_only {
@@ -382,12 +449,7 @@ impl GroundingStatus {
                 "{lead}no path:line citations in the answer (nothing checked against files)"
             );
         }
-        let detail = self.unverified_breakdown();
-        format!(
-            "Grounding: {} verified citations, {} unverified{detail}",
-            self.verified,
-            self.unverified_count()
-        )
+        format!("Grounding: {}", self.counts_line())
     }
 }
 
@@ -1059,9 +1121,8 @@ impl CitationResolver {
             return CitationVerdict::OutOfRange { file, line_count };
         }
         let Some(sym) = &c.symbol else {
-            return CitationVerdict::Unverifiable {
-                reason: "no symbol named next to the citation".to_string(),
-            };
+            // The line exists; nothing names content to check there.
+            return CitationVerdict::LocationVerified { file };
         };
         let lo = c.start.saturating_sub(LINE_TOLERANCE).max(1);
         let hi = (c.end + LINE_TOLERANCE).min(line_count);
@@ -1446,15 +1507,7 @@ impl super::Agent {
         // Counts come from the status, never a literal: a same-step
         // re-evaluation of a still-wrong answer has no round marker and used
         // to report "0 wrong" next to "N wrong" (0.8.2 live validation D13).
-        let marker = marker.unwrap_or_else(|| {
-            format!(
-                "{} checked: {} verified, {} without a checkable symbol, {} wrong",
-                status.total,
-                status.verified,
-                status.unverifiable,
-                status.problem_count()
-            )
-        });
+        let marker = marker.unwrap_or_else(|| status.counts_line());
         state.status = Some(status.clone());
         state.last_eval = Some((key, result.clone()));
         drop(state);

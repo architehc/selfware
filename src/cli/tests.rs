@@ -1281,13 +1281,13 @@ fn render_run_summary_names_unverified_citations() {
     );
     assert!(
         rendered.contains(
-            "outcome: completed — citations: 10 of 50 could not be verified (3 wrong, 7 without a checkable symbol) (answer not fully grounded)"
+            "outcome: completed — citations: 10 of 50 could not be verified (3 wrong, 7 not checkable) (answer not fully grounded)"
         ),
         "{rendered}"
     );
     assert!(
         rendered.contains(
-            "Grounding: 40 verified citations, 10 unverified (3 wrong, 7 without a checkable symbol)"
+            "Grounding: 50 checked: 40 verified, 0 location-only (line exists, content not checked), 3 wrong, 7 not checkable"
         ),
         "{rendered}"
     );
@@ -1308,7 +1308,9 @@ fn render_run_summary_names_unverified_citations() {
         "{rendered}"
     );
     assert!(
-        rendered.contains("Grounding: 5 verified citations, 0 unverified"),
+        rendered.contains(
+            "Grounding: 5 checked: 5 verified, 0 location-only (line exists, content not checked), 0 wrong"
+        ),
         "{rendered}"
     );
     assert!(!rendered.contains("could not be verified"), "{rendered}");

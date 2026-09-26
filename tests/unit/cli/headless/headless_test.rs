@@ -1343,11 +1343,11 @@ fn session_result_json_carries_grounding_with_unverified_count() {
     assert_eq!(g["correction_rounds"], 2);
     assert_eq!(
         g["note"],
-        "citations: 10 of 50 could not be verified (3 wrong, 7 without a checkable symbol)"
+        "citations: 10 of 50 could not be verified (3 wrong, 7 not checkable)"
     );
     assert_eq!(
         g["summary"],
-        "Grounding: 40 verified citations, 10 unverified (3 wrong, 7 without a checkable symbol)"
+        "Grounding: 50 checked: 40 verified, 0 location-only (line exists, content not checked), 3 wrong, 7 not checkable"
     );
     assert!(g["problems"][0]
         .as_str()

@@ -160,11 +160,14 @@ fn verified_wrong_line_missing_out_of_range_and_symbol_missing() {
             file: "src/agent/widget.rs".into()
         }
     );
-    // Range exists, no symbol: unverifiable (neither confirmed nor refuted).
-    assert!(matches!(
+    // Range exists, no symbol: the location is checked, the content is not
+    // (location-only — never counted as verified).
+    assert_eq!(
         r.check(&cite("README.md", 1, 2, None)),
-        CitationVerdict::Unverifiable { .. }
-    ));
+        CitationVerdict::LocationVerified {
+            file: "README.md".into()
+        }
+    );
 }
 
 #[test]
@@ -230,18 +233,19 @@ fn report_counts_and_grounding_line() {
     assert_eq!(report.wrong_line.len(), 1);
     assert_eq!(report.missing_file.len(), 1);
     assert_eq!(report.out_of_range.len(), 1);
-    assert_eq!(report.unverifiable, 1);
+    assert_eq!(report.location_verified, 1, "README.md:2 exists");
+    assert_eq!(report.unverifiable, 0);
     assert_eq!(report.problem_count(), 3);
 
     let status = GroundingStatus::from_report(&report, 2, vec![]);
-    assert_eq!(status.unverified_count(), 4);
+    assert_eq!(status.unverified_count(), 3);
     assert_eq!(
         status.grounding_line(),
-        "Grounding: 1 verified citations, 4 unverified (3 wrong, 1 without a checkable symbol)"
+        "Grounding: 5 checked: 1 verified, 1 location-only (line exists, content not checked), 3 wrong"
     );
     assert_eq!(
         status.unverified_note(),
-        "citations: 4 of 5 could not be verified (3 wrong, 1 without a checkable symbol)"
+        "citations: 3 of 5 could not be verified (3 wrong); 1 location-only (line exists, content not checked)"
     );
     assert!(status.problems[0].contains("but found at src/agent/widget.rs:25"));
 }
@@ -687,7 +691,8 @@ fn legit_relative_absolute_inside_and_suffix_citations_still_verify() {
 }
 
 /// Review P3: the note said "1 of 2 could not be verified" while two were
-/// unverified (one wrong, one without a checkable symbol).
+/// unverified (one wrong, one without a checkable symbol). Since the
+/// location tier, the symbol-less one is location-only and named as such.
 #[test]
 fn unverified_note_count_agrees_with_the_grounding_line() {
     let (_base, ws, _policy) = confinement_fixture();
@@ -697,14 +702,15 @@ fn unverified_note_count_agrees_with_the_grounding_line() {
         ANSWER_SOURCE,
     );
     let status = GroundingStatus::from_report(&report, 2, vec![]);
-    assert_eq!(status.unverified_count(), 2);
+    assert_eq!(status.unverified_count(), 1);
+    assert_eq!(status.location_verified, 1);
     assert_eq!(
         status.unverified_note(),
-        "citations: 2 of 2 could not be verified (1 wrong, 1 without a checkable symbol)"
+        "citations: 1 of 2 could not be verified (1 wrong); 1 location-only (line exists, content not checked)"
     );
     assert_eq!(
         status.grounding_line(),
-        "Grounding: 0 verified citations, 2 unverified (1 wrong, 1 without a checkable symbol)"
+        "Grounding: 2 checked: 0 verified, 1 location-only (line exists, content not checked), 1 wrong"
     );
     // The failure-mode evidence carries the same note.
     let base = crate::agent::failure_mode::FailureMode {
@@ -918,17 +924,37 @@ async fn review_answer_with_no_checkable_citation_is_not_clean() {
     assert!(banner.contains("citations: none checkable"), "{banner}");
     assert!(!banner.contains('✅'), "{banner}");
 
-    // Only symbol-less citations: still nothing checkable.
+    // Only symbol-less citations to existing lines: the locations were
+    // checked (location-only), so this is not "none checkable" — and the
+    // Grounding line says the content was not checked.
     answer(&mut agent, 2, "See `widget.rs:10` and README.md:2.");
+    assert_eq!(agent.citation_gate(true), None);
+    let status = agent.grounding_status().unwrap();
+    assert!(!status.none_checkable());
+    assert_eq!(status.warning_note(), None);
+    assert_eq!(
+        status.grounding_line(),
+        "Grounding: 2 checked: 0 verified, 2 location-only (line exists, content not checked), 0 wrong"
+    );
+
+    // Citations that cannot even be located (ambiguous bare name): nothing
+    // was checked against the files.
+    fs::create_dir_all(ws.path().join("tests")).unwrap();
+    fs::write(ws.path().join("tests/widget.rs"), "one\ntwo\n").unwrap();
+    answer(&mut agent, 3, "See `widget.rs:1` and `widget.rs:2`.");
     assert_eq!(agent.citation_gate(true), None);
     let status = agent.grounding_status().unwrap();
     assert_eq!(
         status.warning_note().as_deref(),
-        Some("citations: none checkable: 2 of 2 without a checkable symbol")
+        Some(
+            "citations: none checkable: 2 of 2 not checkable (ambiguous, unreadable or \
+             outside-policy path)"
+        )
     );
+    fs::remove_dir_all(ws.path().join("tests")).unwrap();
 
     // A grounded answer carries no warning.
-    answer(&mut agent, 3, FIXED_ANSWER);
+    answer(&mut agent, 4, FIXED_ANSWER);
     assert_eq!(agent.citation_gate(true), None);
     assert_eq!(agent.grounding_status().unwrap().warning_note(), None);
 }
@@ -947,7 +973,7 @@ fn a_mostly_uncheckable_review_answer_is_not_clean() {
     assert!(!status.none_checkable());
     let note = status.warning_note().expect("warns");
     assert!(note.contains("19 of 20 could not be verified"), "{note}");
-    assert!(note.contains("19 without a checkable symbol"), "{note}");
+    assert!(note.contains("19 not checkable"), "{note}");
     // At least as many verified as uncheckable: grounded, no warning.
     let balanced = GroundingStatus {
         total: 20,
@@ -1170,4 +1196,109 @@ async fn gate_rejection_inside_the_token_budget_reserve_accepts_with_the_budget_
     agent.client.ensure_budget_floor(1_000_000, 0.0);
     answer(&mut agent, 1, WRONG_ANSWER);
     assert!(agent.citation_gate(true).is_some());
+}
+
+// ── 0.9.2 live shapes (llm.selfware.design on hexyl, 0.9.1) ─────────────
+
+/// A hexyl-shaped `src/lib.rs` (820 lines) with the lines the live answers
+/// cited at their real positions.
+fn hexyl_workspace() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(
+        dir.path().join("src/lib.rs"),
+        fixture_file(
+            820,
+            &[
+                (120, "pub struct Printer<'a, Writer: Write> {"),
+                (
+                    184,
+                    "            char::from_u32(0x2800 + to_braille_bits(self.bytes[i], self.bytes[i + 1])).unwrap()",
+                ),
+                (363, "            line_buf: vec![0x0; 8 * panels as usize],"),
+                (410, "    pub fn print_all<Reader: Read>(&mut self, reader: Reader) -> io::Result<()> {"),
+                (715, "            self.squeezer = Squeezer::Print;"),
+                (795, "        let first = self.line_buf[0];"),
+            ],
+        ),
+    )
+    .unwrap();
+    dir
+}
+
+/// Live shape 1: an accurate architecture explanation whose plain
+/// `file:line` citations sit next to prose ("73 checked: 24 verified, 49
+/// without a checkable symbol, 0 wrong" rendered ⚠️ under the 0.9.1
+/// majority rule). Location-only citations are counted and named as such,
+/// and do not trigger the majority warning.
+#[tokio::test]
+async fn location_only_citations_next_to_prose_do_not_warn() {
+    let ws = hexyl_workspace();
+    let mut agent = gate_agent(ws.path()).await;
+    let text = include_str!("fixtures/hexyl_architecture_answer.md");
+    answer(&mut agent, 1, text);
+    assert_eq!(agent.citation_gate(true), None);
+    let status = agent.grounding_status().expect("status recorded");
+    assert_eq!(
+        (
+            status.verified,
+            status.location_verified,
+            status.problem_count(),
+            status.unverifiable
+        ),
+        (2, 5, 0, 0),
+        "{status:?}"
+    );
+    assert!(!status.mostly_uncheckable());
+    assert_eq!(status.warning_note(), None);
+    assert_eq!(
+        status.grounding_line(),
+        "Grounding: 7 checked: 2 verified, 5 location-only (line exists, content not checked), 0 wrong"
+    );
+    let base = crate::agent::failure_mode::FailureMode {
+        restored_files: Vec::new(),
+        kind: crate::agent::failure_mode::FailureKind::NoChange,
+        evidence: "completed naturally with 0 mutating tool calls".to_string(),
+        advice: "-".to_string(),
+    };
+    let fm = crate::agent::failure_mode::with_citation_status(base, Some(&status));
+    assert!(!fm.cli_banner().starts_with("⚠️"), "{}", fm.cli_banner());
+}
+
+/// The majority rule still holds for citations that fail the location
+/// check itself, and location-only ones count on the passing side.
+#[test]
+fn majority_rule_counts_location_only_as_located() {
+    let located = GroundingStatus {
+        total: 73,
+        verified: 24,
+        location_verified: 49,
+        read_only: true,
+        ..Default::default()
+    };
+    assert_eq!(located.warning_note(), None);
+    let all_location = GroundingStatus {
+        total: 12,
+        location_verified: 12,
+        read_only: true,
+        ..Default::default()
+    };
+    assert!(!all_location.none_checkable());
+    assert_eq!(all_location.warning_note(), None);
+    let unlocatable = GroundingStatus {
+        total: 10,
+        verified: 2,
+        location_verified: 2,
+        unverifiable: 6,
+        read_only: true,
+        ..Default::default()
+    };
+    let note = unlocatable
+        .warning_note()
+        .expect("mostly not locatable warns");
+    assert_eq!(
+        note,
+        "citations: 6 of 10 could not be verified (6 not checkable); 2 location-only \
+         (line exists, content not checked)"
+    );
 }
