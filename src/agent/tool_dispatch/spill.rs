@@ -97,14 +97,7 @@ pub(crate) async fn summarize_and_spill(
     if let Some(selfware_dir) = spill_dir.parent() {
         crate::agent::turn_artifacts::ensure_selfware_gitignore(selfware_dir);
     }
-    let spill_name = format!(
-        "{}_{}.json",
-        tool_name,
-        // Char-safe truncation: byte-slicing `&call_id[..12]` panics if a
-        // non-ASCII tool_call_id from the API has a multi-byte char across byte 12
-        // (found by GLM-5.2 reviewing tool_dispatch.rs; verified + fixed by Claude).
-        call_id.chars().take(12).collect::<String>()
-    );
+    let spill_name = spill_file_name(tool_name, call_id);
     let spill_file = spill_dir.join(&spill_name);
     let spill_path = spill_rel.join(&spill_name).display().to_string();
     if let Err(e) = tokio::fs::write(&spill_file, raw).await {
@@ -130,6 +123,38 @@ pub(crate) async fn summarize_and_spill(
     format!(
         "{}\n\n[SUMMARY — original result was ~{} tokens. Raw data saved to: {} — use file_read to inspect details]",
         summary, estimated_tokens, spill_path
+    )
+}
+
+/// The spill file name for one tool result: `<tool>_<id12>_<hash8>.json`.
+///
+/// Both parts come from outside (the tool name from the model, the call id
+/// from the provider), so only `[A-Za-z0-9_-]` survives. A `/`, `\`, `..`,
+/// `:` or NUL can neither leave the spill directory nor break the write
+/// (which used to fall back to a 20k-char truncation instead of spilling).
+/// The hash of the FULL id keeps ids that share their first 12 characters
+/// (`call_00000001` / `call_00000002`) from overwriting each other
+/// (review, 0.9.1).
+pub(crate) fn spill_file_name(tool_name: &str, call_id: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    fn safe(s: &str, max: usize) -> String {
+        s.chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+            .take(max)
+            .collect()
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    call_id.hash(&mut hasher);
+    let tool = safe(tool_name, 64);
+    let tool = if tool.is_empty() {
+        "tool".to_string()
+    } else {
+        tool
+    };
+    format!(
+        "{tool}_{}_{:08x}.json",
+        safe(call_id, 12),
+        hasher.finish() as u32
     )
 }
 

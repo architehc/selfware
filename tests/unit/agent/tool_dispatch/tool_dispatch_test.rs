@@ -1418,6 +1418,34 @@ fn summarize_generic_keeps_small_input_verbatim() {
     assert_eq!(summarize_generic(raw), raw);
 }
 
+#[test]
+fn spill_file_name_is_confined_and_collision_free() {
+    use super::spill::spill_file_name;
+    // Review (0.9.1): the provider call_id went into the path unfiltered.
+    for hostile in ["/../../../ab", "..\\..\\x", "a:b\0c", "../../etc/passwd"] {
+        let name = spill_file_name("shell_exec", hostile);
+        assert!(
+            name.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')),
+            "{name}"
+        );
+        assert!(!name.contains(".."), "{name}");
+        assert!(name.ends_with(".json"), "{name}");
+    }
+    // A hostile tool name is confined the same way.
+    assert!(!spill_file_name("../x", "call_1").contains('/'));
+    // Ids that share their first 12 characters get distinct files.
+    assert_ne!(
+        spill_file_name("file_read", "call_000000001"),
+        spill_file_name("file_read", "call_000000002")
+    );
+    // Deterministic for one id.
+    assert_eq!(
+        spill_file_name("file_read", "call_abc"),
+        spill_file_name("file_read", "call_abc")
+    );
+}
+
 #[tokio::test]
 async fn summarize_and_spill_redacts_secrets_on_disk() {
     // A large shell result carrying a credential must not land unredacted
@@ -1441,10 +1469,10 @@ async fn summarize_and_spill_redacts_secrets_on_disk() {
     )
     .await;
 
-    let spill_file = ws.path().join(TOOL_RESULTS_DIR).join(format!(
-        "shell_exec_{}.json",
-        call_id.chars().take(12).collect::<String>()
-    ));
+    let spill_file = ws
+        .path()
+        .join(TOOL_RESULTS_DIR)
+        .join(super::spill::spill_file_name("shell_exec", call_id));
     let on_disk = std::fs::read_to_string(&spill_file).expect("spill file should exist");
     // The model is pointed at the workspace-relative path.
     assert!(
