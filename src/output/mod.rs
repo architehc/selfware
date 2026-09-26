@@ -189,6 +189,13 @@ pub(crate) fn take_stream_line_open(flag: &AtomicBool) -> bool {
 /// or clear a transient spinner line (it redraws on its next tick). Call
 /// while holding [`OUTPUT_LOCK`].
 pub(crate) fn prepare_line_for_log() {
+    // Only a terminal has a visible line to end or clear. Redirected stdout
+    // (`selfware -v -p … > out.txt`) and the JSON channels must never receive
+    // these control bytes.
+    use std::io::IsTerminal;
+    if is_json_mode() || !io::stdout().is_terminal() {
+        return;
+    }
     let mut out = io::stdout().lock();
     if take_stream_line_open(&STREAM_LINE_OPEN) {
         let _ = out.write_all(b"\r\n");
