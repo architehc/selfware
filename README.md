@@ -417,6 +417,40 @@ selfware --tui
 
 ---
 
+## What's New in 0.9.2
+
+0.9.2 makes every number and badge match what actually happened, makes
+confirmations readable, and closes a set of argument-injection holes. It
+was re-tested live on real projects against llm.selfware.design. The full
+list is in [CHANGELOG.md](CHANGELOG.md); the highlights:
+
+- **Truthful status.** No invented spinner activity or dollar amounts. One
+  measured token total for `/cost`, `/quit` and the summary. Context shows
+  "X of Y (N%) · compaction at Z". Test counts cover every test binary.
+- **Readable confirmations.** Edits show a diff, and every prompt carries a
+  risk tag ([reads], [installs packages], …). Normal mode stops asking for
+  read-only tools and plain cargo checks. `p` allows a safe command prefix.
+- **Honest outcomes.** Ctrl-C reads "interrupted" with a resume hint. A
+  stale check failure is re-run on the final tree before it counts.
+  Answers from the planning turn are shown and journaled.
+- **Citations without false alarms.** Verified, location-only and wrong are
+  reported separately. ℹ️ instead of ⚠️ when nobody asked for citations.
+- **Cleaner output.** No tool-call markup, one line per tool, a one-line
+  "Thinking…" indicator, Markdown rendering, answers printed once.
+  `stream-json` streams `text_delta` events.
+- **Security.** Model-supplied strings can no longer become options to
+  rg, cargo, docker, npm/pip/yarn or git push.
+
+### Behaviour changes to know when upgrading
+
+- **Normal mode runs read-only tools and plain `cargo check/test/clippy`
+  without asking.**
+- **Full reasoning is shown only with `--verbose`.**
+- **`git_push` pushes branches only, to a configured remote.** Tags, notes
+  and custom refspecs are refused.
+- **JSON results gain `outcome`, `files_changed` and `patch_baseline`.**
+  `patch_*` is measured from task start.
+
 ## What's New in 0.9.1
 
 0.9.1 is a user-experience and honesty release. It follows a hands-on UX field

@@ -5,6 +5,150 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.2] - 2026-09-26
+
+Every number and badge selfware shows now matches what actually happened.
+Confirmations show what you are approving. A sweep also closed a set of
+argument-injection holes in the tools. The fixes come from a live UX study
+on two real open-source projects (sharkdp/hexyl, python-slugify) against
+llm.selfware.design, re-run end to end on this release, and from several
+rounds of external review.
+
+### Fixed
+- **No invented numbers.**
+  - The waiting spinner no longer rotates ~100 phrases that claimed work
+    that wasn't happening ("Formatting with rustfmt…", "Benchmarking
+    solutions…"). It shows "Waiting for the model", then what the stream
+    has actually delivered, e.g. "Model reasoning · ~1.2K tokens".
+  - The REPL status bar no longer shows a dollar cost from a hard-coded
+    price table ("$0.07" on an endpoint that bills nothing). `/cost`,
+    `/quit` and the run summary share one measured session total, split
+    into main loop and side calls. Cost appears only when the provider
+    reports it.
+  - Context reads the same everywhere: "21.7k of 164k context (13%) ·
+    compaction at 106k". The TUI's `/ctx` no longer divides a cumulative
+    counter by a hard-coded 128K.
+  - "✔ Tests: 10 passed" when 56 ran: test counts are now summed over every
+    test binary. The same bug was fixed in three more parsers (evolution
+    sandbox and daemon, bench harness).
+  - The planning phase shows elapsed time, not a "[1/1] 0%" bar. The TUI
+    shows "Step N", not "Step N/400".
+- **Honest outcomes.**
+  - Ctrl-C is `outcome: interrupted`, followed by a resume hint (`selfware
+    resume <id>` / `selfware --continue`), not "failed" three times. The exit
+    code is still 130. A failed run prints its error once.
+  - A stale automatic check failure no longer decides the verdict. If the
+    tree changed after a failed post-edit check (for example, the model
+    installed a missing test dependency), the check is re-run on the final
+    tree and that result counts. A tree that really fails still fails.
+  - "verification: passed (N checks: …)" lists exactly what it counts, e.g.
+    `type_check ×2`.
+  - A task answered directly in the planning turn is shown on screen and
+    journaled with its answer. It used to be recorded as "0 messages", and
+    in streaming mode it could print nothing.
+- **Grounding without false alarms.**
+  - Citations are verified (the named symbol or quoted code was found at
+    the cited lines), location-only (the line exists, the content was not
+    checked), or wrong. A `file:line` citation that exists no longer counts
+    against the answer. A quoted code span next to a citation is checked
+    against the cited lines.
+  - "None checkable" ⚠️ applies only when the task asked for citations or a
+    review. An uncited answer to an unrequested workspace question gets
+    ℹ️ "the answer was not checked against the files (no citations were
+    requested)". Exact-response and general Q&A get no warning.
+  - The citation result appears once in the run summary, not four times.
+- **Confirmations show what you approve.**
+  - Edits show a bounded, coloured diff ("+N −M lines"). New files show
+    their first lines. Other tools show `key: value` lines, not raw
+    escaped JSON.
+  - Every prompt carries a risk tag: [reads], [writes workspace], [runs
+    command], [installs packages], [network], [git history], [deletes
+    files].
+  - Normal mode no longer asks for read-only tools or plain
+    `cargo check/test/clippy`. A cargo call with a flag-shaped argument
+    still asks.
+  - `p` allows a safe shell-command prefix (or the exact command) for the
+    rest of the session.
+  - The TUI permission popup fits its content and offers the same readable
+    view, reason, risk tag and [a]/[p] options.
+- **Terminal output.**
+  - Tool-call markup (including a stray `</tool_call>` and Kimi `<|open|>`
+    sections) never reaches the terminal. Each tool call gets one line.
+  - Reasoning is a one-line "Thinking… (N chars)" indicator. Full
+    reasoning is under `--verbose`.
+  - Prose renders as Markdown, blank gaps collapse, and the final answer
+    prints exactly once.
+- **stream-json** streams the answer as `text_delta` events. Every event
+  has a `type` key, and internal census noise is gone.
+- **JSON result.**
+  - `patch_bytes`/`patch_lines` are measured against the task-start tree,
+    so edits already in the workspace no longer count. New fields:
+    `files_changed` and `patch_baseline`.
+  - `num_turns` matches the event stream.
+  - New `outcome` field (`completed` / `failed` / `interrupted` /
+    `terminated`).
+- **First contact.**
+  - `--help` groups options under headings.
+  - The config path is printed once and shortened.
+  - `doctor` and `llm-doctor` skip the workshop banner. `doctor` checks
+    only the workspace's languages (`--all` for the rest), and config
+    warnings print once.
+  - `llm-doctor` labels its heuristics and server-operator advice, and
+    names the source of each context figure.
+- **REPL, TUI and misc.**
+  - The REPL welcome is compact. `/help` sections have titles. The slash
+    menu hides aliases.
+  - User-facing timestamps are in local time.
+  - The TUI chat reads oldest to newest, with no stray tool markup, and
+    ends with the outcome and run summary. Garden health is measured.
+  - The one-time tokenizer download no longer draws a progress bar over
+    the REPL.
+  - `--version` reports the right commit in git worktrees.
+- **Security: argument injection.** Model-supplied strings that reach a
+  program's argv can no longer be parsed as options:
+  - `grep_search`: this ran without confirmation, and a pattern such as
+    `--pre=sh` made ripgrep execute files.
+  - `cargo_test` `package` and `test_name` (`--config=…runner=…`).
+  - container image, container, service, build and compose operands
+    (`--privileged`, `--volume=/:/host`).
+  - npm, pip and yarn packages, scripts and requirements (`--index-url`,
+    `--registry`, `--target`).
+  - `git_push`: `branch` must be a plain branch name (`+HEAD:main`
+    force-pushed past the protected-branch check), and `remote` must be a
+    configured remote.
+
+### Known issues
+- The 24k-window editing scenario (c24) still does not finish: compaction
+  evicts the file being documented, and the model re-reads it.
+- A stale *passing* automatic check with no later check still counts as
+  passed. Re-checking the final tree would cost an extra check run on most
+  runs; this is left for a decision.
+- The protocol-stall stop's false-positive rate for detector-only turns is
+  still unmeasured.
+
+### Review notes (AGENTS.md rule 2)
+These change or loosen checks or visible behaviour. Each has maintainer
+sign-off, given in the review conversation, and each is noted in its
+commit message:
+- The ~100 loading phrases were removed. Their tests (count, trailing dots)
+  were replaced by stricter honesty tests.
+- Full reasoning is no longer printed in default text mode (`--verbose`
+  keeps it).
+- Normal mode runs read-only tools and plain cargo check/test/clippy
+  without asking. `git_push` now pushes branches only: no tags, notes or
+  custom refspecs.
+- An uncited answer to an unrequested workspace question is ℹ️ instead of
+  ⚠️.
+- 74 red-team corpus cases were relabelled from allow to refuse. This only
+  tightens.
+- Test expectations changed with the fixes: gate-line and summary
+  assertions for print-once, the sandbox multi-binary count (150/155
+  instead of the buggy last line), the TUI step header, the TUI modal
+  height, two git_push remote tests (now refused), the cost-line tests
+  moved to the session totals, and location-verified counts in the
+  citation tests.
+  No assertion was dropped without a stricter replacement.
+
 ## [0.9.1] - 2026-09-26
 
 A user-experience and honesty release. The fixes come from a hands-on UX field
