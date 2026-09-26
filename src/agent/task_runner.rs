@@ -462,6 +462,13 @@ pub struct RunSummary {
     /// (overall passed, check count) from the verification gate's last
     /// report; `None` when no verification ran.
     pub verification: Option<(bool, usize)>,
+    /// Names of the verification checks that actually ran (gate check types
+    /// and the verification commands the run executed), in order, deduped.
+    /// A bare "passed (N checks)" named nothing (UX field test, 0.9.0).
+    pub verification_checks: Vec<String>,
+    /// Vision tool calls this run as (succeeded, failed); `None` when no
+    /// vision tool ran. All-failed means no image was actually seen.
+    pub vision_calls: Option<(usize, usize)>,
     /// Total API tokens consumed (input + output).
     pub total_tokens: usize,
     /// Known USD charges; may be incomplete when providers omit billing.
@@ -499,6 +506,8 @@ impl Agent {
             budget_extended: self.loop_control.extension_was_used(),
             files_changed,
             verification: self.credited_verification_summary(),
+            verification_checks: self.verification_check_names(),
+            vision_calls: self.vision_call_outcomes(),
             total_tokens: self
                 .cumulative_token_usage
                 .total
@@ -556,6 +565,64 @@ impl Agent {
     /// that edits have since outdated is reported as NOT passed: rendering
     /// green for a check that does not cover the final tree would claim a
     /// verification that was not performed on it (AGENTS.md rule 3).
+    /// Names of the checks behind [`Self::credited_verification_summary`]:
+    /// the gate's checks that ran (not-run ones earn nothing and are not
+    /// named), then each verification command the run executed. A shell
+    /// command is shown shortened in backticks.
+    pub(super) fn verification_check_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        let mut push = |name: String| {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        };
+        if let Some(report) = self.verification_gate.last_results() {
+            for check in report.checks.iter().filter(|c| !c.not_run) {
+                push(check.check_type.as_str().to_string());
+            }
+        }
+        if let Some(cp) = self.current_checkpoint.as_ref() {
+            for tc in cp.tool_calls.iter().filter(|tc| {
+                super::tool_dispatch::tool_call_is_verification(&tc.tool_name, &tc.arguments)
+            }) {
+                let command = serde_json::from_str::<serde_json::Value>(&tc.arguments)
+                    .ok()
+                    .and_then(|v| v.get("command").and_then(|c| c.as_str()).map(str::to_owned));
+                push(match command {
+                    Some(cmd) => {
+                        let cmd = cmd.trim();
+                        let short: String = cmd.chars().take(40).collect();
+                        if cmd.chars().count() > 40 {
+                            format!("`{short}…`")
+                        } else {
+                            format!("`{short}`")
+                        }
+                    }
+                    None => tc.tool_name.clone(),
+                });
+            }
+        }
+        names
+    }
+
+    /// (succeeded, failed) vision tool calls this run, from the checkpoint's
+    /// tool log; `None` when no vision tool ran.
+    pub(super) fn vision_call_outcomes(&self) -> Option<(usize, usize)> {
+        let cp = self.current_checkpoint.as_ref()?;
+        let (ok, failed) = cp
+            .tool_calls
+            .iter()
+            .filter(|tc| tc.tool_name.starts_with("vision_"))
+            .fold((0usize, 0usize), |(ok, failed), tc| {
+                if tc.success {
+                    (ok + 1, failed)
+                } else {
+                    (ok, failed + 1)
+                }
+            });
+        (ok + failed > 0).then_some((ok, failed))
+    }
+
     pub(super) fn credited_verification_summary(&self) -> Option<(bool, usize)> {
         let (tool_passes, tool_failures) = self
             .current_checkpoint

@@ -543,3 +543,19 @@ fn unquoted_malformed_tool_syntax_is_still_flagged() {
         assert!(looks_like_malformed_tool_xml(content), "{content}");
     }
 }
+
+#[tokio::test]
+async fn failed_vision_call_tells_the_model_the_image_was_not_seen() {
+    // UX field test (0.9.0): vision_analyze failed 14 times, yet the answer
+    // said the plot "shows a smooth sine" (it had cusps). The failure
+    // feedback must say the image was never analysed.
+    let agent = Agent::new(Config::default()).await.unwrap();
+    for tool in ["vision_analyze", "vision_compare"] {
+        let hint = agent.build_error_recovery_hint(tool, "vision endpoint returned 400");
+        assert!(hint.contains("NOT analysed"), "{tool}: {hint}");
+        assert!(hint.contains("visual verification"), "{tool}: {hint}");
+    }
+    // Other tools keep their own guidance.
+    let hint = agent.build_error_recovery_hint("file_read", "No such file");
+    assert!(!hint.contains("NOT analysed"), "{hint}");
+}

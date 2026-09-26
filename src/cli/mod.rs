@@ -6737,12 +6737,44 @@ fn render_run_summary(summary: &crate::agent::RunSummary, failure: Option<&str>)
             suffix
         ));
     }
+    // Name what was checked: a bare count let "passed (7 checks)" vouch
+    // for a waveform nothing had inspected (UX field test, 0.9.0).
+    let named = |checks: usize| -> String {
+        if summary.verification_checks.is_empty() {
+            return format!("{checks} checks");
+        }
+        let shown: Vec<&str> = summary
+            .verification_checks
+            .iter()
+            .take(4)
+            .map(String::as_str)
+            .collect();
+        let more = summary
+            .verification_checks
+            .len()
+            .saturating_sub(shown.len());
+        let suffix = if more > 0 {
+            format!(", +{more} more")
+        } else {
+            String::new()
+        };
+        format!("{checks} checks: {}{suffix}", shown.join(", "))
+    };
     let verification = match summary.verification {
-        Some((true, checks)) => format!("passed ({checks} checks)"),
-        Some((false, checks)) => format!("failed ({checks} checks)"),
+        Some((true, checks)) => format!("passed ({})", named(checks)),
+        Some((false, checks)) => format!("failed ({})", named(checks)),
         None => "not performed".to_string(),
     };
     lines.push(format!("verification: {verification}"));
+    match summary.vision_calls {
+        Some((0, failed)) => lines.push(format!(
+            "visual check: not performed — vision tools failed {failed}× (image content not verified)"
+        )),
+        Some((ok, failed)) if failed > 0 => lines.push(format!(
+            "visual check: {ok} succeeded, {failed} failed"
+        )),
+        _ => {}
+    }
     if let Some(audit) = &summary.requirements_audit {
         lines.push(format!("requirements audit: {}", audit.label()));
     }

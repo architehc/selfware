@@ -1202,6 +1202,8 @@ fn sample_summary() -> crate::agent::RunSummary {
             "src/d.rs".to_string(),
         ],
         verification: Some((true, 4)),
+        verification_checks: Vec::new(),
+        vision_calls: None,
         total_tokens: 123_456,
         cost_usd: Some(0.0123),
         cost_complete: true,
@@ -1523,6 +1525,8 @@ fn render_cost_line_honest_about_missing_billing() {
         budget_extended: false,
         files_changed: Vec::new(),
         verification: None,
+        verification_checks: Vec::new(),
+        vision_calls: None,
         total_tokens: 12_345,
         cost_usd: None,
         cost_complete: false,
@@ -2521,4 +2525,44 @@ fn config_show_redacts_extra_body_secrets() {
         shown.contains(crate::config::model::REDACTED_SECRET_MARKER),
         "{shown}"
     );
+}
+
+#[test]
+fn render_run_summary_names_checks_and_flags_unseen_images() {
+    // UX field test (0.9.0): "verification: passed (7 checks)" named nothing,
+    // and the answer described a plot after every vision call had failed.
+    let mut summary = sample_summary();
+    summary.verification = Some((true, 3));
+    summary.verification_checks = vec![
+        "type_check".to_string(),
+        "`iverilog -o tb nco.v nco_tb.v`".to_string(),
+        "`vvp tb`".to_string(),
+        "`python3 plot.py`".to_string(),
+        "cargo_test".to_string(),
+    ];
+    summary.vision_calls = Some((0, 14));
+    let rendered = render_run_summary(&summary, None);
+    assert!(
+        rendered.contains(
+            "verification: passed (3 checks: type_check, `iverilog -o tb nco.v nco_tb.v`, `vvp tb`, `python3 plot.py`, +1 more)"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "visual check: not performed — vision tools failed 14× (image content not verified)"
+        ),
+        "{rendered}"
+    );
+
+    summary.vision_calls = Some((2, 1));
+    let rendered = render_run_summary(&summary, None);
+    assert!(
+        rendered.contains("visual check: 2 succeeded, 1 failed"),
+        "{rendered}"
+    );
+
+    summary.vision_calls = Some((3, 0));
+    let rendered = render_run_summary(&summary, None);
+    assert!(!rendered.contains("visual check"), "{rendered}");
 }

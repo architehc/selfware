@@ -540,6 +540,19 @@ impl Agent {
     pub(super) fn build_error_recovery_hint(&self, tool_name: &str, error: &str) -> String {
         let error_lower = error.to_lowercase();
 
+        // A failed vision call means the image was never seen. UX field test
+        // (0.9.0): vision_analyze failed 14 times and the final answer still
+        // said the plot "shows a smooth sine" — the plot had cusps. Say so
+        // plainly, so the answer reports the gap instead of inventing the
+        // picture (AGENTS.md rule 3).
+        if tool_name.starts_with("vision_") {
+            return "The image was NOT analysed. Do not describe, characterise or vouch for its \
+                    contents. Verify the underlying data another way (e.g. check the numbers \
+                    that produced it), or state in your answer that visual verification could \
+                    not be performed."
+                .to_string();
+        }
+
         // Command / subprocess timeouts — tool-specific, NOT LLM infrastructure issues
         if matches!(
             tool_name,
