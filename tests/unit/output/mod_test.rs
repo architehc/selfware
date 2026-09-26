@@ -773,8 +773,8 @@ fn gate_blocked_line_is_one_concise_line() {
     // Never prints the full directive body.
     let body = line.trim_start_matches("[gate] completion blocked: ");
     assert!(
-        body.chars().count() <= 121,
-        "preview must cap at ~120 chars (+ellipsis), got {}",
+        body.chars().count() <= 201,
+        "preview must cap at ~200 chars (+ellipsis), got {}",
         body.chars().count()
     );
 }
@@ -784,7 +784,7 @@ fn gate_blocked_line_truncates_long_reasons() {
     let long = "x".repeat(500);
     let line = gate_blocked_line(&long);
     let body = line.trim_start_matches("[gate] completion blocked: ");
-    assert_eq!(body.chars().count(), 121, "120 chars + ellipsis: {line}");
+    assert_eq!(body.chars().count(), 201, "200 chars + ellipsis: {line}");
     assert!(line.ends_with('…'), "truncation marker: {line}");
 }
 
@@ -839,4 +839,36 @@ fn unrelated_panics_are_not_swallowed_as_closed_pipe() {
 #[test]
 fn closed_pipe_exit_code_is_128_plus_sigpipe() {
     assert_eq!(BROKEN_PIPE_EXIT_CODE, 128 + 13);
+}
+
+#[test]
+fn gate_blocked_line_leads_with_the_gate_reason_and_never_cuts_mid_word() {
+    // UX field test (0.9.0): the line printed the raw `[POLICY …]` header and
+    // cut the message mid-word ("…but you ha…").
+    let reason = crate::agent::task_policy::policy_envelope(
+        crate::agent::task_policy::PolicyKind::Gate,
+        true,
+        "file written without a passing verification",
+        "You have written code, but you have not verified it. Code-affecting edits \
+         awaiting verification: fm_scanner.py. Run a verification command that fits \
+         this project successfully before completing.",
+    );
+    let line = gate_blocked_line(&reason);
+    assert_eq!(
+        line,
+        "[gate] completion blocked: file written without a passing verification — \
+         You have written code, but you have not verified it."
+    );
+    assert!(!line.contains("[POLICY"), "{line}");
+
+    // A long sentence is cut at a word boundary, with an ellipsis.
+    let long = format!("Please {} now.", "verify the build output ".repeat(20));
+    let line = gate_blocked_line(&long);
+    let body = line.trim_start_matches("[gate] completion blocked: ");
+    assert!(body.ends_with('…'), "{line}");
+    let kept = body.trim_end_matches('…');
+    assert!(
+        long.starts_with(kept) && long[kept.len()..].starts_with(' '),
+        "cut must fall on a word boundary: {line}"
+    );
 }

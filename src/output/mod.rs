@@ -827,24 +827,15 @@ pub(crate) fn intent_without_action_detail(
     }
     let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-    // Show what the model said (truncated)
-    let preview: String = model_said.chars().take(120).collect();
-    let truncated = if model_said.len() > 120 { "…" } else { "" };
-    print!(
-        "\r\x1b[2K  {} {}{}\n",
-        "Model:".dimmed(),
-        preview.dimmed(),
-        truncated.dimmed()
-    );
+    // Show what the model said (capped at a word boundary; the old check
+    // compared byte length against a char cut, so multi-byte text got a
+    // spurious ellipsis).
+    let flat_said = model_said.split_whitespace().collect::<Vec<_>>().join(" ");
+    let preview = cap_at_word(&flat_said, 120);
+    print!("\r\x1b[2K  {} {}\n", "Model:".dimmed(), preview.dimmed());
 
-    // Show what correction is being sent
-    let corr_preview: String = correction
-        .lines()
-        .next()
-        .unwrap_or("")
-        .chars()
-        .take(100)
-        .collect();
+    // Show what correction is being sent: its first line, never cut mid-word.
+    let corr_preview = cap_at_word(correction.lines().next().unwrap_or(""), 160);
     print!(
         "\r\x1b[2K  {} {} ({}/{})\n",
         "Action:".bright_yellow(),
@@ -883,14 +874,53 @@ pub(crate) fn smart_fallback_action(tool_name: &str, tool_args: &str) {
 /// the adversarial audit ever fired). Multiline directives are flattened and
 /// capped — never print full directive bodies.
 pub(crate) fn gate_blocked_line(reason: &str) -> String {
-    let flat = reason.split_whitespace().collect::<Vec<_>>().join(" ");
-    let preview: String = flat.chars().take(120).collect();
-    let truncated = if flat.chars().count() > 120 {
-        "…"
-    } else {
-        ""
+    // A policy-envelope gate carries its own one-line reason in the header
+    // (`[POLICY kind=gate retryable=… reason="…"]`): lead with that instead
+    // of printing the raw header, then the body's first sentence. The old
+    // flat 120-char cut printed the header and chopped the message
+    // mid-word ("…but you ha…", UX field test 0.9.0).
+    let (headline, body) = match reason.trim_start().strip_prefix("[POLICY ") {
+        Some(rest) => {
+            let (header, body) = rest.split_once('\n').unwrap_or((rest, ""));
+            let headline = header
+                .split_once("reason=\"")
+                .and_then(|(_, r)| r.rsplit_once('"').map(|(r, _)| r.to_string()));
+            (headline, body)
+        }
+        None => (None, reason),
     };
-    format!("[gate] completion blocked: {preview}{truncated}")
+    let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    // First sentence of the body: up to the first ". " (keeping the period).
+    let sentence = match flat.find(". ") {
+        Some(end) => &flat[..=end],
+        None => flat.as_str(),
+    };
+    let text = match (headline.as_deref(), sentence.is_empty()) {
+        (Some(h), false) => format!("{h} — {sentence}"),
+        (Some(h), true) => h.to_string(),
+        (None, _) => sentence.to_string(),
+    };
+    format!(
+        "[gate] completion blocked: {}",
+        cap_at_word(&text, GATE_LINE_MAX_CHARS)
+    )
+}
+
+/// Longest gate-blocked preview, in chars (plus an ellipsis when cut).
+const GATE_LINE_MAX_CHARS: usize = 200;
+
+/// Cap `text` at `max` chars, cutting at the last word boundary when there is
+/// one, with an ellipsis only when something was cut.
+fn cap_at_word(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max).collect();
+    let cut = match head.rfind(' ') {
+        Some(space) if space > max / 2 => head[..space].trim_end().to_string(),
+        _ => head,
+    };
+    format!("{cut}…")
 }
 
 /// Print a single visible line when the completion gate blocks completion.
