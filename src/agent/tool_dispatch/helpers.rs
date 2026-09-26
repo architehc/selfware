@@ -2726,7 +2726,26 @@ pub(crate) fn tool_call_counts_as_state_change(name: &str, args_str: &str) -> bo
 pub(crate) fn read_tool_target(name: &str, args_str: &str) -> Option<String> {
     let args: Value = serde_json::from_str(args_str).ok()?;
     match name {
-        "file_read" | "file_write" | "file_edit" | "file_delete" => args
+        // A file_read target includes its line range: paging through a large
+        // file (`line_range` 1-200, then 200-400) is new ground, not a
+        // re-read. On a small window an oversized read arrives as its first
+        // chunk with an instruction to continue by range; keyed by path
+        // alone, every next page counted as redundant and the read-loop
+        // guard aborted the run with READ_LOOP_NO_EDIT (c24, 24k window, all
+        // four validation rounds). An identical re-read (same path, same
+        // range) is still redundant, so real thrashing still trips it.
+        "file_read" => {
+            let path = args.get("path").and_then(|v| v.as_str())?;
+            match args.get("line_range").and_then(|r| r.as_array()) {
+                Some(range) if range.len() == 2 => Some(format!(
+                    "{path}#{}-{}",
+                    range[0].as_i64().unwrap_or(0),
+                    range[1].as_i64().unwrap_or(0)
+                )),
+                _ => Some(path.to_string()),
+            }
+        }
+        "file_write" | "file_edit" | "file_delete" => args
             .get("path")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),

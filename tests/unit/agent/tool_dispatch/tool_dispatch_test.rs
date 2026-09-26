@@ -8110,3 +8110,36 @@ fn tsc_no_emit_is_observational_but_emitting_tsc_is_not() {
         "tsc --noEmit && rm -rf dist"
     ));
 }
+
+#[tokio::test]
+async fn paging_through_a_file_by_range_is_progress_but_identical_rereads_are_not() {
+    // c24 (24k window, every validation round): an oversized read arrives as
+    // its first chunk with "continue with line_range", but the read-loop
+    // guard keyed file_read by path alone, so every next page counted as a
+    // redundant re-read and the run aborted with READ_LOOP_NO_EDIT.
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.current_task_context = "Edit the context module after reading it.".to_string();
+    agent.consecutive_read_only_steps = 5;
+    let read = |range: &str| {
+        vec![(
+            "file_read".to_string(),
+            format!(r#"{{"path":"src/agent/context.rs","line_range":{range}}}"#),
+            None,
+        )]
+    };
+    // Each new page of the same file is new ground: the streak relaxes.
+    agent.update_read_only_step_tracking(&read("[1, 200]"), false);
+    agent.update_read_only_step_tracking(&read("[200, 400]"), false);
+    agent.update_read_only_step_tracking(&read("[400, 600]"), false);
+    assert_eq!(agent.consecutive_read_only_steps, 2, "paging is progress");
+    // Re-reading an identical range is still redundant: the streak climbs.
+    agent.update_read_only_step_tracking(&read("[200, 400]"), false);
+    agent.update_read_only_step_tracking(&read("[200, 400]"), false);
+    assert_eq!(
+        agent.consecutive_read_only_steps, 4,
+        "identical re-reads still count toward the guard"
+    );
+    server.stop().await;
+}
