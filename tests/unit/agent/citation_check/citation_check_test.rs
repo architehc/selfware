@@ -25,6 +25,7 @@ fn cite(path: &str, start: usize, end: usize, symbol: Option<&str>) -> Citation 
         start,
         end,
         symbol: symbol.map(str::to_string),
+        quote: None,
     }
 }
 
@@ -1301,4 +1302,140 @@ fn majority_rule_counts_location_only_as_located() {
         "citations: 6 of 10 could not be verified (6 not checkable); 2 location-only \
          (line exists, content not checked)"
     );
+}
+
+/// Live shape 2: a review whose citations each quote the cited code
+/// ("0 verified, 12 without a checkable symbol" on 0.9.1). The quote is the
+/// content claim: found at the cited lines, the citation is verified.
+#[tokio::test]
+async fn quoted_code_at_the_cited_lines_verifies() {
+    let text = include_str!("fixtures/hexyl_quoted_review.md");
+    let parsed = parse_citations(text);
+    let quotes: Vec<Option<&str>> = parsed.iter().map(|c| c.quote.as_deref()).collect();
+    assert_eq!(
+        quotes,
+        vec![
+            Some("char::from_u32(0x2800 + to_braille_bits(..)).unwrap()"),
+            Some("self.line_buf[0]"),
+            Some("line_buf: vec![0x0; 8 * panels as usize]"),
+            Some("self.squeezer = Squeezer::Print"),
+        ]
+    );
+
+    let ws = hexyl_workspace();
+    let mut agent = gate_agent(ws.path()).await;
+    answer(&mut agent, 1, text);
+    assert_eq!(agent.citation_gate(true), None);
+    let status = agent.grounding_status().expect("status recorded");
+    assert_eq!(
+        (status.total, status.verified, status.location_verified),
+        (4, 4, 0),
+        "{status:?}"
+    );
+    assert_eq!(status.warning_note(), None);
+}
+
+#[test]
+fn quote_outcomes_are_verified_location_only_or_wrong() {
+    let ws = hexyl_workspace();
+    let mut r = CitationResolver::new(ws.path());
+    let check = |r: &mut CitationResolver, text: &str| {
+        let c = parse_citations(text)
+            .into_iter()
+            .next()
+            .expect("one citation");
+        r.check(&c)
+    };
+    // Within the ± tolerance, whitespace ignored.
+    assert!(matches!(
+        check(&mut r, "src/lib.rs:797 `let first=self.line_buf[ 0 ];`"),
+        CitationVerdict::Verified { .. }
+    ));
+    // `...` / `…` split fragments that must appear in order.
+    assert!(matches!(
+        check(&mut r, "src/lib.rs:184 `char::from_u32(...).unwrap()`"),
+        CitationVerdict::Verified { .. }
+    ));
+    assert!(matches!(
+        check(&mut r, "src/lib.rs:184 `unwrap() … char::from_u32`"),
+        CitationVerdict::LocationVerified { .. }
+    ));
+    // Present in the file but not at the cited lines: a near miss or a
+    // paraphrase is not evidence either way — location-only, never wrong.
+    assert!(matches!(
+        check(&mut r, "src/lib.rs:600 `self.line_buf[0]`"),
+        CitationVerdict::LocationVerified { .. }
+    ));
+    // Paraphrase whose names exist in the file: location-only.
+    assert!(matches!(
+        check(&mut r, "src/lib.rs:795 `line_buf.first()`"),
+        CitationVerdict::LocationVerified { .. }
+    ));
+    // One name that occurs in the file (`self`) keeps a quote out of
+    // "confidently absent": location-only.
+    assert!(matches!(
+        check(&mut r, "src/lib.rs:795 `self.render_hexagon(frame_cursor)`"),
+        CitationVerdict::LocationVerified { .. }
+    ));
+    // Code-shaped quote none of whose names occur anywhere: wrong.
+    let v = check(&mut r, "src/lib.rs:795 `render_hexagon(frame_cursor)`");
+    assert_eq!(
+        v,
+        CitationVerdict::SymbolNotFound {
+            file: "src/lib.rs".into()
+        }
+    );
+    let c = parse_citations("src/lib.rs:795 `render_hexagon(frame_cursor)`").remove(0);
+    let described = CheckedCitation {
+        citation: c,
+        verdict: v,
+        source: ANSWER_SOURCE.to_string(),
+    }
+    .describe();
+    assert!(
+        described.contains("none of the quoted code's names occur anywhere in src/lib.rs"),
+        "{described}"
+    );
+    // A flag or phrase is not code-shaped: never judged wrong.
+    assert!(matches!(
+        check(&mut r, "src/lib.rs:795 `--frozen`"),
+        CitationVerdict::LocationVerified { .. }
+    ));
+    // Too weak to check (fewer than 3 identifier characters).
+    assert!(matches!(
+        check(&mut r, "src/lib.rs:795 `[0]`"),
+        CitationVerdict::LocationVerified { .. }
+    ));
+    // Out of range stays wrong whatever is quoted.
+    assert!(matches!(
+        check(&mut r, "src/lib.rs:900 `self.line_buf[0]`"),
+        CitationVerdict::OutOfRange { .. }
+    ));
+}
+
+#[test]
+fn only_a_code_span_right_after_the_citation_is_its_quote() {
+    let q = |text: &str| {
+        parse_citations(text)
+            .into_iter()
+            .map(|c| c.quote)
+            .collect::<Vec<_>>()
+    };
+    // Separated by prose or punctuation: not a quote of the cited line.
+    assert_eq!(q("(`src/lib.rs:715`; see `Squeezer`)"), vec![None]);
+    assert_eq!(q("`foo` (`a.rs:1`), `bar` (`a.rs:9`)"), vec![None, None]);
+    assert_eq!(q("src/lib.rs:5 is where `thing` lives"), vec![None]);
+    // A following citation is not a quote.
+    assert_eq!(q("`a.rs:1` `b.rs:2`"), vec![None, None]);
+    // Accepted separators.
+    assert_eq!(
+        q("**src/lib.rs:5** — `do_it()`"),
+        vec![Some("do_it()".to_string())]
+    );
+    assert_eq!(
+        q("src/lib.rs:5: `do_it()`"),
+        vec![Some("do_it()".to_string())]
+    );
+    // Next line: not a quote.
+    assert_eq!(q("src/lib.rs:5\n`do_it()`"), vec![None]);
 }

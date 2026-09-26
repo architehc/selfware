@@ -27,6 +27,15 @@
 //! Citations that cannot even be located (ambiguous bare name, unreadable
 //! file, outside the workspace/policy) are **not checkable**.
 //!
+//! A citation followed by an inline code quote ("src/lib.rs:795
+//! `self.line_buf[0]`") names content too: the quote (whitespace ignored,
+//! `..` / `...` / `…` as wildcards between fragments) must occur, fragments
+//! in order, within the cited range (± `LINE_TOLERANCE`) to verify. A quote
+//! that is not there is wrong only when it is confidently absent from the
+//! whole file (it looks like code and none of its identifiers occur in the
+//! file); otherwise the citation stays location-only — a paraphrase or a
+//! near miss is not evidence either way (see `QuotePattern`).
+//!
 //! The completion gate (`Agent::citation_gate`) feeds wrong citations back to
 //! the model for at most `CITATION_GATE_REJECTION_BOUND` correction rounds
 //! (the audit ledger's bounded step-aside pattern), then lets the run complete
@@ -76,6 +85,9 @@ pub struct Citation {
     pub end: usize,
     /// Identifier named right before the citation, if any.
     pub symbol: Option<String>,
+    /// Inline code quoted right after the citation ("p:1 `code`"), if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quote: Option<String>,
 }
 
 impl Citation {
@@ -92,7 +104,8 @@ impl Citation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "verdict", rename_all = "snake_case")]
 pub enum CitationVerdict {
-    /// The named symbol appears within the cited range (± tolerance).
+    /// The named symbol, or the quoted code, appears within the cited range
+    /// (± tolerance).
     Verified { file: String },
     /// The symbol is elsewhere in the file; `actual_line` is where.
     WrongLine { file: String, actual_line: usize },
@@ -138,13 +151,17 @@ impl CheckedCitation {
     /// One-line human description of a problem (for directives/summary).
     pub fn describe(&self) -> String {
         let c = &self.citation;
-        let what = match &c.symbol {
-            Some(sym) => format!("`{sym}` cited at {}", c.display()),
-            None => format!("`{}`", c.display()),
+        let what = match (&c.symbol, &c.quote) {
+            (Some(sym), _) => format!("`{sym}` cited at {}", c.display()),
+            (None, Some(quote)) => format!("`{}` quoting `{quote}`", c.display()),
+            (None, None) => format!("`{}`", c.display()),
         };
         let body = match &self.verdict {
             CitationVerdict::WrongLine { file, actual_line } => {
                 format!("{what} but found at {file}:{actual_line}")
+            }
+            CitationVerdict::SymbolNotFound { file } if c.symbol.is_none() => {
+                format!("{what} but none of the quoted code's names occur anywhere in {file}")
             }
             CitationVerdict::SymbolNotFound { file } => {
                 format!("{what} but the name does not occur anywhere in {file}")
@@ -240,7 +257,8 @@ impl CitationReport {
 pub struct GroundingStatus {
     /// Distinct citations checked (final answer + written deliverables).
     pub total: usize,
-    /// Named content (symbol) confirmed inside the cited range.
+    /// Named content (symbol or quoted code) confirmed inside the cited
+    /// range.
     pub verified: usize,
     /// File exists and the cited range lies inside it, but nothing named
     /// content to check: location checked, content NOT checked.
@@ -504,7 +522,8 @@ pub fn parse_citations(text: &str) -> Vec<Citation> {
         let end = num("e").or_else(|| num("he")).unwrap_or(start);
         let path = m.as_str().trim_start_matches("./").to_string();
         let symbol = symbol_before(before);
-        let key = (path.clone(), start, end, symbol.clone());
+        let quote = quote_after(&text[whole.end()..], before.ends_with('`'));
+        let key = (path.clone(), start, end, symbol.clone(), quote.clone());
         if !seen.insert(key) {
             continue;
         }
@@ -513,6 +532,7 @@ pub fn parse_citations(text: &str) -> Vec<Citation> {
             start,
             end,
             symbol,
+            quote,
         });
         if out.len() >= MAX_CITATIONS_PER_SOURCE {
             break;
@@ -522,7 +542,13 @@ pub fn parse_citations(text: &str) -> Vec<Citation> {
         if out.len() >= MAX_CITATIONS_PER_SOURCE {
             break;
         }
-        let key = (c.path.clone(), c.start, c.end, c.symbol.clone());
+        let key = (
+            c.path.clone(),
+            c.start,
+            c.end,
+            c.symbol.clone(),
+            c.quote.clone(),
+        );
         if seen.insert(key) {
             out.push(c);
         }
@@ -707,9 +733,112 @@ fn prose_citations(text: &str) -> Vec<Citation> {
             start,
             end,
             symbol,
+            quote: None,
         });
     }
     out
+}
+
+/// The inline code span quoted right after a citation, on the same line:
+/// "p:12 `code`", "p:12: `code`", "p:12 — `code`", "**p:12** `code`",
+/// "`p:12` `code`". `in_span` says the citation itself sits in a code span,
+/// whose closing backtick comes first. A span that is itself a citation, or
+/// anything else between the citation and the span (";", ")", a word), is
+/// not a quote of the cited line.
+fn quote_after(after: &str, in_span: bool) -> Option<String> {
+    let line = &after[..after.find('\n').unwrap_or(after.len())];
+    let mut rest = line;
+    if in_span {
+        rest = rest.strip_prefix('`')?;
+    }
+    rest = rest.trim_start_matches('*').trim_start();
+    for sep in [":", "—", "–", "-", "→", "=>"] {
+        if let Some(r) = rest.strip_prefix(sep) {
+            rest = r.trim_start();
+            break;
+        }
+    }
+    let inner = rest.strip_prefix('`')?;
+    if inner.starts_with('`') {
+        return None;
+    }
+    let close = inner.find('`')?;
+    let quote = inner[..close].trim();
+    if quote.is_empty() || citation_regex().is_match(quote) {
+        return None;
+    }
+    Some(quote.to_string())
+}
+
+/// A code quote prepared for matching (see the module docs): whitespace
+/// removed, split into ordered fragments at `..` / `...` / `…`.
+struct QuotePattern {
+    fragments: Vec<String>,
+    /// Identifiers (3+ chars, not starting with a digit) in the quote.
+    identifiers: Vec<String>,
+    /// Shaped like code (call, path, index, assignment, snake_case ...),
+    /// not a flag or a prose phrase — required before an absent quote is
+    /// judged wrong.
+    code_shaped: bool,
+}
+
+impl QuotePattern {
+    /// `None` when the quote is too weak to check (fewer than 3 identifier
+    /// characters): `x`, `0`, `->` confirm nothing.
+    fn new(quote: &str) -> Option<Self> {
+        let squashed: String = quote.chars().filter(|c| !c.is_whitespace()).collect();
+        let normalized = squashed.replace('…', "..").replace("...", "..");
+        let fragments: Vec<String> = normalized
+            .split("..")
+            .filter(|f| !f.is_empty())
+            .map(str::to_string)
+            .collect();
+        let ident_chars = fragments
+            .iter()
+            .flat_map(|f| f.chars())
+            .filter(|c| is_ident_char(*c))
+            .count();
+        if ident_chars < 3 {
+            return None;
+        }
+        let identifiers: Vec<String> = quote
+            .split(|c: char| !is_ident_char(c))
+            .filter(|w| w.len() >= 3 && !w.starts_with(|c: char| c.is_ascii_digit()))
+            .map(str::to_string)
+            .collect();
+        let code_shaped = quote.contains(['(', '[', '{', '=', ';', '.', '<'])
+            || quote.contains("::")
+            || identifiers.iter().any(|w| w.contains('_'));
+        Some(QuotePattern {
+            fragments,
+            identifiers,
+            code_shaped,
+        })
+    }
+
+    /// The fragments occur, in order, in `hay` (whitespace already removed).
+    fn matches(&self, hay: &str) -> bool {
+        let mut from = 0;
+        for frag in &self.fragments {
+            match hay[from..].find(frag.as_str()) {
+                Some(at) => from += at + frag.len(),
+                None => return false,
+            }
+        }
+        true
+    }
+
+    /// Whether the quote confidently does not come from `lines`: it is
+    /// code-shaped, names at least one 4+ character identifier, and none
+    /// of its identifiers occurs anywhere in the file.
+    fn absent_from(&self, lines: &[String]) -> bool {
+        self.code_shaped
+            && self.identifiers.iter().any(|w| w.len() >= 4)
+            && !self
+                .identifiers
+                .iter()
+                .any(|w| lines.iter().any(|l| contains_word(l, w)))
+    }
 }
 
 /// Words allowed between a code-span symbol and its citation:
@@ -1120,18 +1249,34 @@ impl CitationResolver {
         if c.start == 0 || c.end < c.start || c.end > line_count {
             return CitationVerdict::OutOfRange { file, line_count };
         }
-        let Some(sym) = &c.symbol else {
-            // The line exists; nothing names content to check there.
-            return CitationVerdict::LocationVerified { file };
-        };
         let lo = c.start.saturating_sub(LINE_TOLERANCE).max(1);
         let hi = (c.end + LINE_TOLERANCE).min(line_count);
-        if (lo..=hi).any(|n| contains_word(&lines[n - 1], sym)) {
-            return CitationVerdict::Verified { file };
+        let quote = c.quote.as_deref().and_then(QuotePattern::new);
+        let quote_in_range = || {
+            quote.as_ref().is_some_and(|q| {
+                let window: String = lines[lo - 1..hi]
+                    .iter()
+                    .flat_map(|l| l.chars())
+                    .filter(|ch| !ch.is_whitespace())
+                    .collect();
+                q.matches(&window)
+            })
+        };
+        if let Some(sym) = &c.symbol {
+            if (lo..=hi).any(|n| contains_word(&lines[n - 1], sym)) || quote_in_range() {
+                return CitationVerdict::Verified { file };
+            }
+            return match locate_symbol(lines, sym) {
+                Some(actual_line) => CitationVerdict::WrongLine { file, actual_line },
+                None => CitationVerdict::SymbolNotFound { file },
+            };
         }
-        match locate_symbol(lines, sym) {
-            Some(actual_line) => CitationVerdict::WrongLine { file, actual_line },
-            None => CitationVerdict::SymbolNotFound { file },
+        match &quote {
+            Some(_) if quote_in_range() => CitationVerdict::Verified { file },
+            Some(q) if q.absent_from(lines) => CitationVerdict::SymbolNotFound { file },
+            // The line exists; nothing checkable names content there (or the
+            // quote is a paraphrase / near miss — not evidence either way).
+            _ => CitationVerdict::LocationVerified { file },
         }
     }
 
