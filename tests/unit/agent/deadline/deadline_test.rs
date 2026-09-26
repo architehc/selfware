@@ -343,6 +343,59 @@ async fn requirements_audit_at_limit_steps_aside_when_the_answer_alone_exceeds_t
     server.stop().await;
 }
 
+/// Review of C4 (0.9.1): with the forecast need (next call + answer) above
+/// the 2/3 cap but inside the budget, the capped wrap-up fired only when the
+/// answer could no longer fit. It now fires once the uncapped need no longer
+/// fits; the shared gate window is unchanged.
+#[tokio::test]
+async fn wrap_up_fires_on_the_uncapped_need_when_it_still_fits_the_budget() {
+    let server = MockLlmServer::builder().with_response("x").build().await;
+    let mut config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
+    config.agent.max_wall_secs = Some(450); // cap 300 s; need ~372 s <= 450 s
+    let mut agent = Agent::new(config).await.unwrap();
+    record_slow_endpoint(&agent);
+    backdate(&mut agent, 50); // 400 s left >= 372 s need: too early
+    agent.maybe_inject_wrap_up();
+    assert_eq!(directive_count(&agent), 0, "the need still fits");
+    backdate(&mut agent, 100); // 350 s left < 372 s need, but > 300 s cap
+    assert!(
+        agent.completion_gate_step_aside().is_none(),
+        "gate window unchanged"
+    );
+    agent.maybe_inject_wrap_up();
+    assert_eq!(
+        directive_count(&agent),
+        1,
+        "wrap-up fires before the answer stops fitting"
+    );
+    server.stop().await;
+}
+
+/// ... and never at step 1 when one answer does not fit the budget at all.
+#[tokio::test]
+async fn wrap_up_does_not_fire_early_when_the_need_exceeds_the_whole_budget() {
+    let server = MockLlmServer::builder().with_response("x").build().await;
+    let mut config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
+    config.agent.max_wall_secs = Some(300); // need ~372 s > 300 s budget; cap 200 s
+    let mut agent = Agent::new(config).await.unwrap();
+    record_slow_endpoint(&agent);
+    backdate(&mut agent, 5); // 295 s left
+    agent.maybe_inject_wrap_up();
+    assert_eq!(
+        directive_count(&agent),
+        0,
+        "no wrap-up at the start of the run"
+    );
+    backdate(&mut agent, 150); // 150 s left < 200 s cap
+    agent.maybe_inject_wrap_up();
+    assert_eq!(
+        directive_count(&agent),
+        1,
+        "the capped trigger still applies"
+    );
+    server.stop().await;
+}
+
 /// Review of C4 (0.9.1): widening the SHARED step-aside with the uncapped
 /// check turned off citation corrections, the min-steps floor and the
 /// artifact read-back for a whole run whose budget is smaller than one

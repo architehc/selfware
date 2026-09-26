@@ -416,6 +416,60 @@ impl Agent {
         None
     }
 
+    /// The wrap-up's second trigger: the UNCAPPED need (next call + final
+    /// answer) no longer fits what is left, while that need still fits the
+    /// whole budget. The shared window is capped (2/3 of the wall, 1/2 of
+    /// tokens/cost), so when the forecast need lies between the cap and the
+    /// budget the capped nudge fired only once the answer could no longer
+    /// fit — too late for a run still exploring, and the draft-at-limit
+    /// acceptance does not cover it without a rejected draft (review of C4,
+    /// 0.9.1). When the need exceeds the whole budget nothing can fit it and
+    /// the capped trigger alone applies, so this never fires at step 1.
+    /// Wrap-up only: the shared gate step-aside keeps the capped window.
+    fn uncapped_need_in_reserve(&self) -> Option<StepAside> {
+        let forecast = self.call_forecast();
+        let (wall, tokens, cost) = self.remaining_limits();
+        if let Some((remaining, max)) = wall {
+            let need = forecast.next_call_secs() + forecast.answer_secs();
+            if need <= max && remaining < need {
+                return Some(StepAside {
+                    cause: WrapUpCause::Deadline,
+                    detail: format!(
+                        "{remaining}s of the wall budget left < {need}s (next call ~{}s + final \
+                         answer ~{}s; above the capped window)",
+                        forecast.next_call_secs(),
+                        forecast.answer_secs()
+                    ),
+                });
+            }
+        }
+        if let Some((remaining, max)) = tokens {
+            let need = forecast.next_call_tokens() + forecast.answer_tokens();
+            if need <= max && remaining < need {
+                return Some(StepAside {
+                    cause: WrapUpCause::TokenBudget,
+                    detail: format!(
+                        "{remaining} tokens of the budget left < {need} (next call + final \
+                         answer; above the capped window)"
+                    ),
+                });
+            }
+        }
+        if let Some((remaining, per_token, max)) = cost {
+            let need = (forecast.next_call_tokens() + forecast.answer_tokens()) as f64 * per_token;
+            if per_token > 0.0 && need <= max && remaining < need {
+                return Some(StepAside {
+                    cause: WrapUpCause::CostBudget,
+                    detail: format!(
+                        "${remaining:.4} of the cost budget left < ${need:.4} (next call + final \
+                         answer; above the capped window)"
+                    ),
+                });
+            }
+        }
+        None
+    }
+
     /// One-time wrap-up, whichever limit comes first, evaluated ONE TURN
     /// AHEAD before each ordinary call: when the time, tokens or cost left
     /// after the forecast next call would no longer fit the forecast final
@@ -429,7 +483,10 @@ impl Agent {
         if self.wrap_up_issued().is_some() {
             return;
         }
-        let Some(window) = self.limit_in_reserve() else {
+        let Some(window) = self
+            .limit_in_reserve()
+            .or_else(|| self.uncapped_need_in_reserve())
+        else {
             return;
         };
         self.wrap_up
