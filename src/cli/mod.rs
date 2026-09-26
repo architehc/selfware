@@ -3140,7 +3140,11 @@ async fn handle_command(
             }
             if let Err(e) = &run_result {
                 if !quiet && !is_structured {
-                    eprintln!("✗ Task failed: {}", e);
+                    // Same scrub as the prompt path above (review, 0.9.1).
+                    eprintln!(
+                        "✗ Task failed: {}",
+                        crate::observability::telemetry::redact_secrets(&e.to_string())
+                    );
                 }
             }
             run_result?;

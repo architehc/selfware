@@ -95,7 +95,12 @@ async fn async_main() -> ExitCode {
     selfware::shutdown_tracing();
 
     if let Err(e) = &result {
-        eprintln!("Error: {:?}", e);
+        // Every error that reaches the process edge is scrubbed: upstream
+        // bodies and streamed errors can echo a credential (review, 0.9.1).
+        eprintln!(
+            "Error: {}",
+            selfware::telemetry::redact_secrets(&format!("{e:?}"))
+        );
     }
     // Same mapping the structured result's `exit_status` uses.
     ExitCode::from(selfware::errors::process_exit_code(

@@ -812,7 +812,12 @@ pub(crate) fn parse_sse_event(
                 .and_then(|m| m.as_str())
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| err.to_string());
-            chunks.push(StreamChunk::Error(msg));
+            // A gateway can echo the key in a mid-stream error, and this text
+            // becomes the run's error. Scrub it at the source, as
+            // http_status_error does for HTTP-status bodies (review, 0.9.1).
+            chunks.push(StreamChunk::Error(
+                crate::observability::telemetry::redact_secrets(&msg),
+            ));
             continue;
         }
 

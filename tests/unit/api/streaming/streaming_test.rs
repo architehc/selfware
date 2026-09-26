@@ -601,3 +601,22 @@ mod stream_timeout_classification {
         ));
     }
 }
+
+#[test]
+fn mid_stream_error_message_is_scrubbed_of_echoed_keys() {
+    // Review (0.9.1): a streamed {"error":{"message":…}} reached the run's
+    // error text raw; only HTTP-status bodies were redacted.
+    let mut acc = ToolCallAccumulator::new();
+    let event = "data: {\"error\":{\"message\":\"invalid key sk-or-v1-abcdef0123456789abcdef0123456789 for this route\"}}";
+    let chunks = parse_sse_event(event, &mut acc);
+    let msg = chunks
+        .iter()
+        .find_map(|c| match c {
+            StreamChunk::Error(m) => Some(m.clone()),
+            _ => None,
+        })
+        .expect("error chunk");
+    assert!(!msg.contains("abcdef0123456789abcdef"), "{msg}");
+    assert!(msg.contains("[REDACTED]"), "{msg}");
+    assert!(msg.contains("invalid key"), "non-secret text kept: {msg}");
+}
