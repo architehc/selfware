@@ -421,7 +421,9 @@ pub async fn run_boot_wizard_for_path(config_path: Option<PathBuf>) -> Result<()
                 e
             )),
         }
-    } else if !plan.card.endpoint.contains("localhost") {
+    } else if !crate::config::is_local_endpoint(plan.card.endpoint)
+        && !crate::config::is_keyless_endpoint(plan.card.endpoint)
+    {
         io.say(
             "  No key stored: set SELFWARE_API_KEY=<key> before running, or the endpoint will 401.",
         );

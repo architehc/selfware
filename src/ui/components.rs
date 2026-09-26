@@ -47,7 +47,7 @@ impl Default for WorkshopContext {
 impl WorkshopContext {
     pub fn from_config(endpoint: &str, model: &str) -> Self {
         Self {
-            is_local_model: endpoint.contains("localhost") || endpoint.contains("127.0.0.1"),
+            is_local_model: crate::config::is_local_endpoint(endpoint),
             model_name: model.to_string(),
             ..Default::default()
         }

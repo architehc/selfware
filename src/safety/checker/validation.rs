@@ -4705,7 +4705,13 @@ const DANGEROUS_COMMAND_WORD_VALUES: &[&str] = &[
 /// nc dev workflows against local services stay allowed.
 fn is_loopback_host(host: &str) -> bool {
     let bare = host.trim_matches(['[', ']']);
-    bare.trim_end_matches('.') == "localhost" || bare == "::1" || bare.starts_with("127.")
+    // Parsed, never a prefix match: `starts_with("127.")` took the hostname
+    // `127.attacker.com` for loopback and let a `-q` send past the
+    // named-host exfil block (review, 0.9.1).
+    bare.trim_end_matches('.').eq_ignore_ascii_case("localhost")
+        || bare
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// The remote host of an nc/ncat/netcat ONE-SHOT send to a HOSTNAME, if

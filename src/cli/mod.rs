@@ -1168,11 +1168,8 @@ fn should_skip_calibration(cli: &Cli, config: &Config) -> bool {
 /// Whether an endpoint URL points at the local machine (calibration only makes
 /// sense for a local backend it can port-scan / auto-start).
 fn endpoint_is_local(endpoint: &str) -> bool {
-    let e = endpoint.to_ascii_lowercase();
-    e.contains("localhost")
-        || e.contains("127.0.0.1")
-        || e.contains("0.0.0.0")
-        || e.contains("[::1]")
+    // URL-parsed (the loader's predicate), never a substring match.
+    crate::config::is_local_endpoint(endpoint)
 }
 
 /// Parse task-file contents into a list of tasks.
