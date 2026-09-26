@@ -284,3 +284,28 @@ fn tool_level_risk_tags() {
     assert_eq!(classify_risk("mcp_thing", &none), RiskTag::Unclassified);
     assert_eq!(RiskTag::InstallsPackages.label(), "[installs packages]");
 }
+
+#[test]
+fn test_runners_and_interpreters_run_code_they_are_not_reads() {
+    // UX field test (0.9.2): `python3 -m unittest` was tagged [reads].
+    for cmd in [
+        "python3 -m unittest 2>&1 | head -40",
+        "python3 -m pytest tests/ -q",
+        "pytest -q",
+        "cargo test",
+        "npm test",
+        "go test ./...",
+        "node scripts/check.js",
+    ] {
+        assert_eq!(classify_shell_risk(cmd), RiskTag::RunsCommand, "{cmd}");
+    }
+    // Plain observation stays a read.
+    for cmd in [
+        "ls -la",
+        "cat README.md",
+        "grep -rn max_words slugify/",
+        "git status",
+    ] {
+        assert_eq!(classify_shell_risk(cmd), RiskTag::Reads, "{cmd}");
+    }
+}

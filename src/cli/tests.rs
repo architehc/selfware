@@ -2823,3 +2823,21 @@ fn help_lists_everyday_subcommands_first_and_keeps_all() {
         assert!(names.contains(&kept), "{kept} must stay listed: {names:?}");
     }
 }
+
+#[test]
+fn failure_lines_do_not_repeat_the_task_failed_prefix() {
+    // UX field test (0.9.2): "✗ Task failed: Task failed: task incomplete …".
+    let notice = render_run_end_notice(
+        crate::errors::RunEnd::Failed,
+        "Task failed: task incomplete (VERIFICATION_FAILED)",
+        None,
+    );
+    assert_eq!(
+        notice,
+        "✗ Task failed: task incomplete (VERIFICATION_FAILED)"
+    );
+    let summary = sample_summary();
+    let rendered = render_run_summary(&summary, Some("Task failed: boom"));
+    assert!(rendered.contains("outcome: failed — boom"), "{rendered}");
+    assert!(!rendered.contains("Task failed: Task failed"), "{rendered}");
+}

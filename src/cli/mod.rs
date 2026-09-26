@@ -6767,6 +6767,14 @@ pub(crate) fn journal_title(input: &str, max_chars: usize) -> String {
     truncate_with_ellipsis(first_line, max_chars)
 }
 
+/// `AgentError::TaskFailed` displays as "Task failed: …"; the CLI already
+/// says "✗ Task failed:" / "outcome: failed —", so the inner prefix would
+/// read twice ("✗ Task failed: Task failed: task incomplete …", UX field
+/// test 0.9.2).
+fn without_task_failed_prefix(error: &str) -> &str {
+    error.strip_prefix("Task failed: ").unwrap_or(error)
+}
+
 /// Render the end-of-run summary block (headless text mode): the handful of
 /// lines a user actually reads after a run — outcome, iterations, files
 /// changed, verification, tokens/cost. Printed for completed AND failed
@@ -6786,7 +6794,9 @@ fn render_run_end_notice(
     let what = match end {
         RunEnd::Interrupted => "Task interrupted",
         RunEnd::Terminated => "Task terminated (SIGTERM)",
-        RunEnd::Failed | RunEnd::Completed => return format!("✗ Task failed: {error}"),
+        RunEnd::Failed | RunEnd::Completed => {
+            return format!("✗ Task failed: {}", without_task_failed_prefix(error))
+        }
     };
     match resume_id {
         Some(id) => {
@@ -6885,7 +6895,10 @@ fn render_run_summary_for(
             Some(reason) => format!("outcome: {} — {reason}", end.as_str()),
             None => format!("outcome: {}", end.as_str()),
         }),
-        Some(reason) => lines.push(format!("outcome: failed — {reason}")),
+        Some(reason) => lines.push(format!(
+            "outcome: failed — {}",
+            without_task_failed_prefix(reason)
+        )),
         // Never print a bare "completed" over failed checks (AGENTS.md rule 3).
         None if matches!(summary.verification, Some((false, _))) => lines
             .push("outcome: finished — verification FAILED (not a verified result)".to_string()),

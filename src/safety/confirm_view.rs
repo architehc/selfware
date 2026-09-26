@@ -701,6 +701,45 @@ fn classify_shell_segment(segment: &str) -> RiskTag {
     {
         return RiskTag::WritesWorkspace;
     }
+    // Test runners, builds and interpreters execute project code. The
+    // dispatcher counts them as observational (for its loop guards), but a
+    // person approving the call must not see "[reads]" for
+    // `python3 -m unittest` (UX field test, 0.9.2).
+    let runs_project_code = matches!(
+        prog,
+        "python"
+            | "python3"
+            | "py"
+            | "node"
+            | "deno"
+            | "ruby"
+            | "perl"
+            | "php"
+            | "pytest"
+            | "tox"
+            | "nox"
+            | "jest"
+            | "vitest"
+            | "mocha"
+            | "make"
+            | "just"
+            | "gradle"
+            | "mvn"
+            | "dotnet"
+            | "bash"
+            | "sh"
+            | "zsh"
+    ) || (prog == "cargo"
+        && matches!(
+            sub,
+            "test" | "run" | "bench" | "build" | "check" | "clippy" | "nextest"
+        ))
+        || (matches!(prog, "npm" | "pnpm" | "yarn" | "bun" | "npx")
+            && matches!(sub, "test" | "run" | "exec" | "start" | "x" | "dlx"))
+        || (prog == "go" && matches!(sub, "test" | "run" | "build" | "generate"));
+    if runs_project_code {
+        return RiskTag::RunsCommand;
+    }
     if crate::agent::tool_dispatch::helpers::shell_command_is_observational(segment) {
         RiskTag::Reads
     } else {
