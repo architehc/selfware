@@ -16,6 +16,15 @@
 //! that names the last rejection reasons. Turns that end without a tool call
 //! (final answers, prose) are not dispatches and do not move the window.
 //!
+//! Second writer (0.9.1, review C5): a turn whose markup only the
+//! malformed-call DETECTOR recognises (`detect_and_correct_malformed_tools`:
+//! tool-call syntax no parser accepted and no rejection was reported) is also
+//! recorded, as a protocol failure. It attempted a call and ran nothing,
+//! like a parse rejection; before, it moved no counter on read-only tasks.
+//! The calibration below predates this writer: it counted dispatched turns
+//! only, so the false-positive rate of detector-recorded turns is NOT
+//! measured. Re-measure on the next validation run's turn artifacts.
+//!
 //! Bound (measured on every turn artifact of the val082/val083/val084
 //! validation runs, 1,139 turns in 46 runs): healthy runs never had more than
 //! 2 protocol-failed turns in any 8-dispatch window (val083 `b3_review`,

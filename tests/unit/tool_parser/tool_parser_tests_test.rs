@@ -2040,3 +2040,19 @@ fn c6_unclosed_fence_still_masks_code_and_closed_fences_stay_quoted() {
     let quoted = "Example:\n```\n<tool_call>{\"name\":\"file_read\",\"arguments\":{\"path\":\"a.rs\"}}</tool_call>\n```\nDone.";
     assert!(parse_tool_calls(quoted).tool_calls.is_empty());
 }
+
+#[test]
+fn c6_tradeoff_unclosed_fence_no_longer_quotes_a_line_start_example_call() {
+    // Conscious trade-off of the C6 fix (0.9.1), pinned so it is not
+    // re-reported as new: an UNCLOSED fence now ends at the first line that
+    // starts a tool call, so a model that leaves a fence open while
+    // illustrating call syntax has that example parsed as a real call. The
+    // alternative (the old behaviour) hid every later call silently and
+    // misreported the turn as a tool-less answer. A CLOSED fence still
+    // quotes its examples (c6_unclosed_fence_still_masks_code_...).
+    let content = "The syntax is:\n```\n<tool_call>{\"name\":\"file_read\",\"arguments\":{\"path\":\"a.rs\"}}</tool_call>";
+    assert_eq!(names(&parse_tool_calls(content)), vec!["file_read"]);
+    // A mid-line opener inside an unclosed fence stays masked (narrow residual).
+    let mid = "```\nlet s = \"<tool_call>{\\\"name\\\":\\\"file_read\\\"}\";";
+    assert!(parse_tool_calls(mid).tool_calls.is_empty());
+}
