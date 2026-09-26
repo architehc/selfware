@@ -4704,3 +4704,46 @@ fn step_status_message_never_shows_the_iteration_cap() {
         Some(7)
     );
 }
+
+/// Live review (0.9.2): a task answered directly in the planning turn (the
+/// planning fast path) was journaled with "0 messages, 0 tool calls" — the
+/// only record of the answer was lost, because the fast path completes the
+/// checkpoint without the per-step save that copies the conversation.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn planning_fast_path_answer_is_kept_in_the_completed_checkpoint() {
+    let _state = crate::test_support::ExecGuard::hold();
+    let cwd = crate::test_support::CwdGuard::hold();
+    let dir = tempfile::Builder::new()
+        .prefix("fastpath")
+        .tempdir()
+        .unwrap();
+    cwd.switch_to(dir.path());
+    let answer = "A hash map stores key-value pairs in an array of buckets; a hash \
+                  function picks the bucket, and collisions are resolved by chaining \
+                  or open addressing, giving O(1) average lookups.";
+    let server = MockLlmServer::builder().with_response(answer).build().await;
+    let config = mock_agent_config(format!("{}/v1", server.url()), false);
+    let mut agent = Agent::new(config).await.unwrap();
+    let result = agent
+        .run_task("Explain in general terms how a hash map works.")
+        .await;
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(
+        server.captured_request_bodies().await.len(),
+        1,
+        "the planning fast path answers in one request"
+    );
+    let cp = agent.current_checkpoint.as_ref().expect("checkpoint kept");
+    assert!(
+        cp.messages
+            .iter()
+            .any(|m| m.content.text_all().contains("hash function picks")),
+        "the completed checkpoint must contain the answer; messages: {}",
+        cp.messages.len()
+    );
+    server.stop().await;
+}

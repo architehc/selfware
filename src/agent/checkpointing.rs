@@ -933,10 +933,17 @@ impl Agent {
     pub(super) fn complete_checkpoint(&mut self) -> Result<()> {
         let final_step = self.loop_control.current_step();
         let final_iter = self.loop_control.current_iteration();
+        let final_tokens = self.memory.total_tokens();
         if let Some(ref mut checkpoint) = self.current_checkpoint {
             checkpoint.set_status(TaskStatus::Completed);
             checkpoint.set_step(final_step);
             checkpoint.set_iteration(final_iter);
+            // The final conversation, including the answer. The per-step save
+            // normally copies it, but a task answered in the planning turn
+            // (the planning fast path) completes without any step save and was
+            // journaled with "0 messages" — the answer unrecoverable (0.9.2).
+            checkpoint.set_messages(self.messages.clone());
+            checkpoint.set_estimated_tokens(final_tokens);
         }
         if let Some(plan) = self.cognitive_state.active_tactical_plan.as_mut() {
             plan.status = crate::cognitive::StepStatus::Completed;
