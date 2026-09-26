@@ -337,7 +337,9 @@ impl GroundingStatus {
     /// The warning note the banner, run summary, JSON `grounding.note` and
     /// failure-mode evidence carry, or `None` for a grounded answer: wrong
     /// citations first ([`Self::unverified_note`]), else "none checkable"
-    /// for a review/report answer ([`Self::none_checkable_note`]).
+    /// for a review/report answer ([`Self::none_checkable_note`]), else the
+    /// unverified note when most citations were uncheckable
+    /// ([`Self::mostly_uncheckable`]).
     pub fn warning_note(&self) -> Option<String> {
         if self.problem_count() > 0 {
             let mut note = self.unverified_note();
@@ -348,9 +350,22 @@ impl GroundingStatus {
             Some(note)
         } else if self.none_checkable() {
             Some(self.none_checkable_note())
+        } else if self.mostly_uncheckable() {
+            Some(self.unverified_note())
         } else {
             None
         }
+    }
+
+    /// A review/report answer where MORE citations lack a checkable symbol
+    /// than were verified: one verified citation next to nineteen
+    /// uncheckable ones is not a grounded answer, yet it rendered a clean ✅
+    /// because only "none checkable" and "some wrong" warned (review, 0.9.1).
+    /// Majority rule: a clean badge needs at least as many verified as
+    /// unverifiable citations. Mutation tasks are not held to it, as with
+    /// [`Self::none_checkable`].
+    pub fn mostly_uncheckable(&self) -> bool {
+        self.read_only && self.unverifiable > self.verified
     }
 
     /// The summary's "Grounding:" line. Names what was actually checked:

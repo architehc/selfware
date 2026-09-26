@@ -933,6 +933,38 @@ async fn review_answer_with_no_checkable_citation_is_not_clean() {
     assert_eq!(agent.grounding_status().unwrap().warning_note(), None);
 }
 
+/// Review (0.9.1): 1 verified + 19 without a checkable symbol rendered a
+/// clean ✅ — the boundary was "at least one checkable citation".
+#[test]
+fn a_mostly_uncheckable_review_answer_is_not_clean() {
+    let status = GroundingStatus {
+        total: 20,
+        verified: 1,
+        unverifiable: 19,
+        read_only: true,
+        ..Default::default()
+    };
+    assert!(!status.none_checkable());
+    let note = status.warning_note().expect("warns");
+    assert!(note.contains("19 of 20 could not be verified"), "{note}");
+    assert!(note.contains("19 without a checkable symbol"), "{note}");
+    // At least as many verified as uncheckable: grounded, no warning.
+    let balanced = GroundingStatus {
+        total: 20,
+        verified: 10,
+        unverifiable: 10,
+        read_only: true,
+        ..Default::default()
+    };
+    assert_eq!(balanced.warning_note(), None);
+    // Mutation tasks are not held to the review standard.
+    let mutation = GroundingStatus {
+        read_only: false,
+        ..status
+    };
+    assert_eq!(mutation.warning_note(), None);
+}
+
 /// Mutation tasks are not held to the review standard.
 #[test]
 fn none_checkable_applies_to_review_answers_only() {
