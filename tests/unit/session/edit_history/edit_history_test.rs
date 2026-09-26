@@ -754,3 +754,15 @@ async fn restore_guarded_skips_corrupt_snapshot() {
         "a corrupt checkpoint must not be written back over live content"
     );
 }
+
+#[test]
+fn checkpoint_time_is_shown_in_local_time() {
+    // 0.9.1: /timeline printed UTC (19:07) next to a local 15:07 clock.
+    let checkpoint = EditCheckpoint::new(EditCheckpointId::new(1), EditAction::SessionStart);
+    let expected = checkpoint
+        .timestamp
+        .with_timezone(&chrono::Local)
+        .format("%H:%M:%S")
+        .to_string();
+    assert_eq!(checkpoint.formatted_time(), expected);
+}

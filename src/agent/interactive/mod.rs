@@ -1015,7 +1015,12 @@ impl Agent {
                             "  {} {} {} - {}",
                             icon,
                             format!("[{}]", i).bright_white(),
-                            entry.timestamp.format("%H:%M:%S").to_string().dimmed(),
+                            entry
+                                .timestamp
+                                .with_timezone(&chrono::Local)
+                                .format("%H:%M:%S")
+                                .to_string()
+                                .dimmed(),
                             entry.action.description().bright_white()
                         );
                     }
@@ -1355,7 +1360,11 @@ impl Agent {
                                     chat.name.bright_white(),
                                     chat.message_count,
                                     chat.model.dimmed(),
-                                    chat.saved_at.format("%Y-%m-%d %H:%M").to_string().dimmed()
+                                    chat.saved_at
+                                        .with_timezone(&chrono::Local)
+                                        .format("%Y-%m-%d %H:%M")
+                                        .to_string()
+                                        .dimmed()
                                 );
                             }
                             println!();
@@ -1420,7 +1429,11 @@ impl Agent {
                 // Last dream info
                 if let Some(ts) = status.last_dream_timestamp {
                     let dt = chrono::DateTime::from_timestamp(ts as i64, 0)
-                        .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+                        .map(|d| {
+                            d.with_timezone(&chrono::Local)
+                                .format("%Y-%m-%d %H:%M")
+                                .to_string()
+                        })
                         .unwrap_or_else(|| "Unknown".to_string());
                     println!("  Last dream: {}", dt.bright_white());
                 } else {
@@ -2366,7 +2379,12 @@ impl Agent {
                         "    step {} | {} | {}",
                         error.step,
                         recovered,
-                        error.timestamp.format("%H:%M:%S").to_string().dimmed()
+                        error
+                            .timestamp
+                            .with_timezone(&chrono::Local)
+                            .format("%H:%M:%S")
+                            .to_string()
+                            .dimmed()
                     );
                     println!("      {}", error.error);
                 }
@@ -2441,7 +2459,11 @@ impl Agent {
             call.tool_name.bright_white(),
             status,
             duration.dimmed(),
-            call.timestamp.format("%H:%M:%S").to_string().dimmed()
+            call.timestamp
+                .with_timezone(&chrono::Local)
+                .format("%H:%M:%S")
+                .to_string()
+                .dimmed()
         );
         print_debug_args_block(&call.arguments);
         print_debug_result_block(call.result.as_deref(), full);
@@ -2690,7 +2712,11 @@ impl Agent {
                                     chat.name.bright_white(),
                                     chat.message_count,
                                     chat.model.dimmed(),
-                                    chat.saved_at.format("%Y-%m-%d %H:%M").to_string().dimmed()
+                                    chat.saved_at
+                                        .with_timezone(&chrono::Local)
+                                        .format("%Y-%m-%d %H:%M")
+                                        .to_string()
+                                        .dimmed()
                                 );
                             }
                             println!();

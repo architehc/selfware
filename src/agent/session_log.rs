@@ -805,7 +805,12 @@ impl Agent {
                     index + 1,
                     session_event_label(&event.event_type).bright_white(),
                     status,
-                    event.timestamp.format("%H:%M:%S").to_string().dimmed()
+                    event
+                        .timestamp
+                        .with_timezone(&chrono::Local)
+                        .format("%H:%M:%S")
+                        .to_string()
+                        .dimmed()
                 );
                 if let Some(task_id) = &event.task_id {
                     println!("     Task ID: {}", task_id.dimmed());

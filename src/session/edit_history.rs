@@ -189,9 +189,14 @@ impl EditCheckpoint {
         self
     }
 
-    /// Get formatted timestamp
+    /// Get formatted timestamp, in the user's LOCAL time zone (the stored
+    /// value is UTC; /timeline printed 19:07 while the TUI clock and the
+    /// wall clock said 15:07 — 0.9.1 field finding).
     pub fn formatted_time(&self) -> String {
-        self.timestamp.format("%H:%M:%S").to_string()
+        self.timestamp
+            .with_timezone(&chrono::Local)
+            .format("%H:%M:%S")
+            .to_string()
     }
 
     /// Get relative time (e.g., "2 minutes ago")
