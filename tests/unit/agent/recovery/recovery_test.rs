@@ -535,10 +535,10 @@ fn unquoted_malformed_tool_syntax_is_still_flagged() {
         "Reading it now.\n<tool><name>file_read</name><arguments>{bad}</arguments></tool>",
         "Reading it now.\n<tool><name>file_read</name>",
         "`quoted` then a real attempt:\n<tool_call>{\"name\": \"git_diff\"}",
-        // An unclosed fence never hides markup that follows it on a later
-        // line (markdown_code_spans runs an unclosed fence to the end, so
-        // only markup BEFORE it is checked here).
         "<name=file_read>\n```\nnever closed",
+        // Review C6 (0.9.1): an unclosed fence ends at a line-start opener,
+        // so malformed markup AFTER it is flagged too.
+        "Code:\n```\nfn a() {}\n<function=file_read><parameter=path>a.rs</parameter>",
     ] {
         assert!(looks_like_malformed_tool_xml(content), "{content}");
     }

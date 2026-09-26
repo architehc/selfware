@@ -2011,3 +2011,32 @@ fn n6_unclosed_parameter_example_still_cannot_swallow_the_real_call() {
     let content = "Example: <|open|>call tool=\"x\" index=\"0\"<|sep|><|open|>argument key=\"p\"<|sep|>v\n<|open|>call tool=\"file_read\" index=\"1\"<|sep|><|open|>argument key=\"path\" type=\"string\"<|sep|>a.rs<|close|>argument<|close|>call";
     assert_only_real_file_read(&parse_tool_calls(content), "unclosed kimi example");
 }
+
+#[test]
+fn c6_unclosed_fence_does_not_hide_a_later_real_call() {
+    // Review C6 (0.9.1): an unclosed ``` ran to the end of the text, so the
+    // call after it vanished (0 calls, 0 rejections, detector blind).
+    let content = "Fix:\n```rust\nfn a() {}\n\n<tool_call>{\"name\":\"file_read\",\"arguments\":{\"path\":\"a.rs\"}}</tool_call>";
+    assert_only_real_file_read(&parse_tool_calls(content), "unclosed fence then real call");
+    let content =
+        "Plan:\n~~~\nsteps\n<function=file_read>\n<parameter=path>a.rs</parameter>\n</function>";
+    assert_only_real_file_read(
+        &parse_tool_calls(content),
+        "unclosed tilde fence, qwen call",
+    );
+}
+
+#[test]
+fn c6_unclosed_fence_still_masks_code_and_closed_fences_stay_quoted() {
+    // The fence still covers its code up to the opener line.
+    let content = "x\n```\nlet s = \"`not a span`\";\n<tool_call>{}";
+    let spans = crate::tool_parser::markdown_code_spans(content);
+    let opener = content.find("<tool_call>").unwrap();
+    assert!(
+        spans.iter().any(|r| r.start == 2 && r.end == opener),
+        "{spans:?}"
+    );
+    // A quoted example inside a CLOSED fence is still not a call.
+    let quoted = "Example:\n```\n<tool_call>{\"name\":\"file_read\",\"arguments\":{\"path\":\"a.rs\"}}</tool_call>\n```\nDone.";
+    assert!(parse_tool_calls(quoted).tool_calls.is_empty());
+}

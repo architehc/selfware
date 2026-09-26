@@ -757,14 +757,23 @@ fn unwrap_generic_wrapper(mut call: ParsedToolCall) -> ParsedToolCall {
     call
 }
 
-/// Byte ranges of markdown code: fenced blocks (```/~~~, to the closing fence
-/// or end of text) and inline backtick spans. Text inside is quoted, never a
-/// live tool call or reasoning marker.
+/// Byte ranges of markdown code: fenced blocks (```/~~~, to the closing fence)
+/// and inline backtick spans. Text inside is quoted, never a live tool call or
+/// reasoning marker.
+///
+/// A fence that never closes ends at the first line inside it that starts
+/// with a tool-call opener (or at the end of text when there is none). Running
+/// it to the end hid every later call from the parser, the rejection reporter
+/// and the malformed-call detector at once, so a reply that left a fence open
+/// silently read as a tool-less answer (review C6, 0.9.1). Closed fences are
+/// unchanged: quoted example calls inside them stay quoted.
 pub(crate) fn markdown_code_spans(content: &str) -> Vec<std::ops::Range<usize>> {
     let mut spans = Vec::new();
     let bytes = content.as_bytes();
     let mut line_start = 0usize;
     let mut fence: Option<(usize, &str)> = None; // (start, marker)
+                                                 // Start of the first line in the open fence that begins with an opener.
+    let mut first_opener_line: Option<usize> = None;
     while line_start < content.len() {
         let line_end = content[line_start..]
             .find('\n')
@@ -777,13 +786,19 @@ pub(crate) fn markdown_code_spans(content: &str) -> Vec<std::ops::Range<usize>> 
                 if trimmed.starts_with(marker) {
                     spans.push(start..line_end);
                     fence = None;
+                } else if first_opener_line.is_none()
+                    && TOOL_CALL_OPENERS.iter().any(|o| trimmed.starts_with(o))
+                {
+                    first_opener_line = Some(line_start);
                 }
             }
             None => {
                 if trimmed.starts_with("```") {
                     fence = Some((line_start, "```"));
+                    first_opener_line = None;
                 } else if trimmed.starts_with("~~~") {
                     fence = Some((line_start, "~~~"));
+                    first_opener_line = None;
                 } else {
                     // Inline code spans on this line: a run of N backticks
                     // closed by the next run of exactly N backticks.
@@ -825,7 +840,7 @@ pub(crate) fn markdown_code_spans(content: &str) -> Vec<std::ops::Range<usize>> 
         line_start = line_end;
     }
     if let Some((start, _)) = fence {
-        spans.push(start..content.len());
+        spans.push(start..first_opener_line.unwrap_or(content.len()));
     }
     spans
 }
