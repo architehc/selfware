@@ -16,7 +16,7 @@ apply.
 
 ## 1. Stop-the-line: CI red means stop
 
-`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --lib` must be green
+`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo doc --no-deps --features extras` with `RUSTDOCFLAGS=-D warnings`, and `cargo test --lib` must be green
 before every commit. A `.git/hooks/pre-commit` gate enforces this locally (also
 mirrored in `.pre-commit-config.yaml` for pre-commit-framework users).
 Before pushing, also run `scripts/check_ci_parity.sh` (python scripts/tests suite without optional deps, `cargo doc` with `-D warnings`, `cargo test --no-default-features`, git defaulting to `master`) — the CI jobs the hook does not cover.

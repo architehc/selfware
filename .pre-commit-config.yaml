@@ -18,6 +18,13 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: cargo-doc
+        name: cargo doc (-D warnings, as the CI Documentation job)
+        entry: sh -c 'RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --features extras'
+        language: system
+        types: [rust]
+        pass_filenames: false
+
       - id: cargo-test
         name: cargo test
         entry: sh -c "unset GIT_INDEX_FILE GIT_DIR GIT_WORK_TREE && cargo test --lib"

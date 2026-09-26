@@ -47,6 +47,10 @@ echo "2. cargo clippy --all-targets -- -D warnings..."
 (cd "${WORKTREE_DIR}" && cargo clippy --all-targets -- -D warnings)
 echo "   cargo clippy OK"
 
+echo "2b. cargo doc --no-deps --features extras (RUSTDOCFLAGS=-D warnings)..."
+(cd "${WORKTREE_DIR}" && RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --features extras)
+echo "   cargo doc OK"
+
 echo "3. cargo test --lib </dev/null..."
 (cd "${WORKTREE_DIR}" && cargo test --lib </dev/null)
 echo "   cargo test --lib OK"
