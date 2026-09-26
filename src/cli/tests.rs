@@ -1215,23 +1215,6 @@ fn sample_summary() -> crate::agent::RunSummary {
 }
 
 #[test]
-fn task_complete_banner_requires_verified_edits() {
-    // Review C2 (0.9.1): "Task complete. Your garden has been tended." printed
-    // for an edit run on which no verification check ever ran.
-    let mut s = sample_summary();
-    assert!(earns_task_complete_banner(&s), "edits + passed checks");
-    s.verification = Some((false, 2));
-    assert!(!earns_task_complete_banner(&s), "edits + failed checks");
-    s.verification = None;
-    assert!(!earns_task_complete_banner(&s), "edits + no check at all");
-    s.files_changed.clear();
-    assert!(
-        earns_task_complete_banner(&s),
-        "no edits, nothing to verify"
-    );
-}
-
-#[test]
 fn render_run_summary_completed_run() {
     let rendered = render_run_summary(&sample_summary(), None);
     assert!(rendered.contains("outcome: completed"), "{rendered}");

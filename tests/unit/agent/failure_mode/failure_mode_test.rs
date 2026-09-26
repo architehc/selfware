@@ -800,6 +800,36 @@ fn failed_verification_on_a_read_only_no_change_is_named_not_green() {
 }
 
 #[test]
+fn clean_success_is_exactly_the_green_banner() {
+    // Review of C2 (0.9.1): the CLI's green "Task complete." line re-derived
+    // "clean" from the run summary. It now asks is_clean_success, which is
+    // the banner header's own decision; cover each ✅/⚠️/❌ family here.
+    let clean = with_verification_verdict(verdict(FailureKind::Success), Some((true, 3)), false);
+    assert!(clean.is_clean_success());
+    assert!(clean.cli_banner().starts_with('✅'));
+    let unverified = with_verification_verdict(verdict(FailureKind::Success), None, false);
+    assert!(!unverified.is_clean_success(), "edits + no check at all");
+    let failed = with_verification_verdict(verdict(FailureKind::Success), Some((false, 2)), false);
+    assert!(!failed.is_clean_success(), "edits + failed checks");
+    let no_change = with_verification_verdict(verdict(FailureKind::NoChange), None, true);
+    assert!(no_change.is_clean_success(), "no edits, nothing to verify");
+    let ro_failed =
+        with_verification_verdict(verdict(FailureKind::NoChange), Some((false, 1)), true);
+    assert!(
+        !ro_failed.is_clean_success(),
+        "read-only report over failed checks"
+    );
+    assert!(!verdict(FailureKind::FakeComplete).is_clean_success());
+    for mode in [&clean, &unverified, &failed, &no_change, &ro_failed] {
+        assert_eq!(
+            mode.is_clean_success(),
+            mode.cli_banner().starts_with('✅'),
+            "{mode:?}"
+        );
+    }
+}
+
+#[test]
 fn passing_or_absent_verification_and_failure_verdicts_pass_through() {
     let mode = with_verification_verdict(verdict(FailureKind::Success), Some((true, 4)), false);
     assert_eq!(mode.kind, FailureKind::Success);

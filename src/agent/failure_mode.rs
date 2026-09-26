@@ -519,7 +519,23 @@ impl FailureMode {
 
     /// Render a multi-line CLI banner suitable for the end of a non-TUI run.
     pub fn cli_banner(&self) -> String {
-        let header = if self.kind.is_success() && self.evidence.contains(AUDIT_NOT_PERFORMED_NOTE) {
+        format!(
+            "{}\n   evidence: {}\n   advice: {}",
+            self.banner_header(),
+            self.evidence,
+            self.advice
+        )
+    }
+
+    /// Whether this outcome earns a clean ✅: the one decision the banner
+    /// header makes, reused by every other green signal (the CLI's "Task
+    /// complete." line) so they cannot disagree (review of C2, 0.9.1).
+    pub fn is_clean_success(&self) -> bool {
+        self.banner_header().starts_with('✅')
+    }
+
+    fn banner_header(&self) -> String {
+        if self.kind.is_success() && self.evidence.contains(AUDIT_NOT_PERFORMED_NOTE) {
             // Allowed with an explicit warning: the audit infrastructure
             // failed, so the result was never audited — no clean ✅ claim.
             format!(
@@ -580,11 +596,7 @@ impl FailureMode {
             )
         } else {
             format!("❌ Task aborted ({})", self.kind.tag())
-        };
-        format!(
-            "{}\n   evidence: {}\n   advice: {}",
-            header, self.evidence, self.advice
-        )
+        }
     }
 }
 
