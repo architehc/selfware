@@ -560,6 +560,49 @@ async fn truncated_reply_is_not_accepted_as_a_repeated_completion() {
     );
 }
 
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn repeated_malformed_markup_on_a_read_only_task_ends_in_protocol_stall() {
+    // Review C5 (0.9.1): markup only the malformed-call DETECTOR catches (no
+    // parser rejection) returned before any stall accounting. On a read-only
+    // task nothing counted it, so the loop ran to the iteration cap.
+    let cwd = crate::test_support::CwdGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    cwd.switch_to(dir.path());
+    let malformed = "<tool broken format>";
+    let mut builder = MockLlmServer::builder();
+    for _ in 0..8 {
+        builder = builder.with_response(malformed);
+    }
+    let server = builder.build().await;
+    let config = artifact_config(&format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+    let mut stalled_at = None;
+    for turn in 1..=8 {
+        match agent.execute_step_internal(false).await {
+            Ok(done) => assert!(!done, "turn {turn}: malformed markup is not an answer"),
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains(crate::agent::protocol_stall::PROTOCOL_STALL_MARKER),
+                    "turn {turn}: {msg}"
+                );
+                stalled_at = Some(turn);
+                break;
+            }
+        }
+    }
+    assert_eq!(
+        stalled_at,
+        Some(crate::agent::protocol_stall::PROTOCOL_STALL_THRESHOLD),
+        "the protocol-stall window must stop the run"
+    );
+    server.stop().await;
+}
+
 #[test]
 fn rescue_command_that_cannot_run_is_recognised() {
     use crate::agent::execution::rescue_command_could_not_run;

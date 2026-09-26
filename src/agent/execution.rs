@@ -1244,6 +1244,15 @@ impl Agent {
         // Detect malformed tool calls and inject correction before treating as completion
         if self.detect_and_correct_malformed_tools(&content, &tool_calls) {
             self.note_mutation_no_tool_stall("malformed tool XML")?;
+            // The turn attempted a tool call and ran nothing: a protocol
+            // failure like a parse rejection. Without this the detector
+            // branch escaped every read-only bound (review C5, 0.9.1).
+            if let Some(message) = self.protocol_stall.record(Some(vec![
+                "malformed tool-call markup that no parser accepted".to_string(),
+            ])) {
+                tracing::warn!("{}", message);
+                return Err(anyhow::anyhow!(message));
+            }
             return Ok(false);
         }
 
