@@ -350,6 +350,8 @@ async fn gate_agent(root: &Path) -> crate::agent::Agent {
         .tools
         .set_workspace_root(crate::tools::workspace_root::WorkspaceRoot::fixed(root));
     agent.task_is_read_only = true;
+    agent.current_task_context =
+        "Review src/agent and report findings. Do not edit files.".to_string();
     agent.current_checkpoint = Some(crate::checkpoint::TaskCheckpoint::new(
         "cite".to_string(),
         "Review src/agent and report findings. Do not edit files.".to_string(),
@@ -968,7 +970,7 @@ fn a_mostly_uncheckable_review_answer_is_not_clean() {
         total: 20,
         verified: 1,
         unverifiable: 19,
-        read_only: true,
+        code_report: true,
         ..Default::default()
     };
     assert!(!status.none_checkable());
@@ -980,13 +982,13 @@ fn a_mostly_uncheckable_review_answer_is_not_clean() {
         total: 20,
         verified: 10,
         unverifiable: 10,
-        read_only: true,
+        code_report: true,
         ..Default::default()
     };
     assert_eq!(balanced.warning_note(), None);
     // Mutation tasks are not held to the review standard.
     let mutation = GroundingStatus {
-        read_only: false,
+        code_report: false,
         ..status
     };
     assert_eq!(mutation.warning_note(), None);
@@ -1274,14 +1276,14 @@ fn majority_rule_counts_location_only_as_located() {
         total: 73,
         verified: 24,
         location_verified: 49,
-        read_only: true,
+        code_report: true,
         ..Default::default()
     };
     assert_eq!(located.warning_note(), None);
     let all_location = GroundingStatus {
         total: 12,
         location_verified: 12,
-        read_only: true,
+        code_report: true,
         ..Default::default()
     };
     assert!(!all_location.none_checkable());
@@ -1291,7 +1293,7 @@ fn majority_rule_counts_location_only_as_located() {
         verified: 2,
         location_verified: 2,
         unverifiable: 6,
-        read_only: true,
+        code_report: true,
         ..Default::default()
     };
     let note = unlocatable
@@ -1438,4 +1440,63 @@ fn only_a_code_span_right_after_the_citation_is_its_quote() {
     );
     // Next line: not a quote.
     assert_eq!(q("src/lib.rs:5\n`do_it()`"), vec![None]);
+}
+
+/// Live shape 3: "Reply with exactly this text and nothing else:
+/// PLANNING-PATH-OK" ended "⚠️ … citations: none checkable" on 0.9.1. A
+/// read-only task that is not a report about the workspace's code has
+/// nothing to cite: the Grounding line says so (informational), no ⚠️.
+#[tokio::test]
+async fn exact_response_task_without_citations_is_not_none_checkable() {
+    let ws = workspace();
+    let mut agent = gate_agent(ws.path()).await;
+    for (step, task, reply) in [
+        (
+            1,
+            "Reply with exactly this text and nothing else: PLANNING-PATH-OK",
+            "PLANNING-PATH-OK",
+        ),
+        (
+            2,
+            "Explain how a hash map handles collisions.",
+            "Collisions are resolved by chaining or open addressing.",
+        ),
+    ] {
+        agent.current_task_context = task.to_string();
+        answer(&mut agent, step, reply);
+        assert_eq!(agent.citation_gate(true), None);
+        let status = agent.grounding_status().expect("read-only answer labelled");
+        assert!(!status.code_report, "{task}");
+        assert!(!status.none_checkable(), "{task}");
+        assert_eq!(status.warning_note(), None, "{task}");
+        assert_eq!(
+            status.grounding_line(),
+            "Grounding: no path:line citations in the answer (nothing checked against files)"
+        );
+        let base = crate::agent::failure_mode::FailureMode {
+            restored_files: Vec::new(),
+            kind: crate::agent::failure_mode::FailureKind::NoChange,
+            evidence: "completed naturally with 0 mutating tool calls".to_string(),
+            advice: "-".to_string(),
+        };
+        let banner =
+            crate::agent::failure_mode::with_citation_status(base, Some(&status)).cli_banner();
+        assert!(!banner.starts_with("⚠️"), "{task}: {banner}");
+    }
+
+    // The same answer to a task about the workspace's code is still an
+    // ungrounded report.
+    agent.current_task_context = "Review the parser module and report defects.".to_string();
+    answer(&mut agent, 3, "No defects found.");
+    assert_eq!(agent.citation_gate(true), None);
+    let status = agent.grounding_status().unwrap();
+    assert!(status.code_report);
+    assert!(status.none_checkable());
+
+    // A read-only answer that cites workspace paths is judged as a code
+    // report whatever the task wording.
+    agent.current_task_context = "Tell me something.".to_string();
+    answer(&mut agent, 4, "See `widget.rs:10`.");
+    assert_eq!(agent.citation_gate(true), None);
+    assert!(agent.grounding_status().unwrap().code_report);
 }

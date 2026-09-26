@@ -496,7 +496,7 @@ fn b2_350000_status() -> crate::agent::citation_check::GroundingStatus {
              src/agent/task_policy.rs:69"
                 .to_string(),
         ],
-        read_only: true,
+        code_report: true,
         ..Default::default()
     }
 }

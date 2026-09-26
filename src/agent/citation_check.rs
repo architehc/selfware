@@ -277,10 +277,16 @@ pub struct GroundingStatus {
     /// Up to a dozen problem descriptions (wrong-line entries name the
     /// actual location).
     pub problems: Vec<String>,
-    /// The answer belongs to a read-only (review/report) task, whose claims
-    /// are expected to be grounded in checkable citations. Not serialized.
+    /// The answer is a report about THIS workspace's code: a read-only task
+    /// that either cites workspace paths or asks about the workspace's code
+    /// (`task_policy::task_references_project_code`, the same predicate the
+    /// planning-path grounding gate uses). Only such answers are held to
+    /// `none_checkable` / `mostly_uncheckable`: an exact-response task
+    /// ("Reply with exactly ...") or general Q&A has nothing to cite, and a
+    /// missing citation there is not an ungrounded report (0.9.1 live: that
+    /// rendered "⚠️ … citations: none checkable"). Not serialized.
     #[serde(skip)]
-    pub read_only: bool,
+    pub code_report: bool,
     /// The gate stepped aside for a limit (`"deadline"` or `"budget"`): the
     /// wrong citations above were accepted WITHOUT a correction round (see
     /// [`super::deadline`]). Serialized only when set.
@@ -310,7 +316,7 @@ impl GroundingStatus {
                 .take(MAX_LISTED_PROBLEMS)
                 .map(CheckedCitation::describe)
                 .collect(),
-            read_only: false,
+            code_report: false,
             not_corrected: None,
         }
     }
@@ -375,11 +381,12 @@ impl GroundingStatus {
         self.verified + self.location_verified + self.problem_count()
     }
 
-    /// A review/report answer with no checkable citation at all: nothing in
+    /// A code report (see `code_report`) with no checkable citation at all:
+    /// no citations, or none that could even be located. Nothing in
     /// it was checked against the files — not even that a cited line
     /// exists — so it must not read as grounded (0.8.2 live validation D4).
     pub fn none_checkable(&self) -> bool {
-        self.read_only && self.checkable_count() == 0
+        self.code_report && self.checkable_count() == 0
     }
 
     /// `citations: none checkable: ...` — see [`Self::none_checkable`].
@@ -429,10 +436,10 @@ impl GroundingStatus {
     /// the answer and put ⚠️ on an accurate 73-citation architecture
     /// explanation (24 symbol-verified, 49 plain `file:line` next to prose,
     /// 0 wrong). The Grounding line still names them location-only, never
-    /// verified. Mutation tasks are not held to this rule, as with
-    /// [`Self::none_checkable`].
+    /// verified. Only code reports (see `code_report`) are held to this
+    /// rule, as with [`Self::none_checkable`].
     pub fn mostly_uncheckable(&self) -> bool {
-        self.read_only && self.unverifiable > self.verified + self.location_verified
+        self.code_report && self.unverifiable > self.verified + self.location_verified
     }
 
     /// `N checked: V verified, L location-only (line exists, content not
@@ -458,7 +465,7 @@ impl GroundingStatus {
     /// (AGENTS.md rule 3).
     pub fn grounding_line(&self) -> String {
         if self.total == 0 {
-            let lead = if self.read_only {
+            let lead = if self.code_report {
                 format!("Grounding: {CITATIONS_NONE_CHECKABLE} — ")
             } else {
                 "Grounding: ".to_string()
@@ -1636,7 +1643,19 @@ impl super::Agent {
             )
         };
         let mut status = GroundingStatus::from_report(&report, state.rejections, checked_files);
-        status.read_only = is_read_only;
+        // Held to the report standard only when the task is a report about
+        // this workspace's code (see `GroundingStatus::code_report`).
+        status.code_report = is_read_only
+            && (report.total > 0 || {
+                let project_name = root
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+                super::task_policy::task_references_project_code(
+                    self.task_context_for_classification(),
+                    project_name,
+                )
+            });
         status.not_corrected = limit_step_aside
             .as_ref()
             .map(|w| w.cause.note_word().to_string());
