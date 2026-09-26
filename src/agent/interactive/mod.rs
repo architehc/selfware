@@ -117,9 +117,12 @@ impl Agent {
 
             // Print status bar and update prompt with context usage before each input
             self.print_status_bar();
-            let ctx_pct = self.context_usage_pct();
             let step = self.loop_control.current_step();
-            editor.set_prompt_full_context(&self.config.model, step, ctx_pct);
+            // The status bar just printed already names the model and the
+            // context usage; an empty model keeps the prompt's right side
+            // blank instead of repeating both (0.9.1 field test showed
+            // "[qwen38-flash-next] 13.3% used" under the status bar).
+            editor.set_prompt_full_context("", step, 0.0);
 
             // Use block_in_place to prevent blocking the async runtime
             // while waiting for blocking I/O (stdin read from reedline)

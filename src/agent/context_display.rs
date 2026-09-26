@@ -2,17 +2,146 @@ use colored::*;
 
 use super::*;
 
+/// Compact token count: `999`, `21.7k`, `164k`.
+pub(crate) fn format_tokens_k(tokens: usize) -> String {
+    if tokens < 1_000 {
+        tokens.to_string()
+    } else if tokens < 100_000 {
+        format!("{:.1}k", tokens as f64 / 1000.0)
+    } else {
+        format!("{:.0}k", tokens as f64 / 1000.0)
+    }
+}
+
+/// Share of the model's context window in use, 0–100 (0 when the window is
+/// unknown).
+pub(crate) fn context_pct(used: usize, window: usize) -> f64 {
+    if window == 0 {
+        0.0
+    } else {
+        (used as f64 / window as f64 * 100.0).min(100.0)
+    }
+}
+
+/// The one context-usage wording shared by the status bar, `/ctx`, `/stats`
+/// and the startup line: usage against the MODEL context window, plus the
+/// separate compaction threshold (the history budget that triggers
+/// compression). The status bar used the window (13.3%) while `/stats` used
+/// the compaction budget (20.4%) for the same 21742 tokens — two
+/// percentages, neither labelled (0.9.1 field test).
+///
+/// `21.7k of 164k context (13%) · compaction at 106k`
+pub(crate) fn context_usage_label(used: usize, window: usize, compaction_at: usize) -> String {
+    let mut label = if window == 0 {
+        format!("{} context (window unknown)", format_tokens_k(used))
+    } else {
+        let pct = context_pct(used, window);
+        let pct = if used > 0 && pct < 1.0 {
+            "<1%".to_string()
+        } else {
+            format!("{pct:.0}%")
+        };
+        format!(
+            "{} of {} context ({pct})",
+            format_tokens_k(used),
+            format_tokens_k(window)
+        )
+    };
+    if compaction_at > 0 && (window == 0 || compaction_at < window) {
+        label.push_str(&format!(
+            " · compaction at {}",
+            format_tokens_k(compaction_at)
+        ));
+    }
+    label
+}
+
+/// Shorten `s` to at most `max_chars` characters, marking the cut with `…`
+/// instead of chopping mid-name silently (`[qwen38-flash-ne]`).
+pub(crate) fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+    let mut out: String = s.chars().take(max_chars - 1).collect();
+    out.push('…');
+    out
+}
+
+/// Layout of the pre-prompt status line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StatusBarLayout {
+    /// Draw the 10-cell usage bar (dropped first when space is short).
+    pub show_bar: bool,
+    /// Model name as displayed (ellipsized only when the line cannot fit).
+    pub model: String,
+    /// Spaces between the left hint and the right-hand status.
+    pub padding: usize,
+}
+
+/// Width of the usage bar plus its trailing space.
+const STATUS_BAR_CELLS: usize = 11;
+/// Shortest model name worth showing before it stops identifying anything.
+const MIN_MODEL_CHARS: usize = 12;
+
+/// Fit `left` + (bar) + `middle` + ` [model]` into `term_width` columns:
+/// drop the bar first, then ellipsize the model, never cutting mid-name
+/// without a marker. `middle` is the context label plus any cost.
+pub(crate) fn layout_status_bar(
+    left: &str,
+    middle: &str,
+    model: &str,
+    term_width: usize,
+) -> StatusBarLayout {
+    use crate::ui::components::visible_width;
+    // Leading space before `left`, two before the right side.
+    let fixed = 1 + visible_width(left) + 2 + visible_width(middle);
+    let model_cols = |m: &str| 3 + visible_width(m); // " [" + m + "]"
+    let fits = |bar: bool, m: &str| {
+        fixed + if bar { STATUS_BAR_CELLS } else { 0 } + model_cols(m) <= term_width
+    };
+    let (show_bar, model) = if fits(true, model) {
+        (true, model.to_string())
+    } else if fits(false, model) {
+        (false, model.to_string())
+    } else {
+        let room = term_width.saturating_sub(fixed + 3);
+        (
+            false,
+            truncate_with_ellipsis(model, room.max(MIN_MODEL_CHARS)),
+        )
+    };
+    let used = fixed + if show_bar { STATUS_BAR_CELLS } else { 0 } + model_cols(&model);
+    StatusBarLayout {
+        show_bar,
+        model,
+        padding: term_width.saturating_sub(used).max(1),
+    }
+}
+
 impl Agent {
-    /// Print a Qwen Code-style status bar line before the prompt
+    /// `context_usage_label` for the current conversation.
+    pub(super) fn context_usage_text(&self) -> String {
+        context_usage_label(
+            self.total_tokens_used(),
+            self.memory.context_window(),
+            self.max_context_tokens,
+        )
+    }
+
+    /// Print the status line before the prompt:
     ///
-    /// Layout: `  ? for shortcuts                            45.2% context used`
+    /// ` [normal] ? for shortcuts      ██░░░░░░░░ 21.7k of 164k context (13%) · compaction at 106k [model]`
+    ///
+    /// A dollar amount appears only when the provider reported a cost (the
+    /// same session fold as `/cost`); it used to come from a hard-coded
+    /// price table and showed `$0.07` for an endpoint that bills nothing.
     pub(super) fn print_status_bar(&self) {
         use colored::*;
 
         let pct = self.context_usage_pct();
-        let tokens = self.total_tokens_used();
-        let window = self.memory.context_window();
-        let (k_tokens, k_window) = (tokens as f64 / 1000.0, window as f64 / 1000.0);
 
         // Build progress bar (10 chars wide)
         let bar_width = 10;
@@ -30,18 +159,11 @@ impl Agent {
             bar.bright_green()
         };
 
-        // Cost only when the provider reported one — the same session fold
-        // as /cost. A hard-coded price table showed "$0.07" here while /cost
-        // said "cost not tracked" for the same endpoint (0.9.1 field test).
         let cost = self.session_usage().status_bar_cost();
-        let cost_plain = cost.as_ref().map(|c| format!(" {c}")).unwrap_or_default();
-
-        // Model name
-        let model_name = &self.config.model;
-        let short_model = if model_name.chars().count() > 15 {
-            model_name.chars().take(15).collect::<String>()
-        } else {
-            model_name.clone()
+        let label = self.context_usage_text();
+        let middle = match &cost {
+            Some(c) => format!("{label} {c}"),
+            None => label.clone(),
         };
 
         // Mode indicator
@@ -64,18 +186,7 @@ impl Agent {
             String::new()
         };
         let left = format!("[{}] ? for shortcuts{}", mode, trust_flag);
-        // Right side: bar + percentage + tokens + cost
-        let right = format!(
-            "{} {:.1}% ({:.1}k/{:.0}k){} [{}]",
-            bar, pct, k_tokens, k_window, cost_plain, short_model
-        );
-
-        // Pad middle with spaces
-        let padding = if left.len() + right.len() + 2 < term_width {
-            term_width - left.len() - right.len() - 2
-        } else {
-            1
-        };
+        let layout = layout_status_bar(&left, &middle, &self.config.model, term_width);
 
         // Print colored version
         let mode_colored = match self.execution_mode() {
@@ -90,26 +201,28 @@ impl Agent {
             "".into()
         };
 
+        let bar_part = if layout.show_bar {
+            format!("{} ", colored_bar)
+        } else {
+            String::new()
+        };
+        let cost_part = cost.map(|c| format!(" {}", c.dimmed())).unwrap_or_default();
+
         println!(
-            " {} {}{}{}  {} {:.1}% ({:.1}k/{:.0}k){} [{}]",
+            " {} {}{}{}  {}{}{} [{}]",
             mode_colored,
             "? for shortcuts".dimmed(),
             trust_colored,
-            " ".repeat(padding),
-            colored_bar,
-            pct,
-            k_tokens,
-            k_window,
-            cost.map(|c| format!(" {}", c.dimmed())).unwrap_or_default(),
-            short_model.dimmed(),
+            " ".repeat(layout.padding),
+            bar_part,
+            label,
+            cost_part,
+            layout.model.dimmed(),
         );
     }
 
     /// Show compact startup context line (Claude Code style)
     pub(super) fn show_startup_context(&self) {
-        let tokens = self.total_tokens_used();
-        let window = self.memory.context_window();
-        let used_pct = (tokens as f64 / window as f64 * 100.0).min(100.0);
         let tool_count = self.tools.list().len();
         let cwd = crate::tools::workspace_root::current_path()
             .display()
@@ -125,23 +238,14 @@ impl Agent {
             cwd
         };
 
-        let model_name = &self.config.model;
-        let short_model = if model_name.chars().count() > 20 {
-            model_name.chars().take(20).collect::<String>()
-        } else {
-            model_name.clone()
-        };
-
-        let (k_tokens, k_window) = (tokens as f64 / 1000.0, window as f64 / 1000.0);
+        let short_model = truncate_with_ellipsis(&self.config.model, 32);
 
         println!(
-            "  {} {}  {} {:.1}k/{:.0}k ({:.0}%)  {} {}  {} {}",
+            "  {} {}  {} {}  {} {}  {} {}",
             "Model:".dimmed(),
             short_model.bright_cyan(),
             "Context:".dimmed(),
-            k_tokens,
-            k_window,
-            used_pct,
+            self.context_usage_text(),
             "Tools:".dimmed(),
             tool_count.to_string().bright_white(),
             "Dir:".dimmed(),
@@ -153,7 +257,8 @@ impl Agent {
     pub(super) fn show_context_stats(&self) {
         let tokens = self.total_tokens_used();
         let window = self.memory.context_window();
-        let used_pct = (tokens as f64 / window as f64 * 100.0).min(100.0);
+        let used_pct = context_pct(tokens, window);
+        let compaction_at = self.max_context_tokens;
         let messages = self.messages.len();
         let memory_entries = self.memory.len();
         let available = window.saturating_sub(tokens);
@@ -292,6 +397,22 @@ impl Agent {
             "  {}│{}     {}◈{}  {}available{}     {}{:>10}{} tokens                       {}│{}",
             patina, reset, coral, reset, worn, reset, patina_light, available, reset, patina, reset
         );
+        // The compaction threshold is a separate, smaller budget than the
+        // model window; /stats used to divide by it without saying so.
+        println!(
+            "  {}│{}     {}⇲{}  {}compaction{}    {}{:>10}{} tokens (history budget)      {}│{}",
+            patina,
+            reset,
+            coral,
+            reset,
+            worn,
+            reset,
+            patina_light,
+            compaction_at,
+            reset,
+            patina,
+            reset
+        );
         println!(
             "  {}├┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┤{}",
             patina, reset
@@ -372,13 +493,8 @@ impl Agent {
 
     /// Show detailed session statistics (Qwen Code /stats style)
     pub(super) async fn show_session_stats(&self) {
-        let tokens = self.estimate_messages_tokens();
-        let window = self.max_context_tokens;
-        let used_pct = if window > 0 {
-            (tokens as f64 / window as f64 * 100.0).min(100.0)
-        } else {
-            0.0
-        };
+        // Same measurement and denominators as the status bar and /ctx.
+        let context_label = self.context_usage_text();
         let messages = self.messages.len();
         let user_msgs = self.messages.iter().filter(|m| m.role == "user").count();
         let assistant_msgs = self
@@ -442,10 +558,7 @@ impl Agent {
         let rows = vec![
             String::new(),
             heading(rust, "◈ CONTEXT"),
-            format!(
-                "    Tokens Used     {:>8} / {:<8}  ({:.1}%)",
-                tokens, window, used_pct
-            ),
+            format!("    Context         {context_label}"),
             format!(
                 "    Messages        {:>8}  (user: {}, assistant: {})",
                 messages, user_msgs, assistant_msgs
@@ -505,3 +618,7 @@ impl Agent {
         println!();
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/agent/context_display/context_display_test.rs"]
+mod tests;
