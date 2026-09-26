@@ -911,6 +911,12 @@ pub struct Agent {
     /// any real tool call. Used to force-finalize a read-only task that keeps
     /// narrating without answering, instead of spinning to MAX_ITERATIONS.
     readonly_no_tool_streak: usize,
+    /// The latest substantial, NOT length-truncated read-only answer: the
+    /// only text read-only force-finalize may emit. Kept apart from
+    /// `last_assistant_response`, which the repeated-response bookkeeping
+    /// overwrites with every reply, truncated ones included (review of C1,
+    /// 0.9.1).
+    readonly_best_answer: String,
     /// Length-truncated final answers already sent back for a complete
     /// rewrite in this task (bounded; see execution.rs).
     length_truncation_retries: u32,
@@ -1850,6 +1856,7 @@ To call a tool, use this EXACT XML structure:
             pending_synthesis: None,
             consecutive_no_action_prompts: 0,
             readonly_no_tool_streak: 0,
+            readonly_best_answer: String::new(),
             length_truncation_retries: 0,
             protocol_stall: protocol_stall::ProtocolStallWindow::default(),
             pending_native_rejections: Vec::new(),
@@ -3424,6 +3431,7 @@ To call a tool, use this EXACT XML structure:
         self.recent_failed_tool_attempts.clear();
         self.escalated_edit_args_hashes.clear();
         self.readonly_no_tool_streak = 0;
+        self.readonly_best_answer.clear();
         self.length_truncation_retries = 0;
         self.protocol_stall.clear();
         self.pending_native_rejections.clear();

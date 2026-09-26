@@ -603,6 +603,45 @@ async fn repeated_malformed_markup_on_a_read_only_task_ends_in_protocol_stall() 
     server.stop().await;
 }
 
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn force_finalize_never_emits_text_banked_from_an_earlier_truncated_turn() {
+    // Review of 75b907f8 (C1 class): the repeated-response bookkeeping
+    // stores every reply in last_assistant_response, truncated ones too. Six
+    // later short narration turns then force-finalized that banked text.
+    let cwd = crate::test_support::CwdGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    cwd.switch_to(dir.path());
+    let truncated = "## Review\n\nArea 1: the parser handles mixed batches correctly and \
+                     reports rejections. Area 2: the compaction path keeps";
+    let mut builder = MockLlmServer::builder().with_finished_response(truncated, None, "length");
+    for _ in 0..8 {
+        builder = builder.with_response("Let me check.");
+    }
+    let server = builder.build().await;
+    let config = artifact_config(&format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+    for turn in 1..=9 {
+        let done = match agent.execute_step_internal(false).await {
+            Ok(done) => done,
+            Err(_) => break,
+        };
+        if done {
+            assert!(
+                !agent
+                    .last_assistant_response
+                    .contains("compaction path keeps"),
+                "turn {turn}: force-finalize shipped the truncated text"
+            );
+            break;
+        }
+    }
+    server.stop().await;
+}
+
 #[test]
 fn rescue_command_that_cannot_run_is_recognised() {
     use crate::agent::execution::rescue_command_could_not_run;

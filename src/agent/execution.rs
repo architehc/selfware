@@ -1323,12 +1323,16 @@ impl Agent {
             // below (review C1, 0.9.1 — this path shipped truncated text, exit 0).
             if clean.len() >= 40 && !truncated_by_length {
                 self.last_assistant_response = clean.clone();
+                self.readonly_best_answer = clean.clone();
             }
             self.readonly_no_tool_streak += 1;
             if self.readonly_no_tool_streak >= 6
                 && !truncated_by_length
-                && self.last_assistant_response.len() >= 40
+                && self.readonly_best_answer.len() >= 40
             {
+                // What the gate judges is what gets emitted: the banked,
+                // never-truncated answer, not whatever reply was stored last.
+                self.last_assistant_response = self.readonly_best_answer.clone();
                 // Prefer to force-finalize only when the completion gate is
                 // satisfied — otherwise we would emit a capability-disclaimer or a
                 // response missing a required tool as the "final answer" (found and
@@ -1341,7 +1345,7 @@ impl Agent {
                         "Read-only task: finalizing after {} no-tool turns (gate passed)",
                         self.readonly_no_tool_streak
                     );
-                    let best = self.last_assistant_response.clone();
+                    let best = self.readonly_best_answer.clone();
                     output::final_answer(&best);
                     self.record_final_answer(&artifact_ctx, &best).await;
                     return Ok(true);
