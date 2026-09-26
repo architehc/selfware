@@ -180,6 +180,46 @@ fn has_partial_tag_at_end(buf: &str) -> bool {
     partial_markup_start(buf).is_some()
 }
 
+/// Remove closing suppressed tags that have no opener in `text` (e.g. a
+/// native-FC model echoing `</tool_call>` after its call). The opener-driven
+/// filter never sees them, so they leaked into the chat as a bare
+/// `</tool_call>` message (0.9.1 TUI field finding).
+pub(crate) fn strip_orphan_close_tags(text: &str) -> std::borrow::Cow<'_, str> {
+    if !SUPPRESSED_TAGS
+        .iter()
+        .any(|(_, close)| text.contains(close))
+    {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = text.to_string();
+    for (_, close) in SUPPRESSED_TAGS {
+        out = out.replace(close, "");
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// The user-visible part of a complete model response: every suppressed
+/// block (tool-call markup, `<think>` reasoning) and any stray closing tag
+/// removed — the same text the streaming filter would have shown.
+pub(crate) fn visible_response_text(content: &str) -> String {
+    let mut rest = content;
+    let mut out = String::new();
+    while let Some((start, idx)) = find_earliest_open_tag(rest) {
+        out.push_str(&rest[..start]);
+        let (open, close) = SUPPRESSED_TAGS[idx];
+        let after_open = &rest[start + open.len()..];
+        match after_open.find(close) {
+            Some(end) => rest = &after_open[end + close.len()..],
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    strip_orphan_close_tags(&out).trim().to_string()
+}
+
 /// Extract a tool name from a suppressed XML block for a clean one-line
 /// summary.  Tries `<name>x</name>` (used by `<tool>` blocks), the
 /// existing `<function=x>` / `<function>x</function>` patterns, and Kimi's
@@ -460,7 +500,9 @@ impl Agent {
         for piece in pieces {
             match piece {
                 DisplayPiece::Text(text) => {
-                    if tui_active {
+                    // The TUI renders it; structured output turns it into
+                    // stream-json `text_delta` lines (stdout is JSON-only).
+                    if tui_active || crate::output::is_json_mode() {
                         self.emit_event(AgentEvent::AssistantDelta { text });
                     } else if let Some(p) = prose.as_deref_mut() {
                         rendered.push_str(&p.push(&text));
@@ -683,6 +725,22 @@ impl Agent {
         .await
     }
 
+    /// Surface a response that did NOT stream (non-streaming call, fallback
+    /// or cache hit) on the event channel in structured-output mode, so a
+    /// stream-json consumer still receives the answer as a `text_delta`
+    /// rather than only in the final result object.
+    pub(super) fn emit_unstreamed_text(&self, content: &str) {
+        if !crate::output::is_json_mode() || crate::output::is_tui_active() {
+            return;
+        }
+        let visible = visible_response_text(content);
+        if !visible.is_empty() {
+            self.emit_event(AgentEvent::AssistantDelta {
+                text: format!("{visible}\n"),
+            });
+        }
+    }
+
     pub(super) async fn chat_streaming(
         &self,
         messages: Vec<Message>,
@@ -695,6 +753,7 @@ impl Agent {
         // --- Cache Integration: Check for cached response before API call ---
         if let Some(cached) = self.check_llm_cache(&messages, &tools, thinking).await? {
             debug!("LLM cache hit: returning cached response");
+            self.emit_unstreamed_text(&cached.response);
             // For cached responses, return just the content
             return Ok((cached.response, None, None));
         }

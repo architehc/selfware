@@ -799,3 +799,36 @@ fn display_filter_region_state_is_observable() {
     f.push("}</tool_call>");
     assert!(!f.inside_region());
 }
+
+// ── Stray tool markup never reaches the display (0.9.1 TUI finding) ──
+
+#[test]
+fn orphan_close_tags_are_stripped_from_display_text() {
+    assert_eq!(strip_orphan_close_tags("</tool_call>"), "");
+    assert_eq!(
+        strip_orphan_close_tags("Done.\n</tool_call>\n"),
+        "Done.\n\n"
+    );
+    // Plain text passes through untouched (and unallocated).
+    assert!(matches!(
+        strip_orphan_close_tags("a < b"),
+        std::borrow::Cow::Borrowed("a < b")
+    ));
+}
+
+#[test]
+fn partial_closing_tag_at_end_is_buffered() {
+    // "</tool" + "_call>" split across chunks must not leak "</tool".
+    assert!(has_partial_tag_at_end("text </tool"));
+    assert!(has_partial_tag_at_end("text </think"));
+    assert!(!has_partial_tag_at_end("text done."));
+}
+
+#[test]
+fn visible_response_text_drops_markup_and_reasoning() {
+    let content = "<think>plan it</think>Reading the file.\n<tool_call>{\"name\":\"file_read\"}</tool_call>\n</tool_call>";
+    assert_eq!(visible_response_text(content), "Reading the file.");
+    // An unterminated block hides the rest, as the stream filter does.
+    assert_eq!(visible_response_text("Hi <tool_call>{\"a\":1"), "Hi");
+    assert_eq!(visible_response_text("plain answer"), "plain answer");
+}

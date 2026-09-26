@@ -993,6 +993,7 @@ impl Agent {
                         debug!("Fallback reasoning ({} chars): {}", r.len(), r);
                     }
 
+                    self.emit_unstreamed_text(&content);
                     chat_metadata = Some(fallback_meta);
                     (content, reasoning)
                 }
@@ -1080,6 +1081,7 @@ impl Agent {
                 debug!("Reasoning content ({} chars): {}", r.len(), r);
             }
 
+            self.emit_unstreamed_text(&content);
             chat_metadata = Some(sync_meta);
             (content, reasoning)
         };

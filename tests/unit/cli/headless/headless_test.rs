@@ -1180,6 +1180,7 @@ fn stream_json_stdout_carries_only_json_lines() {
     let _json_guard = RestoreJson(prior_json);
 
     let expected_markers = [
+        "\"event\":\"text_delta\"",
         "\"event\":\"step_started\"",
         "\"event\":\"tool_call_started\"",
         "\"event\":\"tool_call_completed\"",
@@ -1192,8 +1193,17 @@ fn stream_json_stdout_carries_only_json_lines() {
     for _attempt in 0..5 {
         let capture = Fd1Redirect::new();
 
-        // A realistic stream-json event sequence.
+        // A realistic stream-json event sequence, including streamed
+        // assistant text (with quotes, a newline and a non-ASCII char, all of
+        // which must be JSON-escaped, never written raw).
         let emitter = JsonlProgressEmitter::new();
+        let text = emitter.text_emitter(std::sync::Arc::new(AnswerCapture::new().emitter()));
+        text.emit(AgentEvent::AssistantDelta {
+            text: "Let me \"look\" — ".into(),
+        });
+        text.emit(AgentEvent::AssistantDelta {
+            text: "at it.\nNext".into(),
+        });
         emitter.emit(ProgressEvent::StepStarted {
             step: 1,
             model: "m".into(),
@@ -1286,6 +1296,82 @@ fn stream_json_stdout_carries_only_json_lines() {
         non_json_lines, 0,
         "stdout under stream-json must be pure JSON lines, got:\n{captured}"
     );
+}
+
+// ── stream-json assistant text (0.9.1: IDE clients saw no answer) ─────
+
+#[test]
+fn text_delta_batches_at_newlines_and_size() {
+    // Token-sized chunks are held until a line completes...
+    assert_eq!(text_delta_ready("Hel", false), 0);
+    assert_eq!(text_delta_ready("", true), 0);
+    // ...then everything through the LAST newline is released,
+    assert_eq!(text_delta_ready("line one\nline tw", false), 9);
+    // a long unbroken run is released at the batch size,
+    let long = "x".repeat(TEXT_DELTA_BATCH_BYTES);
+    assert_eq!(text_delta_ready(&long, false), long.len());
+    // and a boundary (tool call, end of run) forces the remainder out.
+    assert_eq!(text_delta_ready("tail", true), 4);
+}
+
+#[test]
+fn text_delta_line_is_typed_json_with_escaped_text() {
+    let line = text_delta_line("a \"quote\"\nnext").unwrap();
+    let v: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(v["event"], "text_delta");
+    assert_eq!(v["type"], "text_delta");
+    assert_eq!(v["text"], "a \"quote\"\nnext");
+    assert!(!line.contains('\n'), "one event per line: {line}");
+}
+
+#[test]
+fn text_emitter_forwards_every_event_to_the_answer_capture() {
+    // Streaming text must not starve the result object's `answer`.
+    let emitter = JsonlProgressEmitter::new();
+    let capture = AnswerCapture::new();
+    let text = emitter.text_emitter(std::sync::Arc::new(capture.emitter()));
+    text.emit_terminal(AgentEvent::Completed {
+        message: "The answer.".into(),
+    });
+    assert_eq!(capture.take().as_deref(), Some("The answer."));
+}
+
+#[test]
+fn progress_events_carry_a_type_key_equal_to_event() {
+    // Existing consumers read "event"; clients following the common
+    // {"type": …} JSONL convention read "type". Both must agree.
+    let events = [
+        ProgressEvent::StepStarted {
+            step: 1,
+            model: "m".into(),
+            tools_available: 1,
+        },
+        ProgressEvent::LlmRequestSent { tokens: 3 },
+        ProgressEvent::TaskFailed { reason: "r".into() },
+    ];
+    for event in events {
+        let line = JsonlProgressEmitter::event_json_line(event).unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert!(v["event"].is_string(), "{line}");
+        assert_eq!(v["type"], v["event"], "{line}");
+    }
+}
+
+#[test]
+fn turn_decision_names_decision_and_detail_plainly() {
+    let line = JsonlProgressEmitter::event_json_line(ProgressEvent::TurnDecision {
+        decision: "context_trim".into(),
+        detail: "dropped 3 message(s)".into(),
+    })
+    .unwrap();
+    let v: Value = serde_json::from_str(&line).unwrap();
+    // Backward-compatible keys kept...
+    assert_eq!(v["reason"], "context_trim");
+    assert_eq!(v["outcome"], "dropped 3 message(s)");
+    // ...plus plainly-named ones.
+    assert_eq!(v["decision"], "context_trim");
+    assert_eq!(v["detail"], "dropped 3 message(s)");
+    assert_eq!(v["type"], "turn_decision");
 }
 
 // ── SessionResult grounding (deterministic citation check) ──────────

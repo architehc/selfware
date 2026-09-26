@@ -1308,11 +1308,12 @@ fn resume_progress_emitter(
     quiet: bool,
     verbose: bool,
     output_format: HeadlessOutputFormat,
-) -> Option<std::sync::Arc<dyn crate::agent::progress::ProgressEmitter>> {
+) -> Option<ResumeEmitters> {
     use crate::agent::progress::ProgressEmitter;
     let emitter: std::sync::Arc<dyn ProgressEmitter> = match output_format {
         HeadlessOutputFormat::StreamJson => {
-            std::sync::Arc::new(headless::JsonlProgressEmitter::new())
+            let jsonl = std::sync::Arc::new(headless::JsonlProgressEmitter::new());
+            return Some((jsonl.clone(), Some(jsonl)));
         }
         // Structured `kind=…` lines are diagnostics: `--verbose` only. By
         // default the spinner (with the waiting status), the run summary and
@@ -1323,7 +1324,29 @@ fn resume_progress_emitter(
         }
         _ => return None,
     };
-    Some(emitter)
+    Some((emitter, None))
+}
+
+/// The progress emitter for a resumed run, plus the stream-json writer when
+/// that is what it is (its assistant-text half is wired separately).
+type ResumeEmitters = (
+    std::sync::Arc<dyn crate::agent::progress::ProgressEmitter>,
+    Option<std::sync::Arc<headless::JsonlProgressEmitter>>,
+);
+
+/// The event emitter for a headless run: the answer capture, fronted in
+/// stream-json mode by the writer's assistant-text half so the answer
+/// streams live as `text_delta` lines (0.9.1 field finding: IDE clients saw
+/// only lifecycle events and no answer until the final result object).
+fn answer_event_emitter(
+    capture: &headless::AnswerCapture,
+    jsonl: Option<&headless::JsonlProgressEmitter>,
+) -> std::sync::Arc<dyn crate::agent::tui_events::EventEmitter> {
+    let inner = std::sync::Arc::new(capture.emitter());
+    match jsonl {
+        Some(jsonl) => std::sync::Arc::new(jsonl.text_emitter(inner)),
+        None => inner,
+    }
 }
 
 /// Emit the final structured result object (`--output-format json` /
@@ -1356,15 +1379,20 @@ async fn run_resumed_agent(
     output_format: HeadlessOutputFormat,
 ) -> Result<()> {
     let start = std::time::Instant::now();
-    if let Some(emitter) =
+    let mut jsonl = None;
+    if let Some((emitter, stream)) =
         resume_progress_emitter(quiet, crate::output::is_verbose(), output_format)
     {
         agent = agent.with_progress_emitter(emitter);
+        jsonl = stream;
     }
     let answer_capture = headless::AnswerCapture::new();
-    agent = agent.with_event_emitter(std::sync::Arc::new(answer_capture.emitter()));
+    agent = agent.with_event_emitter(answer_event_emitter(&answer_capture, jsonl.as_deref()));
     let baseline = patch_baseline_for(output_format);
     let run_result = agent.continue_execution().await;
+    if let Some(jsonl) = &jsonl {
+        jsonl.flush_text();
+    }
     finish_resumed_run(
         &agent,
         &run_result,
@@ -2141,8 +2169,10 @@ pub async fn run() -> Result<()> {
         }
         let mut emitters: Vec<std::sync::Arc<dyn crate::agent::progress::ProgressEmitter>> =
             Vec::new();
-        if is_stream_json {
-            emitters.push(std::sync::Arc::new(headless::JsonlProgressEmitter::new()));
+        let jsonl =
+            is_stream_json.then(|| std::sync::Arc::new(headless::JsonlProgressEmitter::new()));
+        if let Some(jsonl) = &jsonl {
+            emitters.push(jsonl.clone());
         } else if !cli.quiet && !is_structured && crate::output::is_verbose() {
             // Structured event lines are `--verbose` diagnostics (see
             // `resume_progress_emitter`).
@@ -2173,10 +2203,13 @@ pub async fn run() -> Result<()> {
         // event (the public conduit to `last_assistant_response`), so the
         // capture emitter is attached before the run starts.
         let answer_capture = headless::AnswerCapture::new();
-        agent = agent.with_event_emitter(std::sync::Arc::new(answer_capture.emitter()));
+        agent = agent.with_event_emitter(answer_event_emitter(&answer_capture, jsonl.as_deref()));
         let baseline = patch_baseline_for(cli.output_format);
         let run_result = agent.run_task(&actual_prompt).await;
         let duration_ms = start.elapsed().as_millis() as u64;
+        if let Some(jsonl) = &jsonl {
+            jsonl.flush_text();
+        }
 
         if !cli.quiet && !is_structured {
             println!(
@@ -3113,8 +3146,10 @@ async fn handle_command(
             }
             let mut emitters: Vec<std::sync::Arc<dyn crate::agent::progress::ProgressEmitter>> =
                 Vec::new();
-            if is_stream_json {
-                emitters.push(std::sync::Arc::new(headless::JsonlProgressEmitter::new()));
+            let jsonl =
+                is_stream_json.then(|| std::sync::Arc::new(headless::JsonlProgressEmitter::new()));
+            if let Some(jsonl) = &jsonl {
+                emitters.push(jsonl.clone());
             } else if !quiet && !is_structured && crate::output::is_verbose() {
                 // Structured event lines are `--verbose` diagnostics (see
                 // `resume_progress_emitter`); the run summary and failure
@@ -3144,10 +3179,14 @@ async fn handle_command(
             // Capture the agent's final answer for the structured result (see
             // the `-p` headless path for why this uses the event channel).
             let answer_capture = headless::AnswerCapture::new();
-            agent = agent.with_event_emitter(std::sync::Arc::new(answer_capture.emitter()));
+            agent =
+                agent.with_event_emitter(answer_event_emitter(&answer_capture, jsonl.as_deref()));
             let baseline = patch_baseline_for(output_format);
             let run_result = agent.run_task(&task).await;
             let duration_ms = start.elapsed().as_millis() as u64;
+            if let Some(jsonl) = &jsonl {
+                jsonl.flush_text();
+            }
 
             if !quiet && !is_structured {
                 println!(

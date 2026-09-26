@@ -229,6 +229,7 @@ impl HeadlessEvent {
 pub fn emit_event(event: &HeadlessEvent) {
     if let Some(json) = serde_json::to_string(event)
         .ok()
+        .map(with_type_key)
         .and_then(validated_jsonl_line)
     {
         use std::io::Write;
@@ -552,15 +553,134 @@ pub fn capture_patch_since(baseline_tree: Option<&str>) -> anyhow::Result<String
 }
 
 /// Progress emitter that writes newline-delimited JSON to stdout.
+///
+/// Also owns the stream's pending assistant text: [`Self::text_emitter`]
+/// hands out an [`EventEmitter`] that batches `AssistantDelta` chunks into
+/// `text_delta` lines. Both halves write under the same lock and every
+/// progress event flushes pending text FIRST, so a consumer sees the answer
+/// text and the tool/step events in the order they happened.
 pub struct JsonlProgressEmitter {
-    lock: Mutex<()>,
+    /// Pending assistant text not yet written; the mutex also serializes
+    /// every stdout write of this stream.
+    text: Arc<Mutex<String>>,
 }
 
 impl JsonlProgressEmitter {
     pub fn new() -> Self {
         Self {
-            lock: Mutex::new(()),
+            text: Arc::new(Mutex::new(String::new())),
         }
+    }
+
+    /// An [`EventEmitter`] that turns streamed assistant text into
+    /// `{"event":"text_delta","type":"text_delta","text":…}` lines on this
+    /// stream and forwards every event (deltas included) to `inner` (the
+    /// answer capture), so the final result keeps its `answer`.
+    pub fn text_emitter(&self, inner: Arc<dyn EventEmitter>) -> StreamJsonTextEmitter {
+        StreamJsonTextEmitter {
+            text: Arc::clone(&self.text),
+            inner,
+        }
+    }
+
+    /// Write any pending assistant text now (end of run, before the result
+    /// object).
+    pub fn flush_text(&self) {
+        let mut pending = self.text.lock().unwrap_or_else(|e| e.into_inner());
+        write_pending_text(&mut pending, true);
+    }
+}
+
+/// Batch threshold for `text_delta` lines: pending text is written at each
+/// newline, or once this many bytes accumulate without one. Token-sized
+/// deltas would otherwise produce one JSON line per token.
+pub const TEXT_DELTA_BATCH_BYTES: usize = 256;
+
+/// JSONL line for one batch of assistant text.
+pub fn text_delta_line(text: &str) -> Option<String> {
+    serde_json::to_string(&serde_json::json!({
+        "event": "text_delta",
+        "type": "text_delta",
+        "text": text,
+    }))
+    .ok()
+}
+
+/// The prefix of `pending` that is ready to be written: everything up to
+/// and including the last newline, or all of it once it reaches
+/// [`TEXT_DELTA_BATCH_BYTES`] (or when `force`). Empty when nothing is due.
+pub fn text_delta_ready(pending: &str, force: bool) -> usize {
+    if pending.is_empty() {
+        return 0;
+    }
+    if force || pending.len() >= TEXT_DELTA_BATCH_BYTES {
+        return pending.len();
+    }
+    pending.rfind('\n').map(|i| i + 1).unwrap_or(0)
+}
+
+/// Write the due part of `pending` as one `text_delta` line (caller holds
+/// the stream lock) and drop it from the buffer.
+fn write_pending_text(pending: &mut String, force: bool) {
+    let n = text_delta_ready(pending, force);
+    if n == 0 {
+        return;
+    }
+    let chunk: String = pending.drain(..n).collect();
+    if let Some(line) = text_delta_line(&chunk).and_then(validated_jsonl_line) {
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{}", line);
+        let _ = stdout.flush();
+    }
+}
+
+/// The assistant-text half of the stream-json writer — see
+/// [`JsonlProgressEmitter::text_emitter`]. Reasoning (`ThinkingDelta`) is
+/// NOT surfaced: it is the model's scratchpad, not the answer, and would
+/// double the stream's volume.
+pub struct StreamJsonTextEmitter {
+    text: Arc<Mutex<String>>,
+    inner: Arc<dyn EventEmitter>,
+}
+
+impl EventEmitter for StreamJsonTextEmitter {
+    fn emit(&self, event: AgentEvent) {
+        {
+            let mut pending = self.text.lock().unwrap_or_else(|e| e.into_inner());
+            match &event {
+                AgentEvent::AssistantDelta { text } => {
+                    pending.push_str(text);
+                    write_pending_text(&mut pending, false);
+                }
+                // Anything else marks a boundary: the text so far is complete.
+                _ => write_pending_text(&mut pending, true),
+            }
+        }
+        self.inner.emit(event);
+    }
+
+    fn emit_terminal(&self, event: AgentEvent) {
+        {
+            let mut pending = self.text.lock().unwrap_or_else(|e| e.into_inner());
+            write_pending_text(&mut pending, true);
+        }
+        self.inner.emit_terminal(event);
+    }
+}
+
+/// Add a `"type"` key equal to `"event"` to a stream-json line: consumers
+/// written against the common `{"type": …}` JSONL convention can dispatch
+/// on it, while existing consumers keep reading `"event"` unchanged.
+fn with_type_key(line: String) -> String {
+    match serde_json::from_str::<serde_json::Value>(&line) {
+        Ok(serde_json::Value::Object(mut obj)) if !obj.contains_key("type") => {
+            if let Some(ev) = obj.get("event").cloned() {
+                obj.insert("type".into(), ev);
+                return serde_json::Value::Object(obj).to_string();
+            }
+            line
+        }
+        _ => line,
     }
 }
 
@@ -575,6 +695,10 @@ impl JsonlProgressEmitter {
     /// surfaced in stream-json. Split out from `emit` so it is unit-testable
     /// without capturing stdout.
     fn event_json_line(event: ProgressEvent) -> Option<String> {
+        Self::event_json_line_untyped(event).map(with_type_key)
+    }
+
+    fn event_json_line_untyped(event: ProgressEvent) -> Option<String> {
         match event {
             ProgressEvent::StepStarted { step, model, .. } => {
                 serde_json::to_string(&HeadlessEvent::step_started(step, model)).ok()
@@ -595,7 +719,19 @@ impl JsonlProgressEmitter {
                 serde_json::to_string(&HeadlessEvent::task_failed(reason)).ok()
             }
             ProgressEvent::TurnDecision { decision, detail } => {
-                serde_json::to_string(&HeadlessEvent::turn_decision(decision, detail)).ok()
+                // `reason`/`outcome` are the original (backward-compatible)
+                // keys; `decision`/`detail` name the same values plainly.
+                let mut v = serde_json::to_value(HeadlessEvent::turn_decision(
+                    decision.clone(),
+                    detail.clone(),
+                ))
+                .ok()?;
+                let obj = v.as_object_mut()?;
+                obj.insert("decision".into(), decision.into());
+                if !detail.is_empty() {
+                    obj.insert("detail".into(), detail.into());
+                }
+                Some(v.to_string())
             }
             ProgressEvent::LlmRequestSent { tokens } => Some(
                 serde_json::json!({
@@ -665,7 +801,9 @@ fn validated_jsonl_line(line: String) -> Option<String> {
 impl ProgressEmitter for JsonlProgressEmitter {
     fn emit(&self, event: ProgressEvent) {
         if let Some(line) = Self::event_json_line(event).and_then(validated_jsonl_line) {
-            let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+            let mut pending = self.text.lock().unwrap_or_else(|e| e.into_inner());
+            // Text streamed before this event belongs before it.
+            write_pending_text(&mut pending, true);
             let mut stdout = std::io::stdout().lock();
             let _ = writeln!(stdout, "{}", line);
             let _ = stdout.flush();

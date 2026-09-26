@@ -1189,15 +1189,19 @@ impl Agent {
                 decision: "input_census".to_string(),
                 detail: "applied".to_string(),
             });
-        } else {
+        } else if census_requested {
+            // The task asked for an inventory but carries its own payload:
+            // a real decision about THIS task, so it stays visible.
             self.emit_progress(super::progress::ProgressEvent::TurnDecision {
                 decision: "input_census".to_string(),
-                detail: if census_requested {
-                    "skipped: self-contained document payload".to_string()
-                } else {
-                    "skipped: not a data-inventory task".to_string()
-                },
+                detail: "skipped: self-contained document payload".to_string(),
             });
+        } else {
+            // The ordinary case — the census is opt-in and this task never
+            // asked for it. Not a decision anyone acts on: debug log only
+            // (0.9.1: every stream-json run opened with this internal
+            // `turn_decision … not a data-inventory task` line).
+            tracing::debug!("input census not applied: not a data-inventory task");
         }
 
         // L0 graph orientation: the repo's architectural map, injected at
