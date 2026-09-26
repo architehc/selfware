@@ -1,5 +1,4 @@
 use anyhow::Result;
-use colored::*;
 use tracing::debug;
 use uuid::Uuid;
 
@@ -41,17 +40,6 @@ fn streaming_usage_delta(
     (prompt, completion)
 }
 
-/// All XML tag pairs that local models may emit and should be hidden from
-/// display.  Each entry is `(open_tag, close_tag)`.  The streaming renderer
-/// suppresses everything between (and including) these tags.
-const SUPPRESSED_TAGS: &[(&str, &str)] = &[
-    ("<tool_call>", "</tool_call>"),
-    ("<tool>", "</tool>"),
-    ("<think>", "</think>"),
-    ("<thinking>", "</thinking>"),
-    ("<|channel>", "<channel|>"),
-];
-
 /// Char budget for one streaming response on a mutation task (~8k tokens).
 /// Past it with no tool call in flight, the response is a runaway monologue:
 /// measured 2026-08-24 on TB 3.0 `cli-2ph-simplex`, where two such responses
@@ -80,6 +68,54 @@ fn monologue_cut_notice(chars: usize) -> String {
     )
 }
 
+/// All tool-call / reasoning markup regions that local models may emit
+/// inside `content` and that must be hidden from display. Each entry is
+/// `(open_tag, close_tag)`; the streaming renderer suppresses everything
+/// between (and including) them. The recorded `content` is never touched —
+/// the parser still sees every byte.
+///
+/// Indices 2..=4 are reasoning regions (see [`is_think_tag`]); the rest are
+/// tool-call regions. Keep the first five in place: tests and the wait-phase
+/// classifier address them by index.
+const SUPPRESSED_TAGS: &[(&str, &str)] = &[
+    ("<tool_call>", "</tool_call>"),
+    ("<tool>", "</tool>"),
+    ("<think>", "</think>"),
+    ("<thinking>", "</thinking>"),
+    ("<|channel>", "<channel|>"),
+    // Bare Qwen call without the `<tool_call>` wrapper (the parser accepts it).
+    ("<function=", "</function>"),
+    // Kimi/Moonshot tool section and bare call.
+    ("<|open|>tools", "<|close|>tools"),
+    ("<|open|>call ", "<|close|>call"),
+];
+
+/// Whether a [`SUPPRESSED_TAGS`] index is a reasoning region (its inner text
+/// is reasoning, not a tool call).
+fn is_think_tag(idx: usize) -> bool {
+    matches!(idx, 2..=4)
+}
+
+/// Wrapper / closing tokens that carry nothing displayable on their own and
+/// must be dropped when they appear OUTSIDE a suppressed region: a stray
+/// `</tool_call>` after a bare `<function=…></function>` call or a `<tool>`
+/// block (seen live on qwen38-flash-next, 0.9.1), a doubled closer, Kimi
+/// section separators. Only exact tokens are listed — none can occur in
+/// ordinary prose.
+const STRAY_MARKUP: &[&str] = &[
+    "</tool_call>",
+    "</tool>",
+    "</function>",
+    "</think>",
+    "</thinking>",
+    "<channel|>",
+    "<|close|>tools",
+    "<|close|>call",
+    "<|close|>message",
+    "<|close|>argument",
+    "<|sep|>",
+];
+
 /// Find the earliest opening tag from `SUPPRESSED_TAGS` in `buf`.
 /// Returns `(byte_offset, tag_index)` or `None`.
 fn find_earliest_open_tag(buf: &str) -> Option<(usize, usize)> {
@@ -94,23 +130,60 @@ fn find_earliest_open_tag(buf: &str) -> Option<(usize, usize)> {
     best
 }
 
-/// Check if `buf` ends with a prefix of any opening suppressed tag,
-/// indicating we should buffer instead of printing (the rest of the tag
-/// may arrive in the next chunk).
-fn has_partial_tag_at_end(buf: &str) -> bool {
-    for &(open, _) in SUPPRESSED_TAGS {
-        for prefix_len in 1..open.len() {
-            if buf.ends_with(&open[..prefix_len]) {
-                return true;
+/// Find the earliest stray markup token in `buf`: `(byte_offset, len)`.
+/// At equal offsets the longest token wins.
+fn find_earliest_stray(buf: &str) -> Option<(usize, usize)> {
+    let mut best: Option<(usize, usize)> = None;
+    for tok in STRAY_MARKUP {
+        if let Some(pos) = buf.find(tok) {
+            let better = match best {
+                None => true,
+                Some((b, len)) => pos < b || (pos == b && tok.len() > len),
+            };
+            if better {
+                best = Some((pos, tok.len()));
             }
         }
     }
-    false
+    best
+}
+
+/// Byte offset where a trailing, possibly-incomplete markup token starts:
+/// `buf` ends with a proper prefix of an opening tag or a stray token, so
+/// the rest of it may arrive in the next chunk. `None` when the tail is
+/// plain text.
+fn partial_markup_start(buf: &str) -> Option<usize> {
+    let tokens = SUPPRESSED_TAGS
+        .iter()
+        .map(|(open, _)| *open)
+        .chain(STRAY_MARKUP.iter().copied());
+    let mut longest = 0;
+    for tok in tokens {
+        for prefix_len in (1..tok.len()).rev() {
+            if prefix_len <= longest {
+                break;
+            }
+            if buf.ends_with(&tok[..prefix_len]) {
+                longest = prefix_len;
+                break;
+            }
+        }
+    }
+    (longest > 0).then(|| buf.len() - longest)
+}
+
+/// Check if `buf` ends with a prefix of any opening suppressed tag or stray
+/// markup token, indicating we should buffer instead of printing (the rest
+/// of the tag may arrive in the next chunk).
+#[cfg(test)]
+fn has_partial_tag_at_end(buf: &str) -> bool {
+    partial_markup_start(buf).is_some()
 }
 
 /// Extract a tool name from a suppressed XML block for a clean one-line
-/// summary.  Tries `<name>x</name>` (used by `<tool>` blocks) and the
-/// existing `<function=x>` / `<function>x</function>` patterns.
+/// summary.  Tries `<name>x</name>` (used by `<tool>` blocks), the
+/// existing `<function=x>` / `<function>x</function>` patterns, and Kimi's
+/// `call tool="x"`.
 fn extract_display_name(xml: &str) -> Option<String> {
     // <name>tool_name</name> — used in <tool> blocks from Qwen
     if let Some(start) = xml.find("<name>") {
@@ -122,7 +195,131 @@ fn extract_display_name(xml: &str) -> Option<String> {
             }
         }
     }
+    if let Some(start) = xml.find("call tool=\"") {
+        let rest = &xml[start + "call tool=\"".len()..];
+        if let Some(end) = rest.find('"') {
+            let name = rest[..end].trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
     Agent::extract_tool_name(xml)
+}
+
+/// One displayable piece of a streamed response after markup filtering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DisplayPiece {
+    /// Prose to show.
+    Text(String),
+    /// A suppressed tool-call region closed; carries the tool name when one
+    /// could be read from the markup.
+    ToolCall(Option<String>),
+    /// The trimmed inner text of an inline reasoning block
+    /// (`<think>…</think>` and friends).
+    Think(String),
+}
+
+/// Incremental display filter for streamed `content`: turns raw chunks into
+/// [`DisplayPiece`]s so no tool-call markup (opening tag, body, closing tag,
+/// a stray closer after the region, Kimi section tokens) ever reaches the
+/// terminal or the TUI, even when a tag is split across chunks. It only
+/// decides what is SHOWN; the caller keeps accumulating the raw content for
+/// the parser.
+#[derive(Debug, Default)]
+pub(crate) struct StreamDisplayFilter {
+    buf: String,
+    inside: Option<usize>,
+}
+
+impl StreamDisplayFilter {
+    /// Whether the stream is currently inside a suppressed region.
+    #[cfg(test)]
+    pub(crate) fn inside_region(&self) -> bool {
+        self.inside.is_some()
+    }
+
+    /// Whether the stream is currently inside an inline reasoning region.
+    pub(crate) fn inside_think(&self) -> bool {
+        self.inside.is_some_and(is_think_tag)
+    }
+
+    /// Whether the stream is currently inside a tool-call region.
+    #[cfg(test)]
+    pub(crate) fn inside_tool_call(&self) -> bool {
+        self.inside.is_some_and(|i| !is_think_tag(i))
+    }
+
+    /// Feed one chunk; returns the pieces that are ready to display.
+    pub(crate) fn push(&mut self, text: &str) -> Vec<DisplayPiece> {
+        self.buf.push_str(text);
+        let mut out = Vec::new();
+        loop {
+            if let Some(idx) = self.inside {
+                let (open, close) = SUPPRESSED_TAGS[idx];
+                let Some(end_pos) = self.buf.find(close) else {
+                    break; // wait for the closing tag
+                };
+                let end = end_pos + close.len();
+                let block: String = self.buf.drain(..end).collect();
+                self.inside = None;
+                if is_think_tag(idx) {
+                    let inner = &block[open.len()..block.len() - close.len()];
+                    let trimmed = inner.trim();
+                    if !trimmed.is_empty() {
+                        out.push(DisplayPiece::Think(trimmed.to_string()));
+                    }
+                } else {
+                    out.push(DisplayPiece::ToolCall(extract_display_name(&block)));
+                }
+                continue;
+            }
+            let open = find_earliest_open_tag(&self.buf);
+            let stray = find_earliest_stray(&self.buf);
+            let open_first = match (open, stray) {
+                (Some((pos, _)), Some((stray_pos, _))) => pos <= stray_pos,
+                (Some(_), None) => true,
+                (None, _) => false,
+            };
+            if let (true, Some((pos, idx))) = (open_first, open) {
+                Self::push_text(&mut out, &self.buf[..pos]);
+                self.buf.drain(..pos);
+                self.inside = Some(idx);
+            } else if let Some((pos, len)) = stray {
+                Self::push_text(&mut out, &self.buf[..pos]);
+                self.buf.drain(..pos + len);
+            } else {
+                let keep_from = partial_markup_start(&self.buf).unwrap_or(self.buf.len());
+                Self::push_text(&mut out, &self.buf[..keep_from]);
+                self.buf.drain(..keep_from);
+                break;
+            }
+        }
+        out
+    }
+
+    /// End of stream: a held partial token was plain text after all and is
+    /// shown; an unclosed region stays hidden (its text is not displayed —
+    /// callers that must show the answer compare against what WAS shown).
+    pub(crate) fn finish(&mut self) -> Vec<DisplayPiece> {
+        let mut out = Vec::new();
+        if self.inside.is_none() {
+            Self::push_text(&mut out, &self.buf);
+        }
+        self.buf.clear();
+        out
+    }
+
+    fn push_text(out: &mut Vec<DisplayPiece>, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if let Some(DisplayPiece::Text(prev)) = out.last_mut() {
+            prev.push_str(text);
+        } else {
+            out.push(DisplayPiece::Text(text.to_string()));
+        }
+    }
 }
 
 /// Whether a finished stream produced nothing AND never explained why.
@@ -195,6 +392,47 @@ impl Agent {
             }
         }
         None
+    }
+
+    /// Show filtered stream pieces: prose to the TUI or stdout, a closed
+    /// tool-call region as a TUI progress event only (text mode announces
+    /// each call once, with the dispatch line "Step N → tool arg"), inline
+    /// reasoning into the accumulated reasoning.
+    fn show_display_pieces(
+        &self,
+        pieces: Vec<DisplayPiece>,
+        reasoning: &mut String,
+        suppress_stream_stdout: bool,
+    ) {
+        use std::io::Write;
+        let tui_active = crate::output::is_tui_active();
+        for piece in pieces {
+            match piece {
+                DisplayPiece::Text(text) => {
+                    if tui_active {
+                        self.emit_event(AgentEvent::AssistantDelta { text });
+                    } else if !suppress_stream_stdout {
+                        // Replace \n with \r\n so every newline resets to col 0
+                        let safe = text.replace('\n', "\r\n");
+                        print!("{}", safe);
+                        std::io::stdout().flush().ok();
+                        output::note_streamed_text(&safe);
+                    }
+                }
+                DisplayPiece::ToolCall(Some(name)) if tui_active => {
+                    self.emit_event(AgentEvent::ToolProgress {
+                        name,
+                        status: "parsing".into(),
+                    });
+                }
+                DisplayPiece::ToolCall(_) => {}
+                DisplayPiece::Think(inner) => {
+                    if !output::is_compact() {
+                        reasoning.push_str(&inner);
+                    }
+                }
+            }
+        }
     }
 
     /// Check LLM cache for a matching previous request
@@ -494,9 +732,7 @@ impl Agent {
         let mut reasoning = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut in_reasoning = false;
-        let mut display_buf = String::new();
-        // Which suppressed tag we're currently inside, if any
-        let mut suppressed_tag_idx: Option<usize> = None;
+        let mut display_filter = StreamDisplayFilter::default();
         let mut captured_logprobs: Option<serde_json::Value> = None;
         // How the loop below ended. `stream_ended_with_done` tracks the
         // [DONE] sentinel; `runaway_cut` tracks the deliberate monologue
@@ -537,8 +773,7 @@ impl Agent {
                                 &content,
                                 &reasoning,
                                 tool_calls.len(),
-                                in_reasoning
-                                    || suppressed_tag_idx.is_some_and(|i| i >= 2),
+                                in_reasoning || display_filter.inside_think(),
                             );
                             let (tokens, source) = super::llm_wait::tokens_so_far(
                                 captured_completion_tokens,
@@ -643,95 +878,10 @@ impl Agent {
                     // Always accumulate full content for parsing
                     content.push_str(&text);
 
-                    // Buffer content and filter suppressed XML tags from display
-                    display_buf.push_str(&text);
-
-                    loop {
-                        if let Some(tag_idx) = suppressed_tag_idx {
-                            // We're inside a suppressed tag — look for its closing tag
-                            let (_, close) = SUPPRESSED_TAGS[tag_idx];
-                            if let Some(end_pos) = display_buf.find(close) {
-                                let end = end_pos + close.len();
-                                let block = &display_buf[..end];
-                                // For tool tags, show a clean one-line summary
-                                let is_think = tag_idx >= 2; // <think> and <thinking>
-                                if !is_think {
-                                    if let Some(fname) = extract_display_name(block) {
-                                        if tui_active {
-                                            self.emit_event(AgentEvent::ToolProgress {
-                                                name: fname,
-                                                status: "parsing".into(),
-                                            });
-                                        } else if !suppress_stream_stdout {
-                                            print!(
-                                                "\r\n  {} {}...",
-                                                "🔧".dimmed(),
-                                                fname.bright_cyan()
-                                            );
-                                            io::stdout().flush().ok();
-                                            output::note_streamed_text("...");
-                                        }
-                                    }
-                                }
-                                // For <think> blocks, optionally show as dimmed reasoning
-                                if is_think && !output::is_compact() {
-                                    // Extract inner text, strip the open/close tags
-                                    let (open, _) = SUPPRESSED_TAGS[tag_idx];
-                                    let inner =
-                                        &block[open.len()..block.len().saturating_sub(close.len())];
-                                    let trimmed = inner.trim();
-                                    if !trimmed.is_empty() {
-                                        reasoning.push_str(trimmed);
-                                    }
-                                }
-                                display_buf.drain(..end);
-                                suppressed_tag_idx = None;
-                            } else {
-                                break; // Wait for more data
-                            }
-                        } else {
-                            // Look for the earliest opening suppressed tag
-                            if let Some((start_pos, tag_idx)) = find_earliest_open_tag(&display_buf)
-                            {
-                                // Emit/print everything before the tag
-                                let before = &display_buf[..start_pos];
-                                if !before.is_empty() {
-                                    if tui_active {
-                                        self.emit_event(AgentEvent::AssistantDelta {
-                                            text: before.to_string(),
-                                        });
-                                    } else if !suppress_stream_stdout {
-                                        // Replace \n with \r\n so every newline resets to col 0
-                                        let safe = before.replace('\n', "\r\n");
-                                        print!("{}", safe);
-                                        io::stdout().flush().ok();
-                                        output::note_streamed_text(&safe);
-                                    }
-                                }
-                                display_buf.drain(..start_pos);
-                                suppressed_tag_idx = Some(tag_idx);
-                            } else if has_partial_tag_at_end(&display_buf) {
-                                // Partial opening tag at end — buffer it
-                                break;
-                            } else {
-                                // No tags — emit/print everything
-                                if !display_buf.is_empty() {
-                                    if tui_active {
-                                        self.emit_event(AgentEvent::AssistantDelta {
-                                            text: display_buf.clone(),
-                                        });
-                                    } else if !suppress_stream_stdout {
-                                        let safe = display_buf.replace('\n', "\r\n");
-                                        print!("{}", safe);
-                                        io::stdout().flush().ok();
-                                        output::note_streamed_text(&safe);
-                                    }
-                                }
-                                display_buf.clear();
-                                break;
-                            }
-                        }
-                    }
+                    // Filter tool-call / reasoning markup from the display;
+                    // `content` above keeps every byte for the parser.
+                    let pieces = display_filter.push(&text);
+                    self.show_display_pieces(pieces, &mut reasoning, suppress_stream_stdout);
                 }
                 StreamChunk::Reasoning(text) => {
                     // Stop spinner on first reasoning — unless (compact,
@@ -827,19 +977,10 @@ impl Agent {
             }
         }
 
-        // Flush any remaining display buffer (non-suppressed text)
-        if !display_buf.is_empty() && suppressed_tag_idx.is_none() {
-            if tui_active {
-                self.emit_event(AgentEvent::AssistantDelta {
-                    text: display_buf.clone(),
-                });
-            } else if !suppress_stream_stdout {
-                let safe = display_buf.replace('\n', "\r\n");
-                print!("{}", safe);
-                io::stdout().flush().ok();
-                output::note_streamed_text(&safe);
-            }
-        }
+        // Flush the display filter: a held partial token that never became
+        // markup is shown; an unclosed region stays hidden.
+        let pieces = display_filter.finish();
+        self.show_display_pieces(pieces, &mut reasoning, suppress_stream_stdout);
 
         // Trailing newline is DISPLAY output — suppress it in json/quiet mode.
         if !tui_active && !suppress_stream_stdout && (!content.is_empty() || !reasoning.is_empty())

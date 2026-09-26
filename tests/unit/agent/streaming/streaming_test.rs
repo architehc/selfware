@@ -251,7 +251,15 @@ fn extract_display_name_from_think_block() {
 #[test]
 fn suppressed_tags_covers_all_local_model_formats() {
     // Ensure all common local model XML formats are covered
-    let formats = ["<tool_call>", "<tool>", "<think>", "<thinking>"];
+    let formats = [
+        "<tool_call>",
+        "<tool>",
+        "<think>",
+        "<thinking>",
+        "<function=",
+        "<|open|>tools",
+        "<|open|>call ",
+    ];
     for fmt in &formats {
         assert!(
             SUPPRESSED_TAGS.iter().any(|(open, _)| open == fmt),
@@ -686,4 +694,108 @@ async fn streamed_call_elapsed_is_the_whole_call_and_headers_time_is_separate() 
         shape.elapsed_ms, meta.elapsed_ms,
         "the deadline forecast measures the whole call"
     );
+}
+
+// --- Display filter: tool-call markup never reaches the terminal ---
+// Live on 0.9.1 (qwen38-flash-next, XML tool calls inside content): a stray
+// "</tool_call>" line was printed after every call, and Kimi
+// `<|open|>tools…` markup was echoed verbatim.
+
+/// Feed `chunks` through a fresh filter; returns (shown text, pieces).
+fn run_filter(chunks: &[&str]) -> (String, Vec<DisplayPiece>) {
+    let mut f = StreamDisplayFilter::default();
+    let mut pieces = Vec::new();
+    for c in chunks {
+        pieces.extend(f.push(c));
+    }
+    pieces.extend(f.finish());
+    let shown = pieces
+        .iter()
+        .filter_map(|p| match p {
+            DisplayPiece::Text(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    (shown, pieces)
+}
+
+/// Every split point of `raw` into two chunks, plus char-by-char.
+fn all_chunkings(raw: &str) -> Vec<Vec<String>> {
+    let mut out = vec![raw.chars().map(|c| c.to_string()).collect::<Vec<_>>()];
+    for (i, _) in raw.char_indices() {
+        out.push(vec![raw[..i].to_string(), raw[i..].to_string()]);
+    }
+    out
+}
+
+fn assert_shown_for_every_chunking(raw: &str, expected: &str) {
+    for chunks in all_chunkings(raw) {
+        let refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
+        let (shown, _) = run_filter(&refs);
+        assert_eq!(shown, expected, "chunks: {chunks:?}");
+    }
+}
+
+#[test]
+fn display_filter_hides_a_whole_qwen_call_for_every_chunk_split() {
+    let raw = "Reading it.\n<tool_call>\n<function=file_read>\n<parameter=path>\nsrc/lib.rs\n</parameter>\n</function>\n</tool_call>\nDone.";
+    assert_shown_for_every_chunking(raw, "Reading it.\n\nDone.");
+    let (_, pieces) = run_filter(&[raw]);
+    assert!(pieces.contains(&DisplayPiece::ToolCall(Some("file_read".into()))));
+}
+
+#[test]
+fn display_filter_drops_a_stray_closer_after_the_region() {
+    // A `<tool>` block followed by the wrapper's closer, and a bare Qwen
+    // call whose `<tool_call>` opener the model omitted: the observed leak.
+    let raw = "a<tool>\n<name>file_read</name>\n</tool>\n</tool_call>b";
+    assert_shown_for_every_chunking(raw, "a\nb");
+    let raw = "x<function=file_read>\n<parameter=path>a.rs</parameter>\n</function>\n</tool_call>y";
+    assert_shown_for_every_chunking(raw, "x\ny");
+    // A doubled closer and a lone closer are dropped too.
+    assert_shown_for_every_chunking("<tool_call>{}</tool_call></tool_call>ok", "ok");
+    assert_shown_for_every_chunking("ok</tool_call>", "ok");
+}
+
+#[test]
+fn display_filter_hides_kimi_tool_sections() {
+    let raw = r#"I'll check.<|open|>tools<|sep|><|open|>call tool="git_diff" index="1"<|sep|><|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|>"#;
+    assert_shown_for_every_chunking(raw, "I'll check.");
+    let (_, pieces) = run_filter(&[raw]);
+    assert!(pieces.contains(&DisplayPiece::ToolCall(Some("git_diff".into()))));
+    // A bare call without the section wrapper.
+    let raw = r#"Go <|open|>call tool="file_read" index="1"<|sep|><|open|>argument key="path" type="string"<|sep|>a.rs<|close|>argument<|close|>call"#;
+    assert_shown_for_every_chunking(raw, "Go ");
+}
+
+#[test]
+fn display_filter_routes_think_blocks_to_reasoning() {
+    let (shown, pieces) = run_filter(&["<think>\nplan it\n</think>Answer"]);
+    assert_eq!(shown, "Answer");
+    assert_eq!(pieces[0], DisplayPiece::Think("plan it".into()));
+    // A stray reasoning closer (the opener went to the reasoning channel).
+    assert_shown_for_every_chunking("thought</think>Answer", "thoughtAnswer");
+}
+
+#[test]
+fn display_filter_leaves_prose_and_near_miss_tags_alone() {
+    // Text that merely starts like a tag is shown once it cannot be one.
+    assert_shown_for_every_chunking("a < b and <tools> and <|x|>", "a < b and <tools> and <|x|>");
+    // A trailing partial tag at end of stream is plain text after all.
+    let (shown, _) = run_filter(&["see <tool"]);
+    assert_eq!(shown, "see <tool");
+    // An unclosed region stays hidden (the caller compares with what WAS shown).
+    let (shown, _) = run_filter(&["pre<tool_call><function=x>"]);
+    assert_eq!(shown, "pre");
+}
+
+#[test]
+fn display_filter_region_state_is_observable() {
+    let mut f = StreamDisplayFilter::default();
+    f.push("x<think>abc");
+    assert!(f.inside_think() && !f.inside_tool_call());
+    f.push("</think><tool_call>{");
+    assert!(f.inside_tool_call() && f.inside_region());
+    f.push("}</tool_call>");
+    assert!(!f.inside_region());
 }
