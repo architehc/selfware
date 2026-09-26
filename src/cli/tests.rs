@@ -1518,30 +1518,34 @@ fn slash_help_lists_all_session_commands() {
 }
 
 #[test]
-fn render_cost_line_honest_about_missing_billing() {
-    let mut summary = crate::agent::RunSummary {
-        iterations: 1,
-        max_iterations: 30,
-        budget_extended: false,
-        files_changed: Vec::new(),
-        verification: None,
-        verification_checks: Vec::new(),
-        vision_calls: None,
+fn cost_lines_honest_about_missing_billing() {
+    // /cost renders the session fold (render_cost_line was removed with the
+    // per-task /cost; the assertions carry over unchanged in substance).
+    use crate::agent::session_usage::{SessionUsage, TaskUsage};
+    let task = TaskUsage {
+        prompt_tokens: 12_000,
+        completion_tokens: 345,
         total_tokens: 12_345,
         cost_usd: None,
         cost_complete: false,
         unmetered_attempts: 1,
-        call_latency: None,
-        requirements_audit: None,
-        grounding: None,
     };
-    let rendered = render_cost_line(&summary);
-    assert!(rendered.contains("tokens: 12345 total"), "{rendered}");
+    let rendered = SessionUsage::default()
+        .with_task(&task)
+        .render_cost_lines(0)
+        .join("\n");
+    assert!(rendered.contains("Total:           12345"), "{rendered}");
     assert!(rendered.contains("cost not tracked"), "{rendered}");
     assert!(!rendered.contains('$'), "no invented cost: {rendered}");
 
-    summary.cost_usd = Some(0.0123);
-    let rendered = render_cost_line(&summary);
+    let billed = TaskUsage {
+        cost_usd: Some(0.0123),
+        ..task
+    };
+    let rendered = SessionUsage::default()
+        .with_task(&billed)
+        .render_cost_lines(0)
+        .join("\n");
     assert!(rendered.contains("cost $0.0123"), "{rendered}");
 }
 
@@ -1921,7 +1925,11 @@ fn run_summary_labels_partial_provider_costs() {
     let mut summary = sample_summary();
     summary.cost_complete = false;
     summary.unmetered_attempts = 2;
-    let line = render_cost_line(&summary);
+    let line = crate::agent::session_usage::cost_phrase(
+        summary.cost_usd,
+        summary.cost_complete,
+        summary.unmetered_attempts,
+    );
     assert!(line.contains("known cost $0.0123"), "{line}");
     assert!(line.contains("incomplete billing"), "{line}");
     assert!(line.contains("2 attempts"), "{line}");

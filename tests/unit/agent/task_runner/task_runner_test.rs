@@ -958,6 +958,50 @@ async fn test_run_task_completes_with_plain_text() {
     target_os = "windows",
     ignore = "mock TCP server unreliable on Windows CI"
 )]
+async fn session_usage_folds_every_task_while_run_summary_stays_per_task() {
+    // 0.9.1 field test: in a REPL, /cost mixed the per-task run-summary
+    // total with a process-global counter and /quit printed a third number.
+    // After two tasks the session total must be the sum of both tasks'
+    // run-summary totals, and the main-loop share must fit inside it.
+    let server = MockLlmServer::builder()
+        .with_default_response(MockResponse::Text("Complete.".to_string()))
+        .with_usage(100, 20, 120)
+        .build()
+        .await;
+    let config = mock_agent_config(format!("{}/v1", server.url()), false);
+    let mut agent = Agent::new(config).await.unwrap();
+
+    agent.run_task("Do a simple task").await.unwrap();
+    let first = agent.run_summary().total_tokens;
+    assert!(first > 0, "the mock reports usage");
+    assert_eq!(agent.session_usage().total_tokens, first);
+
+    agent.run_task("Do another simple task").await.unwrap();
+    let second = agent.run_summary().total_tokens;
+    let session = agent.session_usage();
+    assert_eq!(session.tasks, 2);
+    assert_eq!(session.total_tokens, first + second);
+    assert_eq!(
+        session.prompt_tokens + session.completion_tokens,
+        session.total_tokens,
+        "prompt/completion split adds up to the total"
+    );
+    let main_loop = agent.session_main_loop_tokens();
+    assert!(main_loop > 0);
+    assert!(main_loop as usize <= session.total_tokens);
+    let quit = session.render_quit_line(main_loop).unwrap();
+    assert!(
+        quit.contains(&format!("= {} total", first + second)),
+        "{quit}"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
 async fn run_task_persistent_empty_responses_terminate_as_loop_break() {
     // Acceptance (defects 1 + 2 from the empty-response follow-up review):
     //

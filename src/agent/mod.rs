@@ -122,6 +122,7 @@ mod protocol_stall;
 mod recovery;
 pub(crate) mod result_compaction;
 pub mod session_log;
+pub(crate) mod session_usage;
 mod streaming;
 pub(crate) mod task_policy;
 mod task_runner;
@@ -1227,6 +1228,15 @@ pub struct Agent {
     /// Accumulated provider-reported USD cost for the current run (see
     /// `max_cost_usd`). 0.0 for providers that don't report cost.
     cumulative_cost_usd: f64,
+    /// Usage of every task this session has already finished; the current
+    /// task's per-task accumulators are folded in at the next task boundary
+    /// (see `session_usage`). `/cost` and `/quit` read this, never the
+    /// process-global counter.
+    session_usage_prior: session_usage::SessionUsage,
+    /// Provider-reported tokens (prompt + completion) of main-loop calls
+    /// this session — the streaming usage arm and the non-streaming
+    /// fallback. The `/cost` "main loop" share.
+    session_main_loop_tokens: std::sync::atomic::AtomicU64,
     /// Failure mode from the most recent run (set by `finalize_failure_mode`).
     last_run_failure_mode: Option<failure_mode::FailureMode>,
     /// Wall-clock start time of the CURRENT run segment. Reset on resume so a
@@ -1943,6 +1953,8 @@ To call a tool, use this EXACT XML structure:
             prefill_breaker_open: false,
             cumulative_token_usage: crate::observability::dashboard::TokenUsage::default(),
             cumulative_cost_usd: 0.0,
+            session_usage_prior: session_usage::SessionUsage::default(),
+            session_main_loop_tokens: std::sync::atomic::AtomicU64::new(0),
             last_run_failure_mode: None,
             task_start_time: Instant::now(),
             prior_elapsed_secs: 0,

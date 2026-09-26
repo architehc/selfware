@@ -2455,7 +2455,14 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
                     continue;
                 }
                 if input == "/cost" {
-                    log_line(render_cost_line(&agent.run_summary()));
+                    // Session scope (every task), same fold as the REPL's
+                    // /cost and /quit — the run summary is per task.
+                    for line in agent
+                        .session_usage()
+                        .render_cost_lines(agent.session_main_loop_tokens())
+                    {
+                        log_line(line);
+                    }
                     continue;
                 }
                 if input == "/model" {
@@ -6379,19 +6386,6 @@ pub(crate) fn session_status_text(agent: &crate::agent::Agent) -> String {
         agent.current_iteration(),
         agent.run_summary().max_iterations,
     )
-}
-
-/// /cost — token totals from the Round A counters; cost only when the
-/// endpoint actually billed (rule 3: no invented numbers).
-pub(crate) fn render_cost_line(summary: &crate::agent::RunSummary) -> String {
-    match summary.cost_usd {
-        Some(cost) if summary.cost_complete => format!("tokens: {} total · cost ${:.4}", summary.total_tokens, cost),
-        Some(cost) => format!("tokens: {} total · known cost ${:.4} (incomplete billing; {} attempts without reported cost)", summary.total_tokens, cost, summary.unmetered_attempts),
-        None => format!(
-            "tokens: {} total · cost not tracked (provider billing unavailable)",
-            summary.total_tokens
-        ),
-    }
 }
 
 /// /model without an argument — current model, endpoint, and how to change it.

@@ -224,7 +224,12 @@ pub(crate) fn record_tokens(prompt: u64, completion: u64) {
     TOTAL_COMPLETION_TOKENS.fetch_add(completion, Ordering::SeqCst);
 }
 
-/// Get total token usage
+/// Get total token usage (process-global, main-loop and audit calls only).
+///
+/// Test probe only: user-facing totals (`/cost`, `/quit`, the status bar)
+/// read the agent's session fold (`Agent::session_usage`), which covers
+/// every model call — this counter disagreed with it (0.9.1 field test).
+#[cfg(test)]
 #[inline]
 pub(crate) fn get_total_tokens() -> (u64, u64) {
     (

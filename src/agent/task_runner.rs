@@ -500,6 +500,7 @@ impl Agent {
             .map(|fm| fm.restored_files.as_slice())
             .unwrap_or(&[]);
         let files_changed = annotate_restored_files(files, restored);
+        let task_usage = self.current_task_usage();
         RunSummary {
             iterations: self.loop_control.current_iteration(),
             max_iterations: self.loop_control.max_iterations(),
@@ -508,20 +509,10 @@ impl Agent {
             verification: self.credited_verification_summary(),
             verification_checks: self.verification_check_names(),
             vision_calls: self.vision_call_outcomes(),
-            total_tokens: self
-                .cumulative_token_usage
-                .total
-                .saturating_add(self.client.pending_usage().total_tokens),
-            cost_usd: {
-                let cost =
-                    self.cumulative_cost_usd + self.client.pending_usage().cost.unwrap_or(0.0);
-                (cost > 0.0
-                    || (self.client.cost_accounting_status().0
-                        && !self.client.usage_attempts().is_empty()))
-                .then_some(cost)
-            },
-            cost_complete: self.client.cost_accounting_status().0,
-            unmetered_attempts: self.client.cost_accounting_status().1,
+            total_tokens: task_usage.total_tokens,
+            cost_usd: task_usage.cost_usd,
+            cost_complete: task_usage.cost_complete,
+            unmetered_attempts: task_usage.unmetered_attempts,
             call_latency: {
                 let stats = self.client.call_latency_stats();
                 (stats.call_count > 0).then_some(stats)
@@ -529,6 +520,45 @@ impl Agent {
             requirements_audit: self.requirements_audit_status(),
             grounding: self.grounding_status(),
         }
+    }
+
+    /// The current task's measured usage: the per-task accumulators plus
+    /// the API ledger's not-yet-synced delta. `run_summary` and the session
+    /// totals both read this, so they cannot disagree.
+    pub(crate) fn current_task_usage(&self) -> super::session_usage::TaskUsage {
+        let pending = self.client.pending_usage();
+        let (cost_complete, unmetered_attempts) = self.client.cost_accounting_status();
+        let cost = self.cumulative_cost_usd + pending.cost.unwrap_or(0.0);
+        super::session_usage::TaskUsage {
+            prompt_tokens: self
+                .cumulative_token_usage
+                .input
+                .saturating_add(pending.prompt_tokens),
+            completion_tokens: self
+                .cumulative_token_usage
+                .output
+                .saturating_add(pending.completion_tokens),
+            total_tokens: self
+                .cumulative_token_usage
+                .total
+                .saturating_add(pending.total_tokens),
+            cost_usd: (cost > 0.0 || (cost_complete && !self.client.usage_attempts().is_empty()))
+                .then_some(cost),
+            cost_complete,
+            unmetered_attempts,
+        }
+    }
+
+    /// Session-wide usage: every finished task plus the current one.
+    pub(crate) fn session_usage(&self) -> super::session_usage::SessionUsage {
+        self.session_usage_prior
+            .with_task(&self.current_task_usage())
+    }
+
+    /// Main-loop share of `session_usage` (provider-reported).
+    pub(crate) fn session_main_loop_tokens(&self) -> u64 {
+        self.session_main_loop_tokens
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The completion-time requirements audit's outcome for this task.
@@ -872,6 +902,10 @@ impl Agent {
         self.probe_command_counts.clear();
         self.reset_failure_mode_counters();
         self.required_task_tools.clear();
+        // Fold the finished task into the session totals BEFORE the per-task
+        // accumulators and the API ledger are reset below; otherwise /cost
+        // and /quit in a multi-task REPL only ever saw the last task.
+        self.session_usage_prior = self.session_usage();
         self.cumulative_token_usage = crate::observability::dashboard::TokenUsage::default();
         self.cumulative_cost_usd = 0.0;
         self.task_start_time = std::time::Instant::now();

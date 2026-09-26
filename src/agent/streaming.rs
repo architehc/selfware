@@ -765,6 +765,10 @@ impl Agent {
                         streaming_usage_delta(&mut reported_usage, &u);
                     sticky_state.add_tokens(completion_delta);
                     output::record_tokens(prompt_delta, completion_delta);
+                    self.session_main_loop_tokens.fetch_add(
+                        prompt_delta.saturating_add(completion_delta),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                     output::print_token_usage(
                         reported_usage.prompt_tokens as u64,
                         reported_usage.completion_tokens as u64,

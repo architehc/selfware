@@ -58,6 +58,10 @@ impl Agent {
         let prompt = usage.prompt_tokens as u64;
         let completion = usage.completion_tokens as u64;
         output::record_tokens(prompt, completion);
+        self.session_main_loop_tokens.fetch_add(
+            prompt.saturating_add(completion),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         output::print_token_usage(prompt, completion);
         self.emit_event(AgentEvent::TokenUsage {
             prompt_tokens: prompt,

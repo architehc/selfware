@@ -334,7 +334,15 @@ async fn explicitly_free_usage_is_displayed_as_zero_cost() {
     let summary = agent.run_summary();
     assert!(summary.cost_complete);
     assert_eq!(summary.cost_usd, Some(0.0));
-    assert!(crate::cli::render_cost_line(&summary).contains("cost $0.0000"));
+    assert!(crate::agent::session_usage::cost_phrase(
+        summary.cost_usd,
+        summary.cost_complete,
+        summary.unmetered_attempts
+    )
+    .contains("cost $0.0000"));
+    // The session fold reads the same accumulators.
+    assert_eq!(agent.session_usage().cost_usd, Some(0.0));
+    assert_eq!(agent.session_usage().total_tokens, summary.total_tokens);
     server.await.unwrap();
 }
 

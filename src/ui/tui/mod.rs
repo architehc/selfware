@@ -918,7 +918,7 @@ pub fn run_tui_dashboard_with_events(
                                                /clear          -- Clear chat history\n  \
                                                /status         -- Show agent status\n  \
                                                /stats          -- Show session statistics\n  \
-                                               /cost           -- Show token cost estimate\n  \
+                                               /cost           -- Show session token usage\n  \
                                                /ctx            -- Show context usage\n\
                                              \n\
                                              Plan Mode:\n  \
@@ -1036,23 +1036,16 @@ pub fn run_tui_dashboard_with_events(
                                     });
                                 }
                                 "/cost" => {
-                                    let cost_msg = with_dashboard_state(&shared_state, |state| {
-                                        let tokens = state.tokens_used;
-                                        // Rough cost estimate: ~$0.01 per 1K tokens (blended input/output)
-                                        let estimated_cost = tokens as f64 * 0.00001;
-                                        format!(
-                                                "Cost estimate:\n  \
-                                                 Tokens used:    {}\n  \
-                                                 Est. cost:      ${:.4}\n  \
-                                                 Model:          {}\n  \
-                                                 Note: Estimate is approximate; actual cost depends on model pricing.",
-                                                tokens, estimated_cost, state.model
-                                            )
-                                    });
-                                    app.add_system_message(&cost_msg);
-                                    with_dashboard_state(&shared_state, |state| {
-                                        state.log(LogLevel::Info, "Displayed cost estimate");
-                                    });
+                                    // The agent loop owns the measured
+                                    // session fold (every task, main loop +
+                                    // side calls, provider-reported cost
+                                    // only). This handler used to invent
+                                    // "$0.00001 per token" from the dashboard
+                                    // counter (0.9.1 field test).
+                                    let _ = user_input_tx.send("/cost".to_string());
+                                    app.add_system_message(
+                                        "Session token usage → log panel (cost shown only when the provider reports it)",
+                                    );
                                 }
                                 "/ctx" => {
                                     let ctx_msg = with_dashboard_state(&shared_state, |state| {

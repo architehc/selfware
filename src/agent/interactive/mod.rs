@@ -232,16 +232,14 @@ impl Agent {
             let input = input.trim();
 
             if is_exit_command(input) {
-                // Session-exit cost summary (claude prints usage on quit) —
-                // same counters as /cost.
-                let (prompt, completion) = output::get_total_tokens();
-                if prompt + completion > 0 {
-                    println!(
-                        "session tokens: {} prompt + {} completion = {} total",
-                        prompt,
-                        completion,
-                        prompt + completion
-                    );
+                // Session-exit usage summary (claude prints usage on quit) —
+                // the same session fold as /cost, not the process-global
+                // main-loop counter (which disagreed with /cost).
+                if let Some(line) = self
+                    .session_usage()
+                    .render_quit_line(self.session_main_loop_tokens())
+                {
+                    println!("{line}");
                 }
                 break;
             }
@@ -728,24 +726,24 @@ impl Agent {
             }
 
             if input == "/cost" {
-                let (prompt, completion) = output::get_total_tokens();
-                let total = prompt + completion;
+                // One measured session total (every task, main loop + side
+                // calls) with its breakdowns; cost only when the provider
+                // reported it — never from hard-coded per-token prices
+                // (UX field test, 0.9.0) nor from a second counter that
+                // disagreed with the total (0.9.1).
+                let lines = self
+                    .session_usage()
+                    .render_cost_lines(self.session_main_loop_tokens());
                 println!();
-                println!("  {} Token Usage", "📊".bright_cyan());
-                println!("  Prompt:     {:>10}", prompt.to_string().bright_white());
-                println!(
-                    "  Completion: {:>10}",
-                    completion.to_string().bright_white()
-                );
-                println!("  Total:      {:>10}", total.to_string().bright_cyan());
-                // Cost comes only from what the provider reported — never
-                // from hard-coded per-token prices, which invented "~$0.0951"
-                // for a free endpoint (UX field test, 0.9.0). Same line as
-                // the other /cost handler and the run summary.
-                println!(
-                    "  {}",
-                    crate::cli::render_cost_line(&self.run_summary()).dimmed()
-                );
+                for (i, line) in lines.iter().enumerate() {
+                    if i == 0 {
+                        println!("  {} {}", "📊".bright_cyan(), line);
+                    } else if i + 1 == lines.len() {
+                        println!("  {}", line.dimmed());
+                    } else {
+                        println!("  {line}");
+                    }
+                }
                 println!();
                 continue;
             }
@@ -3239,7 +3237,12 @@ impl Agent {
                 continue;
             }
             if input == "/cost" {
-                println!("{}", crate::cli::render_cost_line(&self.run_summary()));
+                for line in self
+                    .session_usage()
+                    .render_cost_lines(self.session_main_loop_tokens())
+                {
+                    println!("{line}");
+                }
                 continue;
             }
             if input == "/model" {
