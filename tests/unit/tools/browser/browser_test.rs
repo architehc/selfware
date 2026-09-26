@@ -756,3 +756,26 @@ fn test_extract_text_large_html() {
     let text = extract_text_from_html(&html);
     assert!(text.contains("word"));
 }
+
+#[tokio::test]
+async fn default_output_path_is_anchored_to_the_workspace_root() {
+    use crate::tools::workspace_root::{self, WorkspaceRoot};
+    let tmp = tempfile::Builder::new()
+        .prefix("browser-default-out")
+        .tempdir()
+        .unwrap();
+    let base = tmp.path().to_path_buf();
+    let (shot, pdf) = workspace_root::scope(WorkspaceRoot::fixed(base.clone()), async {
+        (
+            default_output_path("screenshot.png"),
+            default_output_path("page.pdf"),
+        )
+    })
+    .await;
+    let expected_dir = base.join(".selfware").join("browser-output");
+    assert_eq!(
+        std::path::PathBuf::from(shot),
+        expected_dir.join("screenshot.png")
+    );
+    assert_eq!(std::path::PathBuf::from(pdf), expected_dir.join("page.pdf"));
+}

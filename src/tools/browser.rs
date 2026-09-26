@@ -635,10 +635,11 @@ impl Tool for BrowserScreenshot {
 
         // A relative output path resolves against the agent's workspace root.
         let args = crate::tools::workspace_root::anchor_json(args, &["output_path"]);
+        let default_output = default_output_path("screenshot.png");
         let output_path = args
             .get("output_path")
             .and_then(|v| v.as_str())
-            .unwrap_or(".selfware/browser-output/screenshot.png");
+            .unwrap_or(&default_output);
         validate_browser_output_path(output_path, self.name())?;
         let (chrome_output_path, staged_output_path) =
             prepare_chrome_output_path(output_path).await?;
@@ -833,10 +834,11 @@ impl Tool for BrowserPdf {
 
         // A relative output path resolves against the agent's workspace root.
         let args = crate::tools::workspace_root::anchor_json(args, &["output_path"]);
+        let default_output = default_output_path("page.pdf");
         let output_path = args
             .get("output_path")
             .and_then(|v| v.as_str())
-            .unwrap_or(".selfware/browser-output/page.pdf");
+            .unwrap_or(&default_output);
         validate_browser_output_path(output_path, self.name())?;
         let (chrome_output_path, staged_output_path) =
             prepare_chrome_output_path(output_path).await?;
@@ -1318,6 +1320,14 @@ fn truncate_output(output: &str, max_len: usize) -> String {
 // ============================================================================
 // Tests
 // ============================================================================
+
+/// Default location for browser output when the call names no
+/// `output_path`, anchored to the agent's workspace root. It is applied after
+/// `anchor_json`, so a bare relative default used to resolve against the
+/// process cwd instead of the workspace.
+fn default_output_path(file_name: &str) -> String {
+    crate::tools::workspace_root::anchor(&format!(".selfware/browser-output/{file_name}"))
+}
 
 #[cfg(test)]
 #[path = "../../tests/unit/tools/browser/browser_test.rs"]
