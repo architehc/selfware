@@ -2110,7 +2110,9 @@ pub async fn run() -> Result<()> {
         }
 
         let start = std::time::Instant::now();
-        let mut agent = Agent::new(config).await?;
+        let mut agent = Agent::new(config)
+            .await?
+            .with_confirmation_timeout(ONE_SHOT_CONFIRM_TIMEOUT);
         // Resume named session if --resume-session was provided (headless path)
         if let Some(ref session_name) = cli.resume_session {
             resume_named_session_or_bail(
@@ -2669,6 +2671,13 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
     Ok(())
 }
 
+/// How long a tool-confirmation prompt waits in a non-REPL run (`-p`, `run`,
+/// `improve`, `batch`) before failing closed. Long enough for someone
+/// watching to read the reason and answer; short enough that an unattended
+/// run does not stall (UX field test: a `-y` run waited ~14 minutes on an
+/// unexplained prompt until it was killed).
+const ONE_SHOT_CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Run a single multi-agent fan-out over `task` and return — the headless
 /// one-shot form of `multi-chat` (P1-4).
 ///
@@ -3038,7 +3047,9 @@ async fn handle_command(
             };
 
             let start = std::time::Instant::now();
-            let mut agent = Agent::new(config).await?;
+            let mut agent = Agent::new(config)
+                .await?
+                .with_confirmation_timeout(ONE_SHOT_CONFIRM_TIMEOUT);
             // Resume named session if --resume-session was provided
             if let Some(ref session_name) = resume_session {
                 resume_named_session_or_bail(
@@ -3590,7 +3601,9 @@ async fn handle_command(
             }
 
             let cycles = if continuous { max_cycles } else { 1 };
-            let mut agent = Agent::new(config).await?;
+            let mut agent = Agent::new(config)
+                .await?
+                .with_confirmation_timeout(ONE_SHOT_CONFIRM_TIMEOUT);
 
             for cycle in 0..cycles {
                 if let Err(e) = crate::safety::killswitch::check_killswitch(Some(&project_root)) {
@@ -4441,7 +4454,9 @@ async fn handle_command(
                     println!("\n── Task {}/{}: {} ──", i + 1, tasks.len(), task);
                 }
                 let start = std::time::Instant::now();
-                let mut agent = crate::agent::Agent::new(config.clone()).await?;
+                let mut agent = crate::agent::Agent::new(config.clone())
+                    .await?
+                    .with_confirmation_timeout(ONE_SHOT_CONFIRM_TIMEOUT);
                 let run_result = agent.run_task(task).await;
                 let duration = start.elapsed();
 

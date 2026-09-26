@@ -4310,3 +4310,42 @@ async fn edit_failure_loop_does_not_fire_below_threshold_or_on_read_only() {
         .expect("read-only tasks never enter the edit-failure loop");
     assert!(!agent.edit_loop_recovery_used);
 }
+
+#[tokio::test]
+async fn bounded_confirmation_read_never_hangs_and_always_unpauses() {
+    // One-shot runs bound the tool-confirmation prompt (UX field test: a `-y`
+    // run waited ~14 minutes on an unanswered prompt). Whatever stdin does in
+    // the test environment — EOF, a closed pipe, or nothing at all — the
+    // bounded read returns within its limit and never leaves the ESC
+    // listener paused.
+    use std::sync::atomic::Ordering;
+    let paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ack = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let started = std::time::Instant::now();
+    let answered = read_line_pausing_esc_bounded(
+        &paused,
+        &ack,
+        tokio::time::Duration::from_millis(5),
+        Some(tokio::time::Duration::from_millis(200)),
+    )
+    .await;
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "a bounded confirmation read must not hang"
+    );
+    // Either an EOF/empty answer or a timeout (None) — both are "no".
+    if let Ok(Some(line)) = &answered {
+        assert!(
+            line.trim().is_empty(),
+            "no operator input in tests: {line:?}"
+        );
+    }
+    assert!(
+        !paused.load(Ordering::Acquire),
+        "esc_paused must be cleared"
+    );
+    assert!(
+        !ack.load(Ordering::Acquire),
+        "esc_pause_ack must be cleared"
+    );
+}

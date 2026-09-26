@@ -3413,7 +3413,13 @@ impl Agent {
                     // the normal interactive prompt below instead of the
                     // usual YOLO auto-approve.
                     return self
-                        .prompt_tool_confirmation(name, args_str, call_id, use_native_fc)
+                        .prompt_tool_confirmation(
+                            name,
+                            args_str,
+                            call_id,
+                            use_native_fc,
+                            Some(&reason),
+                        )
                         .await;
                 }
             }
@@ -3465,18 +3471,24 @@ impl Agent {
             return Ok(true);
         }
 
-        self.prompt_tool_confirmation(name, args_str, call_id, use_native_fc)
+        self.prompt_tool_confirmation(name, args_str, call_id, use_native_fc, None)
             .await
     }
 
     /// Interactive (CLI or TUI) yes/no confirmation prompt for a single tool
     /// call. Assumes the caller has already decided confirmation is required.
+    ///
+    /// `reason` is why the call needs confirmation when a safety gate (not
+    /// the plain per-tool policy) asked for it; it is shown to the operator,
+    /// who otherwise saw only "Execute?" with no explanation (UX field test:
+    /// a `-y` run stopped on this prompt and waited ~14 minutes).
     async fn prompt_tool_confirmation(
         &mut self,
         name: &str,
         args_str: &str,
         call_id: &str,
         use_native_fc: bool,
+        reason: Option<&str>,
     ) -> Result<bool> {
         let args_preview: String = args_str
             .chars()
@@ -3495,7 +3507,10 @@ impl Agent {
             use super::tui_events::AgentEvent;
             self.emit_event(AgentEvent::PermissionRequested {
                 tool_name: name.to_string(),
-                reason: format!("Args: {}", args_display),
+                reason: match reason {
+                    Some(why) => format!("{}\nArgs: {}", why, args_display),
+                    None => format!("Args: {}", args_display),
+                },
             });
             let approved = self.await_tui_permission_response().await;
             if !approved {
@@ -3538,10 +3553,46 @@ impl Agent {
             name.bright_cyan(),
             args_display.bright_white()
         );
+        if let Some(why) = reason {
+            cli_println!("   {} {}", "Why:".bright_yellow(), why);
+        }
+        if let Some(limit) = self.confirmation_timeout {
+            cli_println!(
+                "   {}",
+                format!(
+                    "No answer within {}s skips this call (one-shot run).",
+                    limit.as_secs()
+                )
+                .dimmed()
+            );
+        }
         cli_prompt!("\x1b[0m\x1b[1m\x1b[97mExecute? [y = once / a = always allow this tool (session) / N = skip / type \"yolo\" to disable confirmations]: \x1b[0m");
 
-        let response =
-            super::execution::read_line_pausing_esc(&self.esc_paused, &self.esc_pause_ack).await;
+        let response = super::execution::read_line_pausing_esc_bounded(
+            &self.esc_paused,
+            &self.esc_pause_ack,
+            tokio::time::Duration::from_millis(super::execution::ESC_PAUSE_DEADLINE_MS),
+            self.confirmation_timeout,
+        )
+        .await;
+        if let Ok(None) = response {
+            // Nobody answered within the one-shot bound: fail closed. The
+            // model is told the call was not run and why, so it can take
+            // another route instead of the run hanging on stdin.
+            let limit = self.confirmation_timeout.map(|d| d.as_secs()).unwrap_or(0);
+            let skip_msg = format!(
+                "Tool execution skipped: no confirmation within {}s (one-shot run, fail closed){}",
+                limit,
+                reason
+                    .map(|why| format!(" — it needed confirmation because: {}", why))
+                    .unwrap_or_default()
+            );
+            cli_println!("\n{} {}", "⏭️".bright_yellow(), skip_msg);
+            self.record_failed_tool_attempt(name, args_str, "confirmation_timeout", &skip_msg);
+            self.push_tool_skip_message(name, call_id, use_native_fc, &skip_msg);
+            return Ok(false);
+        }
+        let response = response.map(|line| line.unwrap_or_default());
         if let Ok(response) = response {
             match parse_confirm_response(&response) {
                 ConfirmDecision::ExecuteOnce => return Ok(true),

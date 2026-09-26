@@ -58,6 +58,7 @@ struct TurnArtifactCtx {
 /// cancel token while this prompt is open. The only deadline here is
 /// [`ESC_PAUSE_DEADLINE_MS`], which bounds the listener-handshake wait, never
 /// the human's thinking time.
+#[cfg(test)]
 pub(super) async fn read_line_pausing_esc(
     esc_paused: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     esc_pause_ack: &std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -70,13 +71,31 @@ pub(super) async fn read_line_pausing_esc(
     .await
 }
 
-/// Same as [`read_line_pausing_esc`] but with an explicit ESC-ack deadline,
+/// Same as `read_line_pausing_esc` but with an explicit ESC-ack deadline,
 /// allowing callers to tune the wait when 250 ms is too short or too long.
+#[cfg(test)]
 pub(super) async fn read_line_pausing_esc_with_deadline(
     esc_paused: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     esc_pause_ack: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     esc_deadline: tokio::time::Duration,
 ) -> std::io::Result<String> {
+    read_line_pausing_esc_bounded(esc_paused, esc_pause_ack, esc_deadline, None)
+        .await
+        .map(|line| line.unwrap_or_default())
+}
+
+/// `read_line_pausing_esc` with an optional bound on how long to wait for
+/// the operator. `Ok(None)` means the bound elapsed with no answer. The ESC
+/// listener is always unpaused afterwards (a timeout around the plain reader
+/// would drop it mid-read and leave the listener paused). An abandoned read
+/// may still consume a later line; callers only use the bound where no
+/// further operator input is expected (one-shot runs).
+pub(super) async fn read_line_pausing_esc_bounded(
+    esc_paused: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    esc_pause_ack: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    esc_deadline: tokio::time::Duration,
+    answer_timeout: Option<tokio::time::Duration>,
+) -> std::io::Result<Option<String>> {
     use std::sync::atomic::Ordering;
     use tokio::io::AsyncBufReadExt;
 
@@ -93,16 +112,44 @@ pub(super) async fn read_line_pausing_esc_with_deadline(
     // mode itself after unpause.
     let _ = crossterm::terminal::disable_raw_mode();
 
-    let mut response = String::new();
-    let stdin = tokio::io::stdin();
-    let mut reader = tokio::io::BufReader::new(stdin);
-    let result = reader.read_line(&mut response).await;
+    let result: std::io::Result<Option<String>> = match answer_timeout {
+        // Bounded: read on a plain OS thread, not tokio's stdin. tokio's
+        // stdin reads on a runtime blocking thread, and the runtime waits for
+        // those at shutdown — an abandoned read would keep the process from
+        // exiting until someone pressed Enter. A detached OS thread blocked
+        // on stdin does not hold up the runtime or process exit.
+        Some(limit) => {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            std::thread::Builder::new()
+                .name("confirm-read".into())
+                .spawn(move || {
+                    let mut line = String::new();
+                    let read = std::io::stdin().read_line(&mut line).map(|_| line);
+                    let _ = tx.send(read);
+                })
+                .map_err(std::io::Error::other)?;
+            match tokio::time::timeout(limit, rx).await {
+                Ok(Ok(read)) => read.map(Some),
+                Ok(Err(_closed)) => Ok(None),
+                Err(_elapsed) => Ok(None),
+            }
+        }
+        None => {
+            let mut response = String::new();
+            let stdin = tokio::io::stdin();
+            let mut reader = tokio::io::BufReader::new(stdin);
+            reader
+                .read_line(&mut response)
+                .await
+                .map(|_| Some(response))
+        }
+    };
 
     // Unpause — the listener will re-enter raw mode on its own
     esc_paused.store(false, Ordering::Release);
     esc_pause_ack.store(false, Ordering::Release);
 
-    result.map(|_| response)
+    result
 }
 
 /// Count source files in the current workdir (up to `cap`, then early-return).

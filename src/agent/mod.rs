@@ -1061,6 +1061,11 @@ pub struct Agent {
     esc_paused: Arc<AtomicBool>,
     /// Acknowledgement from the ESC listener that it observed the pause flag.
     esc_pause_ack: Arc<AtomicBool>,
+    /// Bound on how long an interactive tool-confirmation prompt waits for
+    /// an answer. `None` (the default, the chat REPL) waits for the
+    /// operator; one-shot `-p` runs set it so an unanswered prompt fails
+    /// closed instead of hanging the run.
+    confirmation_timeout: Option<std::time::Duration>,
     /// Last tool output for progressive disclosure via `/last`.
     last_tool_output: Option<last_tool::LastToolOutput>,
     /// Monotonic counter for `<workdir>/.selfware/turns/turn_NNNN.json` files.
@@ -1886,6 +1891,7 @@ To call a tool, use this EXACT XML structure:
             governor,
             esc_paused: Arc::new(AtomicBool::new(false)),
             esc_pause_ack: Arc::new(AtomicBool::new(false)),
+            confirmation_timeout: None,
             last_tool_output: None,
             turn_artifact_seq: 0,
             turn_artifact_slots: std::collections::HashMap::new(),
@@ -2051,6 +2057,14 @@ To call a tool, use this EXACT XML structure:
     /// The emitter is also propagated into the inner [`ApiClient`] so HTTP
     /// round-trip events (`LlmRequestSent` / `LlmResponseReceived`) land on
     /// the same channel as step / tool / guard events.
+    /// Bound interactive tool-confirmation prompts: an unanswered prompt is
+    /// treated as "skip" after `limit` (fail closed). Used by one-shot `-p`
+    /// runs, where nobody may be watching the terminal.
+    pub fn with_confirmation_timeout(mut self, limit: std::time::Duration) -> Self {
+        self.confirmation_timeout = Some(limit);
+        self
+    }
+
     pub fn with_progress_emitter(mut self, emitter: Arc<dyn progress::ProgressEmitter>) -> Self {
         self.progress_emitter = Arc::clone(&emitter);
         self.client.with_progress_emitter(emitter);
