@@ -590,9 +590,11 @@ fn test_should_sample_zero_rate() {
 
 #[test]
 fn test_log_entry_count_and_increment() {
+    // Same global-counter race as the increment tests below (Rule 2 note there).
+    let _guard = rotation_test_guard();
     let before = log_entry_count();
     let after = increment_log_count();
-    assert_eq!(after, before + 1);
+    assert!(after > before, "{after} > {before}");
 }
 
 #[test]
@@ -986,7 +988,8 @@ fn test_get_metrics_returns_static_ref() {
     let before = m.api_requests.load(Ordering::Relaxed);
     increment_api_requests();
     let after = m.api_requests.load(Ordering::Relaxed);
-    assert_eq!(after, before + 1);
+    // Global counter; parallel tests make API calls (Rule 2 note above).
+    assert!(after > before, "{after} > {before}");
 }
 
 #[test]
@@ -1035,26 +1038,38 @@ fn test_add_tokens_processed_multiple_adds() {
 
 // --- increment_log_count: verify atomicity ---
 
+// The counter is process-global. The rotation tests STORE and halve it
+// (they hold rotation_test_guard, which these tests now take too), and
+// production paths (record_success, record_state_transition) run in
+// parallel agent tests and add +1s at any time. So exact equality was flaky
+// (failed once in the 0.9.1 gate). Under the guard the counter can only
+// grow, so each call returning a strictly larger value, and at least our
+// own increments landing, is deterministic.
+// Rule 2 (0.9.1, maintainer sign-off: "do the rest"): assert_eq on exact
+// counts relaxed to strictly-increasing / >=.
+
 #[test]
 fn test_increment_log_count_sequential() {
+    let _guard = rotation_test_guard();
     let before = log_entry_count();
     let r1 = increment_log_count();
     let r2 = increment_log_count();
     let r3 = increment_log_count();
-    // Each call returns the new count after incrementing
-    assert_eq!(r1, before + 1);
-    assert_eq!(r2, before + 2);
-    assert_eq!(r3, before + 3);
+    // Each call returns the new count after incrementing.
+    assert!(r1 > before, "{r1} > {before}");
+    assert!(r2 > r1, "{r2} > {r1}");
+    assert!(r3 > r2, "{r3} > {r2}");
 }
 
 #[test]
 fn test_log_entry_count_matches_after_increments() {
+    let _guard = rotation_test_guard();
     let before = log_entry_count();
     for _ in 0..5 {
         increment_log_count();
     }
     let after = log_entry_count();
-    assert_eq!(after, before + 5);
+    assert!(after >= before + 5, "{after} >= {before} + 5");
 }
 
 // --- shutdown_tracing: safe to call even when not initialized ---
@@ -1295,7 +1310,10 @@ fn test_get_metrics_is_same_as_static() {
     let before = m.tool_errors.load(Ordering::Relaxed);
     increment_tool_errors();
     // Should reflect on the same reference
-    assert_eq!(m.tool_errors.load(Ordering::Relaxed), before + 1);
+    // Global counter; parallel agent tests record tool errors (Rule 2 note
+    // at test_increment_log_count_sequential).
+    let after = m.tool_errors.load(Ordering::Relaxed);
+    assert!(after > before, "{after} > {before}");
 }
 
 // --- increment functions: verify both atomic and metrics crate counters ---
