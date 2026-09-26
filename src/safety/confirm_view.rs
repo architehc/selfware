@@ -426,6 +426,239 @@ pub fn file_write_target(tool_name: &str, args_str: &str) -> Option<String> {
     path_arg(&args).map(str::to_string)
 }
 
+// ---------------------------------------------------------------------------
+// Risk tags
+// ---------------------------------------------------------------------------
+
+/// A short, prompt-facing label for what a call can do.
+///
+/// `pip3 install -r dev.requirements.txt` and `grep` used to look identical
+/// at the prompt. The tag is a *display* hint derived from the tool plus
+/// command heuristics; it never grants anything — approval policy lives in
+/// `tool_metadata` / the permission store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RiskTag {
+    /// Only reads the workspace / state.
+    Reads,
+    /// Runs a command or program whose effects are not classified further.
+    RunsCommand,
+    /// Writes files in the workspace.
+    WritesWorkspace,
+    /// Talks to the network.
+    Network,
+    /// Installs packages / dependencies.
+    InstallsPackages,
+    /// Rewrites git history or publishes it (commit, reset, push, …).
+    GitHistory,
+    /// Deletes files.
+    DeletesFiles,
+    /// A tool with no explicit safety classification (e.g. `mcp_*`).
+    Unclassified,
+}
+
+impl RiskTag {
+    /// The bracketed label shown in the prompt, e.g. `[installs packages]`.
+    pub fn label(self) -> &'static str {
+        match self {
+            RiskTag::Reads => "[reads]",
+            RiskTag::RunsCommand => "[runs command]",
+            RiskTag::WritesWorkspace => "[writes workspace]",
+            RiskTag::Network => "[network]",
+            RiskTag::InstallsPackages => "[installs packages]",
+            RiskTag::GitHistory => "[git history]",
+            RiskTag::DeletesFiles => "[deletes files]",
+            RiskTag::Unclassified => "[unclassified tool]",
+        }
+    }
+
+    /// Whether the tag marks a call that only reads.
+    pub fn is_read_only(self) -> bool {
+        self == RiskTag::Reads
+    }
+
+    /// Severity used to pick one tag for a compound shell command (higher
+    /// wins).
+    fn severity(self) -> u8 {
+        match self {
+            RiskTag::Reads => 0,
+            RiskTag::RunsCommand => 1,
+            RiskTag::WritesWorkspace => 2,
+            RiskTag::Network => 3,
+            RiskTag::InstallsPackages => 4,
+            RiskTag::GitHistory => 5,
+            RiskTag::DeletesFiles => 6,
+            RiskTag::Unclassified => 7,
+        }
+    }
+}
+
+/// Classify a tool call for the prompt's risk tag.
+pub fn classify_risk(tool_name: &str, args: &Value) -> RiskTag {
+    match tool_name {
+        "shell_exec" | "pty_shell" => {
+            return match str_arg(args, &["command", "cmd"]) {
+                Some(cmd) if !cmd.trim().is_empty() => classify_shell_risk(cmd),
+                _ => RiskTag::RunsCommand,
+            };
+        }
+        "file_delete" => return RiskTag::DeletesFiles,
+        "git_commit" | "git_push" | "git_checkpoint" => return RiskTag::GitHistory,
+        "npm_install" | "pip_install" | "yarn_install" => return RiskTag::InstallsPackages,
+        "cargo_fmt" => return RiskTag::WritesWorkspace,
+        "cargo_clippy" => {
+            return if args.get("fix").and_then(|v| v.as_bool()).unwrap_or(false) {
+                RiskTag::WritesWorkspace
+            } else {
+                RiskTag::RunsCommand
+            };
+        }
+        "cargo_test" | "cargo_check" => return RiskTag::RunsCommand,
+        _ => {}
+    }
+    if crate::tools::context::is_context_tool(tool_name) {
+        return RiskTag::Reads;
+    }
+    match crate::safety::classify_tool_metadata(tool_name) {
+        None => RiskTag::Unclassified,
+        Some(meta) if meta.destructive && !meta.shell_execution => RiskTag::DeletesFiles,
+        Some(meta) if meta.network_access => RiskTag::Network,
+        Some(meta) if meta.shell_execution => RiskTag::RunsCommand,
+        Some(meta) if meta.read_only => RiskTag::Reads,
+        Some(_) => RiskTag::WritesWorkspace,
+    }
+}
+
+/// Heuristic risk tag for a shell command line. Compound commands take the
+/// most severe tag of their segments; anything not positively recognised
+/// as a read is at least `[runs command]`.
+pub fn classify_shell_risk(command: &str) -> RiskTag {
+    let lower = command.to_lowercase();
+    let mut worst = RiskTag::Reads;
+    // Newlines separate commands too; the dispatcher's segment splitter is
+    // quote-aware and splits on `;`, `&&`, `||`, `|` and a backgrounding `&`.
+    for segment in lower
+        .lines()
+        .flat_map(crate::agent::tool_dispatch::helpers::split_shell_segments)
+    {
+        let tag = classify_shell_segment(&segment);
+        if tag.severity() > worst.severity() {
+            worst = tag;
+        }
+    }
+    if worst == RiskTag::Reads
+        && !crate::agent::tool_dispatch::helpers::shell_command_is_observational(command)
+    {
+        // Our own segment table saw nothing risky, but the dispatcher's
+        // stricter read-only classifier does not vouch for it: never label
+        // an unrecognised command as a read.
+        worst = RiskTag::RunsCommand;
+    }
+    worst
+}
+
+fn classify_shell_segment(segment: &str) -> RiskTag {
+    let words: Vec<&str> = segment
+        .split_whitespace()
+        .skip_while(|w| {
+            matches!(*w, "sudo" | "env" | "command" | "exec" | "nohup" | "time")
+                || (w.contains('=') && !w.starts_with('-'))
+        })
+        .collect();
+    let Some(first) = words.first() else {
+        return RiskTag::Reads;
+    };
+    let prog = first.rsplit('/').next().unwrap_or(first);
+    let sub = words.get(1).copied().unwrap_or("");
+    let has = |w: &str| words.contains(&w);
+
+    // Deletion.
+    if matches!(prog, "rm" | "rmdir" | "shred" | "unlink")
+        || (prog == "find" && (has("-delete") || has("-exec") || has("-execdir")))
+        || (prog == "git" && sub == "clean")
+    {
+        return RiskTag::DeletesFiles;
+    }
+    // Git history / publication.
+    if prog == "git" {
+        return match sub {
+            "commit" | "push" | "reset" | "rebase" | "merge" | "cherry-pick" | "revert" | "tag"
+            | "am" | "stash" | "pull" | "branch" | "filter-branch" | "update-ref" => {
+                RiskTag::GitHistory
+            }
+            "clone" | "fetch" | "ls-remote" | "submodule" => RiskTag::Network,
+            "checkout" | "restore" | "switch" | "apply" | "mv" | "rm" | "add" | "init"
+            | "config" => RiskTag::WritesWorkspace,
+            _ => RiskTag::Reads,
+        };
+    }
+    // Package installation.
+    let installs = match prog {
+        "pip" | "pip3" | "uv" | "pipx" | "poetry" | "pdm" | "conda" | "mamba" => {
+            matches!(sub, "install" | "add" | "sync" | "pip") && !has("list") && !has("freeze")
+        }
+        "python" | "python3" | "py" => {
+            sub == "-m" && words.get(2).is_some_and(|m| *m == "pip") && has("install")
+        }
+        "npm" | "pnpm" | "yarn" | "bun" => {
+            matches!(sub, "install" | "i" | "ci" | "add" | "update" | "upgrade")
+        }
+        "cargo" => matches!(sub, "install" | "add" | "update" | "binstall"),
+        "brew" | "apt" | "apt-get" | "dnf" | "yum" | "apk" | "port" | "snap" | "gem"
+        | "composer" => matches!(sub, "install" | "add" | "require" | "upgrade" | "update"),
+        "pacman" => sub.starts_with("-s") || sub.starts_with("-u"),
+        "go" => matches!(sub, "install" | "get"),
+        _ => false,
+    };
+    if installs {
+        return RiskTag::InstallsPackages;
+    }
+    // Network.
+    if matches!(
+        prog,
+        "curl"
+            | "wget"
+            | "ssh"
+            | "scp"
+            | "sftp"
+            | "rsync"
+            | "nc"
+            | "ncat"
+            | "telnet"
+            | "ftp"
+            | "http"
+            | "https"
+            | "xh"
+    ) || (prog == "docker" && matches!(sub, "pull" | "push" | "login"))
+    {
+        return RiskTag::Network;
+    }
+    // Workspace writes.
+    if crate::agent::tool_dispatch::helpers::has_file_redirect(segment)
+        || matches!(
+            prog,
+            "mv" | "cp"
+                | "mkdir"
+                | "touch"
+                | "tee"
+                | "chmod"
+                | "chown"
+                | "ln"
+                | "truncate"
+                | "patch"
+                | "dd"
+        )
+        || (prog == "sed" && words.iter().any(|w| w.starts_with("-i")))
+        || (prog == "cargo" && sub == "fmt" && !has("--check"))
+    {
+        return RiskTag::WritesWorkspace;
+    }
+    if crate::agent::tool_dispatch::helpers::shell_command_is_observational(segment) {
+        RiskTag::Reads
+    } else {
+        RiskTag::RunsCommand
+    }
+}
+
 #[cfg(test)]
 #[path = "../../tests/unit/safety/confirm_view/confirm_view_test.rs"]
 mod tests;

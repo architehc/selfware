@@ -185,3 +185,102 @@ fn file_write_target_only_for_file_write() {
     );
     assert_eq!(file_write_target("file_edit", &args), None);
 }
+
+// ===== risk tags =====
+
+fn shell(cmd: &str) -> RiskTag {
+    classify_risk("shell_exec", &json!({ "command": cmd }))
+}
+
+#[test]
+fn pip_install_is_not_tagged_like_grep() {
+    // Live 0.9.1: `pip3 install -r dev.requirements.txt` looked identical to grep.
+    assert_eq!(
+        shell("pip3 install -r dev.requirements.txt"),
+        RiskTag::InstallsPackages
+    );
+    assert_eq!(shell("grep -rn slug src"), RiskTag::Reads);
+    assert_ne!(shell("pip3 install x").label(), shell("grep x y").label());
+}
+
+#[test]
+fn shell_install_heuristics() {
+    for cmd in [
+        "pip install requests",
+        "python3 -m pip install -e .",
+        "npm install",
+        "npm ci",
+        "yarn add left-pad",
+        "cargo install ripgrep",
+        "cargo add serde",
+        "brew install jq",
+        "sudo apt-get install -y curl",
+        "go install example.com/x@latest",
+        "uv pip install foo",
+    ] {
+        assert_eq!(shell(cmd), RiskTag::InstallsPackages, "{cmd}");
+    }
+}
+
+#[test]
+fn shell_network_git_delete_and_write_heuristics() {
+    assert_eq!(shell("curl -sL https://example.com"), RiskTag::Network);
+    assert_eq!(shell("wget https://x/y.tgz"), RiskTag::Network);
+    assert_eq!(shell("git clone https://x/y"), RiskTag::Network);
+    assert_eq!(shell("git push origin main"), RiskTag::GitHistory);
+    assert_eq!(shell("git commit -m wip"), RiskTag::GitHistory);
+    assert_eq!(shell("git reset --hard HEAD~1"), RiskTag::GitHistory);
+    assert_eq!(shell("rm -rf build"), RiskTag::DeletesFiles);
+    assert_eq!(shell("find . -name '*.pyc' -delete"), RiskTag::DeletesFiles);
+    assert_eq!(shell("echo hi > out.txt"), RiskTag::WritesWorkspace);
+    assert_eq!(shell("sed -i 's/a/b/' f.txt"), RiskTag::WritesWorkspace);
+    assert_eq!(shell("git status"), RiskTag::Reads);
+    assert_eq!(shell("git log --oneline -5"), RiskTag::Reads);
+}
+
+#[test]
+fn compound_commands_take_the_most_severe_segment() {
+    assert_eq!(shell("ls && rm -rf target"), RiskTag::DeletesFiles);
+    assert_eq!(shell("cat a | grep b; curl http://x"), RiskTag::Network);
+    assert_eq!(shell("ls\ngit push"), RiskTag::GitHistory);
+    // A pipe inside quotes is an argument, not a separator: the quoted
+    // `rm -rf` is not a deletion segment. (The whole-command read-only
+    // classifier still refuses to vouch for the text, so the tag is the
+    // conservative `[runs command]`, never `[reads]`.)
+    assert_eq!(shell("grep 'a | rm -rf x' file"), RiskTag::RunsCommand);
+}
+
+#[test]
+fn unrecognised_commands_are_never_labelled_reads() {
+    assert_eq!(shell("python3 fix.py"), RiskTag::RunsCommand);
+    assert_eq!(shell("./configure"), RiskTag::RunsCommand);
+    assert_eq!(shell("make"), RiskTag::RunsCommand);
+}
+
+#[test]
+fn tool_level_risk_tags() {
+    let none = json!({});
+    assert_eq!(classify_risk("file_read", &none), RiskTag::Reads);
+    assert_eq!(classify_risk("context_bulk_read", &none), RiskTag::Reads);
+    assert_eq!(classify_risk("file_edit", &none), RiskTag::WritesWorkspace);
+    assert_eq!(classify_risk("file_write", &none), RiskTag::WritesWorkspace);
+    assert_eq!(
+        classify_risk("patch_apply", &none),
+        RiskTag::WritesWorkspace
+    );
+    assert_eq!(classify_risk("file_delete", &none), RiskTag::DeletesFiles);
+    assert_eq!(classify_risk("git_commit", &none), RiskTag::GitHistory);
+    assert_eq!(classify_risk("git_push", &none), RiskTag::GitHistory);
+    assert_eq!(
+        classify_risk("pip_install", &none),
+        RiskTag::InstallsPackages
+    );
+    assert_eq!(classify_risk("http_request", &none), RiskTag::Network);
+    assert_eq!(classify_risk("cargo_test", &none), RiskTag::RunsCommand);
+    assert_eq!(
+        classify_risk("cargo_clippy", &json!({"fix": true})),
+        RiskTag::WritesWorkspace
+    );
+    assert_eq!(classify_risk("mcp_thing", &none), RiskTag::Unclassified);
+    assert_eq!(RiskTag::InstallsPackages.label(), "[installs packages]");
+}

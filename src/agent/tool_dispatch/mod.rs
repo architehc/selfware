@@ -3501,6 +3501,10 @@ impl Agent {
             .map(|line| line.text.as_str())
             .collect::<Vec<_>>()
             .join("\n");
+        let risk = crate::safety::confirm_view::classify_risk(
+            name,
+            &serde_json::from_str(args_str).unwrap_or(serde_json::Value::Null),
+        );
 
         // When TUI is active, route the confirmation through the TUI's own
         // permission modal instead of writing to stdout/stdin (which the TUI
@@ -3510,8 +3514,8 @@ impl Agent {
             self.emit_event(AgentEvent::PermissionRequested {
                 tool_name: name.to_string(),
                 reason: match reason {
-                    Some(why) => format!("{}\n{}", why, body_text),
-                    None => body_text,
+                    Some(why) => format!("{}\n{}\n{}", risk.label(), why, body_text),
+                    None => format!("{}\n{}", risk.label(), body_text),
                 },
             });
             let approved = self.await_tui_permission_response().await;
@@ -3549,7 +3553,12 @@ impl Agent {
         // Leading newline separates the block from any unterminated streaming
         // output; the prompt goes through the locked cli_prompt! so it can never
         // interleave with concurrent managed output.
-        cli_println!("\n{} Tool: {}", "⚠️".bright_yellow(), name.bright_cyan());
+        cli_println!(
+            "\n{} Tool: {} {}",
+            "⚠️".bright_yellow(),
+            name.bright_cyan(),
+            style_risk_tag(risk)
+        );
         for line in &body {
             cli_println!("   {}", style_confirm_line(line));
         }
@@ -4612,6 +4621,19 @@ fn existing_file_for_prompt(path: &str) -> Option<String> {
         return None;
     }
     std::fs::read_to_string(&resolved).ok()
+}
+
+/// Colour a risk tag for the CLI prompt: reads green, local effects yellow,
+/// anything reaching beyond the workspace (network, installs, git history,
+/// deletions, unclassified tools) red.
+fn style_risk_tag(tag: crate::safety::confirm_view::RiskTag) -> String {
+    use crate::safety::confirm_view::RiskTag;
+    let label = tag.label();
+    match tag {
+        RiskTag::Reads => label.green().to_string(),
+        RiskTag::RunsCommand | RiskTag::WritesWorkspace => label.yellow().to_string(),
+        _ => label.bright_red().bold().to_string(),
+    }
 }
 
 /// Colour one rendered confirmation line for the CLI prompt.
