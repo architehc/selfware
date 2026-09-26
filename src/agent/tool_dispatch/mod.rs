@@ -63,20 +63,20 @@ pub(crate) struct GreenVerification {
     pub(crate) mutation_sequence: usize,
 }
 
+/// Whether a shell exit status means the command never ran: 127 "command
+/// not found", 126 "found but not executable". The one rule shared by the
+/// verification ledger and the stale-verification rescue
+/// (`execution::rescue_command_could_not_run`), so the two cannot drift.
+pub(super) fn shell_exit_ran_nothing(code: i64) -> bool {
+    code == 126 || code == 127
+}
+
 impl Agent {
-    /// Credit (or record the failure of) a verification tool call for the
-    /// completion gate's StaleVerification check. Single accounting path for
-    /// both dispatch sites: a SUCCESSFUL recognized verification call marks
-    /// the current mutation sequence as verified; a FAILED one records the
-    /// summary so the gate can reject with FailingTestsAccepted. Callers run
-    /// this AFTER the mutating-call accounting, so a command that is both
-    /// mutating and verifying (e.g. an inline `python3 -c` check) still ends
-    /// the turn credited rather than stale.
     /// The exit status a shell-style tool result reports, when it reports one.
     ///
     /// The dispatcher's own success flag says whether the process was spawned
     /// and reaped, not what it returned.
-    fn shell_exit_code(result_str: &str) -> Option<i64> {
+    pub(super) fn shell_exit_code(result_str: &str) -> Option<i64> {
         serde_json::from_str::<serde_json::Value>(result_str)
             .ok()?
             .get("exit_code")?
@@ -147,7 +147,7 @@ impl Agent {
         // Not recording it does not wave the task through: with no successful
         // verification at this revision the gate still refuses, as
         // StaleVerification — which is what actually happened.
-        if Self::shell_exit_code(result_str).is_some_and(|code| code == 126 || code == 127) {
+        if Self::shell_exit_code(result_str).is_some_and(shell_exit_ran_nothing) {
             debug!("{name} could not be executed; no check ran, so nothing is recorded");
             return None;
         }

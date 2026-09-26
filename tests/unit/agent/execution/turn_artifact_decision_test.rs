@@ -613,6 +613,19 @@ fn rescue_command_that_cannot_run_is_recognised() {
     assert!(rescue_command_could_not_run(
         "Failed to spawn ./check: Permission denied (os error 13)"
     ));
+    // Wrapped / prose forms share the ledger's exit-status rule.
+    assert!(rescue_command_could_not_run(
+        "tool result: {\"exit_code\": 126, \"stdout\": \"\"}"
+    ));
+    assert!(rescue_command_could_not_run(
+        "process ended with exit code 127"
+    ));
+    assert!(!rescue_command_could_not_run(
+        "process ended with exit code 1"
+    ));
+    assert!(!rescue_command_could_not_run(
+        r#"{"exit_code":0,"stdout":"ok"}"#
+    ));
     // A test that ran and reports a permission failure is still a real failure.
     assert!(!rescue_command_could_not_run(
         r#"{"exit_code":1,"stdout":"test_perms FAILED: permission denied","stderr":""}"#

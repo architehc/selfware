@@ -2532,12 +2532,31 @@ const MAX_LENGTH_TRUNCATION_RETRIES: u32 = 2;
 /// non-executable (`os error 13`) program. A command that ran and failed (any
 /// other exit) is a real verification failure, not this.
 pub(super) fn rescue_command_could_not_run(tool_result: &str) -> bool {
+    use super::tool_dispatch::shell_exit_ran_nothing;
+    // The same exit-status rule as the verification ledger: the JSON result
+    // when it parses, else the `exit_code` / `exit code N` the text embeds.
+    let code =
+        Agent::shell_exit_code(tool_result.trim()).or_else(|| embedded_exit_code(tool_result));
+    if code.is_some_and(shell_exit_ran_nothing) {
+        return true;
+    }
     let text = tool_result.to_ascii_lowercase();
-    ["126", "127"].iter().any(|code| {
-        text.contains(&format!("\"exit_code\":{code}"))
-            || text.contains(&format!("\"exit_code\": {code}"))
-            || text.contains(&format!("exit code {code}"))
-    }) || text.contains("command not found")
+    text.contains("command not found")
         || (text.contains("no such file or directory") && text.contains("os error 2"))
         || (text.contains("permission denied") && text.contains("os error 13"))
+}
+
+/// The first exit status embedded in tool-result text that is not bare JSON
+/// (`"exit_code": N` inside a wrapper, or `exit code N` in prose).
+fn embedded_exit_code(text: &str) -> Option<i64> {
+    let lower = text.to_ascii_lowercase();
+    ["\"exit_code\":", "exit code "].iter().find_map(|marker| {
+        let at = lower.find(marker)? + marker.len();
+        let digits: String = lower[at..]
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '-')
+            .collect();
+        digits.parse().ok()
+    })
 }
