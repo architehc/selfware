@@ -3490,15 +3490,17 @@ impl Agent {
         use_native_fc: bool,
         reason: Option<&str>,
     ) -> Result<bool> {
-        let args_preview: String = args_str
-            .chars()
-            .take(TOOL_CONFIRM_ARGS_PREVIEW_CHARS)
-            .collect();
-        let args_display = if args_str.chars().count() > TOOL_CONFIRM_ARGS_PREVIEW_CHARS {
-            format!("{}...", args_preview)
-        } else {
-            args_preview
-        };
+        // Readable, bounded view of the call (diff for edits, `key: value`
+        // otherwise) instead of the raw escaped JSON cut at ~240 chars.
+        let existing = crate::safety::confirm_view::file_write_target(name, args_str)
+            .and_then(|path| existing_file_for_prompt(&path));
+        let body =
+            crate::safety::confirm_view::render_tool_call(name, args_str, existing.as_deref());
+        let body_text = body
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
 
         // When TUI is active, route the confirmation through the TUI's own
         // permission modal instead of writing to stdout/stdin (which the TUI
@@ -3508,8 +3510,8 @@ impl Agent {
             self.emit_event(AgentEvent::PermissionRequested {
                 tool_name: name.to_string(),
                 reason: match reason {
-                    Some(why) => format!("{}\nArgs: {}", why, args_display),
-                    None => format!("Args: {}", args_display),
+                    Some(why) => format!("{}\n{}", why, body_text),
+                    None => body_text,
                 },
             });
             let approved = self.await_tui_permission_response().await;
@@ -3547,12 +3549,10 @@ impl Agent {
         // Leading newline separates the block from any unterminated streaming
         // output; the prompt goes through the locked cli_prompt! so it can never
         // interleave with concurrent managed output.
-        cli_println!(
-            "\n{} Tool: {} Args: {}",
-            "⚠️".bright_yellow(),
-            name.bright_cyan(),
-            args_display.bright_white()
-        );
+        cli_println!("\n{} Tool: {}", "⚠️".bright_yellow(), name.bright_cyan());
+        for line in &body {
+            cli_println!("   {}", style_confirm_line(line));
+        }
         if let Some(why) = reason {
             cli_println!("   {} {}", "Why:".bright_yellow(), why);
         }
@@ -4597,6 +4597,38 @@ impl Agent {
 }
 
 /// Returns true if the named tool spawns an external operating system subprocess.
+/// Largest existing file a `file_write` prompt reads to show a diff.
+const CONFIRM_DIFF_MAX_EXISTING_BYTES: u64 = 512 * 1024;
+
+/// Current content of a `file_write` target, for the confirmation diff.
+///
+/// Display-only (never reaches the model); bounded; `None` when the file does
+/// not exist, is not a regular file, is too large or is not UTF-8 — the
+/// prompt then shows the new-file view.
+fn existing_file_for_prompt(path: &str) -> Option<String> {
+    let resolved = crate::tools::workspace_root::anchor(path);
+    let meta = std::fs::symlink_metadata(&resolved).ok()?;
+    if !meta.is_file() || meta.len() > CONFIRM_DIFF_MAX_EXISTING_BYTES {
+        return None;
+    }
+    std::fs::read_to_string(&resolved).ok()
+}
+
+/// Colour one rendered confirmation line for the CLI prompt.
+fn style_confirm_line(line: &crate::safety::confirm_view::ConfirmLine) -> String {
+    use crate::safety::confirm_view::LineKind;
+    let text = line.text.as_str();
+    match line.kind {
+        LineKind::Header => text.bright_cyan().bold().to_string(),
+        LineKind::Hunk => text.cyan().to_string(),
+        LineKind::Added => text.green().to_string(),
+        LineKind::Removed => text.red().to_string(),
+        LineKind::Context => text.dimmed().to_string(),
+        LineKind::Field => text.bright_white().to_string(),
+        LineKind::Note => text.dimmed().italic().to_string(),
+    }
+}
+
 pub(crate) fn is_subprocess_tool(name: &str) -> bool {
     matches!(
         name,

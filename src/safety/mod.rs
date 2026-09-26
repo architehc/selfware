@@ -7,6 +7,7 @@
 
 pub mod audit;
 pub mod checker;
+pub mod confirm_view;
 pub mod killswitch;
 pub mod path_validator;
 pub mod permissions;
