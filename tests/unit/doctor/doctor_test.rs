@@ -203,6 +203,40 @@ fn test_config_checks_default_keyless_endpoint_without_key_passes() {
     );
 }
 
+#[test]
+fn test_config_checks_local_detection_is_url_parsed_not_substring() {
+    // One predicate with the loader; the old substring matcher took these
+    // remote hosts for local and passed them without a key.
+    let api_status = |endpoint: &str| {
+        let cfg = crate::config::Config {
+            endpoint: endpoint.to_string(),
+            api_key: None,
+            ..crate::config::Config::default()
+        };
+        config_checks(&cfg)
+            .into_iter()
+            .find(|c| c.name == "api_key")
+            .unwrap()
+            .status
+    };
+    for remote in [
+        "http://localhost.evil.com/v1",
+        "http://localhost@evil.com/v1",
+        "http://10.example.com/v1",
+        "https://api.example.com/v1?h=127.0.0.1",
+    ] {
+        assert_eq!(api_status(remote), CheckStatus::Missing, "{remote}");
+    }
+    for local in [
+        "http://localhost:1234/v1",
+        "http://127.0.0.1:8000/v1",
+        "http://192.168.1.5:1234/v1",
+        "http://10.0.0.7:8080/v1",
+    ] {
+        assert_eq!(api_status(local), CheckStatus::Ok, "{local}");
+    }
+}
+
 #[cfg(feature = "log-analysis")]
 #[test]
 fn analyze_log_file_counts_errors_and_anomalies() {

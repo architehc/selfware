@@ -787,9 +787,10 @@ impl Config {
                 ""
             };
             // A bare install — no config file was found at all AND no env var
-            // selected an endpoint — has not chosen this endpoint: it is the
-            // built-in default, and the first request is guaranteed to fail
-            // with 401. Stopping here turns "type a prompt, get an auth error
+            // selected an endpoint — has not chosen this endpoint. The shipped
+            // default (llm.selfware.design) is keyless and never reaches this
+            // branch (`is_keyless_endpoint` above); a keyed default would fail
+            // its first request with 401. Stopping here turns "type a prompt, get an auth error
             // from a provider you never picked" into a two-line fix. A user
             // who configured a remote endpoint themselves — via a config file
             // or via SELFWARE_ENDPOINT (the provenance map records the env

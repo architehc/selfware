@@ -739,20 +739,14 @@ pub fn config_checks(config: &crate::config::Config) -> Vec<DoctorCheck> {
         });
     }
 
-    // api_key required for remote endpoints
-    let endpoint_lower = config.endpoint.to_lowercase();
-    let looks_local = endpoint_lower.contains("localhost")
-        || endpoint_lower.contains("127.0.0.1")
-        || endpoint_lower.contains("0.0.0.0")
-        || endpoint_lower.starts_with("http://192.168.")
-        || endpoint_lower.starts_with("http://10.")
-        || endpoint_lower.starts_with("http://172.");
-    // The shipped default endpoint is keyless: `selfware doctor` on a fresh
-    // install (no config, no key) must not FAIL on the endpoint we ship.
-    let is_keyless_default = endpoint_lower.trim_end_matches('/')
-        == crate::config::default_endpoint()
-            .to_lowercase()
-            .trim_end_matches('/');
+    // api_key required for remote endpoints. One source of truth with the
+    // loader (`config::is_local_endpoint` / `config::is_keyless_endpoint`,
+    // URL-parsed, userinfo-spoof safe); the doctor additionally accepts a
+    // private-LAN IPv4 host (LM Studio / llama.cpp on another machine).
+    // The old substring matcher took `http://localhost.evil.com` and
+    // `http://10.example.com` for local (review, 0.9.1).
+    let looks_local = endpoint_is_local_or_lan(&config.endpoint);
+    let is_keyless_default = crate::config::is_keyless_endpoint(&config.endpoint);
     if config.api_key.is_none() && !looks_local && !is_keyless_default {
         out.push(DoctorCheck {
             name: "api_key".to_string(),
@@ -774,7 +768,7 @@ pub fn config_checks(config: &crate::config::Config) -> Vec<DoctorCheck> {
             message: if config.api_key.is_some() {
                 "api_key present".to_string()
             } else if is_keyless_default {
-                "api_key not set (the default endpoint is keyless — OK)".to_string()
+                "api_key not set (keyless selfware endpoint — OK)".to_string()
             } else {
                 "api_key not set (endpoint is local — OK)".to_string()
             },
@@ -783,6 +777,22 @@ pub fn config_checks(config: &crate::config::Config) -> Vec<DoctorCheck> {
     }
 
     out
+}
+
+/// Whether an endpoint needs no API key for the doctor's purposes: loopback
+/// (`config::is_local_endpoint`) or a private-LAN IPv4 host, parsed from the
+/// URL (never a substring match; userinfo is refused like the loader does).
+fn endpoint_is_local_or_lan(endpoint: &str) -> bool {
+    if crate::config::is_local_endpoint(endpoint) {
+        return true;
+    }
+    let Ok(url) = url::Url::parse(endpoint) else {
+        return false;
+    };
+    if !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    matches!(url.host(), Some(url::Host::Ipv4(ip)) if ip.is_private())
 }
 
 /// Strip glob metacharacters from a pattern, returning the literal directory
