@@ -344,11 +344,32 @@ pub(crate) fn semantic_summary(
             } else {
                 cmd
             };
-            let exit_code =
-                result_json(result).and_then(|v| v.get("exit_code").and_then(|c| c.as_i64()));
-            match exit_code {
-                Some(code) => format!("Ran: {} (exit {})", short_cmd, code),
-                None => format!("Ran: {}", short_cmd),
+            let parsed = result_json(result);
+            let exit_code = parsed
+                .as_ref()
+                .and_then(|v| v.get("exit_code").and_then(|c| c.as_i64()));
+            // A failure names its cause: a failed `✕ Ran:` line used to say
+            // nothing about why (UX field test, 0.9.0).
+            let cause = if success {
+                None
+            } else {
+                let text = match exit_code {
+                    Some(_) => parsed
+                        .as_ref()
+                        .and_then(|v| v.get("stderr").and_then(|e| e.as_str()))
+                        .unwrap_or(""),
+                    None => result.unwrap_or(""),
+                };
+                text.lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .map(|line| cap_at_word(line, 90))
+            };
+            match (exit_code, cause) {
+                (Some(code), Some(why)) => format!("Ran: {} (exit {}) — {}", short_cmd, code, why),
+                (Some(code), None) => format!("Ran: {} (exit {})", short_cmd, code),
+                (None, Some(why)) => format!("Ran: {} — {}", short_cmd, why),
+                (None, None) => format!("Ran: {}", short_cmd),
             }
         }
 

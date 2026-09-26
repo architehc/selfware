@@ -278,18 +278,44 @@ async fn test_dangerous_pattern_dev_tcp() {
     assert!(err.contains("Blocked potentially dangerous shell pattern"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
-async fn test_cwd_relative_path_rejected() {
+async fn test_cwd_relative_path_resolves_against_the_workspace_root() {
+    // UX field test (0.9.0): models write `cwd: "."`, which used to be
+    // rejected ("cwd must be an absolute path"). A relative cwd now resolves
+    // against the agent's workspace root.
+    let ws = tempfile::Builder::new().prefix("cwd-ws").tempdir().unwrap();
+    std::fs::create_dir_all(ws.path().join("sub")).unwrap();
+    let root = crate::tools::workspace_root::WorkspaceRoot::fixed(ws.path().to_path_buf());
+    for (cwd, expect) in [
+        (".", ws.path().to_path_buf()),
+        ("sub", ws.path().join("sub")),
+    ] {
+        let args = serde_json::json!({ "command": "pwd -P", "cwd": cwd, "timeout_secs": 10 });
+        let out = crate::tools::workspace_root::scope(root.clone(), ShellExec.execute(args))
+            .await
+            .unwrap_or_else(|e| panic!("cwd {cwd:?} must run: {e}"));
+        let stdout = out["stdout"]
+            .as_str()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        assert_eq!(
+            std::path::Path::new(&stdout),
+            expect.canonicalize().unwrap(),
+            "cwd {cwd:?} runs in the workspace"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_cwd_with_parent_traversal_is_still_rejected() {
     let tool = ShellExec;
-    let args = serde_json::json!({
-        "command": "echo test",
-        "cwd": "relative/path",
-        "timeout_secs": 5
-    });
-    let result = tool.execute(args).await;
-    assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
-    assert!(err.contains("cwd must be an absolute path"));
+    for cwd in ["../outside", "sub/../../outside"] {
+        let args = serde_json::json!({ "command": "echo test", "cwd": cwd, "timeout_secs": 5 });
+        let err = tool.execute(args).await.unwrap_err().to_string();
+        assert!(err.contains("path traversal"), "{cwd}: {err}");
+    }
 }
 
 #[tokio::test]

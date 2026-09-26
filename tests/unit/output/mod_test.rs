@@ -872,3 +872,38 @@ fn gate_blocked_line_leads_with_the_gate_reason_and_never_cuts_mid_word() {
         "cut must fall on a word boundary: {line}"
     );
 }
+
+#[test]
+fn failed_shell_run_line_names_its_cause() {
+    // UX field test (0.9.0): a failed `✕ Ran:` line said nothing about why.
+    let args = serde_json::json!({ "command": "npm test" });
+    let exit = serde_json::json!({
+        "exit_code": 127,
+        "stdout": "",
+        "stderr": "\nsh: npm: command not found\nmore",
+    })
+    .to_string();
+    let line = semantic_summary("shell_exec", &args, Some(&exit), false, 10);
+    assert_eq!(
+        line,
+        "Ran: npm test (exit 127) — sh: npm: command not found"
+    );
+
+    // A tool error (no exit code) names the error's first line.
+    let line = semantic_summary(
+        "shell_exec",
+        &args,
+        Some("cwd must not contain path traversal (..): ../x\ndetail"),
+        false,
+        1,
+    );
+    assert_eq!(
+        line,
+        "Ran: npm test — cwd must not contain path traversal (..): ../x"
+    );
+
+    // Success keeps the plain form.
+    let ok = serde_json::json!({ "exit_code": 0, "stdout": "ok", "stderr": "" }).to_string();
+    let line = semantic_summary("shell_exec", &args, Some(&ok), true, 10);
+    assert_eq!(line, "Ran: npm test (exit 0)");
+}

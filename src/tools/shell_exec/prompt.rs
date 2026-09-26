@@ -107,7 +107,7 @@ impl ToolPrompt for ShellExecPrompt {
             "**Important Notes:**\\n\
              - Default timeout: 60 seconds (configurable up to 1 hour)\\n\
              - Commands are executed in a shell (/bin/sh on Unix, cmd on Windows)\\n\
-             - Working directory (cwd) must be an absolute path without '..' components\\n\
+             - Working directory (cwd): absolute, or relative to the workspace root (e.g. \".\"); no '..' components\\n\
              - Environment variable names cannot contain '=' or null bytes\\n\
              - Maximum command length: 10,000 characters\\n\
              - Dangerous patterns are blocked (e.g., /dev/tcp/, mkfifo, pipes to interactive shells)\\n\

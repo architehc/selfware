@@ -379,16 +379,20 @@ impl Tool for ShellExec {
             anyhow::bail!("Blocked potentially dangerous shell pattern: {}", pattern);
         }
 
-        // Validate cwd: must be an absolute path without path traversal components
-        if let Some(cwd) = &args.cwd {
-            let cwd_path = Path::new(cwd);
-            if !cwd_path.is_absolute() {
-                anyhow::bail!("cwd must be an absolute path, got: {}", cwd);
-            }
+        // Validate cwd: no path traversal. A relative cwd (".", "sub/dir")
+        // is resolved against the agent's workspace root — models naturally
+        // write `cwd: "."`, which used to be rejected outright (UX field
+        // test, 0.9.0).
+        if let Some(cwd) = args.cwd.clone() {
+            let cwd_path = Path::new(&cwd);
             for component in cwd_path.components() {
                 if let std::path::Component::ParentDir = component {
                     anyhow::bail!("cwd must not contain path traversal (..): {}", cwd);
                 }
+            }
+            if !cwd_path.is_absolute() {
+                let resolved = crate::tools::workspace_root::current_path().join(cwd_path);
+                args.cwd = Some(resolved.to_string_lossy().into_owned());
             }
         }
 
