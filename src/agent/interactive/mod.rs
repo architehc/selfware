@@ -773,13 +773,14 @@ impl Agent {
                     completion.to_string().bright_white()
                 );
                 println!("  Total:      {:>10}", total.to_string().bright_cyan());
-                let est_cost = (prompt as f64 * 3.0 + completion as f64 * 15.0) / 1_000_000.0;
-                if est_cost > 0.001 {
-                    println!(
-                        "  Est. cost:  {:>10}",
-                        format!("~${:.4}", est_cost).dimmed()
-                    );
-                }
+                // Cost comes only from what the provider reported — never
+                // from hard-coded per-token prices, which invented "~$0.0951"
+                // for a free endpoint (UX field test, 0.9.0). Same line as
+                // the other /cost handler and the run summary.
+                println!(
+                    "  {}",
+                    crate::cli::render_cost_line(&self.run_summary()).dimmed()
+                );
                 println!();
                 continue;
             }

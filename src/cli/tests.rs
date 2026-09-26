@@ -2611,3 +2611,20 @@ fn status_probes_the_models_route_not_the_bare_base() {
         "http://localhost:8000/v1/models"
     );
 }
+
+#[test]
+fn run_summary_says_cost_is_not_reported_instead_of_billing_incomplete() {
+    // UX field test (0.9.0): a free, self-hosted endpoint that never reports
+    // cost showed "billing incomplete" — as if some billing were missing.
+    let mut summary = sample_summary();
+    summary.cost_usd = None;
+    summary.cost_complete = false;
+    summary.unmetered_attempts = 12;
+    let report = render_run_summary(&summary, None);
+    assert!(
+        report.contains("cost: not reported by this endpoint"),
+        "{report}"
+    );
+    assert!(!report.contains("billing incomplete"), "{report}");
+    assert!(!report.contains('$'), "no invented cost: {report}");
+}

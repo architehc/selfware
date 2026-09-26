@@ -907,3 +907,24 @@ fn failed_shell_run_line_names_its_cause() {
     let line = semantic_summary("shell_exec", &args, Some(&ok), true, 10);
     assert_eq!(line, "Ran: npm test (exit 0)");
 }
+
+#[test]
+fn open_ended_progress_shows_step_and_elapsed_never_a_total() {
+    // UX field test (0.9.0): each agent step appended a phase, so the line
+    // read "[6/6] Step 6 83% ETA ~6s" — total, percentage and ETA invented.
+    let mut progress = TaskProgress::new(&["Planning"]);
+    assert!(
+        !progress.is_open_ended(),
+        "a fixed phase list has a real total"
+    );
+    progress.begin_step(0);
+    progress.begin_step(5);
+    assert!(progress.is_open_ended());
+    let line = progress.open_ended_line();
+    assert!(line.starts_with("Step 6 · "), "{line}");
+    assert!(line.ends_with(" elapsed"), "{line}");
+    for invented in ['%', '/'] {
+        assert!(!line.contains(invented), "no invented totals: {line}");
+    }
+    assert!(!line.contains("ETA"), "no invented ETA: {line}");
+}

@@ -1270,6 +1270,10 @@ pub struct TaskProgress {
     phases: Vec<ProgressPhase>,
     current_phase: usize,
     start_time: Instant,
+    /// Phases are being appended as the run goes (one per agent step), so
+    /// there is no known total: a "[6/6] 83% ETA ~6s" line was invented
+    /// arithmetic (UX field test, 0.9.0). Rendered as step + elapsed only.
+    open_ended: bool,
 }
 
 impl TaskProgress {
@@ -1286,7 +1290,27 @@ impl TaskProgress {
                 .collect(),
             current_phase: 0,
             start_time: Instant::now(),
+            open_ended: false,
         }
+    }
+
+    /// The honest line for an open-ended run: the current phase and the time
+    /// elapsed — no total, percentage or ETA (none of which is known).
+    pub(crate) fn open_ended_line(&self) -> String {
+        let name = self.current_phase_name().unwrap_or("Done");
+        let secs = self.start_time.elapsed().as_secs();
+        let elapsed = if secs >= 60 {
+            format!("{}m {:02}s", secs / 60, secs % 60)
+        } else {
+            format!("{secs}s")
+        };
+        format!("{name} · {elapsed} elapsed")
+    }
+
+    /// Whether phases are appended as the run goes (no known total).
+    #[cfg(test)]
+    pub(crate) fn is_open_ended(&self) -> bool {
+        self.open_ended
     }
 
     /// Start the current phase
@@ -1362,6 +1386,7 @@ impl TaskProgress {
             status: PhaseStatus::Active,
             progress: 0.0,
         });
+        self.open_ended = true;
         self.current_phase = self.phases.len() - 1;
         self.print_progress();
         self.current_phase
@@ -1463,6 +1488,17 @@ impl TaskProgress {
             return;
         }
         let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        if self.open_ended {
+            // No known total: step + elapsed, in every mode.
+            let line = self.open_ended_line();
+            if is_compact() || is_plain_mode() {
+                println!("[{line}]");
+            } else {
+                print!("\r\x1b[2K{} {}\n", "📊".bright_blue(), line.dimmed());
+            }
+            io::stdout().flush().ok();
+            return;
+        }
         if is_compact() {
             // Compact: single line with overall progress
             let progress = self.overall_progress();

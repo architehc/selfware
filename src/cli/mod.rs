@@ -6816,7 +6816,12 @@ fn render_run_summary(summary: &crate::agent::RunSummary, failure: Option<&str>)
         })
         .unwrap_or_default();
     lines.push(format!("tokens: {} total{cost}", summary.total_tokens));
-    if !summary.cost_complete {
+    if summary.cost_usd.is_none() {
+        // The endpoint never reported a cost (self-hosted / free): say that
+        // once, instead of "billing incomplete", which implied some billing
+        // was missing (UX field test, 0.9.0).
+        lines.push("cost: not reported by this endpoint".to_string());
+    } else if !summary.cost_complete {
         lines.push(format!("billing incomplete: {} attempts without reported cost; restored or estimated usage may also lack billing provenance", summary.unmetered_attempts));
     }
     if let Some(latency) = &summary.call_latency {
