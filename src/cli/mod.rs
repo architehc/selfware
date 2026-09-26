@@ -1733,6 +1733,12 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
 
+    // Diagnostic subcommands report the config file themselves (doctor's
+    // "config file" row, llm-doctor's config sanity step): the loader's
+    // startup `config:` line printed it a second (doctor: third) time.
+    if matches!(cli.command, Some(Commands::Doctor | Commands::LlmDoctor)) {
+        crate::config::set_config_line_suppressed(true);
+    }
     let mut config = load_async_config_with_provenance(&cli, &config_path).await?;
 
     apply_session_model_overrides(&cli, &mut config)?;
@@ -5338,9 +5344,7 @@ async fn handle_command(
         }
 
         Commands::LlmDoctor => {
-            if !quiet {
-                println!("{}", render_header(ctx));
-            }
+            // No workshop banner: a diagnostic report, not a session.
             crate::llm_doctor::run_llm_doctor(&config).await?;
         }
 
@@ -5770,9 +5774,7 @@ async fn handle_command(
         Commands::Trust { .. } => unreachable!("Trust is handled before Config::load"),
 
         Commands::Doctor => {
-            if !quiet {
-                println!("{}", render_header(ctx));
-            }
+            // No workshop banner: a diagnostic report, not a session.
             let report = crate::doctor::run_doctor(config_path.as_deref()).await;
             report.print();
             let code = report.exit_code();
@@ -6564,7 +6566,7 @@ pub(crate) fn bug_report_text(agent: &crate::agent::Agent) -> String {
         config.execution_mode,
         config
             .loaded_config_path()
-            .map(|p| p.display().to_string())
+            .map(crate::config::display_config_path)
             .unwrap_or_else(|| "(defaults / env)".to_string()),
     )
 }

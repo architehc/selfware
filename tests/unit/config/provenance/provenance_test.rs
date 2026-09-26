@@ -52,3 +52,45 @@ fn sources_iter_is_sorted() {
     let keys: Vec<&String> = s.iter().map(|(k, _)| k).collect();
     assert_eq!(keys, vec!["endpoint", "model", "temperature"]);
 }
+
+// ── display_path_for (0.9.1: long absolute config path on every command) ──
+
+#[test]
+fn config_path_is_shown_relative_to_cwd_then_home() {
+    use std::path::Path;
+    let cwd = Path::new("/home/u/proj");
+    let home = Path::new("/home/u");
+    assert_eq!(
+        display_path_for(
+            Path::new("/home/u/proj/selfware.toml"),
+            Some(cwd),
+            Some(home)
+        ),
+        "selfware.toml"
+    );
+    assert_eq!(
+        display_path_for(
+            Path::new("/home/u/.config/selfware/config.toml"),
+            Some(cwd),
+            Some(home)
+        ),
+        "~/.config/selfware/config.toml"
+    );
+    assert_eq!(
+        display_path_for(Path::new("/etc/selfware.toml"), Some(cwd), Some(home)),
+        "/etc/selfware.toml"
+    );
+    // Already relative (as given on the command line): unchanged.
+    assert_eq!(
+        display_path_for(Path::new("selfware.toml"), Some(cwd), Some(home)),
+        "selfware.toml"
+    );
+}
+
+#[test]
+fn config_line_suppression_round_trips() {
+    let prior = config_line_suppressed();
+    set_config_line_suppressed(true);
+    assert!(config_line_suppressed());
+    set_config_line_suppressed(prior);
+}

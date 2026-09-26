@@ -79,6 +79,53 @@ impl ConfigSources {
     }
 }
 
+/// How a config path is shown to the user: relative (`selfware.toml`,
+/// `conf/x.toml`) when it lies under `cwd`, `~/…` when under `home`, else
+/// as given. Pure so it is testable; see [`display_config_path`].
+pub fn display_path_for(
+    path: &std::path::Path,
+    cwd: Option<&std::path::Path>,
+    home: Option<&std::path::Path>,
+) -> String {
+    if path.is_relative() {
+        return path.display().to_string();
+    }
+    if let Some(rel) = cwd.and_then(|c| path.strip_prefix(c).ok()) {
+        if !rel.as_os_str().is_empty() {
+            return rel.display().to_string();
+        }
+    }
+    if let Some(rel) = home.and_then(|h| path.strip_prefix(h).ok()) {
+        return format!("~/{}", rel.display());
+    }
+    path.display().to_string()
+}
+
+/// [`display_path_for`] against the process's cwd and home directory — the
+/// one formatter for config paths on the user-facing surfaces (the startup
+/// `config:` line, doctor, bug reports), so a long absolute path is not
+/// repeated on every command (0.9.1 field finding).
+pub fn display_config_path(path: &std::path::Path) -> String {
+    let cwd = std::env::current_dir().ok();
+    let home = dirs::home_dir();
+    display_path_for(path, cwd.as_deref(), home.as_deref())
+}
+
+static CONFIG_LINE_SUPPRESSED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Suppress the loader's startup `config: <path>` line for this process.
+/// Set by subcommands that report the config file themselves (`doctor`,
+/// `llm-doctor`), which otherwise printed the path twice.
+pub fn set_config_line_suppressed(suppressed: bool) {
+    CONFIG_LINE_SUPPRESSED.store(suppressed, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether [`set_config_line_suppressed`] is in effect.
+pub fn config_line_suppressed() -> bool {
+    CONFIG_LINE_SUPPRESSED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[cfg(test)]
 #[path = "../../tests/unit/config/provenance/provenance_test.rs"]
 mod tests;

@@ -650,12 +650,15 @@ pub fn config_checks(config: &crate::config::Config) -> Vec<DoctorCheck> {
                 version: None,
                 message: if shadows_global {
                     format!(
-                        "config: {} (shadowing {})",
-                        path.display(),
-                        home_config.unwrap().display()
+                        "{} (shadowing {})",
+                        crate::config::display_config_path(path),
+                        home_config
+                            .as_deref()
+                            .map(crate::config::display_config_path)
+                            .unwrap_or_default()
                     )
                 } else {
-                    format!("config: {}", path.display())
+                    crate::config::display_config_path(path)
                 },
                 fix_hint: None,
             });
@@ -665,7 +668,7 @@ pub fn config_checks(config: &crate::config::Config) -> Vec<DoctorCheck> {
             category: Category::Configuration,
             status: CheckStatus::Ok,
             version: None,
-            message: "config: none found — using built-in defaults".to_string(),
+            message: "none found — using built-in defaults".to_string(),
             fix_hint: Some(
                 "Run `selfware init` to create a config, or write ~/.config/selfware/config.toml."
                     .to_string(),
@@ -1132,8 +1135,14 @@ pub async fn run_doctor(config_path: Option<&str>) -> DoctorReport {
     {
         checks.push(windows_gui_note());
     }
-    // Best-effort: load and validate the user's config.
-    match crate::config::Config::load(config_path) {
+    // Best-effort: load and validate the user's config. The "config file"
+    // row below reports the path, so the loader's own `config:` line is
+    // held back (it also leaked into the REPL on `/doctor`).
+    let line_was_suppressed = crate::config::config_line_suppressed();
+    crate::config::set_config_line_suppressed(true);
+    let loaded = crate::config::Config::load(config_path);
+    crate::config::set_config_line_suppressed(line_was_suppressed);
+    match loaded {
         Ok(cfg) => checks.extend(config_checks(&cfg)),
         Err(e) => checks.push(DoctorCheck {
             name: "config load".to_string(),

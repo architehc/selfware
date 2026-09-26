@@ -724,7 +724,7 @@ impl Agent {
                     "- config: {}",
                     self.config
                         .loaded_config_path()
-                        .map(|p| p.display().to_string())
+                        .map(crate::config::display_config_path)
                         .unwrap_or_else(|| "(defaults / env)".to_string())
                 );
                 continue;

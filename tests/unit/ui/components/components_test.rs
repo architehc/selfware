@@ -283,3 +283,40 @@ fn visible_width_ignores_ansi_and_counts_wide_glyphs() {
     assert_eq!(visible_width("\u{1b}[1;32mabc\u{1b}[0m"), 3);
     assert_eq!(visible_width("🦊"), 2);
 }
+
+// ── frame_box with width-ambiguous emoji (0.9.1 field finding) ────────
+
+#[test]
+fn frame_safe_drops_vs16_after_text_presentation_glyphs_only() {
+    // ⚙️ 🗜️ 👁️: text-default base + VS16 -> the plain one-cell glyph.
+    assert_eq!(frame_safe("\u{2699}\u{FE0F} gear"), "\u{2699} gear");
+    assert_eq!(frame_safe("\u{1F5DC}\u{FE0F}x"), "\u{1F5DC}x");
+    assert_eq!(frame_safe("\u{1F441}\u{FE0F}x"), "\u{1F441}x");
+    // Emoji-presentation glyphs and plain text are untouched.
+    assert_eq!(frame_safe("🦊 📦 abc"), "🦊 📦 abc");
+    assert!(matches!(frame_safe("plain"), std::borrow::Cow::Borrowed(_)));
+}
+
+#[test]
+fn frame_box_borders_align_with_vs16_rows() {
+    let rows = vec![
+        "\u{1F5DC}\u{FE0F}  /compress".to_string(),
+        "\u{1F441}\u{FE0F}  /review".to_string(),
+        "📦 /compact".to_string(),
+    ];
+    let out = frame_box("title \u{2699}\u{FE0F}", &rows, 10, "", "");
+    let widths: Vec<usize> = out.iter().map(|l| visible_width(l)).collect();
+    assert!(
+        widths.windows(2).all(|w| w[0] == w[1]),
+        "every frame line must have the same width: {widths:?}\n{}",
+        out.join("\n")
+    );
+    assert!(out.iter().all(|l| !l.contains('\u{FE0F}')));
+}
+
+#[test]
+fn workshop_header_has_no_width_ambiguous_glyph() {
+    let header = render_header(&WorkshopContext::default());
+    assert!(!header.contains('\u{2699}'), "{header}");
+    assert!(header.contains("SELFWARE WORKSHOP"));
+}

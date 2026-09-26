@@ -45,7 +45,10 @@ pub use model_profiles::{
 pub use prompt_profiles::PromptProfile;
 #[cfg(feature = "bench-harness")]
 pub use prompt_profiles::SwebenchProInstance;
-pub use provenance::{ConfigSource, ConfigSources};
+pub use provenance::{
+    config_line_suppressed, display_config_path, set_config_line_suppressed, ConfigSource,
+    ConfigSources,
+};
 pub use resources::*;
 pub use safety::*;
 pub use types::*;

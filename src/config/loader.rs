@@ -652,9 +652,16 @@ impl Config {
             } else {
                 None
             };
-            match shadowed_home {
-                Some(h) => eprintln!("config: {} (shadowing {})", p, h.display()),
-                None => eprintln!("config: {}", p),
+            let shown = super::display_config_path(std::path::Path::new(p));
+            if !super::config_line_suppressed() {
+                match shadowed_home {
+                    Some(h) => eprintln!(
+                        "config: {} (shadowing {})",
+                        shown,
+                        super::display_config_path(&h)
+                    ),
+                    None => eprintln!("config: {}", shown),
+                }
             }
             sources.set(
                 "__config_path".to_string(),

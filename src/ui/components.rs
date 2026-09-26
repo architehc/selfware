@@ -83,6 +83,34 @@ pub fn visible_width(s: &str) -> usize {
     UnicodeWidthStr::width(plain.as_str())
 }
 
+/// Make `s` safe to measure inside a frame: drop an emoji variation
+/// selector (VS16, U+FE0F) that follows a character whose default
+/// presentation is TEXT (standalone width 1, e.g. ⚙ 🗜 👁 ↩).
+///
+/// Terminals disagree on those sequences — some honour VS16 and draw two
+/// cells, others draw one — so no width calculation can line a border up
+/// for everyone (0.9.1: the banner's ⚙️ and /help's 🗜️/👁️ pushed the right
+/// border off by one). Without the selector the glyph is plain text, one
+/// cell everywhere, and matches what `visible_width` counts. Emoji whose
+/// DEFAULT presentation is already emoji (🦊 📦, width 2) are untouched.
+pub fn frame_safe(s: &str) -> std::borrow::Cow<'_, str> {
+    use unicode_width::UnicodeWidthChar;
+    if !s.contains('\u{FE0F}') {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut prev_narrow = false;
+    for c in s.chars() {
+        if c == '\u{FE0F}' && prev_narrow {
+            prev_narrow = false;
+            continue;
+        }
+        prev_narrow = c.width() == Some(1);
+        out.push(c);
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 /// A `frame_box` row that renders as a horizontal divider (`├───┤`).
 pub const FRAME_SEPARATOR: &str = "\u{0}--separator--";
 
@@ -98,6 +126,9 @@ pub fn frame_box(
     border: &str,
     reset: &str,
 ) -> Vec<String> {
+    let title = frame_safe(title);
+    let rows: Vec<String> = rows.iter().map(|r| frame_safe(r).into_owned()).collect();
+    let rows = rows.as_slice();
     let title_part = if title.is_empty() {
         String::new()
     } else {
@@ -163,7 +194,8 @@ pub fn render_header(ctx: &WorkshopContext) -> String {
     };
 
     let rows = vec![
-        format!("{} SELFWARE WORKSHOP {}", Glyphs::gear(), mode_str),
+        // No glyph: ⚙ is width-ambiguous across terminals (see frame_safe).
+        format!("SELFWARE WORKSHOP {}", mode_str),
         format!(
             "{} Tending: {}",
             Glyphs::sprout(),
