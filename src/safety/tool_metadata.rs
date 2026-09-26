@@ -490,6 +490,21 @@ pub fn classify_tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
             ToolMetadata::custom(false, false, RiskLevel::Medium, false, false)
         }
 
+        // Context-window management tools (dispatched outside the registry,
+        // see `tools::context`). They read workspace files into / reshape the
+        // agent's own context — no workspace, network or process effect.
+        // `context_bulk_read` / `context_load_skeleton` resolve every path
+        // through the same PathValidator as file_read before any I/O. Being
+        // unlisted made them prompt in Normal mode like a write (0.9.1 field
+        // report: `context_bulk_read` asked "Execute?" on every call).
+        "context_status"
+        | "context_focus"
+        | "context_evict"
+        | "context_recommend"
+        | "context_load_skeleton"
+        | "context_bulk_read"
+        | "context_summary" => ToolMetadata::read_only(),
+
         // Hot reload — state change.
         "hot_reload" => ToolMetadata::custom(false, false, RiskLevel::Medium, false, false),
 
@@ -523,6 +538,11 @@ pub fn default_tool_metadata(tool_name: &str) -> ToolMetadata {
 ///
 /// Unclassified tools (e.g. dynamic `mcp_*` names) keep the old behavior:
 /// they prompt.
+///
+/// This variant is ARGUMENT-BLIND and therefore conservative: tools whose
+/// safety depends on their arguments (the cargo verification tools) prompt.
+/// The dispatcher uses [`normal_mode_call_needs_confirmation`], which sees
+/// the arguments.
 pub fn normal_mode_needs_confirmation(
     tool_name: &str,
     require_confirmation: &[String],
@@ -538,6 +558,77 @@ pub fn normal_mode_needs_confirmation(
         Some(meta) => !(meta.read_only && meta.risk_level == RiskLevel::Low),
         None => true,
     }
+}
+
+/// The dedicated verification tools Normal mode runs without asking, when
+/// their arguments are the plain, non-writing form.
+///
+/// These run a fixed cargo subcommand in the workspace root (never a shell)
+/// and write only build artefacts under `target/`:
+///
+/// - `cargo_check` — always (its arguments are booleans only);
+/// - `cargo_clippy` — only without `fix: true` (`--fix` rewrites sources);
+/// - `cargo_test` — the tests themselves are code in the workspace, which in
+///   Normal mode only changed through confirmed edits.
+///
+/// Every string argument (`package`, `test_name`) must not start with `-`:
+/// the tools pass them as positional cargo arguments, so a value such as
+/// `--config=target.x.runner="sh -c …"` or `--manifest-path=/elsewhere` would
+/// otherwise become a cargo FLAG. Such a call is not auto-allowed — it
+/// prompts. `cargo_fmt` (rewrites sources) is never auto-allowed here.
+///
+/// Build scripts and proc macros run as part of any cargo build; like the
+/// tests they come from the workspace/dependency set the operator controls.
+pub fn verification_call_auto_allowed(tool_name: &str, args: &Value) -> bool {
+    if !matches!(tool_name, "cargo_check" | "cargo_clippy" | "cargo_test") {
+        return false;
+    }
+    let Some(map) = args.as_object() else {
+        // Not a JSON object (unparseable arguments): not the plain form.
+        return false;
+    };
+    let strings_are_plain = map.values().all(|v| match v {
+        Value::String(s) => !s.trim_start().starts_with('-'),
+        Value::Bool(_) | Value::Null | Value::Number(_) => true,
+        _ => false,
+    });
+    if !strings_are_plain {
+        return false;
+    }
+    // `fix` must be absent or literally false — `--fix` rewrites sources.
+    tool_name != "cargo_clippy"
+        || matches!(
+            map.get("fix"),
+            None | Some(Value::Null) | Some(Value::Bool(false))
+        )
+}
+
+/// Normal-mode confirmation decision for one concrete call (arguments known).
+///
+/// Order:
+/// 1. a session/config permission grant for the tool → no prompt;
+/// 2. tools listed in `safety.require_confirmation` → prompt;
+/// 3. plain-form verification calls ([`verification_call_auto_allowed`])
+///    → no prompt;
+/// 4. otherwise the metadata rule: explicitly classified read-only +
+///    Low-risk tools run, everything else (writes, shell, network, installs,
+///    git mutations, unclassified tools) prompts.
+pub fn normal_mode_call_needs_confirmation(
+    tool_name: &str,
+    args: &Value,
+    require_confirmation: &[String],
+    grants: &crate::safety::permissions::PermissionStore,
+) -> bool {
+    if grants.is_authorized(tool_name, None) {
+        return false;
+    }
+    if require_confirmation.iter().any(|t| t == tool_name) {
+        return true;
+    }
+    if verification_call_auto_allowed(tool_name, args) {
+        return false;
+    }
+    normal_mode_needs_confirmation(tool_name, require_confirmation, grants)
 }
 
 #[cfg(test)]

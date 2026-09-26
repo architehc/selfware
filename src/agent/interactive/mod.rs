@@ -578,7 +578,9 @@ impl Agent {
                 use crate::config::ExecutionMode;
                 let new_mode = self.cycle_execution_mode();
                 let mode_desc = match new_mode {
-                    ExecutionMode::Normal => "Normal - Ask for confirmation on all tools",
+                    ExecutionMode::Normal => {
+                        "Normal - Ask before writes/commands/network; reads & checks run"
+                    }
                     ExecutionMode::AutoEdit => "Auto-Edit - Auto-approve file operations",
                     ExecutionMode::Yolo => "YOLO - Execute all tools without confirmation",
                     ExecutionMode::Daemon => "Daemon - Permanent YOLO mode",

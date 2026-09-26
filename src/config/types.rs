@@ -8,7 +8,9 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum ExecutionMode {
-    /// Ask for confirmation before executing tools (default)
+    /// Ask before tools that write, run commands, install, reach the network or
+    /// change git history; read-only tools and plain cargo check/test/clippy
+    /// run without asking (default)
     #[default]
     Normal,
     /// Auto-approve file edits, ask for other operations

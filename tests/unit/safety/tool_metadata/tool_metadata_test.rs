@@ -307,3 +307,128 @@ fn test_browser_screenshot_and_pdf_classified_as_write_capable() {
     assert!(default_tool_metadata("browser_fetch").read_only);
     assert!(default_tool_metadata("browser_links").read_only);
 }
+
+// ===== normal_mode_call_needs_confirmation (0.9.1 field report) =====
+
+fn call_needs(tool: &str, args: serde_json::Value) -> bool {
+    normal_mode_call_needs_confirmation(tool, &args, &[], &no_grants())
+}
+
+#[test]
+fn test_normal_mode_context_tools_are_read_only_and_run_without_asking() {
+    // 0.9.1 live: `context_bulk_read` asked "Execute?" every time because the
+    // context tools had no explicit classification (unclassified ⇒ prompt).
+    for tool in crate::tools::context::CONTEXT_TOOL_NAMES {
+        let meta = classify_tool_metadata(tool).expect("context tools are classified");
+        assert!(
+            meta.read_only && meta.risk_level == RiskLevel::Low,
+            "{tool}"
+        );
+        assert!(
+            !call_needs(tool, serde_json::json!({"pattern": "src/*.rs"})),
+            "{tool} must not prompt in Normal mode"
+        );
+    }
+}
+
+#[test]
+fn test_normal_mode_plain_verification_calls_run_without_asking() {
+    assert!(!call_needs("cargo_check", serde_json::json!({})));
+    assert!(!call_needs(
+        "cargo_check",
+        serde_json::json!({"all_targets": true, "all_features": false, "release": false})
+    ));
+    assert!(!call_needs("cargo_test", serde_json::json!({})));
+    assert!(!call_needs(
+        "cargo_test",
+        serde_json::json!({"package": "selfware", "test_name": "safety::tests", "no_fail_fast": true})
+    ));
+    assert!(!call_needs("cargo_clippy", serde_json::json!({})));
+    assert!(!call_needs(
+        "cargo_clippy",
+        serde_json::json!({"fix": false})
+    ));
+}
+
+#[test]
+fn test_normal_mode_writing_or_flag_injecting_verification_calls_prompt() {
+    // clippy --fix rewrites sources.
+    assert!(call_needs("cargo_clippy", serde_json::json!({"fix": true})));
+    assert!(call_needs(
+        "cargo_clippy",
+        serde_json::json!({"fix": "yes"})
+    ));
+    // A string argument is passed positionally to cargo: a leading `-` would
+    // turn it into a cargo flag (`--config` runner = arbitrary command).
+    assert!(call_needs(
+        "cargo_test",
+        serde_json::json!({"test_name": "--config=target.x.runner='sh -c id'"})
+    ));
+    assert!(call_needs(
+        "cargo_test",
+        serde_json::json!({"package": "--manifest-path=/tmp/evil/Cargo.toml"})
+    ));
+    assert!(call_needs(
+        "cargo_test",
+        serde_json::json!({"test_name": " -q"})
+    ));
+    // Nested / unexpected structures are not the plain form.
+    assert!(call_needs(
+        "cargo_check",
+        serde_json::json!({"extra": ["--x"]})
+    ));
+    assert!(call_needs("cargo_check", serde_json::Value::Null));
+    // cargo_fmt rewrites sources — never auto-allowed.
+    assert!(call_needs("cargo_fmt", serde_json::json!({})));
+}
+
+#[test]
+fn test_normal_mode_call_policy_keeps_mutations_and_shell_prompting() {
+    for (tool, args) in [
+        ("shell_exec", serde_json::json!({"command": "ls"})),
+        ("pty_shell", serde_json::json!({"action": "start"})),
+        (
+            "file_write",
+            serde_json::json!({"path": "a", "content": "b"}),
+        ),
+        (
+            "file_edit",
+            serde_json::json!({"path": "a", "old_str": "b", "new_str": "c"}),
+        ),
+        ("git_commit", serde_json::json!({"message": "m"})),
+        ("git_push", serde_json::json!({})),
+        ("pip_install", serde_json::json!({"package": "x"})),
+        ("npm_install", serde_json::json!({})),
+        ("http_request", serde_json::json!({"url": "http://x"})),
+        ("mcp_server_thing", serde_json::json!({})),
+    ] {
+        assert!(call_needs(tool, args), "{tool} must still prompt");
+    }
+}
+
+#[test]
+fn test_normal_mode_call_policy_respects_require_confirmation_and_grants() {
+    let require = vec!["cargo_test".to_string(), "context_bulk_read".to_string()];
+    assert!(normal_mode_call_needs_confirmation(
+        "cargo_test",
+        &serde_json::json!({}),
+        &require,
+        &no_grants()
+    ));
+    assert!(normal_mode_call_needs_confirmation(
+        "context_bulk_read",
+        &serde_json::json!({}),
+        &require,
+        &no_grants()
+    ));
+    let mut store = crate::safety::permissions::PermissionStore::new();
+    store.add(crate::safety::permissions::PermissionGrant::session(
+        "file_edit",
+    ));
+    assert!(!normal_mode_call_needs_confirmation(
+        "file_edit",
+        &serde_json::json!({}),
+        &[],
+        &store
+    ));
+}

@@ -8171,3 +8171,64 @@ async fn paging_through_a_file_by_range_is_progress_but_identical_rereads_are_no
     );
     server.stop().await;
 }
+
+#[tokio::test]
+async fn normal_mode_confirm_gate_runs_reads_and_plain_checks_without_prompting() {
+    // 0.9.1 field report: 18 prompts in one 10-minute task — context_bulk_read,
+    // cargo_check and cargo_test all asked "Execute?". Headless (cfg(test) is
+    // never interactive), a prompt would surface as the typed confirmation
+    // error, so Ok(true) proves no prompt was needed.
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut config = test_config(format!("{}/v1", server.url()));
+    config.execution_mode = crate::config::ExecutionMode::Normal;
+    let mut agent = Agent::new(config).await.unwrap();
+
+    for (tool, args) in [
+        ("context_bulk_read", r#"{"pattern":"src/*.rs"}"#),
+        ("file_read", r#"{"path":"src/lib.rs"}"#),
+        ("cargo_check", r#"{}"#),
+        ("cargo_test", r#"{"test_name":"slug"}"#),
+        ("cargo_clippy", r#"{"fix":false}"#),
+    ] {
+        let approved = agent
+            .confirm_tool_execution(tool, args, "call_test", false)
+            .await
+            .unwrap_or_else(|e| panic!("{tool} must not need confirmation in Normal mode: {e}"));
+        assert!(approved, "{tool}");
+    }
+
+    for (tool, args) in [
+        ("shell_exec", r#"{"command":"ls"}"#),
+        ("file_edit", r#"{"path":"a","old_str":"b","new_str":"c"}"#),
+        ("cargo_clippy", r#"{"fix":true}"#),
+        ("cargo_test", r#"{"test_name":"--config=x"}"#),
+        ("pip_install", r#"{"package":"x"}"#),
+    ] {
+        let err = agent
+            .confirm_tool_execution(tool, args, "call_test", false)
+            .await
+            .expect_err("must still require confirmation");
+        assert!(
+            crate::errors::is_confirmation_error(&err),
+            "{tool}: {err:?}"
+        );
+    }
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn auto_edit_is_never_stricter_than_normal_for_read_only_tools() {
+    // Interactive-or-not, AutoEdit's legacy list prompted for read-only
+    // tools Normal lets through (context_focus, code_map, ...).
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut config = test_config(format!("{}/v1", server.url()));
+    config.execution_mode = crate::config::ExecutionMode::AutoEdit;
+    let mut agent = Agent::new(config).await.unwrap();
+    for tool in ["context_focus", "code_map", "context_status"] {
+        assert!(agent
+            .confirm_tool_execution(tool, "{}", "call_test", false)
+            .await
+            .unwrap_or_else(|e| panic!("{tool}: {e}")));
+    }
+    server.stop().await;
+}

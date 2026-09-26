@@ -3449,23 +3449,42 @@ impl Agent {
             }
         }
 
-        // Normal mode decides via the tool-metadata classification (P1-5):
-        // read-only/Low-risk tools (`lsp_diagnostics`, `process_list`,
-        // `ask_user`, ...) no longer prompt — only Medium/High-risk tools do.
+        // Normal mode decides per CALL via the tool-metadata classification
+        // (P1-5) plus the plain-form verification allowance: read-only /
+        // Low-risk tools (`file_read`, `context_bulk_read`, `lsp_*`, ...) and
+        // `cargo_check` / `cargo_test` / non-`fix` `cargo_clippy` run without
+        // asking; writes, shell, network, installs and git mutations prompt.
         // Session permission grants ("always allow") and the operator's
-        // `safety.require_confirmation` list keep their precedence. The other
-        // modes keep the legacy `needs_confirmation()` rules.
-        let confirmation_needed = if matches!(
-            self.config.execution_mode,
-            crate::config::ExecutionMode::Normal
-        ) {
-            crate::safety::normal_mode_needs_confirmation(
-                name,
-                &self.config.safety.require_confirmation,
-                &self.permission_store,
-            )
-        } else {
-            self.needs_confirmation(name)
+        // `safety.require_confirmation` list keep their precedence.
+        //
+        // AutoEdit is the MORE permissive interactive mode, yet its legacy
+        // args-blind list prompted for read-only tools Normal lets through
+        // (`context_focus`, `code_map`, ...). It now prompts only when BOTH
+        // policies would — the union of their allowances, never less strict
+        // than Normal about anything Normal asks for. Yolo/Daemon keep the
+        // legacy `needs_confirmation()` (plus the YOLO floor above).
+        let args_for_policy = || {
+            serde_json::from_str::<serde_json::Value>(args_str).unwrap_or(serde_json::Value::Null)
+        };
+        let confirmation_needed = match self.config.execution_mode {
+            crate::config::ExecutionMode::Normal => {
+                crate::safety::tool_metadata::normal_mode_call_needs_confirmation(
+                    name,
+                    &args_for_policy(),
+                    &self.config.safety.require_confirmation,
+                    &self.permission_store,
+                )
+            }
+            crate::config::ExecutionMode::AutoEdit => {
+                self.needs_confirmation(name)
+                    && crate::safety::tool_metadata::normal_mode_call_needs_confirmation(
+                        name,
+                        &args_for_policy(),
+                        &self.config.safety.require_confirmation,
+                        &self.permission_store,
+                    )
+            }
+            _ => self.needs_confirmation(name),
         };
         if !confirmation_needed {
             return Ok(true);

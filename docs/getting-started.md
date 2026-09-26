@@ -241,7 +241,7 @@ This checks:
 
 | Mode | Description |
 |------|-------------|
-| `normal` | Ask for confirmation before every tool execution (default) |
+| `normal` | Ask before tools that write files, run shell commands, install packages, reach the network or change git history; read-only tools and plain `cargo_check` / `cargo_test` / `cargo_clippy` (without `fix`) run without asking (default) |
 | `auto-edit` | Auto-approve file reads/writes, ask for shell commands |
 | `yolo` | Auto-approve all tool executions |
 | `daemon` | Permanent YOLO mode, runs autonomously |
