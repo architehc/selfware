@@ -338,3 +338,189 @@ workflows:
     );
     assert!(executor.get("main_flow").is_some());
 }
+
+// ---------------------------------------------------------------------------
+// Budget checks inside control-flow bodies: overrun ≤ one body step
+// ---------------------------------------------------------------------------
+
+async fn run_metered(yaml: &str, name: &str, calls: &Arc<AtomicUsize>) -> WorkflowResult {
+    let mut executor = metered_executor(60, calls.clone());
+    executor.load_yaml(yaml).unwrap();
+    executor
+        .execute(name, HashMap::new(), PathBuf::from("/tmp"))
+        .await
+        .unwrap()
+}
+
+fn assert_token_stop(result: &WorkflowResult) {
+    assert_eq!(result.status, WorkflowStatus::Failed);
+    assert_eq!(
+        result.stop_reason,
+        Some(WorkflowStopReason::TokenBudget {
+            max_tokens: 100,
+            used_tokens: 120,
+            unmetered_llm_calls: 0,
+        })
+    );
+}
+
+#[tokio::test]
+async fn token_budget_stops_a_loop_between_iterations() {
+    // 50 items in ONE top-level step: before, all 50 calls ran (3000 tokens
+    // against max_tokens: 100). Now the loop stops after the call that
+    // crossed the limit, and a retrying loop step is not re-run.
+    let items: Vec<String> = (1..=50).map(|i| i.to_string()).collect();
+    let yaml = format!(
+        r#"
+name: big_loop
+max_tokens: 100
+steps:
+  - id: each
+    name: Each item
+    type: loop
+    for: item
+    in: "{}"
+    do: [summarize]
+    retry:
+      max_attempts: 3
+  - id: summarize
+    name: Summarize
+    type: llm
+    prompt: "summarize ${{item}}"
+    required: false
+  - id: after
+    name: After
+    type: llm
+    prompt: never
+"#,
+        items.join(",")
+    );
+    let calls = Arc::new(AtomicUsize::new(0));
+    let result = run_metered(&yaml, "big_loop", &calls).await;
+
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "stopped at iteration 3");
+    assert_token_stop(&result);
+    assert_eq!(result.step_results["each"].status, StepStatus::Failed);
+    assert_eq!(
+        result.step_results["each"].retry_count, 0,
+        "budget stop is not retried"
+    );
+    assert!(result.step_results.contains_key("summarize@1"));
+    assert!(!result.step_results.contains_key("summarize@2"));
+    assert!(!result.step_results.contains_key("after"));
+    assert!(result.logs.iter().any(|l| l
+        .message
+        .contains("stopped before loop iteration 3/50 step 'summarize'")));
+}
+
+#[tokio::test]
+async fn token_budget_stops_inside_an_until_pass() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let result = run_metered(
+        r#"
+name: long_pass
+max_tokens: 100
+steps:
+  - id: loop
+    name: Fix until never
+    type: until
+    do: [a, b, c]
+    until: "false"
+    max_iterations: 5
+  - id: a
+    name: A
+    type: llm
+    prompt: a
+  - id: b
+    name: B
+    type: llm
+    prompt: b
+  - id: c
+    name: C
+    type: llm
+    prompt: c
+"#,
+        "long_pass",
+        &calls,
+    )
+    .await;
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "c never started in pass 1");
+    assert_token_stop(&result);
+    assert!(!result.step_results.contains_key("c"));
+}
+
+#[tokio::test]
+async fn token_budget_stops_a_condition_branch_between_steps() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let result = run_metered(
+        r#"
+name: branchy
+max_tokens: 100
+steps:
+  - id: pick
+    name: Pick
+    type: condition
+    if: "true"
+    then: [a, b, c]
+  - id: a
+    name: A
+    type: llm
+    prompt: a
+  - id: b
+    name: B
+    type: llm
+    prompt: b
+  - id: c
+    name: C
+    type: llm
+    prompt: c
+"#,
+        "branchy",
+        &calls,
+    )
+    .await;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_token_stop(&result);
+    assert!(!result.step_results.contains_key("c"));
+}
+
+#[tokio::test]
+async fn wall_clock_budget_stops_a_loop_between_iterations() {
+    let dir = tempfile::tempdir().unwrap();
+    let yaml = r#"
+name: slow_loop
+max_wall_secs: 1
+steps:
+  - id: each
+    name: Each
+    type: loop
+    for: n
+    in: "1,2,3,4,5"
+    do: [nap]
+  - id: nap
+    name: Nap
+    type: shell
+    command: "sleep 1.1 && touch done_${n}"
+"#;
+    let mut executor = WorkflowExecutor::new();
+    executor.load_yaml(yaml).unwrap();
+    let result = executor
+        .execute("slow_loop", HashMap::new(), dir.path().to_path_buf())
+        .await
+        .unwrap();
+    assert_eq!(result.status, WorkflowStatus::Failed);
+    assert!(matches!(
+        result.stop_reason,
+        Some(WorkflowStopReason::WallClockBudget {
+            max_wall_secs: 1,
+            ..
+        })
+    ));
+    // The first iteration alone crosses the 1 s budget; the second never
+    // starts (before, all five ran: ≥ 5.5 s against max_wall_secs: 1).
+    assert!(dir.path().join("done_1").exists());
+    assert!(
+        !dir.path().join("done_2").exists(),
+        "iteration 2 never started"
+    );
+}

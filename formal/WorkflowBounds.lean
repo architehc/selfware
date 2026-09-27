@@ -7,6 +7,10 @@
      step ≤ attempts × cap (no overflow, no unbounded sleep).
   W3 a workflow budget checked between steps overruns by at most one step:
      if every step is bounded by its timeout `T`, the run ends by `budget + T`.
+     The executor checks before every step it starts — top-level steps and
+     each body step of a `loop` iteration, `until` pass and condition branch —
+     so the steps here are the flattened leaf steps (a sub-workflow call is one
+     leaf) and a 1000-item loop overruns by at most one body step.
   W4 a resumed run never re-executes a completed step.
 -/
 
@@ -76,8 +80,8 @@ theorem total_wait_bounded (delay cap : Nat) :
 
 /-! ## W3 — budget checked between steps -/
 
-/-- Run steps with durations `dur i` (each ≤ `T`), starting at time `t`,
-    checking the budget before each step: a step starts only while
+/-- Run (flattened, leaf) steps with durations `dur i` (each ≤ `T`),
+    starting at time `t`, checking the budget before each step: a step starts only while
     `t < budget`. Returns the end time. -/
 def runSteps (dur : Nat → Nat) (budget : Nat) : Nat → Nat → Nat → Nat
   | 0,     _, t => t

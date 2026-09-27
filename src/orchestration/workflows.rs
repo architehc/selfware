@@ -594,16 +594,22 @@ impl WorkflowTelemetry {
     }
 }
 
-/// Workflow-level resource budget, checked between top-level steps and
-/// between `until` passes.
+/// Workflow-level resource budget, checked before every step the executor
+/// starts: between top-level steps, between `until` passes, and before each
+/// body step of a `loop` iteration, an `until` pass and a condition branch.
 ///
 /// Declared at the top level of a workflow YAML (`max_wall_secs:`,
 /// `max_tokens:`) or an SWL workflow definition. Tokens are the MEASURED
 /// usage the LLM handler reported (`WorkflowTelemetry::measured_tokens`,
 /// AGENTS.md §4) — calls that reported no usage are counted in
 /// `unmetered_llm_calls` and named in the stop reason, never guessed.
-/// The check runs between steps, so one long step can overshoot the
-/// limit; the next step then does not start.
+/// The check runs between steps, so the step that crosses the limit can
+/// overshoot it; the next step then does not start. Because loop, `until`
+/// and condition bodies are checked per body step, the overrun is at most
+/// one *leaf* step (a body step, or a whole sub-workflow call — a
+/// sub-workflow's tokens reach the parent when it returns), never a whole
+/// 1000-item loop (`formal/WorkflowBounds.lean` W3 over the flattened step
+/// sequence).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowBudget {
     /// Wall-clock limit for the run, in seconds.
@@ -1113,6 +1119,24 @@ impl WorkflowContext {
     /// The stop reason if the running workflow has used up its budget.
     pub fn budget_exceeded(&self) -> Option<WorkflowStopReason> {
         self.budget.exceeded(self.elapsed_ms(), &self.telemetry)
+    }
+
+    /// Budget check before a control-flow body step (loop iteration, `until`
+    /// pass, condition branch): once the run is over budget (or already
+    /// stopped on one), record the typed stop reason and return it as the
+    /// error, so the body stops before starting a step it cannot afford —
+    /// the same stop the top-level loop makes between steps.
+    fn stop_if_over_budget(&mut self, before: impl FnOnce() -> String) -> Result<()> {
+        if let Some(reason) = self.stop_reason.clone().or_else(|| self.budget_exceeded()) {
+            self.log(
+                LogLevel::Error,
+                format!("Workflow stopped before {}: {}", before(), reason),
+                None,
+            );
+            self.stop_reason = Some(reason.clone());
+            return Err(reason.into());
+        }
+        Ok(())
     }
 
     fn record_llm_call(&mut self, output: &LlmCallOutput, latency_ms: u64) {
@@ -1923,6 +1947,11 @@ impl WorkflowExecutor {
                         format!("Step {} failed: {}", step.id, e),
                         Some(step.id.clone()),
                     );
+                    // A budget stop is final: another attempt cannot
+                    // un-spend the budget, it would only stop again.
+                    if context.stop_reason.is_some() {
+                        break;
+                    }
                 }
                 None => {
                     // Timeout elapsed — step future has been cancelled
@@ -2066,6 +2095,10 @@ impl WorkflowExecutor {
                                 );
                                 continue;
                             }
+
+                            context.stop_if_over_budget(|| {
+                                format!("condition branch step '{step_id}'")
+                            })?;
 
                             context.log(
                                 LogLevel::Info,
@@ -2436,6 +2469,19 @@ impl WorkflowExecutor {
                                     agg.2 += 1; // skipped
                                     continue;
                                 }
+
+                                // Budget check inside the loop, before every
+                                // body step: a 1000-item loop is one top-level
+                                // step, and must not outrun max_tokens /
+                                // max_wall_secs by more than one body step.
+                                context.stop_if_over_budget(|| {
+                                    format!(
+                                        "loop iteration {}/{} step '{}'",
+                                        idx + 1,
+                                        iteration_count,
+                                        step_id
+                                    )
+                                })?;
 
                                 // Track recursion
                                 context.enter_step(step_id);
@@ -2854,6 +2900,11 @@ impl WorkflowExecutor {
                     );
                     continue;
                 }
+
+                // Inside the pass too, before every body step (not only
+                // between passes): one pass must not outrun the budget by
+                // more than the step that crossed it.
+                context.stop_if_over_budget(|| format!("until pass {pass} step '{step_id}'"))?;
 
                 context.enter_step(step_id);
                 let step_result =
