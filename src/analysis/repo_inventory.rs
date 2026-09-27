@@ -747,7 +747,7 @@ fn git_visible_files(root: &Path) -> Option<HashSet<String>> {
 // Languages, generated files
 // ---------------------------------------------------------------------------
 
-fn language_of(rel: &str) -> &'static str {
+pub(crate) fn language_of(rel: &str) -> &'static str {
     let name = rel.rsplit('/').next().unwrap_or(rel);
     match name {
         "Makefile" | "makefile" | "GNUmakefile" => return "Makefile",
@@ -804,7 +804,7 @@ fn language_of(rel: &str) -> &'static str {
     }
 }
 
-fn is_code_language(language: &str) -> bool {
+pub(crate) fn is_code_language(language: &str) -> bool {
     !matches!(
         language,
         "Markdown"

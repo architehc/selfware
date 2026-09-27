@@ -511,3 +511,83 @@ async fn test_code_query_orders_by_relevance_and_counts_all_matches() {
     let results = serde_json::to_string(&out["results"]).unwrap();
     assert_eq!(out["tokens_used"], estimate_content_tokens(&results));
 }
+
+// ── The walk that defines "the repo" (review 2026-09-27) ─────────────────
+//
+// A depth cap of 3 and a 10-extension list shrank the denominator silently:
+// coverage read 100% of a subset. Deep layouts must be walked, the language
+// table is the repository inventory's, and anything the bound does cut off
+// is counted.
+
+fn walk_fixture() -> (tempfile::TempDir, CodeIntrospect) {
+    let dir = tempfile::tempdir().unwrap();
+    let config = scoped_config(format!("{}/**", dir.path().to_string_lossy()), vec![]);
+    (dir, CodeIntrospect::with_safety_config(config))
+}
+
+#[tokio::test]
+async fn introspect_walks_deep_layouts_and_every_code_language() {
+    let (dir, tool) = walk_fixture();
+    let root = dir.path();
+    let files = [
+        "src/main/java/com/example/app/service/Billing.java",
+        "packages/ui/src/components/button/index.tsx",
+        "packages/ui/src/components/button/hooks.jsx",
+        "app/src/main/kotlin/com/example/Main.kt",
+        "lib/models/user.rb",
+        "src/lib.rs",
+    ];
+    for f in files {
+        let p = root.join(f);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "fn f() {}\n").unwrap();
+    }
+    // Docs and config are not code.
+    std::fs::write(root.join("README.md"), "# readme\n").unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[package]\n").unwrap();
+    let result = introspect(
+        &tool,
+        json!({"target": root.to_string_lossy(), "max_tokens": 20000}),
+    )
+    .await;
+    assert_eq!(
+        result.coverage.files_total,
+        files.len(),
+        "every code file at any depth, in any inventory language, is found"
+    );
+    assert_eq!(result.coverage.dirs_not_walked, 0);
+}
+
+#[tokio::test]
+async fn introspect_counts_directories_below_the_walk_bound() {
+    let (dir, tool) = walk_fixture();
+    let mut deep = dir.path().to_path_buf();
+    for i in 0..(MAX_WALK_DEPTH + 2) {
+        deep = deep.join(format!("d{i}"));
+    }
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::write(deep.join("hidden.rs"), "fn hidden() {}\n").unwrap();
+    std::fs::write(dir.path().join("top.rs"), "fn top() {}\n").unwrap();
+    let result = introspect(
+        &tool,
+        json!({"target": dir.path().to_string_lossy(), "max_tokens": 20000}),
+    )
+    .await;
+    assert_eq!(
+        result.coverage.files_total, 1,
+        "only top.rs is within the bound"
+    );
+    assert!(result.coverage.dirs_not_walked >= 1);
+    assert!(
+        result.coverage.is_partial(),
+        "a directory the walk did not enter makes coverage partial, never 100%"
+    );
+    assert!(
+        result
+            .suggestions
+            .iter()
+            .any(|s| s.contains("were not walked")),
+        "the cut-off is named: {:?}",
+        result.suggestions
+    );
+}

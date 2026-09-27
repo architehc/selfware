@@ -51,6 +51,11 @@ pub struct IntrospectResult {
     pub files_included: Vec<FileInfo>,
 }
 
+/// Directory nesting the walk descends into below the target. Only a
+/// runaway (a symlink cycle inside the workspace) reaches it; anything it
+/// cuts off is reported in [`CoverageStats::dirs_not_walked`].
+pub const MAX_WALK_DEPTH: usize = 64;
+
 /// Coverage statistics for introspection.
 ///
 /// Coverage is of the OUTLINE (signatures / names at the chosen depth), not
@@ -78,12 +83,19 @@ pub struct CoverageStats {
     /// are no symbols to render).
     #[serde(default)]
     pub symbols_coverage_pct: f64,
+    /// Directories below the walk's depth bound (`MAX_WALK_DEPTH`) that were
+    /// not descended into: files under them are in neither `files_total` nor
+    /// the output, so a nonzero value makes the coverage partial.
+    #[serde(default)]
+    pub dirs_not_walked: usize,
 }
 
 impl CoverageStats {
     /// Whether anything found was left out of the output.
     pub fn is_partial(&self) -> bool {
-        self.files_included < self.files_total || self.symbols_included < self.symbols_total
+        self.files_included < self.files_total
+            || self.symbols_included < self.symbols_total
+            || self.dirs_not_walked > 0
     }
 }
 
@@ -169,6 +181,7 @@ fn coverage_of(
         } else {
             (symbols_included as f64 / symbols_total as f64) * 100.0
         },
+        dirs_not_walked: 0,
     }
 }
 
@@ -396,8 +409,12 @@ impl CodeIntrospect {
         // 1. Collect every candidate first (validated against the path
         //    policy before it is read); sorted so the order without a query
         //    is deterministic rather than directory-listing order.
-        let mut files = self.collect_files(&target_path, &safety).await?;
+        let not_walked = std::sync::atomic::AtomicUsize::new(0);
+        let mut files = self
+            .collect_files(&target_path, &safety, &not_walked)
+            .await?;
         files.sort();
+        let dirs_not_walked = not_walked.load(std::sync::atomic::Ordering::Relaxed);
         let files_total = files.len();
 
         // 2. Rank by the query. `rank_files` recomputes a BM25 score per file
@@ -461,6 +478,8 @@ impl CodeIntrospect {
             packings.swap_remove(idx)
         };
 
+        let mut packed = packed;
+        packed.coverage.dirs_not_walked = dirs_not_walked;
         let suggestions = self.generate_suggestions(&packed.coverage, &depth, args.query.is_some());
 
         Ok(IntrospectResult {
@@ -473,7 +492,12 @@ impl CodeIntrospect {
         })
     }
 
-    async fn collect_files(&self, target: &Path, safety: &SafetyConfig) -> Result<Vec<PathBuf>> {
+    async fn collect_files(
+        &self,
+        target: &Path,
+        safety: &SafetyConfig,
+        not_walked: &std::sync::atomic::AtomicUsize,
+    ) -> Result<Vec<PathBuf>> {
         let mut files = Vec::new();
 
         if target.is_file() {
@@ -499,8 +523,17 @@ impl CodeIntrospect {
                     files.push(path);
                 } else if path.is_dir() {
                     validate_tool_path(&path.to_string_lossy(), safety)?;
-                    // Recursively collect with depth limit
-                    files.extend(self.collect_files_recursive(&path, 3, safety).await?);
+                    // Recursively collect. The bound only stops runaway
+                    // nesting (e.g. a symlink cycle inside the workspace);
+                    // real layouts (src/main/java/com/…, packages/*/src/…)
+                    // sit far below it, and a directory it does cut off is
+                    // counted, never silently dropped (review 2026-09-27: a
+                    // depth of 3 hid most of a Java or monorepo tree while
+                    // coverage read 100%).
+                    files.extend(
+                        self.collect_files_recursive(&path, MAX_WALK_DEPTH, safety, not_walked)
+                            .await?,
+                    );
                 }
             }
         }
@@ -514,10 +547,12 @@ impl CodeIntrospect {
         dir: &'a Path,
         depth: usize,
         safety: &'a SafetyConfig,
+        not_walked: &'a std::sync::atomic::AtomicUsize,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<PathBuf>>> + Send + 'a>>
     {
         Box::pin(async move {
             if depth == 0 {
+                not_walked.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return Ok(Vec::new());
             }
 
@@ -546,7 +581,7 @@ impl CodeIntrospect {
                 } else if path.is_dir() {
                     validate_tool_path(&path.to_string_lossy(), safety)?;
                     files.extend(
-                        self.collect_files_recursive(&path, depth - 1, safety)
+                        self.collect_files_recursive(&path, depth - 1, safety, not_walked)
                             .await?,
                     );
                 }
@@ -556,12 +591,15 @@ impl CodeIntrospect {
         })
     }
 
-    fn is_source_file(path: &Path) -> bool {
-        let extensions = ["rs", "py", "js", "ts", "go", "java", "c", "cpp", "h", "hpp"];
-        path.extension()
-            .and_then(|e| e.to_str())
-            .map(|e| extensions.contains(&e))
-            .unwrap_or(false)
+    /// A code file by the same language table the repository inventory
+    /// uses (one source of truth, 30+ languages: tsx/jsx/mjs, Kotlin, Swift,
+    /// Ruby, PHP, C#, Scala, Vue, Svelte, …). Docs and config are not code.
+    pub(crate) fn is_source_file(path: &Path) -> bool {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            return false;
+        };
+        let language = crate::analysis::repo_inventory::language_of(name);
+        crate::analysis::repo_inventory::is_code_language(language)
     }
 
     fn generate_suggestions(
@@ -594,6 +632,13 @@ impl CodeIntrospect {
             let omitted = coverage.symbols_total - coverage.symbols_included;
             if omitted > 0 {
                 left_out.push(format!("{omitted} symbols omitted"));
+            }
+            if coverage.dirs_not_walked > 0 {
+                left_out.push(format!(
+                    "{} directories deeper than {MAX_WALK_DEPTH} levels were not walked \
+                     (files under them are not counted)",
+                    coverage.dirs_not_walked
+                ));
             }
             let remedy = if matches!(depth, Depth::Overview) {
                 "Raise max_tokens or narrow the target."

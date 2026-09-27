@@ -285,12 +285,10 @@ impl EvolutionPlanner {
         })
     }
 
+    /// Same language table as `code_introspect` and the repository
+    /// inventory (one source of truth).
     fn is_source_file(path: &Path) -> bool {
-        let extensions = ["rs", "py", "js", "ts", "go", "java"];
-        path.extension()
-            .and_then(|e| e.to_str())
-            .map(|e| extensions.contains(&e))
-            .unwrap_or(false)
+        super::CodeIntrospect::is_source_file(path)
     }
 
     /// Plan with introspection-first strategy
