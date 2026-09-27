@@ -2615,3 +2615,169 @@ steps:
     assert_eq!(step.status, StepStatus::Completed);
     assert_eq!(step.retry_count, 1);
 }
+
+// ---------------------------------------------------------------------------
+// Loop size / step-execution ceilings (review finding: loop item count was
+// uncapped and nested loops multiply).
+// ---------------------------------------------------------------------------
+
+fn csv_items(n: usize) -> String {
+    (0..n).map(|i| i.to_string()).collect::<Vec<_>>().join(",")
+}
+
+#[tokio::test]
+async fn test_loop_over_max_items_is_typed_error() {
+    let executor = WorkflowExecutor::new();
+    let mut ctx = WorkflowContext::new("/tmp");
+    let step_type = StepType::Loop {
+        variable: "item".to_string(),
+        items: csv_items(MAX_LOOP_ITEMS + 1),
+        do_steps: vec![],
+    };
+    let err = executor
+        .execute_step_inner(&step_type, &mut ctx)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<WorkflowLimitError>(),
+        Some(&WorkflowLimitError::LoopTooManyItems {
+            variable: "item".to_string(),
+            items: MAX_LOOP_ITEMS + 1,
+            limit: MAX_LOOP_ITEMS,
+        })
+    );
+    assert!(err.to_string().contains("MAX_LOOP_ITEMS"));
+}
+
+#[tokio::test]
+async fn test_loop_at_max_items_runs() {
+    let executor = WorkflowExecutor::new();
+    let mut ctx = WorkflowContext::new("/tmp");
+    let step_type = StepType::Loop {
+        variable: "item".to_string(),
+        items: csv_items(MAX_LOOP_ITEMS),
+        do_steps: vec![],
+    };
+    assert!(executor
+        .execute_step_inner(&step_type, &mut ctx)
+        .await
+        .is_ok());
+}
+
+#[tokio::test]
+async fn test_nested_loops_hit_step_execution_ceiling() {
+    // 200 outer x (1 inner loop + 100 body) ≈ 20k executions > 10k ceiling.
+    // Body and inner loop are optional, so only the ceiling can stop it.
+    let yaml = format!(
+        r#"
+name: nested_blowup
+description: nested loops multiply
+steps:
+  - id: outer
+    name: outer
+    type: loop
+    for: a
+    in: "{outer}"
+    do:
+      - inner
+  - id: inner
+    name: inner
+    type: loop
+    required: false
+    for: b
+    in: "{inner}"
+    do:
+      - body
+  - id: body
+    name: body
+    type: log
+    required: false
+    message: "${{a}}-${{b}}"
+"#,
+        outer = csv_items(200),
+        inner = csv_items(100),
+    );
+    let mut executor = WorkflowExecutor::new();
+    executor.load_yaml(&yaml).unwrap();
+
+    let result = executor
+        .execute("nested_blowup", HashMap::new(), PathBuf::from("/tmp"))
+        .await
+        .unwrap();
+    assert!(!result.is_success());
+    let outer = &result.step_results["outer"];
+    assert_eq!(outer.status, StepStatus::Failed);
+    assert!(
+        outer
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("MAX_STEP_EXECUTIONS"),
+        "outer loop must fail on the ceiling: {:?}",
+        outer.error
+    );
+}
+
+#[tokio::test]
+async fn test_step_execution_ceiling_is_shared_with_sub_workflows() {
+    // Each child run alone is small (~101 executions); only a run-wide,
+    // shared counter stops 200 of them (~20k executions).
+    let child = format!(
+        r#"
+name: child
+description: child loop
+steps:
+  - id: inner
+    name: inner
+    type: loop
+    for: b
+    in: "{inner}"
+    do:
+      - body
+  - id: body
+    name: body
+    type: log
+    message: "${{b}}"
+"#,
+        inner = csv_items(100),
+    );
+    let parent = format!(
+        r#"
+name: parent
+description: loops over a sub-workflow
+steps:
+  - id: outer
+    name: outer
+    type: loop
+    for: a
+    in: "{outer}"
+    do:
+      - call
+  - id: call
+    name: call
+    type: sub_workflow
+    required: false
+    workflow: child
+"#,
+        outer = csv_items(200),
+    );
+    let mut executor = WorkflowExecutor::new();
+    executor.load_yaml(&child).unwrap();
+    executor.load_yaml(&parent).unwrap();
+
+    let result = executor
+        .execute("parent", HashMap::new(), PathBuf::from("/tmp"))
+        .await
+        .unwrap();
+    let outer = &result.step_results["outer"];
+    assert_eq!(outer.status, StepStatus::Failed);
+    assert!(
+        outer
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("MAX_STEP_EXECUTIONS"),
+        "sub-workflow executions must count against the run: {:?}",
+        outer.error
+    );
+}

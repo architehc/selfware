@@ -445,6 +445,37 @@ const MAX_RECURSION_DEPTH: usize = 10;
 /// Maximum number of workflow log entries before oldest entries are evicted.
 const MAX_WORKFLOW_LOG_ENTRIES: usize = 1000;
 
+/// Maximum number of items a single Loop step may iterate over.
+pub const MAX_LOOP_ITEMS: usize = 1000;
+
+/// Maximum number of step executions (every step run through the retry
+/// runner, including loop iterations, condition branches and sub-workflow
+/// steps) in one `execute` call. Bounds nested loops, whose item counts
+/// multiply.
+pub const MAX_STEP_EXECUTIONS: u64 = 10_000;
+
+/// Typed workflow resource-limit errors (downcast from `anyhow::Error`).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum WorkflowLimitError {
+    /// A Loop step's item list exceeded [`MAX_LOOP_ITEMS`].
+    #[error(
+        "loop over '{variable}' has {items} items, exceeding the limit of {limit} \
+         (MAX_LOOP_ITEMS); split the list across several loop steps or workflows"
+    )]
+    LoopTooManyItems {
+        variable: String,
+        items: usize,
+        limit: usize,
+    },
+    /// The run exceeded [`MAX_STEP_EXECUTIONS`] step executions.
+    #[error(
+        "workflow run exceeded {limit} step executions (MAX_STEP_EXECUTIONS, counted \
+         across loops, condition branches and sub-workflows); reduce loop sizes or \
+         split the run into several workflows"
+    )]
+    StepExecutionLimit { limit: u64 },
+}
+
 /// Workflow execution context
 #[derive(Debug, Clone)]
 pub struct WorkflowContext {
@@ -474,6 +505,9 @@ pub struct WorkflowContext {
     pub workflow_call_stack: Vec<String>,
     /// Aggregated workflow telemetry
     pub telemetry: WorkflowTelemetry,
+    /// Step executions so far in this run, shared with sub-workflows so
+    /// [`MAX_STEP_EXECUTIONS`] bounds the whole run.
+    pub step_executions: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Log entry
@@ -502,7 +536,29 @@ impl WorkflowContext {
             control_flow_managed_steps: std::collections::HashSet::new(),
             workflow_call_stack: Vec::new(),
             telemetry: WorkflowTelemetry::default(),
+            step_executions: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    /// Charge one step execution against [`MAX_STEP_EXECUTIONS`].
+    fn charge_step_execution(&self) -> Result<(), WorkflowLimitError> {
+        let prev = self
+            .step_executions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if prev >= MAX_STEP_EXECUTIONS {
+            Err(WorkflowLimitError::StepExecutionLimit {
+                limit: MAX_STEP_EXECUTIONS,
+            })
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Whether the run has already used up [`MAX_STEP_EXECUTIONS`].
+    fn step_executions_exhausted(&self) -> bool {
+        self.step_executions
+            .load(std::sync::atomic::Ordering::Relaxed)
+            >= MAX_STEP_EXECUTIONS
     }
 
     /// Check if we can safely recurse into a step
@@ -1075,7 +1131,7 @@ impl WorkflowExecutor {
         working_dir: PathBuf,
     ) -> Result<WorkflowResult> {
         // Start with empty call stack for top-level execution
-        self.execute_with_call_stack(name, inputs, working_dir, Vec::new())
+        self.execute_with_call_stack(name, inputs, working_dir, Vec::new(), None)
             .await
     }
 
@@ -1086,6 +1142,7 @@ impl WorkflowExecutor {
         inputs: HashMap<String, VarValue>,
         working_dir: PathBuf,
         call_stack: Vec<String>,
+        step_executions: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
     ) -> Result<WorkflowResult> {
         // Check for workflow-level cycles
         if call_stack.contains(&name.to_string()) {
@@ -1112,6 +1169,9 @@ impl WorkflowExecutor {
             .clone();
 
         let mut context = WorkflowContext::new(working_dir.clone());
+        if let Some(counter) = step_executions {
+            context.step_executions = counter;
+        }
         context.workflow_name = Some(workflow.name.clone());
         context.started_at = Some(Instant::now());
         context.status = WorkflowStatus::Running;
@@ -1343,6 +1403,21 @@ impl WorkflowExecutor {
         workflow_steps: &[WorkflowStep],
     ) -> StepResult {
         let start = Instant::now();
+        if let Err(limit) = context.charge_step_execution() {
+            context.log(
+                LogLevel::Error,
+                format!("Step {} not run: {}", step.id, limit),
+                Some(step.id.clone()),
+            );
+            return StepResult {
+                step_id: step.id.clone(),
+                status: StepStatus::Failed,
+                output: None,
+                error: Some(limit.to_string()),
+                duration_ms: 0,
+                retry_count: 0,
+            };
+        }
         let max_attempts = step.retry.max_attempts.clamp(1, MAX_RETRY_ATTEMPTS);
         let mut last_error = None;
         let mut attempts_made: u32 = 0;
@@ -1842,6 +1917,14 @@ impl WorkflowExecutor {
                 // Simple split by comma for now
                 let item_list: Vec<&str> = items_value.split(',').map(|s| s.trim()).collect();
                 let iteration_count = item_list.len();
+                if iteration_count > MAX_LOOP_ITEMS {
+                    return Err(WorkflowLimitError::LoopTooManyItems {
+                        variable: variable.clone(),
+                        items: iteration_count,
+                        limit: MAX_LOOP_ITEMS,
+                    }
+                    .into());
+                }
 
                 context.log(
                     LogLevel::Info,
@@ -1857,6 +1940,15 @@ impl WorkflowExecutor {
                 let mut step_aggregates: HashMap<String, (u32, u32, u32)> = HashMap::new();
 
                 for (idx, item) in item_list.into_iter().enumerate() {
+                    // Abort the whole loop (even when its body steps are
+                    // optional) once the run's step budget is spent, so a
+                    // nested loop cannot keep spinning through cheap failures.
+                    if context.step_executions_exhausted() {
+                        return Err(WorkflowLimitError::StepExecutionLimit {
+                            limit: MAX_STEP_EXECUTIONS,
+                        }
+                        .into());
+                    }
                     context.set_var(variable, item);
                     context.log(
                         LogLevel::Debug,
@@ -2062,6 +2154,7 @@ impl WorkflowExecutor {
                         resolved_inputs,
                         context.working_dir.clone(),
                         context.workflow_call_stack.clone(),
+                        Some(std::sync::Arc::clone(&context.step_executions)),
                     ))
                     .await?;
 
