@@ -62,6 +62,7 @@ pub mod doctor;
 pub mod errors;
 pub mod hooks;
 pub mod input;
+pub mod lifecycle;
 pub mod lsp;
 pub mod mcp;
 pub mod safety;

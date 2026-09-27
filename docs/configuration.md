@@ -599,6 +599,7 @@ All environment variables override their corresponding config file values.
 | `SELFWARE_CONFIG` | Config file path override | `/path/to/config.toml` |
 | `SELFWARE_STRICT_PERMISSIONS` | Enforce strict file permissions | `1` |
 | `SELFWARE_ASCII` | ASCII-only output (no emoji) | `1` |
+| `SELFWARE_EVENT_LOG` | Task lifecycle event log path (`selfware tasks`, `selfware task show`), or `off`. Default `~/.selfware/state/events.jsonl` | `off` |
 | `NO_COLOR` | Disable colored output (standard) | `1` |
 
 ## Complete Example Config

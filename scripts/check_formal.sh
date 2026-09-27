@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Re-check the formal lifecycle models and the exported task transition table.
+#
+#   1. `lean formal/WorkflowBounds.lean` and `lean formal/TaskFsm.lean` must
+#      elaborate with no errors (every theorem is re-proved).
+#   2. The table TaskFsm.lean prints (`#eval exportTable`) is decoded into JSON
+#      and compared with the committed formal/task_table.json, which the Rust
+#      conformance test (`lifecycle::task` tests) checks src/lifecycle against.
+#
+# Usage: scripts/check_formal.sh [--write]
+#   --write   regenerate formal/task_table.json instead of comparing.
+#
+# Needs Lean 4 (core only, no Mathlib) and python3. When `lean` is not on
+# PATH the check is skipped with exit 0 and a clear message: the Rust
+# conformance test still pins the committed table.
+
+set -euo pipefail
+
+THIS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${THIS_DIR}/.." && pwd)"
+FORMAL="${REPO_ROOT}/formal"
+TABLE="${FORMAL}/task_table.json"
+
+WRITE=0
+case "${1:-}" in
+    --write) WRITE=1 ;;
+    "") ;;
+    *) echo "usage: $0 [--write]" >&2; exit 2 ;;
+esac
+
+if ! command -v lean >/dev/null 2>&1; then
+    echo "check_formal: SKIPPED — 'lean' is not on PATH (install Lean 4, e.g. via elan)."
+    echo "check_formal: the committed formal/task_table.json is still enforced by the Rust conformance test."
+    exit 0
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "check_formal: python3 is required to decode the exported table." >&2
+    exit 1
+fi
+
+echo "check_formal: $(lean --version)"
+
+echo "check_formal: lean formal/WorkflowBounds.lean"
+lean "${FORMAL}/WorkflowBounds.lean"
+
+echo "check_formal: lean formal/TaskFsm.lean"
+raw="$(lean "${FORMAL}/TaskFsm.lean")"
+
+generated="$(mktemp)"
+trap 'rm -f "${generated}"' EXIT
+# The #eval prints a Lean string literal (JSON-compatible escaping): decode it
+# to the JSON array it contains, then write one [state, event, next] row per
+# line.
+printf '%s\n' "${raw}" | tail -n 1 | python3 -c '
+import json, sys
+rows = json.loads(json.loads(sys.stdin.read()))
+assert all(len(r) == 3 for r in rows), "every row is [state, event, next]"
+print("[\n" + ",\n".join("  " + json.dumps(r) for r in rows) + "\n]")
+' > "${generated}"
+
+if [ "${WRITE}" -eq 1 ]; then
+    cp "${generated}" "${TABLE}"
+    echo "check_formal: wrote ${TABLE} ($(grep -c '^  \[' "${TABLE}") transitions)"
+    exit 0
+fi
+
+if ! diff -u "${TABLE}" "${generated}"; then
+    echo "check_formal: FAILED — formal/task_table.json differs from the Lean model's export." >&2
+    echo "check_formal: if the model changed on purpose, rerun with --write and update src/lifecycle/task.rs to match." >&2
+    exit 1
+fi
+echo "check_formal: OK — both models check and task_table.json matches ($(grep -c '^  \[' "${TABLE}") transitions)."
