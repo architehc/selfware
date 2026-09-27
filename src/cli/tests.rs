@@ -2969,6 +2969,48 @@ fn run_budgets_treat_zero_as_unset_like_the_enforcer() {
     );
 }
 
+// ── selfware resources ──
+
+#[test]
+fn cli_resources_list_flags_parse() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from(["selfware", "resources", "--zombies", "--json"]).unwrap();
+    match cli.command.unwrap() {
+        Commands::Resources {
+            command,
+            zombies,
+            json,
+            all,
+        } => {
+            assert!(command.is_none());
+            assert!(zombies && json && !all);
+        }
+        other => panic!("unexpected command {other:?}"),
+    }
+}
+
+#[test]
+fn cli_resources_reap_defaults_to_a_ten_second_deadline() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from(["selfware", "resources", "reap", "--dry-run"]).unwrap();
+    match cli.command.unwrap() {
+        Commands::Resources {
+            command:
+                Some(args::ResourcesCommand::Reap {
+                    dry_run,
+                    include_kept,
+                    deadline_secs,
+                    json,
+                }),
+            ..
+        } => {
+            assert!(dry_run && !include_kept && !json);
+            assert_eq!(deadline_secs, 10);
+        }
+        other => panic!("unexpected command {other:?}"),
+    }
+}
+
 // ── resource teardown line ──
 
 #[test]

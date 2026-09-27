@@ -624,6 +624,23 @@ pub(crate) enum Commands {
         command: RunsCommand,
     },
 
+    /// List or reap resources selfware started (containers, background
+    /// processes, PTY sessions, browsers, worktrees)
+    #[command(display_order = 21)]
+    Resources {
+        #[command(subcommand)]
+        command: Option<ResourcesCommand>,
+        /// Only show zombies (owner gone or teardown could not confirm release)
+        #[arg(long)]
+        zombies: bool,
+        /// Emit JSON instead of text
+        #[arg(long)]
+        json: bool,
+        /// Also list released entries
+        #[arg(long)]
+        all: bool,
+    },
+
     /// Manage the fail-closed emergency killswitch
     #[command(display_order = 28)]
     Killswitch {
@@ -1018,6 +1035,27 @@ pub(crate) enum StateCommands {
         /// Skip confirmation if state exists
         #[arg(short, long)]
         force: bool,
+    },
+}
+
+/// Subcommands of `selfware resources`.
+#[derive(Subcommand, Clone, Debug)]
+pub(crate) enum ResourcesCommand {
+    /// Drain zombie resources: owner task/session gone, and recorded or
+    /// labelled by selfware. Never touches anything else.
+    Reap {
+        /// Show what would be drained without touching anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Also drain `keep` resources whose session has ended
+        #[arg(long)]
+        include_kept: bool,
+        /// Seconds each resource gets to stop politely before it is forced
+        #[arg(long, default_value_t = 10)]
+        deadline_secs: u64,
+        /// Emit JSON instead of text
+        #[arg(long)]
+        json: bool,
     },
 }
 

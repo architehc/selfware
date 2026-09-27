@@ -1762,6 +1762,18 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
 
+    // `selfware resources` is an operator tool like the killswitch: it must
+    // work without (or with a broken) configuration.
+    if let Some(Commands::Resources {
+        command,
+        zombies,
+        json,
+        all,
+    }) = &cli.command
+    {
+        return run_resources_command(command.as_ref(), *zombies, *json, *all).await;
+    }
+
     // Recovery must remain reachable even when the selected configuration
     // cannot be parsed or trusted. Load it only for the diagnostic branch.
     if let Some(Commands::Boot { chat, check }) = &cli.command {
@@ -1803,6 +1815,17 @@ pub async fn run() -> Result<()> {
         crate::config::set_config_line_suppressed(true);
     }
     let mut config = load_async_config_with_provenance(&cli, &config_path).await?;
+
+    // Report (never reap) resources earlier sessions left behind: one line
+    // on stderr, registry only — no container runtime calls on startup.
+    if !cli.quiet {
+        if let Some(line) = crate::resources::reaper::startup_report(
+            crate::resources::ResourceRegistry::global(),
+            &crate::resources::SystemDriver::default(),
+        ) {
+            eprintln!("{line}");
+        }
+    }
 
     apply_session_model_overrides(&cli, &mut config)?;
     config.discover_sglang_capabilities().await;
@@ -6410,6 +6433,9 @@ max_recovery_attempts = 3
         Commands::Killswitch { .. } => {
             unreachable!("Killswitch command handled before Config::load");
         }
+        Commands::Resources { .. } => {
+            unreachable!("Resources command handled before Config::load");
+        }
 
         Commands::Tasks { .. } | Commands::Task { .. } => {
             unreachable!("lifecycle views are handled before Config::load");
@@ -7015,6 +7041,75 @@ pub fn process_exit_message(e: &anyhow::Error, already_reported: bool) -> Option
 
 /// The text run summary for a finished run, its outcome classified from the
 /// result (a user interrupt reads `outcome: interrupted`, not `failed`).
+/// `selfware resources [--zombies] [--json] [--all]` and
+/// `selfware resources reap [--dry-run] [--include-kept]`.
+async fn run_resources_command(
+    command: Option<&args::ResourcesCommand>,
+    zombies: bool,
+    json: bool,
+    all: bool,
+) -> Result<()> {
+    use crate::resources::reaper;
+    let registry = crate::resources::ResourceRegistry::global();
+    let driver = crate::resources::SystemDriver::default();
+    match command {
+        None => {
+            let listing = reaper::list(registry, &driver, true, all).await;
+            if json {
+                let entries: Vec<&reaper::Entry> = listing
+                    .entries
+                    .iter()
+                    .filter(|e| !zombies || matches!(e.status, reaper::EntryStatus::Zombie(_)))
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "entries": entries,
+                        "container_check": listing.container_check,
+                        "registry": registry.path(),
+                    }))?
+                );
+            } else {
+                println!("{}", reaper::render_listing(&listing, zombies));
+            }
+        }
+        Some(args::ResourcesCommand::Reap {
+            dry_run,
+            include_kept,
+            deadline_secs,
+            json,
+        }) => {
+            let policy = crate::resources::TeardownPolicy::with_deadline(
+                std::time::Duration::from_secs(*deadline_secs),
+            );
+            let report = reaper::reap(registry, &driver, *dry_run, *include_kept, policy).await;
+            if *json {
+                let drained = report
+                    .drained
+                    .as_ref()
+                    .map(|d| serde_json::json!({ "released": d.released, "leaked": d.leaked }));
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "report": report,
+                        "drained": drained,
+                    }))?
+                );
+            } else {
+                println!("{}", reaper::render_reap(&report));
+            }
+            if report
+                .drained
+                .as_ref()
+                .is_some_and(|d| !d.leaked.is_empty())
+            {
+                anyhow::bail!("some resources could not be confirmed released");
+            }
+        }
+    }
+    Ok(())
+}
+
 fn render_text_run_summary(summary: &crate::agent::RunSummary, run_result: &Result<()>) -> String {
     let end = crate::errors::RunEnd::classify(run_result, crate::shutdown_reason());
     let reason = run_result
