@@ -160,55 +160,55 @@ fn build_workflow_llm_handler(
             format!("{prompt}\n\nContext:\n{}", ctx.join("\n"))
         };
 
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async move {
-                crate::observability::telemetry::increment_api_requests();
+        // Native async — no block_in_place/block_on bridge, so the workflow
+        // step's select! timeout can preempt (and drop) the in-flight request.
+        Box::pin(async move {
+            crate::observability::telemetry::increment_api_requests();
 
-                let started = std::time::Instant::now();
-                let response = client
-                    .chat(
-                        vec![crate::api::Message::user(request)],
-                        None,
-                        crate::api::ThinkingMode::Disabled,
-                    )
-                    .await;
-                let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let started = std::time::Instant::now();
+            let response = client
+                .chat(
+                    vec![crate::api::Message::user(request)],
+                    None,
+                    crate::api::ThinkingMode::Disabled,
+                )
+                .await;
+            let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
 
-                match response {
-                    Ok(response) => {
-                        let prompt_tokens = response.usage.prompt_tokens as u64;
-                        let completion_tokens = response.usage.completion_tokens as u64;
-                        let total_tokens = response.usage.total_tokens as u64;
-                        let estimated_cost_usd = estimate_workflow_llm_cost_usd(
-                            response.usage.prompt_tokens,
-                            response.usage.completion_tokens,
-                        );
+            match response {
+                Ok(response) => {
+                    let prompt_tokens = response.usage.prompt_tokens as u64;
+                    let completion_tokens = response.usage.completion_tokens as u64;
+                    let total_tokens = response.usage.total_tokens as u64;
+                    let estimated_cost_usd = estimate_workflow_llm_cost_usd(
+                        response.usage.prompt_tokens,
+                        response.usage.completion_tokens,
+                    );
 
-                        tracing::info!(
-                            model = %model_label,
-                            agent = %agent_label,
-                            latency_ms,
-                            prompt_tokens,
-                            completion_tokens,
-                            total_tokens,
-                            estimated_cost_usd,
-                            "workflow llm request completed"
-                        );
-                        workflow_llm_output_from_response(response)
-                    }
-                    Err(err) => {
-                        crate::observability::telemetry::increment_api_errors();
-                        tracing::warn!(
-                            model = %model_label,
-                            agent = %agent_label,
-                            latency_ms,
-                            error = %err,
-                            "workflow llm request failed"
-                        );
-                        Err(err)
-                    }
+                    tracing::info!(
+                        model = %model_label,
+                        agent = %agent_label,
+                        latency_ms,
+                        prompt_tokens,
+                        completion_tokens,
+                        total_tokens,
+                        estimated_cost_usd,
+                        "workflow llm request completed"
+                    );
+                    workflow_llm_output_from_response(response)
                 }
-            })
+                Err(err) => {
+                    crate::observability::telemetry::increment_api_errors();
+                    tracing::warn!(
+                        model = %model_label,
+                        agent = %agent_label,
+                        latency_ms,
+                        error = %err,
+                        "workflow llm request failed"
+                    );
+                    Err(err)
+                }
+            }
         })
     })
 }
@@ -888,10 +888,9 @@ async fn rollback_improve_tree(
 /// steps to the real [`ToolRegistry`] behind the safety gate.
 ///
 /// The handler converts the `HashMap<String, String>` args from the workflow
-/// engine into a `serde_json::Value::Object`, then bridges the sync→async
-/// boundary using `tokio::task::block_in_place` +
-/// `Handle::current().block_on(...)` so we can `.await` the registry's async
-/// `execute_any` call.
+/// engine into a `serde_json::Value::Object` and returns a future that
+/// `.await`s the registry's async `execute_any` call natively (no
+/// `block_in_place` bridge), so the workflow step timeout can preempt it.
 ///
 /// `execute_any` is used (instead of `execute`) so that deferred tools — which
 /// are common in workflow scripts (e.g. `git_status`, `cargo_test`) — are also
@@ -4915,10 +4914,9 @@ async fn handle_command(
 
                                 let client =
                                     std::sync::Arc::new(crate::api::ApiClient::new(&config)?);
-                                executor = executor.with_llm_handler(build_workflow_llm_handler(
-                                    client,
-                                    config.model.clone(),
-                                ));
+                                executor = executor.with_async_llm_handler(
+                                    build_workflow_llm_handler(client, config.model.clone()),
+                                );
                                 executor = executor
                                     .with_tool_handler(build_workflow_tool_handler(&config.safety));
 
@@ -5010,10 +5008,9 @@ async fn handle_command(
                             if !dry_run {
                                 let client =
                                     std::sync::Arc::new(crate::api::ApiClient::new(&config)?);
-                                executor = executor.with_llm_handler(build_workflow_llm_handler(
-                                    client,
-                                    config.model.clone(),
-                                ));
+                                executor = executor.with_async_llm_handler(
+                                    build_workflow_llm_handler(client, config.model.clone()),
+                                );
                                 executor = executor
                                     .with_tool_handler(build_workflow_tool_handler(&config.safety));
                             }

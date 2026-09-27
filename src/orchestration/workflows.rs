@@ -871,8 +871,19 @@ pub type ToolHandler = Box<
         + Sync,
 >;
 
-/// Type alias for LLM handler function
-pub type LlmHandler = Box<dyn Fn(&str, &[String]) -> Result<LlmCallOutput> + Send + Sync>;
+/// Async LLM handler for workflow Llm steps.
+///
+/// Must return a future rather than a finished result: the step runs inside
+/// a `tokio::select!` against its timeout, and a sync handler (the previous
+/// type, bridged with `block_in_place`/`block_on` in the CLI) blocked the very
+/// first poll of the step future until the model answered, so the timeout arm
+/// could never fire for Llm steps — the same defect already fixed for
+/// [`ToolHandler`].
+pub type LlmHandler = Box<
+    dyn Fn(&str, &[String]) -> futures::future::BoxFuture<'static, Result<LlmCallOutput>>
+        + Send
+        + Sync,
+>;
 
 fn estimate_llm_cost_usd(prompt_tokens: u64, completion_tokens: u64) -> f64 {
     (prompt_tokens as f64 * 3.0 / 1_000_000.0) + (completion_tokens as f64 * 15.0 / 1_000_000.0)
@@ -944,15 +955,37 @@ impl WorkflowExecutor {
         self
     }
 
-    /// Set LLM handler for executing LLM steps
+    /// Set a synchronous LLM handler for executing LLM steps.
+    ///
+    /// The closure runs on the blocking thread pool (`spawn_blocking`) so a
+    /// slow handler cannot stall the executor's poll and the step timeout
+    /// still fires. On timeout the step fails and the closure's result is
+    /// discarded (a blocking thread cannot be cancelled mid-call). Prefer
+    /// [`Self::with_async_llm_handler`] for real network clients.
     pub fn with_llm_handler<F, R>(mut self, handler: F) -> Self
     where
         F: Fn(&str, &[String]) -> Result<R> + Send + Sync + 'static,
         R: Into<LlmCallOutput>,
     {
+        let handler = std::sync::Arc::new(handler);
         self.llm_handler = Some(Box::new(move |prompt, context| {
-            handler(prompt, context).map(Into::into)
+            let handler = std::sync::Arc::clone(&handler);
+            let prompt = prompt.to_string();
+            let context = context.to_vec();
+            Box::pin(async move {
+                tokio::task::spawn_blocking(move || handler(&prompt, &context).map(Into::into))
+                    .await
+                    .map_err(|e| anyhow!("LLM handler task failed: {}", e))?
+            })
         }));
+        self
+    }
+
+    /// Set an async LLM handler for executing LLM steps. The returned future
+    /// is awaited inside the step's timeout `select!`, so dropping it on
+    /// timeout cancels the in-flight request.
+    pub fn with_async_llm_handler(mut self, handler: LlmHandler) -> Self {
+        self.llm_handler = Some(handler);
         self
     }
 
@@ -1715,7 +1748,7 @@ impl WorkflowExecutor {
                         None,
                     );
                     let llm_start = Instant::now();
-                    let result = handler(&resolved_prompt, &resolved_context)?;
+                    let result = handler(&resolved_prompt, &resolved_context).await?;
                     context.record_llm_call(&result, llm_start.elapsed().as_millis() as u64);
                     Ok(VarValue::String(result.content))
                 } else {

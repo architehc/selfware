@@ -2409,3 +2409,73 @@ async fn test_guardrail_step_passing_condition_continues() {
     assert!(result.is_success());
     assert_eq!(result.step_results["guard"].status, StepStatus::Completed);
 }
+
+// ---------------------------------------------------------------------------
+// Llm step timeouts (review finding: the sync LlmHandler blocked the first
+// poll of the step future, so the select! timeout arm could never fire).
+// ---------------------------------------------------------------------------
+
+const SLOW_LLM_YAML: &str = r#"
+name: slow_llm
+description: Llm step that outlives its timeout
+steps:
+  - id: think
+    name: Slow model
+    type: llm
+    prompt: "take your time"
+    timeout_secs: 1
+"#;
+
+#[tokio::test]
+async fn test_async_llm_handler_step_timeout_fires() {
+    let mut executor = WorkflowExecutor::new().with_async_llm_handler(Box::new(|_, _| {
+        Box::pin(async {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            Ok(LlmCallOutput::from("too late".to_string()))
+        })
+    }));
+    executor.load_yaml(SLOW_LLM_YAML).unwrap();
+
+    let started = Instant::now();
+    let result = executor
+        .execute("slow_llm", HashMap::new(), PathBuf::from("/tmp"))
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "timeout must preempt the LLM call, took {elapsed:?}"
+    );
+    let step = &result.step_results["think"];
+    assert_eq!(step.status, StepStatus::Failed);
+    assert!(
+        step.error.as_deref().unwrap_or("").contains("timed out"),
+        "error must name the timeout: {:?}",
+        step.error
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_sync_llm_handler_step_timeout_fires() {
+    // A blocking handler (std::thread::sleep) must not freeze the executor:
+    // it runs on the blocking pool, so the step fails on its timeout.
+    let mut executor = WorkflowExecutor::new().with_llm_handler(|_: &str, _: &[String]| {
+        std::thread::sleep(Duration::from_secs(5));
+        Ok("too late".to_string())
+    });
+    executor.load_yaml(SLOW_LLM_YAML).unwrap();
+
+    let started = Instant::now();
+    let result = executor
+        .execute("slow_llm", HashMap::new(), PathBuf::from("/tmp"))
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "timeout must fire while the sync handler blocks, took {elapsed:?}"
+    );
+    assert_eq!(result.step_results["think"].status, StepStatus::Failed);
+}
