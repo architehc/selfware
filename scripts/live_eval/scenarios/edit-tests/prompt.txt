@@ -1,0 +1,1 @@
+Add an optional max_words parameter to slugify() in slugify/slugify.py that keeps only the first N words of the result (default None = no limit). Add a unit test for it in tests/. Run the test suite with python3 -m pytest -q and make sure everything passes.

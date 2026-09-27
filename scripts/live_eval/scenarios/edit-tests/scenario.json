@@ -1,0 +1,13 @@
+{
+  "name": "edit-tests",
+  "tier": "quick",
+  "hermetic_fixture": false,
+  "scorer": "edit_tests",
+  "setup": {"kind": "git_clone", "env": "LIVE_EVAL_SLUGIFY_REPO",
+            "default": "${LIVE_EVAL_FIXTURES}/ux092/projects/slugify"},
+  "config": {"kind": "tracked"},
+  "mode": "yolo",
+  "wall_secs": 1800,
+  "post_check": "edit_tests",
+  "prompt_file": "prompt.txt"
+}

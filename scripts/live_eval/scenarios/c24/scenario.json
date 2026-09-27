@@ -1,0 +1,14 @@
+{
+  "name": "c24",
+  "tier": "quick",
+  "hermetic_fixture": false,
+  "scorer": "c24",
+  "setup": {"kind": "git_clone", "env": "LIVE_EVAL_C24_WS",
+            "default": "${LIVE_EVAL_FIXTURES}/c24_int3/ws"},
+  "config": {"kind": "file", "env": "LIVE_EVAL_C24_CFG",
+             "default": "${LIVE_EVAL_FIXTURES}/c24_int3/cfg.toml"},
+  "mode": "yolo",
+  "wall_secs": 2400,
+  "post_check": "c24",
+  "prompt_file": {"env": "LIVE_EVAL_C24_PROMPT", "default": "${LIVE_EVAL_FIXTURES}/c24_int3/compact.prompt"}
+}

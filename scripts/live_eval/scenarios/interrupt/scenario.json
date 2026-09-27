@@ -1,0 +1,12 @@
+{
+  "name": "interrupt",
+  "tier": "quick",
+  "hermetic_fixture": true,
+  "scorer": "interrupt",
+  "setup": {"kind": "empty"},
+  "config": {"kind": "tracked"},
+  "mode": "yolo",
+  "wall_secs": 600,
+  "interrupt": {"after_stream_secs": 4, "max_wait_secs": 240},
+  "prompt": "Without using any tools, write a 2000-word essay on the history of the printing press. Do not read files."
+}

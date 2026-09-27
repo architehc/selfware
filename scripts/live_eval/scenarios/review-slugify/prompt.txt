@@ -1,0 +1,1 @@
+Review the slugify package in this repository (slugify/) for bugs and risky behavior. Cite every finding as path:line. Do not modify any files.

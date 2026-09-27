@@ -1,0 +1,11 @@
+{
+  "name": "review-planted",
+  "tier": "quick",
+  "hermetic_fixture": true,
+  "scorer": "review_planted",
+  "setup": {"kind": "fixture", "dir": "fixture"},
+  "config": {"kind": "tracked"},
+  "mode": "yolo",
+  "wall_secs": 1800,
+  "prompt_file": "prompt.txt"
+}

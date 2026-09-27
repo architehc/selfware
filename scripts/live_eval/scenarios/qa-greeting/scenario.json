@@ -1,0 +1,11 @@
+{
+  "name": "qa-greeting",
+  "tier": "quick",
+  "hermetic_fixture": true,
+  "scorer": "qa_greeting",
+  "setup": {"kind": "empty"},
+  "config": {"kind": "tracked"},
+  "mode": "yolo",
+  "wall_secs": 300,
+  "prompt": "hi"
+}

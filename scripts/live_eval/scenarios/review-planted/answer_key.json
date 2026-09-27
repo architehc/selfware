@@ -1,0 +1,30 @@
+{
+  "_comment": "Hidden answer key for the review-planted fixture. NEVER copied into the run workspace. Each bug is located by `anchors` (exact code text); `line` is the first anchor's line and is re-derived from the anchors by the unit tests, so an edit to the fixture that moves a bug fails the tests instead of silently mis-scoring. A finding matches a bug when it cites the same file at a line within `window` of any anchor line.",
+  "window": 3,
+  "bugs": [
+    {"id": "pagination-off-by-one", "file": "shopkeep/pagination.py", "line": 30,
+     "anchors": ["return list(items[start:start + size - 1])"],
+     "description": "Slice end is start + size - 1, so every page drops its last item."},
+    {"id": "mutable-default-tags", "file": "shopkeep/tags.py", "line": 13,
+     "anchors": ["def tags_for(sku: str, extra: List[str] = []) -> List[str]:", "extra.append(tag)"],
+     "description": "Mutable default list is appended to, so tags leak between calls."},
+    {"id": "token-expiry-inverted", "file": "shopkeep/auth.py", "line": 28,
+     "anchors": ["return token.expires_at < now"],
+     "description": "Validity check is inverted: expired tokens are valid and fresh ones are not."},
+    {"id": "delete-authz-inverted", "file": "shopkeep/auth.py", "line": 43,
+     "anchors": ["if not actor.is_admin:"],
+     "description": "Non-admins may delete any order; admins only their own (condition inverted)."},
+    {"id": "sql-injection-email", "file": "shopkeep/db.py", "line": 32,
+     "anchors": ["WHERE email = '%s'\" % email"],
+     "description": "E-mail is interpolated into SQL with %, allowing SQL injection; use a ? parameter."},
+    {"id": "price-cache-ignores-currency", "file": "shopkeep/pricing.py", "line": 24,
+     "anchors": ["key = sku"],
+     "description": "Conversion cache is keyed by sku only, so the first currency's price is returned for every currency."},
+    {"id": "save-swallows-errors", "file": "shopkeep/storage.py", "line": 47,
+     "anchors": ["except OSError:", "return True"],
+     "description": "OSError is swallowed and save_order still returns True, reporting success for a failed write."},
+    {"id": "export-path-traversal", "file": "shopkeep/exports.py", "line": 10,
+     "anchors": ["return os.path.join(EXPORT_ROOT, filename)", "with open(export_path(filename), \"rb\") as handle:"],
+     "description": "User-supplied filename is joined unchecked, so ../ or an absolute path escapes EXPORT_ROOT."}
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "_comment": "Regression thresholds for scripts/live_eval report/gate. Every entry carries its rationale. A change beyond a threshold is REGRESSION when both sides have at least min_samples runs (and, for pass rate, a one-sided Fisher exact p below alpha); otherwise it is WATCH: visible, never silently dropped, but not gate-failing on thin evidence.",
+  "min_samples": {
+    "value": 3,
+    "rationale": "Below three runs per side a single flaky run swings a mean by a third or more; qwen38 on this endpoint showed 2x wall variance between identical runs (memory: 17-20 tok/s under load)."
+  },
+  "alpha": {
+    "value": 0.1,
+    "rationale": "One-sided Fisher exact test on pass/fail counts. 0.1, not 0.05: at N=5 per side only a 5/5 -> 1/5 drop reaches 0.05, and a release gate that cannot see a 5/5 -> 2/5 drop is useless."
+  },
+  "pass_rate_drop": {
+    "value": 0.25,
+    "rationale": "One run in four newly failing is the smallest drop worth a human look at N=4..8."
+  },
+  "wall_p50_increase_ratio": {
+    "value": 0.5,
+    "rationale": "p50 wall more than 1.5x the previous commit. Smaller moves are within the endpoint's load-driven latency spread (shared 8-slot server)."
+  },
+  "tokens_p50_increase_ratio": {
+    "value": 0.5,
+    "rationale": "Token spend is less noisy than wall (no queueing), but tool-choice variance still moves it +-30% run to run."
+  },
+  "recall_drop": {
+    "value": 0.2,
+    "rationale": "review-planted has 8 bugs; 0.2 is losing ~2 of them on average, beyond the one-bug wobble between identical runs."
+  },
+  "false_findings_increase": {
+    "value": 2.0,
+    "rationale": "Mean false findings per run up by two or more: the reviewer started reporting noise, which is the top complaint for repository review."
+  },
+  "citations_wrong_increase": {
+    "value": 0.5,
+    "rationale": "Mean wrong citations per run up by half a citation: the target is zero, so any systematic increase matters."
+  },
+  "coverage_drop_points": {
+    "value": 10,
+    "rationale": "Review coverage (percent of relevant lines read) down 10 points or more: reading less of the repo is the failure mode the coverage gate exists to stop."
+  },
+  "intervention_rate_increase": {
+    "value": 0.1,
+    "rationale": "Interventions (nudges, refusals, gate blocks) per turn up by 0.1: the harness is steering one extra turn in ten."
+  },
+  "floor_pass_rate": {
+    "value": {"review-planted": 0.5, "qa-greeting": 0.5, "interrupt": 0.8},
+    "rationale": "Absolute floors for `gate`: independent of the baseline, so a first release or a baseline that was already bad still cannot ship below them. Only scenarios whose floor is met by the current release are listed; review-slugify/edit-tests/c24 get floors once their baseline is measured."
+  }
+}

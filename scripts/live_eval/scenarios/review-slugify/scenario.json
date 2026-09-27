@@ -1,0 +1,12 @@
+{
+  "name": "review-slugify",
+  "tier": "quick",
+  "hermetic_fixture": false,
+  "scorer": "review_slugify",
+  "setup": {"kind": "git_clone", "env": "LIVE_EVAL_SLUGIFY_REPO",
+            "default": "${LIVE_EVAL_FIXTURES}/ux092/projects/slugify"},
+  "config": {"kind": "tracked"},
+  "mode": "yolo",
+  "wall_secs": 1800,
+  "prompt_file": "prompt.txt"
+}

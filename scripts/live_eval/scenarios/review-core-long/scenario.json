@@ -1,0 +1,15 @@
+{
+  "name": "review-core-long",
+  "tier": "long",
+  "hermetic_fixture": true,
+  "scorer": "review_core_long",
+  "setup": {
+    "kind": "source_snapshot"
+  },
+  "config": {
+    "kind": "tracked"
+  },
+  "mode": "yolo",
+  "wall_secs": 14400,
+  "prompt": "can you review the selfware core do not code"
+}
