@@ -408,7 +408,19 @@ impl MultiAgentChat {
 
             let start = Instant::now();
 
-            let results = self.run_task_tagged(input, "Summary:").await?;
+            // A refused or failed task reports and returns to the prompt; it
+            // used to end the whole session through `?` (0.9.3 review).
+            let results = match self.run_task_tagged(input, "Summary:").await {
+                Ok(results) => results,
+                Err(e) => {
+                    eprintln!(
+                        "{} Task failed: {}",
+                        "✗".bright_red(),
+                        crate::observability::telemetry::redact_secrets(&format!("{e:#}"))
+                    );
+                    continue;
+                }
+            };
 
             // Honest per-agent results, then the aggregated output.
             print_agent_summary(&results);
@@ -638,7 +650,19 @@ impl MultiAgentChat {
 
             // 5. Execute the task using the existing per-agent execution path,
             //    streaming each agent's output as tagged lines.
-            let results = self.run_task_tagged(input, "Swarm Summary:").await?;
+            let results = match self.run_task_tagged(input, "Swarm Summary:").await {
+                Ok(results) => results,
+                Err(e) => {
+                    // Release the assigned agents and keep the session alive.
+                    swarm.fail_task(&task_id);
+                    eprintln!(
+                        "{} Task failed: {}",
+                        "✗".bright_red(),
+                        crate::observability::telemetry::redact_secrets(&format!("{e:#}"))
+                    );
+                    continue;
+                }
+            };
 
             // 6. Feed results back to the swarm with the ACTUAL per-agent
             //    success flag so trust scores and failure counters reflect
