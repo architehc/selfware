@@ -1247,7 +1247,26 @@ fn sample_summary() -> crate::agent::RunSummary {
         hit_iteration_cap: false,
         resources: None,
         paused: None,
+        edited_task: None,
     }
+}
+
+#[test]
+fn render_run_summary_names_an_edited_task_and_what_it_started_as() {
+    let rendered = render_run_summary(&sample_summary(), None);
+    assert!(!rendered.contains("task:"), "{rendered}");
+    let mut summary = sample_summary();
+    summary.edited_task = Some(crate::lifecycle::control::EditedDescription {
+        description: "add max_words and max_len".into(),
+        original: "add max_words".into(),
+    });
+    let rendered = render_run_summary(&summary, None);
+    assert!(
+        rendered.contains(
+            "task: add max_words and max_len (edited mid-run; started as: add max_words)"
+        ),
+        "{rendered}"
+    );
 }
 
 #[test]

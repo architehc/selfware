@@ -417,18 +417,23 @@ impl Agent {
     /// The snapshot of the current task the Tasks pane shows.
     pub(crate) fn live_task_snapshot(&self) -> Option<LiveTask> {
         let task = self.task_lifecycle.as_ref()?;
-        let description = self
+        let checkpoint = self
             .current_checkpoint
             .as_ref()
-            .filter(|c| c.task_id == task.id())
+            .filter(|c| c.task_id == task.id());
+        let description = checkpoint
             .map(|c| c.task_description.clone())
             .unwrap_or_default();
+        let original_description = checkpoint
+            .and_then(|c| c.edited_description())
+            .map(|e| e.original);
         let usage = self.measured_task_usage();
         Some(LiveTask {
             id: task.id().to_string(),
             agent: self.agent_id.clone(),
             task_type: Some(Self::infer_task_type(&description).to_string()),
             description,
+            original_description,
             state: *task.state(),
             state_since: chrono::Utc::now(),
             step: self.loop_control.current_step(),
@@ -551,8 +556,14 @@ impl Agent {
         if edit.max_turns != before.constraints.max_turns {
             self.loop_control.set_max_iterations(edit.max_turns);
         }
-        if edit.description.trim() != before.description.trim() {
+        let description_changed = edit.description.trim() != before.description.trim();
+        if description_changed {
             if let Some(cp) = self.current_checkpoint.as_mut() {
+                // The first edit keeps what the task was started with, so
+                // every report can say the description was edited.
+                if cp.original_task_description.is_none() {
+                    cp.original_task_description = Some(cp.task_description.clone());
+                }
                 cp.task_description = edit.description.trim().to_string();
             }
         }
@@ -564,6 +575,24 @@ impl Agent {
             task.attach_usage(usage);
         }
         self.lifecycle_apply(TaskEvent::Edit, &format!("edited: {changes}"));
+        if description_changed && self.checkpoint_manager.is_some() {
+            // The journal must not keep showing the old description until the
+            // next cadence save (a crash before it would lose the edit).
+            let description = edit.description.trim().to_string();
+            if let Err(e) = self.save_checkpoint_forced(&description) {
+                warn!("task edit: checkpoint not saved: {e}");
+            }
+        }
+    }
+
+    /// The current task's description as edited mid-run, with the original
+    /// (`None` when it was not edited).
+    pub(crate) fn edited_task_description(
+        &self,
+    ) -> Option<crate::lifecycle::control::EditedDescription> {
+        self.current_checkpoint
+            .as_ref()
+            .and_then(|c| c.edited_description())
     }
 }
 

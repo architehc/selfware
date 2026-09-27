@@ -114,6 +114,11 @@ pub struct SessionResult {
     /// nothing, so such runs keep the pre-existing shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<crate::resources::teardown::TeardownOutcome>,
+    /// The task description as edited mid-run (`description`) and the one
+    /// it was started with (`original`). Present only for an edited task;
+    /// omitted otherwise, so every other run keeps the pre-existing shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_edited: Option<crate::lifecycle::control::EditedDescription>,
 }
 
 /// Individual event emitted in `--output-format stream-json` mode.

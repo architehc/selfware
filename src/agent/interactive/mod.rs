@@ -2353,7 +2353,14 @@ impl Agent {
         println!("  {} Execution Debug", ">>".bright_cyan());
 
         if let Some(checkpoint) = &self.current_checkpoint {
-            println!("  Task:   {}", checkpoint.task_description.bright_white());
+            println!(
+                "  Task:   {}{}",
+                checkpoint.task_description.bright_white(),
+                checkpoint
+                    .edited_description()
+                    .map(|e| format!(" (edited mid-run; started as: {})", e.original))
+                    .unwrap_or_default()
+            );
             println!("  Task ID: {}", checkpoint.task_id.dimmed());
             println!(
                 "  Status: {:?} | step {} | {} tool call(s) | {} error(s)",
@@ -3162,7 +3169,11 @@ impl Agent {
                 match entry {
                     Some(entry) => {
                         let task_id = entry.task_id.clone();
-                        let title = crate::cli::journal_title(&entry.task_description, 48);
+                        let title = format!(
+                            "{}{}",
+                            crate::cli::journal_title(&entry.task_description, 48),
+                            entry.edited_suffix()
+                        );
                         match Agent::resume(self.config.clone(), &task_id).await {
                             Ok(resumed) => {
                                 let count = resumed.message_count();

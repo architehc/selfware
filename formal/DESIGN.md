@@ -259,7 +259,11 @@ Each phase is shippable alone:
   budget (the API client is rebuilt so its own budget stop follows). It is
   recorded with the measured usage, and the model receives
   "Task updated: …" as a user message. An edit that would end the task on
-  the spot is refused. `allowed_paths` is shown read-only: the safety checker
+  the spot is refused. An edited description is what every report shows
+  from then on — run summary, structured result (`task_edited`), journal
+  (checkpoint saved at the edit, `original_task_description` kept),
+  `task show`, the Tasks pane, the outcome telemetry — each noting that it
+  was edited and what the task was started as. `allowed_paths` is shown read-only: the safety checker
   reads it when the agent is built.
 - **Edit of a finished task** forks it: a new task id whose records carry
   `parent`; the original's history is untouched.

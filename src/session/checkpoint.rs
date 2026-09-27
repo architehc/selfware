@@ -740,6 +740,12 @@ pub struct TaskCheckpoint {
     pub run_endpoint: Option<String>,
     #[serde(default)]
     pub run_model: Option<String>,
+    /// The description the task was started with, when the user edited it
+    /// mid-run (Tasks pane); `task_description` is then the edited one.
+    /// Set at the first edit and never changed after. `None` = never edited
+    /// (and on checkpoints written before the field existed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_task_description: Option<String>,
 }
 
 /// The endpoint as a checkpoint may store it: scheme, host, port and path,
@@ -829,6 +835,7 @@ impl TaskCheckpoint {
             || self.run_endpoint != base.run_endpoint
             || self.run_model != base.run_model
             || self.task_description != base.task_description
+            || self.original_task_description != base.original_task_description
             || self.project_root != base.project_root
             || self.created_at != base.created_at
         {
@@ -1068,9 +1075,36 @@ pub struct TaskSummary {
     /// that do not belong to the current workspace.
     #[serde(default)]
     pub project_root: Option<String>,
+    /// The original description when the task was edited mid-run
+    /// (`task_description` is the edited one); `None` = never edited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_task_description: Option<String>,
+}
+
+impl TaskSummary {
+    /// `" (edited)"` when the description was edited mid-run (listings
+    /// append it after the clipped description), `""` otherwise.
+    pub fn edited_suffix(&self) -> &'static str {
+        match &self.original_task_description {
+            Some(original) if original.trim() != self.task_description.trim() => " (edited)",
+            _ => "",
+        }
+    }
 }
 
 impl TaskCheckpoint {
+    /// The task's description as edited mid-run, with the original; `None`
+    /// when it was never edited (or edited back to the original text).
+    pub fn edited_description(&self) -> Option<crate::lifecycle::control::EditedDescription> {
+        let original = self.original_task_description.as_ref()?;
+        (original.trim() != self.task_description.trim()).then(|| {
+            crate::lifecycle::control::EditedDescription {
+                description: self.task_description.clone(),
+                original: original.clone(),
+            }
+        })
+    }
+
     /// Create a new checkpoint for a task
     pub fn new(task_id: String, task_description: String) -> Self {
         let now = Utc::now();
@@ -1117,6 +1151,7 @@ impl TaskCheckpoint {
             task_start_tree: None,
             run_endpoint: None,
             run_model: None,
+            original_task_description: None,
         }
     }
 
@@ -1132,6 +1167,7 @@ impl TaskCheckpoint {
             tool_call_count: self.tool_calls.len(),
             error_count: self.errors.len(),
             project_root: self.project_root.clone(),
+            original_task_description: self.original_task_description.clone(),
         }
     }
 

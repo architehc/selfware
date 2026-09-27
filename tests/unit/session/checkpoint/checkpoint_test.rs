@@ -331,6 +331,7 @@ fn test_task_summary_struct() {
         tool_call_count: 10,
         error_count: 2,
         project_root: None,
+        original_task_description: None,
     };
     assert_eq!(summary.current_step, 3);
     assert_eq!(summary.tool_call_count, 10);

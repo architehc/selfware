@@ -1702,7 +1702,16 @@ pub async fn run() -> Result<()> {
             let alive = |pid: u32| crate::supervision::run_registry::pid_alive(pid);
             let verb = match command {
                 args::TaskCommands::Show { id } => {
-                    return match crate::lifecycle::projection::task_show_output(&log, id) {
+                    let description_of = |task_id: &str| {
+                        Agent::task_status(task_id)
+                            .ok()
+                            .map(|c| (c.task_description, c.original_task_description))
+                    };
+                    return match crate::lifecycle::projection::task_show_output_with(
+                        &log,
+                        id,
+                        &description_of,
+                    ) {
                         Ok(out) => {
                             print!("{out}");
                             Ok(())
@@ -2162,9 +2171,10 @@ pub async fn run() -> Result<()> {
         }
         if !cli.quiet && !is_structured {
             println!(
-                "{} Resuming latest session: {}",
+                "{} Resuming latest session: {}{}",
                 Glyphs::bookmark(),
-                journal_title(&latest.task_description, 60)
+                journal_title(&latest.task_description, 60),
+                latest.edited_suffix()
             );
         }
         let agent = Agent::resume(config, &latest.task_id).await?;
@@ -2207,10 +2217,11 @@ pub async fn run() -> Result<()> {
                     }
                     if !cli.quiet && !is_structured {
                         println!(
-                            "{} Auto-resuming task {} from checkpoint — {}",
+                            "{} Auto-resuming task {} from checkpoint — {}{}",
                             Glyphs::bookmark(),
                             latest.task_id.as_str().emphasis(),
-                            journal_title(&latest.task_description, 60)
+                            journal_title(&latest.task_description, 60),
+                            latest.edited_suffix()
                         );
                     }
                     tracing::info!(
@@ -2567,6 +2578,7 @@ fn build_session_result(
         requirements_audit: agent.requirements_audit_status().map(|a| a.label()),
         partial: agent.partial_progress(run_result),
         resources: agent.resource_teardown.clone(),
+        task_edited: agent.edited_task_description(),
     }
 }
 
@@ -2868,7 +2880,11 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
                     match entry {
                         Some(entry) => {
                             let task_id = entry.task_id.clone();
-                            let title = journal_title(&entry.task_description, 48);
+                            let title = format!(
+                                "{}{}",
+                                journal_title(&entry.task_description, 48),
+                                entry.edited_suffix()
+                            );
                             match Agent::resume(agent.config().clone(), &task_id).await {
                                 Ok(resumed) => {
                                     let count = resumed.message_count();
@@ -3627,7 +3643,13 @@ async fn handle_command(
 
             let agent = Agent::resume(config, &task_id).await?;
             if let Some(checkpoint) = &agent.current_checkpoint {
-                let task = checkpoint.task_description.clone();
+                let task = match checkpoint.edited_description() {
+                    Some(edited) => format!(
+                        "{} (edited mid-run; started as: {})",
+                        checkpoint.task_description, edited.original
+                    ),
+                    None => checkpoint.task_description.clone(),
+                };
                 if !quiet && !is_structured {
                     println!(
                         "{} Continuing: {}\n",
@@ -3666,7 +3688,11 @@ async fn handle_command(
                         checkpoint::TaskStatus::Paused => Glyphs::bookmark(),
                     };
 
-                    let desc = journal_title(&task.task_description, JOURNAL_DESC_MAX_CHARS);
+                    let desc = format!(
+                        "{}{}",
+                        journal_title(&task.task_description, JOURNAL_DESC_MAX_CHARS),
+                        task.edited_suffix()
+                    );
 
                     println!(
                         "   {} {} {}",
@@ -3707,7 +3733,7 @@ async fn handle_command(
             println!(
                 "   {} Entry ID:    {}",
                 Glyphs::key(),
-                checkpoint.task_id.muted()
+                checkpoint.task_id.as_str().muted()
             );
             println!("   {} Weather:     {}", Glyphs::sprout(), weather);
             println!(
@@ -3732,6 +3758,12 @@ async fn handle_command(
                 "Reflection:".craftsman_voice()
             );
             println!("   {}", checkpoint.task_description.as_str().emphasis());
+            if let Some(edited) = checkpoint.edited_description() {
+                println!(
+                    "   {}",
+                    format!("(edited mid-run; started as: {})", edited.original).muted()
+                );
+            }
             println!();
 
             if let Some(ref git) = checkpoint.git_checkpoint {
@@ -6971,10 +7003,11 @@ pub(crate) fn journal_entries_text(limit: usize) -> String {
             let mut out = format!("journal entries ({} total, showing {limit}):", tasks.len());
             for task in tasks.iter().take(limit) {
                 out.push_str(&format!(
-                    "\n  {} [{:?}] {}",
+                    "\n  {} [{:?}] {}{}",
                     task.task_id,
                     task.status,
-                    journal_title(&task.task_description, 48)
+                    journal_title(&task.task_description, 48),
+                    task.edited_suffix()
                 ));
             }
             out
@@ -7280,6 +7313,13 @@ fn render_run_summary_for(
 ) -> String {
     use crate::errors::RunEnd;
     let mut lines = vec!["── Run summary ──".to_string()];
+    if let Some(edited) = &summary.edited_task {
+        lines.push(format!(
+            "task: {} (edited mid-run; started as: {})",
+            journal_title(&edited.description, 80),
+            journal_title(&edited.original, 80)
+        ));
+    }
     let stopped = matches!(end, RunEnd::Interrupted | RunEnd::Terminated);
     let failure = match end {
         RunEnd::Failed => Some(reason.unwrap_or("unknown error")),

@@ -5,6 +5,7 @@ fn live(id: &str, state: TaskState) -> LiveTask {
         id: id.into(),
         agent: MAIN_AGENT.into(),
         description: "add max_words to slugify()".into(),
+        original_description: None,
         task_type: Some("mutation".into()),
         state,
         state_since: Utc::now(),

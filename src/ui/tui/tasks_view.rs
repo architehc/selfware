@@ -78,6 +78,9 @@ pub struct TasksInputs {
     pub live: Option<LiveTask>,
     /// Task descriptions from the checkpoint journal, by task id.
     pub descriptions: HashMap<String, String>,
+    /// The original description of tasks edited mid-run, by task id (the
+    /// journal's `descriptions` hold the edited text).
+    pub original_descriptions: HashMap<String, String>,
     /// This process's pid (a non-terminal task recorded by another pid is
     /// not controllable here).
     pub this_pid: u32,
@@ -419,6 +422,16 @@ fn agent_tasks(inputs: &TasksInputs, agent: &str) -> Vec<TaskSummary> {
     tasks
 }
 
+/// The description a task was started with, when it was edited mid-run.
+fn original_description_of(inputs: &TasksInputs, id: &str) -> Option<String> {
+    inputs
+        .live
+        .as_ref()
+        .filter(|l| l.id == id)
+        .and_then(|l| l.original_description.clone())
+        .or_else(|| inputs.original_descriptions.get(id).cloned())
+}
+
 fn description_of(inputs: &TasksInputs, id: &str) -> Option<String> {
     inputs
         .live
@@ -698,7 +711,16 @@ fn task_fields(inputs: &TasksInputs, id: &str) -> Vec<(String, String)> {
     ));
     fields.push((
         "description".into(),
-        description_of(inputs, id).unwrap_or_else(|| "not recorded".into()),
+        match (
+            description_of(inputs, id),
+            original_description_of(inputs, id),
+        ) {
+            (Some(d), Some(original)) => {
+                format!("{d} (edited mid-run; started as: {original})")
+            }
+            (Some(d), None) => d,
+            (None, _) => "not recorded".into(),
+        },
     ));
     fields
 }

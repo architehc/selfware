@@ -585,6 +585,9 @@ pub struct RunSummary {
     /// segment (Tasks pane); not counted against the wall-clock budget.
     /// `None` when it was never paused.
     pub paused: Option<std::time::Duration>,
+    /// The task description as edited mid-run, with the original; `None`
+    /// when it was not edited.
+    pub edited_task: Option<crate::lifecycle::control::EditedDescription>,
 }
 
 /// The hard run budgets in force, as configured (`None` = not set; a
@@ -647,6 +650,7 @@ impl Agent {
                 >= self.loop_control.max_iterations(),
             resources: self.resource_teardown.as_ref().map(|o| o.summary.clone()),
             paused: (!self.task_paused().is_zero()).then(|| self.task_paused()),
+            edited_task: self.edited_task_description(),
         }
     }
 

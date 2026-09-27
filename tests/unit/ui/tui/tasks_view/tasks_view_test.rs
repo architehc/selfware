@@ -26,6 +26,7 @@ fn live_task() -> LiveTask {
         id: "01J9LIVETASK0001".into(),
         agent: MAIN_AGENT.into(),
         description: "add max_words to slugify()".into(),
+        original_description: None,
         task_type: Some("mutation".into()),
         state: TaskState::Executing,
         state_since: now() - chrono::Duration::seconds(221),
@@ -154,6 +155,7 @@ fn inputs() -> TasksInputs {
         resources,
         live: Some(live_task()),
         descriptions,
+        original_descriptions: HashMap::new(),
         this_pid: 4242,
         live_pids: Default::default(),
         now: now(),
@@ -277,6 +279,40 @@ fn live_task_detail_shows_measured_state_tokens_resources_and_timeline() {
         .starts_with("● container container 3f2a1b9c0d11 (live)")));
     assert!(view.items.iter().any(|i| i.label.contains("(live, :5000)")));
     assert_eq!(view.keys, KEYS);
+}
+
+#[test]
+fn task_detail_shows_an_edited_description_with_what_it_started_as() {
+    let mut inputs = inputs();
+    let mut nav = Nav::default();
+    nav.push(Level::Task {
+        agent: "main".into(),
+        id: "01J9LIVETASK0001".into(),
+    });
+    assert_eq!(
+        field(&build_view(&inputs, &nav), "description"),
+        "add max_words to slugify()"
+    );
+    let live = inputs.live.as_mut().unwrap();
+    live.original_description = Some(live.description.clone());
+    live.description = "add max_words and max_len to slugify()".into();
+    assert_eq!(
+        field(&build_view(&inputs, &nav), "description"),
+        "add max_words and max_len to slugify() (edited mid-run; started as: add max_words to slugify())"
+    );
+    // A finished task: from the journal.
+    let mut nav = Nav::default();
+    nav.push(Level::Task {
+        agent: "main".into(),
+        id: "01J9DONETASK0002".into(),
+    });
+    inputs
+        .original_descriptions
+        .insert("01J9DONETASK0002".into(), "fix the lexer".into());
+    assert_eq!(
+        field(&build_view(&inputs, &nav), "description"),
+        "fix the parser (edited mid-run; started as: fix the lexer)"
+    );
 }
 
 #[test]

@@ -57,6 +57,7 @@ fn test_session_result_round_trip() {
         requirements_audit: None,
         partial: None,
         resources: None,
+        task_edited: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     let de: SessionResult = serde_json::from_str(&json).unwrap();
@@ -96,6 +97,7 @@ fn test_session_result_with_failure_mode() {
         requirements_audit: None,
         partial: None,
         resources: None,
+        task_edited: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     let de: SessionResult = serde_json::from_str(&json).unwrap();
@@ -126,6 +128,7 @@ fn test_session_result_json_fields() {
         requirements_audit: None,
         partial: None,
         resources: None,
+        task_edited: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     let v: Value = serde_json::from_str(&json).unwrap();
@@ -381,6 +384,7 @@ fn test_emit_result_does_not_panic() {
         requirements_audit: None,
         partial: None,
         resources: None,
+        task_edited: None,
     };
     emit_result(&result, None);
 }
@@ -410,6 +414,7 @@ fn test_session_result_serializes_final_answer() {
         requirements_audit: None,
         partial: None,
         resources: None,
+        task_edited: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     let v: Value = serde_json::from_str(&json).unwrap();
@@ -447,6 +452,7 @@ fn test_session_result_omits_answer_when_none() {
         requirements_audit: None,
         partial: None,
         resources: None,
+        task_edited: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     assert!(
@@ -1054,6 +1060,7 @@ fn cost_field_is_omitted_when_provider_reported_no_pricing() {
         requirements_audit: None,
         partial: None,
         resources: None,
+        task_edited: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     assert!(
@@ -1088,6 +1095,7 @@ fn cost_field_is_present_when_provider_priced_usage() {
         requirements_audit: None,
         partial: None,
         resources: None,
+        task_edited: None,
     };
     let json = serde_json::to_string(&result).unwrap();
     let v: Value = serde_json::from_str(&json).unwrap();
@@ -1404,6 +1412,7 @@ fn grounding_result() -> SessionResult {
         requirements_audit: None,
         partial: None,
         resources: None,
+        task_edited: None,
     }
 }
 
@@ -1618,4 +1627,26 @@ fn the_result_reports_resource_teardown_only_when_the_task_owned_something() {
     );
     let back: SessionResult = serde_json::from_value(value).unwrap();
     assert_eq!(back.resources, result.resources);
+}
+
+/// A task edited mid-run says so in the structured result: the edited
+/// description and the original, under a new `task_edited` key appended
+/// after every pre-existing key; an unedited run keeps the old shape.
+#[test]
+fn edited_task_rides_along_in_the_result_and_is_absent_otherwise() {
+    let mut result = grounding_result();
+    let before = serde_json::to_string(&result).unwrap();
+    assert!(!before.contains("task_edited"), "{before}");
+    result.task_edited = Some(crate::lifecycle::control::EditedDescription {
+        description: "add max_words and max_len".into(),
+        original: "add max_words".into(),
+    });
+    let json = session_result_json(&result, None).expect("serializes");
+    assert!(
+        json.starts_with(before.strip_suffix('}').unwrap()),
+        "existing keys unchanged: {json}"
+    );
+    let v: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["task_edited"]["description"], "add max_words and max_len");
+    assert_eq!(v["task_edited"]["original"], "add max_words");
 }

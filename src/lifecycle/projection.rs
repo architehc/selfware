@@ -363,11 +363,32 @@ pub fn tasks_command_output(log: &super::EventLog, limit: usize, tree: bool) -> 
 /// Output of `selfware task show <id>` (a full id or a unique prefix), or
 /// the message to print when it does not resolve.
 pub fn task_show_output(log: &super::EventLog, query: &str) -> Result<String, String> {
+    task_show_output_with(log, query, &|_| None)
+}
+
+/// [`task_show_output`] with the task's description from the checkpoint
+/// journal: `description_of(id)` returns the description the task holds
+/// now and, when it was edited mid-run, the one it was started with. The
+/// event log itself records no description (only an edit's cause).
+pub fn task_show_output_with(
+    log: &super::EventLog,
+    query: &str,
+    description_of: &dyn Fn(&str) -> Option<(String, Option<String>)>,
+) -> Result<String, String> {
     let (records, skipped) = log.read_all();
     match resolve_task_id(&records, query) {
         Ok(id) => {
             let timeline = task_timeline(&records, &id);
             let mut out = render_timeline(&id, &timeline);
+            if let Some((description, original)) = description_of(&id) {
+                let note = original
+                    .filter(|o| o.trim() != description.trim())
+                    .map(|o| format!("\n  (edited mid-run; started as: {o})"))
+                    .unwrap_or_default();
+                // After the header, before the transitions.
+                let at = out.find("\n\n").map_or(out.len(), |i| i + 1);
+                out.insert_str(at, &format!("  description: {description}{note}\n"));
+            }
             let forks: Vec<String> = task_summaries(&records)
                 .into_iter()
                 .filter(|s| s.parent.as_deref() == Some(id.as_str()))

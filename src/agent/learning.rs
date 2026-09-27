@@ -146,6 +146,12 @@ impl Agent {
         detail: OutcomeDetail<'_>,
     ) {
         self.sync_api_usage();
+        // A task edited mid-run is recorded under the description it ran to
+        // completion with, not the one it started with.
+        let edited = self.edited_task_description();
+        let task_prompt = edited
+            .as_ref()
+            .map_or(task_prompt, |e| e.description.as_str());
         self.log_task_outcome_event(task_prompt, outcome, Some(detail.text()));
         self.publish_phi_activity(match outcome {
             Outcome::Success => crate::phi::activity::ActivityPhase::Completed,

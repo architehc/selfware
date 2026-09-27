@@ -822,3 +822,64 @@ async fn time_paused_is_not_counted_against_the_wall_clock_budget() {
         .unwrap();
     assert!(blocked_for >= pause, "{blocked_for:?}");
 }
+
+#[tokio::test]
+async fn an_edited_description_is_what_every_report_shows_with_the_original_noted() {
+    let _state = crate::test_support::ExecGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    let log = EventLog::at(dir.path().join("events.jsonl"));
+    let mut agent = agent_with_live_task(&log).await;
+    let journal =
+        crate::checkpoint::CheckpointManager::new(dir.path().join("checkpoints")).unwrap();
+    agent.checkpoint_manager = Some(journal);
+    agent.current_checkpoint = Some(crate::checkpoint::TaskCheckpoint::new(
+        "t-live".to_string(),
+        "add max_words to slugify()".to_string(),
+    ));
+    assert_eq!(agent.edited_task_description(), None);
+    assert!(agent.run_summary().edited_task.is_none());
+
+    let control = agent.task_control();
+    let mut edit = crate::lifecycle::control::TaskEdit::from_live(&control.snapshot().unwrap());
+    edit.description = "add max_words and max_len to slugify()".into();
+    control.submit_edit("t-live", edit.clone()).unwrap();
+    agent.task_control_safe_point().await;
+
+    let expected = crate::lifecycle::control::EditedDescription {
+        description: "add max_words and max_len to slugify()".into(),
+        original: "add max_words to slugify()".into(),
+    };
+    // Run summary (text and TUI) and the structured result read this.
+    assert_eq!(agent.edited_task_description(), Some(expected.clone()));
+    assert_eq!(agent.run_summary().edited_task, Some(expected.clone()));
+    // The Tasks pane's live task.
+    let live = control.snapshot().unwrap();
+    assert_eq!(live.description, expected.description);
+    assert_eq!(
+        live.original_description.as_deref(),
+        Some("add max_words to slugify()")
+    );
+    // The journal was written at the edit, with the original kept.
+    let saved = agent
+        .checkpoint_manager
+        .as_ref()
+        .unwrap()
+        .load("t-live")
+        .expect("the edit persists the checkpoint");
+    assert_eq!(saved.task_description, expected.description);
+    assert_eq!(saved.edited_description(), Some(expected.clone()));
+    assert_eq!(saved.to_summary().edited_suffix(), " (edited)");
+    // The lifecycle edit record names the new description.
+    let (records, _) = log.read_all();
+    assert!(records.iter().any(|r| r.event.as_deref() == Some("edit")
+        && r.cause
+            .contains("description is now: add max_words and max_len")));
+
+    // A second edit keeps the ORIGINAL (what the task was started as).
+    edit.description = "only max_len".into();
+    control.submit_edit("t-live", edit).unwrap();
+    agent.task_control_safe_point().await;
+    let again = agent.edited_task_description().unwrap();
+    assert_eq!(again.description, "only max_len");
+    assert_eq!(again.original, "add max_words to slugify()");
+}

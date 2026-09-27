@@ -479,3 +479,31 @@ fn paused_time_is_measured_from_pause_to_the_record_that_leaves_paused() {
     let open = task_timeline(&records[..4], "p-1");
     assert_eq!(paused_total_ms(&open), None);
 }
+
+#[test]
+fn show_reports_the_edited_description_and_what_it_was_started_as() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = crate::lifecycle::EventLog::at(dir.path().join("events.jsonl"));
+    for rec in sample() {
+        log.append(&rec, false);
+    }
+    let edited = |_: &str| {
+        Some((
+            "add max_words and max_len".to_string(),
+            Some("add max_words".to_string()),
+        ))
+    };
+    let shown = task_show_output_with(&log, "aaaa-1", &edited).unwrap();
+    assert!(
+        shown.contains(
+            "  description: add max_words and max_len\n  (edited mid-run; started as: add max_words)\n"
+        ),
+        "{shown}"
+    );
+    // In the header, before the transition lines.
+    assert!(shown.find("description:").unwrap() < shown.find("[start]").unwrap());
+    let plain = |_: &str| Some(("fix the parser".to_string(), None));
+    let shown = task_show_output_with(&log, "aaaa-1", &plain).unwrap();
+    assert!(shown.contains("  description: fix the parser\n"), "{shown}");
+    assert!(!shown.contains("edited"), "{shown}");
+}

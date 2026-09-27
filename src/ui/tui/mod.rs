@@ -1538,8 +1538,17 @@ fn refresh_tasks_inputs(
         .collect();
     inputs.now = chrono::Utc::now();
     if journal {
-        inputs.descriptions = crate::agent::Agent::list_tasks()
-            .unwrap_or_default()
+        let tasks = crate::agent::Agent::list_tasks().unwrap_or_default();
+        inputs.original_descriptions = tasks
+            .iter()
+            .filter(|t| !t.edited_suffix().is_empty())
+            .filter_map(|t| {
+                t.original_task_description
+                    .clone()
+                    .map(|o| (t.task_id.clone(), o))
+            })
+            .collect();
+        inputs.descriptions = tasks
             .into_iter()
             .map(|t| (t.task_id, t.task_description))
             .collect();

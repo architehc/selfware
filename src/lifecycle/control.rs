@@ -47,6 +47,8 @@ pub struct LiveTask {
     pub agent: String,
     /// The task description as the agent currently holds it (edits included).
     pub description: String,
+    /// The description the task was started with, when it was edited.
+    pub original_description: Option<String>,
     /// The classified task type, when known.
     pub task_type: Option<String>,
     /// Current lifecycle state.
@@ -67,6 +69,18 @@ pub struct LiveTask {
     /// current pause shows as time in state). Not counted against the
     /// wall-clock budget.
     pub paused: std::time::Duration,
+}
+
+/// A task description the user edited mid-run, with the one the task was
+/// started with. Reported wherever the task's description is (run summary,
+/// structured result, journal, `task show`, the Tasks pane) so the edited
+/// text is never shown as if it had been the task from the start.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EditedDescription {
+    /// The description the task runs under now.
+    pub description: String,
+    /// The description the task was started with.
+    pub original: String,
 }
 
 /// A user edit of a live task: the full new description and constraints.
