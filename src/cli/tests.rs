@@ -3285,3 +3285,19 @@ fn read_only_no_edit_failed_checks_render_as_informational() {
         "{rendered}"
     );
 }
+
+#[test]
+fn read_only_no_edit_preexisting_failures_render_as_informational() {
+    // 0.9.4 live validation: a Python review ran `python3 tools/check_algorithms.py`
+    // (fails on the unchanged tree) and the outcome read like a verification
+    // caveat. Nothing was changed, so it is informational.
+    let mut summary = sample_summary();
+    summary.files_changed.clear();
+    summary.verification = Some((true, 1));
+    summary.preexisting_failures = vec!["`python3 x.py`: failing before the task too".to_string()];
+    summary.verification_informational = true;
+    let rendered = render_run_summary(&summary, None);
+    assert!(rendered.contains("informational"), "{rendered}");
+    assert!(!rendered.contains("verification FAILED"), "{rendered}");
+    assert!(!rendered.contains("passed"), "{rendered}");
+}

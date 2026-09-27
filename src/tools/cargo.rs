@@ -46,7 +46,17 @@ pub(crate) const NO_CARGO_MANIFEST_MARKER: &str = "NO_CARGO_MANIFEST";
 /// failing verification of the task.
 pub(crate) fn ensure_cargo_manifest(tool: &str) -> Result<()> {
     let anchored = crate::tools::workspace_root::anchor_path(std::path::Path::new("."));
-    let dir: std::path::PathBuf = anchored.components().collect();
+    let anchored = if anchored.is_absolute() {
+        anchored
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&anchored))
+            .unwrap_or(anchored)
+    };
+    let dir: std::path::PathBuf = anchored
+        .components()
+        .filter(|c| !matches!(c, std::path::Component::CurDir))
+        .collect();
     if crate::agent::verification_scope::cargo_project_root(&dir).is_some() {
         return Ok(());
     }
@@ -247,17 +257,17 @@ impl Tool for CargoTest {
 
     #[instrument(level = "info", skip(self, args), fields(tool_name = self.name()))]
     async fn execute(&self, args: Value) -> Result<Value> {
+        let package = args.get("package").and_then(|v| v.as_str());
+        let test_name = args.get("test_name").and_then(|v| v.as_str());
+        // Both land in cargo argv: `--config=...runner=sh` would run a program.
+        // Refused first, whatever the directory holds.
+        reject_flag_like_operand("cargo_test", "package", package)?;
+        reject_flag_like_operand("cargo_test", "test_name", test_name)?;
         ensure_cargo_manifest(self.name())?;
         let mut cmd = tokio::process::Command::new(cargo_program());
         crate::safety::process_env::sanitize_command_env(&mut cmd);
         cmd.in_workspace_root();
         cmd.arg("test");
-
-        let package = args.get("package").and_then(|v| v.as_str());
-        let test_name = args.get("test_name").and_then(|v| v.as_str());
-        // Both land in cargo argv: `--config=...runner=sh` would run a program.
-        reject_flag_like_operand("cargo_test", "package", package)?;
-        reject_flag_like_operand("cargo_test", "test_name", test_name)?;
 
         if let Some(pkg) = package {
             cmd.arg("-p").arg(pkg);

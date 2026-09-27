@@ -1016,3 +1016,15 @@ async fn error_recovery_exhaustion_is_typed_not_max_iterations_or_timeout() {
     assert!(!mode.kind.is_nonfailure());
     assert!(mode.cli_banner().contains("RECOVERY_EXHAUSTED"));
 }
+
+#[test]
+fn preexisting_failures_on_a_no_change_run_are_informational_not_green() {
+    let mode = with_preexisting_failures(
+        verdict(FailureKind::NoChange),
+        &["`python3 x.py`: failing before the task too".to_string()],
+    );
+    let banner = mode.cli_banner();
+    assert!(banner.starts_with("ℹ️"), "{banner}");
+    assert!(banner.contains("informational"), "{banner}");
+    assert!(!mode.is_clean_success());
+}

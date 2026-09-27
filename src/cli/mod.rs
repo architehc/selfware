@@ -7373,6 +7373,13 @@ fn render_run_summary_for(
         // Allowed with a warning: checks fail on the final tree, but only
         // with errors the starting tree already had — not a verified result,
         // and not a failure of this change (c24).
+        None if summary.verification_informational && !summary.preexisting_failures.is_empty() => {
+            lines.push(
+                "outcome: finished — no edits; checks run during the task fail on the unchanged \
+                 tree (pre-existing, informational — no change was verified)"
+                    .to_string(),
+            )
+        }
         None if !summary.preexisting_failures.is_empty() => lines.push(
             "outcome: completed — ⚠️ checks were already failing before the task \
              (pre-existing, not caused by this change; not a verified result)"
@@ -7506,6 +7513,15 @@ fn render_run_summary_for(
     let verification = match summary.verification {
         // Never "passed" over a check that still fails, however old its
         // errors are (AGENTS.md rule 3).
+        Some((true, checks))
+            if summary.verification_informational && !summary.preexisting_failures.is_empty() =>
+        {
+            format!(
+                "informational — no edits to verify; failing on the unchanged tree ({}): {}",
+                named(checks),
+                summary.preexisting_failures.join("; ")
+            )
+        }
         Some((true, checks)) if !summary.preexisting_failures.is_empty() => format!(
             "⚠️ failing before the task too — not caused by this change ({}): {}",
             named(checks),

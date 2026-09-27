@@ -670,6 +670,16 @@ impl FailureMode {
                 "⚠️ Task completed ({}) — {AUDIT_NOT_PERFORMED_NOTE}; the result was not audited",
                 self.kind.tag()
             )
+        } else if matches!(self.kind, FailureKind::NoChange)
+            && self.evidence.contains(PREEXISTING_FAILURE_NOTE)
+        {
+            // Nothing was changed: checks the model ran that fail with
+            // errors the tree already had are findings about the workspace,
+            // reported as informational — still never ✅ (0.9.4).
+            format!(
+                "ℹ️ Completed — no file changes made; checks run during the task fail on the unchanged tree ({PREEXISTING_FAILURE_NOTE}; informational) ({})",
+                self.kind.tag()
+            )
         } else if self.kind.is_nonfailure() && self.evidence.contains(PREEXISTING_FAILURE_NOTE) {
             // The change broke nothing, but a check still fails on the final
             // tree with errors the starting tree already had: not verified
