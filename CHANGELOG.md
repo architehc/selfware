@@ -5,6 +5,176 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.4] - 2026-09-27
+
+Repository review is now a first-class, honest workflow. A review starts
+from a deterministic inventory of the repository, is refused until every
+relevant file has actually been read, and reports its coverage: full, or
+PARTIAL with the files it did not read. It is never shown as ✅ on three
+files read. Each turn runs under a measured quota for llm.selfware.design,
+and headless normal mode can run read-only reviews.
+
+### Added
+- **Live evaluation harness** (`scripts/live_eval/`, `docs/live-eval.md`):
+  golden scenarios against llm.selfware.design (planted-bug review, slugify
+  review, edit plus tests, c24, greeting, Ctrl-C, long core review), scored
+  per run into an append-only JSONL, with `report` (pass rates with
+  confidence intervals, p50/p90 time, recall, coverage, intervention rate,
+  regression flags vs the previous version), `gate` for releases, and a
+  `loop` mode that runs continuously and rebuilds when the branch moves. A
+  nightly CI job runs the quick scenarios.
+- **`selfware review [PATH] [--scope TEXT] [--json]`**: a deterministic
+  repository inventory with no model calls. It shows file, line and byte
+  totals per language; the largest code files; the most central files by
+  import in-degree (Rust, Python, JS/TS and Go imports resolved; the metric
+  is named); entry points; the review scope; and a reading plan (entry
+  points, then hubs, then the rest). A review task shows it first and
+  gives a compact version to the model.
+- **Review coverage gate.**
+  - Coverage counts only the line ranges `file_read` actually delivered.
+    Outlines, grep hits and summaries count for nothing. It survives
+    compaction and resume.
+  - A review's final answer is refused while relevant files are unread,
+    and the refusal names the next files in reading-plan order.
+  - The gate stops refusing when the model stops making progress or the
+    budget runs out. The review then ends ⚠️ PARTIAL, with
+    "read N of M relevant files (X% of lines); not read: …".
+  - Findings written as `FINDING: path:line — …` are kept across
+    compaction. Citations into lines the run never read are listed.
+  - The JSON result gains `review_coverage`.
+- **Per-workload quotas for llm.selfware.design.** Each turn is sent as
+  planning, mechanical, edit or synthesis, and gets its own thinking
+  setting and output cap from a measured table in the qwen38 profile.
+  - planning: thinking off, 12,288 tokens.
+  - synthesis: thinking on, 16,384 tokens.
+  - mechanical reading turns keep thinking on by default. Turning it off
+    was faster in replays but degraded live reviews, so it is opt-in.
+  - A thinking-off reply that would become the answer is re-asked once
+    under the synthesis quota.
+  - Override any field in `[workloads.<kind>]`. `llm-doctor` and the run
+    summary show the active table and where each value came from.
+  - Compaction is per endpoint: qwen38 compacts at 0.80 of its history
+    budget, derived from the p99 per-turn prompt growth (was a global
+    0.75).
+  - `scripts/endpoint_quota_bench.py` reproduces the measurements.
+- **Headless normal mode runs read-only work.** `selfware -p "review …"`
+  without `-m yolo`:
+  - read-only tools and observational shell commands (`ls`, `wc`,
+    `git log`, …) run;
+  - the first call that needs confirmation (a write, a build or test)
+    stops the run before it executes, with exit 6 and `PERMISSION_REQUIRED`
+    naming the tool and the fix.
+
+### Fixed
+- **Tool output reaches the model byte for byte.** `file_read` delivered
+  `tokens = text.split(DEFAULT_SEPARATOR)` as `env_token=[REDACTED]` (and
+  swallowed the newline), and escaped `&` and `<` as `&amp;` and `&lt;`.
+  In a live review the model "repaired" the redacted line and dropped the
+  `&` from a regex. Redaction now targets real secret values only (known
+  key formats, PEM blocks, long high-entropy literals assigned to secret
+  names), keeps line structure, and marks each redaction visibly as
+  `[REDACTED:<kind>]`. Framing no longer escapes file content. An edit
+  that would write a redaction marker or entity-escaped text the original
+  didn't have is refused. Swept every tool-output path.
+- **Verification that matches the project.** A runner the interpreter
+  could not start (`python3 pytest …`) is reported with the right
+  invocation (once) instead of looping, and is never counted as a
+  failing check; check ids keep `-m` (`python3 -m pytest`). Cargo checks on a project with no
+  `Cargo.toml` run nothing, and checks a model runs during a read-only
+  task, or that already failed on the unchanged tree of a no-edit run,
+  are informational (ℹ️), not "verification FAILED". Cargo tools fail fast
+  with a typed `NO_CARGO_MANIFEST` naming the project's languages.
+- **A reply that announces more reading is not an answer.** "… Let me read
+  the key structural files to ground the review." was accepted as a
+  review's final answer after 2 tool calls. The final sentence is now
+  checked, and a structural guard refuses an uncited workspace analysis
+  that announces more reading after fewer than 3 content reads. Offers
+  ("Let me know if …") and questions still count as answers.
+- **Review detection** covers "can you review X", "audit" and similar
+  phrasing through one classifier, so an uncited review gets ⚠️ instead of
+  ✅. Diff, PR and docs reviews are excluded.
+- **The execution path grounds workspace answers** like the planning path
+  did: a workspace question answered with nothing read is sent back once to
+  read.
+- **Greetings are quiet.** "hi" no longer prints a NO_CHANGES banner with
+  edit advice or a `[citations] 0 checked` line.
+- **Typed exit for headless confirmation stops:** exit 6, not 1.
+- **"compaction at N"** shows the threshold compaction actually enforces.
+  A 1M window showed 796k while compaction ran at a different number.
+- **`code_introspect` reports only what it rendered.** `max_tokens` is a
+  hard limit, depth is chosen from the measured sizes of the collected
+  files, symbol coverage can be partial, and any coverage under 100% is
+  warned about. The query ranks files through a real BM25 index, and
+  `code_query` sorts by relevance and counts every match. Its walk no
+  longer stops 3 directories deep or at 10 extensions (a Java tree, a
+  monorepo or a TSX/Kotlin project read "100%" of a fraction): it uses the
+  inventory's language table, and a directory it cannot enter is counted
+  and makes coverage partial.
+- **Security.** A bare `env` or `printenv` is not treated as a read, since
+  it prints API keys. Write-capable options (`git --output`, `rg --pre`,
+  `cargo --config`, `git -c`, `tree -o`) are never observational. Quoted
+  code with a path in a reply is written to that path only on a mutation
+  task.
+
+### Behaviour changes to know when upgrading
+- Headless `--mode normal` starts instead of refusing. It stops at the
+  first action that needs confirmation (exit 6).
+- The tracked `selfware-llm-selfware-design.toml` no longer pins
+  `enable_thinking`, `preserve_thinking` or `reasoning_effort = "xhigh"`.
+  A config that keeps the pin applies it to every turn and disables the
+  per-turn table; `llm-doctor` and the run summary say so.
+- On qwen38, the reasoning step-down switches thinking off instead of
+  retrying at a lower effort the model ignores.
+
+### Known issues
+- c24 (24k-window documentation task) still ends at the iteration cap on
+  this endpoint: 0 of 2 on 0.9.3 and 0 of 3 on 0.9.4 in the new live
+  harness. Not a 0.9.4 regression.
+- A greeting like "hi" can still make the model call a tool first (0 of 2
+  on 0.9.3 as well).
+- Session logs still pass through the broader log redactor and can show
+  mangled code; what the model sees is exact.
+- Throughput on large repositories: a review reads about one file per
+  turn, so a 300-file scope takes hours. The review reports PARTIAL
+  honestly when its budget runs out.
+- Under `-m yolo`, a read-only review may still spend time running builds
+  and tests.
+- "core" scope mapping uses selfware's own list of tooling modules; other
+  repos match a `core/` directory or use the whole repository.
+
+### Review notes (AGENTS.md rule 2)
+These change or loosen checks or visible behaviour. Each has maintainer
+sign-off, given in the review conversation, and each is noted in its
+commit message:
+- **Headless normal-mode refusal removed.** Read-only work runs and the
+  first confirmation stops the run. Its three refusal tests became notice
+  tests; one test now asserts `git status` runs headless (it asserted a
+  stop) and still asserts `cargo test` stops; read-only shell in headless
+  mode takes precedence over `require_confirmation`, as headless auto-edit
+  already did.
+- **Thinking pin removed from the tracked endpoint config**, and the
+  step-down test for qwen38 now expects thinking off (the old assertion
+  moved to qwen3.6-27b).
+- **Secret redaction narrowed to real secret values.** Ordinary code is
+  no longer rewritten; short, low-entropy literals such as
+  `password=hunter2` are no longer redacted in model-facing output,
+  checkpoints or spill files. Redaction tests now assert the
+  `[REDACTED:<kind>]` form (secret-absent assertions unchanged), and the
+  XML breakout test checks for no raw tag opener plus an exact decode round
+  trip instead of "no `<` anywhere".
+- **Read-only runs report checks as informational**: a failed check with no
+  edits no longer reads "verification FAILED" (still never ✅).
+- **`code_introspect` heuristics removed** (allocate, estimate_file,
+  suggest_depth_for_file, the 20% formatting reserve) in favour of
+  measurement; an explicit depth is honoured and a shortfall is reported
+  as partial coverage instead of being silently downgraded. Signatures
+  depth now shows each symbol's signature line; the tool no longer claims
+  `full` returns complete source; the "can include more files" suggestion
+  is gone.
+- **Live-eval report** averages wrong citations only over runs that
+  produced checkable citations (a run with no notes had nothing to get
+  wrong and read as a false regression).
+
 ## [0.9.3] - 2026-09-27
 
 Tasks, agents and everything they spawn now run on typed state machines

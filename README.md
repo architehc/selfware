@@ -435,6 +435,41 @@ selfware --tui
 
 ---
 
+## What's New in 0.9.4
+
+0.9.4 makes repository review honest and complete on llm.selfware.design.
+The full list is in [CHANGELOG.md](CHANGELOG.md); the highlights:
+
+- **`selfware review [PATH]`.** A deterministic inventory with no model
+  calls: file, line and byte totals per language, the largest files, the
+  most central files by import in-degree, entry points and a reading
+  plan. Every review starts from it.
+- **Coverage-gated reviews.** A review's answer is refused until the
+  relevant files have actually been read, counting only what `file_read`
+  delivered. It ends with "read N of M relevant files", or ⚠️ PARTIAL with
+  the unread list when the budget runs out; never ✅ on three files.
+- **Exact file content.** What the model reads is now byte-for-byte the
+  file. Ordinary code was being redacted as a secret, and `&` / `<` were
+  escaped.
+- **Measured per-turn quotas** for llm.selfware.design: planning without
+  thinking, synthesis with a 16k cap, per-endpoint compaction. See them in
+  `llm-doctor`.
+- **Headless read-only reviews.** `selfware -p "review …"` runs in normal
+  mode; the first write, build or test stops it with exit 6.
+- **Live evaluation harness.** `scripts/live_eval/` scores golden
+  scenarios against the endpoint, reports regressions between versions,
+  gates releases and can run continuously.
+
+### Behaviour changes to know when upgrading
+
+- **Headless `--mode normal` starts** and stops at the first action that
+  needs confirmation (exit 6).
+- **Secret redaction targets real secret values only**, marked
+  `[REDACTED:<kind>]`; short low-entropy literals are no longer redacted.
+- **The tracked endpoint config no longer pins thinking.** If your own
+  config keeps `[extra_body.chat_template_kwargs]`, it overrides the
+  per-turn quotas; `llm-doctor` says so.
+
 ## What's New in 0.9.3
 
 0.9.3 puts tasks, agents and everything they spawn on typed state
