@@ -631,6 +631,18 @@ impl RunBudgets {
     }
 }
 
+/// A logged tool call that counts toward the run's credited verification: a
+/// verification-shaped call that actually ran a check. A failed call that ran
+/// nothing (shell 126/127, a runner the interpreter could not start) is
+/// neither a pass nor a failure (`tool_dispatch::verification_call_ran_nothing`).
+fn counts_as_verification(tc: &crate::session::checkpoint::ToolCallLog) -> bool {
+    super::tool_dispatch::tool_call_is_verification(&tc.tool_name, &tc.arguments)
+        && (tc.success
+            || !tc.result.as_deref().is_some_and(|r| {
+                super::tool_dispatch::verification_call_ran_nothing(&tc.tool_name, &tc.arguments, r)
+            }))
+}
+
 impl Agent {
     /// Snapshot the run state for the end-of-run summary.
     pub fn run_summary(&self) -> RunSummary {
@@ -826,9 +838,7 @@ impl Agent {
             }
         }
         if let Some(cp) = self.current_checkpoint.as_ref() {
-            for tc in cp.tool_calls.iter().filter(|tc| {
-                super::tool_dispatch::tool_call_is_verification(&tc.tool_name, &tc.arguments)
-            }) {
+            for tc in cp.tool_calls.iter().filter(|tc| counts_as_verification(tc)) {
                 let command = serde_json::from_str::<serde_json::Value>(&tc.arguments)
                     .ok()
                     .and_then(|v| v.get("command").and_then(|c| c.as_str()).map(str::to_owned));
@@ -883,12 +893,7 @@ impl Agent {
             .map(|cp| {
                 cp.tool_calls
                     .iter()
-                    .filter(|tc| {
-                        super::tool_dispatch::tool_call_is_verification(
-                            &tc.tool_name,
-                            &tc.arguments,
-                        )
-                    })
+                    .filter(|tc| counts_as_verification(tc))
                     .fold((0usize, 0usize), |(pass, fail), tc| {
                         if tc.success {
                             (pass + 1, fail)

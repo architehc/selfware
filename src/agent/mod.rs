@@ -126,6 +126,7 @@ mod recovery;
 pub(crate) mod result_compaction;
 pub(crate) mod result_envelope;
 pub mod review_coverage;
+pub(crate) mod runner_invocation;
 pub mod session_log;
 pub(crate) mod session_usage;
 mod streaming;
@@ -1136,6 +1137,9 @@ pub struct Agent {
     /// verification. Bounded at TRACKED_PROBE_COMMAND_LIMIT entries; cleared
     /// by any successful verification call.
     probe_command_counts: std::collections::HashMap<u64, usize>,
+    /// (interpreter, runner) pairs whose "runner not started" correction was
+    /// already given to the model (`agent::runner_invocation`).
+    runner_hints_given: std::collections::HashSet<String>,
     /// Permission store for pre-authorized tool grants
     permission_store: crate::safety::permissions::PermissionStore,
     /// Unified cache manager for tool results and LLM responses (long-term memory)
@@ -2028,6 +2032,7 @@ To call a tool, use this EXACT XML structure:
             verification_deadline_directive_done: std::sync::atomic::AtomicBool::new(false),
             probe_pivot_done: std::sync::atomic::AtomicBool::new(false),
             probe_command_counts: std::collections::HashMap::new(),
+            runner_hints_given: std::collections::HashSet::new(),
             permission_store,
             cache_manager: crate::session::cache::CacheManager::new(cache_config),
             governor,

@@ -71,6 +71,17 @@ pub(super) fn shell_exit_ran_nothing(code: i64) -> bool {
     code == 126 || code == 127
 }
 
+/// Whether a FAILED verification-shaped call ran no check at all, so it must
+/// be neither recorded nor counted as a failing verification: the shell could
+/// not execute it (126/127), or the interpreter could not start the runner
+/// the command named (`python3 pytest`, `python3 -m pytest` without pytest —
+/// `agent::runner_invocation`). The one rule for the ledger, the run
+/// summary's credited verification and its check names.
+pub(crate) fn verification_call_ran_nothing(name: &str, args_str: &str, result: &str) -> bool {
+    Agent::shell_exit_code(result).is_some_and(shell_exit_ran_nothing)
+        || crate::agent::runner_invocation::detect_for_call(name, args_str, result).is_some()
+}
+
 impl Agent {
     /// The exit status a shell-style tool result reports, when it reports one.
     ///
@@ -149,6 +160,21 @@ impl Agent {
         // StaleVerification — which is what actually happened.
         if Self::shell_exit_code(result_str).is_some_and(shell_exit_ran_nothing) {
             debug!("{name} could not be executed; no check ran, so nothing is recorded");
+            return None;
+        }
+        // The interpreter could not start the runner the command named
+        // (`python3 pytest …` — a script path that does not exist — or
+        // `python3 -m pytest` on an interpreter without pytest). Same class
+        // as 127: no test ran. Recording it parked an unattributable failure
+        // that a passing run under the right invocation could never clear,
+        // and the run ended UNATTRIBUTED_FAILURE_LOOP (0.9.4 live finding).
+        // The model is told the right invocation once
+        // (`runner_unavailable_note`).
+        if !success
+            && crate::agent::runner_invocation::detect_for_call(name, args_str, result_str)
+                .is_some()
+        {
+            debug!("{name}: the runner was never started; no check ran, so nothing is recorded");
             return None;
         }
         // A test runner that executed ZERO tests (`cargo test typo_filter`
@@ -318,6 +344,10 @@ impl Agent {
             })
             .unwrap_or_default();
         if command.is_empty() || !shell_command_is_masked_verification(&command) {
+            return None;
+        }
+        if crate::agent::runner_invocation::detect(&command, result_str).is_some() {
+            debug!("masked verification never started its runner; nothing recorded: {command}");
             return None;
         }
         let (passed, evidence) = if masked_run_output_proves_success(&command, result_str) {
@@ -4724,6 +4754,12 @@ impl Agent {
         // The tool result is now the ONE channel: sequential, parallel,
         // rejected, and suppressed failures all land in this function, so
         // every failed call yields exactly one policy-enveloped message.
+        // A runner the interpreter could not start ran no tests: say so, and
+        // name the right invocation, once per (interpreter, runner).
+        let result_to_store = match self.runner_unavailable_note(tool_name, args_str, result) {
+            Some(note) => format!("{result_to_store}\n{note}"),
+            None => result_to_store,
+        };
         let result_to_store = if success {
             // Credit the current turn: a non-error result is the progress
             // signal the adaptive iteration budget looks for.
@@ -4862,6 +4898,29 @@ impl Agent {
     /// tool-specific guidance — a single header, never two). Errors that
     /// already carry a policy envelope (progress guard, retry suppression)
     /// pass through untouched so markers are never doubled.
+    /// The note for a shell call whose runner was never started
+    /// (`agent::runner_invocation`): the full correction the first time per
+    /// (interpreter, runner), a one-line reminder after that. Bounded: one
+    /// entry per distinct pair.
+    fn runner_unavailable_note(
+        &mut self,
+        tool_name: &str,
+        args_str: &str,
+        result: &str,
+    ) -> Option<String> {
+        let found = crate::agent::runner_invocation::detect_for_call(tool_name, args_str, result)?;
+        let command = serde_json::from_str::<serde_json::Value>(args_str)
+            .ok()
+            .and_then(|v| v.get("command").and_then(|c| c.as_str()).map(str::to_owned))
+            .unwrap_or_default();
+        let command: String = command.trim().chars().take(120).collect();
+        if self.runner_hints_given.insert(found.key()) {
+            Some(found.hint(&command))
+        } else {
+            Some(found.repeat_note(&command))
+        }
+    }
+
     fn tool_error_feedback(&self, tool_name: &str, error: &str) -> String {
         if error.trim_start().starts_with("[POLICY ") {
             return error.to_string();

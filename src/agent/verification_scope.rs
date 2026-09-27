@@ -269,7 +269,11 @@ impl VerificationRecord {
         if !self.same_scope_as(other) {
             return false;
         }
-        if self.check_id == other.check_id {
+        let (mine, theirs) = (
+            comparable_id(&self.check_id),
+            comparable_id(&other.check_id),
+        );
+        if mine == theirs {
             return true;
         }
         // Cargo identities carry their subset selection (`--lib`, `--doc`,
@@ -280,7 +284,7 @@ impl VerificationRecord {
             (Some(_), None) | (None, Some(_)) => return false,
             (None, None) => {}
         }
-        if other.check_id.starts_with(&format!("{} ", self.check_id)) {
+        if theirs.starts_with(&format!("{mine} ")) {
             return true;
         }
         false
@@ -301,7 +305,7 @@ impl VerificationRecord {
 
     /// Whether two records answer the same question about the same tree.
     pub fn same_check_as(&self, other: &VerificationRecord) -> bool {
-        if self.check_id != other.check_id {
+        if comparable_id(&self.check_id) != comparable_id(&other.check_id) {
             return false;
         }
         self.same_scope_as(other)
@@ -658,11 +662,11 @@ mod tests {
         );
         assert_eq!(
             check_id_for("shell_exec", "python3 -m unittest test_user"),
-            "python3 unittest test_user"
+            "python3 -m unittest test_user"
         );
         assert_eq!(
             check_id_for("shell_exec", "python3 -m unittest"),
-            "python3 unittest"
+            "python3 -m unittest"
         );
         assert_eq!(check_id_for("cargo_test", ""), "cargo test");
         assert_eq!(check_id_for("cargo_check", ""), "cargo check");
@@ -1153,6 +1157,20 @@ fn cargo_shape(check: &str) -> Option<CargoCheckShape> {
     }
 }
 
+/// A check identity as compared: `python3 -m pytest` and the pre-0.9.4
+/// rendering `python3 pytest` (restored from an older checkpoint) are the same
+/// check. The rendered id keeps `-m` because it is shown to the model as a
+/// command, and `python3 pytest` is not one (it runs a FILE named `pytest`).
+fn comparable_id(id: &str) -> std::borrow::Cow<'_, str> {
+    let mut words = id.split_whitespace();
+    let interp = words.next().unwrap_or("");
+    if (interp.starts_with("python") || interp == "node") && id.contains(" -m ") {
+        std::borrow::Cow::Owned(id.replacen(" -m ", " ", 1))
+    } else {
+        std::borrow::Cow::Borrowed(id)
+    }
+}
+
 /// Normalise a command to the CHECK it performs.
 ///
 /// `cargo test -- --nocapture` and `cargo test 2>&1` are the same check as
@@ -1213,6 +1231,14 @@ pub fn check_id_for(tool: &str, command: &str) -> String {
                     Vec::new()
                 };
                 (m, sel)
+            };
+            // `-m` stays in the id: the id is shown to the model as the
+            // failing command, and `python3 pytest` is a different (usually
+            // non-existent) command — it runs a FILE named `pytest`.
+            let module = if has_m {
+                format!("-m {module}")
+            } else {
+                module.to_string()
             };
             if selectors.is_empty() {
                 format!("{interp} {module}")

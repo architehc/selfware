@@ -676,7 +676,7 @@ async fn cargo_failure_in_python_only_workspace_is_no_runner_and_unittest_flow_c
             .blocking(&py, 2)
             .unwrap()
             .check_id,
-        "python3 unittest",
+        "python3 -m unittest",
         "a genuine in-scope unittest failure must still block"
     );
 

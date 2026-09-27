@@ -1714,7 +1714,12 @@ impl Agent {
                                 .last()
                                 .map(|m| m.content.text_all())
                                 .unwrap_or_default();
-                            if rescue_command_could_not_run(&rescue_output) {
+                            // Same class: the interpreter could not start the
+                            // runner (`python -m pytest` without pytest).
+                            if rescue_command_could_not_run(&rescue_output)
+                                || super::runner_invocation::detect(&display_cmd, &rescue_output)
+                                    .is_some()
+                            {
                                 info!(
                                     "Rescue `{}` could not run on this host — verification not run",
                                     display_cmd

@@ -495,6 +495,77 @@ mod agent_lifecycle {
         );
     }
 
+    /// 0.9.4 live finding (python-slugify edit run): the model verified with
+    /// an interpreter that could not start the runner — `python3 -m pytest`
+    /// on a python3 without pytest ("No module named pytest"), and
+    /// `python3 pytest` (a script path that does not exist). Each was recorded
+    /// as a failing check with no error lines to attribute; the passing
+    /// `python3.12 -m pytest` run could not clear it, and the run ended
+    /// UNATTRIBUTED_FAILURE_LOOP. Neither ran a test: nothing is recorded.
+    #[tokio::test]
+    async fn a_runner_the_interpreter_could_not_start_is_not_a_failing_check() {
+        let (mut agent, _dir) = agent().await;
+        dispatch(
+            &mut agent,
+            "file_write",
+            json!({ "path": "slug.py", "content": "def f(): return 1\n" }),
+            true,
+        );
+        for (command, result) in [
+            (
+                "python3 -m pytest tests/test_release.py -x -q 2>&1",
+                r#"{"exit_code":1,"stdout":"/Library/Developer/CommandLineTools/usr/bin/python3: No module named pytest\n","stderr":""}"#,
+            ),
+            (
+                "python3 pytest tests/test_release.py",
+                r#"{"exit_code":2,"stdout":"","stderr":"/usr/bin/python3: can't open file '/w/pytest': [Errno 2] No such file or directory\n"}"#,
+            ),
+        ] {
+            let args = json!({ "command": command });
+            agent.note_tool_call_lifecycle("shell_exec", &args, &args.to_string(), false, result);
+            assert!(
+                agent.verification_failures.is_empty(),
+                "`{command}` ran no test: {:?}",
+                agent.verification_failures.outstanding()
+            );
+        }
+        let args =
+            json!({ "command": "/opt/homebrew/bin/python3.12 -m pytest tests/test_release.py" });
+        agent.note_tool_call_lifecycle(
+            "shell_exec",
+            &args,
+            &args.to_string(),
+            true,
+            r#"{"exit_code":0,"stdout":"127 passed","stderr":""}"#,
+        );
+        let refusal = verification_refusal(&mut agent).await;
+        assert!(
+            refusal.is_none(),
+            "the suite passed; nothing blocks: {refusal:?}"
+        );
+    }
+
+    /// The model is told the right invocation ONCE, then a one-line reminder.
+    #[tokio::test]
+    async fn the_runner_correction_is_given_once() {
+        let (mut agent, _dir) = agent().await;
+        let args = json!({ "command": "python3 pytest tests" }).to_string();
+        let result = r#"{"exit_code":2,"stdout":"","stderr":"python3: can't open file '/w/pytest': [Errno 2] No such file or directory\n"}"#;
+        let mut notes = Vec::new();
+        for _ in 0..3 {
+            agent
+                .push_tool_result_message(true, "c", "shell_exec", &args, false, result)
+                .await;
+            notes.push(agent.messages.last().unwrap().content.text().to_string());
+        }
+        assert!(notes[0].contains("RUNNER NOT STARTED:"), "{}", notes[0]);
+        assert!(notes[0].contains("`python3 -m pytest …`"), "{}", notes[0]);
+        for later in &notes[1..] {
+            assert!(later.contains("RUNNER NOT STARTED again"), "{later}");
+            assert!(!later.contains("-m pytest …"), "{later}");
+        }
+    }
+
     /// The other half: a check that DID run and failed still blocks. Skipping
     /// 126/127 must not become a way to launder a red suite.
     #[tokio::test]
