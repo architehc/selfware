@@ -697,7 +697,7 @@ async fn cleanup_idle_sessions(sessions: &RwLock<HashMap<String, PtySession>>) {
 fn release_session_resource(session_id: &str) {
     use crate::resources::{ResourceHandle, ResourceRegistry};
     let session = crate::resources::session_id();
-    ResourceRegistry::global().release_where(|r| {
+    ResourceRegistry::global().release_where("pty session closed and reaped", |r| {
         r.session == session
             && matches!(&r.handle, ResourceHandle::Pty { session_id: s, .. } if s == session_id)
     });

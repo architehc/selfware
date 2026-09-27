@@ -7,9 +7,19 @@
 //! leaves a torn file and two sessions never drop each other's entries: an
 //! entry is written back from memory only if this process created or changed
 //! it, otherwise the on-disk version wins.
+//!
+//! Every state change is a [`ResourceEvent`] checked by
+//! [`ResourceMachine`] ([`ResourceRegistry::transition`]): an accepted one is
+//! appended to the lifecycle event log (`entity: resource`, owner = the task,
+//! with the cause), a refused one is a typed [`TransitionError`] that is
+//! logged and changes nothing. Entering `leaked` raises
+//! [`Effect::LeakAlarm`], surfaced here as a warning.
 
 use super::context::{current_owner, session_id};
 use super::{Resource, ResourceHandle, ResourceKind, ResourceState, TaskId};
+use crate::lifecycle::{
+    Effect, EventLog, InvalidTransition, ResourceEvent, ResourceMachine, Tracked,
+};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -54,6 +64,23 @@ pub struct RegistryFile {
     pub resources: Vec<Resource>,
 }
 
+/// A registry state change that did not happen.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TransitionError {
+    /// No resource with this id is in the registry.
+    #[error("resource {0} is not in the registry")]
+    NotFound(String),
+    /// The resource lifecycle refuses the event in the current state.
+    #[error("resource {id}: {source}")]
+    Invalid {
+        /// The resource.
+        id: String,
+        /// The refusal.
+        #[source]
+        source: InvalidTransition,
+    },
+}
+
 /// What a spawn site knows about the resource it just started.
 #[derive(Debug, Clone)]
 pub struct NewResource {
@@ -94,6 +121,7 @@ struct Inner {
 pub struct ResourceRegistry {
     path: Option<PathBuf>,
     session: SessionRecord,
+    events: EventLog,
     inner: Mutex<Inner>,
 }
 
@@ -123,17 +151,34 @@ impl ResourceRegistry {
         Self {
             path,
             session,
+            events: EventLog::disabled(),
             inner: Mutex::new(Inner::default()),
         }
     }
 
-    /// The process-wide registry. Unit tests get an in-memory one so they
-    /// never write under the real home directory.
+    /// Record every transition to `log` (the constructors above record
+    /// nothing; [`ResourceRegistry::global`] uses the default event log).
+    pub fn with_event_log(mut self, log: EventLog) -> Self {
+        self.events = log;
+        self
+    }
+
+    /// The event log transitions are recorded to.
+    pub fn event_log(&self) -> &EventLog {
+        &self.events
+    }
+
+    /// The process-wide registry, recording to the default lifecycle event
+    /// log. Unit tests get an in-memory one so they never write under the
+    /// real home directory (their event log is a per-process temp file).
     pub fn global() -> &'static ResourceRegistry {
         static GLOBAL: OnceLock<ResourceRegistry> = OnceLock::new();
-        GLOBAL.get_or_init(|| match default_path() {
-            Some(path) if !cfg!(test) => ResourceRegistry::at_path(path),
-            _ => ResourceRegistry::in_memory(),
+        GLOBAL.get_or_init(|| {
+            match default_path() {
+                Some(path) if !cfg!(test) => ResourceRegistry::at_path(path),
+                _ => ResourceRegistry::in_memory(),
+            }
+            .with_event_log(EventLog::default_location())
         })
     }
 
@@ -181,6 +226,13 @@ impl ResourceRegistry {
             label: new.label,
             note: None,
         };
+        Tracked::<ResourceMachine>::new(&id, resource.state, self.events.clone())
+            .with_owner(&resource.owner_task)
+            .record_created(&format!(
+                "registered: {} {}",
+                resource.kind,
+                resource.describe()
+            ));
         let mut inner = self.lock();
         if !inner.session_recorded {
             inner.session_recorded = true;
@@ -197,6 +249,13 @@ impl ResourceRegistry {
     /// Adopt an externally discovered resource (e.g. a labelled container
     /// found by the reaper) so its drain outcome is recorded.
     pub fn adopt(&self, resource: Resource) {
+        Tracked::<ResourceMachine>::new(&resource.id, resource.state, self.events.clone())
+            .with_owner(&resource.owner_task)
+            .record_created(&format!(
+                "adopted by the reaper: {} {} found by label",
+                resource.kind,
+                resource.describe()
+            ));
         let mut inner = self.lock();
         inner.touched.insert(resource.id.clone());
         inner.file.resources.retain(|r| r.id != resource.id);
@@ -216,11 +275,52 @@ impl ResourceRegistry {
         true
     }
 
-    pub fn set_state(&self, id: &str, state: ResourceState, note: Option<String>) -> bool {
-        self.update(id, |r| {
-            r.state = state;
-            r.note = note;
-        })
+    /// Apply `event` to resource `id` through [`ResourceMachine`]. On success
+    /// the state changes, `note` replaces the resource's note, the transition
+    /// is appended to the event log with `cause`, and the effects of
+    /// entering the new state are returned (a `leaked` resource raises
+    /// [`Effect::LeakAlarm`], logged here as a warning). A refused event is a
+    /// typed error, logged, and changes nothing.
+    pub fn transition(
+        &self,
+        id: &str,
+        event: ResourceEvent,
+        cause: &str,
+        note: Option<String>,
+    ) -> Result<Vec<Effect>, TransitionError> {
+        let mut inner = self.lock();
+        let Some(resource) = inner.file.resources.iter_mut().find(|r| r.id == id) else {
+            tracing::warn!("resource registry: {event:?} for unknown resource {id} ignored");
+            return Err(TransitionError::NotFound(id.to_string()));
+        };
+        let mut tracked = Tracked::<ResourceMachine>::new(id, resource.state, self.events.clone())
+            .with_owner(&resource.owner_task);
+        let effects = match tracked.apply(event, cause) {
+            Ok(effects) => effects,
+            Err(source) => {
+                let err = TransitionError::Invalid {
+                    id: id.to_string(),
+                    source,
+                };
+                tracing::warn!("resource registry: {err} ({cause})");
+                return Err(err);
+            }
+        };
+        resource.state = *tracked.state();
+        resource.note = note;
+        resource.updated_at = Utc::now();
+        if effects.contains(&Effect::LeakAlarm) {
+            tracing::warn!(
+                "resource LEAKED: {} {} (owner {}): {} — see `selfware resources`, clean up with `selfware resources reap`",
+                resource.kind,
+                resource.describe(),
+                resource.owner_task,
+                resource.note.as_deref().unwrap_or(cause)
+            );
+        }
+        inner.touched.insert(id.to_string());
+        self.persist(&mut inner);
+        Ok(effects)
     }
 
     pub fn set_handle(&self, id: &str, handle: ResourceHandle) -> bool {
@@ -232,22 +332,33 @@ impl ResourceRegistry {
         self.update(id, |r| r.owner_task = owner)
     }
 
-    /// Mark confirmed-gone. Callers must only use this after they observed
-    /// the resource exit (a reaped child, a successful remove).
-    pub fn release(&self, id: &str) -> bool {
-        self.set_state(id, ResourceState::Released, None)
+    /// Mark confirmed-gone (`stopped`; `drain` for a resource that never
+    /// started), recording `cause`. Callers must only use this after they
+    /// observed the resource exit (a reaped child, a successful remove).
+    /// Returns whether the resource is now released.
+    pub fn release(&self, id: &str, cause: &str) -> bool {
+        let Some(state) = self.get(id).map(|r| r.state) else {
+            return false;
+        };
+        let event = match state {
+            ResourceState::Released => return true,
+            ResourceState::Requested => ResourceEvent::Drain,
+            _ => ResourceEvent::Stopped,
+        };
+        self.transition(id, event, cause, None).is_ok()
     }
 
     /// Release every unreleased resource matching `pred` (e.g. the `pty`
-    /// entry for a closed session). Returns how many were released.
-    pub fn release_where(&self, pred: impl Fn(&Resource) -> bool) -> usize {
+    /// entry for a closed session), recording `cause`. Returns how many were
+    /// released.
+    pub fn release_where(&self, cause: &str, pred: impl Fn(&Resource) -> bool) -> usize {
         let ids: Vec<String> = self
             .unreleased()
             .into_iter()
             .filter(|r| pred(r))
             .map(|r| r.id)
             .collect();
-        ids.iter().filter(|id| self.release(id)).count()
+        ids.iter().filter(|id| self.release(id, cause)).count()
     }
 
     pub fn get(&self, id: &str) -> Option<Resource> {

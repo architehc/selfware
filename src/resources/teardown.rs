@@ -7,11 +7,17 @@
 //! poll a short grace → finalize (e.g. remove the stopped container). Only a
 //! confirmed-gone resource becomes [`ResourceState::Released`]; everything
 //! else becomes [`ResourceState::Leaked`] with the reason in `note`.
+//!
+//! Each step is a lifecycle event applied through the registry
+//! (`drain`/`reap` into `draining`, then `stopped`, `deadline_passed` or
+//! `abandon`), so the drain is recorded in the event log and cannot take a
+//! transition the proved resource table refuses.
 
 use super::context::session_owner;
 use super::driver::{Probe, ResourceDriver};
 use super::registry::ResourceRegistry;
-use super::{Resource, ResourceState};
+use super::{Resource, ResourceEvent, ResourceState};
+use crate::lifecycle::Effect;
 use std::time::Duration;
 
 /// Timing knobs for a drain.
@@ -52,11 +58,19 @@ pub struct DrainReport {
     pub leaked: Vec<Resource>,
     /// `keep` resources handed to the session instead of drained.
     pub kept: Vec<Resource>,
+    /// Ids of the resources whose drain raised [`Effect::LeakAlarm`] (they
+    /// entered `leaked` during this drain).
+    pub leak_alarms: Vec<String>,
 }
 
 impl DrainReport {
     pub fn is_empty(&self) -> bool {
         self.released.is_empty() && self.leaked.is_empty() && self.kept.is_empty()
+    }
+
+    /// `(released, leaked, kept)` counts.
+    pub fn counts(&self) -> (usize, usize, usize) {
+        (self.released.len(), self.leaked.len(), self.kept.len())
     }
 
     /// The run-summary line, or `None` when the task owned nothing.
@@ -117,6 +131,7 @@ pub async fn teardown_task(
     let drained = drain(registry, driver, to_drain, policy).await;
     report.released = drained.released;
     report.leaked = drained.leaked;
+    report.leak_alarms = drained.leak_alarms;
     report
 }
 
@@ -129,47 +144,97 @@ pub async fn drain(
 ) -> DrainReport {
     let mut report = DrainReport::default();
     for resource in resources {
-        let (state, note) = drain_one(registry, driver, &resource, policy).await;
-        registry.set_state(&resource.id, state, note.clone());
+        let alarm = drain_tracked(registry, driver, &resource, policy).await;
         let mut updated = registry.get(&resource.id).unwrap_or(resource);
-        updated.state = state;
-        updated.note = note;
-        if state.is_released() {
+        if alarm {
+            report.leak_alarms.push(updated.id.clone());
+        }
+        if updated.state.is_released() {
             report.released.push(updated);
         } else {
+            if updated.state != ResourceState::Leaked && updated.note.is_none() {
+                updated.note = Some(format!("release not confirmed (state {})", updated.state));
+            }
             report.leaked.push(updated);
         }
     }
     report
 }
 
-async fn drain_one(
+/// Take one resource through `draining` to a settled state. Returns whether
+/// entering `leaked` raised [`Effect::LeakAlarm`].
+async fn drain_tracked(
     registry: &ResourceRegistry,
     driver: &dyn ResourceDriver,
     resource: &Resource,
     policy: TeardownPolicy,
-) -> (ResourceState, Option<String>) {
+) -> bool {
+    let id = resource.id.as_str();
+    // The registry's current state, not the caller's snapshot: a tool may
+    // have released it in the meantime.
+    let state = registry.get(id).map_or(resource.state, |r| r.state);
+    let enter = match state {
+        ResourceState::Released => return false,
+        // Never started: nothing to stop (R4 allows exactly this release).
+        ResourceState::Requested => {
+            let _ = registry.transition(id, ResourceEvent::Drain, "drain: never started", None);
+            return false;
+        }
+        ResourceState::Draining => None,
+        ResourceState::Orphaned | ResourceState::Leaked => Some(ResourceEvent::Reap),
+        ResourceState::Starting | ResourceState::Live => Some(ResourceEvent::Drain),
+    };
+    if let Some(event) = enter {
+        let cause = match event {
+            ResourceEvent::Reap => "reaper: draining",
+            _ => "teardown: draining",
+        };
+        if registry.transition(id, event, cause, None).is_err() {
+            // Refused (logged by the registry): the state is unchanged and
+            // the caller reports it as not released.
+            return false;
+        }
+    }
+    let (event, note) = drain_one(driver, resource, policy).await;
+    let cause = match (&event, &note) {
+        (ResourceEvent::Stopped, _) => "teardown: confirmed gone".to_string(),
+        (_, Some(note)) => format!("teardown: {note}"),
+        (_, None) => "teardown: release not confirmed".to_string(),
+    };
+    registry
+        .transition(id, event, &cause, note)
+        .is_ok_and(|effects| effects.contains(&Effect::LeakAlarm))
+}
+
+/// Drive the host side of a drain for a resource already in `draining` and
+/// return the settling event: `stopped` (confirmed gone), `deadline_passed`
+/// (still running after polite stop + force) or `abandon` (gave up: foreign
+/// or unknown handle, kind not stopped automatically, finalize failed).
+async fn drain_one(
+    driver: &dyn ResourceDriver,
+    resource: &Resource,
+    policy: TeardownPolicy,
+) -> (ResourceEvent, Option<String>) {
     if !resource.kind.is_drainable() {
         return (
-            ResourceState::Leaked,
+            ResourceEvent::Abandon,
             Some(format!(
                 "{} resources are not stopped automatically",
                 resource.kind
             )),
         );
     }
-    registry.set_state(&resource.id, ResourceState::Draining, None);
 
     match driver.probe(resource).await {
         Probe::Gone => return finalize(driver, resource).await,
-        Probe::Foreign(why) | Probe::Unknown(why) => return (ResourceState::Leaked, Some(why)),
+        Probe::Foreign(why) | Probe::Unknown(why) => return (ResourceEvent::Abandon, Some(why)),
         Probe::Running => {}
     }
 
     let mut stop_error = driver.polite_stop(resource).await.err();
     match wait_gone(driver, resource, policy.deadline, policy.poll).await {
         Probe::Gone => return finalize(driver, resource).await,
-        Probe::Foreign(why) => return (ResourceState::Leaked, Some(why)),
+        Probe::Foreign(why) => return (ResourceEvent::Abandon, Some(why)),
         Probe::Running | Probe::Unknown(_) => {}
     }
 
@@ -178,7 +243,8 @@ async fn drain_one(
     }
     match wait_gone(driver, resource, policy.force_grace, policy.poll).await {
         Probe::Gone => finalize(driver, resource).await,
-        Probe::Foreign(why) | Probe::Unknown(why) => (ResourceState::Leaked, Some(why)),
+        Probe::Foreign(why) => (ResourceEvent::Abandon, Some(why)),
+        Probe::Unknown(why) => (ResourceEvent::DeadlinePassed, Some(why)),
         Probe::Running => {
             let mut note = format!(
                 "still running after {}s polite stop + force",
@@ -187,7 +253,7 @@ async fn drain_one(
             if let Some(e) = stop_error {
                 note.push_str(&format!(" ({e:#})"));
             }
-            (ResourceState::Leaked, Some(note))
+            (ResourceEvent::DeadlinePassed, Some(note))
         }
     }
 }
@@ -195,10 +261,10 @@ async fn drain_one(
 async fn finalize(
     driver: &dyn ResourceDriver,
     resource: &Resource,
-) -> (ResourceState, Option<String>) {
+) -> (ResourceEvent, Option<String>) {
     match driver.finalize(resource).await {
-        Ok(()) => (ResourceState::Released, None),
-        Err(e) => (ResourceState::Leaked, Some(format!("{e:#}"))),
+        Ok(()) => (ResourceEvent::Stopped, None),
+        Err(e) => (ResourceEvent::Abandon, Some(format!("{e:#}"))),
     }
 }
 

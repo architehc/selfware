@@ -1,0 +1,17 @@
+[
+  ["requested", "start", "starting"],
+  ["requested", "drain", "released"],
+  ["starting", "ready", "live"],
+  ["starting", "fail", "leaked"],
+  ["starting", "drain", "draining"],
+  ["live", "drain", "draining"],
+  ["live", "stopped", "released"],
+  ["live", "owner_gone", "orphaned"],
+  ["orphaned", "stopped", "released"],
+  ["orphaned", "reap", "draining"],
+  ["draining", "stopped", "released"],
+  ["draining", "deadline_passed", "leaked"],
+  ["draining", "abandon", "leaked"],
+  ["leaked", "stopped", "released"],
+  ["leaked", "reap", "draining"]
+]

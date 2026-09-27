@@ -623,7 +623,8 @@ impl PlaywrightBridge {
         if child.wait().await.is_ok() {
             if let Some(id) = &self.registry_entry {
                 // Reaped: confirmed gone.
-                crate::resources::ResourceRegistry::global().release(id);
+                crate::resources::ResourceRegistry::global()
+                    .release(id, "page-control bridge reaped");
             }
         }
 

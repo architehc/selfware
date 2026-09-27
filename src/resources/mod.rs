@@ -16,8 +16,13 @@
 //! labelled (`selfware.task=<id>` on containers) are ever touched, and a raw
 //! pid is only signalled when its OS start time still matches the recorded one.
 //!
-//! The state enum here is deliberately self-contained so the typed lifecycle
-//! state machines (`src/lifecycle/`) can re-export it without a migration.
+//! There is one resource state model: [`ResourceState`], [`ResourceKind`] and
+//! [`ResourceEvent`] are the typed lifecycle's (`crate::lifecycle`), and every
+//! registry state change is an event checked by `ResourceMachine` (the table
+//! proved in `formal/ResourceFsm.lean`) and appended to the lifecycle event
+//! log (`entity: resource`, with a cause). A transition the table refuses is
+//! a typed [`TransitionError`], logged, never a panic; entering `leaked`
+//! raises `Effect::LeakAlarm`, which the registry surfaces as a warning.
 
 pub mod context;
 pub mod driver;
@@ -29,104 +34,16 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+pub use crate::lifecycle::{ResourceEvent, ResourceKind, ResourceState};
 pub use context::{session_id, Owner};
 pub use driver::{Probe, ResourceDriver, SystemDriver};
-pub use registry::{NewResource, ResourceRegistry, SessionRecord};
+pub use registry::{NewResource, ResourceRegistry, SessionRecord, TransitionError};
 pub use teardown::{DrainReport, TeardownPolicy};
 
 /// Identifier of the task that owns a resource: the agent checkpoint's
 /// `task_id`, or `session:<session id>` for resources owned by the session
 /// itself (spawned outside any task, or kept past their task with `keep`).
 pub type TaskId = String;
-
-/// What kind of thing a [`Resource`] is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ResourceKind {
-    Container,
-    Process,
-    Pty,
-    Browser,
-    ServerPort,
-    Worktree,
-    TempDir,
-}
-
-impl ResourceKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ResourceKind::Container => "container",
-            ResourceKind::Process => "process",
-            ResourceKind::Pty => "pty",
-            ResourceKind::Browser => "browser",
-            ResourceKind::ServerPort => "server_port",
-            ResourceKind::Worktree => "worktree",
-            ResourceKind::TempDir => "tempdir",
-        }
-    }
-
-    /// Kinds selfware can stop on its own. Worktrees, temp dirs and bound
-    /// ports hold user work or die with the process; they are listed but
-    /// never auto-drained.
-    pub fn is_drainable(self) -> bool {
-        matches!(
-            self,
-            ResourceKind::Container
-                | ResourceKind::Process
-                | ResourceKind::Pty
-                | ResourceKind::Browser
-        )
-    }
-}
-
-impl std::fmt::Display for ResourceKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// Lifecycle of a registered resource.
-///
-/// `Released` is the only state meaning "confirmed gone". `Leaked` means a
-/// drain was attempted and release could not be confirmed; `Orphaned` means
-/// the owning session ended without draining it. Both still hold something
-/// on the host and are reap candidates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ResourceState {
-    Requested,
-    Starting,
-    Live,
-    Draining,
-    Released,
-    Leaked,
-    Orphaned,
-}
-
-impl ResourceState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ResourceState::Requested => "requested",
-            ResourceState::Starting => "starting",
-            ResourceState::Live => "live",
-            ResourceState::Draining => "draining",
-            ResourceState::Released => "released",
-            ResourceState::Leaked => "leaked",
-            ResourceState::Orphaned => "orphaned",
-        }
-    }
-
-    /// Confirmed gone; nothing left on the host.
-    pub fn is_released(self) -> bool {
-        matches!(self, ResourceState::Released)
-    }
-}
-
-impl std::fmt::Display for ResourceState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
 
 /// How to reach a resource on the host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,7 +159,7 @@ pub fn record_worktree(path: &std::path::Path, label: impl Into<String>) {
 /// still existed (or as registered).
 pub fn release_worktree(path: &std::path::Path) {
     let session = session_id();
-    ResourceRegistry::global().release_where(|r| {
+    ResourceRegistry::global().release_where("git worktree removed", |r| {
         r.session == session
             && r.kind == ResourceKind::Worktree
             && matches!(&r.handle, ResourceHandle::Path { path: p } if p == path)

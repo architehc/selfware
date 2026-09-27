@@ -585,7 +585,7 @@ fn record_managed(summary: &crate::process_manager::ProcessSummary, keep: bool) 
 /// Mark a managed process's registry entry released (after a confirmed stop).
 fn release_managed(id: &str) {
     if let Some(entry) = managed_entry(id) {
-        crate::resources::ResourceRegistry::global().release(&entry.id);
+        crate::resources::ResourceRegistry::global().release(&entry.id, "managed process stopped");
     }
 }
 

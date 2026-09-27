@@ -10,7 +10,7 @@
 use super::driver::{LabelledContainer, ResourceDriver};
 use super::registry::ResourceRegistry;
 use super::teardown::{drain, DrainReport, TeardownPolicy};
-use super::{Resource, ResourceHandle, ResourceKind, ResourceState};
+use super::{Resource, ResourceEvent, ResourceHandle, ResourceKind, ResourceState};
 use serde::Serialize;
 use std::collections::HashSet;
 
@@ -266,20 +266,8 @@ pub fn startup_report(registry: &ResourceRegistry, driver: &dyn ResourceDriver) 
     let mut total = 0usize;
     for resource in registry.unreleased() {
         let status = classify(&resource, &alive);
-        if matches!(status, EntryStatus::Zombie(_) | EntryStatus::KeptOrphan)
-            && matches!(
-                resource.state,
-                ResourceState::Requested
-                    | ResourceState::Starting
-                    | ResourceState::Live
-                    | ResourceState::Draining
-            )
-        {
-            registry.set_state(
-                &resource.id,
-                ResourceState::Orphaned,
-                Some("owning session ended without teardown".into()),
-            );
+        if matches!(status, EntryStatus::Zombie(_) | EntryStatus::KeptOrphan) {
+            reconcile_ended_session(registry, &resource);
         }
         if matches!(status, EntryStatus::Zombie(_)) {
             total += 1;
@@ -295,6 +283,35 @@ pub fn startup_report(registry: &ResourceRegistry, driver: &dyn ResourceDriver) 
         if total == 1 { "" } else { "s" },
         breakdown.join(", ")
     ))
+}
+
+/// Record what an ended session left behind, as lifecycle events: a live
+/// resource lost its owner (`owner_gone` → orphaned), a drain in progress
+/// can no longer finish in time (`deadline_passed` → leaked), a start that
+/// was never confirmed may have half-happened (`fail` → leaked). Requested
+/// (never started) and already settled resources are left as they are.
+fn reconcile_ended_session(registry: &ResourceRegistry, resource: &Resource) {
+    let (event, note) = match resource.state {
+        ResourceState::Live => (
+            ResourceEvent::OwnerGone,
+            "owning session ended without teardown",
+        ),
+        ResourceState::Draining => (
+            ResourceEvent::DeadlinePassed,
+            "owning session ended while draining it",
+        ),
+        ResourceState::Starting => (
+            ResourceEvent::Fail,
+            "owning session ended before its start was confirmed",
+        ),
+        _ => return,
+    };
+    let _ = registry.transition(
+        &resource.id,
+        event,
+        &format!("startup reconcile: {note}"),
+        Some(note.to_string()),
+    );
 }
 
 /// Text rendering of a listing (`selfware resources`).

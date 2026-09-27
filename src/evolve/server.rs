@@ -341,7 +341,7 @@ impl EvolveServer {
         let bound = listener.local_addr().map(|a| a.port()).unwrap_or(port);
         let entry = registry.register_owned(
             crate::resources::NewResource::new(
-                crate::resources::ResourceKind::ServerPort,
+                crate::resources::ResourceKind::Port,
                 crate::resources::ResourceHandle::Port { port: bound },
                 format!("evolve workspace http://{address}"),
             )
@@ -353,7 +353,7 @@ impl EvolveServer {
             .with_graceful_shutdown(shutdown)
             .await;
         // `serve` consumed and dropped the listener: the port is closed.
-        registry.release(&entry);
+        registry.release(&entry, "listener closed");
         served?;
         Ok(())
     }

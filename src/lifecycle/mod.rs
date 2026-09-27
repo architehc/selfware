@@ -8,7 +8,9 @@
 //!   exported `formal/task_table.json` by a conformance test.
 //! - [`AgentMachine`]: idle → working ⇄ blocked, crash/restart, stop.
 //! - [`ResourceMachine`]: requested → starting → live → draining →
-//!   released | leaked, plus orphan reconciliation.
+//!   released | leaked, plus orphan reconciliation. Its table is the one
+//!   proved in `formal/ResourceFsm.lean`, checked against the exported
+//!   `formal/resource_table.json` the same way.
 //!
 //! A transition is computed by [`Machine::next`]; an event the current state
 //! refuses is a typed [`InvalidTransition`], never a panic. [`Tracked`] holds
@@ -33,7 +35,9 @@ pub use agent::{AgentEvent, AgentMachine, AgentState};
 pub use log::{
     EventLog, RecordedUsage, TransitionRecord, EVENT_LOG_ENV, MAX_CAUSE_CHARS, MAX_LOG_BYTES,
 };
-pub use resource::{ResourceEvent, ResourceKind, ResourceMachine, ResourceState};
+pub use resource::{
+    table as resource_table, ResourceEvent, ResourceKind, ResourceMachine, ResourceState,
+};
 pub use task::{table as task_table, TaskEvent, TaskMachine, TaskState};
 pub use tracked::Tracked;
 
@@ -90,8 +94,9 @@ pub struct InvalidTransition {
 }
 
 /// A side effect requested by entering a state. Reported by
-/// [`Machine::on_enter`]; carried out by whoever owns the entity (the
-/// resource registry for teardown).
+/// [`Machine::on_enter`]; carried out by whoever owns the entity (the agent
+/// drains the task's resources through the resource registry on
+/// `TeardownOwned`; the registry surfaces `LeakAlarm`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Effect {
     /// The task reached a terminal state: every resource it owns must be

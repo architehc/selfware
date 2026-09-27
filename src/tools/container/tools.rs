@@ -1458,7 +1458,7 @@ impl Tool for ComposeDown {
             let dir = compose_project_dir(path);
             let file = args.get("file").and_then(|v| v.as_str()).map(String::from);
             let session = crate::resources::session_id();
-            ResourceRegistry::global().release_where(|r| {
+            ResourceRegistry::global().release_where("compose down succeeded", |r| {
                 r.session == session
                     && matches!(&r.handle, ResourceHandle::Compose { dir: d, file: f, .. } if *d == dir && *f == file)
             });

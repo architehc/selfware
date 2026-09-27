@@ -97,7 +97,17 @@ async fn leaked_resources_of_a_live_session_are_zombies() {
     let reg = ResourceRegistry::in_memory_as(session("me"));
     let driver = FakeDriver::new();
     let id = reg.register_owned(process(61), "t".into(), None);
-    reg.set_state(&id, ResourceState::Leaked, Some("still running".into()));
+    reg.transition(&id, ResourceEvent::Drain, "teardown: draining", None)
+        .unwrap();
+    let effects = reg
+        .transition(
+            &id,
+            ResourceEvent::DeadlinePassed,
+            "teardown: still running",
+            Some("still running".into()),
+        )
+        .unwrap();
+    assert_eq!(effects, vec![crate::lifecycle::Effect::LeakAlarm]);
     let listing = list(&reg, &driver, false, false).await;
     assert!(
         matches!(listing.entries[0].status, EntryStatus::Zombie(ref r) if r.contains("still running"))

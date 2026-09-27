@@ -57,7 +57,7 @@ async fn run_browser_process(cmd: &mut Command) -> std::io::Result<std::process:
     group_guard.disarm();
     if let (Ok(_), Some(id)) = (&output, &entry) {
         // Reaped: the browser process is confirmed gone.
-        registry.release(id);
+        registry.release(id, "browser process reaped");
     }
     output
 }

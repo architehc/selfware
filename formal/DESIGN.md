@@ -210,10 +210,25 @@ Each phase is shippable alone:
 - The task table is the Lean `step` function. `formal/task_table.json` is its
   export; the Rust test `rust_table_equals_the_lean_model_for_every_pair`
   compares all 150 (state, event) pairs, refusals included.
-- `scripts/check_formal.sh` re-checks both Lean files and the exported table
-  (`--write` regenerates it; skipped with a message when `lean` is absent).
+- The resource table is the Lean `step` function of `formal/ResourceFsm.lean`
+  (R1 `released` sticky, R2 `leaked` left only by `reap`/`stopped`, R3 every
+  `draining` exit settles, R4 `released` only on confirmation, R5 no unsettled
+  state is stuck, R6 the reaper path). `formal/resource_table.json` is its
+  export; `rust_resource_table_equals_the_lean_model_for_every_pair` compares
+  all 63 pairs. The registry needed one transition the first sketch lacked:
+  `draining --abandon--> leaked`, a drain that gives up before its deadline
+  (foreign or unknown handle, kind not stopped automatically, finalize
+  failed) — added to the model first, never as a release.
+- `scripts/check_formal.sh` re-checks the Lean files and both exported tables
+  (`--write` regenerates them; skipped with a message when `lean` is absent).
   It is not a CI job: CI would need a Lean toolchain installed per run.
-  Run it whenever `formal/` or `src/lifecycle/task.rs` changes.
+  Run it whenever `formal/` or `src/lifecycle/{task,resource}.rs` changes.
+- `src/resources` (the task-owned resource registry) uses the lifecycle's
+  `ResourceState`/`ResourceKind`/`ResourceEvent`; every registry state change
+  goes through `ResourceMachine` and is appended to the event log
+  (`entity: resource`, owner = the task, with a cause). A refused event is a
+  typed `TransitionError`, logged. `resources.json` keeps its labels
+  (`server_port` from the first registry still reads, as `port`).
 - The event log is `~/.selfware/state/events.jsonl` (`SELFWARE_EVENT_LOG`
   overrides it or turns it `off`), one line per transition, best-effort.
 - The main run (`run_task`, `continue_execution`) is mirrored onto the task

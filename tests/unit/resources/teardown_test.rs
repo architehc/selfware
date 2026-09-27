@@ -232,3 +232,65 @@ async fn session_teardown_drains_kept_resources_of_this_session() {
     assert_eq!(report.released.len(), 1);
     assert_eq!(reg.get(&kept).unwrap().state, ResourceState::Released);
 }
+
+#[tokio::test]
+async fn a_drain_is_recorded_event_by_event_and_a_leak_raises_the_alarm() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = crate::lifecycle::EventLog::at(dir.path().join("events.jsonl"));
+    let reg = ResourceRegistry::in_memory().with_event_log(log.clone());
+    let driver = FakeDriver::new();
+    driver.script("pid 11", Behavior::NeverStops);
+    driver.script("container ffff", Behavior::Foreign);
+    let stuck = register(&reg, process(11), "t1");
+    let foreign = register(&reg, container("ffff"), "t1");
+    let fine = register(&reg, process(12), "t1");
+
+    let report = teardown_task(&reg, &driver, "t1", fast()).await;
+
+    assert_eq!(report.counts(), (1, 2, 0));
+    let mut alarms = report.leak_alarms.clone();
+    alarms.sort();
+    let mut expected = vec![stuck.clone(), foreign.clone()];
+    expected.sort();
+    assert_eq!(
+        alarms, expected,
+        "every resource that leaked raised LeakAlarm"
+    );
+
+    let (records, _) = log.read_all();
+    let path = |id: &str| -> Vec<String> {
+        records
+            .iter()
+            .filter(|r| r.id == id)
+            .map(|r| format!("{}:{}", r.event.as_deref().unwrap_or("new"), r.to))
+            .collect()
+    };
+    assert_eq!(
+        path(&stuck),
+        vec!["new:live", "drain:draining", "deadline_passed:leaked"]
+    );
+    assert_eq!(
+        path(&foreign),
+        vec!["new:live", "drain:draining", "abandon:leaked"]
+    );
+    assert_eq!(
+        path(&fine),
+        vec!["new:live", "drain:draining", "stopped:released"]
+    );
+    assert!(records.iter().all(|r| r.owner.as_deref() == Some("t1")));
+}
+
+#[tokio::test]
+async fn a_resource_released_by_its_tool_during_teardown_is_not_touched() {
+    let reg = ResourceRegistry::in_memory();
+    let driver = FakeDriver::new();
+    let id = register(&reg, process(13), "t1");
+    let snapshot = reg.owned_by("t1");
+    assert!(reg.release(&id, "tool: reaped its child"));
+
+    let report = drain(&reg, &driver, snapshot, fast()).await;
+
+    assert_eq!(report.counts(), (1, 0, 0));
+    assert!(driver.calls().is_empty(), "nothing signalled");
+    assert!(report.leak_alarms.is_empty());
+}
