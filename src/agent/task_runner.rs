@@ -3318,7 +3318,10 @@ impl Agent {
                 reason: format!("{}: {}", mode.kind.tag(), mode.evidence),
             });
         }
-        cli_println!("{}", mode.cli_banner());
+        cli_println!(
+            "{}",
+            crate::output::hyperlink::linkify_for_terminal(&mode.cli_banner())
+        );
         // Best-effort artifact write so the SWE-bench Pro harness can pick it up.
         if let Some(dir) = self.failure_mode_artifact_dir() {
             if let Err(e) = mode.write_artifact(&dir).await {

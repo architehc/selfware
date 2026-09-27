@@ -422,7 +422,8 @@ struct TextProse {
 impl TextProse {
     fn new() -> Self {
         Self {
-            renderer: output::live::ProseRenderer::new(output::markdown_styled()),
+            renderer: output::live::ProseRenderer::new(output::markdown_styled())
+                .with_linker(output::hyperlink::Linker::for_terminal()),
             echo: output::live::EchoGate::new(output::live::echo_target()),
             shown: String::new(),
         }

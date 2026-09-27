@@ -593,6 +593,39 @@ pub fn parse_citations(text: &str) -> Vec<Citation> {
     out
 }
 
+/// Byte ranges of the `path:line` / `path:a-b` / `path#Lnn` citations in
+/// `text` (the whole token, path through line numbers) with the cited path,
+/// in order. Same token rules as [`parse_citations`] (a path glued to a URL
+/// or a longer identifier is not a citation); used by the terminal renderer
+/// to turn citations into clickable links.
+pub(crate) fn citation_spans(text: &str) -> Vec<(std::ops::Range<usize>, String)> {
+    let mut out = Vec::new();
+    for caps in citation_regex().captures_iter(text) {
+        let (Some(m), Some(whole)) = (caps.name("path"), caps.get(0)) else {
+            continue;
+        };
+        let before = &text[..m.start()];
+        if before.ends_with("//")
+            || before.ends_with(':')
+            || before.chars().next_back().is_some_and(is_path_char)
+        {
+            continue;
+        }
+        if text[whole.end()..]
+            .chars()
+            .next()
+            .is_some_and(|c| is_ident_char(c) && !c.is_ascii_digit())
+        {
+            continue;
+        }
+        out.push((
+            m.start()..whole.end(),
+            m.as_str().trim_start_matches("./").to_string(),
+        ));
+    }
+    out
+}
+
 /// A path mention without a `:line` suffix (prose citations tie to these).
 fn bare_path_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();

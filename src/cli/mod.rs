@@ -1500,7 +1500,10 @@ fn print_resume_run_summary(
     }
     println!(
         "{}",
-        render_text_run_summary(&agent.chain_run_summary(), run_result)
+        crate::output::hyperlink::linkify_for_terminal(&render_text_run_summary(
+            &agent.chain_run_summary(),
+            run_result
+        ))
     );
     if let Err(e) = run_result {
         report_text_run_error(agent, e);
@@ -2306,7 +2309,10 @@ pub async fn run() -> Result<()> {
         if !cli.quiet && !is_structured {
             println!(
                 "{}",
-                render_text_run_summary(&agent.run_summary(), &run_result)
+                crate::output::hyperlink::linkify_for_terminal(&render_text_run_summary(
+                    &agent.run_summary(),
+                    &run_result
+                ))
             );
             // A wall-clock TIMEOUT without a final answer: show what was
             // gathered, labelled PARTIAL — the run still fails below.
@@ -2892,7 +2898,13 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
 
     // Session-exit summary (claude prints usage on quit): the Round A run
     // summary — outcome, iterations, files changed, verification, tokens.
-    println!("{}", render_run_summary(&agent.run_summary(), None));
+    println!(
+        "{}",
+        crate::output::hyperlink::linkify_for_terminal(&render_run_summary(
+            &agent.run_summary(),
+            None
+        ))
+    );
 
     // Auto-save conversation/session on exit so history isn't lost — only
     // when the session carried a user task (a "TUI session exit" placeholder
@@ -3380,7 +3392,10 @@ async fn handle_command(
             if !quiet && !is_structured {
                 println!(
                     "{}",
-                    render_text_run_summary(&agent.run_summary(), &run_result)
+                    crate::output::hyperlink::linkify_for_terminal(&render_text_run_summary(
+                        &agent.run_summary(),
+                        &run_result
+                    ))
                 );
                 if let Some(partial) = agent.partial_progress(&run_result) {
                     println!("{}", partial.render());

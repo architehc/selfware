@@ -11,6 +11,7 @@ use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
+pub(crate) mod hyperlink;
 pub(crate) mod live;
 pub(crate) use live::{record_shown_prose, reset_answer_ledger};
 
@@ -1107,7 +1108,10 @@ pub(crate) fn citation_check(detail: &str) {
         return;
     }
     let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    println!("{}", citation_check_line(detail).bright_yellow());
+    println!(
+        "{}",
+        hyperlink::linkify_for_terminal(&citation_check_line(detail).bright_yellow().to_string())
+    );
     io::stdout().flush().ok();
 }
 
@@ -1144,7 +1148,12 @@ pub(crate) fn final_answer(content: &str) {
         // decoration so machine-readable output is not corrupted.
         println!("{}", part);
     } else {
-        let rendered = live::render_prose(&part, markdown_styled());
+        let styled = markdown_styled();
+        let rendered = live::render_prose_linked(
+            &part,
+            styled,
+            styled.then(hyperlink::Linker::for_terminal).flatten(),
+        );
         let body = rendered.trim_end_matches('\n').replace('\n', "\r\n");
         if is_compact() || is_streaming_mode() {
             // Streaming mode: the answer reads like the prose streamed
