@@ -18,6 +18,8 @@
 //! - Declarative workflow definitions
 //! - Step-by-step execution with real shell commands
 //! - Conditional branching
+//! - Conditional loops (`type: until` — "fix, then re-test, until green", bounded by a
+//!   required `max_iterations`)
 //! - Variable substitution
 //! - Tool integration (via handler injection)
 //! - Progress tracking
@@ -41,6 +43,8 @@ mod test_execution;
 mod test_models;
 #[cfg(test)]
 mod test_templates;
+#[cfg(test)]
+mod test_until;
 
 /// Workflow execution status
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -208,6 +212,37 @@ pub enum StepType {
         #[serde(default)]
         inputs: HashMap<String, String>,
     },
+    /// Conditional loop: run `do` steps, then evaluate `until`; repeat until
+    /// the condition is true or `max_iterations` passes have run.
+    ///
+    /// This is the "fix, then re-test, until green" shape: failures of body
+    /// steps do not abort the loop (a failing test is what the next pass
+    /// fixes); the condition decides. After the loop, each body step's
+    /// result is the one from the LAST pass, so a required body step that
+    /// still failed on the final pass fails the workflow (honest status).
+    ///
+    /// `max_iterations` is required (no unbounded loops) and clamped to
+    /// [`MAX_UNTIL_ITERATIONS`]. Exhausting it fails the step with an
+    /// [`UntilExhausted`] error unless `on_exhausted: continue`.
+    ///
+    /// The step's `timeout_secs` bounds the WHOLE loop; when unset the
+    /// default is the per-step default (300s) times the effective
+    /// iteration cap, so each pass gets the budget a plain step gets.
+    Until {
+        #[serde(rename = "do")]
+        do_steps: Vec<String>,
+        /// Condition expression (same evaluator as `condition` steps:
+        /// `success(id)`, `failed(id)`, `defined(var)`, `a == b`, ...).
+        #[serde(rename = "until")]
+        condition: String,
+        /// Maximum number of passes (required, clamped to
+        /// [`MAX_UNTIL_ITERATIONS`], must be >= 1).
+        max_iterations: u32,
+        /// What exhausting `max_iterations` means: `fail` (default) or
+        /// `continue`.
+        #[serde(default)]
+        on_exhausted: UntilExhausted,
+    },
     /// Guardrail enforcement step
     Guardrail {
         /// Guardrail name. Serialized as `guardrail` (see `Tool` above).
@@ -226,6 +261,54 @@ pub enum StepType {
         #[serde(default, rename = "guardrail_description")]
         description: String,
     },
+}
+
+/// Hard ceiling on the passes an [`StepType::Until`] loop may run,
+/// whatever its `max_iterations` says.
+pub const MAX_UNTIL_ITERATIONS: u32 = 100;
+
+/// Default per-step timeout when a step sets no `timeout_secs`.
+const DEFAULT_STEP_TIMEOUT_SECS: u64 = 300;
+
+/// What an [`StepType::Until`] loop does when `max_iterations` passes ran
+/// without the condition becoming true.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UntilExhausted {
+    /// Fail the step with an [`UntilExhaustedError`] naming the cap.
+    #[default]
+    Fail,
+    /// Log a warning and let the workflow continue.
+    Continue,
+}
+
+/// Typed failure of an [`StepType::Until`] loop that ran out of passes.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "until loop exhausted max_iterations={max_iterations} without condition '{condition}' becoming true"
+)]
+pub struct UntilExhaustedError {
+    /// The effective (clamped) iteration cap that was hit.
+    pub max_iterations: u32,
+    /// The condition expression as written.
+    pub condition: String,
+}
+
+/// Effective iteration cap of an until loop: `max_iterations` clamped to
+/// [`MAX_UNTIL_ITERATIONS`]; `None` when it is 0 (a definition error).
+fn effective_until_iterations(max_iterations: u32) -> Option<u32> {
+    (max_iterations >= 1).then(|| max_iterations.min(MAX_UNTIL_ITERATIONS))
+}
+
+/// The timeout a step runs under when it sets no `timeout_secs`.
+fn default_step_timeout(step_type: &StepType) -> Duration {
+    match step_type {
+        StepType::Until { max_iterations, .. } => Duration::from_secs(
+            DEFAULT_STEP_TIMEOUT_SECS
+                * u64::from(effective_until_iterations(*max_iterations).unwrap_or(1)),
+        ),
+        _ => Duration::from_secs(DEFAULT_STEP_TIMEOUT_SECS),
+    }
 }
 
 /// Log level
@@ -1228,6 +1311,11 @@ impl WorkflowExecutor {
                         context.control_flow_managed_steps.insert(step_id.clone());
                     }
                 }
+                StepType::Until { do_steps, .. } => {
+                    for step_id in do_steps {
+                        context.control_flow_managed_steps.insert(step_id.clone());
+                    }
+                }
                 _ => {}
             }
         }
@@ -1426,7 +1514,7 @@ impl WorkflowExecutor {
         let timeout_duration = step
             .timeout_secs
             .map(Duration::from_secs)
-            .unwrap_or(Duration::from_secs(300)); // Default 5 min timeout
+            .unwrap_or_else(|| default_step_timeout(&step.step_type));
 
         // Total wall-time budget for the step: one timeout per allowed
         // attempt. Backoff sleeps are charged against it, so retries can
@@ -2108,6 +2196,23 @@ impl WorkflowExecutor {
                 Ok(last_result)
             }
 
+            StepType::Until {
+                do_steps,
+                condition,
+                max_iterations,
+                on_exhausted,
+            } => {
+                Box::pin(self.execute_until(
+                    do_steps,
+                    condition,
+                    *max_iterations,
+                    *on_exhausted,
+                    context,
+                    workflow_steps,
+                ))
+                .await
+            }
+
             StepType::Pause { message } => {
                 let resolved = context.substitute(message);
                 context.log(LogLevel::Info, format!("Paused: {}", resolved), None);
@@ -2325,6 +2430,156 @@ impl WorkflowExecutor {
                         ))
                     }
                 }
+            }
+        }
+    }
+}
+
+impl WorkflowExecutor {
+    /// Run an [`StepType::Until`] loop: body passes until the condition
+    /// holds or the (clamped) iteration cap is hit.
+    async fn execute_until(
+        &self,
+        do_steps: &[String],
+        condition: &str,
+        max_iterations: u32,
+        on_exhausted: UntilExhausted,
+        context: &mut WorkflowContext,
+        workflow_steps: Option<&[WorkflowStep]>,
+    ) -> Result<VarValue> {
+        for step_id in do_steps {
+            context.control_flow_managed_steps.insert(step_id.clone());
+        }
+
+        let cap = effective_until_iterations(max_iterations).ok_or_else(|| {
+            anyhow!("until loop max_iterations must be at least 1 (got {max_iterations})")
+        })?;
+        if cap < max_iterations {
+            context.log(
+                LogLevel::Warn,
+                format!(
+                    "until loop max_iterations={max_iterations} clamped to the hard ceiling {MAX_UNTIL_ITERATIONS}"
+                ),
+                None,
+            );
+        }
+
+        // Without the workflow's steps (isolated step execution) there is
+        // no body to run: report the body ids like `condition` does.
+        let Some(steps) = workflow_steps else {
+            return Ok(VarValue::List(
+                do_steps.iter().cloned().map(VarValue::String).collect(),
+            ));
+        };
+        let all_step_ids: std::collections::HashSet<String> =
+            steps.iter().map(|s| s.id.clone()).collect();
+
+        for pass in 1..=cap {
+            // Bounded by the run-wide step ceiling too: once it is spent,
+            // stop the loop even if every body step is optional.
+            if context.step_executions_exhausted() {
+                return Err(WorkflowLimitError::StepExecutionLimit {
+                    limit: MAX_STEP_EXECUTIONS,
+                }
+                .into());
+            }
+            context.log(
+                LogLevel::Info,
+                format!("Until loop pass {pass}/{cap} (until: {condition})"),
+                None,
+            );
+
+            for step_id in do_steps {
+                context
+                    .can_recurse(step_id)
+                    .map_err(|e| anyhow!("Recursion error in until loop: {}", e))?;
+                let step = steps
+                    .iter()
+                    .find(|s| &s.id == step_id)
+                    .ok_or_else(|| anyhow!("Until loop references unknown step: {}", step_id))?;
+
+                // Body steps see the latest pass's results (plain ids are
+                // overwritten each pass). An unsatisfied dependency skips
+                // the step for THIS pass — the condition decides whether
+                // another pass runs; unknown ids are definition errors.
+                if let Err(dep_err) = context.check_dependencies(step, &all_step_ids, None) {
+                    if dep_err.is_definition_error() {
+                        return Err(anyhow!(
+                            "Step '{}' has invalid dependency: {}",
+                            step_id,
+                            dep_err
+                        ));
+                    }
+                    context.log(
+                        LogLevel::Warn,
+                        format!("Skipping step {step_id} in until pass {pass}: {dep_err}"),
+                        Some(step_id.clone()),
+                    );
+                    context.step_results.insert(
+                        step_id.clone(),
+                        StepResult {
+                            step_id: step_id.clone(),
+                            status: StepStatus::Skipped,
+                            output: None,
+                            error: Some(dep_err.to_string()),
+                            duration_ms: 0,
+                            retry_count: 0,
+                        },
+                    );
+                    continue;
+                }
+
+                context.enter_step(step_id);
+                let step_result =
+                    Box::pin(self.execute_step_with_retry(step, context, steps)).await;
+                context.exit_step();
+
+                if step_result.status == StepStatus::Completed {
+                    if let Some(output) = step_result.output.clone() {
+                        context.set_var(step_id, output);
+                    }
+                } else {
+                    context.log(
+                        LogLevel::Warn,
+                        format!(
+                            "Step {step_id} did not complete in until pass {pass}: {}",
+                            step_result.error.as_deref().unwrap_or("no error recorded")
+                        ),
+                        Some(step_id.clone()),
+                    );
+                }
+                context.step_results.insert(step_id.clone(), step_result);
+            }
+
+            if context.evaluate_condition(condition) {
+                context.log(
+                    LogLevel::Info,
+                    format!("Until condition '{condition}' met after {pass} pass(es)"),
+                    None,
+                );
+                return Ok(VarValue::String(format!(
+                    "until: condition met after {pass} pass(es)"
+                )));
+            }
+        }
+
+        match on_exhausted {
+            UntilExhausted::Fail => Err(UntilExhaustedError {
+                max_iterations: cap,
+                condition: condition.to_string(),
+            }
+            .into()),
+            UntilExhausted::Continue => {
+                context.log(
+                    LogLevel::Warn,
+                    format!(
+                        "Until condition '{condition}' not met after {cap} pass(es); continuing (on_exhausted: continue)"
+                    ),
+                    None,
+                );
+                Ok(VarValue::String(format!(
+                    "until: condition not met after {cap} pass(es) (on_exhausted: continue)"
+                )))
             }
         }
     }
