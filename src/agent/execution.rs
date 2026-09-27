@@ -1213,7 +1213,12 @@ impl Agent {
         // even when the task should be rejected. If the gate has not yet
         // passed, we nudge the model to use file_write/file_edit explicitly
         // instead, so the normal tool path (with verification) applies.
-        if !tool_calls.is_empty() && contains_unwritten_code(&content) {
+        // Never on a read-only task: quoted code in a review's narration is
+        // not a file to write (same rule as the code-in-text nudge below).
+        if !tool_calls.is_empty()
+            && self.current_task_requires_mutation()
+            && contains_unwritten_code(&content)
+        {
             if let Some((path, code)) = extract_code_and_path(&content).await {
                 let gate_ok = if self.config.agent.require_verification_before_completion {
                     self.check_completion_gate().await.is_none()
@@ -1627,7 +1632,12 @@ impl Agent {
             // Auto-writing assistant text was removed so that the completion
             // gate runs before any state mutation and cannot be bypassed by a
             // synthetic file_write that masks unverified code.
-            if contains_unwritten_code(&content) {
+            // Not on a read-only analysis task: its answers legitimately
+            // quote code (the completion gate exempts them from the same
+            // check), and the nudge fired BEFORE the gate, so a review draft
+            // quoting code got "use file_write" instead of the gate's
+            // refusal naming what is still unread. The gate below decides.
+            if self.current_task_requires_mutation() && contains_unwritten_code(&content) {
                 info!("Rejected text response containing code — nudging to use tools");
                 self.note_mutation_no_tool_stall("code-like text without extractable path")?;
                 self.messages.push(crate::api::types::Message::user(

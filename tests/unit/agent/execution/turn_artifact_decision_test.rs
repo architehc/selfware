@@ -803,3 +803,95 @@ async fn workspace_answer_with_nothing_read_is_nudged_once_then_judged() {
     server.stop().await;
     assert_eq!(nudges(&agent), 1, "the nudge is sent once per task");
 }
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn read_only_review_quoting_code_gets_the_gate_refusal_not_the_code_nudge() {
+    // A review draft that quotes code used to get the "you wrote code in
+    // your text response — use file_write" nudge, which fired BEFORE the
+    // completion gate, so the gate's refusal (here: the progress-note guard;
+    // on a review also the coverage gate naming unread files) never reached
+    // the model. For a read-only task the gate decides.
+    let cwd = crate::test_support::CwdGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    cwd.switch_to(dir.path());
+    let draft = "I'll read src/agent/execution.rs next to confirm the retry path. So far the \
+                 loop looks like this:\n\n```rust\nfn run(&mut self) -> Result<()> {\n    \
+                 let mut step = 0;\n    loop {\n        step += 1;\n        let reply = \
+                 self.call()?;\n        if reply.is_final() {\n            return Ok(());\n        \
+                 }\n        self.apply(reply)?;\n        if step > self.max {\n            \
+                 bail!(\"cap\");\n        }\n    }\n}\n```\n\nThe structure is straightforward \
+                 and the cap is enforced on every iteration of the loop.";
+    let server = MockLlmServer::builder().with_response(draft).build().await;
+    let config = artifact_config(&format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.current_task_context = "review src/agent and report findings, do not code".to_string();
+    agent.classify_task_policy();
+    assert!(!agent.current_task_requires_mutation());
+    let mut cp = crate::checkpoint::TaskCheckpoint::new("t".into(), "review".into());
+    cp.log_tool_call(crate::checkpoint::ToolCallLog {
+        timestamp: chrono::Utc::now(),
+        tool_name: "file_read".to_string(),
+        arguments: r#"{"path":"src/lib.rs"}"#.to_string(),
+        result: Some("ok".to_string()),
+        success: true,
+        duration_ms: Some(1),
+    });
+    agent.current_checkpoint = Some(cp);
+    assert!(
+        super::contains_unwritten_code(draft),
+        "the draft quotes code"
+    );
+    assert!(!crate::agent::verification::is_incomplete_action_response(
+        draft
+    ));
+    let done = agent.execute_step_internal(false).await.unwrap();
+    server.stop().await;
+    assert!(!done);
+    let last = agent
+        .messages
+        .last()
+        .map(|m| m.content.text_all())
+        .unwrap_or_default();
+    assert!(
+        !last.contains("file_write"),
+        "the code nudge must not pre-empt the gate: {last}"
+    );
+    assert!(
+        last.contains(crate::agent::verification::PROGRESS_NOTE_NUDGE),
+        "the gate's refusal reaches the model: {last}"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn read_only_task_never_auto_writes_code_quoted_next_to_a_tool_call() {
+    // Sibling of the code-nudge ordering fix (Rule 5): a reply with a tool
+    // call AND a quoted code block naming a path was auto-written to that
+    // path — on a read-only review too.
+    let cwd = crate::test_support::CwdGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    cwd.switch_to(dir.path());
+    let reply = "The loop in src/agent/demo.rs looks like this:\n\n```rust\nfn run() {\n    \
+                 let mut n = 0;\n    loop {\n        n += 1;\n        if n > 3 {\n            \
+                 break;\n        }\n    }\n    println!(\"{}\", n);\n}\n```\n\n<tool>\n<name>\
+                 file_read</name>\n<arguments>{\"path\":\"README.md\"}</arguments>\n</tool>";
+    let server = MockLlmServer::builder().with_response(reply).build().await;
+    let config = artifact_config(&format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.current_task_context = "review src/agent and report findings, do not code".to_string();
+    agent.classify_task_policy();
+    assert!(super::contains_unwritten_code(reply));
+    let _ = agent.execute_step_internal(false).await;
+    server.stop().await;
+    assert!(
+        !dir.path().join("src/agent/demo.rs").exists(),
+        "a read-only task must not auto-write quoted code"
+    );
+}
