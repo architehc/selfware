@@ -133,6 +133,23 @@ fn novel_reads_never_count_and_reset_the_streak() {
 }
 
 #[test]
+fn a_re_read_or_two_before_answering_is_not_reported() {
+    let mut fs = FinishStall::default();
+    let lines = read_keys("src/a.rs", 1, &["x"]);
+    green_turn(&mut fs, 5);
+    stall_turn(&mut fs, 6, &lines); // first delivery: new
+    stall_turn(&mut fs, 7, &lines);
+    stall_turn(&mut fs, 8, &lines);
+    assert!(fs.summary_detail().is_none());
+    stall_turn(&mut fs, 9, &lines);
+    let detail = fs.summary_detail().expect("directive given");
+    assert!(
+        detail.contains("told to give the final answer after turn 9"),
+        "{detail}"
+    );
+}
+
+#[test]
 fn a_mutation_or_a_red_tree_resets_everything() {
     let mut fs = FinishStall::default();
     let lines = read_keys("src/a.rs", 1, &["x"]);

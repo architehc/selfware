@@ -461,7 +461,10 @@ impl FinishStall {
     /// `None` when it never engaged and withheld nothing.
     pub(crate) fn summary_detail(&self) -> Option<String> {
         self.green.as_ref()?;
-        if self.stall_turns == 0 && self.extension_withheld_at.is_none() {
+        // One or two re-reads before answering are normal; the line is for
+        // runs where the handling acted (live c24 run 2 printed it for a
+        // single re-read before a clean answer).
+        if self.nudged_at.is_none() && self.extension_withheld_at.is_none() {
             return None;
         }
         let mut parts = vec![format!(
