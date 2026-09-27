@@ -617,3 +617,236 @@ fn npm_and_all_stripe_modes_are_redacted_in_source_and_output() {
         assert!(!redact_secrets_with_context(key, context).contains(key));
     }
 }
+
+// ── Model-facing redaction (0.9.4: redaction false positives on ordinary
+// code reached the model, which "repaired" the line into the file) ──
+
+/// Code-shaped lines that must reach the model verbatim.
+const CODE_SHAPED: &[&str] = &[
+    "    tokens = text.split(DEFAULT_SEPARATOR)",
+    "    api_key = get_key()",
+    "    password_field = form[\"password\"]",
+    "    token_count = len(tokens)",
+    "    secret = compute_hash()",
+    "    auth_token = request.headers.get(\"Authorization\")",
+    "    MAX_TOKENS = 4096",
+    "    if token == expected_token_2:",
+    "    token = next_token2 + 1",
+    "    x < y && y > z",
+    "    s = \"a &amp; b <div>\"",
+    "def slugify(text, api_key=None, password=None):",
+    "    headers = {\"Authorization\": f\"Bearer {token}\"}",
+    "    PASSWORD_PROMPT = \"Enter your password:\"",
+    "    kind = \"access_token\"",
+    "    token: Optional[str] = None",
+    "    self.api_key = config.api_key",
+    "    SECRET_KEY = os.environ[\"SECRET_KEY\"]",
+    "    api_key: ${{ secrets.API_KEY }}",
+    "    password = \"********\"",
+    "    GITHUB_TOKEN=$GITHUB_TOKEN",
+    "    url = \"postgres://localhost/db\"",
+    "    use scikit-learn-extra-long-name-here",
+];
+
+#[test]
+fn model_redaction_keeps_code_shaped_lines_verbatim() {
+    let text = CODE_SHAPED.join("\n") + "\n";
+    for context in [RedactionContext::Generic, RedactionContext::RustSource] {
+        let plain = redact_for_model(&text, context);
+        assert_eq!(plain.content, text);
+        assert_eq!(plain.redacted, 0);
+        // Serialized (file_read-shaped, numbered) — the shape the old
+        // redactor ran on, where `\n` was two non-space characters.
+        let numbered = crate::tools::line_numbers::number_lines(&text, 70);
+        let json = serde_json::json!({"content": numbered, "line_numbers": true}).to_string();
+        let out = redact_for_model(&json, context);
+        assert_eq!(out.content, json);
+        assert_eq!(out.redacted, 0);
+    }
+}
+
+#[test]
+fn log_redactor_no_longer_swallows_escaped_newlines() {
+    // The exact live shape: serialized content, value class ran through `\n`.
+    let json = serde_json::json!({
+        "content": "    tokens = text.split(DEFAULT_SEPARATOR)0123456789\n    if word_boundary:\n"
+    })
+    .to_string();
+    let out = redact_secrets(&json);
+    assert!(out.contains("\\n    if word_boundary:"), "{out}");
+}
+
+#[test]
+fn model_redaction_replaces_only_secret_values_and_keeps_lines() {
+    let openai = ["sk", "ant", "api03", "Ab3Cd4Ef5Gh6Ij7Kl8Mn9Op0"].join("-");
+    let text = format!(
+        "API_KEY={openai}\n\
+         config:\n\
+         \x20 password: hunter2secret\n\
+         \x20 db: postgres://app:H9vz3E8Kq5@db.internal/app\n\
+         Authorization: Bearer abcdef1234567890ghijkl\n\
+         const ACCESS_TOKEN = \"Ab3Cd4Ef5Gh6Ij7Kl8Mn9Op0\";\n\
+         -----BEGIN PRIVATE KEY-----\n\
+         MIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8wggE7AgEAAkEA\n\
+         -----END PRIVATE KEY-----\n\
+         done\n"
+    );
+    let out = redact_for_model(&text, RedactionContext::Generic);
+    let lines: Vec<&str> = out.content.lines().collect();
+    assert_eq!(lines.len(), text.lines().count());
+    assert_eq!(lines[0], "API_KEY=[REDACTED:openai_key]");
+    assert_eq!(lines[1], "config:");
+    assert_eq!(lines[2], "  password: [REDACTED:password]");
+    assert_eq!(
+        lines[3],
+        "  db: postgres://app:[REDACTED:connection_password]@db.internal/app"
+    );
+    assert_eq!(lines[4], "Authorization: Bearer [REDACTED:bearer_token]");
+    assert_eq!(lines[5], "const ACCESS_TOKEN = \"[REDACTED:token]\";");
+    assert_eq!(lines[6], "-----BEGIN PRIVATE KEY-----");
+    assert_eq!(lines[7], "[REDACTED:private_key]");
+    assert_eq!(lines[8], "-----END PRIVATE KEY-----");
+    assert_eq!(lines[9], "done");
+    assert_eq!(out.redacted, 6);
+    assert!(out.content.ends_with('\n'));
+
+    // A JSON result is redacted per leaf, including secret-named fields.
+    let json = serde_json::json!({
+        "access_token": "Zx9Yw8Vu7Ts6Rq5Po4Nm3Lk2",
+        "token_type": "bearer",
+        "content": format!("line one\nAPI_KEY={openai}\nline three\n"),
+    })
+    .to_string();
+    let out = redact_for_model(&json, RedactionContext::Generic);
+    let value: serde_json::Value = serde_json::from_str(&out.content).unwrap();
+    assert_eq!(value["access_token"], "[REDACTED:token]");
+    assert_eq!(value["token_type"], "bearer");
+    assert_eq!(
+        value["content"],
+        "line one\nAPI_KEY=[REDACTED:openai_key]\nline three\n"
+    );
+}
+
+#[test]
+fn every_builtin_secret_detector_has_model_redaction_coverage() {
+    // Same independent fixtures as the log-redaction coverage test (built
+    // at runtime for push protection); a new scanner detector fails here
+    // until the model-facing redactor covers it too.
+    let gitlab_token = ["glpat", "A1b2C3d4E5f6G7h8I9j0"].join("-");
+    let twilio_sid = format!("AC{}", "0123456789abcdef".repeat(2));
+    let cases: Vec<(&str, String, String)> = vec![
+        (
+            "AWS Access Key",
+            "AKIA7H3M9Q2V6N8C4R5T".into(),
+            "AKIA7H3M9Q2V6N8C4R5T".into(),
+        ),
+        (
+            "AWS Secret Key",
+            "AWS_SECRET_ACCESS_KEY = \"Ab3Cd4Ef5Gh6Ij7Kl8Mn9Op0Qr1St2Uv3Wx4Yz5A\"".into(),
+            "Ab3Cd4Ef5Gh6Ij7Kl8Mn9Op0Qr1St2Uv3Wx4Yz5A".into(),
+        ),
+        (
+            "GitHub Token",
+            "ghp_A1b2C3d4E5f6G7h8I9j0".into(),
+            "ghp_A1b2C3d4E5f6G7h8I9j0".into(),
+        ),
+        (
+            "GitHub Fine-Grained Token",
+            "github_pat_A1b2C3d4E5f6G7h8I9j0K1L2".into(),
+            "github_pat_A1b2C3d4E5f6G7h8I9j0K1L2".into(),
+        ),
+        ("GitLab Token", gitlab_token.clone(), gitlab_token.clone()),
+        (
+            "npm Token",
+            "npm_H9vz3E8Kq5X2Mf7Yb6Cd4Nr8Q2Az5W7P".into(),
+            "npm_H9vz3E8Kq5X2Mf7Yb6Cd4Nr8Q2Az5W7P".into(),
+        ),
+        (
+            "Generic API Key",
+            "api_key = \"A1b2C3d4E5f6G7h8I9j0\"".into(),
+            "A1b2C3d4E5f6G7h8I9j0".into(),
+        ),
+        (
+            "Private Key",
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nprivate_key_material_without_end_marker".into(),
+            "private_key_material_without_end_marker".into(),
+        ),
+        (
+            "Google API Key",
+            "AIzaAb3Cd4Ef5Gh6Ij7Kl8Mn9Op0Qr1St2Uv3Wx".into(),
+            "AIzaAb3Cd4Ef5Gh6Ij7Kl8Mn9Op0Qr1St2Uv3Wx".into(),
+        ),
+        (
+            "Stripe Key",
+            "sk_test_H9vz3E8Kq5X2Mf7Yb".into(),
+            "sk_test_H9vz3E8Kq5X2Mf7Yb".into(),
+        ),
+        (
+            "Password in Code",
+            "password = \"H9vz3E8Kq5X2\"".into(),
+            "H9vz3E8Kq5X2".into(),
+        ),
+        // A realistic bearer credential (the log fixture's 4-char `B7q2` is
+        // below what a model-facing redactor can tell from prose).
+        (
+            "Bearer Token",
+            "Bearer B7q2Xk9Lm3Np8Qr4".into(),
+            "B7q2Xk9Lm3Np8Qr4".into(),
+        ),
+        (
+            "JWT Token",
+            "eyJhbGciOiJub25lIn0.eyJ1c2VyIjoiYSJ9.c2ln".into(),
+            "eyJhbGciOiJub25lIn0.eyJ1c2VyIjoiYSJ9.c2ln".into(),
+        ),
+        (
+            "Database URL",
+            "mongodb+srv://reader:H9vz3E8Kq5@db.invalid/data".into(),
+            "H9vz3E8Kq5".into(),
+        ),
+        (
+            "Slack Token",
+            "xoxb-H9vz3E8Kq5X2Mf7Yb".into(),
+            "xoxb-H9vz3E8Kq5X2Mf7Yb".into(),
+        ),
+        (
+            "JWT Partial",
+            "eyJhbGciOiJub25lIiwidXNlciI6ImFiY2RlZiJ9".into(),
+            "eyJhbGciOiJub25lIiwidXNlciI6ImFiY2RlZiJ9".into(),
+        ),
+        (
+            "Slack Webhook",
+            "hooks.slack.com/services/T12ABC/B34DEF/H9vz3E8Kq5X2".into(),
+            "H9vz3E8Kq5X2".into(),
+        ),
+        (
+            "Azure Account Key",
+            "AccountKey=Ab3Cd4Ef5Gh6Ij7Kl8Mn9Op0Qr1St2Uv".into(),
+            "Ab3Cd4Ef5Gh6Ij7Kl8Mn9Op0Qr1St2Uv".into(),
+        ),
+        ("Twilio SID", twilio_sid.clone(), twilio_sid.clone()),
+        (
+            "Base64 Secret",
+            "auth=Ab3Cd4Ef5Gh6Ij7Kl8Mn9Op0Qr1St2Uv3Wx4Yz5A".into(),
+            "Ab3Cd4Ef5Gh6Ij7Kl8Mn9Op0Qr1St2Uv3Wx4Yz5A".into(),
+        ),
+    ];
+    for pattern in crate::safety::scanner::SecretScanner::default_patterns() {
+        let (_, input, secret) = cases
+            .iter()
+            .find(|(name, _, _)| *name == pattern.name)
+            .expect("new detector needs a model-facing redaction fixture");
+        let out = redact_for_model(input, RedactionContext::Generic);
+        assert!(
+            !out.content.contains(secret.as_str()),
+            "{} secret survived: {}",
+            pattern.name,
+            out.content
+        );
+        assert!(
+            out.content.contains(MODEL_REDACTION_MARKER_PREFIX),
+            "{}",
+            pattern.name
+        );
+        assert_eq!(out.content.lines().count(), input.lines().count());
+    }
+}

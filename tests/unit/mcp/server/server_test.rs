@@ -1812,7 +1812,7 @@ async fn test_tools_call_file_read_redacts_secrets() {
         "raw api_key must not leak via tools/call file_read: {text}"
     );
     assert!(
-        text.contains("[REDACTED]"),
+        text.contains("[REDACTED:"),
         "expected a redaction marker in the file_read output: {text}"
     );
     assert!(
@@ -1857,7 +1857,7 @@ async fn test_tools_call_grep_search_redacts_secrets() {
         "raw token must not leak via tools/call grep_search: {text}"
     );
     assert!(
-        text.contains("[REDACTED]"),
+        text.contains("[REDACTED:"),
         "expected a redaction marker in the grep_search output: {text}"
     );
 }

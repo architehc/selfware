@@ -682,8 +682,22 @@ impl McpServer {
                 // Structural tools (lsp_*, glob_find, directory_tree) return
                 // locations/paths, not file content, and stay untouched.
                 const CONTENT_SERVING_TOOLS: &[&str] = &["file_read", "grep_search", "git_diff"];
+                // Secret VALUES only, lines intact, each marked inline: the
+                // client's model reads (and edits against) this content, so
+                // the log redactor's rewrites of ordinary code must not reach it.
                 let text = if CONTENT_SERVING_TOOLS.contains(&tool_name) {
-                    crate::safety::redact::redact_secrets(&text).into_owned()
+                    let redaction = crate::safety::redact::redact_for_model(
+                        &text,
+                        crate::safety::redact::RedactionContext::Generic,
+                    );
+                    if redaction.redacted > 0 {
+                        crate::safety::source_context::with_redaction_note(
+                            &redaction.content,
+                            redaction.redacted,
+                        )
+                    } else {
+                        redaction.content
+                    }
                 } else {
                     text
                 };

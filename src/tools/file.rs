@@ -610,6 +610,13 @@ impl Tool for FileWrite {
         } else {
             None
         };
+        refuse_display_artifacts(
+            "file_write",
+            &args.path,
+            existing.as_ref().map(|(text, _)| text.as_str()),
+            "",
+            &args.content,
+        )?;
         let content_to_write = if let Some((existing_text, existing_bytes)) = &existing {
             // Overwriting is a full replace, but refuse to touch a non-UTF-8
             // file: the caller likely believes it is text, and the lossy read
@@ -713,6 +720,10 @@ impl Tool for FileEdit {
         // Check for exactly one match
         let matches = content.matches(&args.old_str).count();
         if matches == 0 {
+            if let Some(hint) = display_artifact_hint(&content, &args.old_str) {
+                return Err(anyhow::Error::from(ToolError::EditStringNotFound)
+                    .context(format!("old_str not found in {}: {hint}", args.path)));
+            }
             return Err(ToolError::EditStringNotFound.into());
         }
         if matches > 1 {
@@ -721,6 +732,13 @@ impl Tool for FileEdit {
         if args.old_str == args.new_str {
             return Err(ToolError::EditNoOp.into());
         }
+        refuse_display_artifacts(
+            "file_edit",
+            &args.path,
+            Some(&content),
+            &args.old_str,
+            &args.new_str,
+        )?;
         if args.new_str.contains(&args.old_str) && content.contains(&args.new_str) {
             bail!(
                 "file_edit duplicate insertion rejected: the requested replacement block is already present in {}. Re-read the file and make a different targeted edit.",
@@ -950,12 +968,22 @@ impl Tool for FileMultiEdit {
             for (idx, edit) in edits {
                 let matches = content.matches(&edit.old_str).count();
                 if matches == 0 {
+                    let hint = display_artifact_hint(&content, &edit.old_str)
+                        .map(|h| format!(" — {h}"))
+                        .unwrap_or_default();
                     return Err(ToolError::Execution {
                         name: "file_multi_edit".to_string(),
-                        message: format!("Edit {}: old_str not found in {}", idx, edit.path),
+                        message: format!("Edit {}: old_str not found in {}{hint}", idx, edit.path),
                     }
                     .into());
                 }
+                refuse_display_artifacts(
+                    "file_multi_edit",
+                    &edit.path,
+                    Some(&content),
+                    &edit.old_str,
+                    &edit.new_str,
+                )?;
                 if matches > 1 {
                     return Err(ToolError::Execution {
                         name: "file_multi_edit".to_string(),
@@ -1426,6 +1454,139 @@ async fn read_line_slice(
 pub(crate) const PREFIXES_STRIPPED_NOTE: &str =
     "line-number prefixes stripped: old_str/new_str carried file_read's `N<TAB>` line-number \
      metadata; the edit was applied to the text without it";
+
+/// Entities the tool-result channel could have shown in place of a literal
+/// character (whole-content XML escaping did, before 0.9.4).
+const DISPLAY_ENTITIES: &[(&str, &str)] = &[
+    ("&amp;", "&"),
+    ("&lt;", "<"),
+    ("&gt;", ">"),
+    ("&quot;", "\""),
+    ("&#39;", "'"),
+];
+
+/// File types whose text legitimately carries entities.
+fn is_markup_path(path: &str) -> bool {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    matches!(
+        ext.as_str(),
+        "html"
+            | "htm"
+            | "xhtml"
+            | "xml"
+            | "svg"
+            | "xsl"
+            | "xslt"
+            | "vue"
+            | "svelte"
+            | "jsx"
+            | "tsx"
+            | "md"
+            | "markdown"
+            | "rst"
+            | "plist"
+            | "csproj"
+            | "props"
+            | "targets"
+            | "resx"
+            | "xaml"
+            | "jsp"
+            | "php"
+            | "erb"
+            | "hbs"
+            | "j2"
+            | "jinja"
+            | "twig"
+    )
+}
+
+/// Refuse to write text that the model copied from a DISPLAY of the file
+/// rather than from the file: a `[REDACTED:…]` secret marker, or an HTML
+/// entity standing in for a literal character. `original` is the file's
+/// current text (`None` for a new file), `old` the text being replaced
+/// (empty for a whole-file write), `new` the replacement.
+///
+/// The model "repaired" a redacted line and wrote entity-escaped text back
+/// into source files (0.9.4 live finding). Writing either corrupts the file
+/// silently, so the edit fails loudly instead.
+pub(crate) fn refuse_display_artifacts(
+    tool: &str,
+    path: &str,
+    original: Option<&str>,
+    old: &str,
+    new: &str,
+) -> Result<()> {
+    let original_text = original.unwrap_or("");
+    for marker in [
+        crate::safety::redact::MODEL_REDACTION_MARKER_PREFIX,
+        "[REDACTED]",
+    ] {
+        if new.matches(marker).count() > old.matches(marker).count()
+            && !original_text.contains(marker)
+        {
+            return Err(ToolError::Execution {
+                name: tool.to_string(),
+                message: format!(
+                    "Refusing to write {path}: the new text contains `{marker}…`, a marker selfware \
+                     showed you IN PLACE OF a secret value — it is not the file's text, and writing \
+                     it would destroy the real value. Leave that line as it is in the file (edit \
+                     around it), or change only the parts you can see."
+                ),
+            }
+            .into());
+        }
+    }
+    if original.is_none() || is_markup_path(path) {
+        return Ok(());
+    }
+    for (entity, literal) in DISPLAY_ENTITIES {
+        if new.matches(entity).count() > old.matches(entity).count()
+            && !original_text.contains(entity)
+        {
+            return Err(ToolError::Execution {
+                name: tool.to_string(),
+                message: format!(
+                    "Refusing to write {path}: the new text contains the HTML entity `{entity}`, \
+                     which this file never uses — tool output is not entity-escaped, so this is \
+                     almost certainly a copy of escaped text. Write the literal character \
+                     (`{literal}`) instead."
+                ),
+            }
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// Why an `old_str` that matches nowhere probably came from a display of the
+/// file (a redaction marker or an entity), for the not-found error.
+fn display_artifact_hint(content: &str, old: &str) -> Option<String> {
+    for marker in [
+        crate::safety::redact::MODEL_REDACTION_MARKER_PREFIX,
+        "[REDACTED]",
+    ] {
+        if old.contains(marker) && !content.contains(marker) {
+            return Some(format!(
+                "old_str contains `{marker}…`, which replaced a secret value in what you were \
+                 shown; the file has the real value there. Choose old_str from lines without \
+                 the marker."
+            ));
+        }
+    }
+    for (entity, literal) in DISPLAY_ENTITIES {
+        if old.contains(entity) && !content.contains(entity) {
+            return Some(format!(
+                "old_str contains the entity `{entity}` but the file never uses it — the file \
+                 has the literal `{literal}`. Use the literal character."
+            ));
+        }
+    }
+    None
+}
 
 /// For an edit whose `old` text matches nowhere in `content` as written:
 /// when EVERY line of `old` carries a line-number prefix (`^\s*\d+\t`,

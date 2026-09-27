@@ -2073,3 +2073,22 @@ fn text_opens_tool_call_covers_every_supported_syntax() {
         "Plain analysis of the function signature."
     ));
 }
+
+#[test]
+fn qwen3_parameter_values_are_delivered_byte_for_byte() {
+    // 0.9.4: tool results are no longer entity-escaped, so a model that
+    // copies `a &amp; b` or `x < y && z` from a file means those bytes.
+    // Entity-decoding the parameter turned `&amp;` into `&` in the edit.
+    let content = "<function=file_edit>\n<parameter=path>\nslug.py\n</parameter>\n\
+                   <parameter=old_str>\nLITERAL = \"a &amp; b\"\n</parameter>\n\
+                   <parameter=new_str>\nLITERAL = \"a &amp; b\" if x < y && z else \"&lt;\"\n</parameter>\n\
+                   </function>";
+    let result = parse_tool_calls(content);
+    assert_eq!(result.tool_calls.len(), 1);
+    let args = &result.tool_calls[0].arguments;
+    assert_eq!(args["old_str"], "LITERAL = \"a &amp; b\"");
+    assert_eq!(
+        args["new_str"],
+        "LITERAL = \"a &amp; b\" if x < y && z else \"&lt;\""
+    );
+}

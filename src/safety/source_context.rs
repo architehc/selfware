@@ -620,6 +620,40 @@ pub(crate) fn sanitize_tool_context(
     } else {
         crate::safety::redact::RedactionContext::Generic
     };
-    let redacted = crate::safety::redact::redact_secrets_with_context(content, context);
+    // Model-facing redaction: secret VALUES only, one inline
+    // `[REDACTED:<kind>]` marker each, line structure untouched (the log
+    // redactor rewrote ordinary code here — 0.9.4 live finding).
+    let redaction = crate::safety::redact::redact_for_model(content, context);
+    let redacted = if redaction.redacted > 0 {
+        with_redaction_note(&redaction.content, redaction.redacted)
+    } else {
+        redaction.content
+    };
     trust_gate_tool_result(tool_name, args_str, &redacted, enabled)
+}
+
+/// Attach the redaction note: a `redaction` field on a JSON object (the
+/// output stays valid JSON), a leading line on anything else.
+pub(crate) fn with_redaction_note(content: &str, redacted: usize) -> String {
+    let note = crate::safety::redact::model_redaction_note(redacted);
+    let trimmed = content.trim_start();
+    if trimmed.starts_with('{') {
+        if let Ok(Value::Object(mut map)) = serde_json::from_str::<Value>(content) {
+            let mut key = "redaction".to_string();
+            while map.contains_key(&key) {
+                key.insert(0, '_');
+            }
+            map.insert(key, Value::String(note.clone()));
+            let pretty = trimmed.starts_with("{\n");
+            let out = if pretty {
+                serde_json::to_string_pretty(&map)
+            } else {
+                serde_json::to_string(&map)
+            };
+            if let Ok(out) = out {
+                return out;
+            }
+        }
+    }
+    format!("{note}\n{content}")
 }

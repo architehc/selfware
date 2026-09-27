@@ -1161,12 +1161,7 @@ fn successful_payload(text: &str, xml: bool) -> Option<String> {
         if inner.starts_with("<error>") {
             return None;
         }
-        Some(
-            inner
-                .replace("&lt;", "<")
-                .replace("&gt;", ">")
-                .replace("&amp;", "&"),
-        )
+        Some(super::result_envelope::decode(inner))
     } else {
         if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(text)
         {

@@ -124,6 +124,7 @@ pub mod prompt_builder;
 mod protocol_stall;
 mod recovery;
 pub(crate) mod result_compaction;
+pub(crate) mod result_envelope;
 pub mod review_coverage;
 pub mod session_log;
 pub(crate) mod session_usage;

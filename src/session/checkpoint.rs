@@ -1727,9 +1727,12 @@ impl CheckpointManager {
 
     /// Save a checkpoint to disk (with secrets redacted and integrity hash).
     ///
-    /// Security: The checkpoint data is run through `redact::redact_json()`
-    /// before writing, which scrubs API keys, passwords, bearer tokens, and
-    /// other sensitive patterns from all serialized string values.  The
+    /// Security: The checkpoint data is run through
+    /// `redact::redact_json_for_model()` before writing, which replaces API
+    /// keys, passwords, bearer tokens and other secret VALUES in all string
+    /// values with inline `[REDACTED:<kind>]` markers. It is the model-facing
+    /// redactor (not the log one) because these messages are restored into
+    /// the model's context on resume: the log redactor rewrote ordinary code.  The
     /// `TaskCheckpoint` struct intentionally does not include config-level
     /// secrets such as `api_key` -- those live only in `Config`.
     ///
@@ -1897,7 +1900,7 @@ impl CheckpointManager {
         let path = self.checkpoint_delta_path(task_id)?;
         let mut json_value =
             serde_json::to_value(delta).context("Failed to serialize checkpoint delta")?;
-        redact::redact_json(&mut json_value);
+        redact::redact_json_for_model(&mut json_value);
         let envelope = CheckpointEnvelope::wrap(json_value)
             .context("Failed to create checkpoint delta envelope")?;
         let line = serde_json::to_string(&envelope)
@@ -2105,7 +2108,7 @@ impl CheckpointManager {
             serde_json::to_value(checkpoint).context("Failed to serialize checkpoint")?;
 
         // Redact any secrets in the checkpoint data
-        redact::redact_json(&mut json_value);
+        redact::redact_json_for_model(&mut json_value);
 
         // Wrap in an integrity envelope
         let envelope =

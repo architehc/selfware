@@ -86,6 +86,36 @@ fn parse_diff_stats(diff: &str) -> (usize, usize, usize, Vec<String>) {
 }
 
 /// Parse the old/new line counts of a hunk header `@@ -a[,b] +c[,d] @@`.
+/// Per target file (the `+++ b/<path>` header): the removed/context text
+/// and the added text of its hunks.
+fn diff_sides_by_target(diff: &str) -> Vec<(String, String, String)> {
+    let mut out: Vec<(String, String, String)> = Vec::new();
+    for line in diff.lines() {
+        if let Some(target) = line.strip_prefix("+++ ") {
+            let target = target.trim();
+            let target = target.strip_prefix("b/").unwrap_or(target);
+            if target != "/dev/null" {
+                out.push((target.to_string(), String::new(), String::new()));
+            }
+            continue;
+        }
+        if line.starts_with("--- ") || line.starts_with("@@") {
+            continue;
+        }
+        let Some((_, removed, added)) = out.last_mut() else {
+            continue;
+        };
+        if let Some(text) = line.strip_prefix('+') {
+            added.push_str(text);
+            added.push('\n');
+        } else if let Some(text) = line.strip_prefix('-').or_else(|| line.strip_prefix(' ')) {
+            removed.push_str(text);
+            removed.push('\n');
+        }
+    }
+    out
+}
+
 fn hunk_counts(header: &str) -> Option<(usize, usize)> {
     let rest = header.strip_prefix("@@ -")?;
     let (old, rest) = rest.split_once(" +")?;
@@ -240,6 +270,20 @@ impl Tool for PatchApply {
             }
             crate::tools::file::validate_tool_path(path, &safety)
                 .map_err(|e| anyhow!("patch_apply path validation failed for '{}': {}", path, e))?;
+        }
+
+        // Added lines copied from a DISPLAY of the file (a `[REDACTED:…]`
+        // secret marker, an entity-escaped character) would corrupt it.
+        for (path, removed, added) in diff_sides_by_target(diff) {
+            let resolved = crate::tools::workspace_root::anchor(&path);
+            let original = std::fs::read_to_string(&resolved).ok();
+            crate::tools::file::refuse_display_artifacts(
+                "patch_apply",
+                &path,
+                original.as_deref(),
+                &removed,
+                &added,
+            )?;
         }
 
         // Write diff to a temporary file

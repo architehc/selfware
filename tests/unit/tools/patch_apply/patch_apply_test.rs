@@ -343,3 +343,31 @@ async fn diff_of_genuinely_numbered_content_applies_as_written() {
         "1\tone\n2\tTWO\n"
     );
 }
+
+#[test]
+fn diff_sides_split_per_target_for_the_display_artifact_guard() {
+    let diff = "--- a/x.py\n+++ b/x.py\n@@ -1,2 +1,2 @@\n ctx\n-old & line\n+new &amp; line\n\
+                --- a/y.py\n+++ b/y.py\n@@ -1 +1 @@\n-k = v\n+k = [REDACTED:token]\n";
+    let sides = diff_sides_by_target(diff);
+    assert_eq!(sides.len(), 2);
+    assert_eq!(sides[0].0, "x.py");
+    assert_eq!(sides[0].1, "ctx\nold & line\n");
+    assert_eq!(sides[0].2, "new &amp; line\n");
+    assert_eq!(sides[1].0, "y.py");
+    assert!(crate::tools::file::refuse_display_artifacts(
+        "patch_apply",
+        &sides[1].0,
+        Some("k = v\n"),
+        &sides[1].1,
+        &sides[1].2
+    )
+    .is_err());
+    assert!(crate::tools::file::refuse_display_artifacts(
+        "patch_apply",
+        &sides[0].0,
+        Some("ctx\nold & line\n"),
+        &sides[0].1,
+        &sides[0].2
+    )
+    .is_err());
+}

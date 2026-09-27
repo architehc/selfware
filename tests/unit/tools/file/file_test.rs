@@ -2111,3 +2111,150 @@ mod fd_checked {
         assert_eq!(fs::read_to_string(&real).unwrap(), "real\n");
     }
 }
+
+// ── Display artifacts (0.9.4 live finding: the model copied a redacted /
+// entity-escaped DISPLAY of a file back into it) ──
+
+const SLUG_PY: &str = "HEX = re.compile(r'&#x([\\da-fA-F]+);')\n\
+                       def f(text):\n\
+                       \x20   tokens = text.split(SEP)\n\
+                       \x20   return a < b and c & d\n";
+
+#[tokio::test]
+async fn file_edit_refuses_a_redaction_marker_the_file_does_not_have() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("slugify.py");
+    fs::write(&path, SLUG_PY).unwrap();
+    let tool = FileEdit::with_safety_config(permissive_safety_config());
+    let err = tool
+        .execute(serde_json::json!({
+            "path": path.to_str().unwrap(),
+            "old_str": "def f(text):\n",
+            "new_str": "def f(text):\n    env_token=[REDACTED:token]\n",
+        }))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("[REDACTED:"), "{err}");
+    assert!(err.contains("IN PLACE OF a secret value"), "{err}");
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        SLUG_PY,
+        "file untouched"
+    );
+}
+
+#[tokio::test]
+async fn file_edit_refuses_entity_escaped_text_in_code() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("slugify.py");
+    fs::write(&path, SLUG_PY).unwrap();
+    let tool = FileEdit::with_safety_config(permissive_safety_config());
+    let err = tool
+        .execute(serde_json::json!({
+            "path": path.to_str().unwrap(),
+            "old_str": "    return a < b and c & d\n",
+            "new_str": "    return a &lt; b and c &amp; d\n",
+        }))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("HTML entity"), "{err}");
+    assert_eq!(fs::read_to_string(&path).unwrap(), SLUG_PY);
+
+    // Markup files legitimately gain entities.
+    let html = dir.path().join("page.html");
+    fs::write(&html, "<html>\n<body>\n<p>a</p>\n</body>\n</html>\n").unwrap();
+    tool.execute(serde_json::json!({
+        "path": html.to_str().unwrap(),
+        "old_str": "<p>a</p>",
+        "new_str": "<p>a &amp; b</p>",
+    }))
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn file_edit_old_str_copied_from_a_display_fails_with_a_hint() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("slugify.py");
+    fs::write(&path, SLUG_PY).unwrap();
+    let tool = FileEdit::with_safety_config(permissive_safety_config());
+    for (old, hint) in [
+        ("    env_token=[REDACTED:token]", "secret value"),
+        ("    return a &lt; b and c &amp; d", "literal"),
+    ] {
+        let err = tool
+            .execute(serde_json::json!({
+                "path": path.to_str().unwrap(),
+                "old_str": old,
+                "new_str": "x",
+            }))
+            .await
+            .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("old_str not found"), "{text}");
+        assert!(text.contains(hint), "{text}");
+        assert!(
+            err.downcast_ref::<crate::errors::ToolError>().is_some(),
+            "the typed error survives: {text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn file_write_and_multi_edit_refuse_display_artifacts() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("slugify.py");
+    fs::write(&path, SLUG_PY).unwrap();
+    let write = FileWrite::with_safety_config(permissive_safety_config());
+    let err = write
+        .execute(serde_json::json!({
+            "path": path.to_str().unwrap(),
+            "content": SLUG_PY.replace("c & d", "c &amp; d"),
+        }))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("&amp;"), "{err}");
+    let multi = FileMultiEdit::with_safety_config(permissive_safety_config());
+    let err = multi
+        .execute(serde_json::json!({"edits": [{
+            "path": path.to_str().unwrap(),
+            "old_str": "    tokens = text.split(SEP)\n",
+            "new_str": "    env_token=[REDACTED:token]\n",
+        }]}))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("[REDACTED:"), "{err}");
+    assert_eq!(fs::read_to_string(&path).unwrap(), SLUG_PY);
+}
+
+#[test]
+fn display_artifact_guard_allows_what_the_file_already_has() {
+    // A file that already carries the marker / entity may keep carrying it.
+    let original = "x = '[REDACTED:token]'\ny = '&amp;'\n";
+    assert!(refuse_display_artifacts(
+        "file_edit",
+        "a.py",
+        Some(original),
+        "x",
+        "z = '[REDACTED:token]' + '&amp;'"
+    )
+    .is_ok());
+    // Replacing text that contained the marker with text that still does.
+    assert!(refuse_display_artifacts(
+        "file_edit",
+        "a.py",
+        Some(""),
+        "[REDACTED:t]",
+        "[REDACTED:t] "
+    )
+    .is_ok());
+    // New files: markers refused, entities allowed (no original to compare).
+    assert!(
+        refuse_display_artifacts("file_write", "a.py", None, "", "k=[REDACTED:token]").is_err()
+    );
+    assert!(refuse_display_artifacts("file_write", "a.py", None, "", "s = '&amp;'").is_ok());
+}

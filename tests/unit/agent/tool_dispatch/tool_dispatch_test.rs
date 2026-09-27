@@ -1495,7 +1495,7 @@ async fn summarize_and_spill_redacts_secrets_on_disk() {
         "secret leaked to the spill file on disk"
     );
     assert!(
-        on_disk.contains("[REDACTED]"),
+        on_disk.contains("[REDACTED:"),
         "spill file should contain the redaction marker"
     );
 }
@@ -5910,7 +5910,7 @@ async fn multimodal_metadata_uses_shared_source_sanitization() {
             .await;
         let message = agent.messages.last().unwrap();
         assert!(!message.content.text_all().contains("npm_H9vz"));
-        assert!(message.content.text_all().contains("[REDACTED]"));
+        assert!(message.content.text_all().contains("[REDACTED:npm_token]"));
         assert!(serde_json::to_string(message).unwrap().contains("aW1hZ2U="));
     }
 }
@@ -5943,8 +5943,10 @@ fn xml_result_escape_neutralizes_breakout_shaped_content() {
     // Only the envelope's own "<tool_result" prefix survives as raw markup;
     // the payload's tag fragments are inert.
     assert_eq!(wrapped.matches("<tool").count(), 1);
-    // The payload text is still present, with every `<` escaped so no
-    // nested tag can be parsed from it.
+    // The payload text is still present, with every TAG-OPENING `<`
+    // neutralized so no envelope/tool tag can be parsed from it, and a
+    // visible note saying so. (0.9.4: a non-tag `<` is content and is no
+    // longer escaped — see `xml_result_keeps_non_tag_text_verbatim`.)
     let inner = wrapped
         .strip_prefix("<tool_result>")
         .and_then(|s| s.strip_suffix("</tool_result>"))
@@ -5953,14 +5955,27 @@ fn xml_result_escape_neutralizes_breakout_shaped_content() {
         inner.contains("output"),
         "payload text must survive: {wrapped}"
     );
-    assert!(
-        inner.contains("&lt;"),
-        "payload brackets must be escaped: {wrapped}"
+    let body = crate::agent::result_envelope::strip_framing_note(inner);
+    assert_eq!(
+        body.matches("&lt;").count(),
+        3,
+        "every payload tag opener must be neutralized: {wrapped}"
     );
     assert!(
-        !inner.contains('<'),
-        "no raw angle bracket may remain: {wrapped}"
+        !body.contains('<'),
+        "no raw tag opener may remain: {wrapped}"
     );
+    assert!(inner.contains("[framing: 3 `<`"), "{wrapped}");
+    assert_eq!(crate::agent::result_envelope::decode(inner), payload);
+}
+
+#[test]
+fn xml_result_keeps_non_tag_text_verbatim() {
+    // 0.9.4 live finding: whole-content escaping delivered `&` as `&amp;`
+    // and `<` as `&lt;`; the model wrote them back into source files.
+    let payload = "if x < y && y > z: s = 'a &amp; b' + '<div>'";
+    let wrapped = Agent::format_xml_tool_result(payload, true);
+    assert_eq!(wrapped, format!("<tool_result>{payload}</tool_result>"));
 }
 
 #[test]

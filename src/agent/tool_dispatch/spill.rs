@@ -149,8 +149,14 @@ pub(crate) async fn summarize_and_spill(
     // a git_diff touching a key — can carry credentials, and the spill file is
     // plaintext on disk (under .selfware/, gitignored but still on the box).
     // Redacting here covers both the spill and every summary built from `raw`.
-    let redacted = crate::safety::redact::redact_secrets(raw);
-    let raw: &str = redacted.as_ref();
+    // Model-facing redaction (secret values only, lines intact): the spill
+    // file is what a later `file_read` shows the model, and the summary is
+    // built from it — the log redactor rewrote ordinary code here.
+    let redacted = crate::safety::redact::redact_for_model(
+        raw,
+        crate::safety::redact::RedactionContext::Generic,
+    );
+    let raw: &str = redacted.content.as_str();
 
     // Save the redacted result to disk, under the agent's workspace root
     // (an entered worktree), not the process cwd. The model is told the

@@ -1315,11 +1315,14 @@ fn parse_qwen3_parameters(captured_name: &str, params_str: &str) -> Result<serde
 
     for cap in param_regex.captures_iter(params_str) {
         let key = qwen3_parameter_key(&cap).to_string();
-        let raw_value = cap[4].trim();
-        let value = decode_xml_entities(raw_value);
+        // Raw, NOT entity-decoded: a Qwen3 parameter body runs to
+        // `</parameter>` and carries `<`/`&` as-is, and tool results are not
+        // entity-escaped (0.9.4), so a model copying `a &amp; b` from a file
+        // means those bytes. Decoding turned them into `a & b` in the edit.
+        let value = cap[4].trim();
 
         // Try to parse value as JSON (for booleans, numbers, arrays, objects)
-        let json_value = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&value) {
+        let json_value = if let Ok(v) = serde_json::from_str::<serde_json::Value>(value) {
             v
         } else {
             // Treat as string

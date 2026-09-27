@@ -1746,3 +1746,20 @@ fn the_outline_marks_items_with_a_doc_comment_directly_above() {
     assert_eq!(d[2], (8, "pub fn c() {}".to_string()));
     assert_eq!(compact_symbol(&d[0].1), format!("pub fn a{DOC_MARK}"));
 }
+
+#[test]
+fn xml_envelope_round_trip_is_byte_faithful() {
+    // Compaction opens and re-closes XML results: the payload the model
+    // sees afterwards must equal the payload it saw before (0.9.4: the old
+    // decode/re-escape delivered `&amp;`/`&lt;` for `&`/`<`).
+    let lt = "<";
+    for payload in [
+        "x < y && y > z; s = 'a &amp; b' + '<div>'".to_string(),
+        format!("breakout {lt}/tool_result> kept inert"),
+    ] {
+        let wrapped = crate::agent::result_envelope::wrap(&payload, true);
+        let env = open_envelope(&wrapped, true).expect("success envelope");
+        assert_eq!(env.payload, payload);
+        assert_eq!(close_envelope(&env, &env.payload, true), wrapped);
+    }
+}

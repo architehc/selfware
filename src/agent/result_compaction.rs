@@ -179,10 +179,7 @@ fn open_envelope(text: &str, xml: bool) -> Option<Envelope> {
         .unwrap_or(&rest[close..]);
     Some(Envelope {
         prefix: text[..open].to_string(),
-        payload: inner
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&amp;", "&"),
+        payload: super::result_envelope::decode(inner),
         suffix: suffix.to_string(),
     })
 }
@@ -191,13 +188,11 @@ fn close_envelope(env: &Envelope, payload: &str, xml: bool) -> String {
     if !xml {
         return payload.to_string();
     }
-    let escaped = payload
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;");
     format!(
-        "{}<tool_result>{escaped}</tool_result>{}",
-        env.prefix, env.suffix
+        "{}{}{}",
+        env.prefix,
+        super::result_envelope::wrap(payload, true),
+        env.suffix
     )
 }
 

@@ -773,7 +773,7 @@ fn test_save_redacts_secrets_in_messages() {
         !raw.contains("sk-secretkey12345678901234567890"),
         "API key should have been redacted in checkpoint file"
     );
-    assert!(raw.contains("[REDACTED]"));
+    assert!(raw.contains("[REDACTED:openai_key]"));
 }
 
 #[test]
@@ -3041,4 +3041,20 @@ fn delta_round_trip_carries_chain_wide_turn_count() {
     json.as_object_mut().unwrap().remove("cumulative_turns");
     let legacy: TaskCheckpoint = serde_json::from_value(json).unwrap();
     assert_eq!(legacy.cumulative_turns, 0);
+}
+
+#[test]
+fn test_save_keeps_code_in_messages_byte_for_byte() {
+    // Checkpointed messages are restored into the model's context on resume:
+    // ordinary code must survive the save redaction unchanged (0.9.4 live
+    // finding: `tokens = text.split(SEP)` came back as `env_token=[REDACTED]`).
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+    let code = "    tokens = text.split(DEFAULT_SEPARATOR)\n    api_key = get_key()\n    \
+                password_field = form[\"password\"]\n    if x < y && y > z: s = 'a &amp; b'\n";
+    let mut checkpoint = TaskCheckpoint::new("fidelity".to_string(), "Fidelity".to_string());
+    checkpoint.messages.push(Message::user(code));
+    manager.save(&checkpoint).unwrap();
+    let loaded = manager.load("fidelity").unwrap();
+    assert_eq!(loaded.messages.last().unwrap().content.text(), code);
 }

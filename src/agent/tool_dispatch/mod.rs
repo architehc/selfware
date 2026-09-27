@@ -4531,32 +4531,15 @@ impl Agent {
         }
     }
 
-    /// Escape untrusted tool-result content before it is placed inside the
-    /// `<tool_result>` envelope used by text tool-calling mode. A result may
-    /// carry tag-shaped text of its own; without escaping it could close the
-    /// envelope early and present its own markup as a tool call (a
-    /// prompt-injection breakout). The native/JSON tool path needs no such
-    /// escape — serde_json quoting already keeps the value opaque.
-    fn escape_xml_result_content(content: &str) -> String {
-        content
-            .replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-    }
-
-    /// Wrap a tool result in the XML envelope for text tool-calling mode,
-    /// escaping the (untrusted) content first so it cannot break out of the
-    /// tag. The envelope itself stays literal: downstream consumers (the
-    /// synthesis tool-history strip, checkpoint restore, critical-message
-    /// detection) parse the literal tags and never see raw `<` inside the
-    /// content.
+    /// Wrap a tool result in the XML envelope for text tool-calling mode.
+    ///
+    /// Only the `<` of framing/tool-call tag text in the (untrusted) content
+    /// is neutralized, reversibly and with a visible note — every other byte
+    /// reaches the model as-is (`super::result_envelope`). Whole-content
+    /// escaping delivered `&` as `&amp;` and `<` as `&lt;`, and the model
+    /// wrote the escaped text back into files (0.9.4 live finding).
     fn format_xml_tool_result(content: &str, success: bool) -> String {
-        let escaped = Self::escape_xml_result_content(content);
-        if success {
-            format!("<tool_result>{escaped}</tool_result>")
-        } else {
-            format!("<tool_result><error>{escaped}</error></tool_result>")
-        }
+        super::result_envelope::wrap(content, success)
     }
 
     pub(super) async fn push_tool_result_message(
@@ -4765,8 +4748,9 @@ impl Agent {
             };
             self.messages.push(Message::tool(result_json, call_id));
         } else {
-            // XML path: escape the (untrusted) result content so it cannot
-            // break out of the envelope or synthesize tool markup of its own.
+            // XML path: neutralize framing/tool-call tag text in the
+            // (untrusted) result so it cannot break out of the envelope or
+            // synthesize tool markup; everything else is delivered as-is.
             let formatted = Self::format_xml_tool_result(&result_to_store, success);
             self.messages.push(Message::user(formatted));
         }
@@ -5054,3 +5038,7 @@ pub(crate) fn extract_subprocess_exit_code(result: &Value) -> i32 {
 #[cfg(test)]
 #[path = "../../../tests/unit/agent/tool_dispatch/tool_dispatch_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../../tests/unit/agent/tool_dispatch/output_fidelity_test.rs"]
+mod output_fidelity_tests;
