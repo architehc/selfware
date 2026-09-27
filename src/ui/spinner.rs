@@ -45,6 +45,34 @@ pub fn supports_color() -> bool {
     supports_ansi()
 }
 
+/// How a spinner's final line is marked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopKind {
+    /// Checked and held: green check.
+    Success,
+    /// Neutral: nothing applied, nothing claimed.
+    Info,
+    /// Something that should have been checked was not.
+    Warn,
+    /// Failed: red cross.
+    Error,
+}
+
+/// The icon printed at the start of a spinner's final line.
+pub fn stop_icon(kind: StopKind, color: bool) -> String {
+    let (glyph, ansi) = match kind {
+        StopKind::Success => ("\u{2714}", "32"), // ✔ green
+        StopKind::Info => ("\u{2139}", "36"),    // ℹ cyan
+        StopKind::Warn => ("\u{26A0}", "33"),    // ⚠ yellow
+        StopKind::Error => ("\u{2715}", "31"),   // ✕ red
+    };
+    if color {
+        format!("\x1b[{ansi}m{glyph}\x1b[0m")
+    } else {
+        glyph.to_string()
+    }
+}
+
 /// A terminal spinner that animates on a single line
 pub struct TerminalSpinner {
     stop_signal: Arc<AtomicBool>,
@@ -111,22 +139,35 @@ impl TerminalSpinner {
         let _ = self.message_tx.send(msg.to_string());
     }
 
-    /// Stop the spinner with a success message
+    /// Stop the spinner with the icon for `kind`.
+    pub fn stop_as(self, kind: StopKind, message: &str) {
+        self.stop_with_icon(&stop_icon(kind, supports_color()), message);
+    }
+
+    /// Stop the spinner with a success message.
+    ///
+    /// Only for an outcome that was actually checked and held (a tool that
+    /// succeeded, a verification that ran and passed). Something that did not
+    /// run is [`Self::stop_info`] or [`Self::stop_warn`], never a green tick
+    /// (AGENTS.md Rule 3).
     pub fn stop_success(self, message: &str) {
-        if supports_color() {
-            self.stop_with_icon("\x1b[32m\u{2714}\x1b[0m", message); // green checkmark
-        } else {
-            self.stop_with_icon("\u{2714}", message); // checkmark without color
-        }
+        self.stop_with_icon(&stop_icon(StopKind::Success, supports_color()), message);
+    }
+
+    /// Stop the spinner with a neutral note: nothing applied, nothing claimed.
+    pub fn stop_info(self, message: &str) {
+        self.stop_with_icon(&stop_icon(StopKind::Info, supports_color()), message);
+    }
+
+    /// Stop the spinner with a warning: something should have been checked
+    /// and was not.
+    pub fn stop_warn(self, message: &str) {
+        self.stop_with_icon(&stop_icon(StopKind::Warn, supports_color()), message);
     }
 
     /// Stop the spinner with an error message
     pub fn stop_error(self, message: &str) {
-        if supports_color() {
-            self.stop_with_icon("\x1b[31m\u{2715}\x1b[0m", message); // red X
-        } else {
-            self.stop_with_icon("\u{2715}", message); // X without color
-        }
+        self.stop_with_icon(&stop_icon(StopKind::Error, supports_color()), message);
     }
 
     /// Stop the spinner and print a final line with icon

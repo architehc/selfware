@@ -4655,3 +4655,19 @@ fn a_reply_ending_by_moving_on_to_the_next_stage_is_not_final() {
         assert!(!is_incomplete_action_response(answer), "{answer}");
     }
 }
+
+#[test]
+fn post_edit_verdict_stop_kind_never_greens_an_unrun_check() {
+    use crate::ui::spinner::StopKind;
+    // AGENTS.md Rule 3: only a check that ran and held renders ✔.
+    assert_eq!(PostEditVerdict::NoChecks.stop_kind(), StopKind::Info);
+    assert_eq!(
+        PostEditVerdict::NotRun("npm not installed".into()).stop_kind(),
+        StopKind::Warn
+    );
+    assert_eq!(PostEditVerdict::Passed(None).stop_kind(), StopKind::Success);
+    assert_eq!(
+        PostEditVerdict::Failed("boom".into()).stop_kind(),
+        StopKind::Error
+    );
+}

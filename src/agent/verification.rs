@@ -3483,13 +3483,15 @@ impl Agent {
                 if !report.checks.is_empty() {
                     self.post_edit_report_mutation_sequence = Some(self.mutation_sequence);
                 }
-                match self.absorb_post_edit_report(tool_name, path, &report) {
+                let verdict = self.absorb_post_edit_report(tool_name, path, &report);
+                let stop_kind = verdict.stop_kind();
+                match verdict {
                     PostEditVerdict::NoChecks => {
                         info!(
                         "Verification after {} on {} ran no applicable checks — not crediting as verified",
                         tool_name, path
                     );
-                        spinner.stop_success("No applicable verification checks");
+                        spinner.stop_as(stop_kind, "No applicable verification checks");
                         None
                     }
                     PostEditVerdict::NotRun(note) => {
@@ -3497,14 +3499,14 @@ impl Agent {
                             "Verification after {} on {}: no check could run — no credit recorded",
                             tool_name, path
                         );
-                        spinner.stop_success("Verification not run (no applicable verifier)");
+                        spinner.stop_as(stop_kind, "Verification not run (no applicable verifier)");
                         // Shown to the user as a report (not the green
                         // "Verification passed" line): nothing was verified.
                         crate::output::verification_report(&format!("{}", report), false);
                         Some(note)
                     }
                     PostEditVerdict::Passed(note) => {
-                        spinner.stop_success("Verification passed");
+                        spinner.stop_as(stop_kind, "Verification passed");
                         self.cognitive_state.episodic_memory.what_worked(
                             tool_name,
                             &format!("{} on {} passed verification", tool_name, path),
@@ -3520,7 +3522,7 @@ impl Agent {
                         note
                     }
                     PostEditVerdict::Failed(note) => {
-                        spinner.stop_error("Verification failed");
+                        spinner.stop_as(stop_kind, "Verification failed");
                         self.cognitive_state.episodic_memory.what_failed(
                             tool_name,
                             &format!("{} on {} failed verification", tool_name, path),
@@ -3724,18 +3726,20 @@ impl Agent {
         if !fresh.checks.is_empty() {
             self.post_edit_report_mutation_sequence = Some(self.mutation_sequence);
         }
-        match self.absorb_post_edit_report("final_tree_recheck", &label, &fresh) {
+        let verdict = self.absorb_post_edit_report("final_tree_recheck", &label, &fresh);
+        let stop_kind = verdict.stop_kind();
+        match verdict {
             PostEditVerdict::Passed(_) => {
-                spinner.stop_success("Final-tree re-check passed");
+                spinner.stop_as(stop_kind, "Final-tree re-check passed");
                 Some(true)
             }
             PostEditVerdict::NoChecks | PostEditVerdict::NotRun(_) => {
-                spinner.stop_success("Final-tree re-check: no check could run");
+                spinner.stop_as(stop_kind, "Final-tree re-check: no check could run");
                 crate::output::verification_report(&format!("{}", fresh), false);
                 None
             }
             PostEditVerdict::Failed(_) => {
-                spinner.stop_error("Final-tree re-check failed");
+                spinner.stop_as(stop_kind, "Final-tree re-check failed");
                 crate::output::verification_report(&format!("{}", fresh), false);
                 Some(false)
             }
@@ -4233,6 +4237,21 @@ pub(super) enum PostEditVerdict {
     Passed(Option<String>),
     /// Failed; the full report.
     Failed(String),
+}
+
+impl PostEditVerdict {
+    /// How the verification spinner's final line is marked. Only a verdict
+    /// where a check ran and held earns the green tick; "nothing applied" is
+    /// neutral and "nothing could run" is a warning (AGENTS.md Rule 3).
+    pub(super) fn stop_kind(&self) -> crate::ui::spinner::StopKind {
+        use crate::ui::spinner::StopKind;
+        match self {
+            PostEditVerdict::NoChecks => StopKind::Info,
+            PostEditVerdict::NotRun(_) => StopKind::Warn,
+            PostEditVerdict::Passed(_) => StopKind::Success,
+            PostEditVerdict::Failed(_) => StopKind::Error,
+        }
+    }
 }
 
 pub(crate) fn requirements_audit_failure_reason(e: &anyhow::Error) -> String {

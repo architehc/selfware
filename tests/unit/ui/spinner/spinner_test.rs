@@ -113,3 +113,30 @@ fn test_supports_ansi_no_panic_on_dumb_term() {
     // Just verify the function doesn't panic regardless of env state
     let _ = supports_ansi();
 }
+
+#[test]
+fn stop_icons_distinguish_not_run_from_success() {
+    // A check that did not run must never render as the success tick
+    // (AGENTS.md Rule 3).
+    let success = stop_icon(StopKind::Success, false);
+    for kind in [StopKind::Info, StopKind::Warn, StopKind::Error] {
+        assert_ne!(stop_icon(kind, false), success, "{kind:?}");
+        assert_ne!(stop_icon(kind, true), stop_icon(StopKind::Success, true));
+    }
+    assert_eq!(stop_icon(StopKind::Info, false), "\u{2139}");
+    assert_eq!(stop_icon(StopKind::Warn, false), "\u{26A0}");
+    assert!(stop_icon(StopKind::Warn, true).contains("\x1b[33m"));
+    assert!(!stop_icon(StopKind::Info, true).contains("\x1b[32m"));
+}
+
+#[test]
+fn test_spinner_stop_info_and_warn_no_panic() {
+    let mk = || TerminalSpinner {
+        stop_signal: Arc::new(AtomicBool::new(true)),
+        message_tx: watch::channel("test".to_string()).0,
+        handle: None,
+        start_time: Instant::now(),
+    };
+    mk().stop_info("Nothing to check");
+    mk().stop_warn("Not run");
+}
