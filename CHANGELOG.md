@@ -53,6 +53,10 @@ rounds of external review.
   - Ctrl-C during a provider call (e.g. while planning) ends as
     `interrupted`, exit 130. It used to read "failed — Network error:
     Shutdown requested", exit 4.
+  - Ctrl-C during a running tool (a long `cargo test`, `sleep`, …) stops
+    it within about a second. Tool runs used to ignore the shutdown request
+    until they finished. A stream cut by Ctrl-C is never counted as a
+    completed turn.
 - **Grounding without false alarms.**
   - Citations are verified (the named symbol or quoted code was found at
     the cited lines), location-only (the line exists, the content was not
