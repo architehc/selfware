@@ -46,6 +46,13 @@ rounds of external review.
   - A task answered directly in the planning turn is shown on screen and
     journaled with its answer. It used to be recorded as "0 messages", and
     in streaming mode it could print nothing.
+  - A planning reply that is only tool-call markup is never accepted as the
+    answer. It used to be printed raw at step 0. A question about the
+    project is never answered from the prompt alone, whatever the task is
+    classified as.
+  - Ctrl-C during a provider call (e.g. while planning) ends as
+    `interrupted`, exit 130. It used to read "failed — Network error:
+    Shutdown requested", exit 4.
 - **Grounding without false alarms.**
   - Citations are verified (the named symbol or quoted code was found at
     the cited lines), location-only (the line exists, the content was not
@@ -67,8 +74,11 @@ rounds of external review.
   - Normal mode no longer asks for read-only tools or plain
     `cargo check/test/clippy`. A cargo call with a flag-shaped argument
     still asks.
-  - `p` allows a safe shell-command prefix (or the exact command) for the
-    rest of the session.
+  - `p` allows a shell-command prefix (or the exact command) for the rest
+    of the session. Only commands that read or run project code can seed a
+    prefix. Writes, installs, network and git-history commands are
+    exact-only. A prefix never carries an option (`cargo test --config=…`
+    is refused).
   - The TUI permission popup fits its content and offers the same readable
     view, reason, risk tag and [a]/[p] options.
 - **Terminal output.**
@@ -140,6 +150,9 @@ commit message:
 - An uncited answer to an unrequested workspace question is ℹ️ instead of
   ⚠️.
 - 74 red-team corpus cases were relabelled from allow to refuse. This only
+  tightens.
+- `p` shell rules are stricter: five permission-test expectations moved to
+  the tighter behaviour (no options in or after a prefix). This only
   tightens.
 - Test expectations changed with the fixes: gate-line and summary
   assertions for print-once, the sandbox multi-binary count (150/155
