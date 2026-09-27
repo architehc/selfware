@@ -2834,6 +2834,18 @@ impl Agent {
                                     info!("Synthesis produced an empty answer after stripping think blocks — continuing normal loop");
                                     continue;
                                 }
+                                // Same progress-note predicate as every other
+                                // final-answer path: a synthesis that only
+                                // announces its next read is not the answer
+                                // (the gate below judges the stored response,
+                                // not this synthesized text).
+                                if super::verification::is_incomplete_action_response(&answer) {
+                                    info!("Synthesis produced a progress note — continuing normal loop");
+                                    self.messages.push(Message::user(
+                                        super::verification::PROGRESS_NOTE_NUDGE.to_string(),
+                                    ));
+                                    continue;
+                                }
                                 Box::pin(self.attribute_blocking_failures()).await;
                                 if let Some(gate_msg) = self.check_completion_gate().await {
                                     info!(

@@ -142,6 +142,11 @@ pub(super) fn is_incomplete_action_response(content: &str) -> bool {
     if SUMMARY_LEADINS.iter().any(|p| lower.starts_with(p)) {
         return false;
     }
+    // An offer to the user ("Let me know if you want me to fix these.") is
+    // the close of an answer, never pending work of the agent's own.
+    if lower.starts_with("let me know") {
+        return false;
+    }
 
     // A response that ends by announcing a next action (trailing colon) is a
     // lead-in, not a final answer — e.g. "Now let me check which module …:".
@@ -180,6 +185,17 @@ pub(super) fn is_incomplete_action_response(content: &str) -> bool {
         if last.chars().count() < 160 && MOVE_ON.iter().any(|p| last.starts_with(p)) {
             return true;
         }
+    }
+
+    // A reply whose final SENTENCE announces the agent's next read/check
+    // ("… plus src/cli/mod.rs (318K). Let me read the key structural files
+    // to ground the review.") is a progress note, even when it is a single
+    // line whose start is ordinary prose — the last-line and leading-prefix
+    // checks both missed it (0.9.3, kimi-k3: accepted as a review's final
+    // answer with no findings). A substantive answer before the sentence
+    // (several citations or a long body) keeps it an answer.
+    if ends_with_next_action_announcement(&lower) {
+        return true;
     }
 
     let strong_prefixes = [
@@ -249,6 +265,276 @@ pub(super) fn is_incomplete_action_response(content: &str) -> bool {
     .iter()
     .any(|cue| lower.contains(cue));
     forward_cue && tool_markers.iter().any(|marker| lower.contains(marker))
+}
+
+/// The continuation nudge sent when a tool-less reply is a progress note
+/// (it narrates the next step instead of delivering the result). One text
+/// for every path that rejects one: the execution loop and the completion
+/// gate.
+pub(super) const PROGRESS_NOTE_NUDGE: &str =
+    "Your response describes work you still need to do instead of a completed result. \
+     Do NOT stop to narrate your next step. Call the needed tool now and continue.";
+
+/// Openers of a first-person statement about what the agent does next.
+const INTENT_OPENERS: &[&str] = &[
+    "now let me ",
+    "so let me ",
+    "ok, let me ",
+    "okay, let me ",
+    "alright, let me ",
+    "next, let me ",
+    "next let me ",
+    "first, let me ",
+    "first let me ",
+    "let me ",
+    "let's ",
+    "now i'll ",
+    "now i will ",
+    "now i'm going to ",
+    "next, i'll ",
+    "next i'll ",
+    "next, i will ",
+    "next i will ",
+    "first, i'll ",
+    "first i'll ",
+    "first, i will ",
+    "first i will ",
+    "i'll ",
+    "i will ",
+    "i'm going to ",
+    "i am going to ",
+    "i still need to ",
+    "i need to ",
+];
+
+/// Adverbs and connectors allowed between the opener and the verb
+/// ("Let me now read", "I'll start by reading", "I'll go ahead and check").
+const INTENT_FILLERS: &[&str] = &[
+    "now ",
+    "next ",
+    "first ",
+    "also ",
+    "then ",
+    "quickly ",
+    "just ",
+    "further ",
+    "go ahead and ",
+    "start by ",
+    "begin by ",
+    "continue by ",
+    "proceed to ",
+    "try to ",
+];
+
+/// Verbs of investigation or execution: what a progress note announces.
+/// Deliberately excludes content verbs ("note", "summarize", "explain",
+/// "add") so a sentence like "Let me note that X is unsafe." stays an answer.
+const INTENT_VERBS: &[&str] = &[
+    "read",
+    "re-read",
+    "reread",
+    "check",
+    "look",
+    "inspect",
+    "examine",
+    "open",
+    "review",
+    "explore",
+    "dig",
+    "dive",
+    "scan",
+    "search",
+    "grep",
+    "find",
+    "locate",
+    "analyze",
+    "analyse",
+    "map",
+    "mapping",
+    "digging",
+    "getting",
+    "verify",
+    "confirm",
+    "trace",
+    "investigate",
+    "fetch",
+    "gather",
+    "pull",
+    "list",
+    "browse",
+    "study",
+    "view",
+    "load",
+    "query",
+    "run",
+    "running",
+    "execute",
+    "build",
+    "compile",
+    "test",
+    "start",
+    "begin",
+    "continue",
+    "proceed",
+    "go through",
+    "take a look",
+    "get",
+    "see",
+    "call",
+    "use",
+];
+
+/// Verbs that read/inspect the workspace (a subset of [`INTENT_VERBS`]).
+const READ_VERBS: &[&str] = &[
+    "read",
+    "re-read",
+    "reread",
+    "look",
+    "inspect",
+    "examine",
+    "open",
+    "explore",
+    "dig",
+    "digging",
+    "dive",
+    "scan",
+    "search",
+    "grep",
+    "trace",
+    "investigate",
+    "study",
+    "view",
+    "load",
+    "browse",
+    "go through",
+    "take a look",
+    "check",
+    "start",
+    "begin",
+];
+
+/// Strip markdown emphasis/list markers from a sentence.
+fn plain_sentence(sentence: &str) -> String {
+    let s = sentence.trim_start_matches(|c: char| {
+        matches!(c, '*' | '_' | '#' | '>' | '-' | '`' | ' ' | '\t') || c.is_ascii_digit()
+    });
+    // A numbered list marker leaves ". " / ") " behind.
+    let s = s
+        .strip_prefix(". ")
+        .or_else(|| s.strip_prefix(") "))
+        .unwrap_or(s);
+    s.replace(['*', '`'], "").trim().to_string()
+}
+
+/// Split `lower` into (text before the final sentence, final sentence,
+/// whether the final sentence ends with `?`). Sentence ends are `.`/`!`/`?`
+/// followed by whitespace, or a line break; trailing punctuation, ellipses
+/// and markdown closers are dropped first.
+fn split_final_sentence(lower: &str) -> (&str, &str, bool) {
+    let body = lower.trim_end_matches(|c: char| {
+        c.is_whitespace() || matches!(c, '.' | '…' | ':' | '!' | '*' | '_' | '`' | ')')
+    });
+    let is_question = body.ends_with('?');
+    let body = body.trim_end_matches('?');
+    let mut cut = 0;
+    let mut prev: Option<char> = None;
+    for (i, c) in body.char_indices() {
+        if c == '\n' {
+            cut = i + 1;
+        } else if c.is_whitespace() && matches!(prev, Some('.' | '!' | '?')) {
+            cut = i;
+        }
+        prev = Some(c);
+    }
+    (&body[..cut], body[cut..].trim(), is_question)
+}
+
+/// Whether `sentence` (lowercase, markdown stripped) is a first-person
+/// statement of an investigation/execution step the agent is about to take.
+/// `verbs` narrows the accepted actions.
+fn is_intent_sentence(sentence: &str, verbs: &[&str]) -> bool {
+    // Offers and questions to the user close an answer.
+    const OFFER_MARKERS: &[&str] = &[
+        "let me know",
+        " if you",
+        "if you'd like",
+        "if you want",
+        "would you like",
+        "want me to",
+        "happy to",
+        "glad to",
+        "on request",
+    ];
+    if OFFER_MARKERS.iter().any(|m| sentence.contains(m)) {
+        return false;
+    }
+    let Some(mut rest) = INTENT_OPENERS.iter().find_map(|o| sentence.strip_prefix(o)) else {
+        return false;
+    };
+    // Summary/recap lead-ins are answers ("Let me summarize: …").
+    const CONTENT_VERBS: &[&str] = &[
+        "summarize",
+        "recap",
+        "explain",
+        "describe",
+        "walk you through",
+        "be clear",
+        "note",
+        "conclude",
+    ];
+    loop {
+        let before = rest;
+        for f in INTENT_FILLERS {
+            if let Some(r) = rest.strip_prefix(f) {
+                rest = r;
+            }
+        }
+        if rest == before {
+            break;
+        }
+    }
+    if CONTENT_VERBS.iter().any(|v| rest.starts_with(v)) {
+        return false;
+    }
+    verbs.iter().any(|v| {
+        rest.strip_prefix(v).is_some_and(|after| {
+            after.is_empty()
+                || after.starts_with(|c: char| !c.is_ascii_alphabetic())
+                // inflected forms: "reading", "checks"
+                || after.starts_with("ing")
+                || after.starts_with('s')
+        })
+    })
+}
+
+/// A reply whose final sentence announces the agent's next action and that
+/// delivers no substantive answer before it.
+fn ends_with_next_action_announcement(lower: &str) -> bool {
+    let (before, last, is_question) = split_final_sentence(lower);
+    if is_question || last.is_empty() {
+        return false;
+    }
+    let last = plain_sentence(last);
+    if last.chars().count() > 240 || !is_intent_sentence(&last, INTENT_VERBS) {
+        return false;
+    }
+    // Substance before the announcement: a long body or several citations
+    // means the answer is there and the tail is an aside.
+    let substantive =
+        before.chars().count() >= 1200 || super::citation_check::parse_citations(before).len() >= 3;
+    !substantive
+}
+
+/// Whether any sentence of `text` announces further reading/inspection by
+/// the agent ("Let me read the key structural files …", "I'll now inspect
+/// …"). Used by the review-task structural guard, where position and
+/// substance do not matter: the answer has no citations yet.
+pub(super) fn announces_further_reading(text: &str) -> bool {
+    let lower = super::recovery::strip_think_blocks(text).to_lowercase();
+    lower
+        .split(['\n', '.', '!', ';'])
+        .map(plain_sentence)
+        .any(|s| is_intent_sentence(&s, READ_VERBS))
 }
 
 fn truncate_visual_note(input: &str, max_chars: usize) -> String {
@@ -2483,6 +2769,55 @@ impl Agent {
 
     /// Check whether the agent has done enough work to accept completion.
     /// Returns `None` to accept, or `Some(message)` to reject with instructions.
+    /// Reads below which a review answer without citations that announces
+    /// further reading is a progress note (see
+    /// [`Self::review_progress_note_without_reads`]).
+    pub(super) const REVIEW_MIN_READS: usize = 3;
+
+    /// Tools that read workspace content a review can cite (a listing such
+    /// as `directory_tree` shows names, not code).
+    const CONTENT_READ_TOOLS: &'static [&'static str] = &[
+        "file_read",
+        "context_bulk_read",
+        "context_load_skeleton",
+        "grep_search",
+        "symbol_search",
+        "git_diff",
+        "lsp_goto_definition",
+        "lsp_find_references",
+        "lsp_document_symbols",
+        "lsp_hover",
+    ];
+
+    /// Successful content reads this task (see [`Self::CONTENT_READ_TOOLS`]).
+    pub(super) fn content_read_count(&self) -> usize {
+        self.current_checkpoint.as_ref().map_or(0, |cp| {
+            cp.tool_calls
+                .iter()
+                .filter(|tc| {
+                    tc.success && Self::CONTENT_READ_TOOLS.contains(&tc.tool_name.as_str())
+                })
+                .count()
+        })
+    }
+
+    /// Structural progress-note test for review tasks (the task asks for a
+    /// review/audit/citations): the candidate answer cites nothing, fewer
+    /// than [`Self::REVIEW_MIN_READS`] content reads happened, and the answer
+    /// announces further reading. Wording of the final sentence does not
+    /// matter — the missing evidence does.
+    pub(super) fn review_progress_note_without_reads(&self) -> bool {
+        if !super::task_policy::task_requests_citations(self.task_context_for_classification()) {
+            return false;
+        }
+        if self.content_read_count() >= Self::REVIEW_MIN_READS {
+            return false;
+        }
+        let answer = self.citation_candidate_answer();
+        super::citation_check::parse_citations(&answer).is_empty()
+            && announces_further_reading(&answer)
+    }
+
     pub(super) async fn check_completion_gate(&self) -> Option<String> {
         self.client
             .ensure_budget_floor(self.cumulative_token_usage.total, self.cumulative_cost_usd);
@@ -2607,11 +2942,19 @@ impl Agent {
         }
 
         if is_incomplete_action_response(&self.last_assistant_response) {
-            return Some(
-                "Your response describes work you still need to do instead of a completed result. \
-                 Do NOT stop to narrate your next step. Call the needed tool now and continue."
-                    .to_string(),
-            );
+            return Some(PROGRESS_NOTE_NUDGE.to_string());
+        }
+
+        // Structural guard for review tasks, independent of the final
+        // sentence's wording: a review answer with no citations, after fewer
+        // than REVIEW_MIN_READS reads, that announces further reading is a
+        // progress note (0.9.3, kimi-k3 "…Let me read the key structural
+        // files to ground the review." completed a review with no findings).
+        // Bounded: every read the model makes moves it toward the floor, and
+        // the read-only no-tool streak caps (6 / 12 → READ_ONLY_INCOMPLETE)
+        // end a model that only narrates.
+        if is_read_only && self.review_progress_note_without_reads() {
+            return Some(PROGRESS_NOTE_NUDGE.to_string());
         }
 
         if super::recovery::looks_like_malformed_tool_xml(&self.last_assistant_response) {

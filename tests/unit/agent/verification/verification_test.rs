@@ -39,6 +39,89 @@ fn incomplete_action_response_catches_forward_looking_narration() {
     ));
 }
 
+/// Verbatim step-2 reply of the 0.9.3 REPL review (moonshotai/kimi-k3,
+/// "can you review the selfware core do not code"): accepted as the final
+/// answer with no findings after two listing calls.
+const KIMI_K3_REVIEW_PROGRESS_NOTE: &str = "The core is concentrated in src/agent/ — notably \
+mod.rs (168K), task_runner.rs (171K), verification.rs (203K), execution.rs (126K), plus \
+src/cli/mod.rs (318K). Let me read the key structural files to ground the review.";
+
+#[test]
+fn trailing_next_action_sentence_is_a_progress_note() {
+    assert!(is_incomplete_action_response(KIMI_K3_REVIEW_PROGRESS_NOTE));
+    // Markdown emphasis around the announcement changes nothing.
+    assert!(is_incomplete_action_response(
+        "The core lives in `src/agent/`. **Let me read the key files next.**"
+    ));
+}
+
+#[test]
+fn progress_note_sentence_table() {
+    // (reply, is a progress note)
+    let cases: &[(&str, bool)] = &[
+        (KIMI_K3_REVIEW_PROGRESS_NOTE, true),
+        ("The parser is small. I'll now inspect the lexer.", true),
+        ("Three modules matter here. Next I will open src/lib.rs.", true),
+        ("Most logic is in the agent loop. Now I'll inspect execution.rs…", true),
+        ("The layout is standard. I will start by reading the entry point.", true),
+        ("I found the config loader. Let me check how it is called:", true),
+        ("The edit is in place. Let me run the tests to confirm.", true),
+        ("Overview done.\n\nLet me also look at the tests.", true),
+        // Offers and questions to the user close an answer.
+        ("Let me know if you want me to fix these.", false),
+        (
+            "Found two bugs: parse_port ignores errors and main unwraps. Let me know what you'd like.",
+            false,
+        ),
+        (
+            "The review is complete. I'll fix these if you want — just say so.",
+            false,
+        ),
+        (
+            "What would you like to do? I can review code, explain a module, or fix a bug.",
+            false,
+        ),
+        ("Should I look at the tests next?", false),
+        // Summary / content lead-ins are answers.
+        ("Let me summarize: parse_port now returns Result.", false),
+        (
+            "parse_port returns Result now. Let me note that main still unwraps it.",
+            false,
+        ),
+        // Next steps addressed to the user are not the agent's pending work.
+        ("The fix is complete.\n\nNext steps: run the tests and read the changelog.", false),
+        ("Done. You may want to review src/lib.rs:10 before merging.", false),
+        ("I used file_read to check the parser; the bug is at src/p.rs:12.", false),
+    ];
+    for (reply, expected) in cases {
+        assert_eq!(
+            is_incomplete_action_response(reply),
+            *expected,
+            "misclassified: {reply:?}"
+        );
+    }
+}
+
+#[test]
+fn trailing_announcement_after_a_substantive_answer_stays_an_answer() {
+    // Three checkable citations before the tail: the findings are there.
+    let answer = "Findings:\n- src/a.rs:10 unwraps user input.\n- src/b.rs:22 leaks a handle.\n\
+                  - src/c.rs:5 ignores the error.\nI'll re-check src/a.rs in a follow-up run.";
+    assert!(!is_incomplete_action_response(answer));
+}
+
+#[test]
+fn announces_further_reading_ignores_offers() {
+    assert!(announces_further_reading(KIMI_K3_REVIEW_PROGRESS_NOTE));
+    assert!(announces_further_reading(
+        "Overview: three crates. I'll now inspect the agent loop. More later"
+    ));
+    assert!(!announces_further_reading(
+        "The review is below. Let me know if you want me to read more files."
+    ));
+    assert!(!announces_further_reading("No issues found in the parser."));
+}
+
 #[test]
 fn explicit_visual_expectation_takes_priority() {
     let args = json!({
@@ -1220,6 +1303,71 @@ mod completion_gate_tests {
                 agent.check_completion_gate().await.is_none(),
                 "a read-only review that quotes code must complete, not livelock on a file_write demand"
             );
+    }
+
+    // 0.9.3 kimi-k3 review: a review answer with no citations, after only
+    // listing calls, that announces further reading is a progress note —
+    // structurally, whatever the final sentence's wording.
+    #[tokio::test]
+    async fn review_without_reads_that_announces_reading_is_rejected() {
+        let mut agent = Agent::new(test_config()).await.expect("agent should build");
+        agent.current_task_context = "can you review the selfware core do not code".to_string();
+        agent.has_written_any_file = false;
+        let mut cp = TaskCheckpoint::new("t".to_string(), "review".to_string());
+        cp.log_tool_call(checkpoint_call(
+            "directory_tree",
+            json!({"path": "."}),
+            true,
+        ));
+        cp.log_tool_call(checkpoint_call("cycles", json!({}), true));
+        agent.current_checkpoint = Some(cp);
+        // Wording the sentence-level check does not catch on its own (the
+        // announcement is mid-reply), so only the structural guard fires.
+        agent.last_assistant_response = "I'll read the agent loop and the CLI to ground the \
+             review. The core is concentrated in src/agent/ and src/cli/, which dominate the \
+             line count and hold the orchestration logic for every entry point."
+            .to_string();
+        assert!(!is_incomplete_action_response(
+            &agent.last_assistant_response
+        ));
+        assert_eq!(
+            agent.check_completion_gate().await.as_deref(),
+            Some(PROGRESS_NOTE_NUDGE),
+            "a citation-free review that still announces reading must continue"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_guard_steps_aside_after_enough_reads() {
+        let mut agent = Agent::new(test_config()).await.expect("agent should build");
+        agent.current_task_context = "can you review the selfware core do not code".to_string();
+        agent.has_written_any_file = false;
+        let mut cp = TaskCheckpoint::new("t".to_string(), "review".to_string());
+        for f in ["a.rs", "b.rs", "c.rs"] {
+            cp.log_tool_call(checkpoint_call("file_read", json!({"path": f}), true));
+        }
+        agent.current_checkpoint = Some(cp);
+        agent.last_assistant_response = "I'll read the agent loop and the CLI to ground the \
+             review. The core is concentrated in src/agent/ and src/cli/."
+            .to_string();
+        assert!(
+            !agent.review_progress_note_without_reads(),
+            "after REVIEW_MIN_READS content reads the structural guard steps aside"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_guard_ignores_non_review_tasks_and_answers_without_announcements() {
+        let mut agent = Agent::new(test_config()).await.expect("agent should build");
+        agent.has_written_any_file = false;
+        agent.current_task_context = "explain how the agent loop works".to_string();
+        agent.last_assistant_response =
+            "I'll read the loop next. The loop plans, executes and verifies.".to_string();
+        assert!(!agent.review_progress_note_without_reads());
+        agent.current_task_context = "review the parser".to_string();
+        agent.last_assistant_response =
+            "The parser is fine; no issues. Let me know if you want me to read more.".to_string();
+        assert!(!agent.review_progress_note_without_reads());
     }
 
     // Contrast: the same unwritten-code answer on a MUTATION task must still

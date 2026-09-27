@@ -1548,7 +1548,7 @@ impl super::Agent {
     /// The answer text the completion gate is judging: the latest assistant
     /// message (pushed to history before any gate probe runs), falling back
     /// to `last_assistant_response`.
-    fn citation_candidate_answer(&self) -> String {
+    pub(super) fn citation_candidate_answer(&self) -> String {
         let latest = self
             .messages
             .iter()

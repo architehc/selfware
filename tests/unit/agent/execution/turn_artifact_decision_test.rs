@@ -725,3 +725,39 @@ async fn truncated_inside_reasoning_is_labelled_as_possibly_reasoning() {
     // is the honest note alone — no reasoning is passed off as the answer.
     server.stop().await;
 }
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn review_progress_note_is_not_accepted_as_the_final_answer() {
+    // 0.9.3 REPL review (moonshotai/kimi-k3): the step-2 reply announced
+    // its next read in the last sentence of a one-line reply and was accepted
+    // as the final answer ("Task completed (NO_CHANGES) — citations: none
+    // checkable"). The loop must continue instead.
+    let cwd = crate::test_support::CwdGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    cwd.switch_to(dir.path());
+    let note = "The core is concentrated in src/agent/ — notably mod.rs (168K), \
+                task_runner.rs (171K), verification.rs (203K), execution.rs (126K), plus \
+                src/cli/mod.rs (318K). Let me read the key structural files to ground the review.";
+    let server = MockLlmServer::builder().with_response(note).build().await;
+    let config = artifact_config(&format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.current_task_context = "can you review the selfware core do not code".to_string();
+    agent.classify_task_policy();
+    assert!(agent.current_task_is_read_only());
+    let done = agent.execute_step_internal(false).await.unwrap();
+    server.stop().await;
+    assert!(!done, "a progress note must not complete the review");
+    let last = agent
+        .messages
+        .last()
+        .map(|m| m.content.text_all())
+        .unwrap_or_default();
+    assert!(
+        last.contains("tool") || last.contains("Call"),
+        "the model must be told to continue with a tool call, got: {last}"
+    );
+}

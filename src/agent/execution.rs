@@ -1483,9 +1483,7 @@ impl Agent {
                 info!("Rejected incomplete planning response before completion");
                 self.last_assistant_response = content.clone();
                 self.messages.push(crate::api::types::Message::user(
-                    "Your response describes work you still need to do instead of a completed result. \
-                     Do NOT stop to narrate your next step. Call the needed tool now and continue."
-                        .to_string(),
+                    super::verification::PROGRESS_NOTE_NUDGE.to_string(),
                 ));
                 return Ok(false);
             }
