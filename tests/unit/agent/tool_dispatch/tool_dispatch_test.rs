@@ -8382,3 +8382,92 @@ async fn auto_edit_confirms_cargo_calls_whose_arguments_would_become_cargo_flags
     }
     server.stop().await;
 }
+
+// ── `v` = view full diff at the confirmation prompt ──
+
+#[test]
+fn confirm_v_maps_to_view_and_never_to_an_approval() {
+    use super::{confirm_step, parse_confirm_response, ConfirmDecision, ConfirmStep};
+    for answer in ["v", "V", " view ", "VIEW"] {
+        assert_eq!(
+            parse_confirm_response(answer),
+            ConfirmDecision::ViewFullDiff
+        );
+    }
+    // Offered: show the diff and ask again.
+    assert_eq!(
+        confirm_step(ConfirmDecision::ViewFullDiff, true),
+        ConfirmStep::ShowFullDiff
+    );
+    // Not offered: a skip like any unknown answer (fail closed), not a yes.
+    assert_eq!(
+        confirm_step(ConfirmDecision::ViewFullDiff, false),
+        ConfirmStep::Decide(ConfirmDecision::Skip)
+    );
+    // Real answers pass through unchanged either way.
+    for d in [
+        ConfirmDecision::ExecuteOnce,
+        ConfirmDecision::AlwaysAllow,
+        ConfirmDecision::Skip,
+    ] {
+        assert_eq!(confirm_step(d, true), ConfirmStep::Decide(d));
+        assert_eq!(confirm_step(d, false), ConfirmStep::Decide(d));
+    }
+}
+
+#[test]
+fn confirm_prompt_offers_v_only_when_there_is_a_full_diff() {
+    use super::confirm_prompt_text;
+    let with = confirm_prompt_text(None, true, true);
+    assert_eq!(
+        with,
+        "Execute? [y = once / a = always allow this tool (session) / v = view full diff / N = skip / type \"yolo\" to disable confirmations]: "
+    );
+    assert!(!confirm_prompt_text(None, true, false).contains("v = view"));
+    // Safety-gate prompt: once / skip only (+ v when offered).
+    assert_eq!(
+        confirm_prompt_text(None, false, false),
+        "Execute? [y = once / N = skip]: "
+    );
+    assert_eq!(
+        confirm_prompt_text(None, false, true),
+        "Execute? [y = once / v = view full diff / N = skip]: "
+    );
+    let rule = confirm_prompt_text(Some("commands starting with `cargo test`"), true, false);
+    assert!(rule.contains(
+        "a = always allow this tool (session) / p = always allow commands starting with `cargo test` (session) / N = skip"
+    ));
+}
+
+#[test]
+fn pager_defaults_to_less_r_and_honours_pager() {
+    use super::pager_command;
+    assert_eq!(pager_command(None), vec!["less", "-R"]);
+    assert_eq!(pager_command(Some("  ")), vec!["less", "-R"]);
+    assert_eq!(pager_command(Some("more")), vec!["more"]);
+    assert_eq!(
+        pager_command(Some("less -R --tabs=4")),
+        vec!["less", "-R", "--tabs=4"]
+    );
+    assert_eq!(
+        pager_command(Some("'/opt/my pager/bin/p' -x")),
+        vec!["/opt/my pager/bin/p", "-x"]
+    );
+    // Unbalanced quotes: fall back rather than run half a command.
+    assert_eq!(pager_command(Some("less 'oops")), vec!["less", "-R"]);
+}
+
+#[test]
+fn non_tty_full_diff_is_bounded_with_a_note() {
+    use super::bounded_lines;
+    let lines: Vec<String> = (0..2_500).map(|i| format!("+line {i}")).collect();
+    let out = bounded_lines(&lines, 2_000);
+    assert_eq!(out.len(), 2_001);
+    assert_eq!(out[1_999], "+line 1999");
+    assert_eq!(
+        out[2_000],
+        "… 500 more lines not shown (output is not a terminal)"
+    );
+    let short = bounded_lines(&lines[..3], 2_000);
+    assert_eq!(short, lines[..3].to_vec());
+}

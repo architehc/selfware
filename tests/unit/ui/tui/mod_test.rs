@@ -423,6 +423,7 @@ fn permission_keys_map_only_to_offered_answers() {
         body: vec![],
         allow_always: true,
         shell_rule: Some("commands starting with `cargo test`".to_string()),
+        full_view: None,
     };
     assert_eq!(
         permission_key_answer(&prompt, KeyCode::Char('y')),
@@ -494,4 +495,54 @@ fn run_outcome_lands_in_the_chat_as_a_system_note() {
     );
     let last = app.messages.last().expect("outcome message");
     assert!(last.content.contains("Run summary"));
+}
+
+#[test]
+fn permission_v_pages_the_full_diff_and_never_answers() {
+    use crate::safety::confirm_view::{
+        ConfirmLine, FullDiffView, LineKind, PermissionPrompt, RiskTag,
+    };
+    let lines: Vec<ConfirmLine> = (0..30)
+        .map(|i| ConfirmLine {
+            kind: LineKind::Added,
+            text: format!("+{i}"),
+        })
+        .collect();
+    let mut prompt = PermissionPrompt {
+        tool_name: "file_edit".to_string(),
+        risk: RiskTag::WritesWorkspace,
+        reason: None,
+        body: vec![],
+        allow_always: true,
+        shell_rule: None,
+        full_view: Some(FullDiffView::new(lines)),
+    };
+    // `v` is never an answer.
+    assert_eq!(permission_key_answer(&prompt, KeyCode::Char('v')), None);
+    // It opens the view; the modal stays open with no decision.
+    assert!(permission_view_key(&mut prompt, KeyCode::Char('v')));
+    assert!(prompt.full_view.as_ref().unwrap().open);
+    assert!(permission_view_key(&mut prompt, KeyCode::PageDown));
+    assert!(permission_view_key(&mut prompt, KeyCode::Down));
+    assert_eq!(prompt.full_view.as_ref().unwrap().scroll, 11);
+    assert!(permission_view_key(&mut prompt, KeyCode::End));
+    assert_eq!(prompt.full_view.as_ref().unwrap().scroll, 29);
+    // Esc closes the view (not a deny) while it is open …
+    assert!(permission_view_key(&mut prompt, KeyCode::Esc));
+    assert!(!prompt.full_view.as_ref().unwrap().open);
+    // … and denies again once it is closed.
+    assert!(!permission_view_key(&mut prompt, KeyCode::Esc));
+    assert_eq!(
+        permission_key_answer(&prompt, KeyCode::Esc),
+        Some(crate::safety::confirm_view::PermissionAnswer::Deny)
+    );
+    // y/n still answer while the view is open.
+    permission_view_key(&mut prompt, KeyCode::Char('v'));
+    assert!(!permission_view_key(&mut prompt, KeyCode::Char('y')));
+    assert!(!permission_view_key(&mut prompt, KeyCode::Char('n')));
+
+    // Without a full diff `v` does nothing at all.
+    prompt.full_view = None;
+    assert!(!permission_view_key(&mut prompt, KeyCode::Char('v')));
+    assert_eq!(permission_key_answer(&prompt, KeyCode::Char('v')), None);
 }

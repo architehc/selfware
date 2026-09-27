@@ -84,6 +84,30 @@ pub(super) async fn read_line_pausing_esc_with_deadline(
         .map(|line| line.unwrap_or_default())
 }
 
+/// Run the blocking `f` (e.g. a pager that reads the keyboard) with the
+/// ESC listener paused and the terminal in cooked mode, like
+/// [`read_line_pausing_esc_bounded`] does for a typed answer.
+pub(super) async fn with_esc_listener_paused<T: Send + 'static>(
+    esc_paused: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    esc_pause_ack: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    esc_deadline: tokio::time::Duration,
+    f: impl FnOnce() -> std::io::Result<T> + Send + 'static,
+) -> std::io::Result<T> {
+    use std::sync::atomic::Ordering;
+    esc_paused.store(true, Ordering::Release);
+    let deadline = tokio::time::Instant::now() + esc_deadline;
+    while !esc_pause_ack.load(Ordering::Acquire) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+    }
+    let _ = crossterm::terminal::disable_raw_mode();
+    let result = tokio::task::spawn_blocking(f)
+        .await
+        .unwrap_or_else(|e| Err(std::io::Error::other(e)));
+    esc_paused.store(false, Ordering::Release);
+    esc_pause_ack.store(false, Ordering::Release);
+    result
+}
+
 /// `read_line_pausing_esc` with an optional bound on how long to wait for
 /// the operator. `Ok(None)` means the bound elapsed with no answer. The ESC
 /// listener is always unpaused afterwards (a timeout around the plain reader

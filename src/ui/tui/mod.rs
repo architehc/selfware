@@ -520,6 +520,56 @@ pub(crate) fn permission_key_answer(
     }
 }
 
+/// Keys that page the prompt's full diff (`v` = view full diff) instead of
+/// answering it. Returns whether the key was consumed. `v` toggles the full
+/// diff when the prompt offers one; while it is open, Esc closes it (it does
+/// not deny) and ↑/↓/k/j, PgUp/PgDn, Home/End scroll. Viewing never answers
+/// the prompt: `y`/`n`/`a`/`p` still go to [`permission_key_answer`].
+pub(crate) fn permission_view_key(
+    prompt: &mut crate::safety::confirm_view::PermissionPrompt,
+    code: KeyCode,
+) -> bool {
+    let Some(view) = prompt.full_view.as_mut() else {
+        return false;
+    };
+    match code {
+        KeyCode::Char('v') | KeyCode::Char('V') => {
+            view.open = !view.open;
+            view.scroll = 0;
+            true
+        }
+        KeyCode::Esc if view.open => {
+            view.open = false;
+            true
+        }
+        KeyCode::Up | KeyCode::Char('k') if view.open => {
+            view.scroll_by(-1);
+            true
+        }
+        KeyCode::Down | KeyCode::Char('j') if view.open => {
+            view.scroll_by(1);
+            true
+        }
+        KeyCode::PageUp if view.open => {
+            view.scroll_by(-10);
+            true
+        }
+        KeyCode::PageDown if view.open => {
+            view.scroll_by(10);
+            true
+        }
+        KeyCode::Home if view.open => {
+            view.scroll = 0;
+            true
+        }
+        KeyCode::End if view.open => {
+            view.scroll_by(isize::MAX);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Run the TUI dashboard with shared state and event receiver
 ///
 /// This version allows external code (like the Agent) to send events that
@@ -729,8 +779,13 @@ pub fn run_tui_dashboard_with_events(
 
             // A permission modal takes over all key input until answered --
             // it must never fall through to chat input, quit handling, etc.
-            if let Some(prompt) = pending_permission.take() {
+            if let Some(mut prompt) = pending_permission.take() {
                 use crate::safety::confirm_view::PermissionAnswer;
+                // Paging the full diff keeps the modal open, unanswered.
+                if permission_view_key(&mut prompt, key.code) {
+                    pending_permission = Some(prompt);
+                    continue;
+                }
                 match permission_key_answer(&prompt, key.code) {
                     Some(answer) => {
                         let _ = permission_response_tx.send(answer);

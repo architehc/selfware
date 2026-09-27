@@ -3527,6 +3527,9 @@ impl Agent {
             .and_then(|path| existing_file_for_prompt(&path));
         let body =
             crate::safety::confirm_view::render_tool_call(name, args_str, existing.as_deref());
+        // The full diff behind a truncated body (`v` = view full diff).
+        let full_diff =
+            crate::safety::confirm_view::full_diff_view(name, args_str, existing.as_deref(), &body);
         let args_value: serde_json::Value =
             serde_json::from_str(args_str).unwrap_or(serde_json::Value::Null);
         let risk = crate::safety::confirm_view::classify_risk(name, &args_value);
@@ -3558,6 +3561,9 @@ impl Agent {
                     body,
                     allow_always: standing_answers,
                     shell_rule: shell_rule.as_ref().map(|rule| rule.describe()),
+                    full_view: full_diff
+                        .clone()
+                        .map(crate::safety::confirm_view::FullDiffView::new),
                 },
             });
             let decision = match self.await_tui_permission_response().await {
@@ -3623,22 +3629,30 @@ impl Agent {
                 .dimmed()
             );
         }
-        match (&shell_rule, standing_answers) {
-            (Some(rule), _) => cli_prompt!(
-                "\x1b[0m\x1b[1m\x1b[97mExecute? [y = once / a = always allow this tool (session) / p = always allow {} (session) / N = skip / type \"yolo\" to disable confirmations]: \x1b[0m",
-                rule.describe()
-            ),
-            (None, true) => cli_prompt!("\x1b[0m\x1b[1m\x1b[97mExecute? [y = once / a = always allow this tool (session) / N = skip / type \"yolo\" to disable confirmations]: \x1b[0m"),
-            (None, false) => cli_prompt!("\x1b[0m\x1b[1m\x1b[97mExecute? [y = once / N = skip]: \x1b[0m"),
-        }
-
-        let response = super::execution::read_line_pausing_esc_bounded(
-            &self.esc_paused,
-            &self.esc_pause_ack,
-            tokio::time::Duration::from_millis(super::execution::ESC_PAUSE_DEADLINE_MS),
-            self.confirmation_timeout,
-        )
-        .await;
+        let question = confirm_prompt_text(
+            shell_rule.as_ref().map(|rule| rule.describe()).as_deref(),
+            standing_answers,
+            full_diff.is_some(),
+        );
+        // `v` pages the full diff and asks the same question again — it is
+        // never an answer (see `confirm_step`).
+        let response = loop {
+            cli_prompt!("\x1b[0m\x1b[1m\x1b[97m{}\x1b[0m", question);
+            let response = super::execution::read_line_pausing_esc_bounded(
+                &self.esc_paused,
+                &self.esc_pause_ack,
+                tokio::time::Duration::from_millis(super::execution::ESC_PAUSE_DEADLINE_MS),
+                self.confirmation_timeout,
+            )
+            .await;
+            if let (Ok(Some(line)), Some(full)) = (&response, &full_diff) {
+                if confirm_step(parse_confirm_response(line), true) == ConfirmStep::ShowFullDiff {
+                    self.show_full_diff(full).await;
+                    continue;
+                }
+            }
+            break response;
+        };
         if let Ok(None) = response {
             // Nobody answered within the one-shot bound: fail closed. The
             // model is told the call was not run and why, so it can take
@@ -3658,7 +3672,12 @@ impl Agent {
         }
         let response = response.map(|line| line.unwrap_or_default());
         if let Ok(response) = response {
-            let decision = parse_confirm_response(&response);
+            let decision =
+                match confirm_step(parse_confirm_response(&response), full_diff.is_some()) {
+                    ConfirmStep::Decide(decision) => decision,
+                    // Handled by the re-prompt loop above; never a yes.
+                    ConfirmStep::ShowFullDiff => ConfirmDecision::Skip,
+                };
             if self.apply_confirm_decision(name, decision, standing_answers, shell_rule) {
                 return Ok(true);
             }
@@ -3669,6 +3688,39 @@ impl Agent {
         cli_println!("{} {}", "⏭️".bright_yellow(), skip_msg);
         self.push_tool_skip_message(name, call_id, use_native_fc, skip_msg);
         Ok(false)
+    }
+
+    /// Show the full diff for `v` at the CLI prompt: through `$PAGER` /
+    /// `less -R` when stdout and stdin are a terminal (the ESC listener is
+    /// paused so the pager owns the keyboard), otherwise printed, bounded
+    /// to [`FULL_DIFF_PRINT_LINES`] lines. Lines are the sanitized
+    /// confirmation lines — model-authored control characters are escaped,
+    /// so only our own colour codes reach the pager.
+    async fn show_full_diff(&self, full: &[crate::safety::confirm_view::ConfirmLine]) {
+        use std::io::IsTerminal;
+        let styled: Vec<String> = full.iter().map(style_confirm_line).collect();
+        let interactive = std::io::stdout().is_terminal() && std::io::stdin().is_terminal();
+        if interactive {
+            let argv = pager_command(std::env::var("PAGER").ok().as_deref());
+            let text = styled.join("\n") + "\n";
+            let paged = super::execution::with_esc_listener_paused(
+                &self.esc_paused,
+                &self.esc_pause_ack,
+                tokio::time::Duration::from_millis(super::execution::ESC_PAUSE_DEADLINE_MS),
+                move || run_pager(&argv, &text),
+            )
+            .await;
+            match paged {
+                Ok(()) => return,
+                Err(e) => cli_println!(
+                    "   {}",
+                    format!("(pager unavailable: {e} — printing the diff)").dimmed()
+                ),
+            }
+        }
+        for line in bounded_lines(&styled, FULL_DIFF_PRINT_LINES) {
+            cli_println!("   {}", line);
+        }
     }
 
     /// Apply an operator's answer (CLI or TUI). Returns whether the call may
@@ -4718,6 +4770,28 @@ fn style_risk_tag(tag: crate::safety::confirm_view::RiskTag) -> String {
         RiskTag::RunsCommand | RiskTag::WritesWorkspace => label.yellow().to_string(),
         _ => label.bright_red().bold().to_string(),
     }
+}
+
+/// Feed `text` to the pager `argv` and wait for it to exit. `LESS=FRX` is
+/// set when the user has no `LESS` of their own (quit if one screen, keep
+/// colours, leave the diff on screen).
+fn run_pager(argv: &[String], text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let (program, args) = argv
+        .split_first()
+        .ok_or_else(|| std::io::Error::other("empty pager command"))?;
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args).stdin(std::process::Stdio::piped());
+    if std::env::var_os("LESS").is_none() {
+        cmd.env("LESS", "FRX");
+    }
+    let mut child = cmd.spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        // A pager quit early closes its stdin: not an error for us.
+        let _ = stdin.write_all(text.as_bytes());
+    }
+    child.wait()?;
+    Ok(())
 }
 
 /// Colour one rendered confirmation line for the CLI prompt.

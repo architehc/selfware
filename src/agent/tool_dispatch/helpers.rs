@@ -671,6 +671,8 @@ pub(crate) enum ConfirmDecision {
     /// prompt treats it as a skip otherwise.
     AllowShellRule,
     EnableYolo,
+    /// `v`: page the full diff, then ask again. Never an approval.
+    ViewFullDiff,
     Skip,
 }
 
@@ -680,8 +682,77 @@ pub(crate) fn parse_confirm_response(response: &str) -> ConfirmDecision {
         "a" | "always" => ConfirmDecision::AlwaysAllow,
         "p" | "prefix" => ConfirmDecision::AllowShellRule,
         "yolo" => ConfirmDecision::EnableYolo,
+        "v" | "view" => ConfirmDecision::ViewFullDiff,
         _ => ConfirmDecision::Skip,
     }
+}
+
+/// What the CLI prompt does with one answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfirmStep {
+    /// Show the full diff, then ask the same question again.
+    ShowFullDiff,
+    /// Act on the decision (it may still be a skip).
+    Decide(ConfirmDecision),
+}
+
+/// `v` re-prompts after showing the full diff when the prompt offered it;
+/// an un-offered `v` is a skip like any unknown answer (fail closed). `v`
+/// is never an approval.
+pub(crate) fn confirm_step(decision: ConfirmDecision, full_diff_offered: bool) -> ConfirmStep {
+    match decision {
+        ConfirmDecision::ViewFullDiff if full_diff_offered => ConfirmStep::ShowFullDiff,
+        ConfirmDecision::ViewFullDiff => ConfirmStep::Decide(ConfirmDecision::Skip),
+        other => ConfirmStep::Decide(other),
+    }
+}
+
+/// The CLI confirmation question: only the answers this prompt offers.
+pub(crate) fn confirm_prompt_text(
+    shell_rule: Option<&str>,
+    standing_answers: bool,
+    full_diff_offered: bool,
+) -> String {
+    let mut options = vec!["y = once".to_string()];
+    if standing_answers {
+        options.push("a = always allow this tool (session)".to_string());
+        if let Some(rule) = shell_rule {
+            options.push(format!("p = always allow {rule} (session)"));
+        }
+    }
+    if full_diff_offered {
+        options.push("v = view full diff".to_string());
+    }
+    options.push("N = skip".to_string());
+    if standing_answers {
+        options.push("type \"yolo\" to disable confirmations".to_string());
+    }
+    format!("Execute? [{}]: ", options.join(" / "))
+}
+
+/// The pager for the full diff: `$PAGER` (split like a shell would) when
+/// set, otherwise `less -R` (keeps the diff colours).
+pub(crate) fn pager_command(pager_env: Option<&str>) -> Vec<String> {
+    pager_env
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .and_then(|p| shlex::split(p).filter(|argv| !argv.is_empty()))
+        .unwrap_or_else(|| vec!["less".to_string(), "-R".to_string()])
+}
+
+/// Lines printed when the full diff cannot be paged (stdout not a TTY).
+pub(crate) const FULL_DIFF_PRINT_LINES: usize = 2_000;
+
+/// The first `max` of `lines`, plus a note naming how many were left out.
+pub(crate) fn bounded_lines(lines: &[String], max: usize) -> Vec<String> {
+    let mut out: Vec<String> = lines.iter().take(max).cloned().collect();
+    if lines.len() > max {
+        out.push(format!(
+            "… {} more lines not shown (output is not a terminal)",
+            lines.len() - max
+        ));
+    }
+    out
 }
 
 pub(crate) fn has_file_redirect(command: &str) -> bool {

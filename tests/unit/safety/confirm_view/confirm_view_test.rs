@@ -309,3 +309,72 @@ fn test_runners_and_interpreters_run_code_they_are_not_reads() {
         assert_eq!(classify_shell_risk(cmd), RiskTag::Reads, "{cmd}");
     }
 }
+
+// ── full diff (`v` at the prompt) ──
+
+#[test]
+fn full_diff_is_offered_only_when_the_body_was_truncated() {
+    let small = json!({"path": "a.rs", "old_str": "x\n", "new_str": "y\n"}).to_string();
+    let body = render_tool_call("file_edit", &small, None);
+    assert_eq!(full_diff_view("file_edit", &small, None, &body), None);
+
+    let new: String = (0..100).map(|i| format!("line {i}\n")).collect();
+    let big = json!({"path": "big.txt", "old_str": "", "new_str": new}).to_string();
+    let body = render_tool_call("file_edit", &big, None);
+    assert!(texts(&body).iter().any(|t| t.contains("more lines")));
+    let full = full_diff_view("file_edit", &big, None, &body).expect("more to see");
+    assert_eq!(kinds(&full, LineKind::Added), 100);
+    assert!(!texts(&full).iter().any(|t| t.contains("more line")));
+    assert_eq!(full[0].text, body[0].text, "same header");
+}
+
+#[test]
+fn full_diff_covers_writes_patches_and_long_lines_but_not_other_tools() {
+    let content: String = (0..60).map(|i| format!("l{i}\n")).collect();
+    let write = json!({"path": "n.txt", "content": content}).to_string();
+    let body = render_tool_call("file_write", &write, None);
+    let full = full_diff_view("file_write", &write, None, &body).unwrap();
+    assert_eq!(kinds(&full, LineKind::Added), 60);
+
+    let patch: String = std::iter::once("--- a/x\n+++ b/x\n@@ -1 +1,60 @@\n".to_string())
+        .chain((0..60).map(|i| format!("+p{i}\n")))
+        .collect();
+    let args = json!({ "diff": patch }).to_string();
+    let body = render_tool_call("patch_apply", &args, None);
+    let full = full_diff_view("patch_apply", &args, None, &body).unwrap();
+    assert_eq!(kinds(&full, LineKind::Added), 60);
+
+    // A line cut at the prompt's width is shown whole in the full diff.
+    let long = "z".repeat(500);
+    let args =
+        json!({"path": "a.rs", "old_str": "a\n", "new_str": format!("{long}\n")}).to_string();
+    let body = render_tool_call("file_edit", &args, None);
+    let full = full_diff_view("file_edit", &args, None, &body).unwrap();
+    assert!(texts(&full).iter().any(|t| t == &format!("+{long}")));
+
+    let shell = json!({"command": "ls"}).to_string();
+    let body = render_tool_call("shell_exec", &shell, None);
+    assert_eq!(full_diff_view("shell_exec", &shell, None, &body), None);
+}
+
+#[test]
+fn full_diff_is_sanitized_like_the_prompt() {
+    let new: String = (0..50).map(|i| format!("l{i}\x1b[2J\n")).collect();
+    let args = json!({"path": "a.rs", "old_str": "", "new_str": new}).to_string();
+    let body = render_tool_call("file_edit", &args, None);
+    let full = full_diff_view("file_edit", &args, None, &body).unwrap();
+    assert!(full.iter().all(|l| !l.text.contains('\x1b')));
+    assert!(texts(&full).iter().any(|t| t.contains("\\u{1b}[2J")));
+}
+
+#[test]
+fn full_view_scroll_is_clamped() {
+    let mut view = FullDiffView::new(vec![ConfirmLine::new(LineKind::Added, "+a"); 5]);
+    assert!(!view.open);
+    view.scroll_by(-3);
+    assert_eq!(view.scroll, 0);
+    view.scroll_by(3);
+    assert_eq!(view.scroll, 3);
+    view.scroll_by(isize::MAX);
+    assert_eq!(view.scroll, 4);
+}

@@ -20,6 +20,7 @@ fn prompt(
         body,
         allow_always: true,
         shell_rule: None,
+        full_view: None,
     }
 }
 
@@ -432,4 +433,36 @@ fn run_outcome_is_logged() {
         summary: "✅ Task completed\n── Run summary ──\noutcome: completed".to_string(),
     });
     assert_eq!(state.logs.len(), before + 3);
+}
+
+#[test]
+fn permission_overlay_offers_and_shows_the_full_diff() {
+    let new: String = (0..100).map(|i| format!("line {i}\n")).collect();
+    let args = serde_json::json!({"path": "big.txt", "old_str": "", "new_str": new}).to_string();
+    let body = crate::safety::confirm_view::render_tool_call("file_edit", &args, None);
+    let full = crate::safety::confirm_view::full_diff_view("file_edit", &args, None, &body)
+        .expect("truncated body");
+    let mut p = prompt("file_edit", "asks", body);
+    p.full_view = Some(crate::safety::confirm_view::FullDiffView::new(full));
+
+    let draw = |p: &crate::safety::confirm_view::PermissionPrompt| {
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal
+            .draw(|frame| render_permission_overlay(frame, frame.area(), p))
+            .unwrap();
+        all_rows(&terminal)
+    };
+    let closed = draw(&p);
+    assert!(closed.contains("[v] view full diff"), "{closed}");
+    assert!(closed.contains("[n/Esc] deny"));
+    assert!(!closed.contains("+line 60"));
+
+    let view = p.full_view.as_mut().unwrap();
+    view.open = true;
+    view.scroll = 60;
+    let open = draw(&p);
+    assert!(open.contains("Full diff — line 61 of"), "{open}");
+    assert!(open.contains("+line 60"));
+    assert!(open.contains("[v/Esc] back"));
+    assert!(open.contains("[n] deny") && !open.contains("[n/Esc] deny"));
 }

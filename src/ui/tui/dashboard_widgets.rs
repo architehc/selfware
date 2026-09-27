@@ -756,9 +756,27 @@ fn permission_modal_rows(
             }
         }
     }
-    if !prompt.body.is_empty() {
+    // The full diff (`v`) replaces the bounded body while it is open,
+    // from its scroll position on.
+    let open_view = prompt.full_view.as_ref().filter(|v| v.open);
+    let body: &[crate::safety::confirm_view::ConfirmLine] = match open_view {
+        Some(view) => &view.lines[view.scroll.min(view.lines.len())..],
+        None => &prompt.body,
+    };
+    if let Some(view) = open_view {
         top.push(Line::from(""));
-        for line in &prompt.body {
+        top.push(Line::from(Span::styled(
+            format!(
+                "Full diff — line {} of {}",
+                (view.scroll + 1).min(view.lines.len()),
+                view.lines.len()
+            ),
+            TuiPalette::muted_style(),
+        )));
+    }
+    if !body.is_empty() {
+        top.push(Line::from(""));
+        for line in body {
             for row in wrap_to_width(&line.text, width) {
                 top.push(Line::from(Span::styled(row, confirm_line_style(line.kind))));
             }
@@ -766,6 +784,19 @@ fn permission_modal_rows(
     }
 
     let mut footer: Vec<Line<'static>> = Vec::new();
+    match prompt.full_view.as_ref() {
+        Some(view) if view.open => footer.push(Line::from(vec![
+            Span::styled("[v/Esc]", key_style),
+            Span::raw(" back   "),
+            Span::styled("[↑↓ PgUp PgDn]", key_style),
+            Span::raw(" scroll"),
+        ])),
+        Some(_) => footer.push(Line::from(vec![
+            Span::styled("[v]", key_style),
+            Span::raw(" view full diff"),
+        ])),
+        None => {}
+    }
     if prompt.allow_always {
         let text = format!(" always allow {} (session)", prompt.tool_name);
         footer.push(Line::from(vec![
@@ -789,10 +820,16 @@ fn permission_modal_rows(
             }
         }
     }
+    // While the full diff is open, Esc closes it instead of denying.
+    let deny_keys = if open_view.is_some() {
+        "[n]"
+    } else {
+        "[n/Esc]"
+    };
     footer.push(Line::from(vec![
         Span::styled("[y]", key_style),
         Span::raw(" allow   "),
-        Span::styled("[n/Esc]", key_style),
+        Span::styled(deny_keys, key_style),
         Span::raw(" deny"),
     ]));
     (top, footer)

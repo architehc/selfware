@@ -33,6 +33,11 @@ const MAX_COMMAND_CHARS: usize = 2000;
 const NEW_FILE_PREVIEW_LINES: usize = 20;
 /// Unified-diff context lines around each change.
 const DIFF_CONTEXT_LINES: usize = 2;
+/// Upper bound on the lines of a full diff (`v` at the prompt) — a pager
+/// can page far more than a prompt shows, but not without limit.
+pub const FULL_VIEW_MAX_LINES: usize = 20_000;
+/// Characters per line in a full diff (lines are still sanitized).
+pub const FULL_VIEW_LINE_CHARS: usize = 2_000;
 
 /// What a rendered confirmation line represents (drives colouring).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +124,7 @@ fn push_text_diff(
     new: &str,
     out: &mut Vec<ConfirmLine>,
     budget: &mut usize,
+    line_chars: usize,
 ) -> (usize, usize, usize) {
     use similar::{ChangeTag, TextDiff};
     let diff = TextDiff::from_lines(old, new);
@@ -147,7 +153,7 @@ fn push_text_diff(
                 };
                 out.push(ConfirmLine::new(
                     kind,
-                    format!("{}{}", sign, sanitize_line(raw, MAX_LINE_CHARS)),
+                    format!("{}{}", sign, sanitize_line(raw, line_chars)),
                 ));
                 *budget -= 1;
             }
@@ -171,15 +177,37 @@ fn more_lines_note(hidden: usize) -> ConfirmLine {
     )
 }
 
-/// Render one or more `(path, old, new)` edits as a bounded unified diff.
-fn render_edits(edits: &[(String, String, String)]) -> Vec<ConfirmLine> {
+/// How much of a call a rendering shows: the prompt body, or the full diff.
+#[derive(Debug, Clone, Copy)]
+struct Limits {
+    body_lines: usize,
+    line_chars: usize,
+    new_file_lines: usize,
+}
+
+const PROMPT_LIMITS: Limits = Limits {
+    body_lines: MAX_BODY_LINES,
+    line_chars: MAX_LINE_CHARS,
+    new_file_lines: NEW_FILE_PREVIEW_LINES,
+};
+
+const FULL_LIMITS: Limits = Limits {
+    body_lines: FULL_VIEW_MAX_LINES,
+    line_chars: FULL_VIEW_LINE_CHARS,
+    new_file_lines: FULL_VIEW_MAX_LINES,
+};
+
+/// Render one or more `(path, old, new)` edits as a unified diff bounded by
+/// `limits`.
+fn render_edits_within(edits: &[(String, String, String)], limits: Limits) -> Vec<ConfirmLine> {
     let mut out = Vec::new();
-    let mut budget = MAX_BODY_LINES;
+    let mut budget = limits.body_lines;
     let mut hidden_total = 0usize;
     for (path, old, new) in edits {
         let header_idx = out.len();
         out.push(ConfirmLine::new(LineKind::Header, String::new()));
-        let (added, removed, hidden) = push_text_diff(old, new, &mut out, &mut budget);
+        let (added, removed, hidden) =
+            push_text_diff(old, new, &mut out, &mut budget, limits.line_chars);
         hidden_total += hidden;
         out[header_idx].text = format!(
             "{}  {}",
@@ -196,8 +224,20 @@ fn render_edits(edits: &[(String, String, String)]) -> Vec<ConfirmLine> {
 /// Render a `file_write`: a diff against `existing` when the file exists,
 /// otherwise the new file's line count and first lines.
 pub fn render_file_write(path: &str, content: &str, existing: Option<&str>) -> Vec<ConfirmLine> {
+    render_file_write_within(path, content, existing, PROMPT_LIMITS)
+}
+
+fn render_file_write_within(
+    path: &str,
+    content: &str,
+    existing: Option<&str>,
+    limits: Limits,
+) -> Vec<ConfirmLine> {
     if let Some(old) = existing {
-        let mut lines = render_edits(&[(path.to_string(), old.to_string(), content.to_string())]);
+        let mut lines = render_edits_within(
+            &[(path.to_string(), old.to_string(), content.to_string())],
+            limits,
+        );
         if let Some(first) = lines.first_mut() {
             first.text.push_str("  (overwrite)");
         }
@@ -213,20 +253,24 @@ pub fn render_file_write(path: &str, content: &str, existing: Option<&str>) -> V
             if total == 1 { "" } else { "s" }
         ),
     )];
-    for line in content.lines().take(NEW_FILE_PREVIEW_LINES) {
+    for line in content.lines().take(limits.new_file_lines) {
         out.push(ConfirmLine::new(
             LineKind::Added,
-            format!("+{}", sanitize_line(line, MAX_LINE_CHARS)),
+            format!("+{}", sanitize_line(line, limits.line_chars)),
         ));
     }
-    if total > NEW_FILE_PREVIEW_LINES {
-        out.push(more_lines_note(total - NEW_FILE_PREVIEW_LINES));
+    if total > limits.new_file_lines {
+        out.push(more_lines_note(total - limits.new_file_lines));
     }
     out
 }
 
 /// Render a unified diff (`patch_apply`) with per-file counts and the cap.
 pub fn render_patch(diff: &str) -> Vec<ConfirmLine> {
+    render_patch_within(diff, PROMPT_LIMITS)
+}
+
+fn render_patch_within(diff: &str, limits: Limits) -> Vec<ConfirmLine> {
     let mut added = 0usize;
     let mut removed = 0usize;
     let mut files = 0usize;
@@ -250,7 +294,7 @@ pub fn render_patch(diff: &str) -> Vec<ConfirmLine> {
         ),
     )];
     let total = diff.lines().count();
-    for line in diff.lines().take(MAX_BODY_LINES) {
+    for line in diff.lines().take(limits.body_lines) {
         let kind =
             if line.starts_with("+++") || line.starts_with("---") || line.starts_with("diff ") {
                 LineKind::Header
@@ -263,10 +307,13 @@ pub fn render_patch(diff: &str) -> Vec<ConfirmLine> {
             } else {
                 LineKind::Context
             };
-        out.push(ConfirmLine::new(kind, sanitize_line(line, MAX_LINE_CHARS)));
+        out.push(ConfirmLine::new(
+            kind,
+            sanitize_line(line, limits.line_chars),
+        ));
     }
-    if total > MAX_BODY_LINES {
-        out.push(more_lines_note(total - MAX_BODY_LINES));
+    if total > limits.body_lines {
+        out.push(more_lines_note(total - limits.body_lines));
     }
     out
 }
@@ -365,6 +412,9 @@ pub fn render_tool_call(
     args_str: &str,
     existing_file: Option<&str>,
 ) -> Vec<ConfirmLine> {
+    if let Some(lines) = render_diff_within(tool_name, args_str, existing_file, PROMPT_LIMITS) {
+        return lines;
+    }
     let args: Value = match serde_json::from_str(args_str) {
         Ok(v @ Value::Object(_)) => v,
         _ => {
@@ -374,6 +424,22 @@ pub fn render_tool_call(
             ]
         }
     };
+    render_fields(tool_name, &args)
+}
+
+/// The diff view of a file-changing call (`file_edit`, `file_multi_edit`,
+/// `file_write`, `patch_apply`) within `limits`; `None` for other tools or
+/// arguments that do not describe a diff.
+fn render_diff_within(
+    tool_name: &str,
+    args_str: &str,
+    existing_file: Option<&str>,
+    limits: Limits,
+) -> Option<Vec<ConfirmLine>> {
+    let args: Value = match serde_json::from_str(args_str) {
+        Ok(v @ Value::Object(_)) => v,
+        _ => return None,
+    };
     match tool_name {
         "file_edit" => {
             if let (Some(path), Some(old), Some(new)) = (
@@ -381,7 +447,10 @@ pub fn render_tool_call(
                 str_arg(&args, &["old_str", "old_string"]),
                 str_arg(&args, &["new_str", "new_string"]),
             ) {
-                return render_edits(&[(path.to_string(), old.to_string(), new.to_string())]);
+                return Some(render_edits_within(
+                    &[(path.to_string(), old.to_string(), new.to_string())],
+                    limits,
+                ));
             }
         }
         "file_multi_edit" => {
@@ -397,23 +466,42 @@ pub fn render_tool_call(
                     })
                     .collect();
                 if let Some(edits) = edits.filter(|e| !e.is_empty()) {
-                    return render_edits(&edits);
+                    return Some(render_edits_within(&edits, limits));
                 }
             }
         }
         "file_write" => {
             if let (Some(path), Some(content)) = (path_arg(&args), str_arg(&args, &["content"])) {
-                return render_file_write(path, content, existing_file);
+                return Some(render_file_write_within(
+                    path,
+                    content,
+                    existing_file,
+                    limits,
+                ));
             }
         }
         "patch_apply" => {
             if let Some(diff) = str_arg(&args, &["diff"]) {
-                return render_patch(diff);
+                return Some(render_patch_within(diff, limits));
             }
         }
         _ => {}
     }
-    render_fields(tool_name, &args)
+    None
+}
+
+/// The full diff of a file-changing call for the prompt's `v` (view full
+/// diff) answer — bounded by [`FULL_VIEW_MAX_LINES`] /
+/// [`FULL_VIEW_LINE_CHARS`] and sanitized like the prompt body. `None` when
+/// the call is not a diff, or when `shown` (the prompt body) already shows
+/// all of it: `v` is offered only when there is more to see.
+pub fn full_diff_view(
+    tool_name: &str,
+    args_str: &str,
+    existing_file: Option<&str>,
+    shown: &[ConfirmLine],
+) -> Option<Vec<ConfirmLine>> {
+    render_diff_within(tool_name, args_str, existing_file, FULL_LIMITS).filter(|full| full != shown)
 }
 
 /// The `file_write` target whose current content the prompt should diff
@@ -448,6 +536,37 @@ pub struct PermissionPrompt {
     /// The offered session shell rule, described (e.g. "commands starting
     /// with `cargo test`"), if any.
     pub shell_rule: Option<String>,
+    /// The full diff behind a truncated `body` (`v` = view full diff), when
+    /// there is more to see. Viewing it never answers the prompt.
+    pub full_view: Option<FullDiffView>,
+}
+
+/// The full diff a prompt can show on `v`, and whether it is open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FullDiffView {
+    /// The full diff ([`full_diff_view`]).
+    pub lines: Vec<ConfirmLine>,
+    /// Whether the full diff replaces the bounded body right now.
+    pub open: bool,
+    /// First shown line of `lines` while open.
+    pub scroll: usize,
+}
+
+impl FullDiffView {
+    /// A closed view of `lines`.
+    pub fn new(lines: Vec<ConfirmLine>) -> Self {
+        Self {
+            lines,
+            open: false,
+            scroll: 0,
+        }
+    }
+
+    /// Scroll by `delta` lines, clamped to the diff.
+    pub fn scroll_by(&mut self, delta: isize) {
+        let max = self.lines.len().saturating_sub(1);
+        self.scroll = self.scroll.saturating_add_signed(delta).min(max);
+    }
 }
 
 impl PermissionPrompt {
