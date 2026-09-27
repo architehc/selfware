@@ -86,6 +86,7 @@ def event_metrics(events):
     steps = set()
     max_prompt_tokens = 0
     citation_corrections = 0
+    completion_tokens = llm_ms = 0
     for ev in events:
         kind = ev.get("event") or ev.get("type")
         if kind == "step_started":
@@ -97,6 +98,9 @@ def event_metrics(events):
         elif kind == "llm_request_sent":
             llm_calls += 1
             max_prompt_tokens = max(max_prompt_tokens, int(ev.get("prompt_tokens") or 0))
+        elif kind == "llm_response_received":
+            completion_tokens += int(ev.get("completion_tokens") or 0)
+            llm_ms += int(ev.get("elapsed_ms") or 0)
         elif kind == "text_delta":
             text_deltas += 1
         elif kind == "turn_decision":
@@ -120,6 +124,10 @@ def event_metrics(events):
         "llm_calls": llm_calls,
         "text_deltas": text_deltas,
         "max_prompt_tokens": max_prompt_tokens,
+        # Completion tokens per second of model call time: the endpoint-load
+        # indicator (it includes queueing and prefill, so it drops under load).
+        "llm_secs": round(llm_ms / 1000, 1),
+        "decode_tok_s": round(completion_tokens / (llm_ms / 1000), 1) if llm_ms else None,
         "decisions": decisions,
         "no_tool_call_turns": decisions.get("no_tool_call", 0),
         "nudges": nudges,

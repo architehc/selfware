@@ -477,6 +477,25 @@ def compress_capped(src, dest):
     Path(src).unlink(missing_ok=True)
 
 
+CHECKPOINT_CAP = 20 * 1024 * 1024
+
+
+def keep_checkpoint(home, run_dir):
+    """Keep the run's checkpoint (the conversation as the model saw it:
+    messages with tool results, tool calls) gzipped next to the record.
+
+    Turn artifacts are off by default and enabling them would change the
+    tracked config under test, so the checkpoint is the evidence of what the
+    model read. Kept whole (a capped JSON is unreadable) up to 20 MB.
+    """
+    for path in sorted(Path(home, ".selfware", "checkpoints").glob("*.json")):
+        if path.stat().st_size > CHECKPOINT_CAP:
+            (run_dir / "checkpoint.skipped").write_text(f"{path.name}: {path.stat().st_size} bytes\n")
+            continue
+        with open(path, "rb") as src, gzip.open(run_dir / "checkpoint.json.gz", "wb") as dst:
+            shutil.copyfileobj(src, dst)
+
+
 def append_record(results_dir, record):
     path = Path(results_dir) / "results.jsonl"
     line = json.dumps(record, sort_keys=True) + "\n"
@@ -667,6 +686,7 @@ def run_scenario(spec, binary, results_dir, abandon=None, endpoint_override=None
         pass
     compress_capped(out_path, run_dir / "events.jsonl.gz")
     compress_capped(err_path, run_dir / "transcript.txt.gz")
+    keep_checkpoint(home, run_dir)
     shutil.rmtree(scratch, ignore_errors=True)
 
     if info["abandoned"]:

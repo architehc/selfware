@@ -125,6 +125,7 @@ class StreamParsingTest(unittest.TestCase):
         stdout = events(
             {"event": "step_started", "step": 1},
             {"event": "llm_request_sent", "prompt_tokens": 4567},
+            {"event": "llm_response_received", "completion_tokens": 100, "elapsed_ms": 4000},
             {"event": "tool_call_started", "tool": "file_read"},
             {"event": "tool_call_completed", "tool": "file_read", "ok": False},
             {"event": "turn_decision", "decision": "nudge_injected", "detail": "keep going"},
@@ -141,6 +142,7 @@ class StreamParsingTest(unittest.TestCase):
         self.assertEqual(m["event_turns"], 2)
         self.assertEqual(m["tool_failures"], 1)
         self.assertEqual(m["max_prompt_tokens"], 4567)
+        self.assertEqual((m["llm_secs"], m["decode_tok_s"]), (4.0, 25.0))
         self.assertEqual((m["nudges"], m["refusals"], m["gate_blocks"]), (1, 1, 1))
         self.assertEqual(m["no_tool_call_turns"], 1)
         self.assertEqual(m["interventions"], 3)
@@ -282,6 +284,15 @@ class RegressionTest(unittest.TestCase):
         text = " ".join(rep["regressions"])
         self.assertIn("wall_p50", text)
         self.assertIn("recall_mean", text)
+
+    def test_wrong_citations_only_count_runs_that_cite(self):
+        base = [rec("s", "A", "fail", f"2026-01-01T00:0{i}", citations_total=0, citations_wrong=0)
+                for i in range(3)]
+        cand = [rec("s", "B", "fail", f"2026-01-02T00:0{i}", citations_total=44, citations_wrong=3)
+                for i in range(3)]
+        rep = report.build_report(base + cand, self.th)
+        self.assertEqual(rep["regressions"], [])
+        self.assertIsNone(rep["scenarios"]["s"]["baseline_stats"]["citations_wrong_mean"])
 
     def test_no_regression_when_equal(self):
         records = [rec("s", c, "pass", f"2026-01-0{d}T00:0{i}", wall_s=100)

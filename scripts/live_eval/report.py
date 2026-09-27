@@ -95,6 +95,13 @@ def summarize(records):
     def metric(name):
         return [r["metrics"].get(name) for r in ran if r["metrics"].get(name) is not None]
 
+    # Wrong citations only mean something where the run produced checkable
+    # citations: a run that wrote nothing has 0 wrong and must not make a
+    # later run that cites (and gets 3 of 44 wrong) look like a regression
+    # (0.9.3 vs fix-094 c24 A/B, 2026-09-27).
+    citing = [r for r in ran if (r["metrics"].get("citations_total") or 0) > 0]
+    wrong_citing = [r["metrics"].get("citations_wrong") for r in citing]
+
     n = len(graded)
     failed = {}
     for r in graded:
@@ -116,11 +123,13 @@ def summarize(records):
         "wall_p50": percentile(metric("wall_s"), 50),
         "wall_p90": percentile(metric("wall_s"), 90),
         "tokens_p50": percentile(metric("total_tokens"), 50),
+        "decode_tok_s_p50": percentile(metric("decode_tok_s"), 50),
         "turns_p50": percentile(metric("num_turns"), 50),
         "coverage_mean": mean(metric("coverage_percent")),
         "recall_mean": mean(metric("planted_recall")),
         "false_findings_mean": mean(metric("false_findings")),
-        "citations_wrong_mean": mean(metric("citations_wrong")),
+        "citations_wrong_mean": mean(wrong_citing),
+        "runs_with_citations": len(citing),
         "citations_verified_mean": mean(metric("citations_verified")),
         "intervention_rate_mean": mean(metric("intervention_rate")),
         "interventions_mean": mean(metric("interventions")),
@@ -266,7 +275,8 @@ def render(report):
         )
         lines.append(
             f"   wall p50/p90 {_fmt(cs['wall_p50'])}/{_fmt(cs['wall_p90'])} s  "
-            f"tokens p50 {_fmt(cs['tokens_p50'])}  turns p50 {_fmt(cs['turns_p50'])}"
+            f"tokens p50 {_fmt(cs['tokens_p50'])}  turns p50 {_fmt(cs['turns_p50'])}  "
+            f"endpoint tok/s p50 {_fmt(cs['decode_tok_s_p50'])}"
         )
         lines.append(
             f"   coverage {_fmt(cs['coverage_mean'])}%  recall {_fmt(cs['recall_mean'])}  "
