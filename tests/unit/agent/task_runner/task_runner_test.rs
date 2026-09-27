@@ -4965,3 +4965,69 @@ async fn finalize_rechecks_a_stale_post_edit_pass_before_classifying() {
         );
     }
 }
+
+/// The consecutive recovery counter resets on every successful step, so an
+/// error → success → error … pattern was bounded only by max_iterations.
+/// The lifetime cap stops it, and the stop reason names the lifetime cap.
+#[test]
+fn error_recovery_lifetime_cap_stops_an_interleaved_error_success_pattern() {
+    let mut budget = ErrorRecoveryBudget::default();
+    let mut entries = 0u32;
+    let reason = loop {
+        entries += 1;
+        if let Some(reason) = budget.enter("boom") {
+            break reason;
+        }
+        budget.note_progress();
+        assert!(entries < 1_000, "the interleaved pattern must be bounded");
+    };
+    assert_eq!(entries, MAX_RUN_ERROR_RECOVERIES);
+    assert_eq!(budget.consecutive(), 1, "each error followed a success");
+    assert!(
+        reason.starts_with(ERROR_RECOVERY_EXHAUSTED_MARKER),
+        "{reason}"
+    );
+    assert!(reason.contains("lifetime error-recovery cap"), "{reason}");
+    assert!(
+        reason.contains(&format!("cap {MAX_RUN_ERROR_RECOVERIES}")),
+        "{reason}"
+    );
+    assert!(
+        reason.ends_with(": boom"),
+        "the last error is kept: {reason}"
+    );
+}
+
+/// The consecutive cap still fires first for back-to-back errors, and names
+/// itself.
+#[test]
+fn error_recovery_consecutive_cap_is_kept() {
+    let mut budget = ErrorRecoveryBudget::default();
+    for _ in 1..MAX_CONSECUTIVE_ERROR_RECOVERIES {
+        assert_eq!(budget.enter("boom"), None);
+    }
+    let reason = budget.enter("boom").expect("the consecutive cap trips");
+    assert!(
+        reason.starts_with(ERROR_RECOVERY_EXHAUSTED_MARKER),
+        "{reason}"
+    );
+    assert!(
+        reason.contains(&format!(
+            "after {MAX_CONSECUTIVE_ERROR_RECOVERIES} consecutive attempts"
+        )),
+        "{reason}"
+    );
+    const { assert!(MAX_RUN_ERROR_RECOVERIES > MAX_CONSECUTIVE_ERROR_RECOVERIES) };
+}
+
+/// A run with scattered transient errors below the lifetime cap is not
+/// stopped: the lifetime cap only bounds the pathological pattern.
+#[test]
+fn error_recovery_below_the_lifetime_cap_is_not_stopped() {
+    let mut budget = ErrorRecoveryBudget::default();
+    for _ in 1..MAX_RUN_ERROR_RECOVERIES {
+        assert_eq!(budget.enter("transient"), None);
+        budget.note_progress();
+    }
+    assert_eq!(budget.lifetime(), MAX_RUN_ERROR_RECOVERIES - 1);
+}

@@ -265,6 +265,73 @@ pub(super) fn is_fatal_loop_error(error: &anyhow::Error) -> bool {
 /// each retry is a billable request the provider rejects.
 pub(super) const MAX_CONSECUTIVE_CONTEXT_OVERFLOW_RECOVERIES: u32 = 3;
 
+/// Error-recovery entries allowed IN A ROW (no successful step between
+/// them) before the run fails. Ungated hard backstop, independent of the
+/// resilience feature and of the per-branch recovery paths.
+pub(super) const MAX_CONSECUTIVE_ERROR_RECOVERIES: u32 = 12;
+
+/// Error-recovery entries allowed over the WHOLE run of the execution loop
+/// (a task, or one resume of it), successes in between notwithstanding.
+///
+/// The consecutive counter resets on every successful step, so an
+/// error → success → error → … pattern never reached it and was bounded only
+/// by `max_iterations` (400 by default): each recovery is a billable
+/// re-send. Three times the consecutive cap leaves room for a long run with
+/// scattered transient errors while stopping a run that fails every other
+/// step.
+pub(super) const MAX_RUN_ERROR_RECOVERIES: u32 = 3 * MAX_CONSECUTIVE_ERROR_RECOVERIES;
+
+/// Stop-reason marker for an exhausted error-recovery budget (either cap);
+/// `FailureMode::classify` keys `FailureKind::RecoveryExhausted` on it
+/// instead of misfiling the stop as MAX_ITERATIONS (or as TIMEOUT when the
+/// embedded error text mentions a timeout).
+pub(crate) const ERROR_RECOVERY_EXHAUSTED_MARKER: &str = "ERROR_RECOVERY_EXHAUSTED";
+
+/// The two error-recovery bounds of one execution-loop run: consecutive
+/// entries (reset by a successful step) and lifetime entries (never reset).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ErrorRecoveryBudget {
+    consecutive: u32,
+    lifetime: u32,
+}
+
+impl ErrorRecoveryBudget {
+    /// Count one entry into `ErrorRecovery`. `Some(reason)` when a cap is
+    /// reached: the typed stop reason (carrying
+    /// [`ERROR_RECOVERY_EXHAUSTED_MARKER`]) names WHICH cap tripped.
+    pub(super) fn enter(&mut self, error: &str) -> Option<String> {
+        self.consecutive += 1;
+        self.lifetime += 1;
+        if self.consecutive >= MAX_CONSECUTIVE_ERROR_RECOVERIES {
+            return Some(format!(
+                "{ERROR_RECOVERY_EXHAUSTED_MARKER}: Error recovery exhausted after {} consecutive attempts: {error}",
+                self.consecutive
+            ));
+        }
+        if self.lifetime >= MAX_RUN_ERROR_RECOVERIES {
+            return Some(format!(
+                "{ERROR_RECOVERY_EXHAUSTED_MARKER}: lifetime error-recovery cap reached ({} recoveries this run, cap {MAX_RUN_ERROR_RECOVERIES}; successful steps in between do not reset it): {error}",
+                self.lifetime
+            ));
+        }
+        None
+    }
+
+    /// A step succeeded: the consecutive count restarts, the lifetime count
+    /// does not.
+    pub(super) fn note_progress(&mut self) {
+        self.consecutive = 0;
+    }
+
+    pub(super) fn consecutive(&self) -> u32 {
+        self.consecutive
+    }
+
+    pub(super) fn lifetime(&self) -> u32 {
+        self.lifetime
+    }
+}
+
 /// The error text carried into `AgentState::ErrorRecovery`.
 ///
 /// `ErrorRecovery` routes on this string, but `anyhow`'s `Display` shows only
@@ -1910,12 +1977,13 @@ impl Agent {
         #[cfg(feature = "resilience")]
         let mut recovery_attempts = 0u32;
         // Ungated hard backstop: count error-recovery entries between successful
-        // tool continuations. Independent of the resilience feature and of the
-        // per-branch recovery paths (context-overflow / visual / generic), so a
-        // recurring error that keeps returning to Executing terminates instead of
-        // burning the entire max_iterations budget.
-        let mut consecutive_error_recoveries = 0u32;
-        const MAX_CONSECUTIVE_ERROR_RECOVERIES: u32 = 12;
+        // tool continuations (consecutive cap) AND over the whole run (lifetime
+        // cap — see MAX_RUN_ERROR_RECOVERIES). Independent of the resilience
+        // feature and of the per-branch recovery paths (context-overflow /
+        // visual / generic), so a recurring error that keeps returning to
+        // Executing terminates instead of burning the entire max_iterations
+        // budget — also when successful steps interleave with it.
+        let mut error_recoveries = ErrorRecoveryBudget::default();
         // Tighter bound for context-overflow compress-and-retry: see
         // MAX_CONSECUTIVE_CONTEXT_OVERFLOW_RECOVERIES. Reset with the generic
         // counter on every successful continuation.
@@ -2307,7 +2375,7 @@ impl Agent {
                                 recovery_attempts = 0;
                                 self.reset_self_healing_retry();
                             }
-                            consecutive_error_recoveries = 0;
+                            error_recoveries.note_progress();
                             consecutive_context_overflow_recoveries = 0;
                             self.rigor_mode = false;
                             self.rigor_directive_injected = false;
@@ -2540,7 +2608,7 @@ impl Agent {
                                 recovery_attempts = 0;
                                 self.reset_self_healing_retry();
                             }
-                            consecutive_error_recoveries = 0;
+                            error_recoveries.note_progress();
                             consecutive_context_overflow_recoveries = 0;
                             self.rigor_mode = false;
                             self.rigor_directive_injected = false;
@@ -2655,23 +2723,20 @@ impl Agent {
                         progress.begin_phase("Recovery");
                     }
 
-                    // Hard terminal for recurring errors (any recovery branch).
-                    consecutive_error_recoveries += 1;
-                    if consecutive_error_recoveries >= MAX_CONSECUTIVE_ERROR_RECOVERIES {
+                    // Hard terminal for recurring errors (any recovery branch):
+                    // the consecutive cap, and the lifetime cap that successful
+                    // steps in between do not reset.
+                    if let Some(reason) = error_recoveries.enter(&error) {
                         warn!(
-                            "Error recovery exhausted: {} consecutive recoveries with no successful progress — failing task",
-                            consecutive_error_recoveries
+                            "Error recovery exhausted ({} consecutive, {} this run) — failing task",
+                            error_recoveries.consecutive(),
+                            error_recoveries.lifetime()
                         );
                         record_state_transition("ErrorRecovery", "Failed");
                         if let Some(ref mut checkpoint) = self.current_checkpoint {
                             checkpoint.log_error(0, error.to_string(), false);
                         }
-                        self.set_loop_state(AgentState::Failed {
-                            reason: format!(
-                                "Error recovery exhausted after {} consecutive attempts: {}",
-                                consecutive_error_recoveries, error
-                            ),
-                        })?;
+                        self.set_loop_state(AgentState::Failed { reason })?;
                         continue;
                     }
 
@@ -2707,7 +2772,7 @@ impl Agent {
                     // When auto_recovery is enabled, classify the error and
                     // walk the offline-first resolution tree.  If a resolver
                     // produces a concrete RecoveryAction, apply it and retry.
-                    // This sits BETWEEN the consecutive_error_recoveries
+                    // This sits BETWEEN the error_recoveries
                     // terminal and the existing nudge/advice logic so the
                     // terminal guard still fires at MAX.
                     #[cfg(feature = "resilience")]

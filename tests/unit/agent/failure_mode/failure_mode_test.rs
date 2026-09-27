@@ -974,3 +974,35 @@ fn uncited_unrequested_answer_renders_an_info_banner_not_a_warning() {
     assert!(!mode.is_clean_success(), "not a clean ✅ either");
     assert!(mode.kind.is_nonfailure());
 }
+
+// ── error-recovery budget stops (lifetime cap, 0.9.3) ──
+
+#[tokio::test]
+async fn error_recovery_exhaustion_is_typed_not_max_iterations_or_timeout() {
+    let mut agent = make_agent().await;
+    agent.test_set_mutating_count(2);
+    let mut budget = crate::agent::task_runner::ErrorRecoveryBudget::default();
+    // Error → success → error …: only the lifetime cap can stop it. The
+    // recovered error mentions a timeout, which must not misfile the stop.
+    let reason = loop {
+        if let Some(reason) = budget.enter("request timeout after 300s") {
+            break reason;
+        }
+        budget.note_progress();
+    };
+    let mode = FailureMode::classify(&agent, RunOutcome::Failed { reason });
+    assert_eq!(mode.kind, FailureKind::RecoveryExhausted, "{mode:?}");
+    assert_eq!(mode.kind.tag(), "RECOVERY_EXHAUSTED");
+    assert!(
+        mode.evidence.contains("lifetime error-recovery cap"),
+        "{}",
+        mode.evidence
+    );
+    assert!(
+        mode.advice.contains("do NOT raise max_iterations"),
+        "{}",
+        mode.advice
+    );
+    assert!(!mode.kind.is_nonfailure());
+    assert!(mode.cli_banner().contains("RECOVERY_EXHAUSTED"));
+}

@@ -87,6 +87,13 @@ pub enum FailureKind {
     /// changed nothing keep `NoChange` (their deliverable is the report), with
     /// the failed verification named in the evidence and banner.
     VerificationFailed,
+    /// The run stopped because its error-recovery budget ran out: either
+    /// the consecutive cap (no successful step between recoveries) or the
+    /// lifetime cap (recoveries over the whole run, successes in between
+    /// notwithstanding). The stop reason names which. Distinct from
+    /// `MaxIterations`: more iterations would only buy more failing
+    /// re-sends — the recurring error's cause must be fixed.
+    RecoveryExhausted,
     /// Outcome could not be classified from available signals.
     Unknown,
 }
@@ -142,6 +149,7 @@ impl FailureKind {
             FailureKind::FakeComplete => "FAKE_COMPLETE",
             FailureKind::RequiredEditMissing => "NO_CHANGES_REQUIRED_EDIT",
             FailureKind::VerificationFailed => "VERIFICATION_FAILED",
+            FailureKind::RecoveryExhausted => "RECOVERY_EXHAUSTED",
             FailureKind::Unknown => "UNKNOWN",
         }
     }
@@ -331,6 +339,23 @@ impl FailureMode {
                 // BEFORE the counter fallback (which otherwise misfiles them as
                 // MaxIterations with the exact-wrong "raise max_iterations" advice
                 // even though the ceiling was never approached — FAIL-MISLABEL-MAXITER).
+                // Error-recovery budget exhausted (consecutive or lifetime
+                // cap). Matched before every other marker: the reason embeds
+                // the last recovered error's text, which may itself mention a
+                // timeout or a budget and would otherwise misfile the stop.
+                if reason.contains(super::task_runner::ERROR_RECOVERY_EXHAUSTED_MARKER) {
+                    return FailureMode {
+                        restored_files: Vec::new(),
+                        kind: FailureKind::RecoveryExhausted,
+                        evidence: format!(
+                            "stopped: {} ({} tool calls executed, {} mutating)",
+                            truncate(&reason, 400),
+                            total_calls,
+                            mutating
+                        ),
+                        advice: "the same kind of error kept recurring — read the recovered errors in the log and fix their cause (provider, tool, environment); do NOT raise max_iterations".to_string(),
+                    };
+                }
                 if reason.contains("FAKE_COMPLETE_LOOP") {
                     return FailureMode {
                         restored_files: Vec::new(),
