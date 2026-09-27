@@ -373,6 +373,10 @@ protected_branches = ["main"]
 [agent]
 max_iterations = 100
 step_timeout_secs = 600         # 10 min per step
+# Hard run budgets — all UNSET by default (see "Run bounds" below):
+# max_wall_secs = 3600          # stop after 1 h wall clock   (--max-wall-secs)
+# max_budget_tokens = 2000000   # stop past 2M total tokens   (--max-budget-tokens)
+# max_cost_usd = 5.0            # stop past $5 reported cost  (--max-cost-usd)
 
 [continuous_work]
 enabled = true
@@ -384,6 +388,16 @@ max_retries = 5
 base_delay_ms = 1000
 max_delay_ms = 60000
 ```
+
+> **Run bounds:** by default a task is bounded only by `[agent] max_iterations`
+> (400 when unset, plus the adaptive extension): the wall-clock
+> (`max_wall_secs`), token (`max_budget_tokens`) and cost (`max_cost_usd`)
+> budgets are unset unless you configure them or pass `--max-wall-secs`,
+> `--max-budget-tokens`, `--max-cost-usd`. A value of `0` means unset. With
+> `--verbose`, or when a run hits the iteration cap, the run summary prints the
+> bounds that were in force, e.g. `bounds: iterations 400 · no wall/token/cost
+> budget set`. A separate per-call cap, `agent.max_call_secs`, fails one stuck
+> model call (also unset by default).
 
 > **Repo trust:** privileged sections in a checkout-local `selfware.toml` — `[safety]` path lists, `[hooks]`, `[mcp]`, `[agent] post_edit_test_command`, `[yolo]` — only take effect after you run `selfware trust` in that directory; untrusted checkouts run with the built-in safety defaults (`selfware init` trusts the config it writes automatically).
 

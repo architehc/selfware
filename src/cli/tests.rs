@@ -1242,6 +1242,8 @@ fn sample_summary() -> crate::agent::RunSummary {
         requirements_audit: None,
         grounding: None,
         context_summaries_disabled_after: None,
+        budgets: crate::agent::RunBudgets::default(),
+        hit_iteration_cap: false,
     }
 }
 
@@ -2900,4 +2902,68 @@ fn parses_the_lifecycle_views() {
         other => panic!("unexpected {other:?}"),
     }
     assert!(Cli::try_parse_from(["selfware", "task", "show"]).is_err());
+}
+
+// ── run bounds line (0.9.3): the iteration cap is the only default bound ──
+
+#[test]
+fn run_bounds_line_names_the_unset_budgets_in_verbose() {
+    let summary = sample_summary();
+    assert_eq!(
+        run_bounds_line(&summary, true).as_deref(),
+        Some("bounds: iterations 30 · no wall/token/cost budget set")
+    );
+}
+
+#[test]
+fn run_bounds_line_is_hidden_by_default_unless_the_cap_was_hit() {
+    let mut summary = sample_summary();
+    assert_eq!(run_bounds_line(&summary, false), None);
+    summary.iterations = 30;
+    summary.hit_iteration_cap = true;
+    assert_eq!(
+        run_bounds_line(&summary, false).as_deref(),
+        Some("bounds: iterations 30 · no wall/token/cost budget set")
+    );
+    let rendered = render_run_summary(&summary, Some("Max iterations exceeded"));
+    assert!(
+        rendered.contains("bounds: iterations 30 · no wall/token/cost budget set"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn run_bounds_line_lists_configured_budgets() {
+    let mut summary = sample_summary();
+    summary.budgets = crate::agent::RunBudgets {
+        max_budget_tokens: Some(500_000),
+        max_wall_secs: Some(1800),
+        max_cost_usd: None,
+    };
+    assert_eq!(
+        run_bounds_line(&summary, true).as_deref(),
+        Some("bounds: iterations 30 · wall 1800s · tokens 500000 · no cost budget set")
+    );
+    summary.budgets.max_cost_usd = Some(2.5);
+    assert_eq!(
+        run_bounds_line(&summary, true).as_deref(),
+        Some("bounds: iterations 30 · wall 1800s · tokens 500000 · cost $2.50")
+    );
+}
+
+#[test]
+fn run_budgets_treat_zero_as_unset_like_the_enforcer() {
+    let mut agent = crate::config::AgentConfig::default();
+    assert_eq!(
+        crate::agent::RunBudgets::from_config(&agent),
+        crate::agent::RunBudgets::default(),
+        "no token/wall/cost budget is configured by default"
+    );
+    agent.max_budget_tokens = Some(0);
+    agent.max_wall_secs = Some(0);
+    agent.max_cost_usd = Some(0.0);
+    assert_eq!(
+        crate::agent::RunBudgets::from_config(&agent),
+        crate::agent::RunBudgets::default()
+    );
 }

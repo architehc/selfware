@@ -7147,6 +7147,9 @@ fn render_run_summary_for(
         "iterations: {}/{}{} · turns: {}",
         summary.iterations, summary.max_iterations, extension_note, summary.turns
     ));
+    if let Some(bounds) = run_bounds_line(summary, crate::output::is_verbose()) {
+        lines.push(bounds);
+    }
     if summary.files_changed.is_empty() {
         lines.push("files changed: none".to_string());
     } else {
@@ -7272,6 +7275,37 @@ fn render_run_summary_for(
         ));
     }
     lines.join("\n")
+}
+
+/// The run's active bounds, e.g. `bounds: iterations 400 · no wall/token/cost
+/// budget set`. Token, wall-clock and cost budgets default to unset, so by
+/// default a task is bounded only by its iteration cap; the summary says so
+/// instead of leaving it implied. Shown in `--verbose` and whenever the run
+/// hit the iteration cap (when the bound decided the outcome); `None`
+/// otherwise. The defaults are unchanged — that is a maintainer decision.
+fn run_bounds_line(summary: &crate::agent::RunSummary, verbose: bool) -> Option<String> {
+    if !verbose && !summary.hit_iteration_cap {
+        return None;
+    }
+    let budgets = &summary.budgets;
+    let mut parts = vec![format!("iterations {}", summary.max_iterations)];
+    let mut unset: Vec<&str> = Vec::new();
+    match budgets.max_wall_secs {
+        Some(secs) => parts.push(format!("wall {secs}s")),
+        None => unset.push("wall"),
+    }
+    match budgets.max_budget_tokens {
+        Some(tokens) => parts.push(format!("tokens {tokens}")),
+        None => unset.push("token"),
+    }
+    match budgets.max_cost_usd {
+        Some(cost) => parts.push(format!("cost ${cost:.2}")),
+        None => unset.push("cost"),
+    }
+    if !unset.is_empty() {
+        parts.push(format!("no {} budget set", unset.join("/")));
+    }
+    Some(format!("bounds: {}", parts.join(" · ")))
 }
 
 fn take_prefix_chars(input: &str, max_chars: usize) -> String {

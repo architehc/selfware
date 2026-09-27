@@ -562,6 +562,32 @@ pub struct RunSummary {
     /// Failed summary calls after which context summaries were disabled
     /// for the rest of the task; `None` when they were not disabled.
     pub context_summaries_disabled_after: Option<usize>,
+    /// The hard budgets this run was held to (`[agent] max_budget_tokens`,
+    /// `max_wall_secs`, `max_cost_usd`); all `None` by default, when the
+    /// iteration cap is the only bound.
+    pub budgets: RunBudgets,
+    /// The loop counter reached the (possibly extended) iteration cap.
+    pub hit_iteration_cap: bool,
+}
+
+/// The hard run budgets in force, as configured (`None` = not set; a
+/// configured `0` is treated as unset, exactly as `enforce_hard_budgets`
+/// treats it).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RunBudgets {
+    pub max_budget_tokens: Option<usize>,
+    pub max_wall_secs: Option<u64>,
+    pub max_cost_usd: Option<f64>,
+}
+
+impl RunBudgets {
+    pub(crate) fn from_config(agent: &crate::config::AgentConfig) -> Self {
+        Self {
+            max_budget_tokens: agent.max_budget_tokens.filter(|&b| b > 0),
+            max_wall_secs: agent.max_wall_secs.filter(|&s| s > 0),
+            max_cost_usd: agent.max_cost_usd.filter(|&c| c > 0.0),
+        }
+    }
 }
 
 impl Agent {
@@ -598,6 +624,9 @@ impl Agent {
                 .compressor
                 .summaries_disabled()
                 .then(|| self.compressor.summary_failures()),
+            budgets: RunBudgets::from_config(&self.config.agent),
+            hit_iteration_cap: self.loop_control.current_iteration()
+                >= self.loop_control.max_iterations(),
         }
     }
 

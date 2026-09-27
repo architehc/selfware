@@ -135,7 +135,7 @@ pub mod tui_events;
 pub mod turn_artifacts;
 pub(crate) mod verification_scope;
 
-pub use task_runner::{RequirementsAuditStatus, RunSummary};
+pub use task_runner::{RequirementsAuditStatus, RunBudgets, RunSummary};
 mod verification;
 
 use crate::errors::{is_confirmation_error, is_no_action_error};
