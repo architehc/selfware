@@ -4926,9 +4926,7 @@ async fn handle_command(
 
                                 let mut executor =
                                     WorkflowExecutor::new_dry_run_with_config(&config.safety);
-                                for workflow in lowered.workflows {
-                                    executor.register(workflow);
-                                }
+                                lowered.register_into(&mut executor);
 
                                 let working_dir = std::env::current_dir()?;
                                 let result = executor
@@ -4974,9 +4972,7 @@ async fn handle_command(
 
                                 let mut executor =
                                     WorkflowExecutor::new_with_config(&config.safety);
-                                for workflow in lowered.workflows {
-                                    executor.register(workflow);
-                                }
+                                lowered.register_into(&mut executor);
 
                                 let client =
                                     std::sync::Arc::new(crate::api::ApiClient::new(&config)?);
@@ -5002,9 +4998,14 @@ async fn handle_command(
                                 if matches!(result.status, crate::workflows::WorkflowStatus::Failed)
                                 {
                                     anyhow::bail!(
-                                        "workflow '{}' failed after {}ms",
+                                        "workflow '{}' failed after {}ms{}",
                                         workflow_name,
-                                        result.duration_ms
+                                        result.duration_ms,
+                                        result
+                                            .stop_reason
+                                            .as_ref()
+                                            .map(|reason| format!(" — stopped: {reason}"))
+                                            .unwrap_or_default()
                                     );
                                 }
 
@@ -5115,6 +5116,13 @@ async fn handle_command(
                                         Glyphs::fallen_leaf(),
                                         result.duration_ms
                                     );
+                                    if let Some(reason) = &result.stop_reason {
+                                        println!(
+                                            "   {} Stopped: {}",
+                                            Glyphs::fallen_leaf(),
+                                            reason
+                                        );
+                                    }
                                 }
                                 other => {
                                     println!(

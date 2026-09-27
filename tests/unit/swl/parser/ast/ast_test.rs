@@ -173,6 +173,7 @@ fn swl_document_with_agents_and_workflows_round_trip() {
             map: None,
             reduce: None,
             merge: None,
+            budget: Default::default(),
         },
     );
 
@@ -347,6 +348,7 @@ fn workflow_definition_with_steps_round_trip() {
         map: None,
         reduce: None,
         merge: None,
+        budget: Default::default(),
     };
     let yaml = serde_yaml::to_string(&wf).unwrap();
     let back: WorkflowDefinition = serde_yaml::from_str(&yaml).unwrap();
@@ -369,6 +371,7 @@ fn workflow_definition_map_reduce_with_reduce_code_round_trip() {
             code: "fn main() {}".to_string(),
         })),
         merge: None,
+        budget: Default::default(),
     };
     let yaml = serde_yaml::to_string(&wf).unwrap();
     let back: WorkflowDefinition = serde_yaml::from_str(&yaml).unwrap();
@@ -396,6 +399,7 @@ fn workflow_definition_map_reduce_with_merge_aggregate_round_trip() {
             instruction: None,
             inputs: vec![],
         }),
+        budget: Default::default(),
     };
     let yaml = serde_yaml::to_string(&wf).unwrap();
     let back: WorkflowDefinition = serde_yaml::from_str(&yaml).unwrap();

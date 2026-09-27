@@ -114,6 +114,7 @@ fn test_select_reduce_agent_honors_declared_agent() {
             },
         )),
         merge: None,
+        budget: Default::default(),
     };
 
     assert_eq!(
@@ -135,6 +136,7 @@ fn test_select_reduce_agent_code_falls_back_to_last_agent() {
             code: "true".to_string(),
         })),
         merge: None,
+        budget: Default::default(),
     };
 
     // BTreeMap ordering: "reducer" > "mapper"
@@ -154,6 +156,7 @@ fn test_select_reduce_agent_none_without_reduce_stage() {
         map: None,
         reduce: None,
         merge: None,
+        budget: Default::default(),
     };
 
     assert_eq!(select_reduce_agent(&workflow, &doc), None);

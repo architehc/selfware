@@ -43,6 +43,7 @@ fn test_workflow_result_helpers() {
         logs: VecDeque::new(),
         duration_ms: 1000,
         telemetry: WorkflowTelemetry::default(),
+        stop_reason: None,
     };
 
     assert!(result.is_success());
@@ -295,6 +296,7 @@ fn test_workflow_result_is_success() {
         logs: VecDeque::new(),
         duration_ms: 1000,
         telemetry: WorkflowTelemetry::default(),
+        stop_reason: None,
     };
 
     assert!(result.is_success());
@@ -310,6 +312,7 @@ fn test_workflow_result_is_not_success() {
         logs: VecDeque::new(),
         duration_ms: 1000,
         telemetry: WorkflowTelemetry::default(),
+        stop_reason: None,
     };
 
     assert!(!result.is_success());
@@ -328,6 +331,7 @@ fn test_workflow_result_get_output() {
         logs: VecDeque::new(),
         duration_ms: 0,
         telemetry: WorkflowTelemetry::default(),
+        stop_reason: None,
     };
 
     assert!(result.get_output("key").is_some());
@@ -368,6 +372,7 @@ fn test_workflow_result_failed_steps() {
         logs: VecDeque::new(),
         duration_ms: 150,
         telemetry: WorkflowTelemetry::default(),
+        stop_reason: None,
     };
 
     let failed = result.failed_steps();
@@ -704,6 +709,7 @@ fn test_workflow_result_multiple_failed_steps() {
         logs: VecDeque::new(),
         duration_ms: 60,
         telemetry: WorkflowTelemetry::default(),
+        stop_reason: None,
     };
     let failed = result.failed_steps();
     assert_eq!(failed.len(), 2);

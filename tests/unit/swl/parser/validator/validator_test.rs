@@ -36,6 +36,7 @@ fn valid_doc() -> SwlDocument {
                 code: "fn merge() {}".to_string(),
             })),
             merge: None,
+            budget: Default::default(),
         },
     );
 

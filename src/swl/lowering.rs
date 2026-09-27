@@ -4,8 +4,8 @@ use crate::swl::parser::ast::{
     SwlDocument, WorkflowDefinition, WorkflowStep as SwlWorkflowStep, WorkflowType,
 };
 use crate::workflows::{
-    LogLevel, RetryConfig, StepType, VarValue, Workflow, WorkflowInput, WorkflowOutput,
-    WorkflowStep,
+    LogLevel, RetryConfig, StepType, VarValue, Workflow, WorkflowBudget, WorkflowExecutor,
+    WorkflowInput, WorkflowOutput, WorkflowStep,
 };
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -15,21 +15,40 @@ use std::sync::OnceLock;
 pub struct LoweredSwl {
     pub workflows: Vec<Workflow>,
     pub warnings: Vec<String>,
+    /// Declared run budgets, by workflow name (unbounded ones omitted).
+    pub budgets: Vec<(String, WorkflowBudget)>,
+}
+
+impl LoweredSwl {
+    /// Register every lowered workflow, with its budget, on `executor`.
+    pub fn register_into(self, executor: &mut WorkflowExecutor) {
+        for (name, budget) in self.budgets {
+            executor.set_budget(name, budget);
+        }
+        for workflow in self.workflows {
+            executor.register(workflow);
+        }
+    }
 }
 
 pub fn lower_document(doc: &SwlDocument) -> Result<LoweredSwl> {
     let mut lowered = Vec::new();
     let mut warnings = Vec::new();
+    let mut budgets = Vec::new();
 
     for (name, workflow) in &doc.workflows {
         let mut ctx = LoweringContext::new(doc, name, workflow);
         lowered.push(ctx.lower_workflow()?);
         warnings.extend(ctx.warnings);
+        if !workflow.budget.is_unbounded() {
+            budgets.push((name.clone(), workflow.budget));
+        }
     }
 
     Ok(LoweredSwl {
         workflows: lowered,
         warnings,
+        budgets,
     })
 }
 

@@ -88,6 +88,10 @@ pub struct WorkflowDefinition {
     pub reduce: Option<ReduceStage>,
     #[serde(default)]
     pub merge: Option<AggregateStage>,
+    /// Run budget (`max_wall_secs`, `max_tokens`) declared inline on the
+    /// workflow; carried through lowering to the executor.
+    #[serde(flatten, default)]
+    pub budget: crate::workflows::WorkflowBudget,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

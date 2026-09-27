@@ -36,6 +36,8 @@ use std::time::{Duration, Instant};
 use tokio::process::Command;
 mod templates;
 #[cfg(test)]
+mod test_budget;
+#[cfg(test)]
 mod test_context;
 #[cfg(test)]
 mod test_execution;
@@ -520,6 +522,115 @@ pub struct WorkflowTelemetry {
     pub completed_steps: u64,
     pub failed_steps: u64,
     pub skipped_steps: u64,
+    /// LLM calls whose handler reported no token usage. Their tokens are
+    /// NOT in the totals above, so a `max_tokens` budget cannot see them;
+    /// this count keeps that gap visible instead of silently under-billing.
+    #[serde(default)]
+    pub unmetered_llm_calls: u64,
+}
+
+impl WorkflowTelemetry {
+    /// Measured tokens: the reported total, or prompt + completion when a
+    /// provider left the total at 0.
+    pub fn measured_tokens(&self) -> u64 {
+        self.total_tokens
+            .max(self.prompt_tokens.saturating_add(self.completion_tokens))
+    }
+
+    /// Fold a sub-workflow's LLM usage into this (parent) telemetry so a
+    /// parent budget and report cover the tokens its sub-workflows spent.
+    /// Step counts are not merged: they are recomputed from the parent's
+    /// own step results.
+    fn absorb_llm_usage(&mut self, other: &WorkflowTelemetry) {
+        self.llm_calls += other.llm_calls;
+        self.llm_latency_ms += other.llm_latency_ms;
+        self.prompt_tokens += other.prompt_tokens;
+        self.completion_tokens += other.completion_tokens;
+        self.total_tokens += other.total_tokens;
+        self.estimated_cost_usd += other.estimated_cost_usd;
+        self.unmetered_llm_calls += other.unmetered_llm_calls;
+    }
+}
+
+/// Workflow-level resource budget, checked between top-level steps and
+/// between `until` passes.
+///
+/// Declared at the top level of a workflow YAML (`max_wall_secs:`,
+/// `max_tokens:`) or an SWL workflow definition. Tokens are the MEASURED
+/// usage the LLM handler reported (`WorkflowTelemetry::measured_tokens`,
+/// AGENTS.md §4) — calls that reported no usage are counted in
+/// `unmetered_llm_calls` and named in the stop reason, never guessed.
+/// The check runs between steps, so one long step can overshoot the
+/// limit; the next step then does not start.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowBudget {
+    /// Wall-clock limit for the run, in seconds.
+    #[serde(default)]
+    pub max_wall_secs: Option<u64>,
+    /// Measured-token limit for the run (all LLM steps, sub-workflows
+    /// included).
+    #[serde(default)]
+    pub max_tokens: Option<u64>,
+}
+
+impl WorkflowBudget {
+    /// True when no limit is set.
+    pub fn is_unbounded(&self) -> bool {
+        self.max_wall_secs.is_none() && self.max_tokens.is_none()
+    }
+
+    /// The stop reason if the run has used up this budget.
+    pub fn exceeded(
+        &self,
+        elapsed_ms: u64,
+        telemetry: &WorkflowTelemetry,
+    ) -> Option<WorkflowStopReason> {
+        if let Some(max_wall_secs) = self.max_wall_secs {
+            if elapsed_ms >= max_wall_secs.saturating_mul(1000) {
+                return Some(WorkflowStopReason::WallClockBudget {
+                    max_wall_secs,
+                    elapsed_ms,
+                });
+            }
+        }
+        if let Some(max_tokens) = self.max_tokens {
+            let used_tokens = telemetry.measured_tokens();
+            if used_tokens >= max_tokens {
+                return Some(WorkflowStopReason::TokenBudget {
+                    max_tokens,
+                    used_tokens,
+                    unmetered_llm_calls: telemetry.unmetered_llm_calls,
+                });
+            }
+        }
+        None
+    }
+}
+
+/// Why a workflow stopped before running all of its steps.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkflowStopReason {
+    /// `max_wall_secs` was reached.
+    #[error("wall-clock budget exhausted: {elapsed_ms}ms elapsed, max_wall_secs={max_wall_secs}")]
+    WallClockBudget {
+        /// The configured limit.
+        max_wall_secs: u64,
+        /// Elapsed run time when the check fired.
+        elapsed_ms: u64,
+    },
+    /// `max_tokens` was reached.
+    #[error(
+        "token budget exhausted: {used_tokens} measured tokens used, max_tokens={max_tokens} ({unmetered_llm_calls} LLM call(s) reported no usage and are not counted)"
+    )]
+    TokenBudget {
+        /// The configured limit.
+        max_tokens: u64,
+        /// Measured tokens used when the check fired.
+        used_tokens: u64,
+        /// LLM calls whose usage was unknown (not in `used_tokens`).
+        unmetered_llm_calls: u64,
+    },
 }
 
 /// Maximum recursion depth for nested step execution
@@ -591,6 +702,10 @@ pub struct WorkflowContext {
     /// Step executions so far in this run, shared with sub-workflows so
     /// [`MAX_STEP_EXECUTIONS`] bounds the whole run.
     pub step_executions: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Resource budget of the running workflow
+    pub budget: WorkflowBudget,
+    /// Set when the run stopped early on a budget
+    pub stop_reason: Option<WorkflowStopReason>,
 }
 
 /// Log entry
@@ -620,6 +735,8 @@ impl WorkflowContext {
             workflow_call_stack: Vec::new(),
             telemetry: WorkflowTelemetry::default(),
             step_executions: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            budget: WorkflowBudget::default(),
+            stop_reason: None,
         }
     }
 
@@ -951,6 +1068,11 @@ impl WorkflowContext {
             .unwrap_or(0)
     }
 
+    /// The stop reason if the running workflow has used up its budget.
+    pub fn budget_exceeded(&self) -> Option<WorkflowStopReason> {
+        self.budget.exceeded(self.elapsed_ms(), &self.telemetry)
+    }
+
     fn record_llm_call(&mut self, output: &LlmCallOutput, latency_ms: u64) {
         self.telemetry.llm_calls += 1;
         self.telemetry.llm_latency_ms += latency_ms;
@@ -962,6 +1084,10 @@ impl WorkflowContext {
         self.telemetry.estimated_cost_usd += output
             .estimated_cost_usd
             .unwrap_or_else(|| estimate_llm_cost_usd(usage.prompt_tokens, usage.completion_tokens));
+
+        if output.usage.is_none() {
+            self.telemetry.unmetered_llm_calls += 1;
+        }
 
         if usage.total_tokens > 0 {
             add_tokens_processed(usage.total_tokens);
@@ -1080,6 +1206,8 @@ pub struct WorkflowExecutor {
     dry_run: bool,
     /// Safety checker for validating shell commands before execution
     safety_checker: crate::safety::SafetyChecker,
+    /// Per-workflow resource budgets (by workflow name)
+    budgets: HashMap<String, WorkflowBudget>,
 }
 
 impl WorkflowExecutor {
@@ -1093,6 +1221,7 @@ impl WorkflowExecutor {
             safety_checker: crate::safety::SafetyChecker::new(
                 &crate::config::SafetyConfig::default(),
             ),
+            budgets: HashMap::new(),
         }
     }
 
@@ -1106,6 +1235,7 @@ impl WorkflowExecutor {
             safety_checker: crate::safety::SafetyChecker::new(
                 &crate::config::SafetyConfig::default(),
             ),
+            budgets: HashMap::new(),
         }
     }
 
@@ -1117,6 +1247,7 @@ impl WorkflowExecutor {
             llm_handler: None,
             dry_run: false,
             safety_checker: crate::safety::SafetyChecker::new(safety_config),
+            budgets: HashMap::new(),
         }
     }
 
@@ -1174,10 +1305,30 @@ impl WorkflowExecutor {
         self.workflows.insert(workflow.name.clone(), workflow);
     }
 
-    /// Load workflow from YAML string
+    /// Set (or, with an unbounded budget, clear) the resource budget of the
+    /// workflow named `name`.
+    pub fn set_budget(&mut self, name: impl Into<String>, budget: WorkflowBudget) {
+        let name = name.into();
+        if budget.is_unbounded() {
+            self.budgets.remove(&name);
+        } else {
+            self.budgets.insert(name, budget);
+        }
+    }
+
+    /// The resource budget of the workflow named `name`.
+    pub fn budget(&self, name: &str) -> WorkflowBudget {
+        self.budgets.get(name).copied().unwrap_or_default()
+    }
+
+    /// Load workflow from YAML string (including its top-level
+    /// `max_wall_secs` / `max_tokens` budget, if any).
     pub fn load_yaml(&mut self, yaml: &str) -> Result<()> {
         let workflow: Workflow = serde_yaml::from_str(yaml)
             .map_err(|e| anyhow!("Failed to parse workflow YAML: {}", e))?;
+        let budget: WorkflowBudget = serde_yaml::from_str(yaml)
+            .map_err(|e| anyhow!("Failed to parse workflow budget: {}", e))?;
+        self.set_budget(workflow.name.clone(), budget);
         self.register(workflow);
         Ok(())
     }
@@ -1263,6 +1414,7 @@ impl WorkflowExecutor {
         let mut current_stack = call_stack;
         current_stack.push(name.to_string());
         context.workflow_call_stack = current_stack;
+        context.budget = self.budget(name);
 
         // Set input variables
         for (key, value) in inputs {
@@ -1323,6 +1475,23 @@ impl WorkflowExecutor {
         // Execute steps
         'step_loop: for (idx, step) in workflow.steps.iter().enumerate() {
             context.current_step = idx;
+
+            // Budget check between steps: stop before starting a step the
+            // run can no longer afford; results so far are kept.
+            if let Some(reason) = context
+                .stop_reason
+                .clone()
+                .or_else(|| context.budget_exceeded())
+            {
+                context.status = WorkflowStatus::Failed;
+                context.log(
+                    LogLevel::Error,
+                    format!("Workflow stopped before step '{}': {}", step.id, reason),
+                    Some(step.id.clone()),
+                );
+                context.stop_reason = Some(reason);
+                break 'step_loop;
+            }
 
             // Skip steps that were already executed inline by control-flow (condition/loop)
             if context.control_flow_managed_steps.contains(&step.id) {
@@ -1436,7 +1605,7 @@ impl WorkflowExecutor {
                         s.required && s.id == key.split('@').next().unwrap_or(key.as_str())
                     })
             });
-            context.status = if required_step_failed {
+            context.status = if required_step_failed || context.stop_reason.is_some() {
                 WorkflowStatus::Failed
             } else {
                 WorkflowStatus::Completed
@@ -1449,6 +1618,17 @@ impl WorkflowExecutor {
             if let Some(value) = context.get_var(&output.from) {
                 outputs.insert(output.name.clone(), value.clone());
             }
+        }
+
+        if context.budget.max_tokens.is_some() && context.telemetry.unmetered_llm_calls > 0 {
+            context.log(
+                LogLevel::Warn,
+                format!(
+                    "max_tokens budget covered only metered calls: {} LLM call(s) reported no token usage",
+                    context.telemetry.unmetered_llm_calls
+                ),
+                None,
+            );
         }
 
         let duration_ms = context.elapsed_ms();
@@ -1480,6 +1660,7 @@ impl WorkflowExecutor {
             logs: context.logs,
             duration_ms,
             telemetry,
+            stop_reason: context.stop_reason,
         })
     }
 
@@ -2263,6 +2444,10 @@ impl WorkflowExecutor {
                     ))
                     .await?;
 
+                    // The parent's telemetry (and so its token budget)
+                    // covers what the sub-workflow spent.
+                    context.telemetry.absorb_llm_usage(&sub_result.telemetry);
+
                     // Merge sub-workflow outputs into current context
                     for (key, value) in &sub_result.outputs {
                         context.set_var(key, value.clone());
@@ -2561,6 +2746,20 @@ impl WorkflowExecutor {
                     "until: condition met after {pass} pass(es)"
                 )));
             }
+
+            // Budget check between passes: a fix loop must not outrun the
+            // workflow's wall-clock or token budget.
+            if pass < cap {
+                if let Some(reason) = context.budget_exceeded() {
+                    context.log(
+                        LogLevel::Error,
+                        format!("Until loop stopped after pass {pass}: {reason}"),
+                        None,
+                    );
+                    context.stop_reason = Some(reason.clone());
+                    return Err(reason.into());
+                }
+            }
         }
 
         match on_exhausted {
@@ -2608,6 +2807,9 @@ pub struct WorkflowResult {
     pub duration_ms: u64,
     /// Aggregated workflow telemetry
     pub telemetry: WorkflowTelemetry,
+    /// Why the run stopped early (budget), when it did. Partial results are
+    /// still in `step_results` / `outputs`.
+    pub stop_reason: Option<WorkflowStopReason>,
 }
 
 impl WorkflowResult {
