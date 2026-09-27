@@ -16,7 +16,7 @@
 use super::context::session_owner;
 use super::driver::{Probe, ResourceDriver};
 use super::registry::ResourceRegistry;
-use super::{Resource, ResourceEvent, ResourceState};
+use super::{Resource, ResourceEvent, ResourceHandle, ResourceState};
 use crate::lifecycle::Effect;
 use std::time::Duration;
 
@@ -223,6 +223,30 @@ async fn drain_tracked(
             return false;
         }
     }
+    // A container_run registered before its id was known (the run was
+    // cancelled or timed out first): find it by its selfware.run label.
+    let resolved;
+    let resource = match resolve_pending_container(registry, driver, resource).await {
+        PendingContainer::NotPending => resource,
+        PendingContainer::Resolved(r) => {
+            resolved = *r;
+            &resolved
+        }
+        PendingContainer::NoContainer(note) => {
+            let _ = registry.transition(id, ResourceEvent::Stopped, &note, Some(note.clone()));
+            return false;
+        }
+        PendingContainer::LookupFailed(note) => {
+            return registry
+                .transition(
+                    id,
+                    ResourceEvent::Abandon,
+                    &format!("teardown: {note}"),
+                    Some(note),
+                )
+                .is_ok_and(|effects| effects.contains(&Effect::LeakAlarm));
+        }
+    };
     let (event, note) = drain_one(driver, resource, policy).await;
     let cause = match (&event, &note) {
         (ResourceEvent::Stopped, _) => "teardown: confirmed gone".to_string(),
@@ -232,6 +256,57 @@ async fn drain_tracked(
     registry
         .transition(id, event, &cause, note)
         .is_ok_and(|effects| effects.contains(&Effect::LeakAlarm))
+}
+
+/// Outcome of resolving a container entry registered before its id was known.
+enum PendingContainer {
+    /// Not such an entry (id known, or not a container).
+    NotPending,
+    /// Found: the registry handle now carries the id.
+    Resolved(Box<Resource>),
+    /// The runtime answered and no container carries the run label.
+    NoContainer(String),
+    /// The runtime could not be asked.
+    LookupFailed(String),
+}
+
+async fn resolve_pending_container(
+    registry: &ResourceRegistry,
+    driver: &dyn ResourceDriver,
+    resource: &Resource,
+) -> PendingContainer {
+    let ResourceHandle::Container {
+        runtime,
+        id,
+        task_label,
+        run_label: Some(run),
+    } = &resource.handle
+    else {
+        return PendingContainer::NotPending;
+    };
+    if !id.is_empty() {
+        return PendingContainer::NotPending;
+    }
+    match driver.container_by_run_label(runtime, run).await {
+        Ok(Some(found)) => {
+            let handle = ResourceHandle::Container {
+                runtime: runtime.clone(),
+                id: found,
+                task_label: task_label.clone(),
+                run_label: Some(run.clone()),
+            };
+            registry.set_handle(&resource.id, handle.clone());
+            let mut updated = resource.clone();
+            updated.handle = handle;
+            PendingContainer::Resolved(Box::new(updated))
+        }
+        Ok(None) => PendingContainer::NoContainer(format!(
+            "teardown: no container carries selfware.run={run} (never created, or already removed)"
+        )),
+        Err(e) => PendingContainer::LookupFailed(format!(
+            "container run {run} was cancelled before its id was read, and looking it up by label failed: {e:#}"
+        )),
+    }
 }
 
 /// Drive the host side of a drain for a resource already in `draining` and

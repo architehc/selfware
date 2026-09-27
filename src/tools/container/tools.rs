@@ -244,6 +244,11 @@ impl Tool for ContainerRun {
         // even for foreground runs.
         let (owner_task, _) = crate::resources::context::current_owner();
         cmd.args(crate::resources::context::container_label_args());
+        // A per-run label: the registry entry is written BEFORE the runtime
+        // is spawned, and a run cancelled or timed out before its id could be
+        // read is found by this label at teardown.
+        let run_label = uuid::Uuid::new_v4().simple().to_string();
+        cmd.arg("--label").arg(format!("selfware.run={run_label}"));
         let cid_dir = tempfile::tempdir().context("create cidfile directory")?;
         let cid_file = cid_dir.path().join("cid");
         cmd.arg("--cidfile").arg(&cid_file);
@@ -322,34 +327,73 @@ impl Tool for ContainerRun {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
+        // Record the container as `starting` before anything is spawned: if
+        // this future is dropped (Ctrl-C cancel, tool timeout) the docker CLI
+        // is killed but the container lives on in the daemon, and it must
+        // still be drained at task end (session end outside a task).
+        use crate::resources::{
+            NewResource, ResourceEvent, ResourceHandle, ResourceKind, ResourceRegistry,
+            ResourceState,
+        };
+        let registry = ResourceRegistry::global();
+        let runtime_name = runtime.command().to_string();
+        let mut entry = NewResource::new(
+            ResourceKind::Container,
+            ResourceHandle::Container {
+                runtime: runtime_name.clone(),
+                id: String::new(),
+                task_label: owner_task.clone(),
+                run_label: Some(run_label.clone()),
+            },
+            match args.get("name").and_then(|v| v.as_str()) {
+                Some(name) => format!("{image} {name}"),
+                None => image.to_string(),
+            },
+        );
+        entry.state = ResourceState::Starting;
+        let entry_id = registry.register(entry);
+
+        // A spawn/wait error leaves the `starting` entry: teardown looks the
+        // container up by its run label and releases the entry if none exists.
         let output = cmd
             .output_grouped()
             .await
             .context("Failed to run container")?;
 
-        // Record the container unless it already removed itself (a
-        // foreground --rm run that returned). A failed start still leaves a
-        // created container behind, so the cidfile — not the exit code —
-        // decides.
+        // Settle the entry. A failed start still leaves a created container
+        // behind, so the cidfile — not the exit code — decides.
         let full_id = std::fs::read_to_string(&cid_file)
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
         let removed_itself = auto_remove && !detach;
         if !full_id.is_empty() && !removed_itself {
-            use crate::resources::{NewResource, ResourceHandle, ResourceKind, ResourceRegistry};
-            let label = match args.get("name").and_then(|v| v.as_str()) {
-                Some(name) => format!("{image} {name}"),
-                None => image.to_string(),
-            };
-            ResourceRegistry::global().register(NewResource::new(
-                ResourceKind::Container,
+            registry.set_handle(
+                &entry_id,
                 ResourceHandle::Container {
-                    runtime: runtime.command().to_string(),
+                    runtime: runtime_name,
                     id: full_id,
                     task_label: owner_task,
+                    run_label: Some(run_label),
                 },
-                label,
-            ));
+            );
+            let _ = registry.transition(
+                &entry_id,
+                ResourceEvent::Ready,
+                "container_run: container created",
+                None,
+            );
+        } else {
+            let cause = if removed_itself {
+                "container_run: foreground --rm run returned; the container removed itself"
+            } else {
+                "container_run: no container was created (no cidfile written)"
+            };
+            if registry
+                .transition(&entry_id, ResourceEvent::Drain, cause, None)
+                .is_ok()
+            {
+                let _ = registry.transition(&entry_id, ResourceEvent::Stopped, cause, None);
+            }
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -1347,27 +1391,85 @@ impl Tool for ComposeUp {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let output =
-            tokio::time::timeout(std::time::Duration::from_secs(300), cmd.output_grouped())
-                .await
-                .context("Compose up timed out")?
-                .context("Failed to run compose up")?;
-
         // Record the project so task teardown runs `compose down` for it.
         // (Compose has no CLI flag to label its containers; the registry
-        // entry is the ownership record.)
+        // entry is the ownership record.) It is recorded as `starting` BEFORE
+        // compose is spawned: a timed-out or cancelled `up` (the compose
+        // process group is killed) can already have started services, and
+        // they must still be taken down at task end.
+        use crate::resources::{
+            NewResource, ResourceEvent, ResourceHandle, ResourceKind, ResourceRegistry,
+            ResourceState,
+        };
+        let registry = ResourceRegistry::global();
+        let dir = compose_project_dir(path);
+        let mut entry = NewResource::new(
+            ResourceKind::Container,
+            ResourceHandle::Compose {
+                runtime: runtime.command().to_string(),
+                dir: dir.clone(),
+                file: args.get("file").and_then(|v| v.as_str()).map(String::from),
+            },
+            format!("compose project {}", dir.display()),
+        );
+        entry.state = ResourceState::Starting;
+        let entry_id = registry.register(entry);
+
+        const COMPOSE_UP_TIMEOUT_SECS: u64 = 300;
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(COMPOSE_UP_TIMEOUT_SECS),
+            cmd.output_grouped(),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "compose up timed out after {COMPOSE_UP_TIMEOUT_SECS}s; the compose processes \
+                 were killed, but some services may already be running. The project is \
+                 recorded and `compose down` runs for it when the task ends — check \
+                 `docker compose ps` in {}",
+                dir.display()
+            )
+        })?
+        .context("Failed to run compose up")?;
+
         if output.status.success() {
-            use crate::resources::{NewResource, ResourceHandle, ResourceKind, ResourceRegistry};
-            let dir = compose_project_dir(path);
-            ResourceRegistry::global().register(NewResource::new(
-                ResourceKind::Container,
-                ResourceHandle::Compose {
-                    runtime: runtime.command().to_string(),
-                    dir: dir.clone(),
-                    file: args.get("file").and_then(|v| v.as_str()).map(String::from),
-                },
-                format!("compose project {}", dir.display()),
-            ));
+            let _ = registry.transition(
+                &entry_id,
+                ResourceEvent::Ready,
+                "compose_up: up finished",
+                None,
+            );
+        } else {
+            // A failed `up` can still have started some services: keep the
+            // entry only when `compose ps` shows something running. Nothing
+            // running (or no project compose can read) releases it, so a bad
+            // compose file is not reported as a leak at task end.
+            use crate::resources::ResourceDriver;
+            let running = match registry.get(&entry_id) {
+                Some(resource) => matches!(
+                    crate::resources::SystemDriver::default()
+                        .probe(&resource)
+                        .await,
+                    crate::resources::Probe::Running
+                ),
+                None => false,
+            };
+            if running {
+                let _ = registry.transition(
+                    &entry_id,
+                    ResourceEvent::Ready,
+                    "compose_up: up failed but some services are running",
+                    None,
+                );
+            } else {
+                let cause = "compose_up: up failed and no service is running";
+                if registry
+                    .transition(&entry_id, ResourceEvent::Drain, cause, None)
+                    .is_ok()
+                {
+                    let _ = registry.transition(&entry_id, ResourceEvent::Stopped, cause, None);
+                }
+            }
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();

@@ -152,6 +152,7 @@ async fn a_registered_container_is_not_double_listed_from_labels() {
                 runtime: "docker".into(),
                 id: "abcdef0123456789".into(),
                 task_label: "t".into(),
+                run_label: None,
             },
             "nginx",
         ),

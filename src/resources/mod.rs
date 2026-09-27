@@ -56,6 +56,13 @@ pub enum ResourceHandle {
         /// The `selfware.task` label the container was started with; a drain
         /// only acts on a container that still carries it.
         task_label: String,
+        /// The unique `selfware.run=<value>` label `container_run` starts the
+        /// container with. The entry is registered BEFORE the runtime is
+        /// spawned, with an empty `id`: a run cancelled or timed out before
+        /// its id was read is still recorded, and teardown resolves the id
+        /// from this label ([`crate::resources::ResourceDriver::container_by_run_label`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_label: Option<String>,
     },
     /// A compose project started with `compose up` in `dir`.
     Compose {
@@ -90,6 +97,16 @@ impl ResourceHandle {
     /// Short human description (`container 3f2a1b9c0d11`, `pid 4242`).
     pub fn short(&self) -> String {
         match self {
+            ResourceHandle::Container {
+                id,
+                run_label: Some(run),
+                ..
+            } if id.is_empty() => {
+                format!(
+                    "container run {} (id not yet known)",
+                    run.chars().take(12).collect::<String>()
+                )
+            }
             ResourceHandle::Container { id, .. } => {
                 format!("container {}", id.chars().take(12).collect::<String>())
             }

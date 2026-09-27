@@ -29,6 +29,10 @@ pub struct FakeDriver {
     pub containers: Vec<LabelledContainer>,
     pub dead_sessions: HashSet<String>,
     pub containers_error: Option<String>,
+    /// `selfware.run` label -> container id, for `container_by_run_label`.
+    pub run_labels: Mutex<HashMap<String, String>>,
+    /// When set, `container_by_run_label` fails with this error.
+    pub run_lookup_error: Option<String>,
 }
 
 /// The key a resource is scripted by: its handle's short form.
@@ -117,6 +121,21 @@ impl ResourceDriver for FakeDriver {
             anyhow::bail!(e.clone());
         }
         Ok(self.containers.clone())
+    }
+
+    async fn container_by_run_label(
+        &self,
+        runtime: &str,
+        run_label: &str,
+    ) -> anyhow::Result<Option<String>> {
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("lookup:{runtime}:{run_label}"));
+        if let Some(e) = &self.run_lookup_error {
+            anyhow::bail!(e.clone());
+        }
+        Ok(self.run_labels.lock().unwrap().get(run_label).cloned())
     }
 
     fn session_alive(&self, session: &SessionRecord) -> bool {

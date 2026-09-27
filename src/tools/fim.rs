@@ -330,7 +330,14 @@ impl Tool for FileFimEdit {
         }
 
         let final_content = preserve_line_endings(&new_content, line_ending);
-        fs::write(path, &final_content).await?;
+        // Atomic temp+rename with the parent re-validated, like the other
+        // file tools: a cancel/timeout mid-write must not leave a torn file.
+        crate::tools::file::write_atomic_checked(
+            std::path::Path::new(path),
+            &final_content,
+            &safety,
+        )
+        .await?;
         clear_file_snapshot(path);
 
         Ok(serde_json::json!({

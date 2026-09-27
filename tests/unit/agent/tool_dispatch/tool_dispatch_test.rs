@@ -8827,3 +8827,31 @@ fn halt_note_for_git_push_says_remote_may_have_received_it() {
     assert!(note.contains("git ls-remote"), "{note}");
     assert_eq!(super::spill::halt_side_effect_note("file_read"), "");
 }
+
+/// Every side-effecting tool gets a halt note saying what may already have
+/// happened and what to check; read-only tools get none.
+#[test]
+fn halt_notes_cover_side_effecting_tools() {
+    use super::spill::halt_side_effect_note as note;
+    for (tool, must) in [
+        ("npm_install", "npm ls"),
+        ("yarn_install", "lockfile"),
+        ("pip_install", "pip list"),
+        ("git_commit", "git log -1"),
+        ("git_checkpoint", "git log -1"),
+        ("enter_worktree", "git worktree list"),
+        ("patch_apply", "git diff"),
+        ("container_run", "stopped and removed when the task ends"),
+        ("compose_up", "`compose down` runs"),
+        ("file_write", "re-read"),
+        ("file_delete", "deleted"),
+        ("shell_exec", "remains"),
+        ("http_request", "reached the server"),
+    ] {
+        let n = note(tool);
+        assert!(n.contains(must), "{tool}: {n}");
+    }
+    for tool in ["file_read", "git_status", "grep_search", "cargo_check"] {
+        assert_eq!(note(tool), "", "{tool}");
+    }
+}

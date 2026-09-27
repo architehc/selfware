@@ -10,15 +10,68 @@ pub(crate) enum ToolHalt {
     Cancelled,
 }
 
-/// What a halt (timeout or cancel) of `tool_name` may already have done
-/// outside this machine, appended to the halt message. Dropping the tool's
-/// future kills its process group, but a network side effect can land before
-/// the kill: a halted `git_push` must not read as "the push did not happen".
+/// What a halt (timeout or cancel) of `tool_name` may already have done,
+/// appended to the halt message. Dropping the tool's future kills its process
+/// group, but a side effect can land before the kill: a halted mutating tool
+/// must not read as "nothing happened". Each note says what to check; the
+/// container notes promise a drain only because `container_run` and
+/// `compose_up` register their resource BEFORE spawning (see
+/// `crate::resources`).
 pub(crate) fn halt_side_effect_note(tool_name: &str) -> &'static str {
     match tool_name {
         "git_push" => {
             " — its processes were stopped, but the remote may already have received the push: \
              check `git ls-remote <remote> refs/heads/<branch>` before retrying."
+        }
+        "git_commit" | "git_checkpoint" => {
+            " — its processes were stopped, but the commit (and any hooks) may already have \
+             run: check `git log -1` and `git status` before retrying."
+        }
+        "enter_worktree" => {
+            " — its processes were stopped, but the worktree may already exist: check \
+             `git worktree list` before retrying."
+        }
+        "patch_apply" => {
+            " — its processes were stopped, but the patch may already be applied: check \
+             `git diff` before retrying."
+        }
+        "npm_install" | "yarn_install" => {
+            " — its processes were stopped, but the install may have partially changed \
+             node_modules and package.json / the lockfile: check `git status` and \
+             `npm ls` before retrying."
+        }
+        "pip_install" => {
+            " — its processes were stopped, but some packages may already be installed: \
+             check `pip list` before retrying."
+        }
+        "npm_run" | "shell_exec" => {
+            " — its process group was killed, but whatever the command already did (files \
+             written, services called) remains: check before re-running."
+        }
+        "container_run" => {
+            " — the runtime CLI was killed, but the container may already have been created \
+             and still be running. It is recorded (by its selfware.run label) and will be \
+             stopped and removed when the task ends (at session end outside a task); see \
+             `selfware resources`."
+        }
+        "compose_up" => {
+            " — compose was killed, but some services may already be running. The project \
+             is recorded and `compose down` runs for it when the task ends (at session end \
+             outside a task); see `selfware resources`."
+        }
+        "container_stop" | "container_remove" | "compose_down" | "process_stop"
+        | "process_restart" => {
+            " — its processes were stopped, but the action may already have taken effect: \
+             check the current state before retrying."
+        }
+        "file_delete" => " — the file may already have been deleted: check before retrying.",
+        "file_write" | "file_edit" | "file_multi_edit" | "file_fim_edit" => {
+            " — each file is replaced atomically, but the change may already have been made: \
+             re-read the file(s) before retrying."
+        }
+        "http_request" => {
+            " — the request may already have reached the server: check before re-sending a \
+             non-idempotent request."
         }
         _ => "",
     }

@@ -121,6 +121,7 @@ fn discovered_resource(c: &LabelledContainer) -> Resource {
             runtime: c.runtime.clone(),
             id: c.id.clone(),
             task_label: c.task.clone(),
+            run_label: None,
         },
         keep: false,
         label: if c.name.is_empty() {

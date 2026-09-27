@@ -63,6 +63,18 @@ pub trait ResourceDriver: Send + Sync {
     }
     /// Containers carrying a `selfware.task` label, across runtimes.
     async fn labelled_containers(&self) -> Result<Vec<LabelledContainer>>;
+    /// The full id of the container `runtime` created with
+    /// `--label selfware.run=<run_label>`; `Ok(None)` when the runtime
+    /// answered and no such container exists (never created, or already
+    /// removed). A driver that cannot look it up returns an error, so the
+    /// entry is reported leaked rather than released.
+    async fn container_by_run_label(
+        &self,
+        _runtime: &str,
+        _run_label: &str,
+    ) -> Result<Option<String>> {
+        anyhow::bail!("this driver cannot look containers up by their selfware.run label")
+    }
     /// Is the selfware process behind `session` still running?
     fn session_alive(&self, session: &SessionRecord) -> bool;
 }
@@ -262,6 +274,7 @@ impl ResourceDriver for SystemDriver {
                 runtime,
                 id,
                 task_label,
+                ..
             } => self.probe_container(runtime, id, task_label).await,
             ResourceHandle::Compose { runtime, dir, file } => {
                 let (program, args) = Self::compose_cmd(runtime, file.as_deref(), &["ps", "-q"]);
@@ -331,6 +344,7 @@ impl ResourceDriver for SystemDriver {
                 runtime,
                 id,
                 task_label,
+                ..
             } => {
                 match self.probe_container(runtime, id, task_label).await {
                     Probe::Gone => {}
@@ -420,6 +434,31 @@ impl ResourceDriver for SystemDriver {
         Ok(found)
     }
 
+    async fn container_by_run_label(
+        &self,
+        runtime: &str,
+        run_label: &str,
+    ) -> Result<Option<String>> {
+        let filter = format!("label=selfware.run={run_label}");
+        let out = self
+            .run(
+                runtime,
+                &["ps", "-a", "-q", "--no-trunc", "--filter", &filter],
+                None,
+            )
+            .await?;
+        anyhow::ensure!(
+            out.status.success(),
+            "{runtime} ps --filter {filter}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .map(String::from))
+    }
+
     fn session_alive(&self, session: &SessionRecord) -> bool {
         if session.id == super::session_id() {
             return true;
@@ -440,6 +479,7 @@ impl SystemDriver {
                 runtime,
                 id,
                 task_label,
+                ..
             } => {
                 match self.probe_container(runtime, id, task_label).await {
                     Probe::Running => {}

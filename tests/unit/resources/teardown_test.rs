@@ -31,6 +31,7 @@ fn container(id: &str) -> NewResource {
             runtime: "docker".into(),
             id: id.into(),
             task_label: "t1".into(),
+            run_label: None,
         },
         "nginx",
     )
@@ -318,4 +319,51 @@ fn the_session_policy_uses_the_configured_deadline() {
     // First call wins: a later configuration does not move it mid-session.
     configure_session_deadline(Duration::from_secs(9));
     assert_eq!(session_policy().deadline, Duration::from_secs(4));
+}
+
+fn pending_container(run: &str) -> NewResource {
+    let mut new = NewResource::new(
+        ResourceKind::Container,
+        ResourceHandle::Container {
+            runtime: "docker".into(),
+            id: String::new(),
+            task_label: "t1".into(),
+            run_label: Some(run.into()),
+        },
+        "alpine",
+    );
+    new.state = ResourceState::Starting;
+    new
+}
+
+/// A container_run cancelled before its id was read, whose container was
+/// never created: the runtime answers "none", so the entry is released —
+/// no stop is attempted.
+#[tokio::test]
+async fn pending_container_with_no_container_is_released() {
+    let reg = ResourceRegistry::in_memory();
+    let driver = FakeDriver::new();
+    let id = register(&reg, pending_container("run1"), "t1");
+    let report = teardown_task(&reg, &driver, "t1", fast()).await;
+    assert_eq!(report.released.len(), 1);
+    assert_eq!(driver.calls(), vec!["lookup:docker:run1"]);
+    let r = reg.get(&id).unwrap();
+    assert_eq!(r.state, ResourceState::Released);
+    assert!(r.note.unwrap().contains("no container carries"));
+}
+
+/// The label lookup fails (runtime down): leaked with the reason, never
+/// released.
+#[tokio::test]
+async fn pending_container_whose_lookup_fails_is_leaked() {
+    let reg = ResourceRegistry::in_memory();
+    let mut driver = FakeDriver::new();
+    driver.run_lookup_error = Some("docker daemon not reachable".into());
+    let id = register(&reg, pending_container("run2"), "t1");
+    let report = teardown_task(&reg, &driver, "t1", fast()).await;
+    assert_eq!(report.leaked.len(), 1);
+    assert_eq!(report.leak_alarms, vec![id.clone()]);
+    let r = reg.get(&id).unwrap();
+    assert_eq!(r.state, ResourceState::Leaked);
+    assert!(r.note.unwrap().contains("docker daemon not reachable"));
 }

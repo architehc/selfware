@@ -399,3 +399,211 @@ async fn container_build_and_compose_refuse_paths_outside_policy() {
         );
     }
 }
+
+// =========================================================================
+// container_run cancelled mid-run: still recorded, drained at task/session end
+// =========================================================================
+//
+// A stub `docker` on PATH (under the shared env lock) records its argv and
+// hangs, like `docker run` attached to a container. The test drops the
+// tool future (what `run_tool_bounded` does on Ctrl-C) before any cidfile
+// exists, then drains with the scripted FakeDriver — no real docker.
+
+#[cfg(unix)]
+struct StubDocker {
+    _env: crate::test_support::EnvGuard,
+    _dir: tempfile::TempDir,
+    args_file: std::path::PathBuf,
+}
+
+/// `write_cid`: write a container id into the `--cidfile` operand and exit
+/// 0 (a normal detached run); otherwise hang without writing it.
+#[cfg(unix)]
+fn stub_docker(write_cid: Option<&str>) -> StubDocker {
+    use std::os::unix::fs::PermissionsExt;
+    let env = crate::test_support::EnvGuard::capture(&["PATH"]);
+    let dir = tempfile::tempdir().unwrap();
+    let args_file = dir.path().join("args");
+    let tail = match write_cid {
+        Some(cid) => format!(
+            "prev=\"\"\nfor a in \"$@\"; do\n  if [ \"$prev\" = \"--cidfile\" ]; then echo {cid} > \"$a\"; fi\n  prev=\"$a\"\ndone\necho {cid}\n"
+        ),
+        None => "sleep 60 &\nwait\n".to_string(),
+    };
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}.tmp' && mv '{}.tmp' '{}'\n{tail}",
+        args_file.display(),
+        args_file.display(),
+        args_file.display()
+    );
+    let stub = dir.path().join("docker");
+    std::fs::write(&stub, script).unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let old = std::env::var("PATH").unwrap_or_default();
+    env.set("PATH", format!("{}:{old}", dir.path().display()));
+    StubDocker {
+        _env: env,
+        _dir: dir,
+        args_file,
+    }
+}
+
+/// The `selfware.run=<value>` label the stub was invoked with.
+#[cfg(unix)]
+fn run_label_from(args_file: &std::path::Path) -> String {
+    let args = std::fs::read_to_string(args_file).unwrap();
+    args.lines()
+        .find_map(|l| l.strip_prefix("selfware.run="))
+        .expect("docker run carries a selfware.run label")
+        .to_string()
+}
+
+#[cfg(unix)]
+fn entry_with_run_label(run: &str) -> crate::resources::Resource {
+    crate::resources::ResourceRegistry::global()
+        .snapshot()
+        .resources
+        .into_iter()
+        .find(|r| {
+            matches!(&r.handle,
+                crate::resources::ResourceHandle::Container { run_label: Some(l), .. } if l == run)
+        })
+        .expect("container_run registered its container")
+}
+
+/// Start `container_run` (attached, so the stub's hang is the container
+/// running), wait until the stub was invoked, then drop the future.
+#[cfg(unix)]
+async fn cancel_container_run_mid_run(owner: Option<crate::resources::Owner>) -> String {
+    let stub = stub_docker(None);
+    let args = serde_json::json!({"image": "alpine", "detach": false, "runtime": "docker"});
+    let run = ContainerRun.execute(args);
+    let mut fut: std::pin::Pin<Box<dyn std::future::Future<Output = _>>> = match owner {
+        Some(owner) => Box::pin(crate::resources::context::scope(owner, run)),
+        None => Box::pin(run),
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        tokio::select! {
+            res = &mut fut => panic!("container_run returned before it was cancelled: {res:?}"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {}
+        }
+        if stub.args_file.exists() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "stub docker never ran"
+        );
+    }
+    drop(fut);
+    run_label_from(&stub.args_file)
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn cancelled_container_run_is_recorded_and_drained_at_task_end() {
+    use crate::resources::fake::FakeDriver;
+    use crate::resources::teardown::{teardown_task, TeardownPolicy};
+    use crate::resources::{Owner, ResourceHandle, ResourceRegistry, ResourceState};
+
+    let task = format!("t-cancel-{}", uuid::Uuid::new_v4().simple());
+    let run = cancel_container_run_mid_run(Some(Owner::for_task(task.clone()))).await;
+
+    let entry = entry_with_run_label(&run);
+    assert_eq!(entry.owner_task, task);
+    assert_eq!(entry.state, ResourceState::Starting, "{entry:?}");
+    assert!(
+        matches!(&entry.handle, ResourceHandle::Container { id, task_label, .. }
+            if id.is_empty() && task_label == &task),
+        "{entry:?}"
+    );
+
+    let driver = FakeDriver::new();
+    driver
+        .run_labels
+        .lock()
+        .unwrap()
+        .insert(run.clone(), "c0ffee0123456789".into());
+    let policy = TeardownPolicy {
+        deadline: std::time::Duration::from_millis(40),
+        force_grace: std::time::Duration::from_millis(40),
+        poll: std::time::Duration::from_millis(5),
+    };
+    let report = teardown_task(ResourceRegistry::global(), &driver, &task, policy).await;
+
+    assert_eq!(report.released.len(), 1, "{report:?}");
+    assert!(report.leaked.is_empty(), "{report:?}");
+    assert_eq!(
+        driver.calls(),
+        vec![
+            format!("lookup:docker:{run}"),
+            "polite:container c0ffee012345".to_string(),
+            "finalize:container c0ffee012345".to_string(),
+        ]
+    );
+    let after = ResourceRegistry::global().get(&entry.id).unwrap();
+    assert_eq!(after.state, ResourceState::Released);
+    assert!(
+        matches!(&after.handle, ResourceHandle::Container { id, .. } if id == "c0ffee0123456789"),
+        "the resolved id is recorded: {after:?}"
+    );
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn cancelled_container_run_outside_a_task_is_drained_at_session_end() {
+    use crate::resources::context::session_owner;
+    use crate::resources::fake::FakeDriver;
+    use crate::resources::teardown::{teardown_session, TeardownPolicy};
+    use crate::resources::{ResourceRegistry, ResourceState};
+
+    let run = cancel_container_run_mid_run(None).await;
+    let entry = entry_with_run_label(&run);
+    assert_eq!(entry.owner_task, session_owner());
+    assert_eq!(entry.state, ResourceState::Starting);
+
+    // Session teardown on a registry holding just this entry (the global
+    // one is shared with concurrent tests); same session id.
+    let reg = ResourceRegistry::in_memory();
+    reg.adopt(entry.clone());
+    let driver = FakeDriver::new();
+    driver
+        .run_labels
+        .lock()
+        .unwrap()
+        .insert(run.clone(), "feedface01234567".into());
+    let policy = TeardownPolicy {
+        deadline: std::time::Duration::from_millis(40),
+        force_grace: std::time::Duration::from_millis(40),
+        poll: std::time::Duration::from_millis(5),
+    };
+    let report = teardown_session(&reg, &driver, policy).await;
+    assert_eq!(report.released.len(), 1, "{report:?}");
+    assert!(driver
+        .calls()
+        .contains(&"polite:container feedface0123".to_string()));
+    assert_eq!(reg.get(&entry.id).unwrap().state, ResourceState::Released);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn container_run_that_returns_records_the_cidfile_id_as_live() {
+    use crate::resources::{Owner, ResourceHandle, ResourceState};
+    let stub = stub_docker(Some("abcabc0123456789"));
+    let task = format!("t-live-{}", uuid::Uuid::new_v4().simple());
+    let out = crate::resources::context::scope(
+        Owner::for_task(task.clone()),
+        ContainerRun.execute(serde_json::json!({"image": "alpine", "runtime": "docker"})),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out["success"], true, "{out}");
+    let entry = entry_with_run_label(&run_label_from(&stub.args_file));
+    assert_eq!(entry.state, ResourceState::Live);
+    assert_eq!(entry.owner_task, task);
+    assert!(
+        matches!(&entry.handle, ResourceHandle::Container { id, .. } if id == "abcabc0123456789"),
+        "{entry:?}"
+    );
+}
