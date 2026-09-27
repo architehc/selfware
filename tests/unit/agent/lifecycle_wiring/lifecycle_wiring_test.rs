@@ -500,3 +500,127 @@ async fn a_fork_is_a_new_task_whose_parent_is_the_original() {
         .filter(|r| r.id == "next-3")
         .all(|r| r.parent.is_none()));
 }
+
+#[test]
+fn teardown_is_effect_driven_and_the_fallback_names_why() {
+    use crate::lifecycle::Effect;
+    assert_eq!(
+        teardown_fallback_reason(&[Effect::TeardownOwned], Some(TaskState::Completed)),
+        None
+    );
+    let none = teardown_fallback_reason(&[], None).unwrap();
+    assert!(none.contains("no task lifecycle tracker"), "{none}");
+    let already = teardown_fallback_reason(&[], Some(TaskState::Failed)).unwrap();
+    assert!(already.contains("already `failed`"), "{already}");
+    let refused = teardown_fallback_reason(&[], Some(TaskState::Executing)).unwrap();
+    assert!(refused.contains("refused"), "{refused}");
+}
+
+/// A non-drainable resource (a bound port) owned by `task` in the global
+/// registry: its drain can only give up, so it ends `leaked` (LeakAlarm).
+fn register_port_for(task: &str) -> String {
+    crate::resources::ResourceRegistry::global().register_owned(
+        crate::resources::NewResource::new(
+            crate::resources::ResourceKind::Port,
+            crate::resources::ResourceHandle::Port { port: 1 },
+            "test port",
+        ),
+        task.to_string(),
+        None,
+    )
+}
+
+#[tokio::test]
+async fn a_run_without_the_teardown_effect_still_drains_and_the_leak_surfaces() {
+    let mut agent = Agent::new(config_for("http://127.0.0.1:9/v1".to_string()))
+        .await
+        .unwrap();
+    let task = format!("no-effect-{}", uuid::Uuid::new_v4().simple());
+    let id = register_port_for(&task);
+    assert_eq!(agent.task_lifecycle_state(), None);
+
+    let why = agent
+        .teardown_after_run(&crate::resources::Owner::for_task(&task), &[])
+        .await;
+
+    assert!(
+        why.as_deref()
+            .is_some_and(|w| w.contains("no task lifecycle tracker")),
+        "{why:?}"
+    );
+    let registry = crate::resources::ResourceRegistry::global();
+    assert_eq!(
+        registry.get(&id).unwrap().state,
+        crate::resources::ResourceState::Leaked,
+        "drained (and could not be released) although no effect asked for it"
+    );
+    // The leak surfaces in the run summary line.
+    let line = agent.run_summary().resources.unwrap();
+    assert!(
+        line.starts_with("resources: 0 released, 1 leaked (port 1: port resources are not stopped automatically)"),
+        "{line}"
+    );
+    // And in the event log, as the abandon that raised the alarm.
+    let (records, _) = registry.event_log().read_all();
+    let path: Vec<String> = records
+        .iter()
+        .filter(|r| r.id == id)
+        .map(|r| format!("{}:{}", r.event.as_deref().unwrap_or("new"), r.to))
+        .collect();
+    assert_eq!(path, vec!["new:live", "drain:draining", "abandon:leaked"]);
+}
+
+#[tokio::test]
+async fn the_teardown_effect_drives_the_drain_without_a_fallback() {
+    let mut agent = Agent::new(config_for("http://127.0.0.1:9/v1".to_string()))
+        .await
+        .unwrap();
+    let task = format!("with-effect-{}", uuid::Uuid::new_v4().simple());
+    let id = register_port_for(&task);
+    let why = agent
+        .teardown_after_run(
+            &crate::resources::Owner::for_task(&task),
+            &[crate::lifecycle::Effect::TeardownOwned],
+        )
+        .await;
+    assert_eq!(why, None);
+    assert_eq!(
+        crate::resources::ResourceRegistry::global()
+            .get(&id)
+            .unwrap()
+            .state,
+        crate::resources::ResourceState::Leaked
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn the_terminal_cause_names_what_the_task_owns_to_drain() {
+    let _state = crate::test_support::ExecGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    let log = EventLog::at(dir.path().join("events.jsonl"));
+    let mut agent = Agent::new(config_for("http://127.0.0.1:9/v1".to_string()))
+        .await
+        .unwrap();
+    agent.event_log = log.clone();
+    let task = format!("owns-two-{}", uuid::Uuid::new_v4().simple());
+    agent.lifecycle_begin_task(&task, "start two servers");
+    register_port_for(&task);
+    register_port_for(&task);
+    let effects = agent.lifecycle_finish(&Ok(()));
+    assert_eq!(effects, vec![crate::lifecycle::Effect::TeardownOwned]);
+    let (records, _) = log.read_all();
+    let last = records.iter().rev().find(|r| r.id == task).unwrap();
+    assert_eq!(last.to, "completed");
+    assert!(
+        last.cause.ends_with("; 2 owned resources to drain"),
+        "{}",
+        last.cause
+    );
+    agent
+        .teardown_after_run(&crate::resources::Owner::for_task(&task), &effects)
+        .await;
+}

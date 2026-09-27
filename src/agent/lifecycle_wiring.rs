@@ -75,6 +75,27 @@ pub(crate) fn terminal_event_for_run(
     }
 }
 
+/// Why a finished run's resource teardown is not driven by
+/// [`Effect::TeardownOwned`], or `None` when it is. `tracked` is the task's
+/// lifecycle state after `lifecycle_finish`. Teardown still runs in every
+/// case (a drain is never lost); this names why it had to run without the
+/// effect, for the warning.
+pub(crate) fn teardown_fallback_reason(
+    effects: &[Effect],
+    tracked: Option<TaskState>,
+) -> Option<String> {
+    if effects.contains(&Effect::TeardownOwned) {
+        return None;
+    }
+    Some(match tracked {
+        None => "no task lifecycle tracker for this run".to_string(),
+        Some(s) if s.is_terminal() => format!(
+            "the task was already `{s}` when the run ended, so no terminal transition was recorded"
+        ),
+        Some(s) => format!("the terminal transition from `{s}` was refused"),
+    })
+}
+
 /// A failure caused by a clock running out (the run's own timeout, the wall
 /// budget, or the per-call time cap), as opposed to any other failure.
 /// Typed causes only.
@@ -231,6 +252,19 @@ impl Agent {
             // task was abandoned on purpose and is not resumable.
             event = TaskEvent::Cancel;
             cause = "cancelled by the user".to_string();
+        }
+        // Say in the task's own record what the teardown effect is about to
+        // drain (its outcome is recorded per resource, owner = this task).
+        if let Some(id) = self.task_lifecycle.as_ref().map(|t| t.id().to_string()) {
+            let owned = crate::resources::ResourceRegistry::global()
+                .owned_by(&id)
+                .len();
+            if owned > 0 {
+                cause.push_str(&format!(
+                    "; {owned} owned resource{} to drain",
+                    if owned == 1 { "" } else { "s" }
+                ));
+            }
         }
         if event == TaskEvent::Succeed && state == TaskState::Planning {
             // The planning turn itself produced the accepted answer.

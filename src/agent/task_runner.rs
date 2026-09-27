@@ -988,8 +988,8 @@ impl Agent {
             )),
         )
         .await;
-        let _effects = self.lifecycle_finish(&result);
-        self.teardown_task_resources(&owner).await;
+        let effects = self.lifecycle_finish(&result);
+        self.teardown_after_run(&owner, &effects).await;
         result
     }
 
@@ -1008,6 +1008,32 @@ impl Agent {
         if let Some(line) = report.summary_line() {
             cli_println!("{}", line);
         }
+    }
+
+    /// The run ended: drain what the task owns. Normally triggered by the
+    /// `TeardownOwned` effect of the task's terminal transition; when that
+    /// effect is absent (no tracker, the task already terminal, a refused
+    /// transition) the drain still runs and a warning names why. Returns that
+    /// reason, `None` when the effect drove the teardown.
+    pub(crate) async fn teardown_after_run(
+        &mut self,
+        owner: &crate::resources::Owner,
+        effects: &[crate::lifecycle::Effect],
+    ) -> Option<String> {
+        let fallback =
+            super::lifecycle_wiring::teardown_fallback_reason(effects, self.task_lifecycle_state());
+        if let (Some(why), Some(task)) = (&fallback, owner.task()) {
+            let owned = crate::resources::ResourceRegistry::global()
+                .owned_by(&task)
+                .len();
+            if owned > 0 {
+                warn!(
+                    "resources: the run ended without a teardown effect ({why}); draining the {owned} resource(s) task {task} owns anyway"
+                );
+            }
+        }
+        self.teardown_task_resources(owner).await;
+        fallback
     }
 
     /// Drain everything the finished task owns (see `crate::resources`)
@@ -1035,7 +1061,9 @@ impl Agent {
             if report.leaked.is_empty() {
                 tracing::info!("{line}");
             } else {
-                warn!("{line}");
+                // Each resource that entered `leaked` raised LeakAlarm (the
+                // registry warned per resource); this is the task's total.
+                warn!("{line} [{} leak alarm(s)]", report.leak_alarms.len());
             }
             self.resource_teardown_summary = Some(line);
         }
@@ -1675,8 +1703,8 @@ impl Agent {
             Box::pin(self.continue_execution_segment()),
         )
         .await;
-        let _effects = self.lifecycle_finish(&result);
-        self.teardown_task_resources(&owner).await;
+        let effects = self.lifecycle_finish(&result);
+        self.teardown_after_run(&owner, &effects).await;
         result
     }
 
