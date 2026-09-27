@@ -492,6 +492,9 @@ pub struct RunSummary {
     /// Deterministic citation check of the final answer (and written
     /// deliverables); `None` when nothing was checked.
     pub grounding: Option<super::citation_check::GroundingStatus>,
+    /// Failed summary calls after which context summaries were disabled
+    /// for the rest of the task; `None` when they were not disabled.
+    pub context_summaries_disabled_after: Option<usize>,
 }
 
 impl Agent {
@@ -524,6 +527,10 @@ impl Agent {
             },
             requirements_audit: self.requirements_audit_status(),
             grounding: self.grounding_status(),
+            context_summaries_disabled_after: self
+                .compressor
+                .summaries_disabled()
+                .then(|| self.compressor.summary_failures()),
         }
     }
 
@@ -890,6 +897,9 @@ impl Agent {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
         self.reset_citation_gate();
+        // Summarizer backoff and failure cap are per-task: a summarizer that
+        // died during the previous task gets a fresh chance on this one.
+        self.compressor.reset_summary_state_for_task();
         self.leak_check_scanned_mutation_sequence
             .store(usize::MAX, std::sync::atomic::Ordering::Relaxed);
         self.input_census_note = None;

@@ -1212,7 +1212,21 @@ fn sample_summary() -> crate::agent::RunSummary {
         call_latency: None,
         requirements_audit: None,
         grounding: None,
+        context_summaries_disabled_after: None,
     }
+}
+
+#[test]
+fn render_run_summary_names_disabled_context_summaries() {
+    let rendered = render_run_summary(&sample_summary(), None);
+    assert!(!rendered.contains("context summaries"), "{rendered}");
+    let mut summary = sample_summary();
+    summary.context_summaries_disabled_after = Some(3);
+    let rendered = render_run_summary(&summary, None);
+    assert!(
+        rendered.contains("context summaries: disabled after 3 failed summary calls"),
+        "{rendered}"
+    );
 }
 
 #[test]

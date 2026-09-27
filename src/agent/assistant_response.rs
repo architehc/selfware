@@ -249,7 +249,11 @@ impl Agent {
                             self.sync_api_usage();
                             // Back off until the history has grown, like a
                             // rejected summary: no paid retry on every step.
-                            self.compressor.note_summary_failed(summarizable);
+                            // After MAX_SUMMARY_FAILURES_PER_TASK failures
+                            // summaries are off for the rest of the task.
+                            if self.compressor.note_summary_failed(summarizable) {
+                                self.note_summaries_disabled();
+                            }
                             Some(format!("summary failed: {e}; original kept"))
                         }
                     }
@@ -268,6 +272,7 @@ impl Agent {
                     self.messages = self
                         .compressor
                         .hard_compress_with_task(&self.messages, self.current_task_text());
+                    self.rebase_summary_backoff();
                     let final_tokens = self.compressor.estimate_tokens(&self.messages);
                     self.log_context_compression_event(
                         super::session_log::ContextCompressionLogDetails {

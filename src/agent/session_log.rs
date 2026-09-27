@@ -654,6 +654,7 @@ impl Agent {
         self.messages = self
             .compressor
             .hard_compress_with_task(&self.messages, self.current_task_text());
+        self.rebase_summary_backoff();
         let after_tokens = self.compressor.estimate_tokens(&self.messages);
         self.log_context_compression_event(ContextCompressionLogDetails {
             strategy,

@@ -2182,3 +2182,165 @@ async fn turns_run_equals_step_started_events() {
         server.stop().await;
     }
 }
+
+/// Review (0.9.3): a summarizer that keeps failing is called at most
+/// `MAX_SUMMARY_FAILURES_PER_TASK` times per task however much the history
+/// grows, the disable is announced once, and the run summary names it.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn a_dead_summarizer_is_called_at_most_the_cap_per_task() {
+    use crate::testing::mock_api::MockResponse;
+    use std::sync::Arc;
+    let server = MockLlmServer::builder()
+        .with_default_response(MockResponse::Error {
+            status: 500,
+            body: r#"{"error":"summarizer down"}"#.to_string(),
+        })
+        .build()
+        .await;
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.retry = crate::config::RetrySettings {
+        max_retries: 0,
+        base_delay_ms: 1,
+        max_delay_ms: 1,
+    };
+    let recorder = Arc::new(super::progress::RecordingProgressEmitter::new());
+    let mut agent = Agent::new(config)
+        .await
+        .unwrap()
+        .with_progress_emitter(recorder.clone());
+    agent.compressor = context::ContextCompressor::new(20_000);
+    let older = |i: usize| {
+        Message::assistant(format!(
+            "older note {i}: {}",
+            "the ledger records every read before compaction. ".repeat(40)
+        ))
+    };
+    agent.messages = vec![Message::system("sys"), Message::user("Review the loop.")];
+    for i in 0..40 {
+        agent.messages.push(older(i));
+        agent.messages.push(Message::user(format!("ok {i}")));
+    }
+    for i in 0..3 {
+        agent.messages.push(Message::assistant(format!("tail {i}")));
+        agent
+            .messages
+            .push(Message::user(format!("tail result {i}")));
+    }
+    let summary_requests = |bodies: Vec<String>| {
+        bodies
+            .iter()
+            .filter(|b| b.contains("Summarize these previous interactions"))
+            .count()
+    };
+    // Rounds in which a summary call went out (one call may be several
+    // HTTP attempts, so count rounds, not requests).
+    let mut rounds_with_a_call = Vec::new();
+    for round in 0..6 {
+        assert!(
+            agent.compressor.should_compress(&agent.messages),
+            "precondition: round {round} is over the threshold"
+        );
+        let seen = summary_requests(server.captured_request_bodies().await);
+        let _ = agent.get_assistant_step_response(false).await;
+        if summary_requests(server.captured_request_bodies().await) > seen {
+            rounds_with_a_call.push(round);
+        }
+        // Grow the summarizable part well past MIN_SUMMARIZABLE_TOKENS so
+        // only the failure cap can stop the next attempt.
+        for j in 0..6 {
+            agent.messages.insert(3, older(1_000 + round * 10 + j));
+            agent.messages.insert(4, Message::user("ok"));
+        }
+    }
+    assert_eq!(
+        rounds_with_a_call,
+        (0..context::MAX_SUMMARY_FAILURES_PER_TASK).collect::<Vec<_>>(),
+        "a dead summarizer must be tried at most the cap"
+    );
+    assert!(agent.compressor.summaries_disabled());
+    let announced = recorder
+        .snapshot()
+        .into_iter()
+        .filter(|e| {
+            matches!(e, progress::ProgressEvent::TurnDecision { decision, .. }
+                if decision == "context_summaries_disabled")
+        })
+        .count();
+    assert_eq!(announced, 1, "the disable is announced exactly once");
+    assert_eq!(
+        agent.run_summary().context_summaries_disabled_after,
+        Some(context::MAX_SUMMARY_FAILURES_PER_TASK)
+    );
+    server.stop().await;
+}
+
+/// Review (0.9.3): hard compression shrinks the summarizable part below
+/// the size a backed-off summary was recorded at; the backoff is rebased so
+/// ordinary growth reopens it (the failure count is kept).
+#[tokio::test]
+async fn hard_compression_rebases_the_summary_backoff() {
+    let config = mock_agent_config("http://127.0.0.1:1/v1".to_string(), false);
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.compressor = context::ContextCompressor::new(20_000);
+    agent.messages = vec![Message::system("sys"), Message::user("task")];
+    for i in 0..60 {
+        agent.messages.push(Message::assistant(format!(
+            "step {i}: {}",
+            "notes on the loop and its ledger. ".repeat(30)
+        )));
+        agent.messages.push(Message::user(format!("continue {i}")));
+    }
+    let before = agent
+        .compressor
+        .summary_split(&agent.messages, None)
+        .unwrap()
+        .summarizable_tokens;
+    agent.compressor.note_summary_failed(before);
+    agent.hard_compress_logged("hard_overflow", "test");
+    let after = agent
+        .compressor
+        .summary_split(&agent.messages, None)
+        .map_or(0, |s| s.summarizable_tokens);
+    assert!(
+        after + context::MIN_SUMMARIZABLE_TOKENS < before,
+        "precondition: hard compression shrank it ({before} -> {after})"
+    );
+    // Grow the summarizable part past `after + MIN` but not past
+    // `before + MIN`: the gate measures growth from `after` now.
+    let mut i = 0;
+    while agent
+        .compressor
+        .summary_split(&agent.messages, None)
+        .map_or(0, |s| s.summarizable_tokens)
+        < after + context::MIN_SUMMARIZABLE_TOKENS + 200
+    {
+        let at = agent.messages.len().saturating_sub(6).max(2);
+        agent.messages.insert(
+            at,
+            Message::assistant(format!("new {i}: {}", "fresh material. ".repeat(20))),
+        );
+        agent
+            .messages
+            .insert(at + 1, Message::user(format!("ok {i}")));
+        i += 1;
+    }
+    let grown = agent
+        .compressor
+        .summary_split(&agent.messages, None)
+        .unwrap()
+        .summarizable_tokens;
+    assert!(grown < before + context::MIN_SUMMARIZABLE_TOKENS);
+    let reason = agent
+        .compressor
+        .summary_skip_reason(&agent.messages, None)
+        .unwrap_or_default();
+    assert!(
+        !reason.contains("the last summary"),
+        "backoff still anchored at the pre-trim size: {reason}"
+    );
+    assert_eq!(agent.compressor.summary_failures(), 1);
+}

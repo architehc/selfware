@@ -1912,3 +1912,138 @@ fn a_summary_that_can_fit_is_allowed_and_a_rejected_one_is_not_repeated() {
     compressor.note_summary_accepted();
     assert!(compressor.summary_skip_reason(&history, None).is_none());
 }
+
+/// long_review-shaped history whose summary is allowed at a 44k budget.
+fn summarizable_history(older_turns: usize) -> Vec<Message> {
+    let mut history = vec![
+        Message::system("You are selfware.\n".repeat(900)),
+        Message::user("Review the agent loop."),
+    ];
+    for i in 0..older_turns {
+        history.push(Message::assistant(format!(
+            "stage {i} notes {}",
+            prose(900)
+        )));
+        history.push(Message::user(format!(
+            "<tool_result>{}</tool_result>",
+            prose(1_800)
+        )));
+    }
+    for i in 0..3 {
+        history.push(Message::assistant(format!("tail {i}")));
+        history.push(Message::user(format!("tail result {i}")));
+    }
+    history
+}
+
+/// Add ~`MIN_SUMMARIZABLE_TOKENS`+ of older material (inserted before the
+/// kept tail) so a growth-gated backoff reopens.
+fn grow_summarizable(history: &mut Vec<Message>) {
+    for i in 0..4 {
+        history.insert(3, Message::assistant(format!("more {i} {}", prose(4_000))));
+        history.insert(4, Message::user(format!("more result {i}")));
+    }
+}
+
+#[test]
+fn failed_summaries_are_capped_per_task_even_when_the_history_keeps_growing() {
+    // Review (0.9.3): the growth-gated backoff had no ceiling — a dead
+    // summarizer on a 128k context allowed ~80 attempts x 90 s in one task.
+    use crate::agent::context::MAX_SUMMARY_FAILURES_PER_TASK;
+    let mut compressor = ContextCompressor::new(44_237);
+    let mut history = summarizable_history(40);
+    for attempt in 1..=MAX_SUMMARY_FAILURES_PER_TASK {
+        assert!(
+            compressor.summary_skip_reason(&history, None).is_none(),
+            "attempt {attempt} must be allowed after growth"
+        );
+        let s = compressor
+            .summary_split(&history, None)
+            .unwrap()
+            .summarizable_tokens;
+        let disabled_now = compressor.note_summary_failed(s);
+        assert_eq!(disabled_now, attempt == MAX_SUMMARY_FAILURES_PER_TASK);
+        grow_summarizable(&mut history);
+    }
+    assert!(compressor.summaries_disabled());
+    // Growth no longer reopens the gate: summaries are off for the task.
+    grow_summarizable(&mut history);
+    grow_summarizable(&mut history);
+    let reason = compressor.summary_skip_reason(&history, None).unwrap();
+    assert!(
+        reason.contains("disabled for the rest of this task after 3 failed"),
+        "{reason}"
+    );
+    // A later failure (e.g. a caller that ignored the gate) does not
+    // re-announce the disable.
+    assert!(!compressor.note_summary_failed(1));
+    // A new task starts fresh.
+    compressor.reset_summary_state_for_task();
+    assert!(!compressor.summaries_disabled());
+    assert_eq!(compressor.summary_failures(), 0);
+    assert!(compressor.summary_skip_reason(&history, None).is_none());
+}
+
+#[test]
+fn an_accepted_summary_resets_the_failure_count() {
+    let mut compressor = ContextCompressor::new(44_237);
+    for _ in 0..crate::agent::context::MAX_SUMMARY_FAILURES_PER_TASK - 1 {
+        compressor.note_summary_failed(10);
+    }
+    assert_eq!(compressor.summary_failures(), 2);
+    compressor.note_summary_accepted();
+    assert_eq!(compressor.summary_failures(), 0);
+    // Two more failures still leave summaries enabled.
+    compressor.note_summary_failed(10);
+    compressor.note_summary_failed(10);
+    assert!(!compressor.summaries_disabled());
+}
+
+#[test]
+fn a_shrink_rebases_the_summary_backoff_to_the_smaller_history() {
+    // Review (0.9.3): after hard compression the summarizable part is
+    // smaller than the size recorded at the failed/rejected summary, so
+    // "grown by MIN_SUMMARIZABLE_TOKENS past it" could never happen again.
+    let mut compressor = ContextCompressor::new(44_237);
+    let history = summarizable_history(40);
+    let s = compressor
+        .summary_split(&history, None)
+        .unwrap()
+        .summarizable_tokens;
+    compressor.note_summary_rejected(s);
+    // Simulate a hard trim: keep system + task + the last 12 older turns.
+    let mut trimmed: Vec<Message> = history[..2].to_vec();
+    trimmed.extend_from_slice(&history[history.len() - 30..]);
+    grow_summarizable(&mut trimmed);
+    let grown = compressor
+        .summary_split(&trimmed, None)
+        .unwrap()
+        .summarizable_tokens;
+    assert!(
+        grown < s + crate::agent::context::MIN_SUMMARIZABLE_TOKENS,
+        "precondition: the grown trimmed history is still below the old gate ({grown} vs {s})"
+    );
+    // Without a rebase the gate stays shut.
+    assert!(compressor.summary_skip_reason(&trimmed, None).is_some());
+
+    // With the rebase at the trim, the same growth reopens it.
+    let mut rebased = ContextCompressor::new(44_237);
+    rebased.note_summary_rejected(s);
+    let mut trimmed: Vec<Message> = history[..2].to_vec();
+    trimmed.extend_from_slice(&history[history.len() - 30..]);
+    rebased.rebase_summary_backoff(&trimmed, None);
+    let reason = rebased.summary_skip_reason(&trimmed, None).unwrap();
+    assert!(reason.contains("has grown only"), "{reason}");
+    grow_summarizable(&mut trimmed);
+    assert!(rebased.summary_skip_reason(&trimmed, None).is_none());
+
+    // A rebase never lifts the failure cap.
+    let mut capped = ContextCompressor::new(44_237);
+    for _ in 0..crate::agent::context::MAX_SUMMARY_FAILURES_PER_TASK {
+        capped.note_summary_failed(s);
+    }
+    capped.rebase_summary_backoff(&trimmed, None);
+    assert!(capped.summaries_disabled());
+    let reason = capped.summary_skip_reason(&trimmed, None).unwrap();
+    assert!(reason.contains("disabled"), "{reason}");
+}

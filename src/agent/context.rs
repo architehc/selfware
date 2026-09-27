@@ -97,6 +97,14 @@ pub(crate) const SUMMARY_TOKENS_ESTIMATE: usize = 720;
 /// 160–256 tokens were of this kind.
 pub(crate) const MIN_SUMMARIZABLE_TOKENS: usize = 1_500;
 
+/// Failed summary calls (error / timeout) without an accepted summary in
+/// between after which summaries are disabled for the rest of the task.
+/// The growth-gated backoff alone had no ceiling: a dead summarizer on a
+/// 128k context allowed ~80 attempts x `CONTEXT_SUMMARY_TIME_CAP_SECS`
+/// (~2 h of stalls) in one task. Three failures cost at most ~4.5 min;
+/// result compaction and the hard fallback keep the history in budget.
+pub(crate) const MAX_SUMMARY_FAILURES_PER_TASK: usize = 3;
+
 /// How a history splits for a summary: what would be summarized and what
 /// is kept verbatim (system prompt + recent tail), both measured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +127,11 @@ pub struct ContextCompressor {
     /// failing summarizer used to be retried on every step with no bound
     /// (review, 0.9.1); it now backs off the same way.
     summary_backoff_failed: bool,
+    /// Failed summary calls since the last accepted summary in this task.
+    /// At `MAX_SUMMARY_FAILURES_PER_TASK` summaries are disabled until
+    /// [`Self::reset_summary_state_for_task`]; a rescaled backoff (see
+    /// [`Self::rebase_summary_backoff`]) never clears it.
+    summary_failures: usize,
     /// Roots the ledger's path keys are computed against: the agent's own
     /// workspace root (`Agent::new` sets it, a worktree switch moves it; see
     /// [`PathKeys`]). A standalone compressor falls back to the current
@@ -143,6 +156,7 @@ impl ContextCompressor {
             min_messages_to_keep: 6,
             summary_backoff: None,
             summary_backoff_failed: false,
+            summary_failures: 0,
             path_keys: None,
             ledger: Mutex::new(WorkLedger::new()),
         }
@@ -334,6 +348,13 @@ impl ContextCompressor {
                 messages.len()
             ));
         };
+        if self.summaries_disabled() {
+            return Some(format!(
+                "context summaries disabled for the rest of this task after {} failed \
+                 summary calls; no summary call made",
+                self.summary_failures
+            ));
+        }
         let s = split.summarizable_tokens;
         if s < MIN_SUMMARIZABLE_TOKENS {
             return Some(format!(
@@ -375,15 +396,64 @@ impl ContextCompressor {
     /// Remember a summary call that FAILED (error or timeout): the same
     /// growth-gated backoff as a rejected summary, so a summarizer that keeps
     /// failing is not called again on every step.
-    pub fn note_summary_failed(&mut self, summarizable_tokens: usize) {
+    /// Returns `true` when THIS failure disabled summaries for the rest of
+    /// the task (the `MAX_SUMMARY_FAILURES_PER_TASK`-th failure), so the
+    /// caller can say so once.
+    pub fn note_summary_failed(&mut self, summarizable_tokens: usize) -> bool {
         self.summary_backoff = Some(summarizable_tokens);
         self.summary_backoff_failed = true;
+        self.summary_failures += 1;
+        self.summary_failures == MAX_SUMMARY_FAILURES_PER_TASK
     }
 
-    /// A summary was accepted: the backoff no longer applies.
+    /// A summary was accepted: the backoff no longer applies and the
+    /// summarizer demonstrably works again.
     pub fn note_summary_accepted(&mut self) {
         self.summary_backoff = None;
         self.summary_backoff_failed = false;
+        self.summary_failures = 0;
+    }
+
+    /// Summaries are off for the rest of the task: the summarizer failed
+    /// `MAX_SUMMARY_FAILURES_PER_TASK` times without an accepted summary.
+    pub fn summaries_disabled(&self) -> bool {
+        self.summary_failures >= MAX_SUMMARY_FAILURES_PER_TASK
+    }
+
+    /// Failed summary calls since the last accepted summary in this task.
+    pub fn summary_failures(&self) -> usize {
+        self.summary_failures
+    }
+
+    /// A new task starts with a fresh summarizer record: no backoff and no
+    /// failure count (both are per-task).
+    pub fn reset_summary_state_for_task(&mut self) {
+        self.summary_backoff = None;
+        self.summary_backoff_failed = false;
+        self.summary_failures = 0;
+    }
+
+    /// Rescale the backoff after the history was shrunk without a summary
+    /// (hard compression, trim, result compaction). The backoff waits for the
+    /// summarizable part to grow `MIN_SUMMARIZABLE_TOKENS` past its size at
+    /// the last rejected/failed summary; after a trim the part is SMALLER
+    /// than that size, so the gate could stay shut for the rest of the task
+    /// even when a summary would work. The recorded size is lowered to the
+    /// current summarizable size, so the same growth is required from the
+    /// post-shrink history. The failure cap is not touched.
+    pub fn rebase_summary_backoff(&mut self, messages: &[Message], task: Option<&str>) {
+        let Some(at) = self.summary_backoff else {
+            return;
+        };
+        let current = self
+            .summary_split(messages, task)
+            .map_or(0, |s| s.summarizable_tokens);
+        if current < at {
+            debug!(
+                "summary backoff rebased after a shrink: ~{at} -> ~{current} summarizable tokens"
+            );
+            self.summary_backoff = Some(current);
+        }
     }
 
     /// Returns the (possibly) compressed messages and the token usage the

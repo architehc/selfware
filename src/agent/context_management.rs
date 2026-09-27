@@ -1171,6 +1171,7 @@ impl Agent {
             });
         }
 
+        self.rebase_summary_backoff();
         let after_messages = self.messages.len();
         let after_tokens = self.estimate_messages_tokens();
         let removed_messages = before_messages.saturating_sub(after_messages);
@@ -1183,6 +1184,33 @@ impl Agent {
                 removed_messages,
             );
         }
+    }
+
+    /// The history was shrunk without a summary (trim, result compaction,
+    /// hard compression, orchestrated compaction): rescale the summary
+    /// backoff to the smaller summarizable part (see
+    /// [`super::context::ContextCompressor::rebase_summary_backoff`]).
+    pub(super) fn rebase_summary_backoff(&mut self) {
+        let task_text = self.current_task_text().map(str::to_string);
+        self.compressor
+            .rebase_summary_backoff(&self.messages, task_text.as_deref());
+    }
+
+    /// Summaries were just disabled for the rest of the task after
+    /// `MAX_SUMMARY_FAILURES_PER_TASK` failed summary calls: log it, say so
+    /// once on screen, and record it as a compaction event.
+    pub(super) fn note_summaries_disabled(&mut self) {
+        let failures = self.compressor.summary_failures();
+        let note = format!(
+            "context summaries disabled for the rest of this task after {failures} failed \
+             summary calls; result compaction and hard compression keep the history in budget"
+        );
+        warn!("{note}");
+        cli_println!("{} {note}", colored::Colorize::bright_yellow("⚠️"));
+        self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+            decision: "context_summaries_disabled".to_string(),
+            detail: note,
+        });
     }
 
     /// Compact old, large tool results in the history IN PLACE until it
@@ -1215,6 +1243,7 @@ impl Agent {
             protect_unseen,
             &path_keys,
         )?;
+        self.rebase_summary_backoff();
         let messages = self.messages.len();
         let reason = format!("{why}; {}", report.describe());
         self.log_context_compression_event(super::session_log::ContextCompressionLogDetails {

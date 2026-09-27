@@ -3062,6 +3062,7 @@ To call a tool, use this EXACT XML structure:
         let metrics = self.compression_orchestrator.run_micro(&mut self.messages);
         self.ensure_task_anchor_present();
         info!("MicroCompact: {}", metrics.summary());
+        self.rebase_summary_backoff();
         self.log_compaction_metrics("micro_compact", &metrics);
         metrics
     }
@@ -3078,6 +3079,7 @@ To call a tool, use this EXACT XML structure:
         self.ensure_task_anchor_present();
         self.account_compression_tokens(&metrics);
         info!("AutoCompact: {}", metrics.summary());
+        self.rebase_summary_backoff();
         self.log_compaction_metrics("auto_compact", &metrics);
         Ok(metrics)
     }
@@ -3094,6 +3096,7 @@ To call a tool, use this EXACT XML structure:
         self.ensure_task_anchor_present();
         self.account_compression_tokens(&metrics);
         info!("FullCompact: {}", metrics.summary());
+        self.rebase_summary_backoff();
         self.log_compaction_metrics("full_compact", &metrics);
         Ok(metrics)
     }

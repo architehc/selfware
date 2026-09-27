@@ -7033,6 +7033,12 @@ fn render_run_summary_for(
             None => lines.push(grounding.grounding_line()),
         }
     }
+    if let Some(failures) = summary.context_summaries_disabled_after {
+        lines.push(format!(
+            "context summaries: disabled after {failures} failed summary calls \
+             (result compaction / hard compression used instead)"
+        ));
+    }
     let cost = summary
         .cost_usd
         .map(|c| {
