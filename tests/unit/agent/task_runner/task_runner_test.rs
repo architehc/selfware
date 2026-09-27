@@ -4793,3 +4793,62 @@ async fn finalize_rechecks_a_stale_post_edit_failure_before_classifying() {
         );
     }
 }
+
+/// Review (0.9.2): a planning reply that was only (unparseable) tool markup
+/// was accepted as the final answer and printed raw at step 0.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn planning_markup_is_never_accepted_as_the_answer() {
+    let _state = crate::test_support::ExecGuard::hold();
+    let markup = "<tool_call>\n<function=file_read>\n<parameter=name>README.md</parameter>\n\
+                  </function>\n</tool_call>";
+    let server = MockLlmServer::builder().with_response(markup).build().await;
+    let config = mock_agent_config(format!("{}/v1", server.url()), false);
+    let mut agent = Agent::new(config).await.unwrap();
+    let task = "Explain ownership in Rust";
+    agent.start_learning_session("gate-markup", task);
+    agent.current_checkpoint = Some(TaskCheckpoint::new(
+        "gate-markup".to_string(),
+        task.to_string(),
+    ));
+    agent.messages.push(Message::user(task));
+    let _ = agent.plan().await.unwrap();
+    assert!(
+        agent.planning_answer_ready_to_finalize().await.is_none(),
+        "tool markup must not finalize as the answer"
+    );
+    server.stop().await;
+}
+
+/// Review (0.9.2): the ungrounded-answer guard only ran for tasks
+/// classified read-only; a non-mutation task naming a project file in
+/// between ("Read README.md …") was answered from the prompt.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn a_project_question_is_not_answered_from_the_prompt_in_planning() {
+    let _state = crate::test_support::ExecGuard::hold();
+    let answer = "The README describes a command-line hex viewer with coloured output, \
+                  squeezing of repeated lines and several character tables.";
+    let server = MockLlmServer::builder().with_response(answer).build().await;
+    let config = mock_agent_config(format!("{}/v1", server.url()), false);
+    let mut agent = Agent::new(config).await.unwrap();
+    let task = "Read README.md and tell me in two sentences what this project does.";
+    agent.start_learning_session("gate-readme", task);
+    agent.current_checkpoint = Some(TaskCheckpoint::new(
+        "gate-readme".to_string(),
+        task.to_string(),
+    ));
+    agent.messages.push(Message::user(task));
+    let _ = agent.plan().await.unwrap();
+    assert!(
+        agent.planning_answer_ready_to_finalize().await.is_none(),
+        "a workspace question with zero reads must not finalize from planning"
+    );
+    server.stop().await;
+}

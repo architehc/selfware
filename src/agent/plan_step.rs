@@ -508,7 +508,11 @@ impl Agent {
         // planning turn in one request. The gate applies when the task asks
         // about THIS workspace's code, where an answer produced without opening
         // anything came from the prompt rather than from the code.
-        if self.current_task_is_read_only() && self.total_tool_call_count() == 0 {
+        // Any non-mutation task (the mutation case returned above), not only
+        // tasks classified read-only: a task in between ("Read README.md and
+        // …") skipped this guard and was answered from the prompt (review,
+        // 0.9.2).
+        if self.total_tool_call_count() == 0 {
             let project_name = super::current_project_root()
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -551,6 +555,17 @@ impl Agent {
         if clean.len() < 40
             || super::verification::is_confused_response(&content)
             || super::verification::is_incomplete_action_response(&content)
+        {
+            return None;
+        }
+        // A planning reply that is (or contains) tool-call markup — parsed or
+        // not — is an attempted call, never the answer. The execution path
+        // reports unparseable calls back to the model; accepting it here
+        // printed the raw `<tool_call>…` block as "the answer" at step 0
+        // (review, 0.9.2).
+        if crate::tool_parser::text_opens_tool_call(&crate::tool_parser::outside_markdown_code(
+            &clean,
+        )) || super::recovery::looks_like_malformed_tool_xml(&content)
         {
             return None;
         }
