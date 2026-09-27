@@ -34,7 +34,10 @@ pub struct TaskConstraints {
     /// The token budget (`[agent] max_budget_tokens`), `None` = unbounded.
     pub token_budget: Option<usize>,
     /// `[safety] allowed_paths`. Shown, not editable mid-task: the safety
-    /// checker reads it once when the agent is built.
+    /// config is copied at agent build into several independent holders
+    /// (safety checker, per-tool configs, a process-global fallback) that
+    /// cannot be replaced atomically at the pause point (formal/DESIGN.md
+    /// §12).
     pub allowed_paths: Vec<String>,
 }
 

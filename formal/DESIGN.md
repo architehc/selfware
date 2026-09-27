@@ -263,8 +263,15 @@ Each phase is shippable alone:
   from then on — run summary, structured result (`task_edited`), journal
   (checkpoint saved at the edit, `original_task_description` kept),
   `task show`, the Tasks pane, the outcome telemetry — each noting that it
-  was edited and what the task was started as. `allowed_paths` is shown read-only: the safety checker
-  reads it when the agent is built.
+  was edited and what the task was started as.
+- **`allowed_paths` stays read-only mid-task.** The `[safety]` config is
+  copied at agent build into independent holders: the `SafetyChecker`,
+  each file/git/worktree/LSP tool's own config inside the `ToolRegistry`,
+  the FIM tool, the process-global file-tool fallback, the YOLO manager's
+  deny list and the citation resolver. They cannot be swapped as one unit
+  at the pause point; a partial swap would leave some holders on the old
+  list, so a narrowing would silently not apply everywhere (a widening
+  relative to what the user asked for). Changing it means a new task.
 - **Edit of a finished task** forks it: a new task id whose records carry
   `parent`; the original's history is untouched.
 - **Usage in the log.** Terminal records and edits carry `usage`: total
