@@ -61,11 +61,18 @@ pub struct DrainReport {
     /// Ids of the resources whose drain raised [`Effect::LeakAlarm`] (they
     /// entered `leaked` during this drain).
     pub leak_alarms: Vec<String>,
+    /// Not drained because a bounded drain ([`teardown_session_within`]) ran
+    /// out of budget first. Still registered (not released, not leaked):
+    /// `selfware resources reap` finds them once this session is gone.
+    pub undrained: Vec<Resource>,
 }
 
 impl DrainReport {
     pub fn is_empty(&self) -> bool {
-        self.released.is_empty() && self.leaked.is_empty() && self.kept.is_empty()
+        self.released.is_empty()
+            && self.leaked.is_empty()
+            && self.kept.is_empty()
+            && self.undrained.is_empty()
     }
 
     /// `(released, leaked, kept)` counts.
@@ -98,6 +105,12 @@ impl DrainReport {
             line.push_str(&format!(
                 ", {} kept running (see `selfware resources`)",
                 self.kept.len()
+            ));
+        }
+        if !self.undrained.is_empty() {
+            line.push_str(&format!(
+                ", {} not drained before the shutdown deadline (left for `selfware resources reap`)",
+                self.undrained.len()
             ));
         }
         Some(line)
@@ -407,6 +420,94 @@ pub async fn teardown_session(
         .collect();
     owned.reverse();
     drain(registry, driver, owned, policy).await
+}
+
+/// [`teardown_session`] bounded by an overall `budget`, for a drain that
+/// must finish before the process is killed anyway (an idle REPL's SIGTERM:
+/// whoever sent it escalates to SIGKILL after its own grace). Each resource
+/// gets `min(policy, what is left)` for its polite stop and force grace, and
+/// each drain step is cut off when the budget runs out; resources not reached
+/// are reported in [`DrainReport::undrained`], never as released. A drain cut
+/// off mid-way leaves its entry `draining`, which the reaper resumes.
+pub async fn teardown_session_within(
+    registry: &ResourceRegistry,
+    driver: &dyn ResourceDriver,
+    policy: TeardownPolicy,
+    budget: Duration,
+) -> DrainReport {
+    let session = registry.session().id.clone();
+    let mut owned: Vec<Resource> = registry
+        .unreleased()
+        .into_iter()
+        .filter(|r| r.session == session && r.kind.is_drainable())
+        .collect();
+    owned.reverse();
+    let end = tokio::time::Instant::now() + budget;
+    let mut report = DrainReport::default();
+    let mut pending = owned.into_iter();
+    while let Some(resource) = pending.next() {
+        let left = end.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            report.undrained.push(resource);
+            report.undrained.extend(pending);
+            break;
+        }
+        let bounded = bounded_policy(policy, left);
+        let one = tokio::time::timeout(
+            left,
+            drain(registry, driver, vec![resource.clone()], bounded),
+        )
+        .await;
+        match one {
+            Ok(one) => {
+                report.released.extend(one.released);
+                report.leaked.extend(one.leaked);
+                report.leak_alarms.extend(one.leak_alarms);
+            }
+            Err(_) => {
+                report
+                    .undrained
+                    .push(registry.get(&resource.id).unwrap_or(resource));
+                report.undrained.extend(pending);
+                break;
+            }
+        }
+    }
+    report
+}
+
+/// `policy` shrunk so one resource's polite stop + force grace fit in `left`
+/// (the force grace takes at most a third of it).
+pub fn bounded_policy(policy: TeardownPolicy, left: Duration) -> TeardownPolicy {
+    let force_grace = policy.force_grace.min(left / 3);
+    TeardownPolicy {
+        deadline: policy.deadline.min(left.saturating_sub(force_grace)),
+        force_grace,
+        poll: policy.poll,
+    }
+}
+
+/// Head-room kept between a signal-triggered drain and the forced exit, for
+/// printing the summary, restoring the terminal and exiting.
+pub const SIGNAL_EXIT_MARGIN: Duration = Duration::from_secs(2);
+
+/// The drain budget for a signal-triggered session end within `grace`.
+pub fn signal_drain_budget(grace: Duration) -> Duration {
+    grace.saturating_sub(SIGNAL_EXIT_MARGIN)
+}
+
+/// [`teardown_session_within`] on the process-wide registry with the system
+/// driver and the configured deadline; the summary line, `None` when the
+/// session owned nothing.
+pub async fn end_process_session_within(budget: Duration) -> Option<String> {
+    teardown_session_within(
+        ResourceRegistry::global(),
+        &super::SystemDriver::default(),
+        session_policy(),
+        budget,
+    )
+    .await
+    .summary_line()
 }
 
 static SESSION_TEARDOWN_DEADLINE: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();

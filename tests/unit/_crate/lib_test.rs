@@ -26,3 +26,25 @@ fn test_repl_waiting_for_input_and_guard() {
     }
     assert!(!is_repl_waiting_for_input());
 }
+
+#[test]
+fn first_signal_action_drains_only_on_sigterm_at_an_idle_repl() {
+    assert_eq!(
+        first_signal_action(ShutdownReason::SignalTerminate, true),
+        FirstSignalAction::DrainSessionThenExit { code: 143 }
+    );
+    assert_eq!(
+        first_signal_action(ShutdownReason::SignalTerminate, false),
+        FirstSignalAction::WindDown
+    );
+    for idle in [true, false] {
+        assert_eq!(
+            first_signal_action(ShutdownReason::UserInterrupt, idle),
+            FirstSignalAction::WindDown
+        );
+        assert_eq!(
+            first_signal_action(ShutdownReason::Timeout, idle),
+            FirstSignalAction::WindDown
+        );
+    }
+}

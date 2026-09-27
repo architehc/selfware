@@ -1,6 +1,10 @@
 use std::process::ExitCode;
 
-/// Grace period after shutdown signal before force-exiting (seconds).
+/// Grace period after shutdown signal before force-exiting (seconds). An idle
+/// REPL's SIGTERM drains the session within this grace minus
+/// `teardown::SIGNAL_EXIT_MARGIN` (10 s is also `docker stop`'s default
+/// SIGTERM→SIGKILL timeout, so the drain must fit inside it rather than
+/// extend it).
 const SHUTDOWN_GRACE_SECS: u64 = 10;
 
 /// Stack size for the thread the CLI actually runs on. Building the clap
@@ -44,9 +48,29 @@ async fn async_main() -> ExitCode {
         match reason {
             selfware::ShutdownReason::SignalTerminate => {
                 eprintln!("\nReceived SIGTERM, winding down...");
-                if selfware::is_repl_waiting_for_input() {
+                if let selfware::FirstSignalAction::DrainSessionThenExit { code } =
+                    selfware::first_signal_action(reason, selfware::is_repl_waiting_for_input())
+                {
+                    // An idle REPL never returns to `main`'s session drain:
+                    // drain here (MCP servers, kept processes, containers),
+                    // bounded to fit inside the grace the signaller gives
+                    // us. A second signal cuts it short — the reaper finds
+                    // whatever was left.
+                    let budget = selfware::resources::teardown::signal_drain_budget(
+                        std::time::Duration::from_secs(SHUTDOWN_GRACE_SECS),
+                    );
+                    tokio::select! {
+                        line = selfware::resources::teardown::end_process_session_within(budget) => {
+                            if let Some(line) = line {
+                                eprintln!("{line}");
+                            }
+                        }
+                        _ = signals.recv() => {
+                            eprintln!("\nSecond signal received, forcing immediate exit.");
+                        }
+                    }
                     selfware::output::restore_terminal_before_exit();
-                    std::process::exit(143);
+                    std::process::exit(code);
                 }
             }
             _ => {

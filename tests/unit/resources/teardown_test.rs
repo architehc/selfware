@@ -367,3 +367,93 @@ async fn pending_container_whose_lookup_fails_is_leaked() {
     assert_eq!(r.state, ResourceState::Leaked);
     assert!(r.note.unwrap().contains("docker daemon not reachable"));
 }
+
+// ---------------------------------------------------------------------------
+// Bounded session drain (idle-REPL SIGTERM)
+// ---------------------------------------------------------------------------
+
+fn slow() -> TeardownPolicy {
+    // A configured deadline far longer than the budget: the bound must win.
+    TeardownPolicy {
+        deadline: Duration::from_secs(10),
+        force_grace: Duration::from_secs(3),
+        poll: Duration::from_millis(5),
+    }
+}
+
+#[tokio::test]
+async fn bounded_session_drain_with_room_releases_everything() {
+    let reg = ResourceRegistry::in_memory();
+    let driver = FakeDriver::new();
+    let a = register(&reg, process(51), &session_owner());
+    let b = register(&reg, process(52).keep(true), &session_owner());
+    let report = teardown_session_within(&reg, &driver, fast(), Duration::from_secs(5)).await;
+    assert_eq!(report.released.len(), 2);
+    assert!(report.undrained.is_empty() && report.leaked.is_empty());
+    for id in [a, b] {
+        assert_eq!(reg.get(&id).unwrap().state, ResourceState::Released);
+    }
+    assert_eq!(
+        report.summary_line().as_deref(),
+        Some("resources: 2 released, 0 leaked")
+    );
+}
+
+#[tokio::test]
+async fn bounded_session_drain_stops_at_the_budget_and_reports_the_rest_undrained() {
+    let reg = ResourceRegistry::in_memory();
+    let driver = FakeDriver::new();
+    let first = register(&reg, process(61), &session_owner());
+    driver.script("pid 62", Behavior::NeverStops);
+    let stuck = register(&reg, process(62), &session_owner());
+
+    let budget = Duration::from_millis(300);
+    let started = std::time::Instant::now();
+    let report = teardown_session_within(&reg, &driver, slow(), budget).await;
+    let elapsed = started.elapsed();
+
+    // The 10 s configured deadline did not apply: the budget bounds the drain.
+    assert!(elapsed < Duration::from_secs(2), "took {elapsed:?}");
+    // The stuck one (drained first: reverse creation order) is never
+    // reported released; the one not reached is undrained and still live.
+    assert!(report.released.is_empty(), "{:?}", report.released);
+    assert!(!reg.get(&stuck).unwrap().state.is_released());
+    assert!(report.undrained.iter().any(|r| r.id == first));
+    assert_eq!(reg.get(&first).unwrap().state, ResourceState::Live);
+    assert!(driver.calls_with("polite:pid 61").is_empty());
+    let line = report.summary_line().expect("a summary line");
+    assert!(
+        line.contains("not drained before the shutdown deadline"),
+        "{line}"
+    );
+}
+
+#[tokio::test]
+async fn bounded_session_drain_with_no_budget_touches_nothing() {
+    let reg = ResourceRegistry::in_memory();
+    let driver = FakeDriver::new();
+    let id = register(&reg, process(71), &session_owner());
+    let report = teardown_session_within(&reg, &driver, fast(), Duration::ZERO).await;
+    assert!(driver.calls().is_empty());
+    assert_eq!(report.undrained.len(), 1);
+    assert_eq!(reg.get(&id).unwrap().state, ResourceState::Live);
+}
+
+#[test]
+fn bounded_policy_fits_polite_stop_and_force_grace_in_what_is_left() {
+    let left = Duration::from_secs(8);
+    let p = bounded_policy(slow(), left);
+    assert!(p.deadline + p.force_grace <= left, "{p:?}");
+    assert_eq!(p.force_grace, Duration::from_secs(8) / 3);
+    // Plenty of room: the configured policy is unchanged.
+    assert_eq!(bounded_policy(fast(), Duration::from_secs(8)), fast());
+}
+
+#[test]
+fn the_signal_drain_budget_leaves_margin_inside_the_grace() {
+    let grace = Duration::from_secs(10);
+    let budget = signal_drain_budget(grace);
+    assert_eq!(budget, Duration::from_secs(8));
+    assert!(budget + SIGNAL_EXIT_MARGIN <= grace);
+    assert_eq!(signal_drain_budget(Duration::from_secs(1)), Duration::ZERO);
+}

@@ -220,6 +220,31 @@ pub fn is_repl_waiting_for_input() -> bool {
     REPL_WAITING_FOR_INPUT.load(Ordering::SeqCst)
 }
 
+/// What `main`'s signal handler does with the *first* shutdown signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirstSignalAction {
+    /// Nothing is running that would wind down on its own (the REPL is
+    /// blocked reading a line): drain the session's resources within the
+    /// shutdown grace, then exit with `code`.
+    DrainSessionThenExit { code: i32 },
+    /// A run, TUI or subcommand is active: it observes the shutdown latch and
+    /// drains on its own way out; the handler only starts the grace timer.
+    WindDown,
+}
+
+/// The decision behind [`FirstSignalAction`]. Only SIGTERM on an idle REPL
+/// exits from the handler: the REPL's blocking line read never observes the
+/// latch, so without this the process would sit out the whole grace. A
+/// SIGINT at an idle prompt is a keypress the line editor handles itself.
+pub fn first_signal_action(reason: ShutdownReason, repl_idle: bool) -> FirstSignalAction {
+    match reason {
+        ShutdownReason::SignalTerminate if repl_idle => {
+            FirstSignalAction::DrainSessionThenExit { code: 143 }
+        }
+        _ => FirstSignalAction::WindDown,
+    }
+}
+
 static FAILURE_REPORTED: AtomicBool = AtomicBool::new(false);
 
 /// Record that the CLI already told the user how the run ended (the
