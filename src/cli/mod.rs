@@ -3033,7 +3033,8 @@ fn tui_run_outcome_text(agent: &Agent, run_result: &Result<()>) -> String {
     let summary = render_run_summary(&agent.run_summary(), failure.as_deref());
     match agent
         .last_run_failure_mode()
-        .and_then(|fm| fm.cli_banner().lines().next().map(str::to_string))
+        .and_then(|fm| agent.outcome_banner(fm))
+        .and_then(|banner| banner.lines().next().map(str::to_string))
     {
         Some(banner) => format!("{banner}\n{summary}"),
         None => summary,

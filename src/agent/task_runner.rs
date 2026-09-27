@@ -3461,6 +3461,20 @@ impl Agent {
         fm
     }
 
+    /// The end-of-run outcome banner to print, or `None` when it would only
+    /// be noise: a plain NO_CHANGES verdict on a task that never implied
+    /// changes (chat, Q&A, a greeting — not a mutation task, no mutating
+    /// call). "✅ Completed — no file changes made" plus advice about edits
+    /// answers a question nobody asked there. The verdict itself is
+    /// unchanged: the run summary, JSON result and failure_mode.json still
+    /// carry NO_CHANGES, and every ⚠️/❌ banner is still printed.
+    pub(crate) fn outcome_banner(&self, mode: &FailureMode) -> Option<String> {
+        let noise = mode.is_plain_no_change()
+            && !self.current_task_requires_mutation()
+            && self.mutating_tool_call_count() == 0;
+        (!noise).then(|| mode.cli_banner())
+    }
+
     async fn finalize_failure_mode(&mut self, outcome: RunOutcome) -> FailureMode {
         // One terminal verdict per run. A hard-budget stop finalizes where it
         // trips and then reaches the loop's failure branch as an error; the
@@ -3521,10 +3535,12 @@ impl Agent {
                 reason: format!("{}: {}", mode.kind.tag(), mode.evidence),
             });
         }
-        cli_println!(
-            "{}",
-            crate::output::hyperlink::linkify_for_terminal(&mode.cli_banner())
-        );
+        if let Some(banner) = self.outcome_banner(&mode) {
+            cli_println!(
+                "{}",
+                crate::output::hyperlink::linkify_for_terminal(&banner)
+            );
+        }
         // Best-effort artifact write so the SWE-bench Pro harness can pick it up.
         if let Some(dir) = self.failure_mode_artifact_dir() {
             if let Err(e) = mode.write_artifact(&dir).await {

@@ -5031,3 +5031,51 @@ fn error_recovery_below_the_lifetime_cap_is_not_stopped() {
     }
     assert_eq!(budget.lifetime(), MAX_RUN_ERROR_RECOVERIES - 1);
 }
+
+/// A plain NO_CHANGES verdict on a task that never implied changes ("hi")
+/// prints no outcome banner — "✅ Completed — no file changes made" plus
+/// edit advice is noise there. The verdict itself is untouched, and every
+/// other banner (mutation tasks, ⚠️ citation notes) is still printed.
+#[tokio::test]
+async fn plain_no_change_banner_is_suppressed_only_for_tasks_without_implied_changes() {
+    let config = mock_agent_config("http://127.0.0.1:1/v1".to_string(), false);
+    let mut agent = Agent::new(config).await.unwrap();
+    let plain = crate::agent::failure_mode::FailureMode {
+        kind: crate::agent::failure_mode::FailureKind::NoChange,
+        evidence: "completed naturally with 0 mutating tool calls (0 total) — no files changed"
+            .to_string(),
+        advice: "if this task needed edits, the model made none; if it was read-only/Q&A, this is expected".to_string(),
+        restored_files: Vec::new(),
+    };
+    assert!(plain.is_plain_no_change());
+
+    agent.current_task_context = "hi".to_string();
+    agent.classify_task_policy();
+    assert_eq!(
+        agent.outcome_banner(&plain),
+        None,
+        "greeting: no NO_CHANGES banner"
+    );
+    assert_eq!(plain.kind.tag(), "NO_CHANGES", "the verdict is unchanged");
+
+    agent.current_task_context = "Fix the off-by-one bug in src/parser.rs".to_string();
+    agent.classify_task_policy();
+    assert!(
+        agent.outcome_banner(&plain).is_some(),
+        "a task that implied changes keeps its banner"
+    );
+
+    agent.current_task_context = "review the parser".to_string();
+    agent.classify_task_policy();
+    let warned = crate::agent::failure_mode::FailureMode {
+        evidence: format!(
+            "{}; {}",
+            plain.evidence,
+            crate::agent::failure_mode::CITATIONS_NONE_CHECKABLE_NOTE
+        ),
+        ..plain.clone()
+    };
+    assert!(!warned.is_plain_no_change());
+    let banner = agent.outcome_banner(&warned).expect("⚠️ banners are kept");
+    assert!(banner.starts_with("⚠️"), "{banner}");
+}

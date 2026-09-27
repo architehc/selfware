@@ -597,6 +597,12 @@ impl FailureMode {
         )
     }
 
+    /// A plain "✅ Completed — no file changes made" verdict: no edits, and
+    /// nothing else (citations, verification, audit) to warn about.
+    pub fn is_plain_no_change(&self) -> bool {
+        matches!(self.kind, FailureKind::NoChange) && self.banner_header().starts_with('✅')
+    }
+
     /// Whether this outcome earns a clean ✅: the one decision the banner
     /// header makes, reused by every other green signal (the CLI's "Task
     /// complete." line) so they cannot disagree (review of C2, 0.9.1).
