@@ -993,19 +993,20 @@ impl Agent {
         result
     }
 
-    /// Drain everything this session owns (REPL exit), printing the summary.
+    /// Drain everything this session owns (REPL / TUI exit), printing the
+    /// summary.
     pub(crate) async fn teardown_session_resources(&self) {
         let registry = crate::resources::ResourceRegistry::global();
         let policy = crate::resources::TeardownPolicy::with_deadline(
             std::time::Duration::from_secs(self.config.resources.teardown_deadline_secs),
         );
-        let report = crate::resources::teardown::teardown_session(
+        if let Some(line) = crate::resources::teardown::end_session(
             registry,
             &crate::resources::SystemDriver::default(),
             policy,
         )
-        .await;
-        if let Some(line) = report.summary_line() {
+        .await
+        {
             cli_println!("{}", line);
         }
     }

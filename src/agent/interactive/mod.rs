@@ -22,7 +22,15 @@ impl Agent {
         // Run the session with this agent's workspace root installed as the
         // task-local root (see `run_task`).
         let root = self.tools.workspace_root().clone();
-        crate::tools::workspace_root::scope(root, self.interactive_in_root()).await
+        let result = crate::tools::workspace_root::scope(root, self.interactive_in_root()).await;
+        // Session end on every way out of the REPL (exit command, Ctrl-D,
+        // double Ctrl-C, or an I/O error): drain everything this session
+        // still owns (kept resources included), then sweep any unregistered
+        // managed process. Only a forced exit (triple Ctrl-C, second
+        // signal) skips it; the next start's reaper report finds those.
+        self.teardown_session_resources().await;
+        crate::tools::process::cleanup_all_processes().await;
+        result
     }
 
     async fn interactive_in_root(&mut self) -> Result<()> {
@@ -1725,11 +1733,6 @@ impl Agent {
             }
         }
 
-        // Session end: drain everything this session still owns (kept
-        // resources included), then sweep any unregistered managed process.
-        self.teardown_session_resources().await;
-        crate::tools::process::cleanup_all_processes().await;
-
         Ok(())
     }
 
@@ -3326,11 +3329,6 @@ impl Agent {
                 );
             }
         }
-
-        // Session end: drain everything this session still owns (kept
-        // resources included), then sweep any unregistered managed process.
-        self.teardown_session_resources().await;
-        crate::tools::process::cleanup_all_processes().await;
 
         Ok(())
     }

@@ -294,3 +294,28 @@ async fn a_resource_released_by_its_tool_during_teardown_is_not_touched() {
     assert!(driver.calls().is_empty(), "nothing signalled");
     assert!(report.leak_alarms.is_empty());
 }
+
+#[tokio::test]
+async fn session_end_drains_once_and_is_silent_the_second_time() {
+    let reg = ResourceRegistry::in_memory();
+    let driver = FakeDriver::new();
+    register(&reg, process(50), &session_owner());
+    register(&reg, process(51).keep(true), &session_owner());
+    // A task's resource left behind by a run that never drained it.
+    register(&reg, process(52), "task-that-crashed");
+
+    let first = end_session(&reg, &driver, fast()).await;
+    assert_eq!(first.as_deref(), Some("resources: 3 released, 0 leaked"));
+    // The REPL drained on its way out; the process-exit drain finds nothing.
+    assert_eq!(end_session(&reg, &driver, fast()).await, None);
+}
+
+#[test]
+fn the_session_policy_uses_the_configured_deadline() {
+    // The only caller in the test process: `cli::run` sets it in production.
+    configure_session_deadline(Duration::from_secs(4));
+    assert_eq!(session_policy().deadline, Duration::from_secs(4));
+    // First call wins: a later configuration does not move it mid-session.
+    configure_session_deadline(Duration::from_secs(9));
+    assert_eq!(session_policy().deadline, Duration::from_secs(4));
+}

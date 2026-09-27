@@ -306,6 +306,51 @@ pub async fn teardown_session(
     drain(registry, driver, owned, policy).await
 }
 
+static SESSION_TEARDOWN_DEADLINE: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+
+/// Record the configured teardown deadline (`resources.teardown_deadline_secs`)
+/// for the process-exit drain, which runs after the configuration is gone.
+/// The first call wins.
+pub fn configure_session_deadline(deadline: Duration) {
+    let _ = SESSION_TEARDOWN_DEADLINE.set(deadline);
+}
+
+/// The policy for the session-end drain: the configured deadline, or the
+/// default when none was configured.
+pub fn session_policy() -> TeardownPolicy {
+    SESSION_TEARDOWN_DEADLINE
+        .get()
+        .map_or_else(TeardownPolicy::default, |d| {
+            TeardownPolicy::with_deadline(*d)
+        })
+}
+
+/// Session end: drain everything this session still owns and return the
+/// summary line, `None` when nothing was left. Idempotent — the REPL/TUI
+/// drain on their own exit and the process-exit drain in `main` then finds
+/// nothing, so a summary is printed once.
+pub async fn end_session(
+    registry: &ResourceRegistry,
+    driver: &dyn ResourceDriver,
+    policy: TeardownPolicy,
+) -> Option<String> {
+    teardown_session(registry, driver, policy)
+        .await
+        .summary_line()
+}
+
+/// [`end_session`] on the process-wide registry with the system driver and
+/// the configured deadline. Called on every non-forced process exit
+/// (headless runs, subcommands, REPL/TUI errors).
+pub async fn end_process_session() -> Option<String> {
+    end_session(
+        ResourceRegistry::global(),
+        &super::SystemDriver::default(),
+        session_policy(),
+    )
+    .await
+}
+
 #[cfg(test)]
 #[path = "../../tests/unit/resources/teardown_test.rs"]
 mod tests;

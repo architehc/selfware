@@ -1851,6 +1851,9 @@ pub async fn run() -> Result<()> {
         crate::config::set_config_line_suppressed(true);
     }
     let mut config = load_async_config_with_provenance(&cli, &config_path).await?;
+    crate::resources::teardown::configure_session_deadline(std::time::Duration::from_secs(
+        config.resources.teardown_deadline_secs,
+    ));
 
     // Report (never reap) resources earlier sessions left behind: one line
     // on stderr, registry only — no container runtime calls on startup.
@@ -2943,6 +2946,10 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
     }
 
     crate::output::set_tui_active(false);
+
+    // Session end: drain what the session still owns, printed after the TUI
+    // left the alternate screen so the line survives.
+    agent.teardown_session_resources().await;
 
     // Session-exit summary (claude prints usage on quit): the Round A run
     // summary — outcome, iterations, files changed, verification, tokens.

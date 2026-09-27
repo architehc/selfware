@@ -92,6 +92,14 @@ async fn async_main() -> ExitCode {
     // tokio::select! which would drop the future mid-flight.
     let result = selfware::cli::run().await;
 
+    // Session end on every non-forced exit (headless runs, subcommands, a
+    // REPL/TUI that returned an error): drain what this process still owns.
+    // The REPL and TUI already drained on their own way out, so this finds
+    // nothing there. stderr, so structured stdout stays pure JSON.
+    if let Some(line) = selfware::resources::teardown::end_process_session().await {
+        eprintln!("{line}");
+    }
+
     selfware::shutdown_tracing();
 
     if let Err(e) = &result {
