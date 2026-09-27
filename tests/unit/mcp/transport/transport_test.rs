@@ -487,3 +487,101 @@ fn transport_error_messages_name_server_and_cause() {
         McpTransportError::WriteFailed { .. }
     ));
 }
+
+// -----------------------------------------------------------------------
+// Resource registry: MCP servers are session-owned `mcp` resources.
+// -----------------------------------------------------------------------
+
+#[cfg(unix)]
+fn mcp_entry(name: &str) -> crate::resources::Resource {
+    crate::resources::ResourceRegistry::global()
+        .snapshot()
+        .resources
+        .into_iter()
+        .find(|r| r.label.contains(name))
+        .unwrap_or_else(|| panic!("no registry entry for MCP server {name}"))
+}
+
+#[cfg(unix)]
+fn pid_alive(pid: u32) -> bool {
+    matches!(
+        crate::resources::driver::probe_pid(pid, None),
+        crate::resources::Probe::Unknown(_)
+    )
+}
+
+/// Spawned inside a task's owner scope, the server is still owned by the
+/// session (it serves later tasks), recorded with pid + start time + group,
+/// and released by an explicit shutdown once the child is reaped.
+#[cfg(unix)]
+#[tokio::test]
+async fn spawn_registers_a_session_owned_mcp_resource_released_on_shutdown() {
+    use crate::resources::{context, ResourceHandle, ResourceKind, ResourceState};
+    use std::collections::HashMap;
+    let name = format!("reg-test-{}", uuid::Uuid::new_v4().simple());
+    let transport = context::scope(
+        context::Owner::for_task("task-that-happened-to-run"),
+        StdioTransport::spawn_named(&name, "sleep", &["300".to_string()], &HashMap::new()),
+    )
+    .await
+    .expect("spawn sleep")
+    .with_request_timeout(std::time::Duration::from_millis(200));
+    let pid = transport.child.lock().await.id().expect("pid");
+
+    let entry = mcp_entry(&name);
+    assert_eq!(entry.kind, ResourceKind::Mcp);
+    assert_eq!(entry.state, ResourceState::Live);
+    assert_eq!(entry.owner_task, context::session_owner());
+    match &entry.handle {
+        ResourceHandle::Process {
+            pid: p,
+            pgid,
+            start_time,
+            managed_id,
+        } => {
+            assert_eq!(*p, pid);
+            assert_eq!(*pgid, Some(pid), "spawned into its own process group");
+            assert!(start_time.is_some(), "start time guards against pid reuse");
+            assert!(managed_id.is_none());
+        }
+        other => panic!("expected a process handle, got {other:?}"),
+    }
+    // A task teardown does not touch it.
+    assert!(crate::resources::ResourceRegistry::global()
+        .owned_by("task-that-happened-to-run")
+        .iter()
+        .all(|r| !r.label.contains(&name)));
+
+    transport.shutdown().await.expect("shutdown");
+    assert!(mcp_entry(&name).state.is_released());
+    assert!(!pid_alive(pid));
+}
+
+/// The session drain (what an idle-REPL SIGTERM and every session end run)
+/// stops a registered MCP server through the pid + start-time guarded driver.
+#[cfg(unix)]
+#[tokio::test]
+async fn session_drain_stops_a_registered_mcp_server() {
+    use crate::resources::{teardown, ResourceRegistry, SystemDriver, TeardownPolicy};
+    use std::collections::HashMap;
+    let name = format!("drain-test-{}", uuid::Uuid::new_v4().simple());
+    let transport =
+        StdioTransport::spawn_named(&name, "sleep", &["300".to_string()], &HashMap::new())
+            .await
+            .expect("spawn sleep");
+    let pid = transport.child.lock().await.id().expect("pid");
+    let entry = mcp_entry(&name);
+
+    // Only this entry: the global registry is shared with concurrent tests.
+    let report = teardown::drain(
+        ResourceRegistry::global(),
+        &SystemDriver::default(),
+        vec![entry],
+        TeardownPolicy::with_deadline(std::time::Duration::from_secs(3)),
+    )
+    .await;
+    assert_eq!(report.counts(), (1, 0, 0), "{:?}", report.leaked);
+    assert!(mcp_entry(&name).state.is_released());
+    assert!(!pid_alive(pid));
+    drop(transport);
+}

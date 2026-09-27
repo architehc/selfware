@@ -183,6 +183,36 @@ pub fn release_worktree(path: &std::path::Path) {
     });
 }
 
+/// Register a process the *session* owns — not whichever task happens to be
+/// running when it is spawned. MCP stdio servers are the case: they are
+/// started once per agent and serve every later task, so a task teardown
+/// must not stop them, but session end must (and after a crash the reaper
+/// finds them because their session is gone). The OS start time is recorded
+/// with the pid, so a drain or reap never signals a reused pid. `pgid` is the
+/// process group the pid leads, if it was spawned into its own.
+pub fn register_session_process(
+    registry: &ResourceRegistry,
+    kind: ResourceKind,
+    pid: u32,
+    pgid: Option<u32>,
+    label: impl Into<String>,
+) -> String {
+    registry.register_owned(
+        NewResource::new(
+            kind,
+            ResourceHandle::Process {
+                pid,
+                pgid,
+                start_time: driver::process_start_time(pid),
+                managed_id: None,
+            },
+            label,
+        ),
+        context::session_owner_of(&registry.session().id),
+        None,
+    )
+}
+
 /// This session's unreleased registry entry for managed process
 /// `managed_id` (started through the `process_start` tool), if any.
 pub fn managed_process_entry(registry: &ResourceRegistry, managed_id: &str) -> Option<Resource> {

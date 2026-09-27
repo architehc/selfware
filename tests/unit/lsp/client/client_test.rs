@@ -684,3 +684,43 @@ async fn write_to_closed_stdin_is_typed_broken_pipe() {
     assert_eq!(again.downcast_ref::<LspTransportError>(), Some(&broken));
     conn.kill_now().await;
 }
+
+/// A language server is a session-owned `process` resource (pid + start
+/// time recorded), released once `kill_now` has reaped it.
+#[cfg(unix)]
+#[tokio::test]
+async fn spawned_server_is_a_session_owned_resource_released_on_kill() {
+    use crate::resources::{context, ResourceHandle, ResourceKind, ResourceRegistry};
+    let dir = tempfile::tempdir().unwrap();
+    let marker = format!("lsp-reg-{}", uuid::Uuid::new_v4().simple());
+    let conn = context::scope(
+        context::Owner::for_task("some-task"),
+        LspServerConnection::spawn(
+            "sh",
+            &["-c".to_string(), format!("sleep 30 # {marker}")],
+            dir.path(),
+            Language::Rust,
+        ),
+    )
+    .await
+    .expect("spawn sh");
+    let id = conn.resource_id.clone().expect("registered");
+    let entry = ResourceRegistry::global().get(&id).expect("entry");
+    assert_eq!(entry.kind, ResourceKind::Process);
+    assert_eq!(entry.owner_task, context::session_owner());
+    assert!(entry.label.starts_with("LSP server sh"), "{}", entry.label);
+    assert!(matches!(
+        entry.handle,
+        ResourceHandle::Process {
+            start_time: Some(_),
+            ..
+        }
+    ));
+    assert!(!entry.state.is_released());
+    conn.kill_now().await;
+    assert!(ResourceRegistry::global()
+        .get(&id)
+        .expect("entry")
+        .state
+        .is_released());
+}

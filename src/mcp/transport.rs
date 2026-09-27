@@ -362,6 +362,13 @@ pub struct StdioTransport {
     /// Framing used for *outgoing* requests/notifications. Incoming messages
     /// are always auto-detected, so a server may reply in either framing.
     framing: Framing,
+    /// The server's resource-registry entry (`ResourceKind::Mcp`, owned by
+    /// the session), released once the child is confirmed reaped.
+    resource_id: Option<String>,
+    /// The process group the server leads (unix: spawned with
+    /// `process_group(0)`), so shutdown also stops what it forked
+    /// (`npx` → `node`).
+    pgid: Option<u32>,
 }
 
 impl StdioTransport {
@@ -403,9 +410,31 @@ impl StdioTransport {
             cmd.env(key, value);
         }
 
+        // Its own process group: a terminal Ctrl-C aimed at a running task
+        // does not kill the session's MCP servers, and shutdown / the session
+        // drain / the reaper can stop the whole server tree by group.
+        #[cfg(unix)]
+        cmd.process_group(0);
+        cmd.kill_on_drop(true);
+
         let mut child = cmd
             .spawn()
             .with_context(|| format!("Failed to spawn MCP server: {} {:?}", command, args))?;
+
+        // Session-owned, not task-owned: the server outlives the task that
+        // happened to be running at connect time. Registered so it is listed
+        // by `selfware resources`, drained at session end (including an idle
+        // REPL's SIGTERM) and reaped after a crash.
+        let pgid = child.id().filter(|_| cfg!(unix));
+        let resource_id = child.id().map(|pid| {
+            crate::resources::register_session_process(
+                crate::resources::ResourceRegistry::global(),
+                crate::resources::ResourceKind::Mcp,
+                pid,
+                pgid,
+                format!("MCP server {server_name} ({command})"),
+            )
+        });
 
         let stdin = child
             .stdin
@@ -551,6 +580,8 @@ impl StdioTransport {
             child,
             reader_handle: Mutex::new(Some(reader_handle)),
             framing: Framing::default(),
+            resource_id,
+            pgid,
         })
     }
 
@@ -698,7 +729,17 @@ impl Transport for StdioTransport {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
         let mut child = self.child.lock().await;
+        // The group first, while the leader is still unreaped (its pid, and so
+        // the pgid, cannot have been reused yet).
+        if matches!(child.try_wait(), Ok(None)) {
+            kill_group(self.pgid);
+        }
         let _ = child.kill().await;
+        // Released only once the child is confirmed reaped; otherwise the
+        // entry stays for the session drain / reaper to confirm.
+        if let (Some(id), Ok(Some(_))) = (&self.resource_id, child.try_wait()) {
+            crate::resources::ResourceRegistry::global().release(id, "MCP server shut down");
+        }
 
         // Cancel reader task
         let mut handle = self.reader_handle.lock().await;
@@ -717,14 +758,38 @@ impl Drop for StdioTransport {
         // process and its reader task so they cannot leak. Best-effort and
         // synchronous — no await, so use try_lock + Child::start_kill (SIGKILL).
         if let Ok(mut child) = self.child.try_lock() {
+            // Group first, only while the leader is unreaped (pgid not reusable).
+            if matches!(child.try_wait(), Ok(None)) {
+                kill_group(self.pgid);
+            }
             let _ = child.start_kill();
         }
+        // The registry entry is not released here: the kill cannot be
+        // confirmed synchronously. The session drain probes the pid (gone or
+        // a zombie reads as gone) and releases it then.
         if let Ok(mut handle) = self.reader_handle.try_lock() {
             if let Some(h) = handle.take() {
                 h.abort();
             }
         }
     }
+}
+
+/// SIGKILL the MCP server's process group (what it forked), best-effort.
+/// The group leader was spawned by us with `process_group(0)` and callers only
+/// signal while it is unreaped, so the pgid is ours; pgid 0/1 are never
+/// signalled.
+fn kill_group(pgid: Option<u32>) {
+    #[cfg(unix)]
+    if let Some(pgid) = pgid.filter(|p| *p > 1) {
+        use nix::sys::signal::{killpg, Signal};
+        use nix::unistd::Pid;
+        if let Ok(raw) = i32::try_from(pgid) {
+            let _ = killpg(Pid::from_raw(raw), Signal::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = pgid;
 }
 
 #[cfg(test)]

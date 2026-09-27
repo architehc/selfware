@@ -388,6 +388,9 @@ struct LspServerConnection {
     reader_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     language: Language,
     root_uri: String,
+    /// The server's session-owned resource-registry entry, released once
+    /// the child is confirmed reaped.
+    resource_id: Option<String>,
 }
 
 impl LspServerConnection {
@@ -437,6 +440,19 @@ impl LspServerConnection {
         let mut child = cmd
             .spawn()
             .with_context(|| format!("Failed to spawn LSP server: {} {:?}", command, args))?;
+
+        // Like MCP servers, a language server is started lazily and then
+        // serves every later task: owned by the session, so session end (and
+        // the reaper after a crash) stops it, never a task teardown.
+        let resource_id = child.id().map(|pid| {
+            crate::resources::register_session_process(
+                crate::resources::ResourceRegistry::global(),
+                crate::resources::ResourceKind::Process,
+                pid,
+                None,
+                format!("LSP server {command} ({language:?})"),
+            )
+        });
 
         let stdin = child.stdin.take().context("Failed to capture LSP stdin")?;
         let stdout = child
@@ -561,6 +577,7 @@ impl LspServerConnection {
             reader_handle: Mutex::new(Some(reader_handle)),
             language,
             root_uri,
+            resource_id,
         })
     }
 
@@ -849,6 +866,9 @@ impl LspServerConnection {
     async fn kill_now(&self) {
         let mut child = self.child.lock().await;
         let _ = child.kill().await;
+        if let (Some(id), Ok(Some(_))) = (&self.resource_id, child.try_wait()) {
+            crate::resources::ResourceRegistry::global().release(id, "LSP server shut down");
+        }
         drop(child);
         if let Some(h) = self.reader_handle.lock().await.take() {
             h.abort();
