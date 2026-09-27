@@ -2344,3 +2344,80 @@ async fn hard_compression_rebases_the_summary_backoff() {
     );
     assert_eq!(agent.compressor.summary_failures(), 1);
 }
+
+async fn failing_side_call_agent() -> (Agent, MockLlmServer) {
+    use crate::testing::mock_api::MockResponse;
+    let server = MockLlmServer::builder()
+        .with_default_response(MockResponse::Error {
+            status: 500,
+            body: r#"{"error":"side calls down"}"#.to_string(),
+        })
+        .build()
+        .await;
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.retry = crate::config::RetrySettings {
+        max_retries: 0,
+        base_delay_ms: 1,
+        max_delay_ms: 1,
+    };
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.messages = vec![Message::system("sys"), Message::user("Explain the loop.")];
+    (agent, server)
+}
+
+/// Rule 5 sweep of the summary cap (0.9.3): the every-5-steps reflection
+/// side call had no failure ceiling either (60 s cap per attempt).
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn a_failing_reflection_is_tried_at_most_the_cap_per_task() {
+    let (mut agent, server) = failing_side_call_agent().await;
+    let mut rounds_with_a_call = Vec::new();
+    for round in 0..6 {
+        let seen = server.captured_request_bodies().await.len();
+        agent.reflect_on_step((round + 1) * 5).await;
+        if server.captured_request_bodies().await.len() > seen {
+            rounds_with_a_call.push(round);
+        }
+    }
+    assert_eq!(
+        rounds_with_a_call,
+        (0..MAX_SIDE_CALL_FAILURES_PER_TASK).collect::<Vec<_>>()
+    );
+    server.stop().await;
+}
+
+/// Rule 5 sweep of the summary cap (0.9.3): phase-2 synthesis re-arms on
+/// every progress-guard stall, 180 s cap per attempt, with no ceiling.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn a_failing_synthesis_is_tried_at_most_the_cap_per_task() {
+    let (mut agent, server) = failing_side_call_agent().await;
+    // Gathered data for a read-only question, so a synthesis call is made.
+    agent.messages.push(Message::assistant("reading the loop"));
+    agent.messages.push(Message::user(format!(
+        "<tool_result>{}</tool_result>",
+        "fn run_loop() { step(); verify(); } // the agent loop body\n".repeat(4)
+    )));
+    let mut rounds_with_a_call = Vec::new();
+    let mut last_err = String::new();
+    for round in 0..6 {
+        let seen = server.captured_request_bodies().await.len();
+        let result = agent.synthesize_answer("Explain the loop.").await;
+        last_err = format!("{:#}", result.expect_err("the endpoint is down"));
+        if server.captured_request_bodies().await.len() > seen {
+            rounds_with_a_call.push(round);
+        }
+    }
+    assert_eq!(
+        rounds_with_a_call,
+        (0..MAX_SIDE_CALL_FAILURES_PER_TASK).collect::<Vec<_>>()
+    );
+    assert!(last_err.contains("synthesis disabled"), "{last_err}");
+    server.stop().await;
+}

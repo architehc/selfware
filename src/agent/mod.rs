@@ -751,6 +751,10 @@ const TASK_STATE_NOTE_LIMIT: usize = 16;
 const SYNTHESIS_SIDE_CALL_MAX_TOKENS: usize = 16_384;
 /// Wall-time cap for the synthesis side call (well under a 300 s gateway).
 const SYNTHESIS_SIDE_CALL_CAP_SECS: u64 = 180;
+/// Failed attempts of a cadence-driven side call (synthesis, reflection)
+/// after which it is skipped for the rest of the task — the same ceiling
+/// as the context summary's (`context::MAX_SUMMARY_FAILURES_PER_TASK`).
+pub(crate) const MAX_SIDE_CALL_FAILURES_PER_TASK: usize = 3;
 /// Bound on the escalation cache (FIFO window) so a model varying
 /// old_str/new_str on each retry cannot grow it without bound — mirrors the
 /// FAILED_TOOL_ATTEMPT_WINDOW_SIZE pattern for recent failed attempts.
@@ -913,6 +917,14 @@ pub struct Agent {
     /// The next execution step will make a tool-free API call to produce a
     /// text answer from data already in context.
     pending_synthesis: Option<String>,
+    /// Failed synthesis / reflection side calls since the last successful
+    /// one in this task (reset per task). At
+    /// `MAX_SIDE_CALL_FAILURES_PER_TASK` that side call is skipped for the
+    /// rest of the task: both re-arm on a cadence (every 5 steps / every
+    /// progress-guard stall) with no attempt ceiling, and each attempt may
+    /// run for its wall cap (60 s / 180 s).
+    synthesis_failures: usize,
+    reflection_failures: usize,
     /// Consecutive turns where the model described intent but emitted no tool call.
     consecutive_no_action_prompts: usize,
     /// Consecutive no-tool-call turns on a read-only (non-mutating) task. Reset by
@@ -1881,6 +1893,8 @@ To call a tool, use this EXACT XML structure:
             session_logger,
             pending_failure_hint: None,
             pending_synthesis: None,
+            synthesis_failures: 0,
+            reflection_failures: 0,
             consecutive_no_action_prompts: 0,
             readonly_no_tool_streak: 0,
             readonly_best_answer: String::new(),
@@ -2505,6 +2519,13 @@ To call a tool, use this EXACT XML structure:
     /// Builds a minimal prompt with just the task + gathered data, no tool
     /// definitions, no XML. Forces the model to produce text.
     pub(super) async fn synthesize_answer(&mut self, task: &str) -> Result<Option<String>> {
+        if self.synthesis_failures >= MAX_SIDE_CALL_FAILURES_PER_TASK {
+            anyhow::bail!(
+                "synthesis disabled for the rest of this task after {} failed synthesis calls; \
+                 no call made",
+                self.synthesis_failures
+            );
+        }
         let mut file_context = self.collect_cached_project_context();
 
         let is_mutation_task = tool_dispatch::task_requires_mutation(task);
@@ -2572,7 +2593,25 @@ To call a tool, use this EXACT XML structure:
                     .max_tokens(SYNTHESIS_SIDE_CALL_MAX_TOKENS)
                     .time_cap_secs(SYNTHESIS_SIDE_CALL_CAP_SECS),
             )
-            .await?;
+            .await;
+        let response = match response {
+            Ok(response) => {
+                self.synthesis_failures = 0;
+                response
+            }
+            Err(e) => {
+                // A failed/timed-out side call may still have been billed.
+                self.sync_api_usage();
+                self.synthesis_failures += 1;
+                if self.synthesis_failures == MAX_SIDE_CALL_FAILURES_PER_TASK {
+                    warn!(
+                        "synthesis disabled for the rest of this task after {} failed calls",
+                        self.synthesis_failures
+                    );
+                }
+                return Err(e);
+            }
+        };
 
         // Account the synthesis LLM call against the budget — this billable
         // call previously went uncounted, so a stuck-model synthesis could

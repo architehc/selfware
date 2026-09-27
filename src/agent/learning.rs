@@ -1,4 +1,4 @@
-use tracing::info;
+use tracing::{info, warn};
 
 use super::*;
 
@@ -397,7 +397,10 @@ impl Agent {
         }
 
         // 3. LLM Functional Reflection (Every 5 steps)
-        if step > 0 && step.is_multiple_of(5) {
+        if step > 0
+            && step.is_multiple_of(5)
+            && self.reflection_failures < super::MAX_SIDE_CALL_FAILURES_PER_TASK
+        {
             info!("Triggering functional reflection for step {}", step);
             let reflection_prompt = format!(
                 "You have just completed step {}. Reflect on the last 5 steps.
@@ -411,7 +414,7 @@ impl Agent {
 
             // Bounded side call: a one-paragraph reflection needs neither
             // the session's reasoning effort nor its 64k output budget.
-            if let Ok(response) = self
+            let reflection = self
                 .client
                 .side_chat(
                     messages,
@@ -419,8 +422,21 @@ impl Agent {
                         .max_tokens(1024)
                         .time_cap_secs(60),
                 )
-                .await
-            {
+                .await;
+            if let Err(e) = &reflection {
+                // A failed/timed-out side call may still have been billed;
+                // and a reflection that keeps failing is not retried every
+                // 5 steps for the rest of the task.
+                self.sync_api_usage();
+                self.reflection_failures += 1;
+                warn!(
+                    "reflection side call failed ({}/{}): {e}",
+                    self.reflection_failures,
+                    super::MAX_SIDE_CALL_FAILURES_PER_TASK
+                );
+            }
+            if let Ok(response) = reflection {
+                self.reflection_failures = 0;
                 // Account the reflection call's token usage against the budget.
                 // Delta-add (never total = input + output): after a resume,
                 // `total` carries the restored prior-run budget whose

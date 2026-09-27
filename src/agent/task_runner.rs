@@ -900,6 +900,8 @@ impl Agent {
         // Summarizer backoff and failure cap are per-task: a summarizer that
         // died during the previous task gets a fresh chance on this one.
         self.compressor.reset_summary_state_for_task();
+        self.synthesis_failures = 0;
+        self.reflection_failures = 0;
         self.leak_check_scanned_mutation_sequence
             .store(usize::MAX, std::sync::atomic::Ordering::Relaxed);
         self.input_census_note = None;
