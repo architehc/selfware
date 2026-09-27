@@ -526,13 +526,30 @@ fn test_git_push_schema_defaults() {
 
 #[tokio::test]
 async fn test_git_push_execute() {
+    // Hermetic: its own git repo as the workspace root. Parallel tests move
+    // the process cwd; outside a repo `git remote` fails with a different
+    // error and this test flaked in the full suite (0.9.3 integration).
+    let repo = tempfile::Builder::new()
+        .prefix("gitpush")
+        .tempdir()
+        .unwrap();
+    let ok = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(repo.path())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    assert!(ok, "git init");
     let tool = GitPush::new();
-    // Push to nonexistent remote will fail, but shouldn't panic
     let args = serde_json::json!({
         "remote": "nonexistent_remote_test",
         "branch": "test-branch"
     });
-    let result = tool.execute(args).await;
+    let result = crate::tools::workspace_root::scope(
+        crate::tools::workspace_root::WorkspaceRoot::fixed(repo.path().to_path_buf()),
+        tool.execute(args),
+    )
+    .await;
     // An unconfigured remote is refused before `git push` runs (git would
     // otherwise treat the bare name as a local path — review, 0.9.2). This
     // used to assert Ok{success:false} from the failed push itself.
