@@ -2872,12 +2872,11 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
                             match Agent::resume(agent.config().clone(), &task_id).await {
                                 Ok(resumed) => {
                                     let count = resumed.message_count();
-                                    // Keep the handles the TUI holds: Esc and
-                                    // the Tasks pane must reach the resumed
-                                    // agent, not the one it replaced.
-                                    agent = resumed
-                                        .with_cancel_token(agent.cancel_token())
-                                        .with_task_control(task_control.clone());
+                                    // Carry this session's wiring over (event
+                                    // sender, permission channel, progress
+                                    // emitter, Esc token, Tasks-pane control,
+                                    // …): the same helper the REPL uses.
+                                    agent.restore_resumed_state(resumed);
                                     log_line(format!(
                                         "resumed '{title}' ({count} messages) — continue chatting"
                                     ));

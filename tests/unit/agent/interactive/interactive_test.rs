@@ -766,6 +766,81 @@ async fn resume_restore_replaces_task_state_but_keeps_live_handles() {
     server.stop().await;
 }
 
+/// The TUI bridge's `/resume` goes through the same helper: the resumed
+/// agent must keep emitting to the TUI's event channel, route permission
+/// prompts through the TUI's answer channel, and stay reachable from the
+/// Tasks pane (task control + the Esc cancel token). It used to rebuild the
+/// agent keeping only the cancel token and the task control, so output and
+/// permission prompts of the resumed agent did not reach the TUI.
+#[cfg(feature = "tui")]
+#[tokio::test]
+async fn tui_resume_keeps_event_sender_permission_channel_and_task_control() {
+    use crate::safety::confirm_view::PermissionAnswer;
+    let _state = crate::test_support::ExecGuard::hold();
+    let config = crate::config::Config {
+        endpoint: "http://127.0.0.1:9/v1".to_string(),
+        model: "mock-model".to_string(),
+        agent: crate::config::AgentConfig {
+            max_iterations: 4,
+            streaming: false,
+            native_function_calling: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let log = crate::lifecycle::EventLog::at(dir.path().join("events.jsonl"));
+
+    // Wired exactly as `run_live_agent_tui` wires its agent.
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let (permission_tx, permission_rx) = std::sync::mpsc::channel();
+    let mut live = Agent::new(config.clone())
+        .await
+        .expect("agent::new")
+        .with_event_sender(event_tx)
+        .with_permission_channel(permission_rx);
+    live.event_log = log.clone();
+    live.confirmation_timeout = Some(Duration::from_secs(7));
+    let ui_cancel = live.cancel_token();
+    let ui_control = live.task_control();
+
+    let resumed = Agent::new(config).await.expect("agent::new");
+    live.restore_resumed_state(resumed);
+
+    // Output of the resumed agent reaches the TUI channel.
+    live.emit_event(crate::agent::tui_events::AgentEvent::Status {
+        message: "after resume".to_string(),
+    });
+    match event_rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(crate::ui::tui::TuiEvent::StatusUpdate { message }) => {
+            assert_eq!(message, "after resume")
+        }
+        other => panic!("expected the status on the TUI channel, got {other:?}"),
+    }
+
+    // A permission prompt of the resumed agent is answered by the TUI.
+    permission_tx.send(PermissionAnswer::Once).unwrap();
+    assert_eq!(
+        live.await_tui_permission_response().await,
+        PermissionAnswer::Once,
+        "the TUI's answer must reach the resumed agent (a fresh agent denies fail-closed)"
+    );
+
+    // The Tasks pane's handle sees the resumed agent's task, records land in
+    // the session's log, and a cancel from the pane latches the Esc token.
+    live.lifecycle_begin_task("t-resumed", "continue the task");
+    assert_eq!(
+        ui_control.snapshot().map(|t| t.id),
+        Some("t-resumed".to_string())
+    );
+    assert!(log.read_all().0.iter().any(|r| r.id == "t-resumed"));
+    ui_control.request_cancel("t-resumed").unwrap();
+    assert!(live.is_cancelled());
+    assert!(ui_cancel.load(std::sync::atomic::Ordering::Relaxed));
+    assert_eq!(live.confirmation_timeout, Some(Duration::from_secs(7)));
+    live.reset_cancellation();
+}
+
 // ── W7d: confirmation-prompt input ownership (listener seam) ──────────────
 //
 // Reproduced failure (4/4): an answer typed or pasted while the ESC listener

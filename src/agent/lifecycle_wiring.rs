@@ -379,14 +379,6 @@ impl Agent {
         self.task_control.clone()
     }
 
-    /// Share `control` with this agent (a resumed agent keeps the handle the
-    /// UI already holds).
-    #[cfg_attr(not(feature = "tui"), allow(dead_code))]
-    pub(crate) fn with_task_control(mut self, control: TaskControl) -> Self {
-        self.task_control = control;
-        self
-    }
-
     /// The next `run_task` is a fork of finished task `parent`: it gets a new
     /// task id recorded with `parent` as its origin.
     pub fn set_fork_parent(&mut self, parent: impl Into<String>) {

@@ -3458,23 +3458,35 @@ impl Agent {
         }
     }
 
-    /// Targeted state restoration for the interactive `/resume <prefix>` path.
+    /// Targeted state restoration for `/resume <prefix>` — the ONE helper
+    /// every in-session agent replacement goes through (the REPL's and the
+    /// TUI bridge's `/resume`; nothing else in either front end replaces the
+    /// agent: `/model` rebuilds only the API client via `install_config`,
+    /// `/clear` resets the conversation in place, and a fork from the Tasks
+    /// pane runs on the same agent).
     ///
     /// `Agent::resume` rebuilds the task state into a FRESH agent (messages,
     /// loop control, checkpoint, cumulative budgets, verification guard
-    /// counters, memory, cognitive state) via `Self::new(config)`. The REPL
-    /// used to swap the whole struct (`*self = resumed`), which silently
-    /// dropped this live session's handles:
+    /// counters, memory, cognitive state) via `Self::new(config)`. Swapping
+    /// the whole struct (`*self = resumed`) silently dropped this live
+    /// session's wiring:
     ///
     /// - `edit_history` / `redo_stack` — the /undo /redo /restore timeline
     /// - `events` / `permission_response_rx` / `progress_emitter` — the TUI
-    ///   event-stream, permission-prompt and progress wiring
+    ///   event-stream, permission-prompt and progress wiring (the progress
+    ///   emitter is also re-attached to the resumed API client, which was
+    ///   built with a no-op one)
     /// - `session_logger` / `audit_logger` — the session log and audit JSONL
     ///   file handles (and their session ids)
     /// - `chat_store` — the chat-session store
     /// - `cancelled` / `esc_paused` / `esc_pause_ack` — the Ctrl+C and ESC
     ///   tokens this loop and its listeners captured at startup; a fresh
     ///   agent gets fresh Arcs that nothing ever signals
+    /// - `task_control` — the handle the TUI Tasks pane pauses, edits and
+    ///   cancels through (its cancel requests latch `cancelled` above)
+    /// - `event_log` — where this session records task transitions
+    /// - `confirmation_timeout` / `learning_data_dir` — how this front end
+    ///   was configured at build time
     /// - `force_non_streaming` — the session's latched streaming decision
     ///
     /// The task state always comes from `resumed` (so anything `Agent::resume`
@@ -3496,6 +3508,9 @@ impl Agent {
             &mut self.progress_emitter,
             std::sync::Arc::new(crate::agent::progress::NoopProgressEmitter),
         );
+        resumed
+            .client
+            .with_progress_emitter(std::sync::Arc::clone(&resumed.progress_emitter));
         resumed.session_logger = std::mem::take(&mut self.session_logger);
         resumed.chat_store = std::mem::replace(
             &mut self.chat_store,
@@ -3515,6 +3530,12 @@ impl Agent {
             &mut self.esc_pause_ack,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         );
+        // The UI holds a clone of this handle; its cancel token is the
+        // `cancelled` Arc carried over just above.
+        resumed.task_control = self.task_control.clone();
+        resumed.event_log = self.event_log.clone();
+        resumed.confirmation_timeout = self.confirmation_timeout;
+        resumed.learning_data_dir = self.learning_data_dir.take();
         resumed.force_non_streaming = self.force_non_streaming;
         *self = resumed;
     }
