@@ -1228,6 +1228,18 @@ async fn monitor_process(
                 // Actually restart the process
                 match spawn_child_process(&config).await {
                     Ok((pid, new_child_handle)) => {
+                        // The resource registry entry of a tool-started
+                        // process still names the crashed pid: point it at
+                        // the restarted one so teardown and a post-crash
+                        // reap stop the process that is actually running.
+                        if let Some(pid) = pid {
+                            crate::resources::refresh_managed_process(
+                                crate::resources::ResourceRegistry::global(),
+                                &id,
+                                pid,
+                                crate::resources::driver::process_start_time(pid),
+                            );
+                        }
                         // Update process state
                         {
                             let mut procs = processes.write().await;

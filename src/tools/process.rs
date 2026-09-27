@@ -536,15 +536,7 @@ impl Tool for PortCheck {
 }
 
 fn managed_entry(id: &str) -> Option<crate::resources::Resource> {
-    use crate::resources::{ResourceHandle, ResourceRegistry};
-    let session = crate::resources::session_id();
-    ResourceRegistry::global()
-        .unreleased()
-        .into_iter()
-        .find(|r| {
-            r.session == session
-                && matches!(&r.handle, ResourceHandle::Process { managed_id: Some(m), .. } if m == id)
-        })
+    crate::resources::managed_process_entry(crate::resources::ResourceRegistry::global(), id)
 }
 
 /// Record a running managed process in the resource registry, or refresh
@@ -562,8 +554,11 @@ fn record_managed(summary: &crate::process_manager::ProcessSummary, keep: bool) 
     };
     let registry = ResourceRegistry::global();
     match managed_entry(&summary.id) {
-        Some(existing) => {
-            registry.set_handle(&existing.id, handle);
+        Some(_) => {
+            let ResourceHandle::Process { start_time, .. } = handle else {
+                return;
+            };
+            crate::resources::refresh_managed_process(registry, &summary.id, pid, start_time);
         }
         None => {
             let label = std::iter::once(summary.command.as_str())

@@ -346,3 +346,58 @@ fn entering_leaked_raises_the_leak_alarm() {
     assert_eq!(effects, vec![crate::lifecycle::Effect::LeakAlarm]);
     assert_eq!(reg.get(&id).unwrap().note.as_deref(), Some("foreign"));
 }
+
+#[test]
+fn a_restarted_managed_process_points_its_entry_at_the_new_pid() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("resources.json");
+    let reg = ResourceRegistry::at_path_as(&path, session("a"));
+    let managed = |pid: u32, start: u64| ResourceHandle::Process {
+        pid,
+        pgid: Some(pid),
+        start_time: Some(start),
+        managed_id: Some("web".into()),
+    };
+    let id = reg.register_owned(
+        NewResource::new(ResourceKind::Process, managed(100, 1), "web: npm run dev"),
+        "t".into(),
+        None,
+    );
+    // Another session's process with the same managed id is not ours.
+    let other = ResourceRegistry::at_path_as(&path, session("b"));
+    let theirs = other.register_owned(
+        NewResource::new(ResourceKind::Process, managed(300, 3), "web"),
+        "u".into(),
+        None,
+    );
+
+    assert!(crate::resources::refresh_managed_process(
+        &reg,
+        "web",
+        200,
+        Some(2)
+    ));
+    let pgid = cfg!(unix).then_some(200);
+    assert_eq!(
+        reg.get(&id).unwrap().handle,
+        ResourceHandle::Process {
+            pid: 200,
+            pgid,
+            start_time: Some(2),
+            managed_id: Some("web".into()),
+        }
+    );
+    // Persisted: a reaper in a later process sees the new pid.
+    let after_crash = ResourceRegistry::at_path_as(&path, session("c"));
+    assert!(matches!(
+        after_crash.get(&id).unwrap().handle,
+        ResourceHandle::Process { pid: 200, .. }
+    ));
+    assert!(matches!(
+        after_crash.get(&theirs).unwrap().handle,
+        ResourceHandle::Process { pid: 300, .. }
+    ));
+    assert!(!crate::resources::refresh_managed_process(
+        &reg, "unknown", 5, None
+    ));
+}

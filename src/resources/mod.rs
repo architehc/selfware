@@ -166,6 +166,46 @@ pub fn release_worktree(path: &std::path::Path) {
     });
 }
 
+/// This session's unreleased registry entry for managed process
+/// `managed_id` (started through the `process_start` tool), if any.
+pub fn managed_process_entry(registry: &ResourceRegistry, managed_id: &str) -> Option<Resource> {
+    let session = registry.session().id.clone();
+    registry.unreleased().into_iter().find(|r| {
+        r.session == session
+            && matches!(&r.handle, ResourceHandle::Process { managed_id: Some(m), .. } if m == managed_id)
+    })
+}
+
+/// Managed process `managed_id` was restarted (automatically after a crash,
+/// or by `process_restart`) and now runs as `pid`: point its registry entry
+/// at the new pid, process group and OS start time, so task teardown and a
+/// post-crash `selfware resources reap` find the running process instead of
+/// the dead one. Returns whether an entry was updated.
+pub fn refresh_managed_process(
+    registry: &ResourceRegistry,
+    managed_id: &str,
+    pid: u32,
+    start_time: Option<u64>,
+) -> bool {
+    let Some(entry) = managed_process_entry(registry, managed_id) else {
+        return false;
+    };
+    let handle = ResourceHandle::Process {
+        pid,
+        pgid: cfg!(unix).then_some(pid),
+        start_time,
+        managed_id: Some(managed_id.to_string()),
+    };
+    if entry.handle == handle {
+        return true;
+    }
+    tracing::info!(
+        "resource registry: managed process {managed_id} restarted as pid {pid}; entry {} updated",
+        entry.id
+    );
+    registry.set_handle(&entry.id, handle)
+}
+
 #[cfg(test)]
 #[path = "../../tests/unit/resources/fake.rs"]
 pub(crate) mod fake;
