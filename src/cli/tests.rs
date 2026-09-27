@@ -1141,6 +1141,19 @@ fn tui_launch_blocked_without_a_terminal() {
     }
 }
 
+#[test]
+fn multi_chat_tui_runs_only_for_plain_text_fan_out() {
+    assert!(multi_chat_tui_block_reason(false, HeadlessOutputFormat::Text).is_none());
+    // --coordinator and structured output fall back to plain output with a
+    // note instead of silently opening the single-agent dashboard.
+    let reason = multi_chat_tui_block_reason(true, HeadlessOutputFormat::Text).unwrap();
+    assert!(reason.contains("--coordinator"), "{reason}");
+    for format in [HeadlessOutputFormat::Json, HeadlessOutputFormat::StreamJson] {
+        let reason = multi_chat_tui_block_reason(false, format).unwrap();
+        assert!(reason.contains("headless"), "{reason}");
+    }
+}
+
 // ── resolve_preset_task tests ──
 
 #[test]

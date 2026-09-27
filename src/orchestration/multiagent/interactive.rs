@@ -17,6 +17,7 @@ use super::config::MultiAgentConfig;
 use super::types::{
     AgentInstance, AgentResult, AgentStatus, MultiAgentEvent, MAX_CONCURRENT_AGENTS,
 };
+use super::view::{agent_color, render_summary_table, AgentLine, MultiChatView};
 
 /// Classification of a `stdin().read_line` result for the interactive loops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,11 +67,23 @@ fn build_role_swarm(roles: &[AgentRole]) -> (Swarm, Vec<String>) {
     (swarm, ids)
 }
 
-/// Print an honest per-agent results summary: what each agent actually
-/// returned, how long it took, provider-reported token usage and cost when
-/// available, and the error for failed agents.
+/// Print an honest per-agent results summary: a table of each agent's role,
+/// outcome, measured duration and provider-reported tokens (`—` when the
+/// provider reported none), then provider-reported cost/reasoning per agent
+/// when present, errors for failed agents, and the totals.
 pub fn print_agent_summary(results: &[AgentResult]) {
     println!("\n{}", "Agent Results:".bright_cyan().bold());
+
+    for (i, line) in render_summary_table(results).iter().enumerate() {
+        if i < 2 {
+            println!("  {}", line.dimmed());
+        } else {
+            println!("  {}", line);
+        }
+    }
+
+    let mut sorted: Vec<&AgentResult> = results.iter().collect();
+    sorted.sort_by_key(|r| r.agent_id);
 
     let mut any_usage = false;
     let mut total_tokens = 0usize;
@@ -79,57 +92,34 @@ pub fn print_agent_summary(results: &[AgentResult]) {
     let mut total_reasoning = 0usize;
     let mut any_reasoning = false;
 
-    for result in results {
-        let status = if result.success {
-            "✓".bright_green()
-        } else {
-            "✗".bright_red()
-        };
-        println!(
-            "  {} {} ({}) — {:.2}s",
-            status,
-            result.agent_name,
-            result.role.name(),
-            result.duration.as_secs_f64()
-        );
+    for result in sorted {
+        let tag = super::view::agent_tag(result.agent_id, result.role);
         if let Some(usage) = &result.usage {
             any_usage = true;
             total_tokens += usage.total_tokens;
+            let mut details = Vec::new();
             if let Some(r) = usage.reasoning_tokens() {
                 any_reasoning = true;
                 total_reasoning = total_reasoning.saturating_add(r);
+                // Label an estimate as one (AGENTS.md §3/§4).
+                if usage.is_estimated_reasoning() {
+                    details.push(format!("~{} reasoning tokens (estimated)", r));
+                } else {
+                    details.push(format!("{} reasoning tokens", r));
+                }
             }
-            let reasoning_str = usage
-                .reasoning_tokens()
-                .map(|r| format!(", {} reasoning", r))
-                .unwrap_or_default();
-            match usage.cost {
-                Some(cost) => {
-                    any_cost = true;
-                    total_cost += cost;
-                    println!(
-                        "    {} tokens ({} prompt + {} completion{}), ${:.6}",
-                        usage.total_tokens,
-                        usage.prompt_tokens,
-                        usage.completion_tokens,
-                        reasoning_str,
-                        cost
-                    );
-                }
-                None => {
-                    println!(
-                        "    {} tokens ({} prompt + {} completion{})",
-                        usage.total_tokens,
-                        usage.prompt_tokens,
-                        usage.completion_tokens,
-                        reasoning_str
-                    );
-                }
+            if let Some(cost) = usage.cost {
+                any_cost = true;
+                total_cost += cost;
+                details.push(format!("${:.6}", cost));
+            }
+            if !details.is_empty() {
+                println!("  {}: {}", tag, details.join(", "));
             }
         }
         if !result.success {
             if let Some(error) = &result.error {
-                println!("    error: {}", error);
+                println!("  {} error: {}", tag, error);
             }
         }
     }
@@ -151,7 +141,95 @@ pub fn print_agent_summary(results: &[AgentResult]) {
     }
 }
 
+/// Format complete agent lines as `[tag] text`, one per line, with the tag
+/// in the agent's stable colour. Returned as one string so the caller can
+/// write the whole batch at once.
+fn format_tagged_lines(view: &MultiChatView, lines: &[AgentLine]) -> String {
+    let mut out = String::new();
+    for line in lines {
+        let tag = view
+            .panels()
+            .iter()
+            .find(|p| p.agent_id == line.agent_id)
+            .map(|p| p.tag())
+            .unwrap_or_else(|| format!("agent·{}", line.agent_id + 1));
+        out.push_str(&format!(
+            "  {} {}\n",
+            format!("[{}]", tag).color(agent_color(line.agent_id)),
+            line.text
+        ));
+    }
+    out
+}
+
+/// Print multi-chat events as per-agent tagged lines until the run ends.
+///
+/// Every event goes through a [`MultiChatView`], which keeps a separate log
+/// per agent and releases only complete lines; each batch is written with a
+/// single locked write, so no two agents are ever spliced together mid-line.
+/// Ends on `AllCompleted` (printing `summary_label` with the success count)
+/// or when the sender is dropped.
+fn spawn_tagged_event_printer(
+    mut view: MultiChatView,
+    mut rx: mpsc::Receiver<MultiAgentEvent>,
+    summary_label: &'static str,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            let lines = view.apply(&event, Instant::now());
+            if !lines.is_empty() {
+                let text = format_tagged_lines(&view, &lines);
+                let mut out = io::stdout().lock();
+                let _ = out.write_all(text.as_bytes());
+                let _ = out.flush();
+            }
+            if let MultiAgentEvent::AllCompleted {
+                results,
+                total_duration,
+            } = &event
+            {
+                let success_count = results.iter().filter(|r| r.success).count();
+                println!(
+                    "\n{} {}/{} agents completed in {:.2}s",
+                    summary_label.bright_cyan(),
+                    success_count,
+                    results.len(),
+                    total_duration.as_secs_f64()
+                );
+                break;
+            }
+        }
+    })
+}
+
 impl MultiAgentChat {
+    /// Run `task` across all agents, printing each agent's events and reply
+    /// as `[tag] …` lines (see `spawn_tagged_event_printer`).
+    ///
+    /// The event sender is dropped when the run returns — including on an
+    /// early error such as the workspace-question refusal — so the printer
+    /// always terminates instead of leaking a task that waits forever.
+    pub async fn run_task_tagged(
+        &mut self,
+        task: &str,
+        summary_label: &'static str,
+    ) -> Result<Vec<AgentResult>> {
+        if self.agents.read().await.is_empty() {
+            self.initialize_agents().await?;
+        }
+        let view = {
+            let agents = self.agents.read().await;
+            MultiChatView::new(agents.iter().map(|a| (a.id, a.role, a.name.clone())))
+        };
+        let (tx, rx) = mpsc::channel::<MultiAgentEvent>(1000);
+        self.event_tx = Some(tx);
+        let handle = spawn_tagged_event_printer(view, rx, summary_label);
+        let result = self.run_task(task).await;
+        self.event_tx = None;
+        let _ = handle.await;
+        result
+    }
+
     /// Run interactive multi-agent chat
     pub async fn interactive(&mut self) -> Result<()> {
         // Fail fast BEFORE any LLM call: on a non-terminal stdin this REPL
@@ -330,60 +408,7 @@ impl MultiAgentChat {
 
             let start = Instant::now();
 
-            // Create event channel for this run
-            let (tx, mut rx) = mpsc::channel::<MultiAgentEvent>(1000);
-            self.event_tx = Some(tx);
-
-            // Spawn event handler
-            let handle = tokio::spawn(async move {
-                while let Some(event) = rx.recv().await {
-                    match event {
-                        MultiAgentEvent::AgentStarted { name, .. } => {
-                            println!("  {} {} started", "▶".bright_blue(), name);
-                        }
-                        MultiAgentEvent::AgentCompleted { result, .. } => {
-                            let status = if result.success {
-                                "✓".bright_green()
-                            } else {
-                                "✗".bright_red()
-                            };
-                            println!(
-                                "  {} {} completed in {:.2}s",
-                                status,
-                                result.agent_name,
-                                result.duration.as_secs_f64()
-                            );
-                        }
-                        MultiAgentEvent::AgentFailed { agent_id, error } => {
-                            println!(
-                                "  {} Agent-{} failed: {}",
-                                "✗".bright_red(),
-                                agent_id,
-                                error
-                            );
-                        }
-                        MultiAgentEvent::AllCompleted {
-                            results,
-                            total_duration,
-                        } => {
-                            let success_count = results.iter().filter(|r| r.success).count();
-                            println!(
-                                "\n{} {}/{} agents completed in {:.2}s",
-                                "Summary:".bright_cyan(),
-                                success_count,
-                                results.len(),
-                                total_duration.as_secs_f64()
-                            );
-                            break;
-                        }
-                    }
-                }
-            });
-
-            let results = self.run_task(input).await?;
-
-            // Wait for event handler
-            let _ = handle.await;
+            let results = self.run_task_tagged(input, "Summary:").await?;
 
             // Honest per-agent results, then the aggregated output.
             print_agent_summary(&results);
@@ -611,57 +636,9 @@ impl MultiAgentChat {
                 assigned.len()
             );
 
-            // 5. Execute the task using the existing per-agent execution path.
-            let (tx, mut rx) = mpsc::channel::<MultiAgentEvent>(1000);
-            self.event_tx = Some(tx);
-
-            let handle = tokio::spawn(async move {
-                while let Some(event) = rx.recv().await {
-                    match event {
-                        MultiAgentEvent::AgentStarted { name, .. } => {
-                            println!("  {} {} started", "▶".bright_blue(), name);
-                        }
-                        MultiAgentEvent::AgentCompleted { result, .. } => {
-                            let status = if result.success {
-                                "✓".bright_green()
-                            } else {
-                                "✗".bright_red()
-                            };
-                            println!(
-                                "  {} {} completed in {:.2}s",
-                                status,
-                                result.agent_name,
-                                result.duration.as_secs_f64()
-                            );
-                        }
-                        MultiAgentEvent::AgentFailed { agent_id, error } => {
-                            println!(
-                                "  {} Agent-{} failed: {}",
-                                "✗".bright_red(),
-                                agent_id,
-                                error
-                            );
-                        }
-                        MultiAgentEvent::AllCompleted {
-                            results,
-                            total_duration,
-                        } => {
-                            let success_count = results.iter().filter(|r| r.success).count();
-                            println!(
-                                "\n  {} {}/{} agents completed in {:.2}s",
-                                "Swarm Summary:".bright_cyan(),
-                                success_count,
-                                results.len(),
-                                total_duration.as_secs_f64()
-                            );
-                            break;
-                        }
-                    }
-                }
-            });
-
-            let results = self.run_task(input).await?;
-            let _ = handle.await;
+            // 5. Execute the task using the existing per-agent execution path,
+            //    streaming each agent's output as tagged lines.
+            let results = self.run_task_tagged(input, "Swarm Summary:").await?;
 
             // 6. Feed results back to the swarm with the ACTUAL per-agent
             //    success flag so trust scores and failure counters reflect

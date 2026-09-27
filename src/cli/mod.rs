@@ -2259,7 +2259,29 @@ pub async fn run() -> Result<()> {
     // Handle TUI dashboard mode
     #[cfg(feature = "tui")]
     {
-        let should_use_tui = !cli.quiet && (cli.tui || (cli.command.is_none() && !cli.no_tui));
+        // `--tui multi-chat` opens the per-agent multi-chat TUI, not the
+        // single-agent dashboard (which used to swallow the subcommand).
+        if let Some(Commands::MultiChat { concurrency, task }) = &cli.command {
+            if cli.tui && !cli.quiet {
+                if let Some(reason) =
+                    multi_chat_tui_block_reason(cli.coordinator, cli.output_format)
+                {
+                    eprintln!("note: {reason}; using the plain per-agent output instead");
+                } else {
+                    use std::io::IsTerminal;
+                    if let Some(reason) = tui_launch_block_reason(
+                        std::io::stdin().is_terminal(),
+                        std::io::stdout().is_terminal(),
+                    ) {
+                        anyhow::bail!("{}", reason);
+                    }
+                    return run_multi_chat_tui(config, *concurrency, task.clone()).await;
+                }
+            }
+        }
+        let is_multi_chat = matches!(cli.command, Some(Commands::MultiChat { .. }));
+        let should_use_tui =
+            !cli.quiet && !is_multi_chat && (cli.tui || (cli.command.is_none() && !cli.no_tui));
         if should_use_tui {
             // Fail loudly on a non-terminal launch: the interactive TUI needs
             // a TTY (crossterm raw mode), and previously a CI/pipe/script run
@@ -2403,6 +2425,41 @@ fn build_session_result(
 /// `selfware dashboard`. It builds an
 /// `Agent` with an event sender, spawns the TUI in a blocking thread,
 /// processes user input, and cleans up on exit.
+/// Why `--tui multi-chat` must fall back to plain output, or `None` when the
+/// per-agent TUI can run.
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
+fn multi_chat_tui_block_reason(
+    coordinator: bool,
+    output_format: HeadlessOutputFormat,
+) -> Option<&'static str> {
+    if coordinator {
+        Some("the multi-chat TUI does not support --coordinator")
+    } else if output_format != HeadlessOutputFormat::Text {
+        Some("--output-format json/stream-json is headless; the multi-chat TUI is not used")
+    } else {
+        None
+    }
+}
+
+/// `selfware --tui multi-chat [task]`: per-agent tabs plus an "All" overview
+/// (see [`crate::ui::tui::multichat`]). The summary table of the last run is
+/// printed after the TUI closes so it survives the alternate screen.
+#[cfg(feature = "tui")]
+async fn run_multi_chat_tui(
+    config: Config,
+    concurrency: usize,
+    task: Option<String>,
+) -> Result<()> {
+    let agent_config = multiagent::MultiAgentConfig::default().with_concurrency(concurrency);
+    let roles = agent_config.roles.clone();
+    let chat = multiagent::MultiAgentChat::new(&config, agent_config)?;
+    let results = crate::ui::tui::multichat::run_multichat_tui(chat, roles, task).await?;
+    if !results.is_empty() {
+        multiagent::print_agent_summary(&results);
+    }
+    Ok(())
+}
+
 #[cfg(feature = "tui")]
 async fn run_live_agent_tui(config: Config) -> Result<()> {
     let (event_tx, event_rx) = mpsc::channel();
@@ -2863,8 +2920,13 @@ async fn run_multi_chat_one_shot(
     let start = std::time::Instant::now();
     let results = if coordinator {
         run_coordinated_fan_out(config, agent_config, task, quiet || is_structured).await?
-    } else {
+    } else if quiet || is_structured {
         multiagent::run_multiagent_task(config, task, concurrency).await?
+    } else {
+        // Human text output: each agent's reply as `[tag] …` lines, never
+        // interleaved mid-line with another agent's.
+        let mut chat = multiagent::MultiAgentChat::new(config, agent_config)?;
+        chat.run_task_tagged(task, "Summary:").await?
     };
 
     if is_structured {
@@ -2975,8 +3037,12 @@ async fn run_coordinated_fan_out(
         );
     }
 
-    let multi_agent = multiagent::MultiAgentChat::new(config, agent_config)?;
-    let results = multi_agent.run_task(task).await?;
+    let mut multi_agent = multiagent::MultiAgentChat::new(config, agent_config)?;
+    let results = if quiet {
+        multi_agent.run_task(task).await?
+    } else {
+        multi_agent.run_task_tagged(task, "Summary:").await?
+    };
 
     // Feed results back to the swarm with the ACTUAL per-agent success flag
     // so trust scores and failure counters reflect reality (`complete_task`

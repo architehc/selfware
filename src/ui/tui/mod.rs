@@ -10,6 +10,7 @@ pub mod dashboard_widgets;
 pub mod garden_view;
 pub mod layout;
 mod markdown;
+pub mod multichat;
 pub mod palette;
 pub mod status_line;
 mod widgets;

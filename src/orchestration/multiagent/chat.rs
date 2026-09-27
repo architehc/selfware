@@ -262,7 +262,10 @@ impl MultiAgentChat {
                     // Task finished
                 }
                 Ok(Err(e)) => {
-                    eprintln!("Agent-specific error: {}", e);
+                    // Not printed: the failure is already reported per agent
+                    // (AgentFailed event + summary table), and a raw eprintln
+                    // here would tear through the multi-chat TUI.
+                    tracing::debug!("Agent-specific error: {}", e);
                     if self.config.failure_policy == MultiAgentFailurePolicy::FailFast {
                         cancelled.notify_waiters();
                         // Abort all remaining in-flight tasks
