@@ -419,8 +419,8 @@ def post_edit_tests(work, env):
     extra = {}
     try:
         res = subprocess.run(
-            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"], cwd=work, env=env,
-            capture_output=True, text=True, timeout=900,
+            [sys.executable, "-m", "pytest", "-q", "--color=no", "-p", "no:cacheprovider"],
+            cwd=work, env=env, capture_output=True, text=True, timeout=900,
         )
         extra["pytest_exit"] = res.returncode
         tail = [ln for ln in res.stdout.strip().splitlines() if ln.strip()]
@@ -680,7 +680,9 @@ def run_scenario(spec, binary, results_dir, abandon=None, endpoint_override=None
         reason = None if status == "pass" else "criteria: " + ", ".join(
             sorted(k for k, v in criteria.items() if not v)
         )
-    if status == "fail" and _looks_like_outage(stdout + stderr):
+    # stderr only: stdout carries the model's own text, which may quote such
+    # errors (a review of HTTP code) without any outage having happened.
+    if status == "fail" and _looks_like_outage(stderr):
         reason = f"endpoint_error_mid_run; {reason}"
     record["wall_s"] = info["wall_s"]
     log(f"[{spec['name']}] {status.upper()} {reason or ''} wall={info['wall_s']}s")

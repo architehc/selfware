@@ -15,6 +15,10 @@ on:
         description: "OpenAI-compatible endpoint"
         default: "https://llm.selfware.design/v1"
         required: false
+      eval_samples:
+        description: "Runs per live-eval scenario (scripts/live_eval)"
+        default: "2"
+        required: false
 
 permissions:
   contents: read
@@ -74,4 +78,65 @@ jobs:
         with:
           name: live-endpoint-out
           path: live-endpoint-out
+          if-no-files-found: ignore
+
+  live-eval:
+    # Quick live-eval scenarios whose fixtures live in the repo
+    # (review-planted, qa-greeting, interrupt; scripts/live_eval). The 4 h
+    # review-core-long and the scenarios that need local fixtures run in the
+    # long-running loop (docs/live-eval.md), not here. Individual failed runs
+    # are data; the job fails on a scenario below its pass-rate floor, on an
+    # endpoint outage, or on a fixture that could not be set up.
+    name: Live eval (quick scenarios)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      LIVE_EVAL_RESULTS_DIR: ${{ github.workspace }}/../live-eval
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-composite0-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: live-endpoint
+          save-if: false
+
+      - name: Endpoint reachable
+        run: curl -fsS -m 20 "$SELFWARE_ENDPOINT/models"
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Run quick scenarios
+        # Per-run failures are recorded and judged by the report step below.
+        run: |
+          python3 scripts/live_eval/run.py run --binary target/release/selfware --source . \
+            --hermetic-only --concurrency 2 --endpoint "$SELFWARE_ENDPOINT" \
+            --samples "${{ github.event.inputs.eval_samples || '1' }}" || true
+
+      - name: Report (fails below floor, on outage or setup failure)
+        run: |
+          mkdir -p live-eval-out
+          python3 scripts/live_eval/run.py report --fail-on-regression --out live-eval-out/report.txt
+
+      - name: Collect results
+        if: always()
+        run: |
+          mkdir -p live-eval-out
+          cp "$LIVE_EVAL_RESULTS_DIR"/results.jsonl live-eval-out/ 2>/dev/null || true
+          cp "$LIVE_EVAL_RESULTS_DIR"/run.log live-eval-out/ 2>/dev/null || true
+
+      - name: Upload live-eval results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-eval-out
+          path: live-eval-out
           if-no-files-found: ignore
