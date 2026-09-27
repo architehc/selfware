@@ -431,6 +431,47 @@ selfware --tui
 
 ---
 
+## What's New in 0.9.3
+
+0.9.3 puts tasks, agents and everything they spawn on typed state
+machines, proved in Lean, so nothing a task starts outlives it unnoticed.
+You can open any task, pause it, edit it and go back. The full list is in
+[CHANGELOG.md](CHANGELOG.md); the highlights:
+
+- **Tasks own their resources.** Containers, processes, terminals,
+  browsers and ports are recorded with the task that started them and
+  drained when it ends. `selfware resources` lists them, `resources reap`
+  cleans up leftovers, and startup reports zombies.
+- **Navigate and edit tasks.** Ctrl+T opens the Tasks pane: Session ›
+  Agents › Task › resource, Enter to open, Esc to go back. `e` pauses a
+  running task at a safe point, lets you edit it and resumes; on a
+  finished task it forks. `selfware tasks`, `task show`, `task edit` and
+  `agents` give the same views on the command line.
+- **Proved bounds.** Task, resource and workflow rules are Lean models
+  whose transition tables the Rust code is tested against: terminal
+  states stick, timeouts exit, teardown is bounded, retries terminate.
+  `scripts/check_formal.sh` re-checks them.
+- **Bounded self-healing.** Summary, reflection and recovery retries are
+  capped per task or run with typed stops; workflows get `until` loops,
+  wall/token budgets and `--resume`.
+- **Honest checks.** A check that was failing before the task no longer
+  blocks it forever (⚠️ pre-existing, never ✅); a stale pass is re-run.
+- **Small windows work.** The 24k-window editing scenario completes live:
+  compaction keeps full outlines, and a model that keeps re-reading
+  finished work is told to answer.
+- **Nicer terminal.** Clickable file citations, highlighted code, a
+  "Sending prompt · ~N tokens" spinner, and `v` for the full diff at a
+  confirmation.
+
+### Behaviour changes to know when upgrading
+
+- **In the REPL, background processes and PTY sessions end with the
+  message that started them** unless started with `keep=true`.
+- **npm/pip/yarn tools install from registries only.**
+- **Workflow retries and loops are bounded** (backoff clamped to 60 s,
+  `max_attempts` ≤ 10, 1,000 loop items, 10,000 step executions).
+- **JSON results gain optional `resources` and `task_edited`.**
+
 ## What's New in 0.9.2
 
 0.9.2 makes every number and badge match what actually happened, makes

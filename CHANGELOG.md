@@ -5,6 +5,242 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.3] - 2026-09-27
+
+Tasks, agents and everything they spawn now run on typed state machines
+whose transition tables are proved in Lean. Containers, processes and
+terminals belong to the task that started them and are drained when it
+ends. A new TUI Tasks pane lets you open any agent's task, pause and edit
+it, and go back. Workflow loops, retries and budgets are bounded, with
+the bounds proved. The long-standing 24k-window editing scenario (c24)
+now completes live on llm.selfware.design.
+
+### Added
+- **Task, agent and resource lifecycles** (`src/lifecycle`).
+  - Every task, agent and resource moves through a typed machine. The
+    task and resource tables are exported from Lean models
+    (`formal/TaskFsm.lean`, `formal/ResourceFsm.lean`,
+    `formal/WorkflowBounds.lean`) and a Rust test compares every
+    (state, event) pair against them. `scripts/check_formal.sh` re-checks
+    the proofs and tables, and a CI job runs it (Lean 4.34.1 via elan)
+    whenever `formal/`, `src/lifecycle/` or the script changes.
+  - Proved properties include: terminal states are sticky, a timeout
+    always exits, teardown leaves nothing live and is bounded, retries
+    terminate, `released` is reached only on confirmation, and an edit
+    is accepted only while paused.
+  - Every transition is appended to `~/.selfware/state/events.jsonl`
+    (`SELFWARE_EVENT_LOG` overrides it or turns it `off`). An invalid
+    transition is a typed error, never a panic.
+- **Tasks own what they spawn.**
+  - Containers (labelled `selfware.task`/`selfware.session`), managed
+    processes, PTY sessions, browsers, ports and worktrees are recorded
+    in `~/.selfware/state/resources.json` with their owner task, agent
+    and session.
+  - When a task ends (success, failure, Ctrl-C or cancel) its resources
+    are drained in reverse order: a polite stop, then force after
+    `[resources] teardown_deadline_secs` (default 10 s). A resource is
+    only marked released once it is confirmed gone; otherwise it is
+    reported as leaked, in the run summary and the JSON result.
+  - The session drains what it still owns on every normal exit, and on
+    SIGTERM while the REPL is idle (bounded to 8 s so it fits the
+    shutdown grace; anything not reached is reported, never "released").
+  - MCP and LSP stdio servers are session-owned resources: listed,
+    drained at session end, and found by the reaper after a crash. They
+    run in their own process group, so Ctrl-C aimed at a task no longer
+    kills them.
+  - A cancelled `container_run` or `compose_up` is recorded before it
+    spawns (with a unique run label), so the container the daemon
+    already started is still found and drained.
+  - `selfware resources [--zombies] [--json] [--all]` lists resources and
+    `selfware resources reap [--dry-run]` drains leftovers. Startup
+    prints one line when zombies exist; it never stops anything itself.
+  - A process is only signalled while its OS start time matches the one
+    recorded, and a container only while it carries its original label.
+- **Tasks pane (TUI, Ctrl+T).** A breadcrumb (`Session › Agents › main ›
+  Task … › resource`), Enter to drill down, Esc/Backspace to go back to
+  the same row. Task detail shows state and time in it, type, measured
+  tokens (main loop vs side calls), cost only when reported, limits,
+  owned resources and a state timeline.
+  - `e` on a running task pauses it at the next step boundary, opens an
+    editor for the description, max turns and token budget, sends the
+    agent "Task updated: …" and resumes. On a finished task it creates a
+    fork with the original as parent.
+  - `p` pauses/resumes, `x` cancels (asks twice), `r` reaps leftovers.
+  - Time spent paused is not counted against any wall clock.
+- **CLI views:** `selfware tasks [--tree]`, `selfware task show <id>`,
+  `selfware task edit <id>` (fork of a finished task),
+  `selfware run --fork-of <id>`, and `selfware agents` (type, state,
+  time in state, tasks done/failed, tokens, last task and its type,
+  resources held). Cross-process pause/resume/cancel says it is not
+  supported yet.
+- **Workflows.**
+  - An `until` step loops until a condition holds, with a required
+    `max_iterations` (clamped to 100) and `on_exhausted`.
+  - Workflow-level `max_wall_secs` and `max_tokens` budgets with a typed
+    stop, checked before every step, including inside `loop`, `until`
+    and condition bodies, so a run overshoots by at most one step.
+  - Per-step checkpoints in `.selfware/workflows/<run-id>.json` and
+    `workflow run --resume <run-id>`, which never re-runs a completed
+    step.
+- **Multi-chat.** Each agent's output is tagged (`[coder·2] …`), a summary
+  table closes the run, and `--tui multi-chat` opens one tab per agent.
+- **Terminal output.**
+  - Workspace citations (`path:line`) are clickable file links on
+    terminals that support OSC 8 (`SELFWARE_HYPERLINKS=0/1`).
+  - Fenced code blocks in text-mode answers are syntax-highlighted.
+  - While the prompt is being sent the spinner reads "Sending prompt ·
+    ~140k tokens".
+  - `v` at a confirmation prompt shows the full diff when it was cut
+    short, then asks again. `v` never approves.
+- **Run bounds.** The run summary says which bounds were active
+  ("bounds: iterations 30 · no wall/token/cost budget set") when the
+  iteration cap was hit or with `--verbose`.
+
+### Fixed
+- **Bounded self-healing.**
+  - Failed context-summary calls are capped at 3 per task, and the
+    backoff is rebased after a hard compression.
+  - Failed reflection and synthesis side calls are capped per task; when
+    a cap trips it is announced once and named in the run summary.
+  - Error recovery has a lifetime cap per run (36) and ends with a typed
+    `RECOVERY_EXHAUSTED` stop.
+  - Workflow retry backoff is saturating, clamped to 60 s and charged to
+    the step budget. Loops are capped at 1,000 items and 10,000 step
+    executions per run. Llm step timeouts can now fire (the handler is
+    async).
+- **Check results you can trust.**
+  - A stale post-edit PASS is re-run on the final tree instead of
+    rendering ✅.
+  - A check that was already failing before the task no longer blocks
+    completion forever or gets blamed on the edit. It is re-run once on
+    a snapshot of the pre-task tree. If every error pre-exists, the run
+    completes with ⚠️ "failing before the task too (pre-existing, not
+    caused by this change)", never ✅. New errors still block. When it
+    cannot tell, the same unchanged failure blocks at most 3 times.
+  - An unverified edit is recorded in learning data as it is shown, not
+    as a green real edit.
+- **Compaction on small windows (c24).**
+  - A compacted file read keeps a complete outline with line numbers
+    and `[doc]` marks, and a single-file grep keeps its hits. The work
+    ledger lists each file's symbols.
+  - A whole-file re-read of an unchanged file that no longer fits
+    returns the outline and asks for a line range, instead of the same
+    chunk again.
+  - A run that has finished and verified its work but keeps re-reading
+    the same content is told once to give its final answer (naming the
+    files changed and the check that passed), then refused further
+    identical reads. Such turns do not earn the +25% iteration
+    extension. If the cap is still hit, the outcome says the work was
+    done and verified at turn N, and files already in the verified state
+    are not "restored".
+  - Live on llm.selfware.design (24k window) c24 completed: all 44 notes
+    with every citation verified, the missing doc comments, cargo check
+    and test green, and a final answer. In 0.9.1 it made no edits. One
+    of two runs completed; the other timed out its first check on a
+    cold build and hit the cap.
+- **Resume and headless.**
+  - `num_turns` and the run summary count the whole task across resume.
+  - The TUI `/resume` keeps the session's wiring (output, permission
+    prompts, cancel, task control, event log).
+  - An edited task's description is what every report shows, marked as
+    edited.
+- **Multi-chat.** A failed or refused task returns to the prompt instead
+  of ending the session. The duplicate "Aggregated Result" block is gone:
+  each reply is shown once, under its agent tag.
+- **Workflows.** A failed YAML `workflow run` exits non-zero, and a bare
+  file name is accepted.
+- **Output.** A short final answer counts as "already shown" only when a
+  whole shown block was it.
+- **Security.** npm, pip and yarn install from registries only; a
+  requirements file cannot switch the package source.
+- **No green for what did not run.** "No applicable checks" ends on ℹ,
+  "no check could run" on ⚠, never on ✔.
+- **Clean JSON stdout.** `-v` phase lines and spinner frames go to stderr
+  (or nowhere) in json/stream-json mode; a test runs the binary and
+  asserts every stdout line is JSON.
+- **No invented cost.** Workflow runs report only provider-reported cost
+  ("Cost $X", "Known cost $X (incomplete …)", "Cost not tracked"); the
+  hard-coded $3/$15 per million estimate is gone from both sites. A
+  `max_cost_usd` budget that cannot be enforced because the provider
+  reports no cost now says so in the run summary.
+- **Killed means killed.** `git push`, all git tools, docker/podman,
+  workflow shell steps, post-edit checks, language QA and the evolve
+  compile check run in their own process group; a timeout, Ctrl-C or
+  cancel kills helpers and grandchildren too (unix; Windows kills the
+  direct child only). A timed-out `git push` checks the remote with
+  `git ls-remote` and reports `pushed`, `not_pushed` or `unknown`
+  instead of "killed". A halted tool with side effects (commits,
+  installs, container runs, file writes, HTTP requests) says what may
+  already have happened and what to check. `file_fim_edit` now writes
+  atomically like the other file tools.
+- **Tests.** Four flaky tests fixed (git_push remote checks, the fast
+  empty-response threshold, the npm timeout stub, and a process-manager
+  prune race with parallel agent tests).
+
+### Behaviour changes to know when upgrading
+- In the REPL each message is a task, so background processes and PTY
+  sessions started by a message end with it, unless `process_start` was
+  given `keep=true`.
+- npm/pip/yarn tools no longer install from URLs, VCS repos, local paths
+  or archives, npm aliases, or requirements files with `-e`, index,
+  find-links or trusted-host lines. You can still run those yourself.
+- Workflow steps whose backoff does not fit in `timeout × max_attempts`
+  get fewer retries than configured; `max_attempts` above 10 is clamped.
+  Loops over 1,000 items or runs over 10,000 step executions fail.
+- A failed YAML `workflow run` exits non-zero.
+- JSON results gain optional `resources` and `task_edited` keys.
+- A `git_push` timeout is a structured result (`timed_out`,
+  `remote_state`) instead of an error.
+- Workflow cost metrics are renamed to
+  `selfware_workflow_reported_cost_usd` and
+  `selfware_workflow_llm_reported_cost_usd`, recorded only when the
+  provider reports a cost; dashboards on the old `*_estimated_cost_usd`
+  names need updating.
+
+### Known issues
+- Cross-process control of a running task (`task pause/resume/cancel`
+  from another terminal) is not supported yet.
+- Swarm and multi-chat agents are not on the agent machine yet;
+  `selfware agents` and the Tasks pane show main agents.
+- A forced exit (triple Ctrl-C, second signal) skips teardown; the next
+  start's reaper report lists what it left.
+- On Windows a timeout or cancel kills only the direct child process
+  (no job objects yet), so tool helpers and grandchildren can outlive it.
+- A model that dithers before its tree is verified green still gets the
+  generic "raise max_iterations" advice, and `--autocontinue` still
+  resumes a finish-stalled run.
+- Allowed paths are shown but not editable mid-task: the safety settings
+  are copied into several components at startup, and a partial swap
+  could widen access.
+
+### Review notes (AGENTS.md rule 2)
+These change or loosen checks or visible behaviour. Each has maintainer
+sign-off, given in the review conversation, and each is noted in its
+commit message:
+- **Pre-existing check failures no longer block completion** when a
+  re-run on the pre-task tree proves every error was already there. This
+  relaxes the completion gate for that one case; it is never shown as a
+  pass.
+- **Registry-only package installs** (feature removal, see above).
+- **Resources end with their task** in the REPL (see above).
+- **No iteration extension for finish-stall turns**: a run that only
+  re-reads a verified, unchanged tree no longer earns the +25% extension.
+- **Multi-chat "Aggregated Result" block removed**: it repeated every
+  agent's reply and error after the tagged stream and summary table.
+- **Invented workflow cost removed**: providers that report no cost show
+  "cost not tracked" instead of a $3/$15-per-million estimate; the test of
+  the removed estimator was replaced by a reported-cost test, and the
+  metrics were renamed.
+- **Workflow bounds**: fewer retries than configured when the backoff
+  does not fit, the `max_attempts` clamp, and the loop/execution caps.
+- Test expectations changed with the fixes, none weakened without a
+  replacement: two ledger-digest assertions follow the new complete
+  outline and `[doc]` mark; lifecycle tests that read "every record" now
+  read every task record because the log also holds agent records; the
+  `avg_loop_turns` check follows the documented `num_turns` counter;
+  the reaper test reaches `leaked` through a real drain and also asserts
+  the leak alarm; the npm timeout stub gets 6 s instead of 3 s.
+
 ## [0.9.2] - 2026-09-26
 
 Every number and badge selfware shows now matches what actually happened.
