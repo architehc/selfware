@@ -85,7 +85,10 @@ impl TerminalSpinner {
     /// Start a new spinner with the given message
     pub fn start(message: &str) -> Self {
         // Skip when TUI owns the terminal, in compact mode, non-terminal, or dumb terminal
-        if output::is_tui_active()
+        // `should_suppress_output` covers TUI, quiet AND structured output:
+        // a spinner frame on a terminal stdout in `--output-format
+        // stream-json` would interleave with the JSON events.
+        if output::should_suppress_output()
             || output::is_compact()
             || !io::stdout().is_terminal()
             || !supports_ansi()
@@ -180,7 +183,8 @@ impl TerminalSpinner {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
-        if !output::is_tui_active() && !output::is_compact() && io::stdout().is_terminal() {
+        if !output::should_suppress_output() && !output::is_compact() && io::stdout().is_terminal()
+        {
             let elapsed = self.start_time.elapsed().as_secs_f64();
             print!("\r\x1b[2K");
             println!("  {} {} ({:.1}s)", icon, message, elapsed);
@@ -201,7 +205,8 @@ impl Drop for TerminalSpinner {
             handle.abort();
         }
         // Clear the spinner line on drop
-        if !output::is_compact() && io::stdout().is_terminal() {
+        if !output::should_suppress_output() && !output::is_compact() && io::stdout().is_terminal()
+        {
             print!("\r\x1b[2K");
             io::stdout().flush().ok();
         }

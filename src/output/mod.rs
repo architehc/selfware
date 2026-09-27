@@ -1791,17 +1791,22 @@ pub(crate) fn step_start(step: usize, name: &str) {
     io::stdout().flush().ok();
 }
 
-/// Print phase transition
+/// Print phase transition (`-v` only).
+///
+/// Routed through [`chrome_line`]: in `--output-format json`/`stream-json`
+/// it goes to stderr, so stdout stays strictly machine-readable (the README
+/// promise). It used to `println!` there under `-v`.
 pub(crate) fn phase_transition(from: &str, to: &str) {
-    if !is_quiet() && is_verbose() {
-        let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        println!(
-            "{} {} → {}",
-            "🔄".bright_yellow(),
-            from.dimmed(),
-            to.bright_white()
-        );
+    if is_quiet() || is_tui_active() || !is_verbose() {
+        return;
     }
+    let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    chrome_line(&format!(
+        "{} {} → {}",
+        "🔄".bright_yellow(),
+        from.dimmed(),
+        to.bright_white()
+    ));
 }
 
 // ── Closed-pipe handling ────────────────────────────────────────────────
