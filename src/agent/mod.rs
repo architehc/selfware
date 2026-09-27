@@ -110,6 +110,7 @@ pub mod input_census;
 mod interactive;
 pub mod last_tool;
 mod learning;
+mod lifecycle_wiring;
 pub mod llm_wait;
 pub mod loop_control;
 mod phi_observation;
@@ -861,6 +862,11 @@ pub struct Agent {
     /// `metrics/snapshots.jsonl`, episodic memory). `None` = the platform
     /// data dir + `selfware`; tests point it at a temp dir.
     learning_data_dir: Option<std::path::PathBuf>,
+    /// Append-only lifecycle event log (`~/.selfware/state/events.jsonl`;
+    /// a per-process temp file in unit tests; tests may point it elsewhere).
+    pub(crate) event_log: crate::lifecycle::EventLog,
+    /// The current task on the typed lifecycle (see `lifecycle_wiring`).
+    task_lifecycle: Option<crate::lifecycle::Tracked<crate::lifecycle::TaskMachine>>,
     /// Chat session store for save/resume/list/delete
     chat_store: ChatStore,
     /// Cancellation token set by Ctrl+C while a task is running
@@ -1871,6 +1877,8 @@ To call a tool, use this EXACT XML structure:
             failure_mode_finalized: false,
             terminal_telemetry_recorded: false,
             learning_data_dir: None,
+            event_log: crate::lifecycle::EventLog::default_location(),
+            task_lifecycle: None,
             chat_store,
             cancelled: Arc::new(AtomicBool::new(false)),
             pending_messages: VecDeque::new(),

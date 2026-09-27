@@ -822,7 +822,9 @@ impl Agent {
     }
 
     fn set_loop_state(&mut self, state: AgentState) -> Result<()> {
-        self.loop_control.transition_to(state).map_err(Into::into)
+        self.loop_control.transition_to(state)?;
+        self.lifecycle_note_loop_state();
+        Ok(())
     }
 
     fn transition_from_planning_to_executing(&mut self) -> Result<()> {
@@ -865,7 +867,11 @@ impl Agent {
         // every other workspace-relative resolution follows the agent's root
         // (e.g. an entered worktree) instead of the process-global cwd.
         let root = self.tools.workspace_root().clone();
-        crate::tools::workspace_root::scope(root, self.run_task_in_root(task)).await
+        let result = crate::tools::workspace_root::scope(root, self.run_task_in_root(task)).await;
+        // Teardown of owned resources hooks in here (the effects of the
+        // terminal transition).
+        let _effects = self.lifecycle_finish(&result);
+        result
     }
 
     async fn run_task_in_root(&mut self, task: &str) -> Result<()> {
@@ -1011,6 +1017,9 @@ impl Agent {
             ));
             checkpoint.run_model = Some(self.config.model.clone());
             self.current_checkpoint = Some(checkpoint);
+        }
+        if let Some(task_id) = self.current_checkpoint.as_ref().map(|c| c.task_id.clone()) {
+            self.lifecycle_begin_task(&task_id, task);
         }
         self.log_task_start_event(task);
         let learning_session_id = self
@@ -1487,6 +1496,15 @@ impl Agent {
 
     /// Continue execution from current state (for resuming tasks)
     pub async fn continue_execution(&mut self) -> Result<()> {
+        let result = self.continue_execution_segment().await;
+        let _effects = self.lifecycle_finish(&result);
+        result
+    }
+
+    /// `continue_execution` without recording the run's end on the task
+    /// lifecycle: an auto-continue chain runs inside the outer run, which
+    /// records the outcome once.
+    async fn continue_execution_segment(&mut self) -> Result<()> {
         // See `run_task`: resolve against this agent's workspace root.
         let root = self.tools.workspace_root().clone();
         crate::tools::workspace_root::scope(root, self.continue_execution_in_root()).await
@@ -1503,6 +1521,7 @@ impl Agent {
         self.terminal_event_emitted = false;
         self.failure_mode_finalized = false;
         self.terminal_telemetry_recorded = false;
+        self.lifecycle_begin_resume();
         let task_description = self
             .current_checkpoint
             .as_ref()
@@ -1727,13 +1746,15 @@ impl Agent {
         // `Failed` arm calls back into this helper — a type-level recursive
         // future. Box the edge so the future has finite size; runtime depth
         // stays bounded by [`MAX_AUTO_CONTINUES`] (3 chains per task).
-        Some(Box::pin(self.continue_execution()).await)
+        Some(Box::pin(self.continue_execution_segment()).await)
     }
 
     async fn run_execution_loop(&mut self, task_description: &str, mode: LoopMode) -> Result<()> {
         // Each segment classifies its own outcome; a stale verdict from a
         // previous segment must not decide this one's exit status.
         self.last_run_failure_mode = None;
+        // A resumed loop may start directly in Executing.
+        self.lifecycle_note_loop_state();
         let result = self.run_execution_loop_inner(task_description, mode).await;
         // The client raises typed budget stops mid-call: WallClockBudgetExceeded
         // (deadline hit an in-flight call), CallTimeBudgetExceeded (one call
@@ -1943,6 +1964,9 @@ impl Agent {
                 }
                 other => other,
             };
+            // Self-healing restores can move the loop to Executing outside
+            // set_loop_state; keep the task lifecycle in step.
+            self.lifecycle_note_loop_state();
             // Liveness heartbeat: a turning loop stays healthy on the health
             // endpoint; a hung process stops pinging and goes stale so a
             // systemd/k8s watchdog can restart it.

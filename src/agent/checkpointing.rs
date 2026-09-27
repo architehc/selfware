@@ -322,9 +322,11 @@ impl Agent {
                     .increment_step()
                     .map_err(anyhow::Error::from)?;
             }
-            restored_loop.set_state(AgentState::Executing {
-                step: checkpoint.current_step,
-            });
+            restored_loop
+                .transition_to(AgentState::Executing {
+                    step: checkpoint.current_step,
+                })
+                .map_err(anyhow::Error::from)?;
         }
         // The per-segment iteration counter reset above is budget fairness;
         // the chain-wide total must still accumulate across every segment of
@@ -1449,9 +1451,13 @@ impl Agent {
         self.messages = messages;
 
         if let Some(step) = state.get("current_step").and_then(|v| v.as_u64()) {
-            self.loop_control.set_state(AgentState::Executing {
+            // A typed refusal, never a panic: keep the restored messages and
+            // let the loop continue from its current state.
+            if let Err(e) = self.loop_control.transition_to(AgentState::Executing {
                 step: step as usize,
-            });
+            }) {
+                warn!("self-healing restore: {e}");
+            }
         }
 
         true
