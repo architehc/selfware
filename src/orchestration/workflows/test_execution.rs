@@ -2479,3 +2479,139 @@ async fn test_sync_llm_handler_step_timeout_fires() {
     );
     assert_eq!(result.step_results["think"].status, StepStatus::Failed);
 }
+
+// ---------------------------------------------------------------------------
+// Retry backoff bounds (review finding: `delay_secs * 2^(attempt-1)`
+// overflowed and large delays slept outside any timeout).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_retry_backoff_huge_attempt_saturates_and_clamps() {
+    let retry = RetryConfig {
+        max_attempts: 100,
+        delay_secs: 5,
+        exponential: true,
+    };
+    // 2^69 overflows u64; must not panic and must clamp.
+    assert_eq!(retry_backoff_secs(&retry, 70), MAX_BACKOFF_SECS);
+    assert_eq!(retry_backoff_secs(&retry, u32::MAX), MAX_BACKOFF_SECS);
+    // Small attempts are still exponential below the cap.
+    assert_eq!(retry_backoff_secs(&retry, 1), 5);
+    assert_eq!(retry_backoff_secs(&retry, 2), 10);
+    assert_eq!(retry_backoff_secs(&retry, 3), 20);
+}
+
+#[test]
+fn test_retry_backoff_large_linear_delay_clamped() {
+    let retry = RetryConfig {
+        max_attempts: 2,
+        delay_secs: u64::MAX,
+        exponential: false,
+    };
+    assert_eq!(retry_backoff_secs(&retry, 1), MAX_BACKOFF_SECS);
+    let exp = RetryConfig {
+        exponential: true,
+        ..retry
+    };
+    assert_eq!(retry_backoff_secs(&exp, 2), MAX_BACKOFF_SECS);
+}
+
+#[test]
+fn test_register_clamps_max_attempts() {
+    let yaml = r#"
+name: many_retries
+description: asks for too many retries
+steps:
+  - id: s
+    name: s
+    type: log
+    message: hi
+    retry:
+      max_attempts: 1000000
+      delay_secs: 1
+"#;
+    let mut executor = WorkflowExecutor::new();
+    executor.load_yaml(yaml).unwrap();
+    let wf = executor.get("many_retries").unwrap();
+    assert_eq!(wf.steps[0].retry.max_attempts, MAX_RETRY_ATTEMPTS);
+}
+
+#[tokio::test]
+async fn test_retry_backoff_charged_against_step_budget() {
+    // Fails instantly every time; timeout 1 s x 3 attempts = 3 s budget, but
+    // each backoff wants 60 s (clamped from 10^6). The backoff must not be
+    // slept past the budget: the step fails fast, naming the budget.
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = std::sync::Arc::clone(&calls);
+    let yaml = r#"
+name: budgeted_retry
+description: backoff larger than budget
+steps:
+  - id: flaky
+    name: flaky
+    type: llm
+    prompt: "fail"
+    timeout_secs: 1
+    retry:
+      max_attempts: 3
+      delay_secs: 1000000
+      exponential: true
+"#;
+    let mut executor = WorkflowExecutor::new().with_llm_handler(move |_: &str, _: &[String]| {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err::<String, _>(anyhow!("boom"))
+    });
+    executor.load_yaml(yaml).unwrap();
+
+    let started = Instant::now();
+    let result = executor
+        .execute("budgeted_retry", HashMap::new(), PathBuf::from("/tmp"))
+        .await
+        .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "backoff must be bounded by the step budget, took {:?}",
+        started.elapsed()
+    );
+    let step = &result.step_results["flaky"];
+    assert_eq!(step.status, StepStatus::Failed);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(step.retry_count, 0);
+    let err = step.error.as_deref().unwrap_or("");
+    assert!(err.contains("boom"), "original error kept: {err}");
+    assert!(err.contains("retry budget"), "budget named: {err}");
+}
+
+#[tokio::test]
+async fn test_retry_small_backoff_still_retries() {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = std::sync::Arc::clone(&calls);
+    let yaml = r#"
+name: retry_ok
+description: second attempt succeeds
+steps:
+  - id: flaky
+    name: flaky
+    type: llm
+    prompt: "try"
+    timeout_secs: 5
+    retry:
+      max_attempts: 3
+      delay_secs: 0
+"#;
+    let mut executor = WorkflowExecutor::new().with_llm_handler(move |_: &str, _: &[String]| {
+        if counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            Err(anyhow!("transient"))
+        } else {
+            Ok("ok".to_string())
+        }
+    });
+    executor.load_yaml(yaml).unwrap();
+    let result = executor
+        .execute("retry_ok", HashMap::new(), PathBuf::from("/tmp"))
+        .await
+        .unwrap();
+    let step = &result.step_results["flaky"];
+    assert_eq!(step.status, StepStatus::Completed);
+    assert_eq!(step.retry_count, 1);
+}

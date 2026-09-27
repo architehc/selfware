@@ -885,6 +885,46 @@ pub type LlmHandler = Box<
         + Sync,
 >;
 
+/// Upper bound on a single retry backoff sleep. `delay_secs * 2^(n-1)`
+/// overflowed (panic in debug, wrap to 0 in release) and a large configured
+/// delay slept practically forever outside any timeout.
+pub const MAX_BACKOFF_SECS: u64 = 60;
+
+/// Upper bound on `retry.max_attempts`; larger values are clamped (with a
+/// warning) when a workflow is registered.
+pub const MAX_RETRY_ATTEMPTS: u32 = 10;
+
+/// Backoff before retry `attempt` (1-based: the first retry is attempt 1).
+/// Saturating and clamped to [`MAX_BACKOFF_SECS`] for any input.
+pub fn retry_backoff_secs(retry: &RetryConfig, attempt: u32) -> u64 {
+    let delay = if retry.exponential {
+        let factor = 2u64
+            .checked_pow(attempt.saturating_sub(1))
+            .unwrap_or(u64::MAX);
+        retry.delay_secs.saturating_mul(factor)
+    } else {
+        retry.delay_secs
+    };
+    delay.min(MAX_BACKOFF_SECS)
+}
+
+/// Clamp every step's `retry.max_attempts` to [`MAX_RETRY_ATTEMPTS`],
+/// warning for each step that asked for more.
+fn clamp_retry_attempts(workflow: &mut Workflow) {
+    for step in &mut workflow.steps {
+        if step.retry.max_attempts > MAX_RETRY_ATTEMPTS {
+            tracing::warn!(
+                workflow = %workflow.name,
+                step = %step.id,
+                requested = step.retry.max_attempts,
+                limit = MAX_RETRY_ATTEMPTS,
+                "workflow step retry.max_attempts clamped"
+            );
+            step.retry.max_attempts = MAX_RETRY_ATTEMPTS;
+        }
+    }
+}
+
 fn estimate_llm_cost_usd(prompt_tokens: u64, completion_tokens: u64) -> f64 {
     (prompt_tokens as f64 * 3.0 / 1_000_000.0) + (completion_tokens as f64 * 15.0 / 1_000_000.0)
 }
@@ -990,7 +1030,8 @@ impl WorkflowExecutor {
     }
 
     /// Register a workflow
-    pub fn register(&mut self, workflow: Workflow) {
+    pub fn register(&mut self, mut workflow: Workflow) {
+        clamp_retry_attempts(&mut workflow);
         self.workflows.insert(workflow.name.clone(), workflow);
     }
 
@@ -1302,18 +1343,46 @@ impl WorkflowExecutor {
         workflow_steps: &[WorkflowStep],
     ) -> StepResult {
         let start = Instant::now();
-        let max_attempts = step.retry.max_attempts.max(1);
+        let max_attempts = step.retry.max_attempts.clamp(1, MAX_RETRY_ATTEMPTS);
         let mut last_error = None;
+        let mut attempts_made: u32 = 0;
+
+        // Apply timeout if specified
+        let timeout_duration = step
+            .timeout_secs
+            .map(Duration::from_secs)
+            .unwrap_or(Duration::from_secs(300)); // Default 5 min timeout
+
+        // Total wall-time budget for the step: one timeout per allowed
+        // attempt. Backoff sleeps are charged against it, so retries can
+        // never run longer than `timeout × max_attempts` in total.
+        let deadline = start.checked_add(timeout_duration.saturating_mul(max_attempts));
 
         for attempt in 0..max_attempts {
+            let remaining = deadline.map(|d| d.saturating_duration_since(Instant::now()));
             if attempt > 0 {
-                // Calculate delay
-                let delay = if step.retry.exponential {
-                    step.retry.delay_secs * 2u64.pow(attempt - 1)
-                } else {
-                    step.retry.delay_secs
-                };
-                tokio::time::sleep(Duration::from_secs(delay)).await;
+                let delay = Duration::from_secs(retry_backoff_secs(&step.retry, attempt));
+                if remaining.is_some_and(|rem| delay >= rem) {
+                    let budget_secs = timeout_duration.saturating_mul(max_attempts).as_secs();
+                    let reason = format!(
+                        "retry budget of {}s (timeout {}s x {} attempts) exhausted before attempt {}",
+                        budget_secs,
+                        timeout_duration.as_secs(),
+                        max_attempts,
+                        attempt + 1
+                    );
+                    context.log(
+                        LogLevel::Warn,
+                        format!("Step {}: {}", step.id, reason),
+                        Some(step.id.clone()),
+                    );
+                    last_error = Some(match last_error {
+                        Some(prev) => format!("{prev} ({reason})"),
+                        None => reason,
+                    });
+                    break;
+                }
+                tokio::time::sleep(delay).await;
 
                 context.log(
                     LogLevel::Info,
@@ -1321,12 +1390,13 @@ impl WorkflowExecutor {
                     Some(step.id.clone()),
                 );
             }
+            attempts_made = attempt + 1;
 
-            // Apply timeout if specified
-            let timeout_duration = step
-                .timeout_secs
-                .map(Duration::from_secs)
-                .unwrap_or(Duration::from_secs(300)); // Default 5 min timeout
+            // Each attempt gets its own timeout, but never more than what is
+            // left of the step's total budget.
+            let attempt_timeout = deadline
+                .map(|d| timeout_duration.min(d.saturating_duration_since(Instant::now())))
+                .unwrap_or(timeout_duration);
 
             // Use tokio::select! to ensure the step future is explicitly
             // dropped (cancelled) when the timeout fires, preventing
@@ -1340,7 +1410,7 @@ impl WorkflowExecutor {
 
                 tokio::select! {
                     result = &mut step_fut => Some(result),
-                    _ = tokio::time::sleep(timeout_duration) => {
+                    _ = tokio::time::sleep(attempt_timeout) => {
                         // Timeout fired: step_fut is dropped at end of this
                         // block, cancelling it. Any in-flight child processes
                         // (with kill_on_drop) are also terminated.
@@ -1373,14 +1443,14 @@ impl WorkflowExecutor {
                     // Timeout elapsed — step future has been cancelled
                     last_error = Some(format!(
                         "Step timed out after {} seconds",
-                        timeout_duration.as_secs()
+                        attempt_timeout.as_secs()
                     ));
                     context.log(
                         LogLevel::Warn,
                         format!(
                             "Step {} timed out after {}s — task cancelled",
                             step.id,
-                            timeout_duration.as_secs()
+                            attempt_timeout.as_secs()
                         ),
                         Some(step.id.clone()),
                     );
@@ -1394,7 +1464,7 @@ impl WorkflowExecutor {
             output: None,
             error: last_error,
             duration_ms: start.elapsed().as_millis() as u64,
-            retry_count: max_attempts - 1,
+            retry_count: attempts_made.saturating_sub(1),
         }
     }
 
