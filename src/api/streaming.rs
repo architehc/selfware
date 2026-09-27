@@ -263,7 +263,7 @@ impl StreamingResponse {
                     biased;
                     _ = tx.closed() => return,
                     _ = crate::shutdown_requested() => {
-                        let _ = tx.send(Err(ApiError::Network("Shutdown requested during provider stream".into()).into())).await;
+                        let _ = tx.send(Err(ApiError::ShutdownRequested("Shutdown requested during provider stream".into()).into())).await;
                         return;
                     },
                     result = tokio::time::timeout(effective_timeout, stream.next()) => result,

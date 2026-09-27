@@ -139,6 +139,15 @@ pub enum ApiError {
     #[error("Network error: {0}")]
     Network(String),
 
+    /// A shutdown signal (Ctrl-C / SIGTERM / timeout) arrived while a
+    /// provider call was in flight. Not a network failure: the run ends as
+    /// interrupted/terminated (`RunEnd::classify_error`, exit 130/143) and is
+    /// never retried. These used to be `Network("Shutdown requested …")`, so
+    /// Ctrl-C during the planning stream read "outcome: failed", exit 4
+    /// (live, 0.9.2).
+    #[error("Shutdown requested: {0}")]
+    ShutdownRequested(String),
+
     #[error("Model not found: {0}")]
     ModelNotFound(String),
 
@@ -636,6 +645,18 @@ pub const EXIT_INTERRUPTED: u8 = 130;
 /// Exit code for a signal-driven shutdown that ended an otherwise-`Ok` run.
 pub const EXIT_TERMINATED: u8 = 143;
 
+/// Whether `cause` is an [`ApiError::ShutdownRequested`], bare or wrapped in
+/// `SelfwareError::Api`.
+fn is_shutdown_api_error(cause: &(dyn std::error::Error + 'static)) -> bool {
+    matches!(
+        cause.downcast_ref::<ApiError>(),
+        Some(ApiError::ShutdownRequested(_))
+    ) || matches!(
+        cause.downcast_ref::<SelfwareError>(),
+        Some(SelfwareError::Api(ApiError::ShutdownRequested(_)))
+    )
+}
+
 /// The process exit code for a finished run: the error mapping of
 /// [`get_exit_code`] on `Err`, and on `Ok` the shutdown signal that ended the
 /// run (143 on SIGTERM, 130 on user interrupt / timeout), else 0.
@@ -668,6 +689,12 @@ pub fn get_exit_code(e: &anyhow::Error) -> u8 {
     // wrapped in anyhow::Context (e.g. "failed to load config" wrapping a
     // SelfwareError::Safety), and downcast only matches the outermost layer.
     for cause in e.chain() {
+        if is_shutdown_api_error(cause) {
+            return match crate::shutdown_reason() {
+                Some(crate::ShutdownReason::SignalTerminate) => EXIT_TERMINATED,
+                _ => EXIT_INTERRUPTED,
+            };
+        }
         if let Some(selfware_err) = cause.downcast_ref::<SelfwareError>() {
             return match selfware_err {
                 SelfwareError::Config(_) => EXIT_CONFIG_ERROR,
@@ -763,6 +790,12 @@ impl RunEnd {
                 Some(SelfwareError::Interrupted)
             ) {
                 return RunEnd::Interrupted;
+            }
+            if is_shutdown_api_error(cause) {
+                return match crate::shutdown_reason() {
+                    Some(crate::ShutdownReason::SignalTerminate) => RunEnd::Terminated,
+                    _ => RunEnd::Interrupted,
+                };
             }
         }
         RunEnd::Failed

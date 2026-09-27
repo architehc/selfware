@@ -1022,7 +1022,7 @@ impl ApiClient {
             let deadline = self.per_call_stream_deadline(self.run_wall_deadline());
             let result = tokio::select! {
                 biased;
-                _ = crate::shutdown_requested() => return Err(ApiError::Network("Shutdown requested during completion".into()).into()),
+                _ = crate::shutdown_requested() => return Err(ApiError::ShutdownRequested("Shutdown requested during completion".into()).into()),
                 result = tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), request.json(&req).send()) => result,
             };
             let result = match result {
@@ -1042,7 +1042,7 @@ impl ApiClient {
                     attempt_usage.status(response.status().as_u16());
                     let body = tokio::select! {
                         biased;
-                        _ = crate::shutdown_requested() => return Err(ApiError::Network("Shutdown requested during completion body".into()).into()),
+                        _ = crate::shutdown_requested() => return Err(ApiError::ShutdownRequested("Shutdown requested during completion body".into()).into()),
                         result = tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), response.text()) => result,
                     };
                     let body = match body {
@@ -1656,7 +1656,7 @@ impl ApiClient {
             let send_result = tokio::select! {
                 biased;
                 _ = crate::shutdown_requested() => {
-                    return Err(ApiError::Network(
+                    return Err(ApiError::ShutdownRequested(
                         "Shutdown requested while waiting for provider response headers"
                             .to_string(),
                     )
@@ -2117,7 +2117,7 @@ impl ApiClient {
         });
         tokio::select! {
             biased;
-            _ = crate::shutdown_requested() => return Err(ApiError::Network("Shutdown requested during provider retry".into()).into()),
+            _ = crate::shutdown_requested() => return Err(ApiError::ShutdownRequested("Shutdown requested during provider retry".into()).into()),
             _ = tokio::time::sleep(wait) => {}
         }
         if let Some(stop) = self.budget_stop() {
@@ -2296,7 +2296,7 @@ impl ApiClient {
             let send_result = tokio::select! {
                 biased;
                 _ = crate::shutdown_requested() => {
-                    return Err(ApiError::Network(
+                    return Err(ApiError::ShutdownRequested(
                         "Shutdown requested while waiting for provider response".to_string(),
                     )
                     .into());
@@ -2350,7 +2350,7 @@ impl ApiClient {
                         let read_result = tokio::select! {
                             biased;
                             _ = crate::shutdown_requested() => {
-                                return Err(ApiError::Network(
+                                return Err(ApiError::ShutdownRequested(
                                     "Shutdown requested while reading provider response body"
                                         .to_string(),
                                 )

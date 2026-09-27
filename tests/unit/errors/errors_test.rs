@@ -569,3 +569,23 @@ fn run_end_classifies_interrupt_terminate_and_failure() {
     assert_eq!(RunEnd::Interrupted.as_str(), "interrupted");
     assert_eq!(RunEnd::Terminated.as_str(), "terminated");
 }
+
+#[test]
+fn shutdown_during_a_provider_call_is_an_interrupt_not_a_failure() {
+    // Live (0.9.2): Ctrl-C during the planning stream surfaced as
+    // `Network error: Shutdown requested during provider stream` and the run
+    // exited 4 as "failed". It is a typed ShutdownRequested now.
+    let err: anyhow::Result<()> = Err(SelfwareError::Api(ApiError::ShutdownRequested(
+        "Shutdown requested during provider stream".into(),
+    ))
+    .into());
+    let e = err.as_ref().unwrap_err();
+    assert_eq!(RunEnd::classify_error(e), RunEnd::Interrupted);
+    assert_eq!(get_exit_code(e), EXIT_INTERRUPTED);
+    // A bare ApiError (as the client returns it) classifies the same.
+    let bare = anyhow::Error::from(ApiError::ShutdownRequested("x".into()));
+    assert_eq!(RunEnd::classify_error(&bare), RunEnd::Interrupted);
+    // A real network error is still a failure.
+    let net = anyhow::Error::from(ApiError::Network("connection reset".into()));
+    assert_eq!(RunEnd::classify_error(&net), RunEnd::Failed);
+}
