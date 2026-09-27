@@ -763,6 +763,23 @@ impl Agent {
         let messages_for_cache = messages.clone();
         let tools_for_cache = tools.clone();
 
+        // Prompt size for the "Sending prompt · ~N tokens" spinner until the
+        // first byte arrives: the shared estimator over the messages and the
+        // tool schemas (per-content cached, so a turn re-counts only what is
+        // new). An estimate — the server's own count arrives with usage.
+        let prompt_tokens_estimate = crate::token_count::estimate_messages_tokens(&messages)
+            + tools
+                .as_deref()
+                .map(crate::token_count::estimate_tool_definitions_tokens)
+                .unwrap_or(0);
+        let prefill_label = |elapsed_secs: Option<u64>| {
+            super::llm_wait::prefill_spinner_status(
+                prompt_tokens_estimate,
+                super::llm_wait::LlmWaitTokenSource::Estimate,
+                elapsed_secs,
+            )
+        };
+
         // Activate the sticky status bar if running interactively
         let mode_label = match self.execution_mode() {
             crate::config::ExecutionMode::Normal => "normal",
@@ -787,14 +804,20 @@ impl Agent {
         // Track whether the TUI spinner is logically active (to avoid
         // sending SpinnerUpdate/SpinnerStop after it has already stopped).
         let mut tui_spinner_active = false;
+        // Until the first byte arrives the spinner names what is measured:
+        // the prompt being sent and its size. The TUI label carries the
+        // elapsed seconds (refreshed every second below); the terminal
+        // spinner renders its own.
         let mut spinner = if tui_active {
             self.emit_event(AgentEvent::SpinnerStart {
-                message: initial_phrase.to_string(),
+                message: prefill_label(Some(0)),
             });
             tui_spinner_active = true;
             None
         } else {
-            Some(crate::ui::spinner::TerminalSpinner::start(initial_phrase))
+            Some(crate::ui::spinner::TerminalSpinner::start(&prefill_label(
+                None,
+            )))
         };
         let mut phrase_rotation = tokio::time::Instant::now();
         let _last_bar_update = tokio::time::Instant::now();
@@ -811,6 +834,8 @@ impl Agent {
         // silent for minutes, so every LLM_WAIT_TICK surface elapsed time,
         // phase, and tokens so far (progress event + spinner text).
         let mut wait_ticker = super::llm_wait::LlmWaitTicker::start();
+        let request_started = std::time::Instant::now();
+        const TUI_PREFILL_REFRESH: tokio::time::Duration = tokio::time::Duration::from_secs(1);
         // Boxed: keeps the large request future out of this (already deep)
         // async frame — inlining it overflowed the test-thread stack.
         let cancel = self.cancel_token();
@@ -837,18 +862,20 @@ impl Agent {
                 }
                 sent = &mut send_fut => break sent?,
                 _ = tokio::time::sleep_until(wait_ticker.next_due()) => {
-                    // Headers not back yet: still queued / prefilling.
+                    // Headers not back yet: still queued / prefilling. The
+                    // heartbeat goes out as a progress event; the spinner
+                    // keeps the "Sending prompt" label.
                     let event = wait_ticker.fire(
                         super::llm_wait::LlmWaitPhase::Prefill,
                         0,
                         super::llm_wait::LlmWaitTokenSource::Estimate,
                     );
-                    self.report_llm_wait(
-                        event,
-                        initial_phrase,
-                        tui_active && tui_spinner_active,
-                        spinner.as_ref(),
-                    );
+                    self.emit_progress(event);
+                }
+                _ = tokio::time::sleep(TUI_PREFILL_REFRESH), if tui_active && tui_spinner_active => {
+                    self.emit_event(AgentEvent::SpinnerUpdate {
+                        message: prefill_label(Some(request_started.elapsed().as_secs())),
+                    });
                 }
             }
         };
@@ -891,6 +918,9 @@ impl Agent {
         // terminal is truncated, not complete.
         let mut stream_ended_with_done = false;
         let mut runaway_cut = false;
+        // Headers can arrive before the prefill ends: the "Sending prompt"
+        // label stays until the first chunk of the response.
+        let mut first_byte_seen = false;
 
         loop {
             // Use select to check cancellation even when recv is waiting
@@ -931,19 +961,35 @@ impl Agent {
                                 &reasoning,
                             );
                             let event = wait_ticker.fire(phase, tokens, source);
-                            self.report_llm_wait(
-                                event,
-                                initial_phrase,
-                                tui_active && tui_spinner_active,
-                                spinner.as_ref().filter(|_| !reasoning_indicator_live),
-                            );
+                            if first_byte_seen {
+                                self.report_llm_wait(
+                                    event,
+                                    initial_phrase,
+                                    tui_active && tui_spinner_active,
+                                    spinner.as_ref().filter(|_| !reasoning_indicator_live),
+                                );
+                            } else {
+                                // Nothing back yet: keep "Sending prompt".
+                                self.emit_progress(event);
+                            }
                             continue;
                         }
                     }
                 }
+                _ = tokio::time::sleep(TUI_PREFILL_REFRESH),
+                    if tui_active && tui_spinner_active && !first_byte_seen =>
+                {
+                    self.emit_event(AgentEvent::SpinnerUpdate {
+                        message: prefill_label(Some(request_started.elapsed().as_secs())),
+                    });
+                    continue;
+                }
             };
 
             let chunk = chunk_result?;
+            // First byte: the "Sending prompt" label is replaced right away
+            // by the live status below.
+            let first_chunk = !std::mem::replace(&mut first_byte_seen, true);
 
             // Runaway-monologue cutoff: checked per chunk, before processing.
             if is_runaway_monologue(
@@ -970,7 +1016,9 @@ impl Agent {
             } else {
                 spinner.is_some()
             };
-            if spinner_live && phrase_rotation.elapsed() > tokio::time::Duration::from_secs(2) {
+            if spinner_live
+                && (first_chunk || phrase_rotation.elapsed() > tokio::time::Duration::from_secs(2))
+            {
                 let phase = super::llm_wait::LlmWaitPhase::classify(
                     &content,
                     &reasoning,

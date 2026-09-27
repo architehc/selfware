@@ -220,3 +220,35 @@ fn spinner_status_shows_phase_and_elapsed() {
     );
     assert!(spinner_status("x", &ProgressEvent::LlmRequestSent { tokens: 1 }, true).is_none());
 }
+
+#[test]
+fn prefill_status_names_the_prompt_size_and_elapsed_time() {
+    assert_eq!(
+        prefill_spinner_status(140_321, LlmWaitTokenSource::Estimate, Some(12)),
+        "Sending prompt · ~140k tokens · 12s"
+    );
+    // The terminal spinner renders its own elapsed time.
+    assert_eq!(
+        prefill_spinner_status(8_400, LlmWaitTokenSource::Estimate, None),
+        "Sending prompt · ~8.4k tokens"
+    );
+    // Only a provider-reported size is shown without `~`.
+    assert_eq!(
+        prefill_spinner_status(900, LlmWaitTokenSource::Usage, Some(0)),
+        "Sending prompt · 900 tokens · 0s"
+    );
+}
+
+#[test]
+fn prefill_status_omits_an_unknown_prompt_size() {
+    assert_eq!(
+        prefill_spinner_status(0, LlmWaitTokenSource::Estimate, Some(3)),
+        "Sending prompt · 3s"
+    );
+    assert_eq!(
+        prefill_spinner_status(5_000, LlmWaitTokenSource::None, None),
+        "Sending prompt"
+    );
+    // Never the old unmeasured "Waiting for the model" copy.
+    assert!(!prefill_spinner_status(1, LlmWaitTokenSource::Estimate, None).contains("Waiting"));
+}

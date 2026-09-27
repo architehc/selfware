@@ -276,6 +276,38 @@ pub(crate) fn live_spinner_status(
     )
 }
 
+/// Spinner text from the moment a streaming request is sent until the first
+/// byte of the response arrives (server queue + prompt prefill), built only
+/// from what is known: the prompt size and the elapsed time.
+///
+/// `"Sending prompt · ~140k tokens · 12s"`. The prompt size is an estimate
+/// before the response reports usage, so it carries a `~` unless `source`
+/// is provider-reported [`LlmWaitTokenSource::Usage`]; a zero or
+/// [`LlmWaitTokenSource::None`] size is left out. `elapsed_secs` is `None`
+/// when the spinner renders its own elapsed time (the terminal spinner).
+pub(crate) fn prefill_spinner_status(
+    prompt_tokens: usize,
+    source: LlmWaitTokenSource,
+    elapsed_secs: Option<u64>,
+) -> String {
+    let mut text = String::from("Sending prompt");
+    if prompt_tokens > 0 && source != LlmWaitTokenSource::None {
+        let approx = if source == LlmWaitTokenSource::Usage {
+            ""
+        } else {
+            "~"
+        };
+        text.push_str(&format!(
+            " · {approx}{} tokens",
+            crate::output::live::compact_count(prompt_tokens)
+        ));
+    }
+    if let Some(secs) = elapsed_secs {
+        text.push_str(&format!(" · {secs}s"));
+    }
+    text
+}
+
 /// One step of a heartbeat-aware receive loop.
 #[derive(Debug)]
 pub(crate) enum RecvOrTick<T> {
