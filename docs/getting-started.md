@@ -247,8 +247,12 @@ This checks:
 | `daemon` | Permanent YOLO mode, runs autonomously |
 
 Headless (`-p`, `run`, stdin not a terminal) in `normal` mode runs the
-read-only tools and stops at the first call that would need a confirmation,
-before it executes: the run fails with exit code `6`
+read-only tools and read-only shell commands (`ls`, `wc`, `grep`/`rg`,
+`find` without `-exec`/`-delete`, `git status/log/diff/show`,
+`cargo metadata/tree`; the same classifier headless `auto-edit` uses) and
+stops at the first call that would need a confirmation — a write, a build or
+test run (`cargo test`/`check`/`clippy`, `pytest`, `npm test`, scripts), an
+option that writes or runs a program, network — before it executes: the run fails with exit code `6`
 (`PERMISSION_REQUIRED` in `--output-format json` / `stream-json`) and the
 message names the tool and the fix (`-m auto-edit` or `-m yolo`). A read-only
 review therefore works headless without granting writes.

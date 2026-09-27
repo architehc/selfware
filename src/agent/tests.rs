@@ -2168,14 +2168,18 @@ async fn test_headless_auto_edit_sensitive_path_read_shell_stops_with_typed_outc
     ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
 )]
 async fn test_normal_mode_headless_observational_shell_still_stops_with_typed_outcome() {
-    // The widening applies ONLY to headless AutoEdit: in Normal mode the
-    // SAME observational command (`git status --short`) is still
-    // confirm-gated and headless still stops with the typed outcome —
-    // Normal mode is provably unchanged.
+    // 0.9.4 (Rule 2, integrator-directed policy change): headless Normal
+    // now runs the observational read `git status --short` by the same
+    // classifier headless AutoEdit uses — this test used to assert it
+    // stopped. What must still stop headless with the typed outcome is a
+    // command that runs project code: `cargo test` via the shell.
     let _g = crate::test_support::ExecGuard::hold();
     let server = MockLlmServer::builder()
         .with_response(
             "<tool>\n<name>shell_exec</name>\n<arguments>{\"command\":\"git status --short\"}</arguments>\n</tool>",
+        )
+        .with_response(
+            "<tool>\n<name>shell_exec</name>\n<arguments>{\"command\":\"cargo test --lib\"}</arguments>\n</tool>",
         )
         .with_default_response(crate::testing::mock_api::MockResponse::Text(
             "done".to_string(),
@@ -2188,20 +2192,22 @@ async fn test_normal_mode_headless_observational_shell_still_stops_with_typed_ou
     let mut agent = Agent::new(config).await.unwrap();
 
     let result = agent.run_task("Show the working tree status.").await;
-    let err = result.expect_err(
-        "Normal mode must still confirm-gate observational shell_exec and stop headless with the typed error",
-    );
+    let err = result
+        .expect_err("`cargo test` via the shell must stop headless Normal with the typed error");
+    assert!(crate::errors::is_confirmation_error(&err), "{err:?}");
     let msg = err.to_string();
     assert!(
-        msg.contains("requires confirmation"),
-        "expected the typed confirmation stop, got: {:?}",
+        msg.contains("requires confirmation") && msg.contains("shell_exec"),
+        "expected the typed confirmation stop naming shell_exec, got: {:?}",
         err
     );
-    assert!(
-        msg.contains("shell_exec"),
-        "the denial must name the denied tool, got: {:?}",
-        err
-    );
+    // The observational read ran before the stop.
+    let ran_status = agent.current_checkpoint.as_ref().is_some_and(|cp| {
+        cp.tool_calls
+            .iter()
+            .any(|c| c.success && c.arguments.contains("git status --short"))
+    });
+    assert!(ran_status, "`git status --short` must have run headless");
 
     server.stop().await;
 }

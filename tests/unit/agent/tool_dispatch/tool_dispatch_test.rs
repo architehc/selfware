@@ -8194,13 +8194,15 @@ async fn paging_through_a_file_by_range_is_progress_but_identical_rereads_are_no
 #[tokio::test]
 async fn normal_mode_confirm_gate_runs_reads_and_plain_checks_without_prompting() {
     // 0.9.1 field report: 18 prompts in one 10-minute task — context_bulk_read,
-    // cargo_check and cargo_test all asked "Execute?". Headless (cfg(test) is
-    // never interactive), a prompt would surface as the typed confirmation
-    // error, so Ok(true) proves no prompt was needed.
+    // cargo_check and cargo_test all asked "Execute?". Evaluated as an
+    // INTERACTIVE run (headless Normal withholds the build/test allowance,
+    // see the headless test below); every call here is approved without
+    // reaching a prompt, so Ok(true) proves no prompt was needed.
     let server = MockLlmServer::builder().with_response("done").build().await;
     let mut config = test_config(format!("{}/v1", server.url()));
     config.execution_mode = crate::config::ExecutionMode::Normal;
     let mut agent = Agent::new(config).await.unwrap();
+    agent.test_interactive = true;
 
     for (tool, args) in [
         ("context_bulk_read", r#"{"pattern":"src/*.rs"}"#),
@@ -8216,8 +8218,12 @@ async fn normal_mode_confirm_gate_runs_reads_and_plain_checks_without_prompting(
         assert!(approved, "{tool}");
     }
 
+    // Headless from here (a prompt surfaces as the typed confirmation
+    // error). `shell_exec ls` moved to the headless-Normal read allowance
+    // (0.9.4); `cargo test` via the shell is the shell case that must stop.
+    agent.test_interactive = false;
     for (tool, args) in [
-        ("shell_exec", r#"{"command":"ls"}"#),
+        ("shell_exec", r#"{"command":"cargo test"}"#),
         ("file_edit", r#"{"path":"a","old_str":"b","new_str":"c"}"#),
         ("cargo_clippy", r#"{"fix":true}"#),
         ("cargo_test", r#"{"test_name":"--config=x"}"#),
@@ -8854,4 +8860,98 @@ fn halt_notes_cover_side_effecting_tools() {
     for tool in ["file_read", "git_status", "grep_search", "cargo_check"] {
         assert_eq!(note(tool), "", "{tool}");
     }
+}
+
+#[tokio::test]
+async fn headless_normal_runs_read_only_shell_and_stops_builds_tests_and_injection() {
+    // 0.9.4: headless `--mode normal` approves observational shell reads by
+    // the SAME classifier headless AutoEdit and the risk tags use
+    // (`Agent::headless_shell_call_allowed`, `[reads]`), and stops on
+    // anything that writes, runs project code (builds, tests, scripts) or
+    // injects a program/output file through an option.
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut config = test_config(format!("{}/v1", server.url()));
+    config.execution_mode = crate::config::ExecutionMode::Normal;
+    let mut agent = Agent::new(config).await.unwrap();
+    assert!(!agent.is_interactive());
+
+    let shell = |cmd: &str| serde_json::json!({ "command": cmd }).to_string();
+    for cmd in [
+        "ls",
+        "ls -la src",
+        "wc -l src/lib.rs",
+        "cat Cargo.toml",
+        "head -n 20 README.md",
+        "grep -rn fn src/lib.rs",
+        "rg -n Agent src/agent",
+        "find src -name '*.rs'",
+        "git status",
+        "git log --oneline -5",
+        "git diff",
+        "git show HEAD --stat",
+        "cargo metadata --format-version 1 --no-deps",
+        "cargo tree --depth 1",
+        "sed -n '1,20p' src/lib.rs",
+    ] {
+        let approved = agent
+            .confirm_tool_execution("shell_exec", &shell(cmd), "call_test", false)
+            .await
+            .unwrap_or_else(|e| panic!("`{cmd}` must run headless in Normal mode: {e}"));
+        assert!(approved, "{cmd}");
+    }
+
+    for cmd in [
+        // builds / tests / project code
+        "cargo test",
+        "cargo test --lib 2>&1 | tail -30",
+        "cargo build",
+        "cargo check",
+        "cargo clippy --all-targets -- -D warnings",
+        "bash scripts/check_ci_parity.sh",
+        "pytest -q",
+        "python3 stats.py",
+        "npm test",
+        "make test",
+        // writes
+        "find . -name '*.tmp' -delete",
+        "find . -exec rm {} ;",
+        "echo x > notes.txt",
+        "sed -i s/a/b/ src/lib.rs",
+        "sed -n '1w out.txt' src/lib.rs",
+        "git log --output=log.txt",
+        "tree -o out.txt",
+        "git checkout -- src/lib.rs",
+        // program injection through options
+        "rg --pre cat foo src",
+        "git -c core.pager=sh log",
+        "cargo metadata --config build.rustc-wrapper=/tmp/x",
+        // secrets / network
+        "printenv",
+        "env",
+        "curl https://example.com",
+    ] {
+        let err = agent
+            .confirm_tool_execution("shell_exec", &shell(cmd), "call_test", false)
+            .await
+            .expect_err(&format!("`{cmd}` must stop headless Normal"));
+        assert!(crate::errors::is_confirmation_error(&err), "{cmd}: {err:?}");
+    }
+
+    // The dedicated build/test tools lose their plain-verification allowance
+    // headless (interactive Normal keeps it — see the test above).
+    for (tool, args) in [
+        ("cargo_test", "{}"),
+        ("cargo_check", "{}"),
+        ("cargo_clippy", r#"{"fix":false}"#),
+    ] {
+        let err = agent
+            .confirm_tool_execution(tool, args, "call_test", false)
+            .await
+            .expect_err(&format!("{tool} must stop headless Normal"));
+        assert!(
+            crate::errors::is_confirmation_error(&err),
+            "{tool}: {err:?}"
+        );
+    }
+    server.stop().await;
 }

@@ -114,11 +114,12 @@ An **agentic coding harness** for LLMs that's **local-first, cloud-compatible** 
 >
 > `-m auto-edit` lets the agent apply edits without prompting; drop it (or use
 > `selfware chat`) to confirm each change yourself. Non-interactive runs (stdin
-> not a terminal, e.g. CI) in the default `normal` mode run read-only tools, so
-> a read-only review (`selfware -p "review src/ — do not change code"`) needs no
-> write permission; the first call that would need a confirmation (a write,
-> shell command, network or git change) stops the run before it executes, with
-> exit code `6` and the tool named.
+> not a terminal, e.g. CI) in the default `normal` mode run read-only tools and
+> read-only shell commands (`ls`, `grep`, `git log`, …), so a read-only review
+> (`selfware -p "review src/ — do not change code"`) needs no write permission;
+> the first call that would need a confirmation (a write, a build or test run,
+> network or git change) stops the run before it executes, with exit code `6`
+> and the tool named.
 > `selfware llm-doctor` checks the endpoint if something looks wrong, and
 > [Running against llm.selfware.design / SGLang](#running-against-llmselfwaredesign--sglang)
 > lists the settings we measured for long tasks on this model.
@@ -179,7 +180,7 @@ An **agentic coding harness** for LLMs that's **local-first, cloud-compatible** 
 > | Config isn't picked up | Discovery order: `--config <file>` → `SELFWARE_CONFIG` env → `./selfware.toml` (cwd) → `~/.config/selfware/config.toml`. Run `selfware config show` to see the effective config + where each value came from. |
 > | Slow output (a few tok/s) | Normal on the free tier — shared capacity. Interactive `chat` is fine; long autonomous runs will take a while (the paid variant is faster). |
 > | Context seems trimmed despite a 1M model | That's the **OpenRouter provider's** own limit, not Selfware (Selfware honors `context_length`). Providers for the same model differ — see them at `https://openrouter.ai/models` → the model's *Providers* tab. The `provider` block in the response tells you who served you. |
-> | Headless `-p` stops with *"requires confirmation …"* (exit code 6) | In the default `normal` mode a headless run executes read-only tools only; the first write, shell command, network or git call stops it before it runs. Add `-m auto-edit` (file edits) or `-m yolo` (all tools), or use interactive `selfware chat` and confirm each edit. |
+> | Headless `-p` stops with *"requires confirmation …"* (exit code 6) | In the default `normal` mode a headless run executes read-only tools and read-only shell commands only; the first write, build/test run, network or git call stops it before it runs. Add `-m auto-edit` (file edits) or `-m yolo` (all tools), or use interactive `selfware chat` and confirm each edit. |
 > | `FAKE_COMPLETE` / "produced final answer but executed 0 mutating calls" | The model answered in prose instead of editing. Add `--yolo` (headless), keep `native_function_calling = true`, and phrase the task as a concrete change ("edit X to do Y"), not a question. |
 > | `NONTERM_PROSE_NO_TOOL` / "kept describing intent without using tools" | The model narrated instead of calling a tool. Make sure `native_function_calling = true`, keep `selfware` up to date (older builds mis-detected some models' `**FILES:**` planning headers), and give a concrete, single-goal task. Re-run — recovery usually proceeds. |
 >

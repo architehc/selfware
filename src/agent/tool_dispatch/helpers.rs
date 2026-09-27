@@ -1043,6 +1043,10 @@ pub(crate) fn shell_command_is_observational(command: &str) -> bool {
         "cargo check",
         "cargo clippy",
         "cargo metadata",
+        // Prints the resolved dependency graph; `--config` / `-Z` (program
+        // injection) are refused by the risk classifier before any
+        // unattended approval.
+        "cargo tree",
         "cargo locate-project",
         "cargo nextest",
         "git status",

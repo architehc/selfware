@@ -17,7 +17,10 @@ fn headless_normal_mode_is_allowed_with_a_notice() {
         notice.contains("-m yolo") && notice.contains("-m auto-edit"),
         "notice must name the fix, got: {notice}"
     );
-    assert!(notice.contains("read-only tools run"), "got: {notice}");
+    assert!(
+        notice.contains("read-only shell commands") && notice.contains("build or test run"),
+        "got: {notice}"
+    );
 }
 
 #[test]

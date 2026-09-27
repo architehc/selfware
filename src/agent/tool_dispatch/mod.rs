@@ -3605,7 +3605,31 @@ impl Agent {
         let args_for_policy = || {
             serde_json::from_str::<serde_json::Value>(args_str).unwrap_or(serde_json::Value::Null)
         };
+        let headless = !self.is_interactive() && !self.has_tui_renderer();
+        // Headless Normal: read-only shell observation (`ls`, `wc`, `grep`,
+        // `git log`, ...) runs — the same classifier headless AutoEdit and
+        // the risk tags use (`Agent::headless_shell_call_allowed`). Like the
+        // headless AutoEdit branch above, this precedes
+        // `safety.require_confirmation` (whose default lists `shell_exec`):
+        // only a `[reads]` command that passes the checker and every YOLO
+        // guard gets here; everything else still stops.
+        if headless && self.headless_normal_auto_approve(name, &args_for_policy()) == Some(true) {
+            return Ok(true);
+        }
         let confirmation_needed = match self.config.execution_mode {
+            // Headless Normal does NOT get the plain cargo_check / cargo_test
+            // / cargo_clippy allowance: builds and tests run project code for
+            // minutes, and with nobody to ask they must stop the run
+            // (PERMISSION_REQUIRED) — observed live: a "do not code" review
+            // spent ~25 min in `cargo test`. Interactive Normal keeps it.
+            crate::config::ExecutionMode::Normal if headless => {
+                crate::safety::tool_metadata::normal_mode_call_needs_confirmation_without_verification(
+                    name,
+                    &args_for_policy(),
+                    &self.config.safety.require_confirmation,
+                    &self.permission_store,
+                )
+            }
             crate::config::ExecutionMode::Normal => {
                 crate::safety::tool_metadata::normal_mode_call_needs_confirmation(
                     name,

@@ -733,7 +733,17 @@ fn classify_shell_segment(segment: &str) -> RiskTag {
         })
         .collect();
     let Some(first) = words.first() else {
-        return RiskTag::Reads;
+        // Only wrappers: a bare `env` prints the whole environment (API
+        // keys included) — not a read to wave through.
+        return if segment
+            .split_whitespace()
+            .next()
+            .is_some_and(|w| w == "env")
+        {
+            RiskTag::RunsCommand
+        } else {
+            RiskTag::Reads
+        };
     };
     let prog = first.rsplit('/').next().unwrap_or(first);
     let sub = words.get(1).copied().unwrap_or("");
@@ -745,6 +755,28 @@ fn classify_shell_segment(segment: &str) -> RiskTag {
         || (prog == "git" && sub == "clean")
     {
         return RiskTag::DeletesFiles;
+    }
+    // Read-only programs whose OPTIONS write files or run programs: never a
+    // plain read (headless Normal/AutoEdit approve `[reads]` unasked).
+    let starts = |p: &str| words.iter().any(|w| w.starts_with(p));
+    let option_writes = (prog == "git" && starts("--output"))
+        || (prog == "tree" && (has("-o") || starts("--output")))
+        || (prog == "file" && (has("-c") || has("--compile")))
+        || (prog == "sort" && (starts("-o") || starts("--output")));
+    if option_writes {
+        return RiskTag::WritesWorkspace;
+    }
+    let option_runs_program = (prog == "rg" && starts("--pre"))
+        || (prog == "cargo" && (starts("--config") || has("-z") || starts("-z")))
+        // Global `git -c key=val` / `-C dir` before the subcommand (a
+        // pager, alias or hook config runs a program).
+        || (prog == "git" && (sub == "-c" || starts("--exec-path") || starts("--ext-diff")))
+        || (prog == "sed"
+            && !words.iter().any(|w| w.starts_with("-i"))
+            && !sed_script_is_plain_print(&words[1..]))
+        || prog == "printenv";
+    if option_runs_program {
+        return RiskTag::RunsCommand;
     }
     // Git history / publication.
     if prog == "git" {
@@ -864,6 +896,50 @@ fn classify_shell_segment(segment: &str) -> RiskTag {
     } else {
         RiskTag::RunsCommand
     }
+}
+
+/// Whether `sed` arguments are the plain print form (`-n` plus scripts made
+/// only of line addresses and `p`, e.g. `-n '10,20p'`). Any other sed
+/// script can write (`w file`) or execute (`e cmd`).
+fn sed_script_is_plain_print(args: &[&str]) -> bool {
+    let mut saw_n = false;
+    let mut saw_script = false;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match *arg {
+            "-n" | "--quiet" | "--silent" => saw_n = true,
+            "-e" | "--expression" => {
+                let Some(script) = iter.next() else {
+                    return false;
+                };
+                if !plain_print_script(script) {
+                    return false;
+                }
+                saw_script = true;
+            }
+            a if a.starts_with('-') => return false,
+            a if !saw_script => {
+                if !plain_print_script(a) {
+                    return false;
+                }
+                saw_script = true;
+            }
+            _ => {} // input files
+        }
+    }
+    saw_n && saw_script
+}
+
+fn plain_print_script(script: &str) -> bool {
+    let body = script.trim_matches(|c| c == '\'' || c == '"');
+    !body.is_empty()
+        && body.split(';').all(|cmd| {
+            let cmd = cmd.trim();
+            cmd.strip_suffix('p').is_some_and(|addr| {
+                addr.chars()
+                    .all(|c| c.is_ascii_digit() || matches!(c, ',' | '$' | ' '))
+            })
+        })
 }
 
 #[cfg(test)]

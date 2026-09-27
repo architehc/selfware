@@ -876,6 +876,11 @@ pub struct Agent {
     /// `ConfirmationRequired` is rebuilt from this when the run returns
     /// (exit code 6, `PERMISSION_REQUIRED`). Reset at run start.
     confirmation_stop_tool: Option<String>,
+    /// Tests only: evaluate the confirmation policy as an interactive run
+    /// (unit tests are never interactive), for policy checks whose calls
+    /// need no prompt.
+    #[cfg(test)]
+    pub(crate) test_interactive: bool,
     /// Whether this run's terminal outcome has been written to the learning
     /// stores (one performance snapshot + the improvement engine save). An
     /// auto-continue chain nests a run inside a run; the innermost exit
@@ -1938,6 +1943,8 @@ To call a tool, use this EXACT XML structure:
             terminal_event_emitted: false,
             failure_mode_finalized: false,
             confirmation_stop_tool: None,
+            #[cfg(test)]
+            test_interactive: false,
             terminal_telemetry_recorded: false,
             learning_data_dir: None,
             event_log: crate::lifecycle::EventLog::default_location(),
@@ -2967,33 +2974,84 @@ To call a tool, use this EXACT XML structure:
                 if cmd.trim().is_empty() {
                     return None;
                 }
-                let observational =
-                    crate::agent::tool_dispatch::helpers::shell_command_is_observational(cmd)
-                        || interpreter_script_run_is_observational(cmd);
-                let checker_ok = self.safety.check_shell_command(cmd).is_ok();
-                let guard_ok = crate::safety::yolo::headless_auto_edit_shell_guard_pass(
-                    cmd,
-                    &self.config.safety.denied_paths,
-                    self.yolo_manager.protected_paths(),
-                );
-                if observational && checker_ok && guard_ok {
-                    Some(true)
-                } else {
-                    Some(false)
-                }
+                Some(self.headless_shell_call_allowed(cmd, true))
             }
             _ => None,
         }
     }
 
+    /// Whether a headless shell call (`shell_exec` / `pty_shell`) may run
+    /// without an operator. ONE classifier chain for every headless mode:
+    ///
+    /// - read-only by the confirmation risk tags (`classify_shell_risk` is
+    ///   `[reads]`, which itself requires the dispatcher's observational
+    ///   classifier and excludes writes, network, installs and every
+    ///   runner of project code — tests, builds, interpreters);
+    /// - or, only when `allow_project_code` (headless AutoEdit's documented
+    ///   widening), observational by the dispatcher's classifier (which
+    ///   counts test runners and `cargo test/check/clippy`) or a plain
+    ///   interpreter script run;
+    /// - AND the safety checker's path policy AND every YOLO guard
+    ///   heuristic pass.
+    ///
+    /// Headless Normal passes `allow_project_code = false`: `ls`, `wc`,
+    /// `grep`, `git log` run; `cargo test`, `pytest`, `python3 x.py` stop.
+    pub(crate) fn headless_shell_call_allowed(&self, cmd: &str, allow_project_code: bool) -> bool {
+        if cmd.trim().is_empty() {
+            return false;
+        }
+        let reads = crate::safety::confirm_view::classify_shell_risk(cmd)
+            == crate::safety::confirm_view::RiskTag::Reads;
+        let observational = reads
+            || (allow_project_code
+                && (crate::agent::tool_dispatch::helpers::shell_command_is_observational(cmd)
+                    || interpreter_script_run_is_observational(cmd)));
+        observational
+            && self.safety.check_shell_command(cmd).is_ok()
+            && crate::safety::yolo::headless_auto_edit_shell_guard_pass(
+                cmd,
+                &self.config.safety.denied_paths,
+                self.yolo_manager.protected_paths(),
+            )
+    }
+
+    /// Headless Normal mode (0.9.4): with no operator, a shell call is
+    /// approved only when [`Self::headless_shell_call_allowed`] says it is a
+    /// read (`allow_project_code = false`). `None` for every other tool,
+    /// mode, or an interactive/TUI run — those keep the ordinary policy,
+    /// which headless turns into the typed `ConfirmationRequired` stop.
+    pub(crate) fn headless_normal_auto_approve(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> Option<bool> {
+        if !matches!(
+            self.config.execution_mode,
+            crate::config::ExecutionMode::Normal
+        ) || self.is_interactive()
+            || self.has_tui_renderer()
+        {
+            return None;
+        }
+        if !matches!(tool_name, "shell_exec" | "pty_shell") {
+            return None;
+        }
+        let cmd = args.get("command").and_then(|c| c.as_str())?;
+        Some(self.headless_shell_call_allowed(cmd, false))
+    }
+
     /// Check if running in non-interactive mode (piped stdin)
     #[inline]
     pub fn is_interactive(&self) -> bool {
-        if cfg!(test) {
-            return false;
+        #[cfg(test)]
+        {
+            self.test_interactive
         }
-        use std::io::IsTerminal;
-        std::io::stdin().is_terminal()
+        #[cfg(not(test))]
+        {
+            use std::io::IsTerminal;
+            std::io::stdin().is_terminal()
+        }
     }
 
     /// Returns true when the TUI is active and owns rendering.

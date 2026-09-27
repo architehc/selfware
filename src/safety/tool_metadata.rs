@@ -656,6 +656,25 @@ pub fn normal_mode_call_needs_confirmation(
     normal_mode_needs_confirmation(tool_name, require_confirmation, grants)
 }
 
+/// [`normal_mode_call_needs_confirmation`] without the plain-verification
+/// allowance ([`verification_call_auto_allowed`]): for headless Normal runs,
+/// where a build/test cannot be approved by anyone and must stop the run.
+/// Grants and shell rules still apply.
+pub fn normal_mode_call_needs_confirmation_without_verification(
+    tool_name: &str,
+    args: &Value,
+    require_confirmation: &[String],
+    grants: &crate::safety::permissions::PermissionStore,
+) -> bool {
+    if grants.is_authorized(tool_name, None) || grants.shell_rule_allows(tool_name, args) {
+        return false;
+    }
+    if verification_call_auto_allowed(tool_name, args) {
+        return true;
+    }
+    normal_mode_call_needs_confirmation(tool_name, args, require_confirmation, grants)
+}
+
 #[cfg(test)]
 #[path = "../../tests/unit/safety/tool_metadata/tool_metadata_test.rs"]
 mod tests;

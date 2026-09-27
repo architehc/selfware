@@ -31,9 +31,10 @@ pub fn headless_normal_mode_notice(
     stdin_is_terminal: bool,
 ) -> Option<&'static str> {
     (mode == ExecutionMode::Normal && !stdin_is_terminal).then_some(
-        "note: headless `--mode normal`: read-only tools run without asking; the first \
-         call that needs confirmation (a write, shell command, network or git change) stops \
-         the run before it executes. Use `-m auto-edit` or `-m yolo` to allow edits.",
+        "note: headless `--mode normal`: read-only tools and read-only shell commands \
+         (ls, grep, git log, ...) run without asking; the first call that needs confirmation \
+         (a write, a build or test run, network or git change) stops the run before it \
+         executes. Use `-m auto-edit` or `-m yolo` to allow edits.",
     )
 }
 
