@@ -192,7 +192,10 @@ async fn fast_empty_response_is_not_the_long_call_outcome() {
     // about burned wall time, not emptiness alone.
     let (endpoint, task) = scripted_server(vec![(Duration::ZERO, EMPTY)]).await;
     let mut client = ApiClient::new(&config(endpoint)).unwrap();
-    client.zero_content_threshold_override_ms = Some(50);
+    // "Fast" relative to the threshold: a zero-delay local response under a
+    // loaded test machine can still take tens of ms, so a 50 ms threshold
+    // flaked (0.9.3 integration). 5 s keeps the response clearly below it.
+    client.zero_content_threshold_override_ms = Some(5_000);
     let resp = client
         .chat(vec![Message::user("answer")], None, ThinkingMode::Enabled)
         .await
