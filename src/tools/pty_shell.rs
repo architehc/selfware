@@ -518,6 +518,35 @@ impl PtySession {
         matches!(self.child.try_wait(), Ok(None))
     }
 
+    /// Pid of the session shell (also its process-group id on unix), while
+    /// it has not been reaped.
+    pub fn pid(&self) -> Option<u32> {
+        self.child.id()
+    }
+
+    /// Signal the session's process tree without waiting: SIGTERM, or
+    /// SIGKILL with `force`. Only while the shell is unreaped, so the group
+    /// id cannot have been reused.
+    fn signal_tree(&mut self, force: bool) {
+        if !self.is_alive() {
+            return;
+        }
+        #[cfg(unix)]
+        if let Some(pgid) = self.pgid.and_then(|p| i32::try_from(p).ok()) {
+            use nix::sys::signal::{killpg, Signal};
+            use nix::unistd::Pid;
+            let signal = if force {
+                Signal::SIGKILL
+            } else {
+                Signal::SIGTERM
+            };
+            if killpg(Pid::from_raw(pgid), signal).is_ok() {
+                return;
+            }
+        }
+        let _ = self.child.start_kill();
+    }
+
     /// Terminate the session, killing the child process tree.
     pub async fn close(&mut self) {
         // Kill the whole process group (shell plus anything it spawned) so no
@@ -659,6 +688,58 @@ async fn cleanup_idle_sessions(sessions: &RwLock<HashMap<String, PtySession>>) {
     for id in stale_ids {
         if let Some(mut session) = map.remove(&id) {
             session.close().await;
+            release_session_resource(&id);
+        }
+    }
+}
+
+/// Mark the registry entry of a closed (reaped) session released.
+fn release_session_resource(session_id: &str) {
+    use crate::resources::{ResourceHandle, ResourceRegistry};
+    let session = crate::resources::session_id();
+    ResourceRegistry::global().release_where(|r| {
+        r.session == session
+            && matches!(&r.handle, ResourceHandle::Pty { session_id: s, .. } if s == session_id)
+    });
+}
+
+/// Lock the session map for teardown, giving up after a second (a command
+/// may still hold it); the caller then falls back to the recorded pid.
+async fn lock_sessions_for_teardown(
+) -> Option<tokio::sync::RwLockWriteGuard<'static, HashMap<String, PtySession>>> {
+    tokio::time::timeout(Duration::from_secs(1), SESSIONS.write())
+        .await
+        .ok()
+}
+
+/// Whether session `id` of this process has exited (reaping the shell).
+/// `None` if the session is not in this process's map.
+pub(crate) async fn session_exited(id: &str) -> Option<bool> {
+    let mut sessions = lock_sessions_for_teardown().await?;
+    let session = sessions.get_mut(id)?;
+    Some(!session.is_alive())
+}
+
+/// Signal session `id`'s process tree (teardown). `false` if the session is
+/// not in this process's map.
+pub(crate) async fn signal_session(id: &str, force: bool) -> bool {
+    let Some(mut sessions) = lock_sessions_for_teardown().await else {
+        return false;
+    };
+    match sessions.get_mut(id) {
+        Some(session) => {
+            session.signal_tree(force);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Drop session `id` from the map after teardown confirmed it exited.
+pub(crate) async fn forget_session(id: &str) {
+    if let Some(mut sessions) = lock_sessions_for_teardown().await {
+        if let Some(mut session) = sessions.remove(id) {
+            session.close().await;
         }
     }
 }
@@ -715,7 +796,8 @@ impl Tool for PtyShellTool {
     }
 
     fn description(&self) -> &str {
-        "Interactive shell sessions that persist across invocations. \
+        "Interactive shell sessions that persist across invocations within a task \
+         (closed when the task ends). \
          Supports multiple concurrent sessions with automatic idle cleanup. \
          Actions: start, send, read, resize, status, close."
     }
@@ -801,6 +883,19 @@ impl PtyShellTool {
         }
         let session = PtySession::new(shell).await?;
 
+        if let Some(pid) = session.pid() {
+            use crate::resources::{NewResource, ResourceHandle, ResourceKind, ResourceRegistry};
+            ResourceRegistry::global().register(NewResource::new(
+                ResourceKind::Pty,
+                ResourceHandle::Pty {
+                    session_id: session_id.clone(),
+                    pid,
+                    pgid: cfg!(unix).then_some(pid),
+                    start_time: crate::resources::driver::process_start_time(pid),
+                },
+                format!("pty_shell {}", shell.unwrap_or("default shell")),
+            ));
+        }
         sessions.insert(session_id.clone(), session);
 
         Ok(serde_json::json!({
@@ -838,6 +933,7 @@ impl PtyShellTool {
 
         if !session.is_alive() {
             sessions.remove(session_id);
+            release_session_resource(session_id);
             bail!("Session {} has terminated", session_id);
         }
 
@@ -932,6 +1028,7 @@ impl PtyShellTool {
             .context(format!("No session found with id: {}", session_id))?;
 
         session.close().await;
+        release_session_resource(session_id);
 
         Ok(serde_json::json!({
             "status": "closed",

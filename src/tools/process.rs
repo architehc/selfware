@@ -34,7 +34,9 @@ impl Tool for ProcessStart {
     }
 
     fn description(&self) -> &str {
-        "Start a background process (e.g., dev server, file watcher). The process persists across agent steps. \
+        "Start a background process (e.g., dev server, file watcher). The process persists across agent steps \
+         and is stopped when the current task ends, unless keep=true (use keep for a server the user \
+         wants left running; it stays listed in `selfware resources`). \
          If the same id is already running with the same configuration, the existing process is reused. \
          Use health_check_pattern to wait for readiness (e.g., 'Ready on http' for Next.js, 'Compiled successfully' for webpack). \
          When expected_port is provided, selfware automatically reserves that port until the child is spawned."
@@ -87,6 +89,11 @@ impl Tool for ProcessStart {
                     "type": "integer",
                     "default": 3,
                     "description": "Maximum restart attempts (0 = unlimited)"
+                },
+                "keep": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Keep the process running after the current task ends (default: stopped at task end)"
                 }
             },
             "required": ["id", "command"]
@@ -191,8 +198,16 @@ impl Tool for ProcessStart {
             max_restart_attempts,
         };
 
+        let keep = args.get("keep").and_then(|v| v.as_bool()).unwrap_or(false);
+
         let manager = PROCESS_MANAGER.read().await;
         let summary = manager.start(config).await?;
+        if matches!(
+            summary.status,
+            crate::process_manager::ProcessStatus::Running
+        ) {
+            record_managed(&summary, keep);
+        }
 
         // Double-check: the process manager should now return Err for failure
         // states, but guard against future regressions by checking status here.
@@ -265,6 +280,9 @@ impl Tool for ProcessStop {
 
         let manager = PROCESS_MANAGER.read().await;
         let summary = manager.stop(id, force).await?;
+        // `stop` returns only after the child was reaped (or it had already
+        // exited), so its registry entry is confirmed released.
+        release_managed(id);
 
         Ok(serde_json::to_value(summary)?)
     }
@@ -382,6 +400,8 @@ impl Tool for ProcessRestart {
 
         let manager = PROCESS_MANAGER.read().await;
         let summary = manager.restart(id).await?;
+        // New pid: refresh the registry handle (keeps the original owner).
+        record_managed(&summary, false);
 
         Ok(serde_json::to_value(summary)?)
     }
@@ -513,6 +533,71 @@ impl Tool for PortCheck {
             "ports": results
         }))
     }
+}
+
+fn managed_entry(id: &str) -> Option<crate::resources::Resource> {
+    use crate::resources::{ResourceHandle, ResourceRegistry};
+    let session = crate::resources::session_id();
+    ResourceRegistry::global()
+        .unreleased()
+        .into_iter()
+        .find(|r| {
+            r.session == session
+                && matches!(&r.handle, ResourceHandle::Process { managed_id: Some(m), .. } if m == id)
+        })
+}
+
+/// Record a running managed process in the resource registry, or refresh
+/// the pid of its existing entry (reuse, restart).
+fn record_managed(summary: &crate::process_manager::ProcessSummary, keep: bool) {
+    use crate::resources::{NewResource, ResourceHandle, ResourceKind, ResourceRegistry};
+    let Some(pid) = summary.pid else {
+        return;
+    };
+    let handle = ResourceHandle::Process {
+        pid,
+        pgid: cfg!(unix).then_some(pid),
+        start_time: crate::resources::driver::process_start_time(pid),
+        managed_id: Some(summary.id.clone()),
+    };
+    let registry = ResourceRegistry::global();
+    match managed_entry(&summary.id) {
+        Some(existing) => {
+            registry.set_handle(&existing.id, handle);
+        }
+        None => {
+            let label = std::iter::once(summary.command.as_str())
+                .chain(summary.args.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join(" ");
+            registry.register(
+                NewResource::new(
+                    ResourceKind::Process,
+                    handle,
+                    format!("{}: {label}", summary.id),
+                )
+                .keep(keep),
+            );
+        }
+    }
+}
+
+/// Mark a managed process's registry entry released (after a confirmed stop).
+fn release_managed(id: &str) {
+    if let Some(entry) = managed_entry(id) {
+        crate::resources::ResourceRegistry::global().release(&entry.id);
+    }
+}
+
+/// Whether managed process `id` has exited (reaping it). `None` if unknown.
+pub(crate) async fn managed_exited(id: &str) -> Option<bool> {
+    PROCESS_MANAGER.read().await.has_exited(id).await
+}
+
+/// Signal managed process `id` (SIGTERM, or SIGKILL with `force`) without
+/// waiting. `Ok(false)` if it is not managed by this process.
+pub(crate) async fn signal_managed(id: &str, force: bool) -> Result<bool> {
+    PROCESS_MANAGER.read().await.signal(id, force).await
 }
 
 /// Stop all managed background processes and print a summary.

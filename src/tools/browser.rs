@@ -19,6 +19,50 @@ use crate::config::is_local_endpoint;
 use crate::safety::process_env::SanitizedEnvExt;
 
 // ============================================================================
+// Tracked browser processes
+// ============================================================================
+
+/// Run a headless browser (Chrome, or Node driving Playwright) as a tracked,
+/// bounded process, with `Command::output` semantics. The browser leads its
+/// own process group, so when the caller's timeout drops this future the
+/// whole tree (renderer/GPU helpers included) is SIGKILLed instead of
+/// outliving the call; while it runs it is recorded in the resource registry
+/// and the entry is released once the process has been reaped.
+async fn run_browser_process(cmd: &mut Command) -> std::io::Result<std::process::Output> {
+    use crate::resources::{NewResource, ResourceHandle, ResourceKind, ResourceRegistry};
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let program = cmd.as_std().get_program().to_string_lossy().into_owned();
+    let child = cmd.spawn()?;
+    let pid = child.id();
+    let mut group_guard = crate::tools::process_guard::ProcessGroupGuard::new(pid);
+    let registry = ResourceRegistry::global();
+    let entry = pid.map(|pid| {
+        registry.register(NewResource::new(
+            ResourceKind::Browser,
+            ResourceHandle::Process {
+                pid,
+                pgid: cfg!(unix).then_some(pid),
+                start_time: crate::resources::driver::process_start_time(pid),
+                managed_id: None,
+            },
+            format!("headless browser ({program})"),
+        ))
+    });
+    let output = child.wait_with_output().await;
+    group_guard.disarm();
+    if let (Ok(_), Some(id)) = (&output, &entry) {
+        // Reaped: the browser process is confirmed gone.
+        registry.release(id);
+    }
+    output
+}
+
+// ============================================================================
 // Browser Detection
 // ============================================================================
 
@@ -401,7 +445,7 @@ async fn fetch_with_chrome(
 
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(timeout_secs + 10),
-        cmd.output(),
+        run_browser_process(&mut cmd),
     )
     .await
     .context("Browser fetch timed out")?
@@ -500,7 +544,7 @@ async fn fetch_with_playwright(
 
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(timeout_secs + 10),
-        cmd.output(),
+        run_browser_process(&mut cmd),
     )
     .await
     .context("Playwright fetch timed out")?
@@ -684,7 +728,7 @@ impl Tool for BrowserScreenshot {
 
                 let output = tokio::time::timeout(
                     std::time::Duration::from_secs(timeout_secs + 10),
-                    cmd.output(),
+                    run_browser_process(&mut cmd),
                 )
                 .await
                 .context("Screenshot timed out")?
@@ -755,7 +799,7 @@ impl Tool for BrowserScreenshot {
 
                 let output = tokio::time::timeout(
                     std::time::Duration::from_secs(timeout_secs + 10),
-                    cmd.output(),
+                    run_browser_process(&mut cmd),
                 )
                 .await
                 .context("Screenshot timed out")?
@@ -880,7 +924,7 @@ impl Tool for BrowserPdf {
 
                 let output = tokio::time::timeout(
                     std::time::Duration::from_secs(timeout_secs + 10),
-                    cmd.output(),
+                    run_browser_process(&mut cmd),
                 )
                 .await
                 .context("PDF generation timed out")?
@@ -942,7 +986,7 @@ impl Tool for BrowserPdf {
 
                 let output = tokio::time::timeout(
                     std::time::Duration::from_secs(timeout_secs + 10),
-                    cmd.output(),
+                    run_browser_process(&mut cmd),
                 )
                 .await
                 .context("PDF generation timed out")?
@@ -1081,7 +1125,7 @@ impl Tool for BrowserEval {
 
                 let output = tokio::time::timeout(
                     std::time::Duration::from_secs(timeout_secs + 10),
-                    cmd.output(),
+                    run_browser_process(&mut cmd),
                 )
                 .await
                 .context("Script execution timed out")?

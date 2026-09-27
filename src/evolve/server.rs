@@ -335,9 +335,26 @@ impl EvolveServer {
         let address = format!("127.0.0.1:{port}");
         let listener = TcpListener::bind(&address).await?;
         println!("Evolve workspace listening on http://{address}");
-        axum::serve(listener, self.router())
+        // The bound port is this session's for as long as it serves; listed
+        // by `selfware resources`, released once the listener is dropped.
+        let registry = crate::resources::ResourceRegistry::global();
+        let bound = listener.local_addr().map(|a| a.port()).unwrap_or(port);
+        let entry = registry.register_owned(
+            crate::resources::NewResource::new(
+                crate::resources::ResourceKind::ServerPort,
+                crate::resources::ResourceHandle::Port { port: bound },
+                format!("evolve workspace http://{address}"),
+            )
+            .keep(true),
+            crate::resources::context::session_owner(),
+            None,
+        );
+        let served = axum::serve(listener, self.router())
             .with_graceful_shutdown(shutdown)
-            .await?;
+            .await;
+        // `serve` consumed and dropped the listener: the port is closed.
+        registry.release(&entry);
+        served?;
         Ok(())
     }
 

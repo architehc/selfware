@@ -221,6 +221,9 @@ struct PlaywrightBridge {
     /// still-running Chromium to PID 1); the group kill reaches the whole tree.
     #[cfg(unix)]
     pgid: Option<u32>,
+    /// Resource-registry entry: the bridge is session infrastructure (open
+    /// pages persist across tasks), recorded as a kept, session-owned browser.
+    registry_entry: Option<String>,
 }
 
 impl PlaywrightBridge {
@@ -322,6 +325,24 @@ impl PlaywrightBridge {
         // None — the surviving Chromium group members would be unreachable.
         #[cfg(unix)]
         let pgid = child.id();
+        let registry_entry = child.id().map(|pid| {
+            use crate::resources::{NewResource, ResourceHandle, ResourceKind, ResourceRegistry};
+            ResourceRegistry::global().register_owned(
+                NewResource::new(
+                    ResourceKind::Browser,
+                    ResourceHandle::Process {
+                        pid,
+                        pgid: cfg!(unix).then_some(pid),
+                        start_time: crate::resources::driver::process_start_time(pid),
+                        managed_id: None,
+                    },
+                    "playwright bridge (page_control)",
+                )
+                .keep(true),
+                crate::resources::context::session_owner(),
+                None,
+            )
+        });
 
         let stdin = child
             .stdin
@@ -465,6 +486,7 @@ impl PlaywrightBridge {
             stderr_handle: Mutex::new(Some(stderr_handle)),
             #[cfg(unix)]
             pgid,
+            registry_entry,
         })
     }
 
@@ -598,7 +620,12 @@ impl PlaywrightBridge {
         self.kill_bridge_group();
         let mut child = self.child.lock().await;
         let _ = child.kill().await;
-        let _ = child.wait().await;
+        if child.wait().await.is_ok() {
+            if let Some(id) = &self.registry_entry {
+                // Reaped: confirmed gone.
+                crate::resources::ResourceRegistry::global().release(id);
+            }
+        }
 
         // Cancel reader tasks
         let mut handle = self.reader_handle.lock().await;

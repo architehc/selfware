@@ -555,6 +555,10 @@ impl ProcessManager {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         cmd.kill_on_drop(true); // Ensure child is killed if handle is dropped to prevent zombies
+                                // Lead its own process group so stop/teardown reach the whole tree
+                                // (`npm run dev` → node → esbuild), not just the direct child.
+        #[cfg(unix)]
+        cmd.process_group(0);
 
         info!(
             "Starting process '{}': {} {:?}",
@@ -836,7 +840,14 @@ impl ProcessManager {
                         use nix::unistd::Pid;
                         if let Some(pid) = proc.pid {
                             if let Ok(raw_pid) = i32::try_from(pid) {
-                                let _ = kill(Pid::from_raw(raw_pid), Signal::SIGTERM);
+                                // The child leads its own group (see
+                                // `start`): SIGTERM the whole tree, falling
+                                // back to the pid alone.
+                                if nix::sys::signal::killpg(Pid::from_raw(raw_pid), Signal::SIGTERM)
+                                    .is_err()
+                                {
+                                    let _ = kill(Pid::from_raw(raw_pid), Signal::SIGTERM);
+                                }
                             } else {
                                 warn!(
                                     "Skipping SIGTERM for pid {}: does not fit into platform pid_t",
@@ -876,6 +887,69 @@ impl ProcessManager {
         proc.pid = None;
 
         Ok(proc.to_summary(20))
+    }
+
+    /// Signal a managed process (its whole process group) without waiting:
+    /// SIGTERM, or SIGKILL with `force`. The entry is marked `Stopped` first
+    /// so the monitor never auto-restarts a process being torn down.
+    /// Returns `Ok(false)` when `id` is not managed here.
+    pub async fn signal(&self, id: &str, force: bool) -> Result<bool> {
+        let mut processes = self.processes.write().await;
+        let Some(proc) = processes.get_mut(id) else {
+            return Ok(false);
+        };
+        proc.status = ProcessStatus::Stopped;
+        let Some(handle) = proc.child_handle.clone() else {
+            return Ok(true);
+        };
+        let mut guard = handle.write().await;
+        let Some(child) = guard.as_mut() else {
+            return Ok(true);
+        };
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return Ok(true);
+        }
+        // The child is unreaped, so its pid (and the group it leads) cannot
+        // have been reused.
+        #[cfg(unix)]
+        if let Some(pid) = child.id().and_then(|p| i32::try_from(p).ok()) {
+            use nix::sys::signal::{kill, killpg, Signal};
+            use nix::unistd::Pid;
+            let signal = if force {
+                Signal::SIGKILL
+            } else {
+                Signal::SIGTERM
+            };
+            if killpg(Pid::from_raw(pid), signal).is_err() {
+                kill(Pid::from_raw(pid), signal)
+                    .with_context(|| format!("signal process '{id}'"))?;
+            }
+            return Ok(true);
+        }
+        child
+            .start_kill()
+            .with_context(|| format!("kill process '{id}'"))?;
+        Ok(true)
+    }
+
+    /// Whether the managed process has exited (reaping it if so). `None`
+    /// when `id` is unknown here or its state cannot be read.
+    pub async fn has_exited(&self, id: &str) -> Option<bool> {
+        let processes = self.processes.read().await;
+        let proc = processes.get(id)?;
+        let Some(handle) = proc.child_handle.clone() else {
+            return Some(true);
+        };
+        drop(processes);
+        let mut guard = handle.write().await;
+        match guard.as_mut() {
+            None => Some(true),
+            Some(child) => match child.try_wait() {
+                Ok(Some(_)) => Some(true),
+                Ok(None) => Some(false),
+                Err(_) => None,
+            },
+        }
     }
 
     /// Stop all running managed processes gracefully.
@@ -1018,6 +1092,9 @@ async fn spawn_child_process(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.kill_on_drop(true); // Ensure child is killed if handle is dropped to prevent zombies
+                            // Same process-group rule as the initial spawn in `start`.
+    #[cfg(unix)]
+    cmd.process_group(0);
 
     let child = cmd.spawn().with_context(|| {
         format!(

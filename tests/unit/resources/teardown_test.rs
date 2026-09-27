@@ -1,0 +1,234 @@
+use super::*;
+use crate::resources::fake::{Behavior, FakeDriver};
+use crate::resources::registry::NewResource;
+use crate::resources::{ResourceHandle, ResourceKind};
+
+fn fast() -> TeardownPolicy {
+    TeardownPolicy {
+        deadline: Duration::from_millis(40),
+        force_grace: Duration::from_millis(40),
+        poll: Duration::from_millis(5),
+    }
+}
+
+fn process(pid: u32) -> NewResource {
+    NewResource::new(
+        ResourceKind::Process,
+        ResourceHandle::Process {
+            pid,
+            pgid: Some(pid),
+            start_time: Some(1),
+            managed_id: None,
+        },
+        format!("proc {pid}"),
+    )
+}
+
+fn container(id: &str) -> NewResource {
+    NewResource::new(
+        ResourceKind::Container,
+        ResourceHandle::Container {
+            runtime: "docker".into(),
+            id: id.into(),
+            task_label: "t1".into(),
+        },
+        "nginx",
+    )
+}
+
+fn register(reg: &ResourceRegistry, new: NewResource, task: &str) -> String {
+    reg.register_owned(new, task.to_string(), None)
+}
+
+#[tokio::test]
+async fn drains_in_reverse_creation_order_and_releases() {
+    let reg = ResourceRegistry::in_memory();
+    let driver = FakeDriver::new();
+    let a = register(&reg, process(101), "t1");
+    let b = register(&reg, container("aaaa"), "t1");
+    let c = register(&reg, process(103), "t1");
+
+    let report = teardown_task(&reg, &driver, "t1", fast()).await;
+
+    assert_eq!(
+        driver.calls_with("polite:"),
+        vec!["polite:pid 103", "polite:container aaaa", "polite:pid 101"],
+        "last created is stopped first"
+    );
+    assert_eq!(report.released.len(), 3);
+    assert!(report.leaked.is_empty());
+    for id in [a, b, c] {
+        assert_eq!(reg.get(&id).unwrap().state, ResourceState::Released);
+    }
+    assert_eq!(
+        report.summary_line().as_deref(),
+        Some("resources: 3 released, 0 leaked")
+    );
+}
+
+#[tokio::test]
+async fn polite_stop_ignored_is_forced_after_deadline() {
+    let reg = ResourceRegistry::in_memory();
+    let driver = FakeDriver::new();
+    driver.script("pid 7", Behavior::StopsOnForce);
+    let id = register(&reg, process(7), "t1");
+
+    let report = teardown_task(&reg, &driver, "t1", fast()).await;
+
+    assert_eq!(
+        driver.calls(),
+        vec!["polite:pid 7", "force:pid 7", "finalize:pid 7"]
+    );
+    assert_eq!(report.released.len(), 1);
+    assert_eq!(reg.get(&id).unwrap().state, ResourceState::Released);
+}
+
+#[tokio::test]
+async fn still_running_after_deadline_and_force_is_leaked_not_released() {
+    let reg = ResourceRegistry::in_memory();
+    let driver = FakeDriver::new();
+    driver.script("pid 9", Behavior::NeverStops);
+    let id = register(&reg, process(9), "t1");
+
+    let started = std::time::Instant::now();
+    let report = teardown_task(&reg, &driver, "t1", fast()).await;
+
+    // The deadline was honoured before forcing, and the force grace after.
+    assert!(started.elapsed() >= Duration::from_millis(80));
+    assert!(report.released.is_empty());
+    assert_eq!(report.leaked.len(), 1);
+    let entry = reg.get(&id).unwrap();
+    assert_eq!(entry.state, ResourceState::Leaked);
+    let note = entry.note.unwrap();
+    assert!(note.contains("still running"), "{note}");
+    assert!(note.contains("kill refused"), "{note}");
+    let line = report.summary_line().unwrap();
+    assert!(
+        line.starts_with("resources: 0 released, 1 leaked (pid 9: still running"),
+        "{line}"
+    );
+    // Never finalized: release was not confirmed.
+    assert!(driver.calls_with("finalize:").is_empty());
+}
+
+#[tokio::test]
+async fn finalize_failure_is_leaked() {
+    let reg = ResourceRegistry::in_memory();
+    let driver = FakeDriver::new();
+    driver.script("container bbbb", Behavior::FinalizeFails);
+    let id = register(&reg, container("bbbb"), "t1");
+
+    let report = teardown_task(&reg, &driver, "t1", fast()).await;
+
+    assert_eq!(report.leaked.len(), 1);
+    assert_eq!(reg.get(&id).unwrap().state, ResourceState::Leaked);
+    assert!(reg
+        .get(&id)
+        .unwrap()
+        .note
+        .unwrap()
+        .contains("stopped but not removed"));
+}
+
+#[tokio::test]
+async fn foreign_handle_is_never_stopped() {
+    let reg = ResourceRegistry::in_memory();
+    let driver = FakeDriver::new();
+    driver.script("pid 11", Behavior::Foreign);
+    let id = register(&reg, process(11), "t1");
+
+    let report = teardown_task(&reg, &driver, "t1", fast()).await;
+
+    assert!(driver.calls_with("polite:").is_empty());
+    assert!(driver.calls_with("force:").is_empty());
+    assert_eq!(report.leaked.len(), 1);
+    assert_eq!(reg.get(&id).unwrap().state, ResourceState::Leaked);
+}
+
+#[tokio::test]
+async fn already_gone_is_released_without_signals() {
+    let reg = ResourceRegistry::in_memory();
+    let driver = FakeDriver::new();
+    driver.script("pid 12", Behavior::AlreadyGone);
+    register(&reg, process(12), "t1");
+
+    let report = teardown_task(&reg, &driver, "t1", fast()).await;
+
+    assert_eq!(driver.calls(), vec!["finalize:pid 12"]);
+    assert_eq!(report.released.len(), 1);
+}
+
+#[tokio::test]
+async fn keep_resources_are_reowned_by_the_session_not_drained() {
+    let reg = ResourceRegistry::in_memory();
+    let driver = FakeDriver::new();
+    let kept = register(&reg, process(20).keep(true), "t1");
+    let dropped = register(&reg, process(21), "t1");
+
+    let report = teardown_task(&reg, &driver, "t1", fast()).await;
+
+    assert_eq!(driver.calls_with("polite:"), vec!["polite:pid 21"]);
+    assert_eq!(report.kept.len(), 1);
+    let kept = reg.get(&kept).unwrap();
+    assert_eq!(kept.state, ResourceState::Live);
+    assert_eq!(kept.owner_task, session_owner());
+    assert_eq!(reg.get(&dropped).unwrap().state, ResourceState::Released);
+    let line = report.summary_line().unwrap();
+    assert!(line.contains("1 kept running"), "{line}");
+    // A second task end does not touch the kept resource either.
+    let again = teardown_task(&reg, &driver, "t1", fast()).await;
+    assert!(again.is_empty());
+}
+
+#[tokio::test]
+async fn only_the_finished_tasks_resources_are_drained() {
+    let reg = ResourceRegistry::in_memory();
+    let driver = FakeDriver::new();
+    let other = register(&reg, process(30), "t2");
+    register(&reg, process(31), "t1");
+
+    teardown_task(&reg, &driver, "t1", fast()).await;
+
+    assert_eq!(driver.calls_with("polite:"), vec!["polite:pid 31"]);
+    assert_eq!(reg.get(&other).unwrap().state, ResourceState::Live);
+}
+
+#[tokio::test]
+async fn a_task_that_owned_nothing_gets_no_summary_line_and_no_host_calls() {
+    let reg = ResourceRegistry::in_memory();
+    let driver = FakeDriver::new();
+    let report = teardown_task(&reg, &driver, "t1", fast()).await;
+    assert!(report.summary_line().is_none());
+    assert!(driver.calls().is_empty());
+}
+
+#[tokio::test]
+async fn non_drainable_kinds_are_never_auto_drained() {
+    let reg = ResourceRegistry::in_memory();
+    let driver = FakeDriver::new();
+    let wt = register(
+        &reg,
+        NewResource::new(
+            ResourceKind::Worktree,
+            ResourceHandle::Path {
+                path: "/tmp/wt".into(),
+            },
+            "wt",
+        ),
+        "t1",
+    );
+    let report = teardown_task(&reg, &driver, "t1", fast()).await;
+    assert!(driver.calls().is_empty());
+    assert_eq!(report.leaked.len(), 1);
+    assert_eq!(reg.get(&wt).unwrap().state, ResourceState::Leaked);
+}
+
+#[tokio::test]
+async fn session_teardown_drains_kept_resources_of_this_session() {
+    let reg = ResourceRegistry::in_memory();
+    let driver = FakeDriver::new();
+    let kept = register(&reg, process(40).keep(true), &session_owner());
+    let report = teardown_session(&reg, &driver, fast()).await;
+    assert_eq!(report.released.len(), 1);
+    assert_eq!(reg.get(&kept).unwrap().state, ResourceState::Released);
+}

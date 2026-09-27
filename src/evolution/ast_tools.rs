@@ -108,6 +108,7 @@ pub fn create_shadow_worktree_named_at(
             String::from_utf8_lossy(&output.stderr).to_string(),
         ));
     }
+    crate::resources::record_worktree(&worktree_path, "evolution shadow worktree");
 
     Ok(worktree_path)
 }
@@ -191,6 +192,10 @@ pub fn get_git_head_commit(repo_root: &Path) -> Option<String> {
 
 /// Remove a git worktree after evaluation
 pub fn cleanup_worktree(repo_root: &Path, worktree_path: &Path) -> Result<(), WorktreeError> {
+    // Canonical form while it still exists (matches the registry entry).
+    let registered_path = worktree_path
+        .canonicalize()
+        .unwrap_or_else(|_| worktree_path.to_path_buf());
     let output = Command::new("git")
         .sanitized_env()
         .env_remove("GIT_INDEX_FILE")
@@ -209,6 +214,9 @@ pub fn cleanup_worktree(repo_root: &Path, worktree_path: &Path) -> Result<(), Wo
             .args(["worktree", "prune"])
             .current_dir(repo_root)
             .output();
+    }
+    if !worktree_path.exists() {
+        crate::resources::release_worktree(&registered_path);
     }
 
     Ok(())

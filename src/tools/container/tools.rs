@@ -232,9 +232,20 @@ impl Tool for ContainerRun {
         }
 
         // Remove on exit
-        if args.get("rm").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let auto_remove = args.get("rm").and_then(|v| v.as_bool()).unwrap_or(false);
+        if auto_remove {
             cmd.arg("--rm");
         }
+
+        // Ownership labels (selfware.task / selfware.session / selfware.agent)
+        // let teardown and `selfware resources reap` find exactly the
+        // containers selfware started, and a --cidfile gives the full id
+        // even for foreground runs.
+        let (owner_task, _) = crate::resources::context::current_owner();
+        cmd.args(crate::resources::context::container_label_args());
+        let cid_dir = tempfile::tempdir().context("create cidfile directory")?;
+        let cid_file = cid_dir.path().join("cid");
+        cmd.arg("--cidfile").arg(&cid_file);
 
         // Port mappings -- validate to prevent argument injection
         if let Some(ports) = args.get("ports").and_then(|v| v.as_array()) {
@@ -311,6 +322,31 @@ impl Tool for ContainerRun {
         cmd.stderr(Stdio::piped());
 
         let output = cmd.output().await.context("Failed to run container")?;
+
+        // Record the container unless it already removed itself (a
+        // foreground --rm run that returned). A failed start still leaves a
+        // created container behind, so the cidfile — not the exit code —
+        // decides.
+        let full_id = std::fs::read_to_string(&cid_file)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        let removed_itself = auto_remove && !detach;
+        if !full_id.is_empty() && !removed_itself {
+            use crate::resources::{NewResource, ResourceHandle, ResourceKind, ResourceRegistry};
+            let label = match args.get("name").and_then(|v| v.as_str()) {
+                Some(name) => format!("{image} {name}"),
+                None => image.to_string(),
+            };
+            ResourceRegistry::global().register(NewResource::new(
+                ResourceKind::Container,
+                ResourceHandle::Container {
+                    runtime: runtime.command().to_string(),
+                    id: full_id,
+                    task_label: owner_task,
+                },
+                label,
+            ));
+        }
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -831,6 +867,10 @@ impl Tool for ContainerBuild {
         cmd.sanitized_env_preserve(crate::safety::process_env::CONTAINER_RUNTIME_ENV);
         crate::tools::workspace_root::CommandRootExt::in_workspace_root(&mut cmd);
         cmd.args(["build", "-t", tag]);
+        // Attribution only. Deliberately NOT the `selfware.task` key: image
+        // labels are inherited by every container run from the image, and a
+        // user's own container must never look selfware-owned to the reaper.
+        cmd.args(crate::resources::context::image_label_args());
 
         // Dockerfile path
         if let Some(dockerfile) = args.get("dockerfile").and_then(|v| v.as_str()) {
@@ -1162,6 +1202,17 @@ impl Tool for ContainerRemove {
 // Docker Compose / Podman Compose
 // ============================================================================
 
+/// Absolute compose project directory for the registry.
+fn compose_project_dir(path: &str) -> std::path::PathBuf {
+    let dir = std::path::PathBuf::from(crate::tools::workspace_root::anchor(path));
+    let dir = if dir.is_absolute() {
+        dir
+    } else {
+        crate::tools::workspace_root::current_path().join(dir)
+    };
+    std::fs::canonicalize(&dir).unwrap_or(dir)
+}
+
 /// Run docker-compose or podman-compose commands
 pub struct ComposeUp;
 
@@ -1279,6 +1330,23 @@ impl Tool for ComposeUp {
             .context("Compose up timed out")?
             .context("Failed to run compose up")?;
 
+        // Record the project so task teardown runs `compose down` for it.
+        // (Compose has no CLI flag to label its containers; the registry
+        // entry is the ownership record.)
+        if output.status.success() {
+            use crate::resources::{NewResource, ResourceHandle, ResourceKind, ResourceRegistry};
+            let dir = compose_project_dir(path);
+            ResourceRegistry::global().register(NewResource::new(
+                ResourceKind::Container,
+                ResourceHandle::Compose {
+                    runtime: runtime.command().to_string(),
+                    dir: dir.clone(),
+                    file: args.get("file").and_then(|v| v.as_str()).map(String::from),
+                },
+                format!("compose project {}", dir.display()),
+            ));
+        }
+
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
@@ -1384,6 +1452,17 @@ impl Tool for ComposeDown {
         cmd.stderr(Stdio::piped());
 
         let output = cmd.output().await.context("Failed to run compose down")?;
+
+        if output.status.success() {
+            use crate::resources::{ResourceHandle, ResourceRegistry};
+            let dir = compose_project_dir(path);
+            let file = args.get("file").and_then(|v| v.as_str()).map(String::from);
+            let session = crate::resources::session_id();
+            ResourceRegistry::global().release_where(|r| {
+                r.session == session
+                    && matches!(&r.handle, ResourceHandle::Compose { dir: d, file: f, .. } if *d == dir && *f == file)
+            });
+        }
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();

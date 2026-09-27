@@ -472,6 +472,7 @@ impl Tool for EnterWorktreeTool {
         }
 
         record_created_worktree(&git_root, &worktree_path).await;
+        crate::resources::record_worktree(&worktree_path, "enter_worktree");
 
         let worktree_path_str = worktree_path.to_string_lossy().to_string();
         let branch_used = branch_arg.unwrap_or("(detached)").to_string();
@@ -553,6 +554,10 @@ impl Tool for ExitWorktreeTool {
         let mut removed = false;
         if remove {
             if let Some(ref worktree_path) = removed_path {
+                // Canonical form while it still exists (matches the registry).
+                let registered_path = worktree_path
+                    .canonicalize()
+                    .unwrap_or_else(|_| worktree_path.clone());
                 let mut cmd = tokio::process::Command::new("git");
                 crate::safety::process_env::sanitize_command_env(&mut cmd);
                 let output = cmd
@@ -564,6 +569,7 @@ impl Tool for ExitWorktreeTool {
 
                 if output.status.success() {
                     removed = true;
+                    crate::resources::release_worktree(&registered_path);
                     info!("Removed worktree: {}", worktree_path.display());
                 } else {
                     let stderr = String::from_utf8_lossy(&output.stderr);

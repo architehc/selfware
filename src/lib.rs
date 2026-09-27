@@ -85,6 +85,8 @@ pub(crate) mod devops;
 pub(crate) mod observability;
 pub(crate) mod orchestration;
 pub mod resource;
+// Task-owned resource registry, teardown and reaper (`selfware resources`)
+pub mod resources;
 pub(crate) mod session;
 pub mod supervision;
 pub mod testing;
