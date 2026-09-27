@@ -448,6 +448,26 @@ pub(crate) enum Commands {
         path: String,
     },
 
+    /// Inventory a repository for review (deterministic, no model): file
+    /// counts, lines and sizes per language, the largest code files, the
+    /// most central files by import in-degree, entry points and a reading
+    /// plan. Runs automatically at the start of every review task.
+    #[command(display_order = 13)]
+    Review {
+        /// Repository (or directory) to inventory
+        #[arg(default_value = ".")]
+        path: String,
+
+        /// Free-text review scope to map onto the repository, as a review
+        /// task would name it (e.g. "src/agent", "the core", "and its tests")
+        #[arg(long)]
+        scope: Option<String>,
+
+        /// Print the inventory and reading plan as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Render the codebase as an ecosystem visualization
     #[command(display_order = 15)]
     Garden {

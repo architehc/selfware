@@ -99,37 +99,7 @@ impl GraphBuilder {
             // bulk (they remain in the graph and are reachable on demand via
             // expand). bench/vlm/swl are tooling runtimes; the rest are the
             // presentation+ops layer (DEBLOAT_STATE.md).
-            let is_tooling_module = {
-                let module = relative
-                    .components()
-                    .nth(1)
-                    .and_then(|c| c.as_os_str().to_str())
-                    .map(|m| m.strip_suffix(".rs").unwrap_or(m));
-                matches!(
-                    module,
-                    Some("bench_harness")
-                        | Some("vlm_bench")
-                        | Some("swl")
-                        | Some("ui")
-                        | Some("computer")
-                        | Some("testing")
-                        | Some("observability")
-                        | Some("devops")
-                        | Some("doctor")
-                        | Some("llm_doctor")
-                        | Some("bin")
-                        | Some("resource")
-                        | Some("input")
-                        | Some("output")
-                        | Some("supervision")
-                        | Some("self_healing")
-                        | Some("mcp")
-                        | Some("lsp")
-                        | Some("consolidation")
-                        | Some("templates")
-                        | Some("interview")
-                )
-            };
+            let is_tooling_module = is_tooling_module_path(relative);
             let is_code = matches!(source_set, SourceSet::Code)
                 && is_production_source_class(file_class)
                 && !is_tooling_module;
@@ -417,25 +387,131 @@ pub(crate) fn repository_source_inventory(
     }
     paths.sort();
 
-    let test_partition = discover_test_sources(project_root, &paths)?;
+    let classes = classify_repository_paths(project_root, &paths)?;
     Ok(paths
         .into_iter()
+        .zip(classes)
+        .map(|(path, classification)| RepositorySourceFile {
+            path,
+            classification,
+        })
+        .collect())
+}
+
+/// Production / test / example classification of repository files, the
+/// same partition the graph uses: Rust files reached only through
+/// `#[cfg(test)]` modules, structurally-test paths (`tests/`, `*_test.go`,
+/// `test_*.py`, …) and `examples/` trees. One class per input path, in order.
+pub(crate) fn classify_repository_paths(
+    project_root: &Path,
+    paths: &[PathBuf],
+) -> Result<Vec<RepositoryFileClass>> {
+    let test_partition = discover_test_sources(project_root, paths)?;
+    Ok(paths
+        .iter()
         .map(|path| {
-            let relative = path.strip_prefix(project_root).unwrap_or(&path);
-            let classification =
-                if test_partition.files.contains(&path) || structurally_test_path(relative) {
-                    RepositoryFileClass::Test
-                } else if structurally_example_path(relative) {
-                    RepositoryFileClass::Example
-                } else {
-                    RepositoryFileClass::Production
-                };
-            RepositorySourceFile {
-                path,
-                classification,
+            let relative = path.strip_prefix(project_root).unwrap_or(path);
+            if test_partition.files.contains(path) || structurally_test_path(relative) {
+                RepositoryFileClass::Test
+            } else if structurally_example_path(relative) {
+                RepositoryFileClass::Example
+            } else {
+                RepositoryFileClass::Production
             }
         })
         .collect())
+}
+
+/// Every regular, non-symlink file under `project_root` that survives the
+/// graph's discovery pruning (build output, dependency and cache
+/// directories, nested Python environments, VCS internals) and its privacy
+/// filter (`selfware.toml`, `.env*`, credential files) — WITHOUT the graph's
+/// source-format allowlist, so docs and data count too. Sorted. Binary
+/// detection is the caller's concern (nothing here opens a file).
+pub(crate) fn repository_file_walk(project_root: &Path) -> Result<Vec<PathBuf>> {
+    let root_metadata = std::fs::symlink_metadata(project_root)?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        anyhow::bail!("repository root must be a real directory");
+    }
+    let mut paths = Vec::new();
+    let walker = walkdir::WalkDir::new(project_root)
+        .follow_links(false)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(|entry| {
+            retain_outside_python_environments(entry)
+                && (entry.depth() == 0
+                    || !entry.file_type().is_dir()
+                    || !is_excluded_repository_directory(entry.file_name()))
+        });
+    for entry in walker {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        if !entry.file_type().is_file() || entry.file_type().is_symlink() {
+            continue;
+        }
+        let file_name = entry.file_name().to_str().unwrap_or_default();
+        if is_private_repository_file(entry.path(), file_name) {
+            continue;
+        }
+        paths.push(entry.into_path());
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+/// The `use` paths of a Rust source file, flattened (`use a::{b, c::d}` →
+/// `[a, b]`, `[a, c, d]`; a glob keeps its prefix). Top-level `use` items
+/// only, parsed with `syn`; a file that does not parse falls back to the
+/// line scan the graph uses. The same extraction as the graph's
+/// `DependsOn` edges.
+pub(crate) fn rust_use_paths(content: &str) -> Vec<Vec<String>> {
+    let Ok(file) = syn::parse_file(content) else {
+        return fallback_imports(content);
+    };
+    let mut imports = Vec::new();
+    for item in file.items {
+        if let syn::Item::Use(item_use) = item {
+            flatten_use_tree(&item_use.tree, Vec::new(), &mut imports);
+        }
+    }
+    imports
+}
+
+/// Whether a `src/`-relative path belongs to one of selfware's tooling
+/// modules (presentation, operations, scaffolding — DEBLOAT_STATE.md) rather
+/// than product logic. `relative` is repository-relative (`src/ui/x.rs`).
+pub(crate) fn is_tooling_module_path(relative: &Path) -> bool {
+    let module = relative
+        .components()
+        .nth(1)
+        .and_then(|c| c.as_os_str().to_str())
+        .map(|m| m.strip_suffix(".rs").unwrap_or(m));
+    matches!(
+        module,
+        Some("bench_harness")
+            | Some("vlm_bench")
+            | Some("swl")
+            | Some("ui")
+            | Some("computer")
+            | Some("testing")
+            | Some("observability")
+            | Some("devops")
+            | Some("doctor")
+            | Some("llm_doctor")
+            | Some("bin")
+            | Some("resource")
+            | Some("input")
+            | Some("output")
+            | Some("supervision")
+            | Some("self_healing")
+            | Some("mcp")
+            | Some("lsp")
+            | Some("consolidation")
+            | Some("templates")
+            | Some("interview")
+    )
 }
 
 /// Validate a repository-relative document name without opening it. Existing
@@ -900,19 +976,7 @@ fn imported_modules(path: &Path, current_id: &str) -> Vec<Vec<String>> {
     let Ok(content) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
-    let Ok(file) = syn::parse_file(&content) else {
-        return fallback_imports(&content)
-            .into_iter()
-            .filter_map(|parts| normalize_import(parts, current_id))
-            .collect();
-    };
-    let mut imports = Vec::new();
-    for item in file.items {
-        if let syn::Item::Use(item_use) = item {
-            flatten_use_tree(&item_use.tree, Vec::new(), &mut imports);
-        }
-    }
-    imports
+    rust_use_paths(&content)
         .into_iter()
         .filter_map(|parts| normalize_import(parts, current_id))
         .collect()

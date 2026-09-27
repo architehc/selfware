@@ -3541,6 +3541,28 @@ async fn handle_command(
             agent.analyze(&path).await?;
         }
 
+        Commands::Review { path, scope, json } => {
+            let root = std::path::PathBuf::from(&path);
+            let inventory = tokio::task::spawn_blocking(move || {
+                crate::analysis::repo_inventory::RepoInventory::scan(&root)
+            })
+            .await??;
+            let scope = crate::analysis::repo_inventory::resolve_review_scope(
+                scope.as_deref().unwrap_or_default(),
+                &inventory,
+            );
+            let plan = inventory.review_plan(scope);
+            if json {
+                let value = serde_json::json!({
+                    "inventory": inventory,
+                    "review": plan,
+                });
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else {
+                println!("{}", inventory.render_text(Some(&plan)));
+            }
+        }
+
         Commands::Garden { path } => {
             if !quiet {
                 println!("{}", render_header(ctx));

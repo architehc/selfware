@@ -6,10 +6,12 @@
 //! - BM25 search
 //! - Vector storage
 //! - Technical debt tracking
+//! - Deterministic repository inventory for reviews
 
 pub mod analyzer;
 pub mod bm25;
 pub mod code_graph;
+pub mod repo_inventory;
 pub mod tech_debt;
 pub mod vector_store;
 pub mod workspace_graph;
