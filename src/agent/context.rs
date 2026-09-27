@@ -984,10 +984,19 @@ const LEDGER_MAX_WRITES: usize = 64;
 const LEDGER_NOTE_MAX_CHARS: usize = 240;
 /// Per-file remembered range hashes (oldest evicted first).
 const LEDGER_MAX_RANGE_HASHES: usize = 32;
-/// Per-file remembered symbols (digest), by line.
-const LEDGER_MAX_SYMBOLS: usize = 64;
-/// Longest rendered symbol digest per file line (chars).
-const LEDGER_SYMBOLS_MAX_CHARS: usize = 360;
+/// Per-file remembered symbols (digest), by line. A memory bound: 64 kept
+/// only the first 64 items of a file (val091 compression.rs has 57,
+/// context_management.rs 51 — larger files lost their tail).
+const LEDGER_MAX_SYMBOLS: usize = 512;
+/// Largest rendered symbol digest per file line (measured tokens). The old
+/// 360-char cap kept 7 of src/agent/context.rs's 17 items in c24 ("+10
+/// more"); in kind-and-name form (`result_compaction::fit_outline`) all 17
+/// measure 154 tokens.
+const LEDGER_SYMBOLS_MAX_TOKENS: usize = 200;
+/// Largest rendered hit list of one search (measured tokens): val091 c24's
+/// `pub fn` grep of compression.rs — 33 hits, re-run ~20 times after its
+/// result was compacted — measures 306 tokens in kind-and-name form.
+const LEDGER_HITS_MAX_TOKENS: usize = 320;
 /// Remembered processed-result fingerprints (bounded FIFO).
 const LEDGER_SEEN_CAP: usize = 4096;
 
@@ -1059,6 +1068,9 @@ pub struct LedgerSearch {
     pub path: String,
     pub matches: Option<u64>,
     pub turn: usize,
+    /// The hits `(line, text)` when every match was in one file (see
+    /// `result_compaction::single_file_grep_hits`); bounded.
+    pub hits: Vec<(usize, String)>,
     seq: u64,
 }
 
@@ -1437,10 +1449,12 @@ impl WorkLedger {
                 // An "unchanged re-read" note (tool_dispatch) carries no
                 // content: the earlier full read is already recorded, and the
                 // note must not turn it into a partial read.
-                if parsed
-                    .as_ref()
-                    .is_some_and(|v| v.get(UNCHANGED_REREAD_NOTE_KEY).is_some())
-                {
+                // The same for an outline re-read note: an outline, no content.
+                if parsed.as_ref().is_some_and(|v| {
+                    v.get(UNCHANGED_REREAD_NOTE_KEY).is_some()
+                        || v.get(super::result_compaction::OUTLINE_REREAD_KEY)
+                            .is_some()
+                }) {
                     return;
                 }
                 // Hash the file text, not file_read's line-number prefixes:
@@ -1459,9 +1473,15 @@ impl WorkLedger {
                     None => (fnv1a64(&[payload]), true),
                 };
                 let hash = Some(hash);
+                // With the index a chunk carries of the lines it does not
+                // show (merged by line).
                 let symbols = content
                     .map(|c| {
-                        super::result_compaction::symbol_digest(c, range.map_or(1, |r| r.0.max(1)))
+                        super::result_compaction::merged_symbols(
+                            parsed.as_ref(),
+                            c,
+                            range.map_or(1, |r| r.0.max(1)),
+                        )
                     })
                     .unwrap_or_default();
                 self.record_file_read(path, range, total_lines, hash, partial, symbols);
@@ -1476,13 +1496,18 @@ impl WorkLedger {
                     return;
                 }
                 let path = key(args.get("path").and_then(|p| p.as_str()).unwrap_or("."));
-                let matches = serde_json::from_str::<serde_json::Value>(payload)
-                    .ok()
-                    .and_then(|v| {
-                        v.get("total_matches")
-                            .or_else(|| v.get("count"))
-                            .and_then(|n| n.as_u64())
-                    });
+                let parsed_search = serde_json::from_str::<serde_json::Value>(payload).ok();
+                let matches = parsed_search.as_ref().and_then(|v| {
+                    v.get("total_matches")
+                        .or_else(|| v.get("count"))
+                        .and_then(|n| n.as_u64())
+                });
+                let mut hits = parsed_search
+                    .as_ref()
+                    .and_then(super::result_compaction::single_file_grep_hits)
+                    .map(|(_, hits)| hits)
+                    .unwrap_or_default();
+                hits.truncate(LEDGER_MAX_SYMBOLS);
                 let seq = self.next_seq();
                 let turn = self.turn;
                 self.searches
@@ -1492,6 +1517,7 @@ impl WorkLedger {
                     path,
                     matches,
                     turn,
+                    hits,
                     seq,
                 });
                 if self.searches.len() > LEDGER_MAX_SEARCHES {
@@ -1619,7 +1645,7 @@ impl WorkLedger {
                 let symbols = v
                     .get("content")
                     .and_then(|c| c.as_str())
-                    .map(|c| super::result_compaction::symbol_digest(c, range.0.max(1)))
+                    .map(|c| super::result_compaction::merged_symbols(Some(&v), c, range.0.max(1)))
                     .unwrap_or_default();
                 self.record_file_read(path, Some(range), total_lines, None, false, symbols);
             }
@@ -1832,6 +1858,24 @@ impl WorkLedger {
         }
     }
 
+    /// `symbols` as `"N: item; N: item"` within `max_tokens` (measured):
+    /// full signatures, else every item by kind and name, else a prefix
+    /// with `(+N more)`.
+    fn render_digest(symbols: &[(usize, String)], max_tokens: usize) -> String {
+        use super::result_compaction::{fit_outline, Outline, OutlineBudgets};
+        let join = |o: &Outline| -> String {
+            let mut digest = o.lines.join("; ");
+            if o.omitted > 0 {
+                digest.push_str(&format!(" (+{} more)", o.omitted));
+            }
+            digest
+        };
+        let outline = fit_outline(symbols, OutlineBudgets::uniform(max_tokens), &mut |o| {
+            crate::token_count::estimate_content_tokens(&join(o))
+        });
+        join(&outline)
+    }
+
     fn render_file_line(f: &LedgerFileEntry, presence: Option<&ContextPresence>) -> String {
         let coverage = if f.whole_file {
             match f.total_lines {
@@ -1913,27 +1957,10 @@ impl WorkLedger {
                 line.push_str(" [content NOT in context]");
             }
             if !presence.whole(&f.path) && !f.symbols.is_empty() {
-                let mut digest = String::new();
-                let mut shown = 0usize;
-                for (n, sym) in &f.symbols {
-                    let item = format!("{n}: {sym}");
-                    if !digest.is_empty()
-                        && digest.chars().count() + item.chars().count() + 2
-                            > LEDGER_SYMBOLS_MAX_CHARS
-                    {
-                        break;
-                    }
-                    if !digest.is_empty() {
-                        digest.push_str("; ");
-                    }
-                    digest.push_str(&item);
-                    shown += 1;
-                }
-                let more = f.symbols.len() - shown;
-                if more > 0 {
-                    digest.push_str(&format!(" (+{more} more)"));
-                }
-                line.push_str(&format!("\n  symbols (index, not code): {digest}"));
+                let digest = Self::render_digest(&f.symbols, LEDGER_SYMBOLS_MAX_TOKENS);
+                line.push_str(&format!(
+                    "\n  symbols (index, not code; [doc] = documented): {digest}"
+                ));
             }
         }
         if let Some((source, _, note)) = &f.note {
@@ -2064,10 +2091,17 @@ impl WorkLedger {
                             .matches
                             .map(|m| format!("{m} matches"))
                             .unwrap_or_else(|| "results".to_string());
-                        format!(
+                        let mut line = format!(
                             "- grep {:?} in {} → {}, turn {}",
                             s.pattern, s.path, matches, s.turn
-                        )
+                        );
+                        if !s.hits.is_empty() {
+                            line.push_str(&format!(
+                                "\n  hits (line: text): {}",
+                                Self::render_digest(&s.hits, LEDGER_HITS_MAX_TOKENS)
+                            ));
+                        }
+                        line
                     })
                     .collect(),
             ),

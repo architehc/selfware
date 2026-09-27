@@ -56,8 +56,11 @@ const MIN_SAVING_TOKENS: usize = 64;
 /// The latest result is never cut below this many tokens.
 const MIN_TRUNCATED_RESULT_TOKENS: usize = 256;
 
-/// Symbols kept per digest before the rest is counted as omitted.
-const MAX_DIGEST_SYMBOLS: usize = 80;
+/// JSON key of a whole-file `file_read` of an unchanged file answered with
+/// its outline instead of its content (tool dispatch,
+/// `Agent::outline_reread_note`); the value is the turn of the read that
+/// delivered the content.
+pub(crate) const OUTLINE_REREAD_KEY: &str = "outline_only_unchanged_since_turn";
 
 /// Longest rendered symbol line (chars).
 const MAX_SYMBOL_LINE_CHARS: usize = 100;
@@ -335,6 +338,9 @@ pub(crate) fn symbol_digest(content: &str, first_line: usize) -> Vec<(usize, Str
         .all(|l| LINE_NUMBER_PREFIX.is_match(l))
         && !content.trim().is_empty();
     let mut out = Vec::new();
+    // Whether the lines since the last blank or code line are a doc comment
+    // (attributes in between allowed): the item under it is documented.
+    let mut doc_above = false;
     for (i, raw) in content.lines().enumerate() {
         let (line_no, line) = if numbered {
             match LINE_NUMBER_PREFIX.captures(raw) {
@@ -348,10 +354,219 @@ pub(crate) fn symbol_digest(content: &str, first_line: usize) -> Vec<(usize, Str
             (first_line + i, raw)
         };
         if let Some(text) = symbol_text(line) {
-            out.push((line_no, text));
+            out.push((
+                line_no,
+                if doc_above {
+                    format!("{text}{DOC_MARK}")
+                } else {
+                    text
+                },
+            ));
+        }
+        let t = line.trim();
+        if t.starts_with("///") || t.starts_with("/**") || (doc_above && t.starts_with('*')) {
+            doc_above = true;
+        } else if !(t.starts_with("#[") || t.starts_with('@')) {
+            doc_above = false;
         }
     }
     out
+}
+
+/// Suffix of an outline item that has a doc comment directly above it (a
+/// documentation task needs to know which items lack one without reading
+/// every body — val091 c24 re-read context.rs ranges 13 times for that).
+/// Absent means no doc comment was seen above it in the lines read.
+pub(crate) const DOC_MARK: &str = " [doc]";
+
+// ---------------------------------------------------------------------------
+// Outlines
+// ---------------------------------------------------------------------------
+
+/// Items an outline holds at most. A memory bound only: what is rendered
+/// is decided by measuring (see [`fit_outline`]).
+const MAX_OUTLINE_SYMBOLS: usize = 1_000;
+
+/// Longest kind-and-name form of an item that has no plain name (an
+/// `impl` header, a Go method), in chars.
+const MAX_COMPACT_SYMBOL_CHARS: usize = 60;
+
+/// Ceiling (measured tokens) of a `file_read` stub that keeps its file's
+/// COMPLETE outline in kind-and-name form when the full signatures do not
+/// fit the ordinary stub budget. c24 (val091, 24k window): the 200-token
+/// stub of src/agent/context.rs kept 5 of its 17 items ("+10 more"), and
+/// the model re-read the whole file 19 times to get its `pub fn` list back.
+/// Measured on that workspace, complete kind-and-name stubs cost 256
+/// (context.rs: 17 items, content 4,479 tokens), 588 (compression.rs: 57,
+/// 8,403) and 735 (context_management.rs: 51, 16,452) tokens; a file whose outline does not fit
+/// this ceiling keeps what fits the ordinary budget and says how many
+/// items it omits.
+pub(crate) const OUTLINE_STUB_MAX_TOKENS: usize = 1_024;
+
+/// Words that introduce an item's name.
+const ITEM_KEYWORDS: &[&str] = &[
+    "fn",
+    "struct",
+    "enum",
+    "trait",
+    "union",
+    "mod",
+    "type",
+    "const",
+    "static",
+    "macro_rules!",
+    "def",
+    "class",
+    "function",
+    "function*",
+    "interface",
+    "let",
+    // `static mut NAME`, `let mut name`: the name follows `mut`.
+    "mut",
+];
+
+/// An item line in kind-and-name form: everything up to and including the
+/// item's name (`pub async fn load<T>(p: &Path) -> T` -> `pub async fn
+/// load`), parameters, generics and return types elided. Items without a
+/// plain name (an `impl` header, a Go method) keep a bounded head.
+pub(crate) fn compact_symbol(text: &str) -> String {
+    if let Some(item) = text.strip_suffix(DOC_MARK) {
+        return format!("{}{DOC_MARK}", compact_symbol(item));
+    }
+    let ident_len = |w: &str| {
+        w.char_indices()
+            .find(|(_, c)| !(c.is_alphanumeric() || *c == '_' || *c == '$'))
+            .map_or(w.len(), |(i, _)| i)
+    };
+    let mut words = Vec::new();
+    let mut offset = 0;
+    for w in text.split_whitespace() {
+        let start = offset + text[offset..].find(w).unwrap_or(0);
+        words.push((start, w));
+        offset = start + w.len();
+    }
+    for pair in words.windows(2) {
+        let [(_, kw), (name_start, name)] = pair else {
+            continue;
+        };
+        if !ITEM_KEYWORDS.contains(kw) {
+            continue;
+        }
+        let raw = name.starts_with("r#");
+        let name = name.strip_prefix("r#").unwrap_or(name);
+        let len = ident_len(name);
+        if len == 0 || (!raw && ITEM_KEYWORDS.contains(&&name[..len])) {
+            continue;
+        }
+        let raw_prefix = if text[*name_start..].starts_with("r#") {
+            2
+        } else {
+            0
+        };
+        return text[..name_start + raw_prefix + len].to_string();
+    }
+    let head = text.split(" where ").next().unwrap_or(text).trim_end();
+    let mut out: String = head.chars().take(MAX_COMPACT_SYMBOL_CHARS).collect();
+    if head.chars().count() > MAX_COMPACT_SYMBOL_CHARS {
+        out.push('…');
+    }
+    out
+}
+
+/// A file outline fitted to a budget: `"N: item"` lines (N = the item's
+/// line), in full-signature or kind-and-name (`compact`) form, with the
+/// number of items left out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Outline {
+    pub lines: Vec<String>,
+    pub compact: bool,
+    pub omitted: usize,
+}
+
+impl Outline {
+    /// Write the outline into a JSON result as `symbols` (the key stubs,
+    /// chunks and the ledger's resume path already use), with
+    /// `symbols_form` when signatures were elided and `symbols_omitted`
+    /// when items were left out.
+    pub(crate) fn write_into(&self, v: &mut Value) {
+        v["symbols"] = json!(self.lines);
+        if let Some(obj) = v.as_object_mut() {
+            obj.remove("symbols_form");
+            obj.remove("symbols_omitted");
+        }
+        if self.compact {
+            v["symbols_form"] = json!("kind and name only; signatures elided");
+        }
+        if self.omitted > 0 {
+            v["symbols_omitted"] = json!(self.omitted);
+        }
+    }
+}
+
+/// Budgets (measured tokens of the whole containing result) for the three
+/// forms [`fit_outline`] tries in turn.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct OutlineBudgets {
+    /// Every item with its full signature.
+    pub full: usize,
+    /// Every item in kind-and-name form.
+    pub complete: usize,
+    /// As many items (kind-and-name) as fit; the rest counted as omitted.
+    pub partial: usize,
+}
+
+impl OutlineBudgets {
+    pub(crate) fn uniform(max_tokens: usize) -> Self {
+        Self {
+            full: max_tokens,
+            complete: max_tokens,
+            partial: max_tokens,
+        }
+    }
+}
+
+/// The richest outline of `symbols` whose containing result fits:
+/// every item with its full signature within `budgets.full`, else every
+/// item in kind-and-name form within `budgets.complete`, else the first
+/// items (kind-and-name) that fit `budgets.partial`, the rest counted as
+/// omitted. `measure(outline)` is the measured size of the containing
+/// result with that outline (AGENTS.md rule 4).
+pub(crate) fn fit_outline(
+    symbols: &[(usize, String)],
+    budgets: OutlineBudgets,
+    measure: &mut dyn FnMut(&Outline) -> usize,
+) -> Outline {
+    let bounded = &symbols[..symbols.len().min(MAX_OUTLINE_SYMBOLS)];
+    let beyond = symbols.len() - bounded.len();
+    let full = Outline {
+        lines: bounded.iter().map(|(n, s)| format!("{n}: {s}")).collect(),
+        compact: false,
+        omitted: beyond,
+    };
+    if measure(&full) <= budgets.full {
+        return full;
+    }
+    let names: Vec<String> = bounded
+        .iter()
+        .map(|(n, s)| format!("{n}: {}", compact_symbol(s)))
+        .collect();
+    let complete = Outline {
+        lines: names.clone(),
+        compact: true,
+        omitted: beyond,
+    };
+    if measure(&complete) <= budgets.complete {
+        return complete;
+    }
+    let prefix = |k: usize| Outline {
+        lines: names[..k].to_vec(),
+        compact: true,
+        omitted: symbols.len() - k,
+    };
+    let keep = largest_fitting(names.len(), names.len() / 2, &mut |k| {
+        measure(&prefix(k)) <= budgets.partial
+    });
+    prefix(keep)
 }
 
 // ---------------------------------------------------------------------------
@@ -386,7 +601,9 @@ pub(crate) fn build_stub(
                 .and_then(|t| t.as_u64());
             let first_line = range.map_or(1, |r| r.0.max(1));
             let lines_in_result = content.lines().count();
-            let symbols = symbol_digest(content, first_line);
+            // A chunk's (or a truncated head's) own index covers lines its
+            // content does not show: keep it.
+            let symbols = merged_symbols(parsed.as_ref(), content, first_line);
             // The ledger hashes the file text, not file_read's line-number
             // prefixes: the same here, so a stub's hash matches the ledger
             // line (and a ledger rebuilt from the stub on resume).
@@ -404,7 +621,8 @@ pub(crate) fn build_stub(
             // work ledger's header states the rule once for every file.
             let note = format!(
                 "Content of {what} NO LONGER in your context. `symbols` = definitions with line \
-                 numbers, not code. To quote or cite, re-read only the line_range you need."
+                 numbers ([doc]: has a doc comment), not code. To quote or cite, re-read only \
+                 the line_range you need."
             );
             let mut stub = json!({
                 COMPACTED_RESULT_KEY: "stub",
@@ -420,7 +638,77 @@ pub(crate) fn build_stub(
             if let Some(f) = finding.filter(|f| !f.trim().is_empty()) {
                 stub["findings"] = Value::String(f.to_string());
             }
-            return fit_symbols(stub, &symbols, max_tokens);
+            return fit_stub_outline(stub, &symbols, max_tokens, original_tokens);
+        }
+        // An outline re-read note (tool dispatch) is already an outline:
+        // compacted, it stays one (refitted), never a head of its JSON.
+        if let Some(v) = parsed
+            .as_ref()
+            .filter(|v| v.get(OUTLINE_REREAD_KEY).is_some())
+        {
+            let symbols: Vec<(usize, String)> = v
+                .get("symbols")
+                .and_then(Value::as_array)
+                .map(|s| s.iter().filter_map(parse_outline_line).collect())
+                .unwrap_or_default();
+            let omitted = v
+                .get("symbols_omitted")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize;
+            let path = arg_path(&args_v).unwrap_or_else(|| "?".to_string());
+            let stub = json!({
+                COMPACTED_RESULT_KEY: "stub",
+                "tool": "file_read",
+                "path": path,
+                "line_range": Value::Null,
+                "total_lines": v.get("total_lines").cloned().unwrap_or(Value::Null),
+                // No hash: this stub never carried content, and the ledger
+                // must not record it as a whole-file read (resume path).
+                "outline_only": true,
+                "content_in_context": false,
+                "note": format!(
+                    "Outline of `{path}` (no file content). `symbols` = definitions with line \
+                     numbers, not code. Read only the line_range you need."
+                ),
+            });
+            let mut out = fit_stub_outline(stub, &symbols, max_tokens, original_tokens);
+            if omitted > 0 {
+                if let Ok(mut v) = serde_json::from_str::<Value>(&out) {
+                    let now = v
+                        .get("symbols_omitted")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    v["symbols_omitted"] = json!(now + omitted as u64);
+                    out = v.to_string();
+                }
+            }
+            return out;
+        }
+    }
+
+    // A one-file search keeps its hits (line and kind-and-name text) the
+    // way a read keeps its outline — c24 (val091) re-ran the same `pub fn`
+    // grep of compression.rs ~20 times after its result became a JSON head.
+    if name == "grep_search" {
+        if let Some((file, hits)) = parsed.as_ref().and_then(single_file_grep_hits) {
+            if !hits.is_empty() {
+                let args_short: String = args.chars().take(200).collect();
+                let stub = json!({
+                    COMPACTED_RESULT_KEY: "stub",
+                    "tool": name,
+                    "args": args_short,
+                    "file": file,
+                    "total_matches": parsed
+                        .as_ref()
+                        .and_then(|v| v.get("total_matches").cloned())
+                        .unwrap_or(Value::Null),
+                    "content_in_context": false,
+                    "note": "The full result is NO LONGER in your context. `symbols` = its \
+                             matches as line: text (definitions by kind and name). Re-read \
+                             the line_range you need before quoting.",
+                });
+                return fit_stub_outline(stub, &hits, max_tokens, original_tokens);
+            }
         }
     }
 
@@ -442,29 +730,91 @@ pub(crate) fn build_stub(
     stub.to_string()
 }
 
-/// Add as many symbols as fit `max_tokens` (measured), stating how many were
-/// left out.
-fn fit_symbols(mut stub: Value, symbols: &[(usize, String)], max_tokens: usize) -> String {
-    let rendered: Vec<String> = symbols
-        .iter()
-        .take(MAX_DIGEST_SYMBOLS)
-        .map(|(n, s)| format!("{n}: {s}"))
-        .collect();
-    let mut keep = rendered.len();
-    loop {
-        stub["symbols"] = json!(rendered[..keep]);
-        let omitted = symbols.len() - keep;
-        if omitted > 0 {
-            stub["symbols_omitted"] = json!(omitted);
-        } else if let Some(obj) = stub.as_object_mut() {
-            obj.remove("symbols_omitted");
+/// The items of a `file_read` result: those in its `content` (numbered
+/// from `first_line`) merged by line with the `symbols` index the result
+/// already carries (a chunk indexes the lines it does not show).
+pub(crate) fn merged_symbols(
+    parsed: Option<&Value>,
+    content: &str,
+    first_line: usize,
+) -> Vec<(usize, String)> {
+    let mut symbols = symbol_digest(content, first_line);
+    if let Some(index) = parsed
+        .and_then(|v| v.get("symbols"))
+        .and_then(Value::as_array)
+    {
+        for (n, s) in index.iter().filter_map(parse_outline_line) {
+            if !symbols.iter().any(|(m, _)| *m == n) {
+                symbols.push((n, s));
+            }
         }
-        let text = stub.to_string();
-        if keep == 0 || estimate_content_tokens(&text) <= max_tokens {
-            return text;
-        }
-        keep = keep.saturating_sub((keep / 4).max(1));
+        symbols.sort_by_key(|(n, _)| *n);
     }
+    symbols
+}
+
+/// The matches of a successful `grep_search` result as `(line, text)` when
+/// they all lie in ONE file (a search of a file: the common "list the
+/// `pub fn`s" call), text in kind-and-name form for an item line and
+/// trimmed otherwise. `None` for anything else (no matches array, several
+/// files) — the caller keeps what it had.
+pub(crate) fn single_file_grep_hits(payload: &Value) -> Option<(String, Vec<(usize, String)>)> {
+    let matches = payload.get("matches")?.as_array()?;
+    let mut file: Option<&str> = None;
+    let mut hits = Vec::with_capacity(matches.len());
+    for m in matches {
+        let f = m.get("file")?.as_str()?;
+        if file.is_some_and(|prev| prev != f) {
+            return None;
+        }
+        file = Some(f);
+        let line = m.get("line")?.as_u64()? as usize;
+        let text = m.get("content")?.as_str()?.trim();
+        let text = match symbol_text(text) {
+            Some(sym) => sym,
+            None => {
+                let mut t: String = text.chars().take(MAX_COMPACT_SYMBOL_CHARS).collect();
+                if text.chars().count() > MAX_COMPACT_SYMBOL_CHARS {
+                    t.push('…');
+                }
+                t
+            }
+        };
+        hits.push((line, text));
+    }
+    Some((file?.to_string(), hits))
+}
+
+/// One `"N: item"` outline line back as `(N, item)`.
+pub(crate) fn parse_outline_line(line: &Value) -> Option<(usize, String)> {
+    let (n, text) = line.as_str()?.split_once(": ")?;
+    Some((n.trim().parse().ok()?, text.to_string()))
+}
+
+/// Put the file's outline into a `file_read` stub (measured): full
+/// signatures when they fit `max_tokens`; else the COMPLETE outline in
+/// kind-and-name form when that fits [`OUTLINE_STUB_MAX_TOKENS`] (and the
+/// stub still saves tokens over the `original_tokens` it replaces); else
+/// the first items that fit `max_tokens`, the rest counted as omitted.
+fn fit_stub_outline(
+    mut stub: Value,
+    symbols: &[(usize, String)],
+    max_tokens: usize,
+    original_tokens: usize,
+) -> String {
+    let complete = max_tokens
+        .max(OUTLINE_STUB_MAX_TOKENS.min(original_tokens.saturating_sub(MIN_SAVING_TOKENS)));
+    let budgets = OutlineBudgets {
+        full: max_tokens,
+        complete,
+        partial: max_tokens,
+    };
+    let outline = fit_outline(symbols, budgets, &mut |o| {
+        o.write_into(&mut stub);
+        estimate_content_tokens(&stub.to_string())
+    });
+    outline.write_into(&mut stub);
+    stub.to_string()
 }
 
 /// The largest `k` in `0..=upper` for which `fits(k)` holds, for a
@@ -658,6 +1008,16 @@ fn truncate_result_with(
                 .as_ref()
                 .and_then(|v| v.get("total_lines"))
                 .and_then(|t| t.as_u64());
+            // The read's outline (its items with line numbers, including
+            // those in the cut lines — and those a chunk indexed), fitted
+            // once to the share of the budget a chunk's index gets, so the
+            // search below stays monotone in `keep`.
+            let symbols = merged_symbols(parsed.as_ref(), content, first_line);
+            let outline = fit_outline(
+                &symbols,
+                OutlineBudgets::uniform(max_tokens / CHUNK_SYMBOLS_SHARE_DIV),
+                &mut |o| estimate_content_tokens(&json!(o.lines).to_string()),
+            );
             let build = |keep: usize| -> String {
                 let shown_end = first_line + keep.saturating_sub(1);
                 let note = format!(
@@ -668,15 +1028,18 @@ fn truncate_result_with(
                     shown_end + 1,
                     shown_end + 1
                 );
-                json!({
+                let mut v = json!({
                     COMPACTED_RESULT_KEY: "truncated",
                     "path": path,
                     "total_lines": total_lines,
                     "shown_line_range": [first_line, shown_end],
                     "note": note,
                     "content": lines[..keep].join("\n"),
-                })
-                .to_string()
+                });
+                if !outline.lines.is_empty() {
+                    outline.write_into(&mut v);
+                }
+                v.to_string()
             };
             // Largest whole-line prefix that fits (measured), bounded above
             // by a proportional guess so the search measures short strings.
@@ -771,7 +1134,7 @@ pub(crate) fn chunk_whole_read(payload: &str, room: usize) -> Option<String> {
         .and_then(Value::as_u64)
         .map_or(lines.len(), |t| t as usize);
     let all_symbols = symbol_digest(&raw, 1);
-    let build = |keep: usize, symbols: &[(usize, String)], symbols_kept: usize| -> Value {
+    let build = |keep: usize, outline: &Outline| -> Value {
         let content = crate::tools::line_numbers::number_lines(&lines[..keep].concat(), 1);
         let mut v = json!({
             "content": content,
@@ -790,33 +1153,16 @@ pub(crate) fn chunk_whole_read(payload: &str, room: usize) -> Option<String> {
                 keep + 1
             ),
         });
-        let rendered: Vec<String> = symbols
-            .iter()
-            .take(symbols_kept)
-            .map(|(n, s)| format!("{n}: {s}"))
-            .collect();
-        v["symbols"] = json!(rendered);
-        if symbols.len() > symbols_kept {
-            v["symbols_omitted"] = json!(symbols.len() - symbols_kept);
-        }
+        outline.write_into(&mut v);
         v
     };
-    // How many of `symbols` fit their share of the room (measured).
+    // The outline of `symbols` that fits its share of the room (measured):
+    // full signatures, else every item by kind and name, else a prefix.
     let symbol_cap = room / CHUNK_SYMBOLS_SHARE_DIV;
-    let fit_symbols = |symbols: &[(usize, String)]| -> usize {
-        let mut kept = symbols.len().min(MAX_DIGEST_SYMBOLS);
-        while kept > 0 {
-            let rendered: Vec<String> = symbols
-                .iter()
-                .take(kept)
-                .map(|(n, s)| format!("{n}: {s}"))
-                .collect();
-            if estimate_content_tokens(&json!(rendered).to_string()) <= symbol_cap {
-                break;
-            }
-            kept = kept.saturating_sub((kept / 4).max(1));
-        }
-        kept
+    let fit_symbols = |symbols: &[(usize, String)]| -> Outline {
+        fit_outline(symbols, OutlineBudgets::uniform(symbol_cap), &mut |o| {
+            estimate_content_tokens(&json!(o.lines).to_string())
+        })
     };
     // The largest whole-line prefix that fits next to a full-share index
     // (binary search, measured) ...
@@ -829,7 +1175,7 @@ pub(crate) fn chunk_whole_read(payload: &str, room: usize) -> Option<String> {
         lines.len() - 1,
         room,
         estimate_content_tokens(&raw).max(1) as f64 / raw.len().max(1) as f64,
-        &mut |mid| measure_candidate(&build(mid, &all_symbols, reserve).to_string()),
+        &mut |mid| measure_candidate(&build(mid, &reserve).to_string()),
     );
     if lo == 0 {
         return None;
@@ -843,7 +1189,7 @@ pub(crate) fn chunk_whole_read(payload: &str, room: usize) -> Option<String> {
             .filter(|(n, _)| *n > keep)
             .cloned()
             .collect();
-        let out = build(keep, &rest, fit_symbols(&rest)).to_string();
+        let out = build(keep, &fit_symbols(&rest)).to_string();
         let tokens = estimate_content_tokens(&out);
         if tokens <= room {
             return (tokens < estimate_content_tokens(payload)).then_some(out);
@@ -1109,10 +1455,20 @@ pub(crate) fn slim_stub(name: &str, args: &str, superseded: bool) -> String {
         );
     } else {
         stub["slim"] = json!(true);
-        stub["note"] = json!(
-            "NO LONGER in your context; its symbol index and findings are in the work ledger. \
-             Re-read only the line_range you need before quoting."
-        );
+        // Only what the work ledger really keeps: a read's symbol index and
+        // findings, a one-file search's hits — nothing of any other tool's
+        // output (val091 c24: slim shell stubs claimed a "symbol index").
+        stub["note"] = json!(match name {
+            "file_read" => {
+                "NO LONGER in your context; its symbol index and findings are in the work \
+                 ledger. Re-read only the line_range you need before quoting."
+            }
+            "grep_search" => {
+                "NO LONGER in your context; the work ledger lists this search, with its hits \
+                 when they were all in one file. Re-run it if you need the full output."
+            }
+            _ => "NO LONGER in your context. Re-run the tool if you need its output.",
+        });
     }
     stub.to_string()
 }

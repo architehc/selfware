@@ -512,6 +512,20 @@ struct DeliveredReadResult {
     mutation_sequence: usize,
 }
 
+/// The last whole-file `file_read` of one path that delivered content (the
+/// whole file or its first chunk): used to answer a later whole-file read of
+/// the unchanged file with its outline when the content does not fit (see
+/// `Agent::outline_reread_note`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WholeReadDelivery {
+    /// Hash of the file text the read returned.
+    content_hash: u64,
+    /// Work-ledger turn in which it was delivered.
+    turn: usize,
+    /// `Agent::mutation_sequence` when it was delivered.
+    mutation_sequence: usize,
+}
+
 /// Re-reads of one path forgiven per guard after its content left the
 /// context. Matches the redundant-reread guard's own allowance of 3.
 pub(super) const EVICTED_REREAD_EXEMPTION_CAP: u32 = 3;
@@ -1047,6 +1061,9 @@ pub struct Agent {
     /// Last full `file_read` result per exact path + line range (key from
     /// `Agent::file_read_range_key`), for the unchanged re-read note.
     delivered_read_results: std::collections::HashMap<String, DeliveredReadResult>,
+    /// Last whole-file `file_read` that delivered content, per path key, for
+    /// the outline re-read note.
+    whole_read_deliveries: std::collections::HashMap<String, WholeReadDelivery>,
     /// `mutation_sequence` of the last successful mutation that named each
     /// path (ledger-normalized), for the unchanged re-read note: an edit of
     /// ANOTHER file does not make this file's earlier result a different
@@ -1940,6 +1957,7 @@ To call a tool, use this EXACT XML structure:
             stagnation_warned: std::sync::atomic::AtomicBool::new(false),
             read_result_fingerprints: std::collections::HashMap::new(),
             delivered_read_results: std::collections::HashMap::new(),
+            whole_read_deliveries: std::collections::HashMap::new(),
             path_mutation_sequences: std::collections::HashMap::new(),
             last_opaque_mutation_sequence: 0,
             evicted_reread_budget: std::collections::HashMap::new(),
@@ -3513,6 +3531,7 @@ To call a tool, use this EXACT XML structure:
         // Delivered-read records carry the mutation sequence they were
         // delivered at; a restarted sequence would let a stale record match.
         self.delivered_read_results.clear();
+        self.whole_read_deliveries.clear();
         self.path_mutation_sequences.clear();
         self.last_opaque_mutation_sequence = 0;
         self.last_successful_verification_mutation_sequence = 0;

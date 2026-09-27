@@ -450,7 +450,8 @@ fn the_ledger_records_a_digest_before_compaction_and_never_counts_a_stub_as_a_re
     assert!(
         a.symbols
             .iter()
-            .any(|(line, s)| *line == 4 && s == "pub fn f0_0(input: &str) -> usize"),
+            // The fixture documents every item (`/// Doc for ...`).
+            .any(|(line, s)| *line == 4 && s == "pub fn f0_0(input: &str) -> usize [doc]"),
         "digest recorded from the full content: {:?}",
         &a.symbols[..3.min(a.symbols.len())]
     );
@@ -523,10 +524,13 @@ fn replay_rendered_request_tells_the_model_which_content_is_gone() {
     assert!(line_of("src/agent/task_policy.rs").contains("[content NOT in context]"));
     assert!(line_of("src/agent/loop_control.rs").contains("[content in context]"));
     assert!(line_of("src/agent/progress.rs").contains("[content in context]"));
-    assert!(
-        tail.contains("symbols (index, not code): 4: pub fn f0_0(input: &str) -> usize"),
-        "a gone file carries its digest with line numbers:\n{tail}"
-    );
+    // Every item by kind and name (the full signatures of all of them do
+    // not fit the per-file digest; completeness wins over signatures).
+    let digest = tail
+        .lines()
+        .find(|l| l.contains("symbols (index, not code; [doc] = documented): 4: pub fn f0_0"))
+        .unwrap_or_else(|| panic!("a gone file carries its digest with line numbers:\n{tail}"));
+    assert!(digest.contains(": pub fn f0_1 [doc];"), "{digest}");
     assert!(tail.contains("re-read just the line range you need"));
     assert!(
         tail.contains("Your context cannot hold every file at once"),
@@ -1338,4 +1342,407 @@ fn a_resumed_ledger_keeps_the_coverage_of_slimmed_and_skips_superseded_stubs() {
     let mut rebuilt = resume(&messages);
     rebuilt.observe(&later, None);
     assert!(entry(&rebuilt, "src/a.rs").whole_file);
+}
+
+// ---------------------------------------------------------------------------
+// Outlines (c24, val091: the stub of src/agent/context.rs kept 5 of its 17
+// items and the model re-read the whole file 19 times)
+// ---------------------------------------------------------------------------
+
+/// The val091 c24 shape of src/agent/context.rs: 17 items (a const, a
+/// struct, an impl, 10 `pub fn`s, private fns) in ~390 lines of ~5k tokens,
+/// most of it bodies.
+fn c24_context_source() -> String {
+    let body = |i: usize| -> String {
+        (0..24)
+            .map(|j| {
+                format!(
+                    "        let step_{j} = messages.len().saturating_mul({j}) + limit + {i}; \
+                     // budget step {j}\n"
+                )
+            })
+            .collect()
+    };
+    let mut s = String::from("// c24 fixture header\nuse std::collections::HashMap;\n\n");
+    s.push_str("const MESSAGE_OVERHEAD_TOKENS: usize = 4;\n\n");
+    s.push_str("fn safe_tail_start(messages: &[String]) -> usize {\n    messages.len()\n}\n\n");
+    s.push_str("pub struct ContextCompressor {\n    budget: usize,\n}\n\n");
+    s.push_str("impl ContextCompressor {\n");
+    for i in 0..10 {
+        if i % 3 == 0 {
+            s.push_str(&format!("    /// Documented method {i}.\n"));
+        }
+        s.push_str(&format!(
+            "    pub fn method_{i}(&self, messages: &[String], limit: usize) -> usize {{\n"
+        ));
+        s.push_str(&body(i));
+        s.push_str("        0\n    }\n\n");
+    }
+    s.push_str("}\n\n");
+    for i in 0..3 {
+        s.push_str(&format!(
+            "fn helper_{i}(messages: &[String]) -> usize {{\n    messages.len() + {i}\n}}\n\n"
+        ));
+    }
+    s
+}
+
+/// `(line, text)` of every `pub fn` in `source`.
+fn pub_fn_lines(source: &str) -> Vec<(usize, String)> {
+    source
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| l.trim_start().starts_with("pub fn "))
+        .map(|(i, l)| {
+            let name = l.trim_start()["pub fn ".len()..]
+                .split('(')
+                .next()
+                .unwrap()
+                .to_string();
+            (i + 1, name)
+        })
+        .collect()
+}
+
+fn outline_lines(v: &serde_json::Value) -> Vec<String> {
+    v["symbols"]
+        .as_array()
+        .map(|a| a.iter().map(|s| s.as_str().unwrap().to_string()).collect())
+        .unwrap_or_default()
+}
+
+/// Every `pub fn` of `source` is in the outline, with its own line number.
+fn assert_outline_has_every_pub_fn(outline: &[String], source: &str) {
+    let fns = pub_fn_lines(source);
+    assert!(!fns.is_empty());
+    for (line, name) in fns {
+        assert!(
+            outline
+                .iter()
+                .any(|o| o.starts_with(&format!("{line}: ")) && o.contains(&name)),
+            "`{name}` (line {line}) missing from the outline: {outline:?}"
+        );
+    }
+}
+
+#[test]
+fn compact_symbol_keeps_kind_and_name_only() {
+    let cases = [
+        (
+            "pub async fn load<T: Clone>(path: &Path) -> Result<T>",
+            "pub async fn load",
+        ),
+        (
+            "pub(crate) const fn limit() -> usize",
+            "pub(crate) const fn limit",
+        ),
+        ("pub const MAX_TOKENS: usize = 4;", "pub const MAX_TOKENS"),
+        ("static mut COUNTER: u32 = 0;", "static mut COUNTER"),
+        ("pub struct Foo<T> where T: Clone", "pub struct Foo"),
+        ("macro_rules! outline", "macro_rules! outline"),
+        ("def run(self, x):", "def run"),
+        (
+            "export const handler = async (req) =>",
+            "export const handler",
+        ),
+        (
+            "impl<T: Clone> Trait for Foo<T> where T: Send",
+            "impl<T: Clone> Trait for Foo<T>",
+        ),
+        ("pub fn r#type(&self) -> &str", "pub fn r#type"),
+    ];
+    for (full, compact) in cases {
+        assert_eq!(compact_symbol(full), compact, "{full}");
+    }
+}
+
+#[test]
+fn a_c24_stub_keeps_the_complete_outline_at_the_24k_stub_budget() {
+    let source = c24_context_source();
+    let payload = read_payload(&source);
+    let budget = stub_token_budget(11_008);
+    assert_eq!(budget, 200, "the c24 stub budget");
+    let all = symbol_digest(&source, 1);
+    assert_eq!(all.len(), 17, "the val091 context.rs item count");
+    let stub = build_stub(
+        "file_read",
+        r#"{"path":"src/agent/context.rs"}"#,
+        &payload,
+        budget,
+        Some("the compressor's budget helpers"),
+    );
+    let v: serde_json::Value = serde_json::from_str(&stub).unwrap();
+    let outline = outline_lines(&v);
+    assert_eq!(outline.len(), all.len(), "every item: {outline:?}");
+    assert!(v.get("symbols_omitted").is_none(), "{v}");
+    assert_outline_has_every_pub_fn(&outline, &source);
+    assert!(outline
+        .iter()
+        .any(|o| o.starts_with("4: const MESSAGE_OVERHEAD_TOKENS")));
+    assert!(outline.iter().any(|o| o.contains("impl ContextCompressor")));
+    // Measured: bounded by the ceiling, far below the content it replaces.
+    let tokens = estimate_content_tokens(&stub);
+    assert!(tokens <= OUTLINE_STUB_MAX_TOKENS, "{tokens}");
+    assert!(tokens * 5 < estimate_content_tokens(&payload), "{tokens}");
+    assert_eq!(v["content_in_context"], false);
+    eprintln!(
+        "c24 context.rs stub: {tokens} tokens for {} items (content {} tokens)",
+        outline.len(),
+        estimate_content_tokens(&payload)
+    );
+}
+
+#[test]
+fn an_outline_that_fits_the_ordinary_budget_keeps_full_signatures() {
+    let source = "pub fn alpha(x: usize) -> usize {\n    x\n}\n\nstruct Beta;\n";
+    let stub = build_stub(
+        "file_read",
+        r#"{"path":"src/a.rs"}"#,
+        &read_payload(source),
+        400,
+        None,
+    );
+    let v: serde_json::Value = serde_json::from_str(&stub).unwrap();
+    assert_eq!(
+        outline_lines(&v),
+        vec!["1: pub fn alpha(x: usize) -> usize", "5: struct Beta;"]
+    );
+    assert!(v.get("symbols_form").is_none(), "signatures kept: {v}");
+}
+
+#[test]
+fn a_stubbed_chunk_keeps_its_index_of_the_lines_it_did_not_show() {
+    let source = c24_context_source();
+    let payload = read_payload(&source);
+    let chunk = chunk_whole_read(&payload, 2_000).expect("chunked");
+    let cv: serde_json::Value = serde_json::from_str(&chunk).unwrap();
+    let keep = cv["shown_line_range"][1].as_u64().unwrap() as usize;
+    assert!(keep < source.lines().count());
+    // The chunk's own index is complete.
+    let chunk_outline = outline_lines(&cv);
+    assert!(cv.get("symbols_omitted").is_none(), "{cv}");
+    assert!(chunk_outline
+        .iter()
+        .all(|o| o.split(':').next().unwrap().parse::<usize>().unwrap() > keep));
+    // Stubbed, the chunk keeps the items of the lines it showed AND of the
+    // rest (before: only the shown lines' items survived).
+    let stub = build_stub(
+        "file_read",
+        r#"{"path":"src/agent/context.rs"}"#,
+        &chunk,
+        stub_token_budget(11_008),
+        None,
+    );
+    let v: serde_json::Value = serde_json::from_str(&stub).unwrap();
+    let outline = outline_lines(&v);
+    assert_outline_has_every_pub_fn(&outline, &source);
+    assert_eq!(outline.len(), 17, "{outline:?}");
+}
+
+#[test]
+fn a_truncated_latest_read_carries_the_outline_of_the_lines_it_cut() {
+    let source = c24_context_source();
+    let payload = read_payload(&source);
+    let cut = truncate_result(
+        "file_read",
+        r#"{"path":"src/agent/context.rs"}"#,
+        &payload,
+        1_500,
+    );
+    assert!(estimate_content_tokens(&cut) <= 1_500);
+    let v: serde_json::Value = serde_json::from_str(&cut).unwrap();
+    let shown_end = v["shown_line_range"][1].as_u64().unwrap() as usize;
+    assert!(shown_end < source.lines().count());
+    let outline = outline_lines(&v);
+    assert_outline_has_every_pub_fn(&outline, &source);
+    assert!(
+        pub_fn_lines(&source).iter().any(|(l, _)| *l > shown_end),
+        "precondition: pub fns in the cut lines"
+    );
+}
+
+#[test]
+fn an_outline_too_large_for_the_ceiling_keeps_a_measured_prefix_and_says_so() {
+    let payload = read_payload(&rust_source("huge", 40_000));
+    let stub = build_stub(
+        "file_read",
+        r#"{"path":"src/huge.rs"}"#,
+        &payload,
+        300,
+        None,
+    );
+    assert!(estimate_content_tokens(&stub) <= 300);
+    let v: serde_json::Value = serde_json::from_str(&stub).unwrap();
+    assert!(v["symbols_omitted"].as_u64().unwrap() > 0);
+    assert!(!outline_lines(&v).is_empty());
+}
+
+#[test]
+fn an_outline_reread_note_compacts_to_an_outline_stub_not_a_json_head() {
+    let source = c24_context_source();
+    let symbols = symbol_digest(&source, 1);
+    let lines: Vec<String> = symbols.iter().map(|(n, s)| format!("{n}: {s}")).collect();
+    let note = serde_json::json!({
+        "path": "src/agent/context.rs",
+        OUTLINE_REREAD_KEY: 3,
+        "content_returned": false,
+        "total_lines": source.lines().count(),
+        "note": "x".repeat(2_000),
+        "symbols": lines,
+    })
+    .to_string();
+    let stub = build_stub(
+        "file_read",
+        r#"{"path":"src/agent/context.rs"}"#,
+        &note,
+        200,
+        None,
+    );
+    let v: serde_json::Value = serde_json::from_str(&stub).unwrap();
+    assert_eq!(v[COMPACTED_RESULT_KEY], "stub");
+    assert_eq!(v["outline_only"], true);
+    assert!(v.get("content_hash").is_none(), "no content, no hash: {v}");
+    assert_outline_has_every_pub_fn(&outline_lines(&v), &source);
+    // The ledger's resume path does not take it for a whole-file read.
+    let messages = vec![
+        system_prompt(),
+        Message::user(TASK),
+        native_call(
+            "o1",
+            "file_read",
+            serde_json::json!({"path": "src/agent/context.rs"}),
+        ),
+        Message::tool(stub, "o1"),
+    ];
+    let mut ledger = WorkLedger::new();
+    ledger.observe(&messages, None);
+    assert!(!ledger
+        .files()
+        .iter()
+        .any(|f| f.path.ends_with("context.rs") && f.whole_file));
+}
+
+/// A grep_search result of `n` `pub fn` hits in one file (the val091 c24
+/// shape: 33 hits in compression.rs).
+fn grep_payload(file: &str, n: usize) -> String {
+    let matches: Vec<serde_json::Value> = (0..n)
+        .map(|i| {
+            serde_json::json!({
+                "file": file,
+                "line": 50 + i * 20,
+                "column": 5,
+                "content": format!(
+                    "    pub fn f{i}(&self, messages: &[Message], budget: usize) -> Vec<Message> {{"
+                ),
+                "context_before": [],
+                "context_after": [],
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "count": n, "matches": matches, "total_matches": n, "truncated": false
+    })
+    .to_string()
+}
+
+#[test]
+fn a_stubbed_one_file_grep_keeps_every_hit_with_its_line() {
+    let payload = grep_payload("src/agent/compression.rs", 33);
+    let args = r#"{"pattern":"^\\s*pub (async )?fn","path":"src/agent/compression.rs"}"#;
+    let stub = build_stub(
+        "grep_search",
+        args,
+        &payload,
+        stub_token_budget(11_008),
+        None,
+    );
+    let v: serde_json::Value = serde_json::from_str(&stub).unwrap();
+    assert_eq!(v[COMPACTED_RESULT_KEY], "stub");
+    assert_eq!(v["file"], "src/agent/compression.rs");
+    let hits = outline_lines(&v);
+    assert_eq!(hits.len(), 33, "{v}");
+    assert!(v.get("symbols_omitted").is_none());
+    for i in 0..33 {
+        assert!(hits.contains(&format!("{}: pub fn f{i}", 50 + i * 20)));
+    }
+    assert!(estimate_content_tokens(&stub) < estimate_content_tokens(&payload));
+    assert!(estimate_content_tokens(&stub) <= OUTLINE_STUB_MAX_TOKENS);
+}
+
+#[test]
+fn slim_stub_notes_claim_only_what_the_ledger_keeps() {
+    let read = slim_stub("file_read", r#"{"path":"src/a.rs"}"#, false);
+    assert!(read.contains("symbol index"), "{read}");
+    let shell = slim_stub("shell_exec", r#"{"command":"grep -n fn src/a.rs"}"#, false);
+    assert!(
+        !shell.contains("symbol index") && !shell.contains("ledger"),
+        "{shell}"
+    );
+    assert!(shell.contains("Re-run the tool"), "{shell}");
+    let grep = slim_stub(
+        "grep_search",
+        r#"{"pattern":"fn","path":"src/a.rs"}"#,
+        false,
+    );
+    assert!(!grep.contains("symbol index"), "{grep}");
+}
+
+#[test]
+fn the_ledger_keeps_a_one_file_searchs_hits_after_its_result_is_gone() {
+    let args = serde_json::json!({"pattern": "^\\s*pub fn", "path": "src/agent/compression.rs"});
+    let messages = vec![
+        system_prompt(),
+        Message::user(TASK),
+        native_call("g1", "grep_search", args),
+        Message::tool(grep_payload("src/agent/compression.rs", 33), "g1"),
+    ];
+    let mut ledger = WorkLedger::new();
+    ledger.begin_turn(Some(TASK));
+    ledger.observe(&messages, None);
+    let search = ledger.searches().first().expect("recorded").clone();
+    assert_eq!(search.hits.len(), 33);
+    let rendered = ledger.render(2_000).unwrap();
+    let hits_line = rendered
+        .lines()
+        .find(|l| l.contains("hits (line: text):"))
+        .unwrap_or_else(|| panic!("{rendered}"));
+    assert!(hits_line.contains("50: pub fn f0;"), "{hits_line}");
+    assert!(
+        hits_line.contains(&format!("{}: pub fn f32", 50 + 32 * 20)),
+        "all 33 hits: {hits_line}"
+    );
+    assert!(!hits_line.contains("more)"), "{hits_line}");
+    // Several files: no hits recorded (the count only, as before).
+    let mut two = serde_json::from_str::<serde_json::Value>(&grep_payload("src/a.rs", 2)).unwrap();
+    two["matches"][1]["file"] = serde_json::json!("src/b.rs");
+    assert!(single_file_grep_hits(&two).is_none());
+}
+
+#[test]
+fn the_outline_marks_items_with_a_doc_comment_directly_above() {
+    let source = c24_context_source();
+    let digest = symbol_digest(&source, 1);
+    let marked: Vec<&str> = digest
+        .iter()
+        .filter(|(_, s)| s.ends_with(DOC_MARK))
+        .map(|(_, s)| s.as_str())
+        .collect();
+    // method_0, _3, _6, _9 carry `/// Documented method N.`; nothing else.
+    assert_eq!(marked.len(), 4, "{digest:?}");
+    for i in [0, 3, 6, 9] {
+        assert!(
+            marked.iter().any(|s| s.contains(&format!("method_{i}("))),
+            "{marked:?}"
+        );
+    }
+    // Attributes between the doc and the item keep it; a blank line or
+    // code resets it; the compact form keeps the mark.
+    let d = symbol_digest(
+        "/// A.\n#[inline]\npub fn a() {}\n/// B.\n\npub fn b() {}\nlet x = 1;\npub fn c() {}\n",
+        1,
+    );
+    assert_eq!(d[0], (3, format!("pub fn a() {{}}{DOC_MARK}")));
+    assert_eq!(d[1], (6, "pub fn b() {}".to_string()));
+    assert_eq!(d[2], (8, "pub fn c() {}".to_string()));
+    assert_eq!(compact_symbol(&d[0].1), format!("pub fn a{DOC_MARK}"));
 }

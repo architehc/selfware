@@ -8471,3 +8471,345 @@ fn non_tty_full_diff_is_bounded_with_a_note() {
     let short = bounded_lines(&lines[..3], 2_000);
     assert_eq!(short, lines[..3].to_vec());
 }
+
+// ---------------------------------------------------------------------------
+// c24 (val091, 24k window): compaction kept evicting src/agent/context.rs and
+// the model re-read it whole 19 times — each time the same first chunk —
+// until MAX_ITERATIONS with 0 edits. An unchanged whole re-read that does not
+// fit now gets the file's outline and a pointer to line ranges.
+// ---------------------------------------------------------------------------
+
+/// The val091 c24 shape of src/agent/context.rs: 17 items, 10 `pub fn`s,
+/// ~5k tokens of mostly bodies. Line 1 is a marker every content delivery
+/// (whole or first chunk) shows and no outline does.
+fn c24_outline_fixture() -> String {
+    let mut s = String::from("// c24 fixture header\nuse std::collections::HashMap;\n\n");
+    s.push_str("const MESSAGE_OVERHEAD_TOKENS: usize = 4;\n\n");
+    s.push_str("fn safe_tail_start(messages: &[String]) -> usize {\n    messages.len()\n}\n\n");
+    s.push_str("pub struct ContextCompressor {\n    budget: usize,\n}\n\n");
+    s.push_str("impl ContextCompressor {\n");
+    for i in 0..10 {
+        if i % 3 == 0 {
+            s.push_str(&format!("    /// Documented method {i}.\n"));
+        }
+        s.push_str(&format!(
+            "    pub fn method_{i}(&self, messages: &[String], limit: usize) -> usize {{\n"
+        ));
+        for j in 0..24 {
+            s.push_str(&format!(
+                "        let step_{j} = messages.len().saturating_mul({j}) + limit + {i}; \
+                 // budget step {j}\n"
+            ));
+        }
+        s.push_str("        0\n    }\n\n");
+    }
+    s.push_str("}\n\n");
+    for i in 0..3 {
+        s.push_str(&format!(
+            "fn helper_{i}(messages: &[String]) -> usize {{\n    messages.len() + {i}\n}}\n\n"
+        ));
+    }
+    s
+}
+
+const C24_FIXTURE_MARKER: &str = "c24 fixture header";
+
+/// Every `pub fn` of `source` appears in `text` as `"LINE: ...name"`.
+fn assert_text_outlines_every_pub_fn(text: &str, source: &str) {
+    let mut n = 0;
+    for (i, line) in source.lines().enumerate() {
+        let Some(rest) = line.trim_start().strip_prefix("pub fn ") else {
+            continue;
+        };
+        let name = rest.split('(').next().unwrap();
+        let entry = format!("\"{}: pub fn {name}", i + 1);
+        assert!(text.contains(&entry), "{entry} missing: {text}");
+        n += 1;
+    }
+    assert_eq!(n, 10);
+}
+
+fn c24_read_result(source: &str) -> String {
+    serde_json::json!({
+        "path": "src/agent/context.rs",
+        "content": source,
+        "total_lines": source.lines().count()
+    })
+    .to_string()
+}
+
+async fn c24_outline_agent() -> Agent {
+    let mut agent = reread_agent().await;
+    agent.max_context_tokens = 11_008;
+    agent.messages[0] = crate::api::types::Message::system(
+        "You are selfware, a careful coding agent. Follow the tool protocol.\n".repeat(380),
+    );
+    agent
+}
+
+#[tokio::test]
+async fn c24_an_unchanged_whole_reread_that_does_not_fit_gets_the_outline() {
+    let mut agent = c24_outline_agent().await;
+    let source = c24_outline_fixture();
+    let result = c24_read_result(&source);
+    let args = r#"{"path":"src/agent/context.rs"}"#;
+
+    // First whole read: content (its first chunk).
+    agent.messages.push(native_read_call("r1", args));
+    agent
+        .push_tool_result_message(true, "r1", "file_read", args, true, &result)
+        .await;
+    let first = last_text(&agent);
+    assert!(first.contains(C24_FIXTURE_MARKER), "{first}");
+    assert!(first.contains("whole_file_chunked"), "{first}");
+
+    // Unchanged whole re-read: the outline, and it says no content came back.
+    agent.messages.push(native_read_call("r2", args));
+    agent
+        .push_tool_result_message(true, "r2", "file_read", args, true, &result)
+        .await;
+    let text = last_text(&agent);
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert!(
+        v.get(super::super::result_compaction::OUTLINE_REREAD_KEY)
+            .is_some(),
+        "{v}"
+    );
+    assert_eq!(v["content_returned"], false);
+    assert!(v.get("content").is_none(), "no content field: {v}");
+    assert!(!text.contains(C24_FIXTURE_MARKER));
+    assert!(
+        v["note"].as_str().unwrap().contains("NO file content"),
+        "{v}"
+    );
+    assert!(v["note"].as_str().unwrap().contains("line_range"), "{v}");
+    assert_eq!(v["total_lines"], source.lines().count());
+    assert!(v.get("symbols_omitted").is_none(), "complete: {v}");
+    assert_text_outlines_every_pub_fn(&text, &source);
+    let history = crate::token_count::estimate_messages_tokens(&agent.messages);
+    assert!(history <= agent.max_context_tokens, "{history}");
+
+    // The ledger does not take the note for a (partial) read.
+    agent.compressor.observe_work(&agent.messages);
+    let ledger = agent.compressor.work_ledger();
+    let entry = ledger
+        .files()
+        .iter()
+        .find(|f| f.path.ends_with("src/agent/context.rs"))
+        .expect("recorded");
+    assert!(!entry.partial, "an outline is not a truncated read");
+
+    // A ranged read is never answered with the outline.
+    let ranged = r#"{"path":"src/agent/context.rs","line_range":[14,40]}"#;
+    let slice: String = source
+        .lines()
+        .skip(13)
+        .take(27)
+        .map(|l| format!("{l}\n"))
+        .collect();
+    agent.messages.push(native_read_call("r3", ranged));
+    agent
+        .push_tool_result_message(
+            true,
+            "r3",
+            "file_read",
+            ranged,
+            true,
+            &serde_json::json!({"content": slice, "total_lines": source.lines().count()})
+                .to_string(),
+        )
+        .await;
+    assert!(last_text(&agent).contains("pub fn method_0"));
+
+    // A changed file (no recorded mutation, other bytes): content.
+    let changed = source.replace("const MESSAGE_OVERHEAD_TOKENS", "const MESSAGE_OVERHEAD");
+    agent.messages.push(native_read_call("r4", args));
+    agent
+        .push_tool_result_message(
+            true,
+            "r4",
+            "file_read",
+            args,
+            true,
+            &c24_read_result(&changed),
+        )
+        .await;
+    assert!(last_text(&agent).contains(C24_FIXTURE_MARKER));
+}
+
+#[tokio::test]
+async fn c24_after_an_edit_or_with_room_a_whole_reread_returns_content() {
+    let mut agent = c24_outline_agent().await;
+    let source = c24_outline_fixture();
+    let result = c24_read_result(&source);
+    let args = r#"{"path":"src/agent/context.rs"}"#;
+    for id in ["r1", "r2"] {
+        agent.messages.push(native_read_call(id, args));
+        agent
+            .push_tool_result_message(true, id, "file_read", args, true, &result)
+            .await;
+    }
+    assert!(!last_text(&agent).contains(C24_FIXTURE_MARKER), "outline");
+
+    // An edit of the file: re-reads are legitimate again (even when the
+    // bytes read back happen to match).
+    let edit = serde_json::json!({
+        "path": "src/agent/context.rs", "old_str": "x", "new_str": "x"
+    });
+    agent.note_tool_call_lifecycle("file_edit", &edit, &edit.to_string(), true, "{}");
+    agent.messages.push(native_read_call("r3", args));
+    agent
+        .push_tool_result_message(true, "r3", "file_read", args, true, &result)
+        .await;
+    assert!(
+        last_text(&agent).contains(C24_FIXTURE_MARKER),
+        "content after the edit"
+    );
+    // ... and the read after that one is the outline again.
+    agent.messages.push(native_read_call("r4", args));
+    agent
+        .push_tool_result_message(true, "r4", "file_read", args, true, &result)
+        .await;
+    assert!(!last_text(&agent).contains(C24_FIXTURE_MARKER));
+
+    // A window with room for the whole file: the whole file.
+    agent.max_context_tokens = 200_000;
+    agent.messages.push(native_read_call("r5", args));
+    agent
+        .push_tool_result_message(true, "r5", "file_read", args, true, &result)
+        .await;
+    let text = last_text(&agent);
+    assert!(
+        text.contains(C24_FIXTURE_MARKER) && text.contains("helper_2"),
+        "whole"
+    );
+}
+
+/// The c24 loop end to end against a mock endpoint: a 24k-window run whose
+/// model reads src/agent/context.rs whole four times between ranged reads,
+/// edits it, reads it whole again and finishes. Before: every whole read
+/// delivered the same first chunk. Now: only the first read and the read
+/// after the edit deliver content; the rest are the outline.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn c24_mock_run_repeated_whole_reads_deliver_content_at_most_twice() {
+    use crate::testing::mock_api::MockToolCall;
+    let _exec = crate::test_support::ExecGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    let _cwd = crate::test_support::CwdGuard::enter(dir.path());
+    std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
+    let source = c24_outline_fixture();
+    std::fs::write(dir.path().join("src/agent/context.rs"), &source).unwrap();
+
+    let read = |id: &str| {
+        vec![MockToolCall {
+            id: id.to_string(),
+            name: "file_read".to_string(),
+            arguments: r#"{"path":"src/agent/context.rs"}"#.to_string(),
+        }]
+    };
+    let ranged = |id: &str, a: usize, b: usize| {
+        vec![MockToolCall {
+            id: id.to_string(),
+            name: "file_read".to_string(),
+            arguments: serde_json::json!({
+                "path": "src/agent/context.rs", "line_range": [a, b]
+            })
+            .to_string(),
+        }]
+    };
+    // The live shape: whole reads between ranged reads of the same file.
+    let mut builder = MockLlmServer::builder();
+    let mut read_ids = Vec::new();
+    for i in 0..4 {
+        let id = format!("read_{i}");
+        builder = builder.with_tool_calls(read(&id));
+        read_ids.push(id);
+        if i < 3 {
+            builder =
+                builder.with_tool_calls(ranged(&format!("range_{i}"), 1 + 40 * i, 40 * (i + 1)));
+        }
+    }
+    builder = builder.with_tool_calls(vec![MockToolCall {
+        id: "edit_0".to_string(),
+        name: "file_edit".to_string(),
+        arguments: serde_json::json!({
+            "path": "src/agent/context.rs",
+            "old_str": "    pub fn method_1(",
+            "new_str": "    /// Method 1.\n    pub fn method_1(",
+        })
+        .to_string(),
+    }]);
+    builder = builder.with_tool_calls(read("read_after_edit"));
+    read_ids.push("read_after_edit".to_string());
+    let server = builder
+        .with_default_response(crate::testing::mock_api::MockResponse::Text(
+            "Documented 1 function (method_1).".to_string(),
+        ))
+        .build()
+        .await;
+    let mut config = crate::test_support::mock_agent_config_with_limits(
+        &format!("{}/v1", server.url()),
+        24_000,
+        8_192,
+        20,
+        30,
+    );
+    config.agent.native_function_calling = true;
+    let mut agent = Agent::new(config).await.unwrap();
+    let outcome = agent
+        .run_task("Add a /// doc comment above pub fn method_1 in src/agent/context.rs.")
+        .await;
+    // The scripted model never runs a verification, so the run may end on
+    // a completion gate — never on the read loop.
+    if let Err(e) = &outcome {
+        let msg = e.to_string();
+        assert!(!msg.contains("READ_LOOP_NO_EDIT"), "{msg}");
+    }
+    assert!(
+        std::fs::read_to_string(dir.path().join("src/agent/context.rs"))
+            .unwrap()
+            .contains("/// Method 1."),
+        "the edit landed"
+    );
+
+    // What each whole read delivered: the first request that carries its
+    // result shows it as the model saw it.
+    let requests = server.captured_request_bodies().await;
+    let first_seen = |id: &str| -> Option<String> {
+        requests.iter().find_map(|body| {
+            let v: serde_json::Value = serde_json::from_str(body).ok()?;
+            v["messages"].as_array()?.iter().find_map(|m| {
+                (m["role"] == "tool" && m["tool_call_id"] == id)
+                    .then(|| m["content"].as_str().unwrap_or_default().to_string())
+            })
+        })
+    };
+    let mut content_deliveries = 0;
+    let mut outlines = 0;
+    for id in &read_ids {
+        let Some(text) = first_seen(id) else {
+            continue;
+        };
+        if text.contains(C24_FIXTURE_MARKER) {
+            content_deliveries += 1;
+        } else if text.contains(super::super::result_compaction::OUTLINE_REREAD_KEY) {
+            outlines += 1;
+            assert_text_outlines_every_pub_fn(&text, &source);
+        }
+    }
+    eprintln!(
+        "c24 mock run: {content_deliveries} whole reads delivered content, {outlines} got \
+         the outline, of {} reads",
+        read_ids.len()
+    );
+    assert!(
+        content_deliveries <= 2,
+        "whole-file content deliveries: {content_deliveries}"
+    );
+    assert!(outlines >= 2, "outlines: {outlines}");
+    server.stop().await;
+}

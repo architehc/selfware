@@ -1222,7 +1222,8 @@ impl Agent {
                  content as your earlier read of the same path and range, and that earlier \
                  result is still in your context above — use it. The content is not repeated \
                  here. If the earlier result leaves your context, reading again returns the \
-                 full content.",
+                 content (a whole file too large for the room left: its outline — read \
+                 line ranges then).",
                 turn = record.turn
             ),
         });
@@ -1232,6 +1233,107 @@ impl Agent {
         if let Some(total) = total_lines {
             note["total_lines"] = total;
         }
+        Some(note.to_string())
+    }
+
+    /// Record a whole-file `file_read` that delivered content (all of it or
+    /// its first chunk), for [`Self::outline_reread_note`].
+    fn record_whole_read_delivery(&mut self, args_str: &str, raw_result: &str) {
+        let Some(path) = self.whole_file_read_path_key(args_str) else {
+            return;
+        };
+        let Some(content) = Self::file_read_result_content(raw_result) else {
+            return;
+        };
+        let record = super::WholeReadDelivery {
+            content_hash: super::recovery::hash_text_signature(&content),
+            turn: self.compressor.work_ledger_turn(),
+            mutation_sequence: self.mutation_sequence,
+        };
+        self.whole_read_deliveries.insert(path, record);
+    }
+
+    /// The path key of a `file_read` call WITHOUT a `line_range`, else
+    /// `None`.
+    fn whole_file_read_path_key(&self, args_str: &str) -> Option<String> {
+        let args = serde_json::from_str::<Value>(args_str).ok()?;
+        if args.get("line_range").is_some_and(|r| !r.is_null()) {
+            return None;
+        }
+        let key = self.file_read_range_key(args_str)?;
+        key.split('\u{1f}').next().map(str::to_string)
+    }
+
+    /// For a whole-file `file_read` of a file that a whole-file read already
+    /// delivered (in full or as its first chunk) and that is unchanged since
+    /// — same content, no mutation of the path in between — whose content
+    /// does NOT fit the room left in the context: the file's outline (every
+    /// item with its line number, measured to fit that room) and a pointer
+    /// to `line_range` reads, instead of the same first chunk again.
+    ///
+    /// c24 (val091, 24k window): compaction kept evicting src/agent/context.rs
+    /// and the model re-read it whole 19 times, each time getting the same
+    /// first chunk, and ran out of iterations with 0 edits. The note says
+    /// plainly that no content is returned (AGENTS.md rule 3); after an edit
+    /// of the path, or when the file fits the room, the content is returned
+    /// as usual. A file without any recognized item gets its content.
+    pub(super) fn outline_reread_note(&self, args_str: &str, raw_result: &str) -> Option<String> {
+        use super::result_compaction as rc;
+        use crate::token_count::{estimate_content_tokens, estimate_messages_tokens};
+        let path_key = self.whole_file_read_path_key(args_str)?;
+        let record = self.whole_read_deliveries.get(&path_key)?;
+        if self.path_mutated_since(&path_key, record.mutation_sequence) {
+            return None;
+        }
+        let content = Self::file_read_result_content(raw_result)?;
+        if super::recovery::hash_text_signature(&content) != record.content_hash {
+            return None;
+        }
+        // The same room a whole read is chunked to: a file that fits it
+        // arrives whole, as usual.
+        let history = estimate_messages_tokens(&self.messages);
+        let room = (self.max_context_tokens.saturating_sub(history) / 2)
+            .max(rc::MIN_WHOLE_READ_CHUNK_TOKENS);
+        let full_tokens = estimate_content_tokens(raw_result);
+        if full_tokens <= room {
+            return None;
+        }
+        let symbols = rc::symbol_digest(&content, 1);
+        if symbols.is_empty() {
+            return None;
+        }
+        let args = serde_json::from_str::<Value>(args_str).unwrap_or_default();
+        let shown_path = ["path", "file_path", "file", "filepath"]
+            .iter()
+            .find_map(|k| args.get(*k).and_then(Value::as_str))
+            .unwrap_or_default()
+            .trim();
+        let path = shown_path.strip_prefix("./").unwrap_or(shown_path);
+        let total_lines = content.lines().count();
+        let mut note = serde_json::json!({
+            "path": path,
+            rc::OUTLINE_REREAD_KEY: record.turn,
+            "content_returned": false,
+            "content_in_context": false,
+            "total_lines": total_lines,
+            "content_hash": format!("{:016x}", super::context::content_fingerprint(&content)),
+            "note": format!(
+                "NO file content is returned by this read. `{path}` is unchanged since your \
+                 whole-file read at turn {turn}, and its full content ({full_tokens} tokens) \
+                 does not fit the room left in your context ({room} tokens). `symbols` is its \
+                 outline: every item with its line number ([doc]: has a doc comment \
+                 directly above; definitions, not code). Read the \
+                 bodies you need with file_read line_range [start, end] — do not re-read the \
+                 whole file. After you edit this file, a whole-file read returns its content \
+                 again.",
+                turn = record.turn
+            ),
+        });
+        let outline = rc::fit_outline(&symbols, rc::OutlineBudgets::uniform(room), &mut |o| {
+            o.write_into(&mut note);
+            estimate_content_tokens(&note.to_string())
+        });
+        outline.write_into(&mut note);
         Some(note.to_string())
     }
 
@@ -4438,8 +4540,15 @@ impl Agent {
         // only the model-facing message is shortened. The note is NOT
         // recorded as the path's delivered result — the earlier message
         // stays the one that carries the content.
+        //
+        // A whole-file re-read of an unchanged file whose content does not
+        // fit the room left: its outline and a pointer to line ranges, not
+        // the same first chunk again (see `outline_reread_note`).
         if success && tool_name == "file_read" {
-            if let Some(note) = self.unchanged_reread_note(args_str, result) {
+            if let Some(note) = self
+                .unchanged_reread_note(args_str, result)
+                .or_else(|| self.outline_reread_note(args_str, result))
+            {
                 let gate = sanitize_tool_context(
                     tool_name,
                     args_str,
@@ -4593,6 +4702,9 @@ impl Agent {
                     }
                 } else {
                     self.record_delivered_read_result(args_str, full_result);
+                }
+                if !spilled {
+                    self.record_whole_read_delivery(args_str, full_result);
                 }
             }
         }
