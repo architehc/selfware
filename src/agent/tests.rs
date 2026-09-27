@@ -1763,6 +1763,106 @@ async fn test_headless_auto_edit_confirm_gated_tool_stops_with_typed_outcome() {
 }
 
 // =========================================================================
+// Headless Normal mode (0.9.4): the CLI no longer refuses `--mode normal`
+// without a TTY. Read-only tools run; the FIRST call that needs a
+// confirmation ends the run with the typed stop before it executes.
+// =========================================================================
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn test_headless_normal_mode_read_only_review_completes() {
+    let _g = crate::test_support::ExecGuard::hold();
+    let server = MockLlmServer::builder()
+        .with_response(
+            "<tool>\n<name>file_read</name>\n<arguments>{\"path\":\"Cargo.toml\"}</arguments>\n</tool>",
+        )
+        .with_default_response(crate::testing::mock_api::MockResponse::Text(
+            "Review: Cargo.toml:1 declares the package; no issues found in the manifest."
+                .to_string(),
+        ))
+        .build()
+        .await;
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.execution_mode = ExecutionMode::Normal;
+    let mut agent = Agent::new(config).await.unwrap();
+    // Unit tests run without an operator (`is_interactive()` is false), the
+    // same position as a headless `-p` run.
+    let result = agent
+        .run_task("Review Cargo.toml and report problems. Do not change anything.")
+        .await;
+    server.stop().await;
+    if let Err(e) = &result {
+        assert!(
+            !crate::errors::is_confirmation_error(e),
+            "a read-only review must not hit the confirmation stop: {e:#}"
+        );
+    }
+    assert!(
+        result.is_ok(),
+        "read-only review should complete: {result:?}"
+    );
+    assert_eq!(agent.mutating_tool_call_count(), 0);
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn test_headless_normal_mode_write_stops_at_once_with_typed_reason() {
+    let _g = crate::test_support::ExecGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("written_by_model.txt");
+    let call = format!(
+        "<tool>\n<name>file_write</name>\n<arguments>{{\"path\":\"{}\",\"content\":\"x\"}}</arguments>\n</tool>",
+        target.display().to_string().replace('\\', "/")
+    );
+    let server = MockLlmServer::builder()
+        .with_response(&call)
+        .with_default_response(crate::testing::mock_api::MockResponse::Text(call.clone()))
+        .build()
+        .await;
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.execution_mode = ExecutionMode::Normal;
+    let mut agent = Agent::new(config).await.unwrap();
+    let result = agent.run_task("Write x into the file.").await;
+    let requests = server.captured_request_bodies().await.len();
+    server.stop().await;
+    let err = result.expect_err("a write in headless Normal mode must stop the run");
+    assert!(
+        crate::errors::is_confirmation_error(&err),
+        "the stop must stay typed to the caller: {err:#}"
+    );
+    assert_eq!(
+        crate::errors::get_exit_code(&err),
+        crate::errors::EXIT_CONFIRMATION_REQUIRED
+    );
+    assert_eq!(
+        crate::errors::RunEnd::classify_error(&err),
+        crate::errors::RunEnd::Failed
+    );
+    let msg = err.to_string();
+    assert!(msg.contains("file_write"), "names the tool: {msg}");
+    assert!(
+        msg.contains("-m auto-edit") && msg.contains("-m yolo"),
+        "names the fix: {msg}"
+    );
+    assert!(!target.exists(), "nothing may be written");
+    assert!(
+        requests <= 2,
+        "the run stops at the first write ({requests} LLM calls)"
+    );
+    let fm = agent
+        .last_run_failure_mode()
+        .expect("a failed run records its failure mode");
+    assert_eq!(fm.kind.tag(), "PERMISSION_REQUIRED");
+    assert!(fm.evidence.contains("`file_write`"), "{}", fm.evidence);
+}
+
+// =========================================================================
 // Test: Headless AutoEdit read-only observation widening (2026-09-22)
 //
 // The documented default headless deployment (`-m auto-edit`, no TTY) died
@@ -2122,10 +2222,13 @@ fn test_headless_confirmation_denial_error_is_typed() {
         crate::errors::get_exit_code(&err),
         crate::errors::EXIT_CONFIRMATION_REQUIRED
     );
-    // Display names the denied tool and the documented escape hatch.
+    // Display names the denied tool and both documented escape hatches.
     let msg = err.to_string();
     assert!(msg.contains("shell_exec"), "got: {msg}");
-    assert!(msg.contains("--yolo"), "got: {msg}");
+    assert!(
+        msg.contains("-m yolo") && msg.contains("-m auto-edit"),
+        "got: {msg}"
+    );
 }
 
 /// 0.9.1 field report: `"num_turns": 1` in the JSON result while the

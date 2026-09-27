@@ -869,6 +869,11 @@ pub struct Agent {
     /// error into the loop's failure branch, which finalizes again; this
     /// latch keeps that to one terminal event per run. Reset at run start.
     failure_mode_finalized: bool,
+    /// The tool whose headless confirmation stop ended this run: the loop's
+    /// `Failed` state carries only a string, so the typed
+    /// `ConfirmationRequired` is rebuilt from this when the run returns
+    /// (exit code 6, `PERMISSION_REQUIRED`). Reset at run start.
+    confirmation_stop_tool: Option<String>,
     /// Whether this run's terminal outcome has been written to the learning
     /// stores (one performance snapshot + the improvement engine save). An
     /// auto-continue chain nests a run inside a run; the innermost exit
@@ -1926,6 +1931,7 @@ To call a tool, use this EXACT XML structure:
             last_assistant_response: String::new(),
             terminal_event_emitted: false,
             failure_mode_finalized: false,
+            confirmation_stop_tool: None,
             terminal_telemetry_recorded: false,
             learning_data_dir: None,
             event_log: crate::lifecycle::EventLog::default_location(),

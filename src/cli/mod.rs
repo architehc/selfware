@@ -2294,14 +2294,16 @@ pub async fn run() -> Result<()> {
             .await;
         }
 
-        // Fail fast BEFORE any LLM call: in Normal mode every mutating tool
-        // needs an interactive confirmation, and with no terminal on stdin
-        // there is nobody to answer — the agent would refuse every write,
-        // burn tokens for the whole turn budget, then die at MAX_ITERATIONS.
-        if let Some(reason) =
-            headless::headless_mode_block_reason(exec_mode, std::io::stdin().is_terminal())
+        // Headless Normal mode runs read-only tools; the first call that
+        // needs a confirmation nobody can give stops the run with the typed
+        // ConfirmationRequired error before it executes (see
+        // `headless::headless_normal_mode_notice`).
+        if let Some(notice) =
+            headless::headless_normal_mode_notice(exec_mode, std::io::stdin().is_terminal())
         {
-            anyhow::bail!("{}", reason);
+            if !cli.quiet {
+                eprintln!("{notice}");
+            }
         }
 
         let is_json = cli.output_format == HeadlessOutputFormat::Json;
@@ -3363,14 +3365,16 @@ async fn handle_command(
             // invariants; otherwise the positional task is required (clap
             // enforces this via required_unless_present).
             let task = resolve_preset_task(preset, task)?;
-            // Fail fast BEFORE any LLM call: Normal mode cannot confirm tool
-            // executions without a terminal on stdin (see the -p entry path).
+            // Headless Normal mode: read-only tools run; the first call that
+            // needs confirmation stops the run (see the -p entry path).
             {
                 use std::io::IsTerminal;
-                if let Some(reason) =
-                    headless::headless_mode_block_reason(exec_mode, std::io::stdin().is_terminal())
+                if let Some(notice) =
+                    headless::headless_normal_mode_notice(exec_mode, std::io::stdin().is_terminal())
                 {
-                    anyhow::bail!("{}", reason);
+                    if !quiet {
+                        eprintln!("{notice}");
+                    }
                 }
             }
             let is_json = output_format == HeadlessOutputFormat::Json;
@@ -6423,13 +6427,16 @@ max_recovery_attempts = 3
                 RunsCommand::Start { task } => {
                     use std::io::IsTerminal;
 
-                    // Same fail-fast as the headless `-p` path: a supervised
-                    // run in Normal mode has nobody to answer confirmations.
-                    if let Some(reason) = headless::headless_mode_block_reason(
+                    // Same as the headless `-p` path: a supervised run in
+                    // Normal mode runs read-only tools and stops at the first
+                    // call that needs a confirmation nobody can give.
+                    if let Some(notice) = headless::headless_normal_mode_notice(
                         config.execution_mode,
                         std::io::stdin().is_terminal(),
                     ) {
-                        anyhow::bail!("{}", reason);
+                        if !quiet {
+                            eprintln!("{notice}");
+                        }
                     }
 
                     let supervisor = RunSupervisor::new();

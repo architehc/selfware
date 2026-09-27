@@ -3,35 +3,29 @@ use crate::agent::progress::ProgressEvent;
 use crate::observability::dashboard::TokenUsage;
 use serde_json::Value;
 
-// ── headless_mode_block_reason ───────────────────────────────────────
+// ── headless_normal_mode_notice ──────────────────────────────────────
 
+// Until 0.9.3 a headless `--mode normal` run was refused before any LLM
+// call. Normal mode now runs read-only tools headless and stops at the first
+// call that needs confirmation (typed, exit 6), so the refusal became a
+// notice naming that behaviour and the fix.
 #[test]
-fn headless_block_reason_normal_mode_without_tty_is_blocked() {
-    let reason = headless_mode_block_reason(ExecutionMode::Normal, false)
-        .expect("Normal mode + non-TTY stdin must be blocked");
+fn headless_normal_mode_is_allowed_with_a_notice() {
+    let notice = headless_normal_mode_notice(ExecutionMode::Normal, false)
+        .expect("Normal mode + non-TTY stdin gets the notice");
     assert!(
-        reason.contains("-m yolo") && reason.contains("-m auto-edit"),
-        "message must name the fix, got: {}",
-        reason
+        notice.contains("-m yolo") && notice.contains("-m auto-edit"),
+        "notice must name the fix, got: {notice}"
     );
-    assert!(
-        reason.contains("stdin is not a terminal"),
-        "message must name the real cause, got: {}",
-        reason
-    );
+    assert!(notice.contains("read-only tools run"), "got: {notice}");
 }
 
 #[test]
-fn headless_block_reason_normal_mode_with_tty_is_allowed() {
-    // Interactive terminal: the confirmation prompt can be answered.
-    assert!(headless_mode_block_reason(ExecutionMode::Normal, true).is_none());
-}
-
-#[test]
-fn headless_block_reason_autonomous_modes_allowed_without_tty() {
-    assert!(headless_mode_block_reason(ExecutionMode::Yolo, false).is_none());
-    assert!(headless_mode_block_reason(ExecutionMode::AutoEdit, false).is_none());
-    assert!(headless_mode_block_reason(ExecutionMode::Daemon, false).is_none());
+fn headless_normal_mode_notice_only_for_headless_normal() {
+    assert!(headless_normal_mode_notice(ExecutionMode::Normal, true).is_none());
+    assert!(headless_normal_mode_notice(ExecutionMode::Yolo, false).is_none());
+    assert!(headless_normal_mode_notice(ExecutionMode::AutoEdit, false).is_none());
+    assert!(headless_normal_mode_notice(ExecutionMode::Daemon, false).is_none());
 }
 
 // ── SessionResult serialization ──────────────────────────────────────

@@ -70,7 +70,7 @@ impl From<glob::PatternError> for SelfwareError {
 
 #[derive(Error, Debug)]
 pub enum AgentError {
-    #[error("Tool '{tool_name}' requires confirmation but running in non-interactive mode. Use --yolo to auto-approve tools, or run interactively.")]
+    #[error("Tool '{tool_name}' requires confirmation but running in non-interactive mode, so nobody can approve it; the call was not executed and the run stopped. Re-run with `-m auto-edit` (auto-approves file edits) or `-m yolo` (auto-approves all tools), or run interactively.")]
     ConfirmationRequired { tool_name: String },
 
     #[error("Iteration limit reached ({limit})")]
@@ -566,6 +566,23 @@ pub fn is_confirmation_error(e: &anyhow::Error) -> bool {
     }
 
     false
+}
+
+/// The tool named by a [`AgentError::ConfirmationRequired`] anywhere in
+/// `e`'s cause chain.
+pub fn confirmation_required_tool(e: &anyhow::Error) -> Option<String> {
+    e.chain().find_map(|cause| {
+        let agent_err = cause.downcast_ref::<AgentError>().or_else(|| {
+            match cause.downcast_ref::<SelfwareError>() {
+                Some(SelfwareError::Agent(a)) => Some(a),
+                _ => None,
+            }
+        });
+        match agent_err {
+            Some(AgentError::ConfirmationRequired { tool_name }) => Some(tool_name.clone()),
+            _ => None,
+        }
+    })
 }
 
 /// Check if an anyhow error is a "no action" error (agent failed to take action after multiple prompts)

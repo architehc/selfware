@@ -15,27 +15,26 @@ use crate::config::ExecutionMode;
 use crate::observability::dashboard::TokenUsage;
 use crate::safety::process_env::SanitizedEnvExt;
 
-/// Reason a headless run must not start, or `None` when it may proceed.
+/// One-line notice for a headless run in `Normal` mode, or `None` when the
+/// run is interactive or in another mode.
 ///
-/// In `Normal` execution mode every mutating tool requires an interactive
-/// confirmation. When stdin is not a terminal (piped, cron, CI, `selfware -p`
-/// from a script) there is nobody to answer, so every write tool is refused,
-/// the model flails for the whole turn budget burning real API tokens, and the
-/// run finally dies at MAX_ITERATIONS with advice pointing the wrong way.
-/// Detecting this up front lets the CLI fail fast BEFORE any LLM call with a
-/// message that names the real cause and the fix.
-pub fn headless_mode_block_reason(mode: ExecutionMode, stdin_is_terminal: bool) -> Option<String> {
-    if mode == ExecutionMode::Normal && !stdin_is_terminal {
-        Some(
-            "headless run in `--mode normal` cannot confirm tool executions \
-             (stdin is not a terminal): every write tool would be refused and the \
-             agent would spend tokens until MAX_ITERATIONS without making progress. \
-             Re-run with `-m yolo` or `-m auto-edit`, e.g. `selfware -m yolo -p \"...\"`."
-                .to_string(),
-        )
-    } else {
-        None
-    }
+/// Normal mode runs read-only tools without asking (since 0.9.2), so a
+/// headless read-only task — `selfware -p "review …"` — works there, and is
+/// safer than `-m yolo`, which would grant writes to a "do not code" review.
+/// With stdin not a terminal nobody can answer a confirmation, so the FIRST
+/// call that would need one ends the run at once with the typed
+/// `ConfirmationRequired` stop (exit code 6, `PERMISSION_REQUIRED`), before
+/// that call executes — the run never burns tokens re-trying refused writes
+/// until MAX_ITERATIONS. (Until 0.9.3 this mode refused to start headless.)
+pub fn headless_normal_mode_notice(
+    mode: ExecutionMode,
+    stdin_is_terminal: bool,
+) -> Option<&'static str> {
+    (mode == ExecutionMode::Normal && !stdin_is_terminal).then_some(
+        "note: headless `--mode normal`: read-only tools run without asking; the first \
+         call that needs confirmation (a write, shell command, network or git change) stops \
+         the run before it executes. Use `-m auto-edit` or `-m yolo` to allow edits.",
+    )
 }
 
 /// Final session result emitted once at the end of a headless run.

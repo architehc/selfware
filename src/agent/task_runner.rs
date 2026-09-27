@@ -1258,6 +1258,7 @@ impl Agent {
         // Arm the single-terminal-event guard for this run.
         self.terminal_event_emitted = false;
         self.failure_mode_finalized = false;
+        self.confirmation_stop_tool = None;
         self.terminal_telemetry_recorded = false;
         self.last_run_failure_mode = None;
         // Capture the set of paths already dirty relative to HEAD so the
@@ -1839,6 +1840,7 @@ impl Agent {
         // Arm the single-terminal-event guard for this resumed run.
         self.terminal_event_emitted = false;
         self.failure_mode_finalized = false;
+        self.confirmation_stop_tool = None;
         self.terminal_telemetry_recorded = false;
         self.lifecycle_begin_resume();
         let task_description = self
@@ -2662,6 +2664,8 @@ impl Agent {
                             warn!("Initial execution failed: {}", e);
 
                             if is_confirmation_error(&e) {
+                                self.confirmation_stop_tool =
+                                    crate::errors::confirmation_required_tool(&e);
                                 record_state_transition("Planning", "Failed");
                                 if let Some(ref mut checkpoint) = self.current_checkpoint {
                                     checkpoint.log_error(0, e.to_string(), false);
@@ -2934,6 +2938,8 @@ impl Agent {
 
                             // Confirmation errors (user denied) are truly fatal
                             if is_confirmation_error(&e) {
+                                self.confirmation_stop_tool =
+                                    crate::errors::confirmation_required_tool(&e);
                                 record_state_transition("Executing", "Failed");
                                 if let Some(ref mut checkpoint) = self.current_checkpoint {
                                     checkpoint.log_error(step, e.to_string(), false);
@@ -3360,6 +3366,15 @@ impl Agent {
                     }
                     if let Err(e) = self.fail_checkpoint(&reason) {
                         warn!("Failed to save failed checkpoint: {}", e);
+                    }
+                    // A headless confirmation stop stays TYPED to the caller
+                    // (exit code 6, `RunEnd::Failed`): the loop state only
+                    // carried its text, and a plain bail exited 1.
+                    if let Some(tool_name) = self.confirmation_stop_tool.take() {
+                        return Err(anyhow::Error::new(
+                            crate::errors::AgentError::ConfirmationRequired { tool_name },
+                        )
+                        .context(format!("Agent failed: {reason}")));
                     }
                     anyhow::bail!("Agent failed: {}", reason);
                 }

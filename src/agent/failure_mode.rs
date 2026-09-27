@@ -436,10 +436,16 @@ impl FailureMode {
                         restored_files: Vec::new(),
                         kind: FailureKind::PermissionRequired,
                         evidence: format!(
-                            "run stopped: a tool call required interactive approval unavailable in this mode ({} total tool calls, {} mutating)",
-                            total_calls, mutating
+                            "run stopped before executing {}: it required interactive approval unavailable in this mode ({} total tool calls, {} mutating)",
+                            reason
+                                .split('\'')
+                                .nth(1)
+                                .map(|t| format!("`{t}`"))
+                                .unwrap_or_else(|| "a tool call".to_string()),
+                            total_calls,
+                            mutating
                         ),
-                        advice: "re-run interactively, use --yolo / auto-approve the tool, or pre-grant the permission — do NOT raise max_iterations".to_string(),
+                        advice: "re-run with `-m auto-edit` (file edits) or `-m yolo` (all tools), run interactively, or pre-grant the permission — do NOT raise max_iterations".to_string(),
                     };
                 }
                 // Safety-blocked runs burn their whole budget and then get

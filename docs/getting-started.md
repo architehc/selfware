@@ -246,6 +246,13 @@ This checks:
 | `yolo` | Auto-approve all tool executions |
 | `daemon` | Permanent YOLO mode, runs autonomously |
 
+Headless (`-p`, `run`, stdin not a terminal) in `normal` mode runs the
+read-only tools and stops at the first call that would need a confirmation,
+before it executes: the run fails with exit code `6`
+(`PERMISSION_REQUIRED` in `--output-format json` / `stream-json`) and the
+message names the tool and the fix (`-m auto-edit` or `-m yolo`). A read-only
+review therefore works headless without granting writes.
+
 ## Next Steps
 
 - [Configuration Reference](configuration.md) -- all config options
