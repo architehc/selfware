@@ -1315,6 +1315,34 @@ impl Agent {
             .and_then(|m| m.finish_reason.as_deref())
             == Some("length");
 
+        // A would-be final answer to a question about THIS workspace, when no
+        // file content was read at all (a directory listing is not a read):
+        // ask once to read and cite before answering — the execution-path
+        // twin of the planning fast path's grounding check. One nudge per
+        // task; after it the answer is judged normally. Stands aside once
+        // the read-only no-tool streak is at its finalize threshold or a
+        // required tool is missing: those bounded paths decide from there.
+        if tool_calls.is_empty()
+            && !truncated_by_length
+            && self.readonly_no_tool_streak < 6
+            && self.missing_required_task_tools().is_empty()
+            && self.content_read_count() == 0
+            && self.task_is_workspace_question()
+        {
+            let clean = super::recovery::strip_think_blocks(&content);
+            if clean.trim().len() >= 40
+                && !super::verification::is_incomplete_action_response(&content)
+                && !super::verification::is_confused_response(&content)
+                && self.push_ungrounded_answer_nudge_once()
+            {
+                info!(
+                    "Workspace question answered with nothing read — asking to read first (once)"
+                );
+                self.last_assistant_response = clean.trim().to_string();
+                return Ok(false);
+            }
+        }
+
         if tool_calls.is_empty() && !truncated_by_length {
             let clean = super::recovery::strip_think_blocks(&content)
                 .trim()

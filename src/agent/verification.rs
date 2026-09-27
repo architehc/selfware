@@ -2771,7 +2771,7 @@ impl Agent {
     /// Returns `None` to accept, or `Some(message)` to reject with instructions.
     /// Reads below which a review answer without citations that announces
     /// further reading is a progress note (see
-    /// [`Self::review_progress_note_without_reads`]).
+    /// [`Self::analysis_progress_note_without_reads`]).
     pub(super) const REVIEW_MIN_READS: usize = 3;
 
     /// Tools that read workspace content a review can cite (a listing such
@@ -2801,13 +2801,16 @@ impl Agent {
         })
     }
 
-    /// Structural progress-note test for review tasks (the task asks for a
-    /// review/audit/citations): the candidate answer cites nothing, fewer
-    /// than [`Self::REVIEW_MIN_READS`] content reads happened, and the answer
+    /// Structural progress-note test for read-only analysis of this
+    /// workspace (a review/audit/citation request, or a question about this
+    /// project's code): the candidate answer cites nothing, fewer than
+    /// [`Self::REVIEW_MIN_READS`] content reads happened, and the answer
     /// announces further reading. Wording of the final sentence does not
     /// matter — the missing evidence does.
-    pub(super) fn review_progress_note_without_reads(&self) -> bool {
-        if !super::task_policy::task_requests_citations(self.task_context_for_classification()) {
+    pub(super) fn analysis_progress_note_without_reads(&self) -> bool {
+        if !super::task_policy::task_requests_citations(self.task_context_for_classification())
+            && !self.task_is_workspace_question()
+        {
             return false;
         }
         if self.content_read_count() >= Self::REVIEW_MIN_READS {
@@ -2945,7 +2948,7 @@ impl Agent {
             return Some(PROGRESS_NOTE_NUDGE.to_string());
         }
 
-        // Structural guard for review tasks, independent of the final
+        // Structural guard for read-only analysis/review tasks, independent of the final
         // sentence's wording: a review answer with no citations, after fewer
         // than REVIEW_MIN_READS reads, that announces further reading is a
         // progress note (0.9.3, kimi-k3 "…Let me read the key structural
@@ -2953,7 +2956,7 @@ impl Agent {
         // Bounded: every read the model makes moves it toward the floor, and
         // the read-only no-tool streak caps (6 / 12 → READ_ONLY_INCOMPLETE)
         // end a model that only narrates.
-        if is_read_only && self.review_progress_note_without_reads() {
+        if is_read_only && self.analysis_progress_note_without_reads() {
             return Some(PROGRESS_NOTE_NUDGE.to_string());
         }
 

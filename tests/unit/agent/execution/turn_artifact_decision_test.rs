@@ -761,3 +761,45 @@ async fn review_progress_note_is_not_accepted_as_the_final_answer() {
         "the model must be told to continue with a tool call, got: {last}"
     );
 }
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn workspace_answer_with_nothing_read_is_nudged_once_then_judged() {
+    // The execution-path twin of the planning fast path's grounding check:
+    // an answer about this workspace with no file content read is sent back
+    // ONCE to read and cite; the same answer is then judged normally.
+    let cwd = crate::test_support::CwdGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    cwd.switch_to(dir.path());
+    let answer = "The parser module is small and handles its error paths; nothing \
+                  stands out as a defect in how it is structured.";
+    let server = MockLlmServer::builder()
+        .with_response(answer)
+        .with_response(answer)
+        .build()
+        .await;
+    let config = artifact_config(&format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.current_task_context = "explain what the parser module does".to_string();
+    agent.classify_task_policy();
+    assert!(agent.task_is_workspace_question());
+    let first = agent.execute_step_internal(false).await.unwrap();
+    assert!(!first, "the first ungrounded answer is sent back");
+    let nudges = |a: &Agent| {
+        a.messages
+            .iter()
+            .filter(|m| {
+                m.content
+                    .text()
+                    .contains("read-only report without any read")
+            })
+            .count()
+    };
+    assert_eq!(nudges(&agent), 1);
+    let _ = agent.execute_step_internal(false).await;
+    server.stop().await;
+    assert_eq!(nudges(&agent), 1, "the nudge is sent once per task");
+}

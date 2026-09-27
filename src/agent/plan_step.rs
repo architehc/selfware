@@ -512,36 +512,9 @@ impl Agent {
         // tasks classified read-only: a task in between ("Read README.md and
         // …") skipped this guard and was answered from the prompt (review,
         // 0.9.2).
-        if self.total_tool_call_count() == 0 {
-            let project_name = super::current_project_root()
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default()
-                .to_string();
-            if super::task_policy::task_references_project_code(
-                self.task_context_for_classification(),
-                &project_name,
-            ) {
-                const UNGROUNDED_REASON: &str = "read-only report without any read";
-                let already_asked = self
-                    .messages
-                    .iter()
-                    .any(|m| m.content.text().contains(UNGROUNDED_REASON));
-                if !already_asked {
-                    self.messages.push(crate::api::types::Message::system(
-                        super::task_policy::policy_envelope(
-                            super::task_policy::PolicyKind::Gate,
-                            true,
-                            UNGROUNDED_REASON,
-                            "This is a read-only report about this workspace, but nothing has \
-                             been read yet. Read the relevant files with your tools first and \
-                             cite file:line from what you actually opened, then deliver the \
-                             report.",
-                        ),
-                    ));
-                }
-                return None;
-            }
+        if self.total_tool_call_count() == 0 && self.task_is_workspace_question() {
+            self.push_ungrounded_answer_nudge_once();
+            return None;
         }
         // The planning response is the assistant message plan() just pushed.
         let content = self
@@ -578,6 +551,55 @@ impl Agent {
             return None;
         }
         Some(clean)
+    }
+}
+
+/// Marker (and dedupe key) of the one-time "nothing has been read" nudge.
+pub(super) const UNGROUNDED_REASON: &str = "read-only report without any read";
+
+impl Agent {
+    /// A non-mutation task that asks about THIS workspace's code (see
+    /// `task_policy::task_references_project_code`), where an answer produced
+    /// without opening anything came from the prompt, not the code.
+    pub(super) fn task_is_workspace_question(&self) -> bool {
+        if self.current_task_requires_mutation() {
+            return false;
+        }
+        let project_name = super::current_project_root()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_string();
+        super::task_policy::task_references_project_code(
+            self.task_context_for_classification(),
+            &project_name,
+        )
+    }
+
+    /// Push the "read before you report" gate envelope unless it already
+    /// reached the model this task. Returns whether it was pushed. Shared by
+    /// the planning fast path and the execution path's final-answer
+    /// acceptance, so one nudge covers both.
+    pub(super) fn push_ungrounded_answer_nudge_once(&mut self) -> bool {
+        let already_asked = self
+            .messages
+            .iter()
+            .any(|m| m.content.text().contains(UNGROUNDED_REASON));
+        if already_asked {
+            return false;
+        }
+        self.messages.push(crate::api::types::Message::system(
+            super::task_policy::policy_envelope(
+                super::task_policy::PolicyKind::Gate,
+                true,
+                UNGROUNDED_REASON,
+                "This is a read-only report about this workspace, but nothing has \
+                 been read yet. Read the relevant files with your tools first and \
+                 cite file:line from what you actually opened, then deliver the \
+                 report.",
+            ),
+        ));
+        true
     }
 }
 

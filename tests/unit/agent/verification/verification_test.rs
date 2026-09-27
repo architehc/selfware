@@ -1351,8 +1351,28 @@ mod completion_gate_tests {
              review. The core is concentrated in src/agent/ and src/cli/."
             .to_string();
         assert!(
-            !agent.review_progress_note_without_reads(),
+            !agent.analysis_progress_note_without_reads(),
             "after REVIEW_MIN_READS content reads the structural guard steps aside"
+        );
+    }
+
+    // The structural guard is generic for read-only analysis of THIS
+    // workspace, not only for tasks that say "review".
+    #[tokio::test]
+    async fn workspace_question_answer_announcing_reading_is_rejected() {
+        let mut agent = Agent::new(test_config()).await.expect("agent should build");
+        agent.current_task_context = "how does the config loader in src/config work?".to_string();
+        agent.has_written_any_file = false;
+        agent.last_assistant_response = "I'll read src/config/loader.rs to confirm. It \
+             loads the TOML file, merges environment overrides and validates the result."
+            .to_string();
+        assert!(!is_incomplete_action_response(
+            &agent.last_assistant_response
+        ));
+        assert!(agent.analysis_progress_note_without_reads());
+        assert_eq!(
+            agent.check_completion_gate().await.as_deref(),
+            Some(PROGRESS_NOTE_NUDGE)
         );
     }
 
@@ -1363,11 +1383,11 @@ mod completion_gate_tests {
         agent.current_task_context = "explain how the agent loop works".to_string();
         agent.last_assistant_response =
             "I'll read the loop next. The loop plans, executes and verifies.".to_string();
-        assert!(!agent.review_progress_note_without_reads());
+        assert!(!agent.analysis_progress_note_without_reads());
         agent.current_task_context = "review the parser".to_string();
         agent.last_assistant_response =
             "The parser is fine; no issues. Let me know if you want me to read more.".to_string();
-        assert!(!agent.review_progress_note_without_reads());
+        assert!(!agent.analysis_progress_note_without_reads());
     }
 
     // Contrast: the same unwritten-code answer on a MUTATION task must still
