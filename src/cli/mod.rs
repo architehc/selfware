@@ -127,6 +127,41 @@ fn print_workflow_telemetry(result: &crate::workflows::WorkflowResult) {
     println!("      LLM latency: {}ms", result.telemetry.llm_latency_ms);
 }
 
+/// Print the id of a checkpointed workflow run before it starts.
+fn print_workflow_run_id(run: &crate::workflows::WorkflowRun) {
+    let verb = if run.resume_from.is_some() {
+        "Resuming run"
+    } else {
+        "Run id"
+    };
+    println!(
+        "   {} {}: {}",
+        Glyphs::journal(),
+        verb,
+        run.run_id.as_str().emphasis()
+    );
+}
+
+/// After a failed run, name the command that resumes it — only when the
+/// checkpoint actually exists (never promise a resume that cannot work).
+fn print_workflow_resume_hint(result: &crate::workflows::WorkflowResult, file: &str) {
+    let Some(run_id) = result.run_id.as_deref() else {
+        return;
+    };
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    let store = crate::workflows::CheckpointStore::for_workspace(&cwd);
+    if store.path_for(run_id).is_ok_and(|path| path.is_file()) {
+        println!(
+            "   {} Resume with: selfware workflow run {} --resume {}",
+            Glyphs::compass(),
+            file,
+            run_id
+        );
+    }
+}
+
 fn estimate_workflow_llm_cost_usd(prompt_tokens: usize, completion_tokens: usize) -> f64 {
     let prompt_cost_per_1m = 3.0;
     let completion_cost_per_1m = 15.0;
@@ -4875,8 +4910,19 @@ async fn handle_command(
                     workflow,
                     input,
                     dry_run,
+                    resume,
                 } => {
                     let path = std::path::Path::new(&file);
+                    // Live runs are checkpointed per step so a failed or
+                    // budget-stopped run can be resumed (`--resume`).
+                    let checkpoint_store =
+                        crate::workflows::CheckpointStore::for_workspace(&std::env::current_dir()?);
+                    let resumed_run = resume
+                        .as_deref()
+                        .map(|run_id| {
+                            crate::workflows::WorkflowRun::resume(checkpoint_store.clone(), run_id)
+                        })
+                        .transpose()?;
                     if !path.exists() {
                         anyhow::bail!("Workflow file not found: {}", file);
                     }
@@ -4898,6 +4944,12 @@ async fn handle_command(
                             let lowered = lower_document(&doc)?;
                             let workflow_name = workflow
                                 .clone()
+                                .or_else(|| {
+                                    resumed_run
+                                        .as_ref()
+                                        .and_then(|run| run.resumed_workflow_name())
+                                        .map(str::to_string)
+                                })
                                 .or_else(|| lowered.workflows.first().map(|w| w.name.clone()))
                                 .or_else(|| doc.workflows.keys().next().cloned())
                                 .unwrap_or_else(|| "main".to_string());
@@ -4989,14 +5041,22 @@ async fn handle_command(
                                 );
 
                                 let working_dir = std::env::current_dir()?;
+                                let run = resumed_run.clone().unwrap_or_else(|| {
+                                    crate::workflows::WorkflowRun::fresh(
+                                        checkpoint_store.clone(),
+                                        &workflow_name,
+                                    )
+                                });
+                                print_workflow_run_id(&run);
                                 let result = executor
-                                    .execute(&workflow_name, inputs, working_dir)
+                                    .execute_run(&workflow_name, inputs, working_dir, run)
                                     .await?;
 
                                 // A workflow whose required steps failed must
                                 // not exit zero (honest status, AGENTS.md §3).
                                 if matches!(result.status, crate::workflows::WorkflowStatus::Failed)
                                 {
+                                    print_workflow_resume_hint(&result, &file);
                                     anyhow::bail!(
                                         "workflow '{}' failed after {}ms{}",
                                         workflow_name,
@@ -5098,9 +5158,22 @@ async fn handle_command(
                             println!();
 
                             let working_dir = std::env::current_dir()?;
-                            let result = executor
-                                .execute(&workflow_name, inputs, working_dir)
-                                .await?;
+                            let result = if dry_run {
+                                executor
+                                    .execute(&workflow_name, inputs, working_dir)
+                                    .await?
+                            } else {
+                                let run = resumed_run.clone().unwrap_or_else(|| {
+                                    crate::workflows::WorkflowRun::fresh(
+                                        checkpoint_store.clone(),
+                                        &workflow_name,
+                                    )
+                                });
+                                print_workflow_run_id(&run);
+                                executor
+                                    .execute_run(&workflow_name, inputs, working_dir, run)
+                                    .await?
+                            };
 
                             match result.status {
                                 crate::workflows::WorkflowStatus::Completed => {
@@ -5123,6 +5196,7 @@ async fn handle_command(
                                             reason
                                         );
                                     }
+                                    print_workflow_resume_hint(&result, &file);
                                 }
                                 other => {
                                     println!(

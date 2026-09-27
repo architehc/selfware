@@ -900,6 +900,12 @@ pub(crate) enum WorkflowCommands {
         /// Dry-run mode (log but don't execute)
         #[arg(long)]
         dry_run: bool,
+
+        /// Resume a previous run by its run id: steps that completed are
+        /// skipped and its variables restored (checkpoints live in
+        /// `.selfware/workflows/<run-id>.json`)
+        #[arg(long, value_name = "RUN_ID", conflicts_with = "dry_run")]
+        resume: Option<String>,
     },
 
     /// Generate a Rust stub from an SWL workflow file

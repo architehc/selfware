@@ -34,9 +34,16 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
+mod checkpoint;
 mod templates;
+pub use checkpoint::{
+    new_run_id, step_fingerprint, validate_run_id, CheckpointStore, WorkflowCheckpoint,
+    WorkflowRun, CHECKPOINT_FORMAT_VERSION,
+};
 #[cfg(test)]
 mod test_budget;
+#[cfg(test)]
+mod test_checkpoint;
 #[cfg(test)]
 mod test_context;
 #[cfg(test)]
@@ -61,7 +68,8 @@ pub enum WorkflowStatus {
     Completed,
     /// Failed with error
     Failed,
-    /// Paused (can be resumed)
+    /// Paused (reserved: no step currently produces it; failed or stopped
+    /// runs are resumed from their checkpoint, see `WorkflowRun`)
     Paused,
     /// Cancelled by user
     Cancelled,
@@ -439,7 +447,7 @@ pub struct WorkflowOutput {
 }
 
 /// Step execution result
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepResult {
     /// Step ID
     pub step_id: String,
@@ -1369,6 +1377,22 @@ impl WorkflowExecutor {
             .await
     }
 
+    /// Execute a workflow as a checkpointed run: after every top-level step
+    /// the run's state is written to `run.store`, and when `run` resumes a
+    /// checkpoint, its variables are restored and every top-level step that
+    /// completed with an unchanged definition is skipped (not re-run, not
+    /// re-billed). Explicit `inputs` override restored variables.
+    pub async fn execute_run(
+        &self,
+        name: &str,
+        inputs: HashMap<String, VarValue>,
+        working_dir: PathBuf,
+        run: WorkflowRun,
+    ) -> Result<WorkflowResult> {
+        self.execute_workflow(name, inputs, working_dir, Vec::new(), None, Some(run))
+            .await
+    }
+
     /// Execute a workflow with call stack tracking for cycle detection
     async fn execute_with_call_stack(
         &self,
@@ -1377,6 +1401,21 @@ impl WorkflowExecutor {
         working_dir: PathBuf,
         call_stack: Vec<String>,
         step_executions: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    ) -> Result<WorkflowResult> {
+        self.execute_workflow(name, inputs, working_dir, call_stack, step_executions, None)
+            .await
+    }
+
+    /// Execute a workflow; `run` enables checkpointing / resume (top-level
+    /// runs only — sub-workflows are part of their parent's step).
+    async fn execute_workflow(
+        &self,
+        name: &str,
+        inputs: HashMap<String, VarValue>,
+        working_dir: PathBuf,
+        call_stack: Vec<String>,
+        step_executions: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+        run: Option<WorkflowRun>,
     ) -> Result<WorkflowResult> {
         // Check for workflow-level cycles
         if call_stack.contains(&name.to_string()) {
@@ -1420,6 +1459,41 @@ impl WorkflowExecutor {
         for (key, value) in inputs {
             context.set_var(&key, value);
         }
+
+        // Resume: restore the checkpoint's variables (explicit inputs win)
+        // and its completed step results. Failed/skipped results are not
+        // restored — those steps run again and decide the verdict afresh.
+        let resumed = run.as_ref().and_then(|run| run.resume_from.as_ref());
+        if let Some(checkpoint) = resumed {
+            if checkpoint.workflow_name != workflow.name {
+                return Err(anyhow!(
+                    "run '{}' is a run of workflow '{}', not '{}'",
+                    checkpoint.run_id,
+                    checkpoint.workflow_name,
+                    workflow.name
+                ));
+            }
+            for (key, value) in &checkpoint.variables {
+                context
+                    .variables
+                    .entry(key.clone())
+                    .or_insert_with(|| value.clone());
+            }
+            for (key, result) in checkpoint.completed_results() {
+                context.step_results.insert(key.clone(), result.clone());
+            }
+            context.log(
+                LogLevel::Info,
+                format!(
+                    "Resuming run '{}' ({} completed step(s) in checkpoint)",
+                    checkpoint.run_id,
+                    checkpoint.completed_steps.len()
+                ),
+                None,
+            );
+        }
+        let mut completed_steps: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
 
         // Set defaults for missing inputs
         for input in &workflow.inputs {
@@ -1506,6 +1580,36 @@ impl WorkflowExecutor {
                 continue 'step_loop;
             }
 
+            // Resume: a step that completed in the checkpointed run, with the
+            // same definition, is not run (or billed) again.
+            if let Some(previous) = resumed.and_then(|cp| cp.completed_steps.get(&step.id)) {
+                let fingerprint = step_fingerprint(step);
+                let restored = context
+                    .step_results
+                    .get(&step.id)
+                    .is_some_and(|r| r.status == StepStatus::Completed);
+                if *previous == fingerprint && restored {
+                    context.log(
+                        LogLevel::Info,
+                        format!(
+                            "Step '{}' completed in the resumed run; not re-run",
+                            step.id
+                        ),
+                        Some(step.id.clone()),
+                    );
+                    completed_steps.insert(step.id.clone(), fingerprint);
+                    continue 'step_loop;
+                }
+                context.log(
+                    LogLevel::Warn,
+                    format!(
+                        "Step '{}' changed since the checkpoint; re-running it",
+                        step.id
+                    ),
+                    Some(step.id.clone()),
+                );
+            }
+
             // Check dependencies using unified check_dependencies (no iteration context at top level)
             if let Err(dep_err) = context.check_dependencies(step, &all_step_ids, None) {
                 // Definition errors (unknown deps) are always fatal
@@ -1576,6 +1680,12 @@ impl WorkflowExecutor {
                 if let Some(output) = result.output.clone() {
                     context.set_var(&step.id, output);
                 }
+                completed_steps.insert(step.id.clone(), step_fingerprint(step));
+            } else {
+                completed_steps.remove(&step.id);
+            }
+            if let Some(run) = &run {
+                checkpoint::save_progress(run, &workflow.name, &mut context, &completed_steps);
             }
 
             // Check if we should abort
@@ -1633,6 +1743,9 @@ impl WorkflowExecutor {
 
         let duration_ms = context.elapsed_ms();
         context.finalize_telemetry();
+        if let Some(run) = &run {
+            checkpoint::save_progress(run, &workflow.name, &mut context, &completed_steps);
+        }
         let telemetry = context.telemetry.clone();
         record_workflow_run(
             &workflow.name,
@@ -1661,6 +1774,7 @@ impl WorkflowExecutor {
             duration_ms,
             telemetry,
             stop_reason: context.stop_reason,
+            run_id: run.map(|run| run.run_id),
         })
     }
 
@@ -2810,6 +2924,9 @@ pub struct WorkflowResult {
     /// Why the run stopped early (budget), when it did. Partial results are
     /// still in `step_results` / `outputs`.
     pub stop_reason: Option<WorkflowStopReason>,
+    /// Id of the checkpointed run (`execute_run`), resumable with
+    /// `selfware workflow run <file> --resume <run-id>`.
+    pub run_id: Option<String>,
 }
 
 impl WorkflowResult {

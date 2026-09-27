@@ -44,6 +44,7 @@ fn test_workflow_result_helpers() {
         duration_ms: 1000,
         telemetry: WorkflowTelemetry::default(),
         stop_reason: None,
+        run_id: None,
     };
 
     assert!(result.is_success());
@@ -297,6 +298,7 @@ fn test_workflow_result_is_success() {
         duration_ms: 1000,
         telemetry: WorkflowTelemetry::default(),
         stop_reason: None,
+        run_id: None,
     };
 
     assert!(result.is_success());
@@ -313,6 +315,7 @@ fn test_workflow_result_is_not_success() {
         duration_ms: 1000,
         telemetry: WorkflowTelemetry::default(),
         stop_reason: None,
+        run_id: None,
     };
 
     assert!(!result.is_success());
@@ -332,6 +335,7 @@ fn test_workflow_result_get_output() {
         duration_ms: 0,
         telemetry: WorkflowTelemetry::default(),
         stop_reason: None,
+        run_id: None,
     };
 
     assert!(result.get_output("key").is_some());
@@ -373,6 +377,7 @@ fn test_workflow_result_failed_steps() {
         duration_ms: 150,
         telemetry: WorkflowTelemetry::default(),
         stop_reason: None,
+        run_id: None,
     };
 
     let failed = result.failed_steps();
@@ -710,6 +715,7 @@ fn test_workflow_result_multiple_failed_steps() {
         duration_ms: 60,
         telemetry: WorkflowTelemetry::default(),
         stop_reason: None,
+        run_id: None,
     };
     let failed = result.failed_steps();
     assert_eq!(failed.len(), 2);
