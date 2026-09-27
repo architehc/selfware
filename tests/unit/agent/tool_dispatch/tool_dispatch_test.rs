@@ -8267,7 +8267,7 @@ async fn normal_mode_confirm_gate_honours_session_shell_prefix_rule() {
     assert!(agent
         .confirm_tool_execution(
             "shell_exec",
-            r#"{"command":"python3 -m unittest -v"}"#,
+            r#"{"command":"python3 -m unittest tests.test_other"}"#,
             "call_a",
             false
         )
@@ -8338,7 +8338,7 @@ async fn confirm_decisions_apply_only_offered_standing_answers() {
     ));
     assert!(agent.permission_store.shell_rule_allows(
         "shell_exec",
-        &serde_json::json!({"command": "cargo test --lib foo"})
+        &serde_json::json!({"command": "cargo test foo"})
     ));
     assert!(!agent.permission_store.is_authorized("shell_exec", None));
 

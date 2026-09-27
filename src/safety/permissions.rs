@@ -268,6 +268,18 @@ fn plain_prefix_token(token: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '@' | '+' | ','))
 }
 
+/// Whether a command's risk tag allows a prefix rule: it only reads, or runs
+/// project code (tests, builds, scripts), and does nothing the classifier
+/// tags as writing, installing, networking, rewriting git history or
+/// deleting.
+fn prefix_eligible_risk(command: &str) -> bool {
+    use crate::safety::confirm_view::{classify_shell_risk, RiskTag};
+    matches!(
+        classify_shell_risk(command),
+        RiskTag::Reads | RiskTag::RunsCommand
+    )
+}
+
 impl ShellAllowRule {
     /// The rule the prompt offers for `command`: a safe prefix when one
     /// exists, otherwise the exact command.
@@ -275,6 +287,13 @@ impl ShellAllowRule {
         let trimmed = command.trim();
         let exact = || ShellAllowRule::Exact(trimmed.to_string());
         if trimmed.contains(SHELL_RULE_METACHARS) {
+            return exact();
+        }
+        // Only commands that merely read or run project code may seed a
+        // prefix rule. A write (`sed -i`), install (`pip install`), network,
+        // git-history or delete command is exact-only: a prefix grant would
+        // allow every later rewrite or install unasked (review, 0.9.2).
+        if !prefix_eligible_risk(trimmed) {
             return exact();
         }
         let tokens: Vec<&str> = trimmed.split_whitespace().collect();
@@ -298,12 +317,17 @@ impl ShellAllowRule {
                 _ => exact(),
             };
         }
+        // Options never belong to a prefix: `sed -i` as a prefix would be an
+        // in-place-edit grant.
         let prefix: Vec<String> = tokens
             .iter()
             .take(SHELL_RULE_MAX_PREFIX_TOKENS)
-            .take_while(|t| plain_prefix_token(t))
+            .take_while(|t| plain_prefix_token(t) && !t.starts_with('-'))
             .map(|t| t.to_string())
             .collect();
+        if prefix.is_empty() {
+            return exact();
+        }
         // A bare multi-purpose tool (`git`, `cargo`, `npm`, …) as the whole
         // prefix would allow every subcommand (push, publish, …).
         if prefix.len() == 1 && SHELL_RULE_NEEDS_SUBCOMMAND.contains(&program.as_str()) {
@@ -327,6 +351,13 @@ impl ShellAllowRule {
                         .iter()
                         .zip(prefix.iter())
                         .all(|(t, p)| *t == p.as_str())
+                    // Nothing after the prefix may be an option: a granted
+                    // `cargo test` must not carry `--config=…runner=…`, and a
+                    // granted `python3 -m unittest` must not become `-c …`.
+                    && tokens[prefix.len()..].iter().all(|t| !t.starts_with('-'))
+                    // …and the concrete command must still only read or run
+                    // project code.
+                    && prefix_eligible_risk(trimmed)
             }
         }
     }

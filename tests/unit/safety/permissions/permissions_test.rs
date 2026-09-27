@@ -90,8 +90,9 @@ fn shell_rule_derives_a_1_to_3_token_prefix() {
         prefix(&["python3", "-m", "unittest"])
     );
     assert_eq!(
+        // Options never enter a prefix (review, 0.9.2).
         ShellAllowRule::for_command("cargo test --lib slug"),
-        prefix(&["cargo", "test", "--lib"])
+        prefix(&["cargo", "test"])
     );
     assert_eq!(
         ShellAllowRule::for_command("pytest tests/test_x.py"),
@@ -99,7 +100,7 @@ fn shell_rule_derives_a_1_to_3_token_prefix() {
     );
     assert_eq!(
         ShellAllowRule::for_command("git log --oneline -5"),
-        prefix(&["git", "log", "--oneline"])
+        prefix(&["git", "log"])
     );
     // Stops at the first non-plain token (paths, dotted names, quotes, `=`).
     assert_eq!(
@@ -150,7 +151,11 @@ fn shell_rule_is_exact_when_no_safe_prefix_exists() {
 fn prefix_rule_matches_plain_commands_by_whole_tokens() {
     let rule = prefix(&["python3", "-m", "unittest"]);
     assert!(rule.matches("python3 -m unittest"));
-    assert!(rule.matches("python3 -m unittest tests.test_other -v"));
+    assert!(rule.matches("python3 -m unittest tests.test_other"));
+    // Nothing after the prefix may be an option (review, 0.9.2): `-c` would
+    // run arbitrary code, and a harmless `-v` is refused alike.
+    assert!(!rule.matches("python3 -m unittest tests.test_other -v"));
+    assert!(!rule.matches("python3 -m unittest -c 'import os'"));
     assert!(rule.matches("  python3   -m unittest  "));
     // Whole-token equality, not string prefix.
     assert!(!rule.matches("python3 -m unittestX"));
@@ -197,7 +202,8 @@ fn store_shell_rules_are_shell_exec_only_env_free_and_session_only() {
     let mut store = PermissionStore::new();
     store.add_shell_rule(ShellAllowRule::for_command("python3 -m unittest"));
     let call = |cmd: &str| serde_json::json!({ "command": cmd });
-    assert!(store.shell_rule_allows("shell_exec", &call("python3 -m unittest -v")));
+    assert!(store.shell_rule_allows("shell_exec", &call("python3 -m unittest tests.test_x")));
+    assert!(!store.shell_rule_allows("shell_exec", &call("python3 -m unittest -v")));
     assert!(store.shell_rule_allows(
         "shell_exec",
         &serde_json::json!({"cmd": "python3 -m unittest"})
@@ -220,4 +226,25 @@ fn store_shell_rules_are_shell_exec_only_env_free_and_session_only() {
     assert!(!json.contains("unittest"), "{json}");
     store.clear();
     assert!(!store.shell_rule_allows("shell_exec", &call("python3 -m unittest")));
+}
+
+#[test]
+fn prefix_rules_never_grant_writes_installs_or_option_injection() {
+    // Review (0.9.2): one `p` on these used to grant a whole class.
+    // `sed -i …` → exact only (a prefix would allow every in-place rewrite).
+    assert!(matches!(
+        ShellAllowRule::for_command("sed -i 's/a/b/' src/lib.rs"),
+        ShellAllowRule::Exact(_)
+    ));
+    // `python3 -m pip install x` → exact only (future installs unasked).
+    assert!(matches!(
+        ShellAllowRule::for_command("python3 -m pip install unidecode"),
+        ShellAllowRule::Exact(_)
+    ));
+    // `cargo test` → a prefix, but it never carries an injected option.
+    let rule = ShellAllowRule::for_command("cargo test");
+    assert_eq!(rule, prefix(&["cargo", "test"]));
+    assert!(rule.matches("cargo test parser"));
+    assert!(!rule.matches("cargo test --config=target.x86_64-unknown-linux-gnu.runner=sh"));
+    assert!(!rule.matches("cargo test -Zunstable-options"));
 }
