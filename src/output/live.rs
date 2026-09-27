@@ -2,8 +2,9 @@
 //!
 //! Pure building blocks, tested without a terminal:
 //! - [`ProseRenderer`]: line-buffered prose → terminal lines. Renders
-//!   Markdown (headings, bold/italic, inline code, lists, quotes, fences) to
-//!   ANSI styling when `styled`, keeps the raw text otherwise (non-tty,
+//!   Markdown (headings, bold/italic, inline code, lists, quotes, fences —
+//!   syntax-highlighted, see [`super::highlight`]) to ANSI styling when
+//!   `styled`, keeps the raw text otherwise (non-tty,
 //!   `--no-color`, `NO_COLOR`), and collapses blank-line runs to at most one
 //!   in both modes.
 //! - [`BlankCollapser`]: the same blank-line collapse for free-flowing
@@ -24,6 +25,7 @@ use std::sync::Mutex;
 
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
+use super::highlight::{fence_language, CodeHighlighter};
 use super::hyperlink::Linker;
 
 const RESET: &str = "\x1b[0m";
@@ -259,6 +261,9 @@ pub(crate) struct ProseRenderer {
     blank_pending: bool,
     /// Hyperlinks workspace citations (styled output only).
     linker: Option<Linker>,
+    /// Syntax highlighter of the open fenced block (styled output, a
+    /// language with a bundled grammar).
+    code: Option<CodeHighlighter>,
 }
 
 impl ProseRenderer {
@@ -270,6 +275,7 @@ impl ProseRenderer {
             started: false,
             blank_pending: false,
             linker: None,
+            code: None,
         }
     }
 
@@ -328,10 +334,29 @@ impl ProseRenderer {
         }
         self.started = true;
         if blank {
-            out.push('\n'); // blank line inside a code block is content
+            // A blank line inside a code block is content; the highlighter
+            // sees it too (an open string or comment spans it).
+            if let Some(h) = self.code.as_mut() {
+                h.line(line);
+            }
+            out.push('\n');
             return out;
         }
         if self.styled {
+            let trimmed = line.trim_start();
+            if is_fence(trimmed) {
+                // Opening fence: highlight the block when its language has
+                // a grammar; closing fence: done.
+                self.code = if self.in_fence {
+                    None
+                } else {
+                    fence_language(trimmed).and_then(CodeHighlighter::for_terminal)
+                };
+            } else if let Some(h) = self.code.as_mut().filter(|_| self.in_fence) {
+                out.push_str(&h.line(line));
+                out.push('\n');
+                return out;
+            }
             out.push_str(&render_styled_line(
                 line,
                 &mut self.in_fence,

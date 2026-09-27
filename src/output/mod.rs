@@ -11,6 +11,7 @@ use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
+pub(crate) mod highlight;
 pub(crate) mod hyperlink;
 pub(crate) mod live;
 pub(crate) use live::{record_shown_prose, reset_answer_ledger};
