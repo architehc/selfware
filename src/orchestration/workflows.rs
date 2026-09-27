@@ -478,7 +478,10 @@ pub struct LlmCallOutput {
     pub content: String,
     pub usage: Option<LlmTokenUsage>,
     pub model: Option<String>,
-    pub estimated_cost_usd: Option<f64>,
+    /// Provider-reported cost of this call in USD (e.g. OpenRouter's
+    /// `usage.cost`). `None` when the provider reported none — never an
+    /// estimate from token counts (AGENTS.md rules 3 and 4).
+    pub cost_usd: Option<f64>,
 }
 
 impl LlmCallOutput {
@@ -487,7 +490,7 @@ impl LlmCallOutput {
             content: content.into(),
             usage: None,
             model: None,
-            estimated_cost_usd: None,
+            cost_usd: None,
         }
     }
 
@@ -501,8 +504,9 @@ impl LlmCallOutput {
         self
     }
 
-    pub fn with_estimated_cost(mut self, estimated_cost_usd: f64) -> Self {
-        self.estimated_cost_usd = Some(estimated_cost_usd);
+    /// Attach the provider-reported cost; `None` leaves the call uncosted.
+    pub fn with_reported_cost(mut self, cost_usd: Option<f64>) -> Self {
+        self.cost_usd = cost_usd;
         self
     }
 }
@@ -527,7 +531,14 @@ pub struct WorkflowTelemetry {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
-    pub estimated_cost_usd: f64,
+    /// Sum of provider-reported LLM cost in USD; `None` when no call
+    /// reported a cost. Incomplete when `uncosted_llm_calls > 0`.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    /// LLM calls whose provider reported no cost: `cost_usd` does not
+    /// cover them, and nothing is estimated in their place.
+    #[serde(default)]
+    pub uncosted_llm_calls: u64,
     pub completed_steps: u64,
     pub failed_steps: u64,
     pub skipped_steps: u64,
@@ -546,6 +557,25 @@ impl WorkflowTelemetry {
             .max(self.prompt_tokens.saturating_add(self.completion_tokens))
     }
 
+    /// Add one call's provider-reported cost; `None` is counted as an
+    /// uncosted call, never priced.
+    fn add_reported_cost(&mut self, cost: Option<f64>) {
+        match cost {
+            Some(c) => self.cost_usd = Some(self.cost_usd.unwrap_or(0.0) + c),
+            None => self.uncosted_llm_calls += 1,
+        }
+    }
+
+    /// `cost $X` / `known cost $X (incomplete …)` / `cost not tracked …`:
+    /// the same wording as the agent's `/cost` and run summary.
+    pub fn cost_phrase(&self) -> String {
+        crate::agent::session_usage::cost_phrase(
+            self.cost_usd,
+            self.uncosted_llm_calls == 0,
+            usize::try_from(self.uncosted_llm_calls).unwrap_or(usize::MAX),
+        )
+    }
+
     /// Fold a sub-workflow's LLM usage into this (parent) telemetry so a
     /// parent budget and report cover the tokens its sub-workflows spent.
     /// Step counts are not merged: they are recomputed from the parent's
@@ -556,7 +586,10 @@ impl WorkflowTelemetry {
         self.prompt_tokens += other.prompt_tokens;
         self.completion_tokens += other.completion_tokens;
         self.total_tokens += other.total_tokens;
-        self.estimated_cost_usd += other.estimated_cost_usd;
+        if let Some(c) = other.cost_usd {
+            self.cost_usd = Some(self.cost_usd.unwrap_or(0.0) + c);
+        }
+        self.uncosted_llm_calls += other.uncosted_llm_calls;
         self.unmetered_llm_calls += other.unmetered_llm_calls;
     }
 }
@@ -1090,9 +1123,7 @@ impl WorkflowContext {
         self.telemetry.prompt_tokens += usage.prompt_tokens;
         self.telemetry.completion_tokens += usage.completion_tokens;
         self.telemetry.total_tokens += usage.total_tokens;
-        self.telemetry.estimated_cost_usd += output
-            .estimated_cost_usd
-            .unwrap_or_else(|| estimate_llm_cost_usd(usage.prompt_tokens, usage.completion_tokens));
+        self.telemetry.add_reported_cost(output.cost_usd);
 
         if output.usage.is_none() {
             self.telemetry.unmetered_llm_calls += 1;
@@ -1109,9 +1140,7 @@ impl WorkflowContext {
             usage.prompt_tokens,
             usage.completion_tokens,
             usage.total_tokens,
-            output.estimated_cost_usd.unwrap_or_else(|| {
-                estimate_llm_cost_usd(usage.prompt_tokens, usage.completion_tokens)
-            }),
+            output.cost_usd,
         );
     }
 
@@ -1197,10 +1226,6 @@ fn clamp_retry_attempts(workflow: &mut Workflow) {
             step.retry.max_attempts = MAX_RETRY_ATTEMPTS;
         }
     }
-}
-
-fn estimate_llm_cost_usd(prompt_tokens: u64, completion_tokens: u64) -> f64 {
-    (prompt_tokens as f64 * 3.0 / 1_000_000.0) + (completion_tokens as f64 * 15.0 / 1_000_000.0)
 }
 
 /// Workflow executor
@@ -1763,7 +1788,7 @@ impl WorkflowExecutor {
             telemetry.prompt_tokens,
             telemetry.completion_tokens,
             telemetry.total_tokens,
-            telemetry.estimated_cost_usd,
+            telemetry.cost_usd,
         );
 
         Ok(WorkflowResult {

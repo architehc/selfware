@@ -76,10 +76,9 @@ fn workflow_llm_output_from_response(response: crate::api::ChatResponse) -> Resu
         completion_tokens: response.usage.completion_tokens as u64,
         total_tokens: response.usage.total_tokens as u64,
     };
-    let estimated_cost_usd = estimate_workflow_llm_cost_usd(
-        response.usage.prompt_tokens,
-        response.usage.completion_tokens,
-    );
+    // Provider-reported only; `None` stays uncosted (never priced from
+    // token counts).
+    let reported_cost_usd = response.usage.cost;
     let model = response.model.clone();
 
     let choice = response
@@ -102,7 +101,7 @@ fn workflow_llm_output_from_response(response: crate::api::ChatResponse) -> Resu
     Ok(LlmCallOutput::text(content)
         .with_model(model)
         .with_usage(usage)
-        .with_estimated_cost(estimated_cost_usd))
+        .with_reported_cost(reported_cost_usd))
 }
 
 fn print_workflow_telemetry(result: &crate::workflows::WorkflowResult) {
@@ -121,10 +120,7 @@ fn print_workflow_telemetry(result: &crate::workflows::WorkflowResult) {
         result.telemetry.completion_tokens,
         result.telemetry.total_tokens
     );
-    println!(
-        "      Estimated cost: ~${:.4}",
-        result.telemetry.estimated_cost_usd
-    );
+    println!("      {}", workflow_cost_line(&result.telemetry));
     println!("      LLM latency: {}ms", result.telemetry.llm_latency_ms);
 }
 
@@ -163,12 +159,16 @@ fn print_workflow_resume_hint(result: &crate::workflows::WorkflowResult, file: &
     }
 }
 
-fn estimate_workflow_llm_cost_usd(prompt_tokens: usize, completion_tokens: usize) -> f64 {
-    let prompt_cost_per_1m = 3.0;
-    let completion_cost_per_1m = 15.0;
-
-    (prompt_tokens as f64 / 1_000_000.0 * prompt_cost_per_1m)
-        + (completion_tokens as f64 / 1_000_000.0 * completion_cost_per_1m)
+/// The workflow telemetry cost line: a dollar figure only when the provider
+/// reported one ("Cost: cost $0.0123", "Cost: known cost $… (incomplete …)",
+/// "Cost: cost not tracked …").
+fn workflow_cost_line(telemetry: &crate::workflows::WorkflowTelemetry) -> String {
+    let phrase = telemetry.cost_phrase();
+    let mut chars = phrase.chars();
+    match chars.next() {
+        Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+        None => phrase,
+    }
 }
 
 fn workflow_agent_label(prompt: &str) -> String {
@@ -216,10 +216,7 @@ fn build_workflow_llm_handler(
                     let prompt_tokens = response.usage.prompt_tokens as u64;
                     let completion_tokens = response.usage.completion_tokens as u64;
                     let total_tokens = response.usage.total_tokens as u64;
-                    let estimated_cost_usd = estimate_workflow_llm_cost_usd(
-                        response.usage.prompt_tokens,
-                        response.usage.completion_tokens,
-                    );
+                    let reported_cost_usd = response.usage.cost;
 
                     tracing::info!(
                         model = %model_label,
@@ -228,7 +225,7 @@ fn build_workflow_llm_handler(
                         prompt_tokens,
                         completion_tokens,
                         total_tokens,
-                        estimated_cost_usd,
+                        ?reported_cost_usd,
                         "workflow llm request completed"
                     );
                     workflow_llm_output_from_response(response)
@@ -7553,7 +7550,10 @@ fn render_run_summary_for(
 /// hit the iteration cap (when the bound decided the outcome); `None`
 /// otherwise. The defaults are unchanged — that is a maintainer decision.
 fn run_bounds_line(summary: &crate::agent::RunSummary, verbose: bool) -> Option<String> {
-    if !verbose && !summary.hit_iteration_cap {
+    let cost_note = cost_budget_enforcement_note(summary);
+    // A cost budget the run could not (fully) enforce is always named: the
+    // user set a limit and must not assume it held (AGENTS.md Rule 3).
+    if !verbose && !summary.hit_iteration_cap && cost_note.is_none() {
         return None;
     }
     let budgets = &summary.budgets;
@@ -7568,13 +7568,35 @@ fn run_bounds_line(summary: &crate::agent::RunSummary, verbose: bool) -> Option<
         None => unset.push("token"),
     }
     match budgets.max_cost_usd {
-        Some(cost) => parts.push(format!("cost ${cost:.2}")),
+        Some(cost) => match cost_note {
+            Some(note) => parts.push(format!("cost ${cost:.2} ({note})")),
+            None => parts.push(format!("cost ${cost:.2}")),
+        },
         None => unset.push("cost"),
     }
     if !unset.is_empty() {
         parts.push(format!("no {} budget set", unset.join("/")));
     }
     Some(format!("bounds: {}", parts.join(" · ")))
+}
+
+/// Why a configured `max_cost_usd` could not be (fully) enforced: the
+/// enforcer only sees provider-reported cost, and nothing is estimated for
+/// calls that reported none. `None` when no cost budget is set or every
+/// call's cost was reported.
+fn cost_budget_enforcement_note(summary: &crate::agent::RunSummary) -> Option<String> {
+    summary.budgets.max_cost_usd?;
+    if summary.cost_complete {
+        return None;
+    }
+    Some(match summary.cost_usd {
+        Some(_) if summary.unmetered_attempts > 0 => format!(
+            "enforced on reported cost only: {} call(s) reported no cost",
+            summary.unmetered_attempts
+        ),
+        Some(_) => "enforced on reported cost only: billing incomplete".to_string(),
+        None => "NOT enforced: the provider reported no cost".to_string(),
+    })
 }
 
 fn take_prefix_chars(input: &str, max_chars: usize) -> String {

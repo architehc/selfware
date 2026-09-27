@@ -354,7 +354,7 @@ pub fn record_workflow_run(
     prompt_tokens: u64,
     completion_tokens: u64,
     total_tokens: u64,
-    estimated_cost_usd: f64,
+    reported_cost_usd: Option<f64>,
 ) {
     metrics::counter!(
         "selfware_workflow_runs_total",
@@ -388,11 +388,15 @@ pub fn record_workflow_run(
         total_tokens,
         "workflow" => workflow_name.to_string()
     );
-    metrics::histogram!(
-        "selfware_workflow_estimated_cost_usd",
-        estimated_cost_usd,
-        "workflow" => workflow_name.to_string()
-    );
+    // Only a provider-reported cost is recorded; nothing is priced from
+    // token counts (AGENTS.md rules 3 and 4).
+    if let Some(cost) = reported_cost_usd {
+        metrics::histogram!(
+            "selfware_workflow_reported_cost_usd",
+            cost,
+            "workflow" => workflow_name.to_string()
+        );
+    }
 }
 
 pub fn record_workflow_llm_call(
@@ -402,7 +406,7 @@ pub fn record_workflow_llm_call(
     prompt_tokens: u64,
     completion_tokens: u64,
     total_tokens: u64,
-    estimated_cost_usd: f64,
+    reported_cost_usd: Option<f64>,
 ) {
     metrics::counter!(
         "selfware_workflow_llm_requests_total",
@@ -434,12 +438,14 @@ pub fn record_workflow_llm_call(
         "workflow" => workflow_name.to_string(),
         "model" => model.to_string()
     );
-    metrics::histogram!(
-        "selfware_workflow_llm_estimated_cost_usd",
-        estimated_cost_usd,
-        "workflow" => workflow_name.to_string(),
-        "model" => model.to_string()
-    );
+    if let Some(cost) = reported_cost_usd {
+        metrics::histogram!(
+            "selfware_workflow_llm_reported_cost_usd",
+            cost,
+            "workflow" => workflow_name.to_string(),
+            "model" => model.to_string()
+        );
+    }
 }
 
 // Guardrail telemetry
@@ -521,12 +527,12 @@ pub fn start_prometheus_exporter(bind_addr: std::net::SocketAddr) -> anyhow::Res
         "Total tokens consumed by workflows"
     );
     metrics::describe_histogram!(
-        "selfware_workflow_estimated_cost_usd",
-        "Estimated workflow execution cost in USD"
+        "selfware_workflow_reported_cost_usd",
+        "Provider-reported workflow LLM cost in USD (runs where at least one call reported a cost)"
     );
     metrics::describe_histogram!(
-        "selfware_workflow_llm_estimated_cost_usd",
-        "Estimated workflow LLM request cost in USD"
+        "selfware_workflow_llm_reported_cost_usd",
+        "Provider-reported cost of one workflow LLM request in USD (only requests that reported one)"
     );
 
     // Guardrail metrics. Only the series that are actually incremented

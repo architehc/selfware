@@ -1958,12 +1958,28 @@ fn parse_workflow_inputs_rejects_missing_equals() {
 }
 
 #[test]
-fn estimate_workflow_llm_cost_scales_linearly() {
-    let one = estimate_workflow_llm_cost_usd(1_000_000, 0);
-    assert!((one - 3.0).abs() < 1e-9);
-    let both = estimate_workflow_llm_cost_usd(1_000_000, 1_000_000);
-    assert!((both - 18.0).abs() < 1e-9);
-    assert_eq!(estimate_workflow_llm_cost_usd(0, 0), 0.0);
+fn workflow_cost_line_names_only_reported_cost() {
+    let mut t = crate::workflows::WorkflowTelemetry {
+        llm_calls: 2,
+        prompt_tokens: 1_000_000,
+        completion_tokens: 1_000_000,
+        total_tokens: 2_000_000,
+        uncosted_llm_calls: 2,
+        ..Default::default()
+    };
+    // No provider cost: no dollar figure, however many tokens were spent.
+    let line = workflow_cost_line(&t);
+    assert!(!line.contains('$'), "{line}");
+    assert!(line.contains("not tracked"), "{line}");
+    t.cost_usd = Some(0.25);
+    t.uncosted_llm_calls = 1;
+    let line = workflow_cost_line(&t);
+    assert!(
+        line.contains("$0.2500") && line.contains("incomplete"),
+        "{line}"
+    );
+    t.uncosted_llm_calls = 0;
+    assert_eq!(workflow_cost_line(&t), "Cost $0.2500");
 }
 
 #[test]
@@ -3058,6 +3074,39 @@ fn run_bounds_line_lists_configured_budgets() {
         run_bounds_line(&summary, true).as_deref(),
         Some("bounds: iterations 30 · wall 1800s · tokens 500000 · cost $2.50")
     );
+}
+
+#[test]
+fn run_bounds_line_says_an_unreported_cost_budget_was_not_enforced() {
+    let mut summary = sample_summary();
+    summary.budgets.max_cost_usd = Some(2.5);
+    // Every call reported its cost: enforced, and hidden outside -v.
+    assert_eq!(run_bounds_line(&summary, false), None);
+
+    // No provider cost at all: the budget could not hold — shown even
+    // without -v, never as a plain "cost $2.50".
+    summary.cost_usd = None;
+    summary.cost_complete = false;
+    summary.unmetered_attempts = 7;
+    assert_eq!(
+        run_bounds_line(&summary, false).as_deref(),
+        Some(
+            "bounds: iterations 30 · cost $2.50 (NOT enforced: the provider reported no cost) · no wall/token budget set"
+        )
+    );
+
+    // Partial billing: enforced on what was reported.
+    summary.cost_usd = Some(0.4);
+    summary.unmetered_attempts = 2;
+    let line = run_bounds_line(&summary, false).unwrap();
+    assert!(
+        line.contains("cost $2.50 (enforced on reported cost only: 2 call(s) reported no cost)"),
+        "{line}"
+    );
+
+    // No cost budget set: nothing to enforce, nothing extra to say.
+    summary.budgets.max_cost_usd = None;
+    assert_eq!(run_bounds_line(&summary, false), None);
 }
 
 #[test]

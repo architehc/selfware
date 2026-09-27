@@ -1831,7 +1831,7 @@ steps:
                     completion_tokens: 7,
                     total_tokens: 18,
                 })
-                .with_estimated_cost(0.000138))
+                .with_reported_cost(Some(0.000138)))
         });
     executor.load_yaml(yaml).unwrap();
 
@@ -1848,7 +1848,12 @@ steps:
     assert_eq!(result.telemetry.completed_steps, 1);
     assert_eq!(result.telemetry.failed_steps, 0);
     assert_eq!(result.telemetry.skipped_steps, 0);
-    assert!((result.telemetry.estimated_cost_usd - 0.000138).abs() < f64::EPSILON);
+    let cost = result
+        .telemetry
+        .cost_usd
+        .expect("provider-reported cost is kept");
+    assert!((cost - 0.000138).abs() < f64::EPSILON);
+    assert_eq!(result.telemetry.uncosted_llm_calls, 0);
 }
 
 #[tokio::test]
@@ -2780,4 +2785,59 @@ steps:
         "sub-workflow executions must count against the run: {:?}",
         outer.error
     );
+}
+
+#[tokio::test]
+async fn test_llm_cost_is_never_estimated_from_tokens() {
+    // A provider that reports tokens but no cost: the run has NO cost
+    // figure (it used to be priced at an invented $3/$15 per million).
+    let yaml = r#"
+name: llm_uncosted
+description: Unreported cost stays unreported
+steps:
+  - id: one
+    name: One
+    type: llm
+    prompt: "a"
+  - id: two
+    name: Two
+    type: llm
+    prompt: "b"
+"#;
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = calls.clone();
+    let mut executor =
+        WorkflowExecutor::new().with_llm_handler(move |_prompt: &str, _ctx: &[String]| {
+            let n = seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let out = LlmCallOutput::text("ok").with_usage(LlmTokenUsage {
+                prompt_tokens: 1_000_000,
+                completion_tokens: 1_000_000,
+                total_tokens: 2_000_000,
+            });
+            // The second call reports a cost, the first does not.
+            Ok(out.with_reported_cost((n == 1).then_some(0.5)))
+        });
+    executor.load_yaml(yaml).unwrap();
+    let result = executor
+        .execute("llm_uncosted", HashMap::new(), PathBuf::from("/tmp"))
+        .await
+        .unwrap();
+    assert!(result.is_success());
+    assert_eq!(result.telemetry.llm_calls, 2);
+    assert_eq!(
+        result.telemetry.cost_usd,
+        Some(0.5),
+        "only the reported $0.50"
+    );
+    assert_eq!(result.telemetry.uncosted_llm_calls, 1);
+    let phrase = result.telemetry.cost_phrase();
+    assert!(phrase.contains("incomplete"), "{phrase}");
+
+    let none = WorkflowTelemetry {
+        llm_calls: 1,
+        total_tokens: 2_000_000,
+        uncosted_llm_calls: 1,
+        ..Default::default()
+    };
+    assert!(!none.cost_phrase().contains('$'), "{}", none.cost_phrase());
 }
