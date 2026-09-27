@@ -679,6 +679,7 @@ fn aggregate_snapshot(
         failure_mode: None,
         runs: 1,
         task_success_rate: success,
+        clean_success_rate: None,
         avg_loop_turns: turns,
         avg_tool_calls: tool_calls,
         error_recovery_rate: recovery,

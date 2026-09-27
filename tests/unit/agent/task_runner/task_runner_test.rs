@@ -4568,9 +4568,16 @@ async fn completed_run_writes_one_snapshot_with_terminal_counters_and_not_run_ch
         "the mock billed at least one call, got {total}"
     );
     assert_eq!(s["avg_llm_total_tokens"].as_f64(), Some(total as f64));
+    // `loop_turns` is `num_turns` (one per step_started), not the
+    // per-segment iteration counter.
+    assert_eq!(s["avg_loop_turns"].as_f64(), Some(agent.turns_run() as f64));
+    // The clean-✅ rate follows the banner's own decision.
+    let clean = agent
+        .last_run_failure_mode()
+        .is_some_and(|fm| fm.is_clean_success());
     assert_eq!(
-        s["avg_loop_turns"].as_f64(),
-        Some(agent.current_iteration() as f64)
+        s["clean_success_rate"].as_f64(),
+        Some(if clean { 1.0 } else { 0.0 })
     );
     // Nothing verified the run: not run, never a pass.
     assert!(s["final_verification_pass_rate"].is_null());
@@ -4609,6 +4616,50 @@ fn natural_completion_status_texts_match_the_legacy_record_filter() {
         "no file changes [{}]",
         FailureKind::NoChange.tag()
     )));
+}
+
+/// 0.9.2 review: a real edit whose banner said "verification NOT PERFORMED"
+/// (no clean ✅) was still recorded as `[green] [REAL_EDIT]` / Success by
+/// the learner. The record now follows the banner's clean-success decision.
+#[test]
+fn unverified_edit_is_not_recorded_green() {
+    use crate::agent::failure_mode::{AUDIT_NOT_PERFORMED_NOTE, VERIFICATION_NOT_PERFORMED_NOTE};
+    let verdict = |kind: FailureKind, evidence: String| FailureMode {
+        kind,
+        evidence,
+        advice: String::new(),
+        restored_files: Vec::new(),
+    };
+
+    let clean = verdict(
+        FailureKind::Success,
+        "edited src/lib.rs; tests passed".into(),
+    );
+    assert!(clean.is_clean_success());
+    assert_eq!(
+        natural_completion_record(&clean),
+        (Outcome::Success, "[green] [REAL_EDIT]".to_string())
+    );
+
+    for note in [VERIFICATION_NOT_PERFORMED_NOTE, AUDIT_NOT_PERFORMED_NOTE] {
+        let fm = verdict(FailureKind::Success, format!("edited src/lib.rs; {note}"));
+        assert!(!fm.is_clean_success(), "banner withholds ✅ for {note}");
+        let (outcome, detail) = natural_completion_record(&fm);
+        assert_eq!(outcome, Outcome::Partial, "{note}: {detail}");
+        assert!(!detail.contains("[green]"), "{note}: {detail}");
+        assert!(detail.contains("[REAL_EDIT]"), "{detail}");
+        assert!(
+            detail.contains(note),
+            "the caveat the user saw is named: {detail}"
+        );
+    }
+
+    // A clean no-op keeps its neutral status.
+    let noop = verdict(FailureKind::NoChange, "no mutating tool calls".into());
+    assert_eq!(
+        natural_completion_record(&noop),
+        (Outcome::Partial, "no file changes [NO_CHANGES]".to_string())
+    );
 }
 
 /// A failed run (terminal 401 at planning) used to write NO snapshot and

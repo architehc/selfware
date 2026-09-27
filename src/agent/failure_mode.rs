@@ -536,6 +536,23 @@ impl FailureMode {
         self.banner_header().starts_with('✅')
     }
 
+    /// Why the banner withholds a clean ✅ (e.g. "edits landed, but
+    /// verification NOT PERFORMED"), from the same header text; `None` for a
+    /// clean success. Lets every consumer of the outcome (learner, telemetry,
+    /// session log) name the caveat the user saw instead of recording green.
+    pub fn clean_success_caveat(&self) -> Option<String> {
+        let header = self.banner_header();
+        if header.starts_with('✅') {
+            return None;
+        }
+        Some(
+            header
+                .split_once(" — ")
+                .map(|(_, caveat)| caveat.to_string())
+                .unwrap_or(header),
+        )
+    }
+
     fn banner_header(&self) -> String {
         if self.kind.is_success() && self.evidence.contains(AUDIT_NOT_PERFORMED_NOTE) {
             // Allowed with an explicit warning: the audit infrastructure

@@ -21,6 +21,7 @@ fn run(
         first_verification_passed: verified.map(|(first, _)| first),
         final_verification_passed: verified.map(|(_, last)| last),
         llm_total_tokens: tokens,
+        clean_success: outcome == TerminalOutcome::Completed,
     })
 }
 
@@ -378,4 +379,40 @@ fn legacy_success_only_lines_are_not_loaded() {
     assert_eq!(trend[0].task_success_rate, 0.0);
     let raw = std::fs::read_to_string(&path).unwrap();
     assert_eq!(raw.lines().count(), 3, "legacy lines are kept on disk");
+}
+
+/// A completed run that the banner did not mark clean (e.g. an edit with
+/// verification NOT PERFORMED) is completed but not a clean success; legacy
+/// snapshots without the field are left out of the clean-rate average.
+#[test]
+fn clean_success_rate_follows_the_banner_not_the_completion() {
+    let mut stats = TerminalRunStats {
+        outcome: TerminalOutcome::Completed,
+        failure_mode: Some("REAL_EDIT".to_string()),
+        loop_turns: 3,
+        tool_calls: 2,
+        errors_total: 0,
+        errors_recovered: 0,
+        first_verification_passed: None,
+        final_verification_passed: None,
+        llm_total_tokens: 10,
+        clean_success: false,
+    };
+    let unverified = PerformanceSnapshot::from_terminal_run(&stats);
+    assert_eq!(unverified.task_success_rate, 1.0);
+    assert_eq!(unverified.clean_success_rate, Some(0.0));
+    stats.clean_success = true;
+    let clean = PerformanceSnapshot::from_terminal_run(&stats);
+    assert_eq!(clean.clean_success_rate, Some(1.0));
+
+    let mut legacy = clean.clone();
+    legacy.clean_success_rate = None;
+    let avg = PerformanceSnapshot::average(&[unverified, clean, legacy]).unwrap();
+    assert_eq!(avg.clean_success_rate, Some(0.5));
+
+    // Legacy JSON lines without the field still load.
+    let mut json = serde_json::to_value(&avg).unwrap();
+    json.as_object_mut().unwrap().remove("clean_success_rate");
+    let loaded: PerformanceSnapshot = serde_json::from_value(json).unwrap();
+    assert_eq!(loaded.clean_success_rate, None);
 }

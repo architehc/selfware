@@ -193,7 +193,7 @@ impl Agent {
 
     /// Measured facts about the run that just ended, from the counters the
     /// terminal result reports: `loop_turns` is `SessionResult.num_turns`
-    /// (`current_iteration`), `llm_total_tokens` is `SessionResult.usage.total`
+    /// (`turns_run`), `llm_total_tokens` is `SessionResult.usage.total`
     /// (the API-usage accumulator, after draining pending usage).
     #[cfg(feature = "self-improvement")]
     pub(super) fn terminal_run_stats(
@@ -246,13 +246,20 @@ impl Agent {
         crate::cognitive::metrics::TerminalRunStats {
             outcome,
             failure_mode,
-            loop_turns: self.loop_control.current_iteration(),
+            // `num_turns` (one per step_started, whole task), not the
+            // per-segment iteration counter it used to read.
+            loop_turns: self.loop_control.turns_run(),
             tool_calls,
             errors_total,
             errors_recovered,
             first_verification_passed,
             final_verification_passed,
             llm_total_tokens: self.cumulative_token_usage.total as u64,
+            // The banner's own ✅ decision: an unverified edit is completed
+            // but not clean.
+            clean_success: verdict
+                .as_ref()
+                .is_some_and(|fm| result.is_ok() && fm.is_clean_success()),
         }
     }
 

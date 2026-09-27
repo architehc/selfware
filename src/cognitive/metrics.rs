@@ -58,6 +58,12 @@ pub struct TerminalRunStats {
     /// Total LLM tokens (input + output) billed to the run: the counter
     /// `SessionResult.usage.total` reports.
     pub llm_total_tokens: u64,
+    /// The run ended with the banner's clean ✅
+    /// (`FailureMode::is_clean_success`). `Completed` alone also covers a
+    /// real edit whose banner said "verification NOT PERFORMED"; this is the
+    /// same decision the user saw, so statistics cannot report green for a
+    /// run the terminal did not.
+    pub clean_success: bool,
 }
 
 /// Performance of one task run, or the average of several.
@@ -82,8 +88,15 @@ pub struct PerformanceSnapshot {
     pub failure_mode: Option<String>,
     /// Number of task runs this snapshot covers (1 for a single run).
     pub runs: u64,
-    /// Fraction of runs whose outcome is [`TerminalOutcome::Completed`].
+    /// Fraction of runs whose outcome is [`TerminalOutcome::Completed`]
+    /// (including completions the banner flagged with a caveat — see
+    /// `clean_success_rate`).
     pub task_success_rate: f64,
+    /// Fraction of runs that ended with a clean ✅ verdict (the banner's own
+    /// decision). `None` on legacy snapshots written before it was measured;
+    /// aggregates average over the snapshots that carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_success_rate: Option<f64>,
     /// Average agent-loop turns per run (`SessionResult.num_turns`).
     pub avg_loop_turns: f64,
     /// Average tool calls per run (task checkpoint log).
@@ -138,6 +151,7 @@ impl PerformanceSnapshot {
             } else {
                 0.0
             },
+            clean_success_rate: bool_rate(Some(stats.clean_success)),
             avg_loop_turns: stats.loop_turns as f64,
             avg_tool_calls: stats.tool_calls as f64,
             error_recovery_rate: if stats.errors_total > 0 {
@@ -177,6 +191,7 @@ impl PerformanceSnapshot {
             failure_mode: None,
             runs: snapshots.iter().map(|s| s.runs).sum(),
             task_success_rate: mean(|s| s.task_success_rate),
+            clean_success_rate: mean_measured(snapshots.iter().map(|s| s.clean_success_rate)),
             avg_loop_turns: mean(|s| s.avg_loop_turns),
             avg_tool_calls: mean(|s| s.avg_tool_calls),
             error_recovery_rate: mean(|s| s.error_recovery_rate),

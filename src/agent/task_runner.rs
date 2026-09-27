@@ -3071,23 +3071,7 @@ impl Agent {
         let fm = self
             .finalize_failure_mode(RunOutcome::NaturalCompletion)
             .await;
-        let (outcome, detail) = if fm.kind == FailureKind::Success {
-            (Outcome::Success, format!("[green] [{}]", fm.kind.tag()))
-        } else if fm.kind.is_nonfailure() {
-            // NoChange: completed cleanly but changed nothing — don't claim a
-            // full success.
-            (
-                Outcome::Partial,
-                format!("no file changes [{}]", fm.kind.tag()),
-            )
-        } else {
-            // A failure verdict on a natural completion (FakeComplete,
-            // RequiredEditMissing): the loop ended, the task did not.
-            (
-                Outcome::Failure,
-                format!("{} [{}]", fm.evidence, fm.kind.tag()),
-            )
-        };
+        let (outcome, detail) = natural_completion_record(&fm);
         // Success and NoChange carry a completion STATUS; only a failure
         // verdict is an error for the learner (val083: every completed run's
         // status was stored as an unrecovered execution error).
@@ -3440,6 +3424,32 @@ where
 /// Carries the step number only — never the iteration cap as a denominator.
 pub(crate) fn step_status_message(step: usize) -> String {
     format!("Step {step}")
+}
+
+/// The learner/telemetry record of a natural completion: the outcome and its
+/// status text, decided by the SAME clean-success rule as the banner
+/// ([`FailureMode::is_clean_success`]). A real edit whose banner withholds
+/// ✅ (verification NOT PERFORMED, audit not performed, citations not
+/// verified) is recorded `Partial` with the caveat named — never
+/// `[green] [REAL_EDIT]` (AGENTS.md rule 3).
+pub(super) fn natural_completion_record(fm: &FailureMode) -> (Outcome, String) {
+    let tag = fm.kind.tag();
+    match fm.clean_success_caveat() {
+        None if fm.kind == FailureKind::Success => (Outcome::Success, format!("[green] [{tag}]")),
+        // NoChange: completed cleanly but changed nothing — don't claim a
+        // full success.
+        None if fm.kind.is_nonfailure() => (Outcome::Partial, format!("no file changes [{tag}]")),
+        Some(caveat) if fm.kind == FailureKind::Success => {
+            (Outcome::Partial, format!("[not clean] [{tag}] {caveat}"))
+        }
+        Some(caveat) if fm.kind.is_nonfailure() => (
+            Outcome::Partial,
+            format!("no file changes [{tag}] {caveat}"),
+        ),
+        // A failure verdict on a natural completion (FakeComplete,
+        // RequiredEditMissing): the loop ended, the task did not.
+        _ => (Outcome::Failure, format!("{} [{tag}]", fm.evidence)),
+    }
 }
 
 #[cfg(test)]
