@@ -13,6 +13,7 @@
 
 use super::registry::SessionRecord;
 use super::{Resource, ResourceHandle};
+use crate::tools::process_guard::GroupedOutputExt;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::path::Path;
@@ -194,7 +195,7 @@ impl SystemDriver {
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
         }
-        tokio::time::timeout(self.command_timeout, cmd.output())
+        tokio::time::timeout(self.command_timeout, cmd.output_grouped())
             .await
             .with_context(|| format!("{program} {} timed out", args.join(" ")))?
             .with_context(|| format!("run {program}"))

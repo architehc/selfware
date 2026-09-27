@@ -8813,3 +8813,17 @@ async fn c24_mock_run_repeated_whole_reads_deliver_content_at_most_twice() {
     assert!(outlines >= 2, "outlines: {outlines}");
     server.stop().await;
 }
+
+/// A halted (timed-out / cancelled) git_push must not read as "the push did
+/// not happen": the dispatcher's halt message carries the remote caveat.
+/// Other tools get no note.
+#[test]
+fn halt_note_for_git_push_says_remote_may_have_received_it() {
+    let note = super::spill::halt_side_effect_note("git_push");
+    assert!(
+        note.contains("remote may already have received the push"),
+        "{note}"
+    );
+    assert!(note.contains("git ls-remote"), "{note}");
+    assert_eq!(super::spill::halt_side_effect_note("file_read"), "");
+}

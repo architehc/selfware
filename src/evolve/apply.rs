@@ -381,12 +381,18 @@ async fn cargo_check_shadow(shadow_path: &Path, project_root: &Path) -> CompileG
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .env("CARGO_TARGET_DIR", project_root.join("target"));
+    // Own process group + guard: the shutdown/timeout returns below (and a
+    // dropped future) kill cargo AND its rustc children; `kill_on_drop`
+    // alone left rustc holding target/ locks.
+    #[cfg(unix)]
+    cmd.process_group(0);
     let child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
             return CompileGate::Unavailable(format!("compile gate failed to spawn cargo: {e}"));
         }
     };
+    let mut pg_guard = crate::tools::process_guard::ProcessGroupGuard::new(child.id());
     let wait_fut = tokio::time::timeout(CARGO_CHECK_TIMEOUT, child.wait_with_output());
     tokio::pin!(wait_fut);
     let wait_res = loop {
@@ -400,6 +406,9 @@ async fn cargo_check_shadow(shadow_path: &Path, project_root: &Path) -> CompileG
             _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
         }
     };
+    if matches!(wait_res, Ok(Ok(_))) {
+        pg_guard.disarm();
+    }
     match wait_res {
         Ok(Ok(output)) if output.status.success() => CompileGate::Passed,
         Ok(Ok(output)) => {

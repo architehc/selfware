@@ -2647,11 +2647,19 @@ impl Agent {
                             (idx, (false, e.to_string(), summary))
                         }
                         Err(ToolHalt::TimedOut) => {
-                            let msg = format!("Tool execution timed out after {}s", timeout_secs);
+                            let msg = format!(
+                                "Tool execution timed out after {}s{}",
+                                timeout_secs,
+                                halt_side_effect_note(&tool_name)
+                            );
                             (idx, (false, msg.clone(), msg))
                         }
                         Err(ToolHalt::Cancelled) => {
-                            let msg = format!("Tool '{}' cancelled", tool_name);
+                            let msg = format!(
+                                "Tool '{}' cancelled{}",
+                                tool_name,
+                                halt_side_effect_note(&tool_name)
+                            );
                             (idx, (false, msg.clone(), msg))
                         }
                     }
@@ -4469,7 +4477,12 @@ impl Agent {
             }
             Err(ToolHalt::TimedOut) => {
                 let elapsed = start_time.elapsed().as_millis() as u64;
-                let err = format!("Tool '{}' timed out after {}s", name, timeout_secs);
+                let err = format!(
+                    "Tool '{}' timed out after {}s{}",
+                    name,
+                    timeout_secs,
+                    halt_side_effect_note(name)
+                );
                 let summary =
                     crate::output::semantic_summary(name, args, Some(&err), false, elapsed);
                 self.log_tool_call(name, args_str, &err, false, start_time, false);
@@ -4485,7 +4498,7 @@ impl Agent {
             }
             Err(ToolHalt::Cancelled) => {
                 let elapsed = start_time.elapsed().as_millis() as u64;
-                let err = format!("Tool '{}' cancelled", name);
+                let err = format!("Tool '{}' cancelled{}", name, halt_side_effect_note(name));
                 let summary =
                     crate::output::semantic_summary(name, args, Some(&err), false, elapsed);
                 self.log_tool_call(name, args_str, &err, false, start_time, false);

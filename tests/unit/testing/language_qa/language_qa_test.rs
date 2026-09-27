@@ -449,3 +449,28 @@ async fn vitest_with_no_test_files_is_not_run_end_to_end() {
     assert!(r.not_run.is_some(), "{}", r.output);
     assert!(!r.failed(), "no tests must not block: {}", r.output);
 }
+
+/// A QA stage whose future is dropped (the post-edit check abandoned by a
+/// tool cancel/timeout) must kill the runner's grandchildren too, not only
+/// the direct child (`kill_on_drop`): e.g. `cargo test` -> test binary.
+#[tokio::test]
+#[cfg(unix)]
+async fn run_stage_drop_kills_grandchild() {
+    use crate::tools::process_guard::tests::{all_gone, forking_stub, pids_while_running};
+    let dir = tempfile::tempdir().unwrap();
+    let (stub, pidfile, sleep_pidfile) = forking_stub(dir.path(), "qa-runner");
+    let program = stub.to_string_lossy().into_owned();
+    let mut fut = Box::pin(run_stage_with_code(
+        QaStage::Test,
+        &program,
+        &[],
+        dir.path(),
+        60,
+    ));
+    let (child, grandchild) = pids_while_running(&mut fut, &pidfile, &sleep_pidfile).await;
+    drop(fut);
+    assert!(
+        all_gone(&[child, grandchild]).await,
+        "dropped QA stage must kill child {child} and grandchild {grandchild}"
+    );
+}

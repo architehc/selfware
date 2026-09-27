@@ -15,6 +15,7 @@ use super::validation::{
 };
 use crate::safety::process_env::SanitizedEnvExt;
 use crate::tools::argv_guard::{reject_flag_like_operand, reject_flag_like_operands};
+use crate::tools::process_guard::GroupedOutputExt;
 use crate::tools::Tool;
 
 /// Validate a model-supplied build/compose path operand: it must not be
@@ -321,7 +322,10 @@ impl Tool for ContainerRun {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let output = cmd.output().await.context("Failed to run container")?;
+        let output = cmd
+            .output_grouped()
+            .await
+            .context("Failed to run container")?;
 
         // Record the container unless it already removed itself (a
         // foreground --rm run that returned). A failed start still leaves a
@@ -429,7 +433,10 @@ impl Tool for ContainerStop {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let output = cmd.output().await.context("Failed to stop container")?;
+        let output = cmd
+            .output_grouped()
+            .await
+            .context("Failed to stop container")?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -514,7 +521,10 @@ impl Tool for ContainerList {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let output = cmd.output().await.context("Failed to list containers")?;
+        let output = cmd
+            .output_grouped()
+            .await
+            .context("Failed to list containers")?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -642,7 +652,10 @@ impl Tool for ContainerLogs {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let output = cmd.output().await.context("Failed to get container logs")?;
+        let output = cmd
+            .output_grouped()
+            .await
+            .context("Failed to get container logs")?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -777,7 +790,10 @@ impl Tool for ContainerExec {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let output = cmd.output().await.context("Failed to exec in container")?;
+        let output = cmd
+            .output_grouped()
+            .await
+            .context("Failed to exec in container")?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -906,7 +922,7 @@ impl Tool for ContainerBuild {
 
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(600), // 10 minute timeout for builds
-            cmd.output(),
+            cmd.output_grouped(),
         )
         .await
         .context("Build timed out")?
@@ -1001,7 +1017,10 @@ impl Tool for ContainerImages {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let output = cmd.output().await.context("Failed to list images")?;
+        let output = cmd
+            .output_grouped()
+            .await
+            .context("Failed to list images")?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -1088,7 +1107,7 @@ impl Tool for ContainerPull {
 
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(300), // 5 minute timeout for pulls
-            cmd.output(),
+            cmd.output_grouped(),
         )
         .await
         .context("Pull timed out")?
@@ -1181,7 +1200,10 @@ impl Tool for ContainerRemove {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let output = cmd.output().await.context("Failed to remove container")?;
+        let output = cmd
+            .output_grouped()
+            .await
+            .context("Failed to remove container")?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -1325,10 +1347,11 @@ impl Tool for ComposeUp {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let output = tokio::time::timeout(std::time::Duration::from_secs(300), cmd.output())
-            .await
-            .context("Compose up timed out")?
-            .context("Failed to run compose up")?;
+        let output =
+            tokio::time::timeout(std::time::Duration::from_secs(300), cmd.output_grouped())
+                .await
+                .context("Compose up timed out")?
+                .context("Failed to run compose up")?;
 
         // Record the project so task teardown runs `compose down` for it.
         // (Compose has no CLI flag to label its containers; the registry
@@ -1451,7 +1474,10 @@ impl Tool for ComposeDown {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let output = cmd.output().await.context("Failed to run compose down")?;
+        let output = cmd
+            .output_grouped()
+            .await
+            .context("Failed to run compose down")?;
 
         if output.status.success() {
             use crate::resources::{ResourceHandle, ResourceRegistry};

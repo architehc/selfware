@@ -61,6 +61,61 @@ impl Drop for ProcessGroupGuard {
     }
 }
 
+/// Run `cmd` to completion like [`tokio::process::Command::output`] (stdin
+/// null, stdout/stderr captured), but spawned in its own process group with a
+/// [`ProcessGroupGuard`] held across the wait.
+///
+/// `kill_on_drop` alone signals only the direct child: a dropped future (a
+/// tool timeout, Ctrl-C cancel via `run_tool_bounded`, an outer
+/// `tokio::time::timeout`) killed `git` but left `git-remote-https`/`ssh`
+/// pushing, or `cargo` but left `rustc` compiling. Here, if the returned future
+/// is dropped before the child finished, or the wait itself fails, the whole
+/// group is SIGKILLed.
+///
+/// Wrap it in `tokio::time::timeout` for a deadline: the timeout drops this
+/// future, which kills the group.
+///
+/// Windows: no process groups here — `kill_on_drop` kills the direct child
+/// only (no job object is set up); descendants can outlive a cancel.
+///
+/// The child is taken out of the terminal's foreground process group, so a
+/// terminal Ctrl-C reaches selfware (which cancels and kills the group), not the
+/// child directly. Do not use it for interactive children the user drives from
+/// the terminal (pagers, `!cmd` passthrough).
+pub async fn output_in_process_group(
+    cmd: &mut tokio::process::Command,
+) -> std::io::Result<std::process::Output> {
+    #[cfg(unix)]
+    cmd.process_group(0);
+    cmd.kill_on_drop(true);
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let child = cmd.spawn()?;
+    let mut guard = ProcessGroupGuard::new(child.id());
+    // On `Err` (or a drop while awaiting) the armed guard kills the group.
+    let output = child.wait_with_output().await?;
+    guard.disarm();
+    Ok(output)
+}
+
+/// Method form of [`output_in_process_group`] for builder chains:
+/// `Command::new("git").args([..]).output_grouped().await`.
+pub trait GroupedOutputExt {
+    /// See [`output_in_process_group`].
+    fn output_grouped(
+        &mut self,
+    ) -> impl std::future::Future<Output = std::io::Result<std::process::Output>> + Send + '_;
+}
+
+impl GroupedOutputExt for tokio::process::Command {
+    fn output_grouped(
+        &mut self,
+    ) -> impl std::future::Future<Output = std::io::Result<std::process::Output>> + Send + '_ {
+        output_in_process_group(self)
+    }
+}
+
 /// Read an async reader (stdout/stderr pipe) up to `max_bytes`, continuing to consume
 /// and discard remaining bytes until EOF so the child process never deadlocks on a full pipe.
 pub async fn drain_capped<R: tokio::io::AsyncRead + Unpin>(
@@ -279,7 +334,7 @@ pub async fn run_command_bounded(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[tokio::test]
@@ -375,5 +430,165 @@ mod tests {
             "stderr drained after the process-group kill must be preserved, got {stderr:?}"
         );
         assert!(stderr.contains("[process_guard] Process group had lingering descendant"));
+    }
+
+    /// Test support: a `sh` stub that records its own pid, forks a
+    /// `sleep 60` grandchild, records that pid too, and waits. Returns the
+    /// stub path and the two pid files.
+    #[cfg(unix)]
+    pub(crate) fn forking_stub(
+        dir: &std::path::Path,
+        name: &str,
+    ) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let pidfile = dir.join(format!("{name}.pid"));
+        let sleep_pidfile = dir.join(format!("{name}.sleep.pid"));
+        let stub = dir.join(name);
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\necho $$ > '{}'\nsleep 60 &\necho $! > '{}'\nwait\n",
+                pidfile.display(),
+                sleep_pidfile.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (stub, pidfile, sleep_pidfile)
+    }
+
+    /// Test support: poll a pid file until it holds a pid or `deadline`.
+    #[cfg(unix)]
+    pub(crate) async fn wait_for_pidfile(
+        path: &std::path::Path,
+        deadline: std::time::Instant,
+    ) -> Option<i32> {
+        loop {
+            if let Some(pid) = std::fs::read_to_string(path)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+            {
+                return Some(pid);
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    /// Test support: true while `pid` exists and is not a zombie.
+    #[cfg(unix)]
+    pub(crate) fn pid_is_running(pid: i32) -> bool {
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+        if kill(Pid::from_raw(pid), None).is_err() {
+            return false;
+        }
+        // A killed grandchild is reparented to init and reaped promptly; a
+        // zombie still answers kill(0). `ps -o stat=` works on macOS and Linux.
+        let stat = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        !(stat.is_empty() || stat.starts_with('Z'))
+    }
+
+    /// Test support: wait up to ~15s for every pid to be gone.
+    #[cfg(unix)]
+    pub(crate) async fn all_gone(pids: &[i32]) -> bool {
+        for _ in 0..150 {
+            if pids.iter().all(|p| !pid_is_running(*p)) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        false
+    }
+
+    /// Drive `fut` until the stub recorded both pids, then return them with
+    /// the still-pending future (panics if it finished first).
+    #[cfg(unix)]
+    pub(crate) async fn pids_while_running<F: std::future::Future + Unpin>(
+        fut: &mut F,
+        pidfile: &std::path::Path,
+        sleep_pidfile: &std::path::Path,
+    ) -> (i32, i32) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let pids = async {
+            (
+                wait_for_pidfile(pidfile, deadline).await,
+                wait_for_pidfile(sleep_pidfile, deadline).await,
+            )
+        };
+        let (a, b) = tokio::select! {
+            pids = pids => pids,
+            _ = fut => panic!("command finished before it could be cancelled"),
+        };
+        (
+            a.expect("stub wrote its pid"),
+            b.expect("stub wrote the grandchild pid"),
+        )
+    }
+
+    /// Cancel (future dropped mid-wait, as `run_tool_bounded` does on
+    /// Ctrl-C) must kill the grandchild, not only the direct child.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn output_in_process_group_drop_kills_grandchild() {
+        let dir = tempfile::tempdir().unwrap();
+        let (stub, pidfile, sleep_pidfile) = forking_stub(dir.path(), "stub");
+        let mut cmd = tokio::process::Command::new(&stub);
+        let mut fut = Box::pin(output_in_process_group(&mut cmd));
+        let (child, grandchild) = pids_while_running(&mut fut, &pidfile, &sleep_pidfile).await;
+        drop(fut);
+        assert!(
+            all_gone(&[child, grandchild]).await,
+            "dropped future must kill child {child} and grandchild {grandchild}"
+        );
+    }
+
+    /// A `tokio::time::timeout` around the helper drops it at the deadline:
+    /// the whole group dies.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn output_in_process_group_timeout_kills_grandchild() {
+        let dir = tempfile::tempdir().unwrap();
+        let (stub, pidfile, sleep_pidfile) = forking_stub(dir.path(), "stub");
+        let mut cmd = tokio::process::Command::new(&stub);
+        let res =
+            tokio::time::timeout(Duration::from_secs(3), output_in_process_group(&mut cmd)).await;
+        assert!(res.is_err(), "hung stub must time out");
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let child = wait_for_pidfile(&pidfile, deadline).await.expect("pid");
+        let grandchild = wait_for_pidfile(&sleep_pidfile, deadline)
+            .await
+            .expect("pid");
+        assert!(all_gone(&[child, grandchild]).await);
+    }
+
+    /// Same guarantee for `run_command_bounded` (cargo_*, npm/pip/yarn, hook
+    /// commands): a dropped future kills the grandchild.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn run_command_bounded_drop_kills_grandchild() {
+        let dir = tempfile::tempdir().unwrap();
+        let (stub, pidfile, sleep_pidfile) = forking_stub(dir.path(), "stub");
+        let cmd = tokio::process::Command::new(&stub);
+        let mut fut = Box::pin(run_command_bounded(cmd, Duration::from_secs(60), 10_000));
+        let (child, grandchild) = pids_while_running(&mut fut, &pidfile, &sleep_pidfile).await;
+        drop(fut);
+        assert!(all_gone(&[child, grandchild]).await);
+    }
+
+    #[tokio::test]
+    async fn output_in_process_group_collects_output() {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.args(["-c", "echo out; echo err >&2; exit 3"]);
+        let out = output_in_process_group(&mut cmd).await.unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "out");
+        assert_eq!(String::from_utf8_lossy(&out.stderr).trim(), "err");
+        assert_eq!(out.status.code(), Some(3));
     }
 }

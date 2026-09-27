@@ -99,6 +99,10 @@ where
         })
     })?;
     let pid = child.id();
+    // `kill_on_drop` reaches only the direct child: if this future is dropped
+    // (tool cancel/timeout upstream), the guard SIGKILLs the whole group so
+    // `rustc`/test binaries/npm workers do not outlive the check.
+    let mut pg_guard = crate::tools::process_guard::ProcessGroupGuard::new(pid);
 
     let mut so = child.stdout.take();
     let mut se = child.stderr.take();
@@ -185,6 +189,8 @@ where
             drain_timed_out,
         )
     };
+    // Run complete (and any timeout already killed the group above).
+    pg_guard.disarm();
     let timed_out = wait_timed_out || drain_timed_out;
     // Fail-closed: a timed-out run (wait OR collection) never reports
     // success, even when the parent exited 0 — the invocation was killed and

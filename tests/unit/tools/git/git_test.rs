@@ -749,3 +749,196 @@ fn test_write_commit_message_file_unique_names() {
     let _ = std::fs::remove_file(path1.unwrap());
     let _ = std::fs::remove_file(path2.unwrap());
 }
+
+// ── git push: timeout / cancel kill the helpers and report honestly ──────
+//
+// The remote is a local bare repository whose `remote.origin.receivepack`
+// is a `sh` stub that forks a `sleep 60` grandchild and hangs: `git push`
+// runs it as a child (git -> sh stub -> sleep), the same shape as
+// git -> git-remote-https / ssh. No PATH mutation is needed, and
+// `git ls-remote` (upload-pack) still answers from the real bare repo.
+
+#[cfg(unix)]
+fn git_in(dir: &std::path::Path, args: &[&str]) {
+    let st = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .status()
+        .unwrap();
+    assert!(st.success(), "git {args:?} failed");
+}
+
+/// An isolated repo (cwd) on branch `feature-x` with `origin` pointing at a
+/// bare repo. Returns (guards, remote tempdir, stub dir).
+#[cfg(unix)]
+fn repo_with_hanging_receivepack(
+    prepush: bool,
+) -> (
+    (crate::test_support::CwdGuard, tempfile::TempDir),
+    tempfile::TempDir,
+    tempfile::TempDir,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    let iso = isolated_git_repo();
+    let repo = iso.1.path().to_path_buf();
+    let remote = tempfile::TempDir::new().unwrap();
+    git_in(remote.path(), &["init", "-q", "--bare"]);
+    git_in(&repo, &["checkout", "-qb", "feature-x"]);
+    git_in(
+        &repo,
+        &["remote", "add", "origin", &remote.path().to_string_lossy()],
+    );
+    if prepush {
+        git_in(&repo, &["push", "-q", "origin", "feature-x"]);
+    }
+    let stubs = tempfile::TempDir::new().unwrap();
+    let (stub, pidfile, sleep_pidfile) =
+        crate::tools::process_guard::tests::forking_stub(stubs.path(), "receive-pack");
+    git_in(
+        &repo,
+        &[
+            "config",
+            "remote.origin.receivepack",
+            &stub.to_string_lossy(),
+        ],
+    );
+    (iso, remote, stubs, pidfile, sleep_pidfile)
+}
+
+#[cfg(unix)]
+async fn assert_push_helpers_gone(pidfile: &std::path::Path, sleep_pidfile: &std::path::Path) {
+    use crate::tools::process_guard::tests::{all_gone, wait_for_pidfile};
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    let helper = wait_for_pidfile(pidfile, deadline)
+        .await
+        .expect("receive-pack stub ran and wrote its pid");
+    let grandchild = wait_for_pidfile(sleep_pidfile, deadline)
+        .await
+        .expect("receive-pack stub forked its grandchild");
+    assert!(
+        all_gone(&[helper, grandchild]).await,
+        "push helper {helper} and its child {grandchild} must be killed"
+    );
+}
+
+/// Timeout, remote not updated: helpers are killed, and the result says the
+/// remote was checked and did not have the commit — with the caveat — not a
+/// bare "timed out".
+#[tokio::test]
+#[cfg(unix)]
+async fn git_push_timeout_kills_helpers_and_reports_not_pushed() {
+    let (_iso, _remote, _stubs, pidfile, sleep_pidfile) = repo_with_hanging_receivepack(false);
+    let started = std::time::Instant::now();
+    let result = GitPush::new()
+        .execute(serde_json::json!({"remote": "origin", "branch": "feature-x", "timeout_secs": 5}))
+        .await
+        .expect("a timed-out push is a structured result, not an error");
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    assert_eq!(result["success"], false, "{result}");
+    assert_eq!(result["timed_out"], true, "{result}");
+    assert_eq!(result["remote_state"], "not_pushed", "{result}");
+    assert_eq!(result["verified_by"], "git ls-remote", "{result}");
+    assert!(result["remote_commit"].is_null(), "{result}");
+    let out = result["output"].as_str().unwrap();
+    assert!(out.contains("timed out after 5s"), "{out}");
+    assert!(out.contains("remote helpers were killed"), "{out}");
+    assert!(out.contains("had not landed"), "{out}");
+    assert!(
+        out.contains("git ls-remote origin refs/heads/feature-x"),
+        "{out}"
+    );
+    assert_push_helpers_gone(&pidfile, &sleep_pidfile).await;
+}
+
+/// Timeout, but the remote already has the local commit: reported as
+/// pushed, verified by ls-remote — not "timed out, push killed".
+#[tokio::test]
+#[cfg(unix)]
+async fn git_push_timeout_reports_pushed_when_remote_has_commit() {
+    let (iso, _remote, _stubs, pidfile, sleep_pidfile) = repo_with_hanging_receivepack(true);
+    let local = std::process::Command::new("git")
+        .current_dir(iso.1.path())
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    let local = String::from_utf8_lossy(&local.stdout).trim().to_string();
+    let result = GitPush::new()
+        .execute(serde_json::json!({"remote": "origin", "branch": "feature-x", "timeout_secs": 5}))
+        .await
+        .unwrap();
+    assert_eq!(result["remote_state"], "pushed", "{result}");
+    assert_eq!(result["success"], true, "{result}");
+    assert_eq!(result["timed_out"], true, "{result}");
+    assert_eq!(result["local_commit"], local.as_str(), "{result}");
+    assert_eq!(result["remote_commit"], local.as_str(), "{result}");
+    assert!(
+        result["output"]
+            .as_str()
+            .unwrap()
+            .contains("The push landed anyway"),
+        "{result}"
+    );
+    assert_push_helpers_gone(&pidfile, &sleep_pidfile).await;
+}
+
+/// Timeout and the follow-up check fails: unknown, never "not pushed".
+#[tokio::test]
+#[cfg(unix)]
+async fn git_push_timeout_reports_unknown_when_check_fails() {
+    let (iso, _remote, _stubs, pidfile, sleep_pidfile) = repo_with_hanging_receivepack(false);
+    git_in(
+        iso.1.path(),
+        &["config", "remote.origin.uploadpack", "false"],
+    );
+    let result = GitPush::new()
+        .execute(serde_json::json!({"remote": "origin", "branch": "feature-x", "timeout_secs": 5}))
+        .await
+        .unwrap();
+    assert_eq!(result["remote_state"], "unknown", "{result}");
+    assert_eq!(result["success"], false, "{result}");
+    assert!(result["verified_by"].is_null(), "{result}");
+    let out = result["output"].as_str().unwrap();
+    assert!(
+        out.contains("remote may already have received the push"),
+        "{out}"
+    );
+    assert!(!out.contains("had not landed"), "{out}");
+    assert_push_helpers_gone(&pidfile, &sleep_pidfile).await;
+}
+
+/// Cancel (the dispatcher drops the future, as `run_tool_bounded` does on
+/// Ctrl-C): the helper and its grandchild must die with it.
+#[tokio::test]
+#[cfg(unix)]
+async fn git_push_cancel_kills_helpers() {
+    let (_iso, _remote, _stubs, pidfile, sleep_pidfile) = repo_with_hanging_receivepack(false);
+    let tool = GitPush::new();
+    let mut fut = Box::pin(tool.execute(
+        serde_json::json!({"remote": "origin", "branch": "feature-x", "timeout_secs": 120}),
+    ));
+    let (helper, grandchild) =
+        crate::tools::process_guard::tests::pids_while_running(&mut fut, &pidfile, &sleep_pidfile)
+            .await;
+    drop(fut);
+    assert!(
+        crate::tools::process_guard::tests::all_gone(&[helper, grandchild]).await,
+        "cancelled push must kill helper {helper} and grandchild {grandchild}"
+    );
+}
+
+#[test]
+fn push_timeout_result_never_claims_not_pushed_without_a_check() {
+    let check = PushRemoteCheck {
+        state: PushRemoteState::Unknown,
+        local_commit: Some("abc1234".into()),
+        remote_commit: None,
+        detail: "git ls-remote timed out after 15s".into(),
+    };
+    let v = push_timeout_result("origin", "feature-x", 120, &check);
+    assert_eq!(v["success"], false);
+    assert_eq!(v["remote_state"], "unknown");
+    let out = v["output"].as_str().unwrap();
+    assert!(out.contains("may already have received the push"), "{out}");
+    assert!(out.contains("git ls-remote timed out after 15s"), "{out}");
+}

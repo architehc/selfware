@@ -30,6 +30,7 @@
 use super::Tool;
 use crate::config::SafetyConfig;
 use crate::tools::file::{resolve_safety_config, validate_tool_path};
+use crate::tools::process_guard::GroupedOutputExt;
 use crate::tools::workspace_root::{self, CommandRootExt, WorkspaceRoot};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -54,7 +55,7 @@ async fn find_git_root(root: &WorkspaceRoot) -> Result<PathBuf> {
     let output = cmd
         .in_root(root)
         .args(["rev-parse", "--show-toplevel"])
-        .output()
+        .output_grouped()
         .await
         .context("Failed to execute git rev-parse")?;
 
@@ -77,12 +78,12 @@ const PRUNE_GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10
 const CREATED_LEDGER: &str = "selfware-created-worktrees";
 
 /// Run a housekeeping git command in `dir` with a sanitized environment and a
-/// bounded timeout (the child is killed if the timeout fires).
+/// bounded timeout (its whole process group is killed if the timeout fires).
 async fn run_git_bounded(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
     let mut cmd = tokio::process::Command::new("git");
     crate::safety::process_env::sanitize_command_env(&mut cmd);
     cmd.current_dir(dir).args(args).kill_on_drop(true);
-    match tokio::time::timeout(PRUNE_GIT_TIMEOUT, cmd.output()).await {
+    match tokio::time::timeout(PRUNE_GIT_TIMEOUT, cmd.output_grouped()).await {
         Ok(out) => out.with_context(|| format!("Failed to execute git {}", args.join(" "))),
         Err(_) => anyhow::bail!(
             "git {} timed out after {}s",
@@ -462,7 +463,7 @@ impl Tool for EnterWorktreeTool {
 
         let output = cmd
             .current_dir(&git_root)
-            .output()
+            .output_grouped()
             .await
             .context("Failed to execute git worktree add")?;
 
@@ -563,7 +564,7 @@ impl Tool for ExitWorktreeTool {
                 let output = cmd
                     .current_dir(&restored_path)
                     .args(["worktree", "remove", &worktree_path.to_string_lossy()])
-                    .output()
+                    .output_grouped()
                     .await
                     .context("Failed to execute git worktree remove")?;
 
@@ -628,7 +629,7 @@ impl Tool for ListWorktreesTool {
         let output = cmd
             .in_root(&root)
             .args(["worktree", "list", "--porcelain"])
-            .output()
+            .output_grouped()
             .await
             .context("Failed to execute git worktree list")?;
 

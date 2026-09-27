@@ -1,4 +1,5 @@
 use super::file::{resolve_safety_config, validate_tool_path};
+use super::process_guard::GroupedOutputExt;
 use super::workspace_root::CommandRootExt;
 use super::Tool;
 use crate::config::SafetyConfig;
@@ -156,6 +157,163 @@ fn validate_git_path(path: &str, safety_config: Option<&SafetyConfig>) -> Result
     validate_tool_path(path, &safety)
 }
 
+/// Cap on captured `git push` output.
+const MAX_PUSH_OUTPUT_BYTES: usize = 256 * 1024;
+/// Upper bound on the follow-up remote check after a push timed out (also
+/// never longer than the push's own timeout).
+const PUSH_REMOTE_CHECK_MAX_SECS: u64 = 15;
+
+/// What a push that timed out left on the remote, as checked afterwards with
+/// `git ls-remote` against the local branch commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PushRemoteState {
+    /// The remote branch points at the local commit: the push landed.
+    Pushed,
+    /// The remote branch is absent or at another commit when checked.
+    NotPushed,
+    /// The check itself failed or timed out: nothing is known.
+    Unknown,
+}
+
+/// Result of [`check_remote_after_push`].
+#[derive(Debug, Clone)]
+pub(crate) struct PushRemoteCheck {
+    pub state: PushRemoteState,
+    pub local_commit: Option<String>,
+    pub remote_commit: Option<String>,
+    /// Why the state is `Unknown` (empty otherwise).
+    pub detail: String,
+}
+
+/// What a kill after a push timeout reached, per platform.
+#[cfg(unix)]
+const PUSH_KILL_SCOPE: &str = "git and its remote helpers were killed";
+#[cfg(not(unix))]
+const PUSH_KILL_SCOPE: &str =
+    "git was killed (on this platform its remote helpers may still be running)";
+
+/// After a timed-out push, compare `refs/heads/<branch>` on `remote`
+/// (`git ls-remote`) with the local branch commit, bounded by `check_timeout`
+/// per command. Both commands run in their own process group.
+pub(crate) async fn check_remote_after_push(
+    remote: &str,
+    branch: &str,
+    check_timeout: std::time::Duration,
+) -> PushRemoteCheck {
+    use crate::tools::process_guard::{run_command_bounded, CommandRunError};
+    let refname = format!("refs/heads/{branch}");
+    let unknown = |local: Option<String>, detail: String| PushRemoteCheck {
+        state: PushRemoteState::Unknown,
+        local_commit: local,
+        remote_commit: None,
+        detail,
+    };
+    let describe = |what: &str, e: CommandRunError| match e {
+        CommandRunError::Timeout(d) => format!("{what} timed out after {}s", d.as_secs()),
+        other => format!("{what} failed: {other}"),
+    };
+
+    let mut local_cmd = tokio::process::Command::new("git");
+    crate::safety::process_env::sanitize_command_env(&mut local_cmd);
+    local_cmd.in_workspace_root();
+    local_cmd
+        .args(["rev-parse", "--verify", "--quiet"])
+        .arg(format!("{refname}^{{commit}}"));
+    let local = match run_command_bounded(local_cmd, check_timeout, 4096).await {
+        Ok(out) if out.status.success() => {
+            let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            (!sha.is_empty()).then_some(sha)
+        }
+        Ok(_) => None,
+        Err(e) => return unknown(None, describe("git rev-parse", e)),
+    };
+    let Some(local) = local else {
+        return unknown(None, format!("local {refname} could not be resolved"));
+    };
+
+    let mut ls_cmd = tokio::process::Command::new("git");
+    crate::safety::process_env::sanitize_command_env(&mut ls_cmd);
+    ls_cmd.in_workspace_root();
+    if let Ok(v) = std::env::var("SSH_AUTH_SOCK") {
+        ls_cmd.env("SSH_AUTH_SOCK", v);
+    }
+    ls_cmd.args(["ls-remote", "--"]).arg(remote).arg(&refname);
+    let out = match run_command_bounded(ls_cmd, check_timeout, 64 * 1024).await {
+        Ok(out) => out,
+        Err(e) => return unknown(Some(local), describe("git ls-remote", e)),
+    };
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return unknown(
+            Some(local),
+            format!("git ls-remote failed: {}", stderr.trim()),
+        );
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let remote_commit = stdout.lines().find_map(|line| {
+        let (sha, name) = line.split_once('\t')?;
+        (name.trim() == refname).then(|| sha.trim().to_string())
+    });
+    let state = if remote_commit.as_deref() == Some(local.as_str()) {
+        PushRemoteState::Pushed
+    } else {
+        PushRemoteState::NotPushed
+    };
+    PushRemoteCheck {
+        state,
+        local_commit: Some(local),
+        remote_commit,
+        detail: String::new(),
+    }
+}
+
+/// The tool result for a push that hit its timeout. Never claims the push
+/// did not happen: it reports what the remote check saw, or that nothing is
+/// known.
+pub(crate) fn push_timeout_result(
+    remote: &str,
+    branch: &str,
+    timeout_secs: u64,
+    check: &PushRemoteCheck,
+) -> Value {
+    let head = format!("git push timed out after {timeout_secs}s; {PUSH_KILL_SCOPE}.");
+    let recheck = format!("git ls-remote {remote} refs/heads/{branch}");
+    let local = check.local_commit.as_deref().unwrap_or("?");
+    let message = match check.state {
+        PushRemoteState::Pushed => format!(
+            "{head} The push landed anyway: `{recheck}` shows the remote branch at {local}, \
+             the local commit."
+        ),
+        PushRemoteState::NotPushed => format!(
+            "{head} When checked, `{recheck}` showed the remote branch {} instead of the \
+             local commit {local}, so the push had not landed. A server that had already \
+             received the data could still apply it: re-run `{recheck}` before retrying.",
+            match check.remote_commit.as_deref() {
+                Some(sha) => format!("at {sha}"),
+                None => "absent".to_string(),
+            }
+        ),
+        PushRemoteState::Unknown => format!(
+            "{head} The remote may already have received the push; the follow-up check \
+             could not tell ({}). Check `{recheck}` before retrying.",
+            check.detail
+        ),
+    };
+    serde_json::json!({
+        "success": check.state == PushRemoteState::Pushed,
+        "timed_out": true,
+        "remote_state": check.state,
+        "verified_by": if check.state == PushRemoteState::Unknown { Value::Null } else { Value::from("git ls-remote") },
+        "local_commit": check.local_commit,
+        "remote_commit": check.remote_commit,
+        "remote": remote,
+        "branch": branch,
+        "force": false,
+        "output": message,
+    })
+}
+
 #[derive(Default)]
 pub struct GitStatus {
     pub safety_config: Option<SafetyConfig>,
@@ -279,7 +437,7 @@ impl Tool for GitCheckpoint {
         cmd.in_workspace_root();
         let branch_output = cmd
             .args(["rev-parse", "--abbrev-ref", "HEAD"])
-            .output()
+            .output_grouped()
             .await?;
         let current_branch = String::from_utf8_lossy(&branch_output.stdout)
             .trim()
@@ -294,7 +452,9 @@ impl Tool for GitCheckpoint {
                 let mut cmd = tokio::process::Command::new("git");
                 crate::safety::process_env::sanitize_command_env(&mut cmd);
                 cmd.in_workspace_root();
-                cmd.args(["checkout", "-b", &agent_branch]).output().await?;
+                cmd.args(["checkout", "-b", &agent_branch])
+                    .output_grouped()
+                    .await?;
 
                 info!("Created agent branch: {}", agent_branch);
                 agent_branch
@@ -307,7 +467,7 @@ impl Tool for GitCheckpoint {
         crate::safety::process_env::sanitize_command_env(&mut cmd);
         cmd.in_workspace_root();
         cmd.args(["add", "-A"])
-            .output()
+            .output_grouped()
             .await
             .context("Failed to stage changes")?;
 
@@ -322,12 +482,12 @@ impl Tool for GitCheckpoint {
                 .arg("--file")
                 .arg(path)
                 .arg("--allow-empty")
-                .output()
+                .output_grouped()
                 .await
                 .context("Failed to create checkpoint commit")?
         } else {
             cmd.args(["commit", "-m", &full_msg, "--allow-empty"])
-                .output()
+                .output_grouped()
                 .await
                 .context("Failed to create checkpoint commit")?
         };
@@ -339,7 +499,7 @@ impl Tool for GitCheckpoint {
         let mut cmd = tokio::process::Command::new("git");
         crate::safety::process_env::sanitize_command_env(&mut cmd);
         cmd.in_workspace_root();
-        let hash_output = cmd.args(["rev-parse", "HEAD"]).output().await?;
+        let hash_output = cmd.args(["rev-parse", "HEAD"]).output_grouped().await?;
         let hash = String::from_utf8_lossy(&hash_output.stdout)
             .trim()
             .to_string();
@@ -350,14 +510,16 @@ impl Tool for GitCheckpoint {
             let mut cmd = tokio::process::Command::new("git");
             crate::safety::process_env::sanitize_command_env(&mut cmd);
             cmd.in_workspace_root();
-            cmd.args(["tag", "-f", tag_name, &hash]).output().await?;
+            cmd.args(["tag", "-f", tag_name, &hash])
+                .output_grouped()
+                .await?;
         }
 
         // Get status summary
         let mut cmd = tokio::process::Command::new("git");
         crate::safety::process_env::sanitize_command_env(&mut cmd);
         cmd.in_workspace_root();
-        let status_output = cmd.args(["status", "--short"]).output().await?;
+        let status_output = cmd.args(["status", "--short"]).output_grouped().await?;
         let status = String::from_utf8_lossy(&status_output.stdout);
 
         Ok(serde_json::json!({
@@ -517,7 +679,7 @@ impl Tool for GitDiff {
             cmd.arg("--").arg(file_spec);
         }
 
-        let output = cmd.output().await?;
+        let output = cmd.output_grouped().await?;
         // A non-zero exit (bad revision, not a repo, ...) used to be reported
         // as `has_changes: false` with the error text silently dropped.
         if !output.status.success() {
@@ -595,7 +757,7 @@ impl Tool for GitCommit {
                 .arg(repo_path)
                 .arg("add")
                 .arg("-u")
-                .output()
+                .output_grouped()
                 .await?;
             // A failed add must not silently become a partial commit below.
             if !add_output.status.success() {
@@ -617,7 +779,7 @@ impl Tool for GitCommit {
                         .arg("add")
                         .arg("--")
                         .arg(f)
-                        .output()
+                        .output_grouped()
                         .await?;
                     // A typo'd/unmatched path makes `git add` exit non-zero;
                     // ignoring it would produce a partial commit reported as
@@ -642,7 +804,7 @@ impl Tool for GitCommit {
                 .arg("commit")
                 .arg("--file")
                 .arg(path)
-                .output()
+                .output_grouped()
                 .await?
         } else {
             cmd.arg("-C")
@@ -650,7 +812,7 @@ impl Tool for GitCommit {
                 .arg("commit")
                 .arg("-m")
                 .arg(message)
-                .output()
+                .output_grouped()
                 .await?
         };
         if let Some(path) = msg_file {
@@ -746,7 +908,7 @@ impl Tool for GitPush {
             cmd.in_workspace_root();
             let output = cmd
                 .args(["rev-parse", "--abbrev-ref", "HEAD"])
-                .output()
+                .output_grouped()
                 .await
                 .context("Failed to get current branch")?;
             if !output.status.success() {
@@ -781,7 +943,7 @@ impl Tool for GitPush {
         remotes_cmd.in_workspace_root();
         let remotes_out = remotes_cmd
             .arg("remote")
-            .output()
+            .output_grouped()
             .await
             .context("Failed to list git remotes")?;
         if !remotes_out.status.success() {
@@ -809,20 +971,36 @@ impl Tool for GitPush {
             .arg("--")
             .arg(remote)
             .arg(format!("refs/heads/{branch}:refs/heads/{branch}"));
-        // Kill the child if the timeout below drops the output future —
-        // a "timed-out" push must not keep running and still land on the
-        // remote after we've reported the timeout.
-        cmd.kill_on_drop(true);
-
+        // Own process group + guard (`run_command_bounded`): a timeout, a
+        // cancel, or a dropped future kills git AND its remote helpers
+        // (`git-remote-https`, `ssh`). `kill_on_drop` alone signalled only
+        // `git`, and the orphaned helper kept pushing after we had reported
+        // the timeout.
         let timeout_secs = args
             .get("timeout_secs")
             .and_then(|v| v.as_u64())
-            .unwrap_or(120);
-        let output =
-            tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output())
-                .await
-                .context("git push timed out (network hang?) — the push process was killed")?
-                .context("Failed to execute git push")?;
+            .unwrap_or(120)
+            .max(1);
+        let output = match crate::tools::process_guard::run_command_bounded(
+            cmd,
+            std::time::Duration::from_secs(timeout_secs),
+            MAX_PUSH_OUTPUT_BYTES,
+        )
+        .await
+        {
+            Ok(output) => output,
+            Err(crate::tools::process_guard::CommandRunError::Timeout(_)) => {
+                // The helpers are dead, but the remote may already have the
+                // update: check instead of claiming it did not happen.
+                let check_timeout =
+                    std::time::Duration::from_secs(timeout_secs.min(PUSH_REMOTE_CHECK_MAX_SECS));
+                let check = check_remote_after_push(remote, &branch, check_timeout).await;
+                return Ok(push_timeout_result(remote, &branch, timeout_secs, &check));
+            }
+            Err(e) => anyhow::bail!("Failed to execute git push: {e}"),
+        };
+        // git's own exit status decides whether the push happened; a helper
+        // that lingered past git's exit (and was killed) does not undo it.
         let success = output.status.success();
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -832,6 +1010,7 @@ impl Tool for GitPush {
             "remote": remote,
             "branch": branch,
             "force": force,
+            "lingering_helpers_killed": output.killed_descendants,
             "output": format!("{}{}", stdout, stderr)
         }))
     }

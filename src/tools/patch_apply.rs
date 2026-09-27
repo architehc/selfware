@@ -1,3 +1,4 @@
+use super::process_guard::GroupedOutputExt;
 use super::workspace_root::CommandRootExt;
 use super::Tool;
 use anyhow::{anyhow, Result};
@@ -155,8 +156,9 @@ fn strip_numbered_diff(diff: &str) -> Option<String> {
 
 /// Build a sanitized `git apply` invocation: the tool applies
 /// project-controlled diffs, so the child must not inherit host credentials
-/// (see `safety::process_env`). `kill_on_drop` ensures a dropped future (or
-/// early return) cannot leave a cached child holding repo locks.
+/// (see `safety::process_env`). Callers run it with `output_grouped`, so a
+/// dropped future (or early return) kills its whole process group and cannot
+/// leave a child holding repo locks.
 fn git_apply_command(args: &[&str]) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("git");
     crate::safety::process_env::sanitize_command_env(&mut cmd);
@@ -248,7 +250,7 @@ impl Tool for PatchApply {
 
         // Try git apply --check first
         let check_output = git_apply_command(&["apply", "--check", &temp_path_str])
-            .output()
+            .output_grouped()
             .await;
 
         // A diff built from file_read output may carry its line-number
@@ -262,7 +264,7 @@ impl Tool for PatchApply {
                 t.write_all(stripped.as_bytes())?;
                 let t_path = t.path().to_string_lossy().to_string();
                 let stripped_check = git_apply_command(&["apply", "--check", &t_path])
-                    .output()
+                    .output_grouped()
                     .await;
                 if matches!(stripped_check, Ok(ref out) if out.status.success()) {
                     numbered_temp = Some(t);
@@ -274,7 +276,9 @@ impl Tool for PatchApply {
         let applied = match check_output {
             Ok(ref out) if out.status.success() => {
                 // Check passed — apply for real
-                let apply_out = git_apply_command(&["apply", &temp_path_str]).output().await;
+                let apply_out = git_apply_command(&["apply", &temp_path_str])
+                    .output_grouped()
+                    .await;
                 matches!(apply_out, Ok(ref o) if o.status.success())
             }
             _ if prefixes_stripped => {
@@ -282,13 +286,15 @@ impl Tool for PatchApply {
                     .as_ref()
                     .map(|t| t.path().to_string_lossy().to_string())
                     .unwrap_or_default();
-                let apply_out = git_apply_command(&["apply", &t_path]).output().await;
+                let apply_out = git_apply_command(&["apply", &t_path])
+                    .output_grouped()
+                    .await;
                 matches!(apply_out, Ok(ref o) if o.status.success())
             }
             _ if allow_3way => {
                 // Try 3-way merge fallback
                 let apply3_out = git_apply_command(&["apply", "-3", &temp_path_str])
-                    .output()
+                    .output_grouped()
                     .await;
                 matches!(apply3_out, Ok(ref o) if o.status.success())
             }

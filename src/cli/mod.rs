@@ -422,12 +422,17 @@ async fn run_gate_command(
         .spawn()
         .map_err(|e| anyhow::anyhow!("'{program} {}' failed to spawn: {e}", args.join(" ")))?;
     let child_pid = child.id();
+    // A dropped future (Ctrl-C of the gate) also kills the whole group.
+    let mut pg_guard = crate::tools::process_guard::ProcessGroupGuard::new(child_pid);
 
     let wait_fut = tokio::time::timeout(within, child.wait_with_output());
     tokio::pin!(wait_fut);
 
     match wait_fut.await {
-        Ok(Ok(output)) => Ok(output),
+        Ok(Ok(output)) => {
+            pg_guard.disarm();
+            Ok(output)
+        }
         Ok(Err(e)) => anyhow::bail!("'{program} {}' failed to run: {e}", args.join(" ")),
         Err(_) => {
             #[cfg(unix)]

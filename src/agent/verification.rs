@@ -10,6 +10,7 @@ use super::*;
 use crate::checkpoint::VisualAssertion;
 use crate::cognitive::CyclePhase;
 use crate::safety::process_env::SanitizedEnvExt;
+use crate::tools::process_guard::GroupedOutputExt;
 
 /// Result of visual verification including whether it should hard-gate execution.
 pub(super) struct VisualVerificationResult {
@@ -1088,7 +1089,7 @@ impl Agent {
             .sanitized_env()
             .args(["diff", "-z", "--name-only", "HEAD", "--"])
             .current_dir(&root)
-            .output()
+            .output_grouped()
             .await
             .ok()?;
         if !output.status.success() {
@@ -1112,7 +1113,7 @@ impl Agent {
             .sanitized_env()
             .args(["ls-files", "-z", "--others", "--exclude-standard"])
             .current_dir(&root)
-            .output()
+            .output_grouped()
             .await
         {
             if untracked.status.success() {
@@ -1224,7 +1225,7 @@ impl Agent {
                 .sanitized_env()
                 .args(["diff", "HEAD", "--", path])
                 .current_dir(&root)
-                .output()
+                .output_grouped()
                 .await;
             let non_additive = match output {
                 Ok(out) if out.status.success() => {
@@ -4514,7 +4515,7 @@ async fn audit_file_evidence(
             .arg(anchored)
             .current_dir(root)
             .kill_on_drop(true)
-            .output(),
+            .output_grouped(),
     )
     .await
     .ok()
@@ -4748,7 +4749,7 @@ pub(crate) async fn committed_paths_since_baseline(
             "--",
         ])
         .current_dir(root)
-        .output()
+        .output_grouped()
         .await
         .ok()?;
     if !output.status.success() {

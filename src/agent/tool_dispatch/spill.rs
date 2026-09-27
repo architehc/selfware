@@ -10,6 +10,20 @@ pub(crate) enum ToolHalt {
     Cancelled,
 }
 
+/// What a halt (timeout or cancel) of `tool_name` may already have done
+/// outside this machine, appended to the halt message. Dropping the tool's
+/// future kills its process group, but a network side effect can land before
+/// the kill: a halted `git_push` must not read as "the push did not happen".
+pub(crate) fn halt_side_effect_note(tool_name: &str) -> &'static str {
+    match tool_name {
+        "git_push" => {
+            " — its processes were stopped, but the remote may already have received the push: \
+             check `git ls-remote <remote> refs/heads/<branch>` before retrying."
+        }
+        _ => "",
+    }
+}
+
 /// Race a tool-execution future against the per-tool deadline AND the agent's
 /// cancel token. Returns the tool's own `Result` when it finishes first, or a
 /// [`ToolHalt`] when the deadline elapses or cancellation is observed. The

@@ -127,6 +127,10 @@ async fn run_stage_with_code(
         }
     };
     let child_pid = child.id();
+    // `kill_on_drop` reaches only the direct child: if this future is dropped
+    // (tool cancel/timeout upstream), the guard SIGKILLs the whole group so
+    // `rustc`/test binaries/npm workers do not outlive the check.
+    let mut pg_guard = crate::tools::process_guard::ProcessGroupGuard::new(child_pid);
 
     // Drain stdout/stderr concurrently so a chatty stage can't deadlock on a
     // full pipe; keep only the display cap (matching the previous truncation).
@@ -252,6 +256,7 @@ async fn run_stage_with_code(
             drain_timed_out,
         )
     };
+    pg_guard.disarm();
     let timed_out = wait_timed_out || drain_timed_out;
     let duration_ms = start.elapsed().as_millis() as u64;
 

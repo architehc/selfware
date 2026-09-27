@@ -3556,3 +3556,23 @@ fn targeted_test_found_nothing_covers_js_runners_and_libtest() {
         );
     }
 }
+
+/// A verification check whose future is dropped (the final-tree re-check or
+/// a post-edit check abandoned by cancel/timeout) must kill the checker's
+/// grandchildren, not only the direct child.
+#[tokio::test]
+#[cfg(unix)]
+async fn run_reaped_drop_kills_grandchild() {
+    use crate::tools::process_guard::tests::{all_gone, forking_stub, pids_while_running};
+    let dir = tempfile::tempdir().unwrap();
+    let (stub, pidfile, sleep_pidfile) = forking_stub(dir.path(), "checker");
+    let program = stub.to_string_lossy().into_owned();
+    let no_args: [&str; 0] = [];
+    let mut fut = Box::pin(run_reaped_env(&program, no_args, dir.path(), 60, &[]));
+    let (child, grandchild) = pids_while_running(&mut fut, &pidfile, &sleep_pidfile).await;
+    drop(fut);
+    assert!(
+        all_gone(&[child, grandchild]).await,
+        "dropped check must kill child {child} and grandchild {grandchild}"
+    );
+}

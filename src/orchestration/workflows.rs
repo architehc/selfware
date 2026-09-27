@@ -27,6 +27,7 @@
 use crate::observability::telemetry::{
     add_tokens_processed, record_workflow_llm_call, record_workflow_run,
 };
+use crate::tools::process_guard::GroupedOutputExt;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -1870,8 +1871,9 @@ impl WorkflowExecutor {
                     result = &mut step_fut => Some(result),
                     _ = tokio::time::sleep(attempt_timeout) => {
                         // Timeout fired: step_fut is dropped at end of this
-                        // block, cancelling it. Any in-flight child processes
-                        // (with kill_on_drop) are also terminated.
+                        // block, cancelling it. In-flight shell steps run via
+                        // `output_grouped`, so their whole process group is
+                        // killed, not just the direct shell.
                         None
                     }
                 }
@@ -2167,7 +2169,7 @@ impl WorkflowExecutor {
                     .arg(&resolved_cmd)
                     .current_dir(&dir)
                     .kill_on_drop(true)
-                    .output();
+                    .output_grouped();
 
                 const WORKFLOW_SHELL_TIMEOUT_SECS: u64 = 300;
                 let output = tokio::time::timeout(
