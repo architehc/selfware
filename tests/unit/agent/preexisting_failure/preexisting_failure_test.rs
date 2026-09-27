@@ -724,7 +724,7 @@ async fn c24_mock_run_edit_adding_a_new_error_is_still_blocked_and_named_new() {
     assert!(
         refusal.contains("caused by the task's changes"),
         "the refusal names the error as new: {}",
-        &refusal[refusal.find("FailingTestsAccepted").unwrap_or(0)..]
+        refusal[refusal.find("FailingTestsAccepted").unwrap_or(0)..]
             .chars()
             .take(600)
             .collect::<String>()
