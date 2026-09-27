@@ -1658,6 +1658,32 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
 
+    // The lifecycle views only read the event log: no configuration needed,
+    // so they work even when the configuration is invalid.
+    match &cli.command {
+        Some(Commands::Tasks { limit }) => {
+            let log = crate::lifecycle::EventLog::default_location();
+            print!(
+                "{}",
+                crate::lifecycle::projection::tasks_command_output(&log, *limit)
+            );
+            return Ok(());
+        }
+        Some(Commands::Task {
+            command: args::TaskCommands::Show { id },
+        }) => {
+            let log = crate::lifecycle::EventLog::default_location();
+            return match crate::lifecycle::projection::task_show_output(&log, id) {
+                Ok(out) => {
+                    print!("{out}");
+                    Ok(())
+                }
+                Err(msg) => Err(anyhow::anyhow!(msg)),
+            };
+        }
+        _ => {}
+    }
+
     // Emergency killswitch management must run BEFORE Config::load so an operator
     // can check, trip, or reset the killswitch even when configuration is invalid.
     if let Some(Commands::Killswitch { command }) = &cli.command {
@@ -6383,6 +6409,10 @@ max_recovery_attempts = 3
 
         Commands::Killswitch { .. } => {
             unreachable!("Killswitch command handled before Config::load");
+        }
+
+        Commands::Tasks { .. } | Commands::Task { .. } => {
+            unreachable!("lifecycle views are handled before Config::load");
         }
 
         Commands::Skill { command } => {

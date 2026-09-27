@@ -637,6 +637,31 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: SkillCommands,
     },
+
+    /// List recent tasks from the lifecycle event log
+    #[command(display_order = 29)]
+    Tasks {
+        /// How many tasks to show, most recently active first
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+
+    /// Inspect one task's recorded lifecycle
+    #[command(display_order = 30)]
+    Task {
+        #[command(subcommand)]
+        command: TaskCommands,
+    },
+}
+
+/// Subcommands of `selfware task`.
+#[derive(Subcommand, Clone, Debug)]
+pub(crate) enum TaskCommands {
+    /// Show a task's recorded transitions (timeline)
+    Show {
+        /// The task id, or a unique prefix of it (see `selfware tasks`)
+        id: String,
+    },
 }
 
 /// Subcommands of `selfware killswitch`.

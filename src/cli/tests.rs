@@ -2884,3 +2884,20 @@ fn failure_lines_do_not_repeat_the_task_failed_prefix() {
     assert!(rendered.contains("outcome: failed — boom"), "{rendered}");
     assert!(!rendered.contains("Task failed: Task failed"), "{rendered}");
 }
+
+#[test]
+fn parses_the_lifecycle_views() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from(["selfware", "tasks", "--limit", "3"]).unwrap();
+    assert!(matches!(cli.command, Some(Commands::Tasks { limit: 3 })));
+    let cli = Cli::try_parse_from(["selfware", "tasks"]).unwrap();
+    assert!(matches!(cli.command, Some(Commands::Tasks { limit: 20 })));
+    let cli = Cli::try_parse_from(["selfware", "task", "show", "abc"]).unwrap();
+    match cli.command {
+        Some(Commands::Task {
+            command: args::TaskCommands::Show { id },
+        }) => assert_eq!(id, "abc"),
+        other => panic!("unexpected {other:?}"),
+    }
+    assert!(Cli::try_parse_from(["selfware", "task", "show"]).is_err());
+}
