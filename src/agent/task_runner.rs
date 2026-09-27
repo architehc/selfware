@@ -3369,12 +3369,13 @@ impl Agent {
                     }
                     // A headless confirmation stop stays TYPED to the caller
                     // (exit code 6, `RunEnd::Failed`): the loop state only
-                    // carried its text, and a plain bail exited 1.
+                    // carried its text, and a plain bail exited 1. Returned
+                    // bare: its message already is the reason, and a context
+                    // layer printed it twice ("Caused by: …").
                     if let Some(tool_name) = self.confirmation_stop_tool.take() {
-                        return Err(anyhow::Error::new(
-                            crate::errors::AgentError::ConfirmationRequired { tool_name },
-                        )
-                        .context(format!("Agent failed: {reason}")));
+                        return Err(
+                            crate::errors::AgentError::ConfirmationRequired { tool_name }.into(),
+                        );
                     }
                     anyhow::bail!("Agent failed: {}", reason);
                 }
