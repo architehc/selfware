@@ -1244,6 +1244,7 @@ fn sample_summary() -> crate::agent::RunSummary {
         context_summaries_disabled_after: None,
         budgets: crate::agent::RunBudgets::default(),
         hit_iteration_cap: false,
+        resources: None,
     }
 }
 
@@ -2966,4 +2967,16 @@ fn run_budgets_treat_zero_as_unset_like_the_enforcer() {
         crate::agent::RunBudgets::from_config(&agent),
         crate::agent::RunBudgets::default()
     );
+}
+
+// ── resource teardown line ──
+
+#[test]
+fn run_summary_names_resources_only_when_the_task_owned_some() {
+    let without = render_run_summary(&sample_summary(), None);
+    assert!(!without.contains("resources:"));
+    let mut summary = sample_summary();
+    summary.resources = Some("resources: 2 released, 1 leaked (pid 9: still running)".into());
+    let with = render_run_summary(&summary, None);
+    assert!(with.contains("resources: 2 released, 1 leaked (pid 9: still running)"));
 }

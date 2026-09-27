@@ -7201,6 +7201,10 @@ fn render_run_summary_for(
         None => "not performed".to_string(),
     };
     lines.push(format!("verification: {verification}"));
+    // Only when the task owned containers/processes/sessions.
+    if let Some(resources) = &summary.resources {
+        lines.push(resources.clone());
+    }
     match summary.vision_calls {
         Some((0, failed)) => lines.push(format!(
             "visual check: not performed — vision tools failed {failed}× (image content not verified)"

@@ -1001,6 +1001,9 @@ pub struct Agent {
     /// commands deliberately do NOT reset it — the spiral pattern includes
     /// working diagnostic reads.
     failed_install_streak: usize,
+    /// "resources: N released, M leaked (…)" from the last task's resource
+    /// teardown; `None` when the task owned no resources.
+    pub(crate) resource_teardown_summary: Option<String>,
     /// Last-green workspace snapshot (best-snapshot restore): updated whenever
     /// the model's own verification passes, restored when the run fails so a
     /// broken end state never gets submitted over a working one.
@@ -1923,6 +1926,7 @@ To call a tool, use this EXACT XML structure:
             input_census_suspicious: Vec::new(),
             leak_check_scanned_mutation_sequence: std::sync::atomic::AtomicUsize::new(usize::MAX),
             failed_install_streak: 0,
+            resource_teardown_summary: None,
             best_snapshot: best_snapshot::AgentSnapshot::default(),
             last_green_verification: None,
             commit_mode_65_fired: std::sync::atomic::AtomicBool::new(false),

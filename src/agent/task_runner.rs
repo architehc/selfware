@@ -568,6 +568,9 @@ pub struct RunSummary {
     pub budgets: RunBudgets,
     /// The loop counter reached the (possibly extended) iteration cap.
     pub hit_iteration_cap: bool,
+    /// Resource teardown line ("resources: N released, M leaked (…)");
+    /// `None` when the task owned no containers/processes/sessions.
+    pub resources: Option<String>,
 }
 
 /// The hard run budgets in force, as configured (`None` = not set; a
@@ -627,6 +630,7 @@ impl Agent {
             budgets: RunBudgets::from_config(&self.config.agent),
             hit_iteration_cap: self.loop_control.current_iteration()
                 >= self.loop_control.max_iterations(),
+            resources: self.resource_teardown_summary.clone(),
         }
     }
 
@@ -970,11 +974,71 @@ impl Agent {
         // every other workspace-relative resolution follows the agent's root
         // (e.g. an entered worktree) instead of the process-global cwd.
         let root = self.tools.workspace_root().clone();
-        let result = crate::tools::workspace_root::scope(root, self.run_task_in_root(task)).await;
-        // Teardown of owned resources hooks in here (the effects of the
-        // terminal transition).
+        // Every resource a tool spawns during the task is owned by it (the
+        // task id is filled in once the checkpoint exists) and drained when
+        // the run ends — success, failure, interrupt or cancel alike.
+        // (Boxed: in debug builds every wrapper layer would otherwise hold
+        // another stack copy of the very large task future.)
+        let owner = crate::resources::Owner::new();
+        let result = crate::resources::context::scope(
+            owner.clone(),
+            Box::pin(crate::tools::workspace_root::scope(
+                root,
+                self.run_task_in_root(task),
+            )),
+        )
+        .await;
         let _effects = self.lifecycle_finish(&result);
+        self.teardown_task_resources(&owner).await;
         result
+    }
+
+    /// Drain everything this session owns (REPL exit), printing the summary.
+    pub(crate) async fn teardown_session_resources(&self) {
+        let registry = crate::resources::ResourceRegistry::global();
+        let policy = crate::resources::TeardownPolicy::with_deadline(
+            std::time::Duration::from_secs(self.config.resources.teardown_deadline_secs),
+        );
+        let report = crate::resources::teardown::teardown_session(
+            registry,
+            &crate::resources::SystemDriver::default(),
+            policy,
+        )
+        .await;
+        if let Some(line) = report.summary_line() {
+            cli_println!("{}", line);
+        }
+    }
+
+    /// Drain everything the finished task owns (see `crate::resources`)
+    /// and keep the summary line for the run summary.
+    pub(crate) async fn teardown_task_resources(&mut self, owner: &crate::resources::Owner) {
+        self.resource_teardown_summary = None;
+        let Some(task) = owner.task() else {
+            return;
+        };
+        let registry = crate::resources::ResourceRegistry::global();
+        if registry.owned_by(&task).is_empty() {
+            return;
+        }
+        let policy = crate::resources::TeardownPolicy::with_deadline(
+            std::time::Duration::from_secs(self.config.resources.teardown_deadline_secs),
+        );
+        let report = crate::resources::teardown::teardown_task(
+            registry,
+            &crate::resources::SystemDriver::default(),
+            &task,
+            policy,
+        )
+        .await;
+        if let Some(line) = report.summary_line() {
+            if report.leaked.is_empty() {
+                tracing::info!("{line}");
+            } else {
+                warn!("{line}");
+            }
+            self.resource_teardown_summary = Some(line);
+        }
     }
 
     async fn run_task_in_root(&mut self, task: &str) -> Result<()> {
@@ -1109,6 +1173,7 @@ impl Agent {
         self.current_checkpoint = None;
         if self.current_checkpoint.is_none() {
             let task_id = uuid::Uuid::new_v4().to_string();
+            crate::resources::context::set_current_task(task_id.clone());
             let mut checkpoint = TaskCheckpoint::new(task_id, task.to_string());
             // Baseline for the completion gate's committed-work fallback:
             // only commits made AFTER this point (`<baseline>..HEAD`) are
@@ -1599,14 +1664,26 @@ impl Agent {
 
     /// Continue execution from current state (for resuming tasks)
     pub async fn continue_execution(&mut self) -> Result<()> {
-        let result = self.continue_execution_segment().await;
+        // A resumed task owns what it spawns, like `run_task`, and is drained
+        // when it ends.
+        let owner = match self.current_checkpoint.as_ref() {
+            Some(cp) => crate::resources::Owner::for_task(cp.task_id.clone()),
+            None => crate::resources::Owner::new(),
+        };
+        let result = crate::resources::context::scope(
+            owner.clone(),
+            Box::pin(self.continue_execution_segment()),
+        )
+        .await;
         let _effects = self.lifecycle_finish(&result);
+        self.teardown_task_resources(&owner).await;
         result
     }
 
-    /// `continue_execution` without recording the run's end on the task
-    /// lifecycle: an auto-continue chain runs inside the outer run, which
-    /// records the outcome once.
+    /// One continuation segment in this agent's workspace root, without
+    /// recording the run's end on the task lifecycle and without resource
+    /// teardown: an auto-continue chain runs inside the outer run, which
+    /// records the outcome and drains owned resources once at the real end.
     async fn continue_execution_segment(&mut self) -> Result<()> {
         // See `run_task`: resolve against this agent's workspace root.
         let root = self.tools.workspace_root().clone();

@@ -2421,3 +2421,55 @@ async fn a_failing_synthesis_is_tried_at_most_the_cap_per_task() {
     assert!(last_err.contains("synthesis disabled"), "{last_err}");
     server.stop().await;
 }
+
+/// A background process started by a task is owned by that task and drained
+/// when the run ends; the run summary names the outcome.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_run_task_drains_task_owned_background_process() {
+    let _g = crate::test_support::ExecGuard::hold();
+    let proc_id = format!("teardown-probe-{}", uuid::Uuid::new_v4().simple());
+    let server = MockLlmServer::builder()
+        .with_response(format!(
+            r#"<tool>
+<name>process_start</name>
+<arguments>{{"id":"{proc_id}","command":"sleep","args":["30"]}}</arguments>
+</tool>"#
+        ))
+        .with_response("Task complete: started the sleeper.")
+        .build()
+        .await;
+
+    let config = mock_agent_config(format!("{}/v1", server.url()), false);
+    let mut agent = Agent::new(config).await.unwrap();
+    let _ = agent
+        .run_task("Start a background sleeper and finish")
+        .await;
+
+    let task_id = agent.current_checkpoint.as_ref().unwrap().task_id.clone();
+    let registry = crate::resources::ResourceRegistry::global();
+    let entry = registry
+        .snapshot()
+        .resources
+        .into_iter()
+        .find(|r| r.label.contains(&proc_id))
+        .expect("process_start registered the process");
+    assert_eq!(
+        entry.owner_task, task_id,
+        "owned by the task that started it"
+    );
+    assert_eq!(entry.state, crate::resources::ResourceState::Released);
+    let crate::resources::ResourceHandle::Process { pid, .. } = entry.handle else {
+        panic!("process handle expected");
+    };
+    assert_eq!(
+        crate::resources::driver::probe_pid(pid, None),
+        crate::resources::Probe::Gone,
+        "the sleeper is really gone"
+    );
+    let summary = agent.run_summary();
+    assert_eq!(
+        summary.resources.as_deref(),
+        Some("resources: 1 released, 0 leaked")
+    );
+}

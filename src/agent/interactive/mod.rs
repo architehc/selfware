@@ -1725,7 +1725,9 @@ impl Agent {
             }
         }
 
-        // Clean up any managed background processes before exiting
+        // Session end: drain everything this session still owns (kept
+        // resources included), then sweep any unregistered managed process.
+        self.teardown_session_resources().await;
         crate::tools::process::cleanup_all_processes().await;
 
         Ok(())
@@ -1738,6 +1740,9 @@ impl Agent {
             self.esc_pause_ack_token(),
         );
         let result = self.run_task(task).await;
+        if let Some(line) = &self.resource_teardown_summary {
+            cli_println!("{}", line);
+        }
         let queued = coalesce_pending_messages(esc_guard.stop().await);
         // Add messages typed during generation to the pending queue
         for msg in queued {
@@ -2223,6 +2228,10 @@ impl Agent {
                 .await
             {
                 Ok(out) if out.status.success() => {
+                    crate::resources::record_worktree(
+                        std::path::Path::new(&worktree_path),
+                        "/worktree",
+                    );
                     // Move this agent's workspace root into the worktree —
                     // the same root the enter_worktree/exit_worktree tools
                     // move. The process cwd is never changed, so no other
@@ -3318,7 +3327,9 @@ impl Agent {
             }
         }
 
-        // Clean up any managed background processes before exiting
+        // Session end: drain everything this session still owns (kept
+        // resources included), then sweep any unregistered managed process.
+        self.teardown_session_resources().await;
         crate::tools::process::cleanup_all_processes().await;
 
         Ok(())

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Resource management configuration
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourcesConfig {
     #[serde(default)]
     pub gpu: GpuConfig,
@@ -11,6 +11,26 @@ pub struct ResourcesConfig {
     pub disk: DiskConfig,
     #[serde(default)]
     pub quotas: ResourceQuotas,
+    /// Seconds a task-owned container/process/PTY gets to stop politely at
+    /// task end before it is force-stopped (see `crate::resources`).
+    #[serde(default = "default_teardown_deadline_secs")]
+    pub teardown_deadline_secs: u64,
+}
+
+fn default_teardown_deadline_secs() -> u64 {
+    10
+}
+
+impl Default for ResourcesConfig {
+    fn default() -> Self {
+        Self {
+            gpu: GpuConfig::default(),
+            memory: MemoryConfig::default(),
+            disk: DiskConfig::default(),
+            quotas: ResourceQuotas::default(),
+            teardown_deadline_secs: default_teardown_deadline_secs(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
