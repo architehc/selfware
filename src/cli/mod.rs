@@ -5215,6 +5215,21 @@ async fn handle_command(
                                 }
                             }
                             println!();
+
+                            // Same contract as the SWL path: a failed
+                            // workflow must not exit zero (AGENTS.md §3).
+                            if result.status == crate::workflows::WorkflowStatus::Failed {
+                                anyhow::bail!(
+                                    "workflow '{}' failed after {}ms{}",
+                                    workflow_name,
+                                    result.duration_ms,
+                                    result
+                                        .stop_reason
+                                        .as_ref()
+                                        .map(|reason| format!(" — stopped: {reason}"))
+                                        .unwrap_or_default()
+                                );
+                            }
                         }
                         None => anyhow::bail!(
                             "Unsupported workflow file '{}'. Use .swl, .yaml, or .yml",
@@ -7334,13 +7349,21 @@ async fn run_local_tests(pattern: &str, format: &str) -> Result<()> {
     Ok(())
 }
 
+/// Directory whose YAML workflows are loaded next to `path`. A bare file
+/// name has the EMPTY parent `""`, which walkdir cannot open ("IO error for
+/// operation on : No such file or directory" for `workflow run wf.yaml`);
+/// that means the current directory.
+fn related_workflow_dir(path: &std::path::Path) -> &std::path::Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."))
+}
+
 fn load_related_yaml_workflows(
     executor: &mut WorkflowExecutor,
     path: &std::path::Path,
 ) -> Result<()> {
-    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-
-    for entry in walkdir::WalkDir::new(dir).max_depth(1) {
+    for entry in walkdir::WalkDir::new(related_workflow_dir(path)).max_depth(1) {
         let entry = entry?;
         if !entry.file_type().is_file() {
             continue;

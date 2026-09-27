@@ -85,6 +85,22 @@ fn take_prefix_chars_empty_string() {
     assert_eq!(take_prefix_chars("", 5), "");
 }
 
+// ── related_workflow_dir tests ──
+
+#[test]
+fn related_workflow_dir_of_a_bare_file_name_is_the_current_dir() {
+    assert_eq!(related_workflow_dir(Path::new("wf.yaml")), Path::new("."));
+    assert_eq!(related_workflow_dir(Path::new("./wf.yaml")), Path::new("."));
+    assert_eq!(
+        related_workflow_dir(Path::new("flows/wf.yaml")),
+        Path::new("flows")
+    );
+    assert_eq!(
+        related_workflow_dir(Path::new("/abs/wf.yml")),
+        Path::new("/abs")
+    );
+}
+
 // ── default_workflow_name tests ──
 
 #[test]
