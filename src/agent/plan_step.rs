@@ -192,6 +192,18 @@ impl Agent {
                 .context("No response from model")?
                 .message
         };
+        // A planning call counts under its workload (run summary); the plan
+        // call also discards any classification left over from a previous
+        // task's last tool batch.
+        // `None` for a non-workload call (the step-down retry): no quota was
+        // applied, so it counts as planning and is never escalated.
+        let quota_kind = match thinking {
+            ThinkingMode::Workload(kind) => Some(kind),
+            _ => None,
+        };
+        let workload = quota_kind.unwrap_or(crate::config::TurnWorkload::Planning);
+        self.pending_turn_workload = None;
+        self.record_turn_workload(workload, plan_meta.completion_tokens);
         // Same contract as the execution turn (assistant_response.rs): a
         // planning response cut off by the completion budget whose only output
         // is a reasoning trace is TRUNCATED, not a plan — fail typed so the
@@ -225,6 +237,35 @@ impl Agent {
                 }),
             );
             return Err(err);
+        }
+
+        // Same escalation as the execution turn
+        // (`request_step_completion_for_workload`): a planning reply made
+        // with thinking OFF that carries no tool call is about to be the
+        // answer, so it is discarded and the plan is re-asked once under the
+        // synthesis quota. Nothing from this reply has entered the history.
+        if quota_kind.is_some_and(|k| k != crate::config::TurnWorkload::Synthesis)
+            && self.config.workloads.get(workload).enable_thinking == Some(false)
+            && crate::api::tool_calling::extract_tool_calls(
+                &assistant_msg,
+                self.effective_native_fc(),
+            )
+            .is_empty()
+            && !self.is_cancelled()
+        {
+            let escalate_to = crate::config::TurnWorkload::Synthesis;
+            self.workload_turns.record_escalation(workload);
+            let detail = format!(
+                "{workload} turn (thinking off) answered without a tool call ({} chars); \
+                 re-asking once under the {escalate_to} quota before it becomes the answer",
+                assistant_msg.content.text().chars().count()
+            );
+            info!("{detail}");
+            self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+                decision: "workload_escalated".to_string(),
+                detail,
+            });
+            return Box::pin(self.plan_with_thinking(ThinkingMode::Workload(escalate_to))).await;
         }
 
         let content = &assistant_msg.content;

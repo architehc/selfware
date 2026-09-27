@@ -121,6 +121,8 @@ async fn main() -> Result<()> {
         debug: Default::default(),
         matched_profile: None,
         matched_profile_applied: Vec::new(),
+        workloads: Default::default(),
+        workload_overrides: Vec::new(),
         sources: Default::default(),
     };
 

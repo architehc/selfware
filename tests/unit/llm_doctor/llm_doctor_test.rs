@@ -1376,3 +1376,63 @@ fn recommendations_box_has_straight_borders_for_long_rows() {
     );
     assert!(lines.iter().any(|l| l.contains("Context (from /models)")));
 }
+
+/// Step 0b shows the active per-workload table with its sources and the
+/// profile's measured endpoint quotas, labelled `measured:`.
+#[test]
+fn quota_report_lists_workloads_and_measured_quotas() {
+    let mut config = Config {
+        model: "qwen38-flash-next".to_string(),
+        ..Default::default()
+    };
+    let profile = crate::config::match_profile(&config.model).unwrap();
+    crate::config::apply_model_defaults_profile(
+        &mut config,
+        &profile,
+        &crate::config::UserExplicitFields::default(),
+    );
+    config.matched_profile = Some(profile.name.to_string());
+    let lines = quota_report_lines(&config);
+    let text = lines.join("\n");
+    assert!(text.contains("planning    thinking off ["), "{text}");
+    assert!(text.contains("max_tokens 12288 ["), "{text}");
+    assert!(text.contains("mechanical  thinking on ["), "{text}");
+    assert!(text.contains("synthesis   thinking on ["), "{text}");
+    assert!(text.contains("max_tokens 16384 ["), "{text}");
+    assert!(text.contains("profile qwen38 endpoint quotas:"), "{text}");
+    assert!(
+        text.contains("context_length = 163840 — measured:"),
+        "{text}"
+    );
+    assert!(
+        text.contains("thinking budget knobs = none honored"),
+        "{text}"
+    );
+
+    // An extra_body pin is reported, never shown as an active toggle.
+    let mut pinned = Config {
+        model: "qwen38-flash-next".to_string(),
+        ..Default::default()
+    };
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "chat_template_kwargs".into(),
+        serde_json::json!({"enable_thinking": true}),
+    );
+    pinned.extra_body = Some(extra);
+    let applied = crate::config::apply_model_defaults_profile(
+        &mut pinned,
+        &profile,
+        &crate::config::UserExplicitFields::default(),
+    );
+    pinned.workload_overrides = applied.workload_overrides;
+    let text = quota_report_lines(&pinned).join("\n");
+    assert!(
+        text.contains("mechanical  thinking as extra_body"),
+        "{text}"
+    );
+    assert!(
+        text.contains("! per-turn enable_thinking not applied"),
+        "{text}"
+    );
+}

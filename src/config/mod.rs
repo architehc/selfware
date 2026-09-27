@@ -40,7 +40,8 @@ pub use debug::DebugConfig;
 pub use model::*;
 pub use model_profiles::{
     apply_profile as apply_model_defaults_profile, builtin_profiles, match_profile, AppliedFields,
-    ModelDefaultsProfile, UserExplicitFields,
+    MeasuredQuota, ModelDefaultsProfile, TurnWorkload, UserExplicitFields, WorkloadQuota,
+    WorkloadQuotas,
 };
 pub use prompt_profiles::PromptProfile;
 #[cfg(feature = "bench-harness")]
@@ -189,6 +190,19 @@ pub struct Config {
     #[serde(default)]
     pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
 
+    /// Per-turn quotas by workload kind (planning / mechanical / edit /
+    /// synthesis): `enable_thinking` and `max_tokens` for that kind of turn
+    /// only. Unset fields are filled from the matched model profile's
+    /// measured table; see [`model_profiles::WorkloadQuotas`] for precedence.
+    ///
+    /// ```toml
+    /// [workloads.mechanical]
+    /// enable_thinking = false
+    /// max_tokens = 8192
+    /// ```
+    #[serde(default)]
+    pub workloads: model_profiles::WorkloadQuotas,
+
     /// QA framework configuration for multi-language verification.
     #[serde(default)]
     pub qa: crate::testing::qa_profiles::QaConfig,
@@ -259,6 +273,11 @@ pub struct Config {
     /// `None` or when the user explicitly set every relevant field.
     #[serde(skip)]
     pub matched_profile_applied: Vec<String>,
+
+    /// Profile workload quotas NOT applied because an explicit user setting
+    /// holds for every turn (see `AppliedFields::workload_overrides`).
+    #[serde(skip)]
+    pub workload_overrides: Vec<String>,
 
     /// Provenance map: dotted field name → where the value came from.
     /// Populated by `Config::load`. Not persisted (transient runtime metadata).
@@ -402,6 +421,8 @@ impl std::fmt::Debug for Config {
             .field("plan_mode", &self.plan_mode)
             .field("matched_profile", &self.matched_profile)
             .field("matched_profile_applied", &self.matched_profile_applied)
+            .field("workloads", &self.workloads)
+            .field("workload_overrides", &self.workload_overrides)
             .field("sources", &self.sources)
             .finish()
     }
@@ -431,6 +452,7 @@ impl Default for Config {
             debug: DebugConfig::default(),
             models: HashMap::new(),
             extra_body: None,
+            workloads: model_profiles::WorkloadQuotas::default(),
             qa: crate::testing::qa_profiles::QaConfig::default(),
             mcp: crate::mcp::McpConfig::default(),
             hooks: Vec::new(),
@@ -442,6 +464,7 @@ impl Default for Config {
             plan_mode: false,
             matched_profile: None,
             matched_profile_applied: Vec::new(),
+            workload_overrides: Vec::new(),
             sources: ConfigSources::new(),
         }
     }

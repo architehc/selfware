@@ -1253,6 +1253,7 @@ fn sample_summary() -> crate::agent::RunSummary {
         finish_stall_outcome: None,
         finish_stall_detail: None,
         review_coverage: None,
+        workloads: Vec::new(),
     }
 }
 
@@ -3233,6 +3234,26 @@ fn render_run_summary_says_a_capped_run_had_finished_verified_work() {
     let rendered = render_run_summary(&summary, None);
     assert!(
         !rendered.contains("no final answer was given"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn render_run_summary_lists_workload_quotas_only_when_set() {
+    let rendered = render_run_summary(&sample_summary(), None);
+    assert!(!rendered.contains("workload quotas"), "{rendered}");
+    let mut summary = sample_summary();
+    summary.workloads = vec![
+        "mechanical: 12 turns, 467 completion tokens — thinking off, max_tokens 12288".to_string(),
+        "! per-turn enable_thinking not applied: extra_body pins it".to_string(),
+    ];
+    let rendered = render_run_summary(&summary, None);
+    assert!(
+        rendered.contains("workload quotas:\n  mechanical: 12 turns"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("  ! per-turn enable_thinking"),
         "{rendered}"
     );
 }

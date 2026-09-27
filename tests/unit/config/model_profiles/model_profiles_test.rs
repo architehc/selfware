@@ -227,7 +227,9 @@ fn apply_profile_respects_explicit_user_config() {
         max_streams: false,
         max_global: false,
         max_call_secs: false,
+        context_content_ratio: false,
         extra_body_keys: vec!["presence_penalty".to_string()],
+        workload_max_tokens: None,
     };
     let applied = apply_profile(&mut config, &profile, &user_explicit);
 
@@ -259,8 +261,11 @@ fn applied_fields_render_is_stable() {
         max_streams: true,
         max_global: true,
         max_call_secs: false,
+        context_content_ratio: false,
         max_call_secs_scaled_for_max_tokens: None,
         extra_body_keys: vec!["a".to_string(), "b".to_string()],
+        workload_fields: Vec::new(),
+        workload_overrides: Vec::new(),
     };
     let s = af.render();
     assert!(s.contains("native_function_calling"));
@@ -435,4 +440,162 @@ fn every_profile_with_both_fields_scales_its_call_cap() {
             }
         }
     }
+}
+
+// ── Per-workload quotas ─────────────────────────────────────────────────────
+
+/// With nothing set by the user, the qwen38 profile's measured table fills
+/// every `[workloads]` field it defines, and names them as applied.
+#[test]
+fn qwen38_workload_table_fills_unset_workloads() {
+    let mut config = Config::default();
+    let profile = match_profile("qwen38-flash-next").unwrap();
+    let applied = apply_profile(&mut config, &profile, &UserExplicitFields::default());
+    assert_eq!(config.workloads, QWEN38_WORKLOAD_QUOTAS);
+    assert!(applied.workload_overrides.is_empty());
+    assert!(applied
+        .workload_fields
+        .contains(&"workloads.planning.enable_thinking".to_string()));
+    assert_eq!(config.workloads.planning.enable_thinking, Some(false));
+    assert_eq!(config.workloads.mechanical.enable_thinking, Some(true));
+    assert_eq!(config.workloads.synthesis.enable_thinking, Some(true));
+    assert_eq!(config.workloads.synthesis.max_tokens, Some(16_384));
+}
+
+/// A user `extra_body` `enable_thinking` pin holds for EVERY turn: the
+/// profile's per-turn toggle is not applied, and that is reported.
+/// Per-turn max_tokens still applies (the pin says nothing about it).
+#[test]
+fn extra_body_thinking_pin_overrides_profile_per_turn_thinking() {
+    let mut config = Config::default();
+    let mut extra = Map::new();
+    extra.insert(
+        "chat_template_kwargs".to_string(),
+        json!({"enable_thinking": true}),
+    );
+    config.extra_body = Some(extra);
+    let profile = match_profile("qwen38-flash-next").unwrap();
+    let user_explicit = UserExplicitFields {
+        extra_body_keys: vec!["chat_template_kwargs".to_string()],
+        ..Default::default()
+    };
+    let applied = apply_profile(&mut config, &profile, &user_explicit);
+    for kind in TurnWorkload::ALL {
+        assert_eq!(config.workloads.get(kind).enable_thinking, None, "{kind}");
+        assert_eq!(
+            config.workloads.get(kind).max_tokens,
+            QWEN38_WORKLOAD_QUOTAS.get(kind).max_tokens,
+            "{kind}"
+        );
+    }
+    assert!(applied
+        .workload_overrides
+        .iter()
+        .any(|n| n.contains("enable_thinking")));
+}
+
+/// An explicit top-level max_tokens holds for every turn; an explicit
+/// `[workloads.<kind>]` value wins over both the profile and the pins.
+#[test]
+fn explicit_settings_win_over_the_profile_workload_table() {
+    let toml = r#"
+model = "qwen38-flash-next"
+max_tokens = 4096
+
+[extra_body.chat_template_kwargs]
+enable_thinking = true
+
+[workloads.mechanical]
+enable_thinking = false
+max_tokens = 2048
+"#;
+    let user_explicit = UserExplicitFields::from_toml(toml);
+    assert_eq!(user_explicit.workload_max_tokens, Some(2048));
+    let mut config: Config = toml::from_str(toml).unwrap();
+    let profile = match_profile("qwen38-flash-next").unwrap();
+    let applied = apply_profile(&mut config, &profile, &user_explicit);
+    assert_eq!(
+        config.workloads.mechanical,
+        WorkloadQuota {
+            enable_thinking: Some(false),
+            max_tokens: Some(2048),
+        }
+    );
+    assert_eq!(config.workloads.synthesis, WorkloadQuota::default());
+    assert!(
+        applied.workload_fields.is_empty(),
+        "{:?}",
+        applied.workload_fields
+    );
+    assert!(applied
+        .workload_overrides
+        .iter()
+        .any(|n| n.contains("enable_thinking")));
+}
+
+/// The per-call wall-time cap is sized for the largest completion any turn
+/// may ask for: an explicit workload max_tokens above the profile's scales
+/// it like a raised top-level max_tokens.
+#[test]
+fn workload_max_tokens_above_profile_scales_the_call_cap() {
+    let toml = r#"
+model = "qwen38-flash-next"
+
+[workloads.synthesis]
+max_tokens = 49152
+"#;
+    let user_explicit = UserExplicitFields::from_toml(toml);
+    let mut config: Config = toml::from_str(toml).unwrap();
+    let profile = match_profile("qwen38-flash-next").unwrap();
+    let applied = apply_profile(&mut config, &profile, &user_explicit);
+    // ceil(1628 * 49152 / 24576) = 3256
+    assert_eq!(config.agent.max_call_secs, Some(3_256));
+    assert_eq!(applied.max_call_secs_scaled_for_max_tokens, Some(49_152));
+}
+
+/// Rule-5 sweep: no built-in workload table asks for more completion than
+/// its profile's max_tokens, so the profile's max_call_secs (sized for that
+/// max_tokens) covers every turn kind.
+#[test]
+fn builtin_workload_tables_stay_within_profile_max_tokens() {
+    for p in builtin_profiles() {
+        let Some(table) = p.workload_quotas else {
+            continue;
+        };
+        if let (Some(worst), Some(pm)) = (table.max_max_tokens(), p.max_tokens) {
+            assert!(worst <= pm, "{}: {worst} > {pm}", p.name);
+        }
+        assert!(
+            !p.measured.is_empty(),
+            "{}: table without measurements",
+            p.name
+        );
+    }
+}
+
+/// qwen38's compaction point is per endpoint (0.80, from measured per-turn
+/// prompt growth); an explicit `[agent] context_content_ratio` still wins.
+#[test]
+fn qwen38_compaction_ratio_applies_unless_set_explicitly() {
+    let mut config = Config::default();
+    let profile = match_profile("qwen38-flash-next").unwrap();
+    let applied = apply_profile(&mut config, &profile, &UserExplicitFields::default());
+    assert!(applied.context_content_ratio);
+    assert!((config.agent.context_content_ratio - 0.80).abs() < f32::EPSILON);
+    assert!(applied.render().contains("agent.context_content_ratio"));
+
+    let toml = "model = \"qwen38-flash-next\"\n[agent]\ncontext_content_ratio = 0.6\n";
+    let user_explicit = UserExplicitFields::from_toml(toml);
+    let mut config: Config = toml::from_str(toml).unwrap();
+    let applied = apply_profile(&mut config, &profile, &user_explicit);
+    assert!(!applied.context_content_ratio);
+    assert!((config.agent.context_content_ratio - 0.6).abs() < f32::EPSILON);
+    // Other profiles keep the global default.
+    let mut config = Config::default();
+    apply_profile(
+        &mut config,
+        &match_profile("qwen3.6-27b").unwrap(),
+        &UserExplicitFields::default(),
+    );
+    assert!((config.agent.context_content_ratio - 0.75).abs() < f32::EPSILON);
 }

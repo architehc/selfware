@@ -382,6 +382,11 @@ pub enum ThinkingMode {
     /// switched off where no effort can be lowered (see
     /// [`client::apply_reasoning_step_down`]). `max_tokens` is untouched.
     StepDown,
+    /// A main-loop turn of the given kind: built as for `Enabled`, then the
+    /// session's `[workloads.<kind>]` quota (`config.workloads`, filled from
+    /// the matched model profile) sets this request's
+    /// `chat_template_kwargs.enable_thinking` and `max_tokens`.
+    Workload(crate::config::TurnWorkload),
 }
 
 #[cfg(test)]

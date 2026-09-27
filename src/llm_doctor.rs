@@ -195,6 +195,9 @@ pub struct DoctorReport {
     pub capabilities: Vec<DoctorCheckResult>,
     /// `/get_server_info` capacity comparisons vs the configured model (Step 8).
     pub server_capacity_checks: Vec<DoctorCheckResult>,
+    /// Active per-workload quota table and the matched profile's measured
+    /// endpoint quotas (Step 0b), as display lines.
+    pub quota_table: Vec<String>,
     /// `true` if any check had a FAIL outcome.
     pub had_failures: bool,
 }
@@ -214,6 +217,7 @@ impl DoctorReport {
             streaming_tool_call: None,
             capabilities: Vec::new(),
             server_capacity_checks: Vec::new(),
+            quota_table: Vec::new(),
             had_failures: false,
         }
     }
@@ -297,6 +301,20 @@ async fn run_llm_doctor_inner(config: &Config) -> Result<(DoctorReport, bool)> {
         });
     }
     println!();
+
+    // Quotas this session runs under — the per-workload table (thinking /
+    // max_tokens per kind of turn) and the matched profile's measured
+    // endpoint quotas. Static config, printed before any probe so it shows
+    // even when the endpoint is down.
+    let quota_lines = quota_report_lines(config);
+    if !quota_lines.is_empty() {
+        println!("{}", "Step 0b: Endpoint Quotas".bold().underline());
+        for line in &quota_lines {
+            println!("  {line}");
+        }
+        println!();
+        report.quota_table = quota_lines;
+    }
 
     // Step 1: Detect Backend
     println!("{}", "Step 1: Detecting Backend".bold().underline());
@@ -644,6 +662,26 @@ async fn run_llm_doctor_inner(config: &Config) -> Result<(DoctorReport, bool)> {
     report.had_failures = had_fail;
 
     Ok((report, had_fail))
+}
+
+/// Step 0b lines: the active per-workload table, then the matched profile's
+/// measured endpoint quotas (labelled `measured:` with their basis).
+fn quota_report_lines(config: &Config) -> Vec<String> {
+    let mut lines = Vec::new();
+    let workloads = crate::config::model_profiles::workload_quota_lines(config);
+    if !workloads.is_empty() {
+        lines.push("per-turn quotas (workload: thinking, max_tokens [source]):".to_string());
+        lines.extend(workloads.into_iter().map(|l| format!("  {l}")));
+    }
+    let measured = crate::config::model_profiles::measured_quota_lines(config);
+    if !measured.is_empty() {
+        lines.push(format!(
+            "profile {} endpoint quotas:",
+            config.matched_profile.as_deref().unwrap_or("?")
+        ));
+        lines.extend(measured.into_iter().map(|l| format!("  {l}")));
+    }
+    lines
 }
 
 // ── Unified output + capability probe helpers ────────────────────────────────

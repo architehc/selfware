@@ -604,6 +604,11 @@ pub struct RunSummary {
     /// Review coverage (inventory line, files/lines read of the relevant
     /// set, what was not read); `None` when the task was not a code review.
     pub review_coverage: Option<super::ReviewCoverageReport>,
+    /// Main turns per workload kind with the quota each ran under, one line
+    /// per kind that ran ("mechanical: 41 turns, 5,210 completion tokens —
+    /// thinking off, max_tokens 8192"), then any profile quota an explicit
+    /// setting overrode ("! ..."). Empty when no workload quota is set.
+    pub workloads: Vec<String>,
 }
 
 /// The hard run budgets in force, as configured (`None` = not set; a
@@ -676,7 +681,48 @@ impl Agent {
             finish_stall_outcome: self.finish_stall.outcome_clause(),
             finish_stall_detail: self.finish_stall.summary_detail(),
             review_coverage: self.review_coverage(),
+            workloads: self.workload_summary_lines(),
         }
+    }
+
+    /// Run-summary lines for the per-workload quotas: only when a quota is
+    /// configured (or a profile quota was overridden), so runs without a
+    /// table print nothing new.
+    fn workload_summary_lines(&self) -> Vec<String> {
+        let workloads = &self.config.workloads;
+        if workloads.is_empty() && self.config.workload_overrides.is_empty() {
+            return Vec::new();
+        }
+        let mut lines: Vec<String> = self
+            .workload_turns
+            .rows
+            .iter()
+            .map(|(kind, turns, tokens)| {
+                let q = workloads.get(*kind);
+                let thinking = match q.enable_thinking {
+                    Some(true) => "thinking on",
+                    Some(false) => "thinking off",
+                    None => "thinking as configured",
+                };
+                let max_tokens = q.max_tokens.unwrap_or(self.config.max_tokens);
+                let noun = if *turns == 1 { "turn" } else { "turns" };
+                let escalated = match self.workload_turns.escalations(*kind) {
+                    0 => String::new(),
+                    n => format!(" ({n} re-asked as synthesis: no tool call with thinking off)"),
+                };
+                format!(
+                    "{kind}: {turns} {noun}, {tokens} completion tokens — {thinking}, \
+                     max_tokens {max_tokens}{escalated}"
+                )
+            })
+            .collect();
+        lines.extend(
+            self.config
+                .workload_overrides
+                .iter()
+                .map(|note| format!("! {note}")),
+        );
+        lines
     }
 
     /// The current task's measured usage: the per-task accumulators plus
@@ -1208,6 +1254,8 @@ impl Agent {
         self.compressor.reset_summary_state_for_task();
         self.synthesis_failures = 0;
         self.reflection_failures = 0;
+        self.workload_turns = super::turn_workload::WorkloadTurnCounts::default();
+        self.pending_turn_workload = None;
         self.leak_check_scanned_mutation_sequence
             .store(usize::MAX, std::sync::atomic::Ordering::Relaxed);
         self.input_census_note = None;
@@ -2463,7 +2511,9 @@ impl Agent {
                             let thinking = if planning_step_down.is_some() {
                                 crate::api::ThinkingMode::StepDown
                             } else {
-                                crate::api::ThinkingMode::Enabled
+                                crate::api::ThinkingMode::Workload(
+                                    crate::config::TurnWorkload::Planning,
+                                )
                             };
                             match self.plan_with_thinking(thinking).await {
                                 Ok(has_tool_calls) => break has_tool_calls,

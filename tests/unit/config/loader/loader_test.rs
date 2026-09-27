@@ -3425,6 +3425,26 @@ fn tracked_llm_selfware_design_config_uses_the_measured_qwen38_profile() {
         crate::config::default_max_iterations(),
         "iteration cap is not pinned below the default"
     );
+    // Thinking is not pinned in extra_body, so the profile's per-workload
+    // table applies (a pin would hold for every turn) and nothing was
+    // reported as overridden.
+    assert_eq!(
+        config.workloads,
+        crate::config::model_profiles::QWEN38_WORKLOAD_QUOTAS
+    );
+    assert!(
+        config.workload_overrides.is_empty(),
+        "{:?}",
+        config.workload_overrides
+    );
+    let kwargs = config
+        .extra_body
+        .as_ref()
+        .and_then(|e| e.get("chat_template_kwargs"))
+        .expect("profile kwargs");
+    assert_eq!(kwargs["enable_thinking"], true);
+    assert_eq!(kwargs["preserve_thinking"], false);
+    assert!(kwargs.get("reasoning_effort").is_none());
 }
 
 /// Classifier and redaction share one secret predicate: every value the

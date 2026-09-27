@@ -404,11 +404,20 @@ fn test_config_full_roundtrip() {
         concurrency: crate::config::ConcurrencyConfig::default(),
         matched_profile: None,
         matched_profile_applied: Vec::new(),
+        workloads: crate::config::WorkloadQuotas {
+            mechanical: crate::config::WorkloadQuota {
+                enable_thinking: Some(false),
+                max_tokens: Some(8192),
+            },
+            ..Default::default()
+        },
+        workload_overrides: Vec::new(),
         sources: crate::config::ConfigSources::new(),
     };
 
     let toml_str = toml::to_string(&config).unwrap();
     let parsed: Config = toml::from_str(&toml_str).unwrap();
+    assert_eq!(parsed.workloads, config.workloads);
 
     assert_eq!(parsed.endpoint, config.endpoint);
     assert_eq!(parsed.model, config.model);

@@ -443,6 +443,7 @@ impl Agent {
             &compressor.path_keys(),
         )?;
 
+        let workload = self.next_turn_workload();
         let StepCompletion {
             content,
             reasoning,
@@ -451,7 +452,7 @@ impl Agent {
             chat_metadata,
             streamed_call_elapsed_ms,
         } = self
-            .request_step_completion_with_reasoning_recovery(request_messages, turn_start)
+            .request_step_completion_for_workload(request_messages, workload, turn_start)
             .await?;
         let mut native_tool_calls = step_native_tool_calls;
 
@@ -665,6 +666,69 @@ impl Agent {
         Ok(response)
     }
 
+    /// Main-turn model call under the turn's workload quota, with one
+    /// escalation: a turn sent with thinking OFF (a `mechanical` quota)
+    /// whose reply carries no tool call is about to become the final answer
+    /// — and a final answer is not a mechanical turn. That reply is
+    /// discarded and the SAME request is re-sent once under the `synthesis`
+    /// quota (thinking as configured for synthesis). Measured on
+    /// llm.selfware.design (2026-09-27): thinking-off replies at a
+    /// "write the report" point were a degenerate fragment (a live review
+    /// ended on ", not part of the file content") or a malformed call, while
+    /// thinking-off read turns were valid tool calls 17/18 times — so the
+    /// escalation costs one short extra call only where the answer is made.
+    /// Announced as a `workload_escalated` turn decision; both calls are
+    /// counted in the run summary's workload lines.
+    async fn request_step_completion_for_workload(
+        &mut self,
+        request_messages: Vec<crate::api::types::Message>,
+        workload: crate::config::TurnWorkload,
+        turn_start: std::time::Instant,
+    ) -> Result<StepCompletion> {
+        // Boxed: this layer sits inside every main turn's future; keeping the
+        // (large) streaming call future on the heap keeps the task loop's
+        // stack use where it was before the escalation layer existed.
+        let completion = Box::pin(self.request_step_completion_with_reasoning_recovery(
+            request_messages.clone(),
+            workload,
+            turn_start,
+        ))
+        .await?;
+        let completion_tokens =
+            |c: &StepCompletion| c.chat_metadata.as_ref().and_then(|m| m.completion_tokens);
+        let thinking_off = self.config.workloads.get(workload).enable_thinking == Some(false);
+        let escalate_to = crate::config::TurnWorkload::Synthesis;
+        if !thinking_off
+            || workload == escalate_to
+            || step_completion_has_tool_calls(&completion)
+            || self.is_cancelled()
+        {
+            self.record_turn_workload(workload, completion_tokens(&completion));
+            return Ok(completion);
+        }
+        self.record_turn_workload(workload, completion_tokens(&completion));
+        self.workload_turns.record_escalation(workload);
+        let detail = format!(
+            "{workload} turn (thinking off) answered without a tool call ({} chars); \
+             re-asking once under the {escalate_to} quota before it becomes the answer",
+            completion.content.chars().count()
+        );
+        info!("{detail}");
+        cli_println!("{} {}", "↻".cyan(), detail);
+        self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+            decision: "workload_escalated".to_string(),
+            detail,
+        });
+        let escalated = Box::pin(self.request_step_completion_with_reasoning_recovery(
+            request_messages,
+            escalate_to,
+            turn_start,
+        ))
+        .await?;
+        self.record_turn_workload(escalate_to, completion_tokens(&escalated));
+        Ok(escalated)
+    }
+
     /// Main-turn model call with the bounded reasoning-budget recovery.
     ///
     /// When the model spends the whole completion budget on hidden reasoning
@@ -686,10 +750,15 @@ impl Agent {
     async fn request_step_completion_with_reasoning_recovery(
         &mut self,
         request_messages: Vec<crate::api::types::Message>,
+        workload: crate::config::TurnWorkload,
         turn_start: std::time::Instant,
     ) -> Result<StepCompletion> {
         let first_err = match self
-            .request_step_completion(request_messages.clone(), ThinkingMode::Enabled, turn_start)
+            .request_step_completion(
+                request_messages.clone(),
+                ThinkingMode::Workload(workload),
+                turn_start,
+            )
             .await
         {
             Ok(completion) => return Ok(completion),
@@ -1157,6 +1226,20 @@ impl Agent {
 /// deliberately does not retry a cap breach (a retry would burn another full
 /// cap window), so the planner must file it as a budget stop, not a
 /// transient failure.
+/// Whether a step reply carries at least one tool call in any form the
+/// loop executes: native tool calls, text-fallback calls, or tool markup in
+/// the content (XML mode parses calls from the content later).
+fn step_completion_has_tool_calls(c: &StepCompletion) -> bool {
+    c.native_tool_calls.as_ref().is_some_and(|t| !t.is_empty())
+        || c.text_fallback_tool_calls
+            .as_ref()
+            .is_some_and(|t| !t.is_empty())
+        || !crate::api::tool_calling::extract_tool_calls_from_text(&c.content).is_empty()
+        || c.reasoning
+            .as_deref()
+            .is_some_and(reasoning_carries_tool_markup)
+}
+
 pub(super) fn is_terminal_api_client_error(e: &anyhow::Error) -> bool {
     e.chain().any(|cause| {
         if cause

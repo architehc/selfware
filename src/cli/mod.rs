@@ -7567,6 +7567,10 @@ fn render_run_summary_for(
              (the task continued without answer synthesis)"
         ));
     }
+    if !summary.workloads.is_empty() {
+        lines.push("workload quotas:".to_string());
+        lines.extend(summary.workloads.iter().map(|l| format!("  {l}")));
+    }
     let cost = summary
         .cost_usd
         .map(|c| {
@@ -7874,6 +7878,26 @@ pub(crate) fn config_show_rows(
         format!("{}", config.concurrency.max_global),
         config.source_of("concurrency.max_global"),
     ));
+    rows.push((
+        "agent.context_content_ratio".to_string(),
+        format!("{}", config.agent.context_content_ratio),
+        config.source_of("agent.context_content_ratio"),
+    ));
+    // Per-workload turn quotas: one row per field that is set (profile or
+    // user), so a profile-applied quota is never invisible.
+    for kind in crate::config::TurnWorkload::ALL {
+        let q = config.workloads.get(kind);
+        if let Some(on) = q.enable_thinking {
+            let key = format!("workloads.{kind}.enable_thinking");
+            let source = config.source_of(&key);
+            rows.push((key, format!("{on}"), source));
+        }
+        if let Some(n) = q.max_tokens {
+            let key = format!("workloads.{kind}.max_tokens");
+            let source = config.source_of(&key);
+            rows.push((key, format!("{n}"), source));
+        }
+    }
 
     if let Some(extra) = &config.extra_body {
         // Shown through the shared config redaction: an `[extra_body.headers]`

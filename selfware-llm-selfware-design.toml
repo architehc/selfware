@@ -13,10 +13,19 @@ model = "qwen38-flash-next"
 # (174,897 prompt tokens observed against 163,840) and the reads that fell
 # off were lost server-side. Set them only if you have measured otherwise.
 
-[extra_body.chat_template_kwargs]
-enable_thinking = true
-preserve_thinking = false
-reasoning_effort = "xhigh"
+# Thinking is NOT pinned here either: the qwen38 profile sends
+# chat_template_kwargs {enable_thinking = true, preserve_thinking = false}
+# and sets thinking and max_tokens per kind of turn (the [workloads] table,
+# measured 2026-09-27; `selfware llm-doctor` prints it). A pin of
+# enable_thinking under [extra_body.chat_template_kwargs] holds for EVERY
+# turn and disables the per-turn setting (explicit wins). reasoning_effort
+# is not set: no value measurably bounds reasoning on this model ("low" and
+# "xhigh" both ranged 643-8,192 reasoning tokens on one prompt), and a
+# reasoning-exhausted turn's retry now switches thinking off directly.
+# To tune one kind of turn, e.g. read turns without thinking (faster in
+# replays, worse in live reviews — docs/model-playbook.md § 7):
+#   [workloads.mechanical]
+#   enable_thinking = false
 
 [safety]
 allowed_paths = ["./**"]

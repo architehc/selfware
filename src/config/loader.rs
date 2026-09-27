@@ -29,6 +29,7 @@ const TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "debug",
     "models",
     "extra_body",
+    "workloads",
     "qa",
     "mcp",
     "hooks",
@@ -251,6 +252,7 @@ fn known_section_keys(section: &str) -> Option<std::collections::HashSet<String>
         "cache" => struct_field_names::<crate::session::cache::LlmCacheConfig>(),
         "debug" => struct_field_names::<super::debug::DebugConfig>(),
         "computer" => struct_field_names::<super::types::ComputerConfig>(),
+        "workloads" => struct_field_names::<super::model_profiles::WorkloadQuotas>(),
         _ => return None,
     };
     Some(names)
@@ -1145,6 +1147,7 @@ impl Config {
             let profile_name = profile.name.to_string();
             let applied = apply_profile(&mut config, &profile, &user_explicit);
             config.matched_profile = Some(profile_name.clone());
+            config.workload_overrides = applied.workload_overrides.clone();
             if !applied.is_empty() {
                 let mut fields: Vec<String> = Vec::new();
                 if applied.native_function_calling {
@@ -1171,9 +1174,13 @@ impl Config {
                 if applied.max_call_secs {
                     fields.push("agent.max_call_secs".to_string());
                 }
+                if applied.context_content_ratio {
+                    fields.push("agent.context_content_ratio".to_string());
+                }
                 for k in &applied.extra_body_keys {
                     fields.push(format!("extra_body.{}", k));
                 }
+                fields.extend(applied.workload_fields.iter().cloned());
                 if applied.context_length && !token_budget_was_explicit {
                     config.agent.token_budget = config.context_length * 3 / 5;
                 }

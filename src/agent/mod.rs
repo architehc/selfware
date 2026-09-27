@@ -136,6 +136,7 @@ pub(crate) mod tool_dispatch;
 mod tool_validator;
 pub mod tui_events;
 pub mod turn_artifacts;
+pub mod turn_workload;
 pub(crate) mod verification_scope;
 
 pub use review_coverage::{ReviewCoverageReport, ReviewPhase};
@@ -1234,6 +1235,11 @@ pub struct Agent {
     /// Stays latched for the session: the streaming path is what produced
     /// nothing, so the safer default afterwards is the path that did not.
     force_non_streaming: bool,
+    /// Workload kind of the NEXT main turn, recorded when a tool batch is
+    /// dispatched (`turn_workload`); consumed by that turn.
+    pending_turn_workload: Option<crate::config::TurnWorkload>,
+    /// Main turns sent per workload kind (run summary).
+    workload_turns: turn_workload::WorkloadTurnCounts,
     /// Most recently read file path (set by file_read).  Used to inject
     /// concrete edit templates when the model is stuck in a read loop.
     last_read_file: Option<String>,
@@ -2048,6 +2054,8 @@ To call a tool, use this EXACT XML structure:
             terminal_guard_hits: 0,
             consecutive_empty_responses: 0,
             force_non_streaming: false,
+            pending_turn_workload: None,
+            workload_turns: turn_workload::WorkloadTurnCounts::default(),
             last_read_file: None,
             has_written_any_file: false,
             files_checklist_seen: false,

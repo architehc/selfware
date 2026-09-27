@@ -5990,8 +5990,24 @@ fn test_apply_reasoning_step_down_ladder_and_placements() {
     // Qwen refuses "high": xhigh -> medium.
     let mut body = serde_json::json!({"chat_template_kwargs": {"reasoning_effort": "xhigh"}});
     assert_eq!(
-        apply_reasoning_step_down(&mut body, "qwen38-flash-next"),
+        apply_reasoning_step_down(&mut body, "qwen3.6-27b"),
         lowered("xhigh", "medium")
+    );
+
+    // qwen38's profile measured reasoning_effort as ignored: the step-down
+    // switches thinking off at once and leaves the (ineffective) pin alone.
+    let mut body = serde_json::json!({
+        "chat_template_kwargs": {"reasoning_effort": "xhigh", "enable_thinking": true}
+    });
+    assert_eq!(
+        apply_reasoning_step_down(&mut body, "qwen38-flash-next"),
+        Some(ReasoningStepDown::ThinkingDisabled)
+    );
+    assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
+    assert_eq!(body["chat_template_kwargs"]["reasoning_effort"], "xhigh");
+    assert_eq!(
+        apply_reasoning_step_down(&mut body, "qwen38-flash-next"),
+        None
     );
 
     // Every placement is lowered: top-level, kwargs, OpenRouter reasoning.effort.
@@ -6067,4 +6083,81 @@ fn compacted_history_shape_is_role_alternating_at_send() {
     ] {
         assert!(all.contains(needle), "{needle} dropped");
     }
+}
+
+/// Request body of one mock-server capture (headers stripped).
+fn captured_json_body(raw: &str) -> serde_json::Value {
+    let body = raw.split("\r\n\r\n").nth(1).expect("HTTP body");
+    serde_json::from_str(body).expect("JSON request body")
+}
+
+#[tokio::test]
+async fn test_workload_quota_sets_thinking_and_max_tokens_per_turn() {
+    use crate::config::{TurnWorkload, WorkloadQuota, WorkloadQuotas};
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bodies = Arc::new(Mutex::new(Vec::<String>::new()));
+    let ok_body = r#"{"id":"c-ok","object":"chat.completion","created":123,"model":"test","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}"#;
+    let server = reasoning_mock_server!(listener, bodies.clone(), [ok_body, ok_body, ok_body]);
+
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "chat_template_kwargs".into(),
+        serde_json::json!({"enable_thinking": true, "preserve_thinking": false}),
+    );
+    let config = crate::config::Config {
+        endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+        max_tokens: 4096,
+        extra_body: Some(extra),
+        workloads: WorkloadQuotas {
+            mechanical: WorkloadQuota {
+                enable_thinking: Some(false),
+                max_tokens: Some(1000),
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config).unwrap();
+    for mode in [
+        ThinkingMode::Workload(TurnWorkload::Mechanical),
+        ThinkingMode::Workload(TurnWorkload::Synthesis),
+        ThinkingMode::Enabled,
+    ] {
+        client
+            .chat(vec![Message::user("q")], None, mode)
+            .await
+            .expect("mock answers");
+    }
+    let sent: Vec<serde_json::Value> = bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|b| captured_json_body(b))
+        .collect();
+    // Mechanical: its quota wins for this turn only; other kwargs kept.
+    assert_eq!(sent[0]["chat_template_kwargs"]["enable_thinking"], false);
+    assert_eq!(sent[0]["chat_template_kwargs"]["preserve_thinking"], false);
+    assert_eq!(sent[0]["max_tokens"], 1000);
+    // Synthesis has no quota: the session request, unchanged.
+    assert_eq!(sent[1]["chat_template_kwargs"]["enable_thinking"], true);
+    assert_eq!(sent[1]["max_tokens"], 4096);
+    // A non-workload call never picks up a quota.
+    assert_eq!(sent[2]["chat_template_kwargs"]["enable_thinking"], true);
+    assert_eq!(sent[2]["max_tokens"], 4096);
+    let _ = server.await;
+}
+
+#[test]
+fn test_set_enable_thinking_creates_or_updates_kwargs() {
+    let mut body = serde_json::json!({"model": "m"});
+    crate::api::client::set_enable_thinking(&mut body, false);
+    assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
+    let mut body = serde_json::json!({"chat_template_kwargs": {"enable_thinking": false, "x": 1}});
+    crate::api::client::set_enable_thinking(&mut body, true);
+    assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
+    assert_eq!(body["chat_template_kwargs"]["x"], 1);
 }

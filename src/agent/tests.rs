@@ -2679,3 +2679,122 @@ async fn test_displayed_compaction_threshold_is_the_enforced_one() {
         assert!(agent.compressor.should_compress(&messages));
     }
 }
+
+/// A turn sent with thinking OFF (mechanical quota) that answers without a
+/// tool call is not accepted as the final answer: the same request is
+/// re-sent once under the synthesis quota, and that reply is the answer.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn test_thinking_off_reply_without_tool_call_is_reasked_as_synthesis() {
+    use crate::config::{TurnWorkload, WorkloadQuota};
+    let _g = crate::test_support::ExecGuard::hold();
+    let server = MockLlmServer::builder()
+        .with_response(
+            r#"<tool>
+<name>file_read</name>
+<arguments>{"path":"./Cargo.toml"}</arguments>
+</tool>"#,
+        )
+        // The measured degenerate thinking-off reply (live review 2026-09-27).
+        .with_response(", not part of the file content")
+        .with_response("Task complete: the real answer.")
+        .build()
+        .await;
+
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.workloads.mechanical = WorkloadQuota {
+        enable_thinking: Some(false),
+        max_tokens: Some(1000),
+    };
+    config.workloads.synthesis = WorkloadQuota {
+        enable_thinking: Some(true),
+        max_tokens: None,
+    };
+    let mut agent = Agent::new(config).await.unwrap();
+    let result = agent.run_task("Read Cargo.toml and finish").await;
+    assert!(result.is_ok(), "{:?}", result.err());
+    assert!(
+        agent.last_assistant_response.contains("the real answer"),
+        "{}",
+        agent.last_assistant_response
+    );
+    assert!(!agent
+        .messages
+        .iter()
+        .any(|m| m.content.text().contains("not part of the file content")));
+    assert_eq!(
+        agent.workload_turns.escalations(TurnWorkload::Mechanical),
+        1
+    );
+
+    let bodies: Vec<serde_json::Value> = server
+        .captured_request_bodies()
+        .await
+        .iter()
+        .filter_map(|b| serde_json::from_str(b).ok())
+        .collect();
+    let off = bodies
+        .iter()
+        .position(|b| b["chat_template_kwargs"]["enable_thinking"] == false)
+        .expect("a thinking-off mechanical request");
+    assert_eq!(bodies[off]["max_tokens"], 1000);
+    let next = &bodies[off + 1];
+    assert_eq!(next["chat_template_kwargs"]["enable_thinking"], true);
+    assert_eq!(
+        next["messages"], bodies[off]["messages"],
+        "same request re-sent"
+    );
+    server.stop().await;
+}
+
+/// The planning call takes the same escalation: a thinking-off plan with no
+/// tool call is re-asked once under the synthesis quota before it becomes
+/// the answer.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn test_thinking_off_plan_without_tool_call_is_reasked_as_synthesis() {
+    use crate::config::{TurnWorkload, WorkloadQuota};
+    let _g = crate::test_support::ExecGuard::hold();
+    let server = MockLlmServer::builder()
+        .with_response("Hi! What would you like to do?")
+        .with_response("Task complete: the considered answer.")
+        .build()
+        .await;
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.workloads.planning = WorkloadQuota {
+        enable_thinking: Some(false),
+        max_tokens: Some(1000),
+    };
+    config.workloads.synthesis = WorkloadQuota {
+        enable_thinking: Some(true),
+        max_tokens: None,
+    };
+    let mut agent = Agent::new(config).await.unwrap();
+    let result = agent.run_task("What does this project do?").await;
+    assert!(result.is_ok(), "{:?}", result.err());
+    assert_eq!(agent.workload_turns.escalations(TurnWorkload::Planning), 1);
+    // The discarded thinking-off plan never entered the history.
+    assert!(!agent
+        .messages
+        .iter()
+        .any(|m| m.content.text().contains("What would you like to do")));
+    let bodies: Vec<serde_json::Value> = server
+        .captured_request_bodies()
+        .await
+        .iter()
+        .filter_map(|b| serde_json::from_str(b).ok())
+        .collect();
+    assert_eq!(bodies[0]["chat_template_kwargs"]["enable_thinking"], false);
+    assert_eq!(bodies[1]["chat_template_kwargs"]["enable_thinking"], true);
+    assert_eq!(
+        bodies[1]["messages"], bodies[0]["messages"],
+        "same plan re-sent"
+    );
+    server.stop().await;
+}

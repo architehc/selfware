@@ -624,6 +624,27 @@ fn zero_content_response(resp: &ChatResponse) -> bool {
     })
 }
 
+/// Set `chat_template_kwargs.enable_thinking` on a request body, keeping the
+/// other template kwargs (`preserve_thinking`, ...). Toggling it changes only
+/// the generation prompt the template appends, not the rendered history.
+/// Measured on llm.selfware.design (2026-09-27, see
+/// `docs/model-playbook.md` § per-workload quotas): `false` yields zero
+/// reasoning tokens.
+pub(crate) fn set_enable_thinking(body: &mut serde_json::Value, enable: bool) {
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    let kwargs = obj
+        .entry("chat_template_kwargs")
+        .or_insert_with(|| serde_json::json!({}));
+    if !kwargs.is_object() {
+        *kwargs = serde_json::json!({});
+    }
+    if let Some(map) = kwargs.as_object_mut() {
+        map.insert("enable_thinking".into(), serde_json::Value::Bool(enable));
+    }
+}
+
 /// Whether an `extra_body` already pins reasoning behavior, in EITHER placement.
 ///
 /// Top-level `reasoning_effort` / `reasoning` is the OpenAI-style spelling.
@@ -1328,9 +1349,13 @@ impl ApiClient {
         }
 
         let available_for_output = hard_limit.saturating_sub(input_tokens);
-        let max_tokens = self
-            .config
+        let quota = match thinking {
+            ThinkingMode::Workload(kind) => self.config.workloads.get(kind),
+            _ => crate::config::WorkloadQuota::default(),
+        };
+        let max_tokens = quota
             .max_tokens
+            .unwrap_or(self.config.max_tokens)
             .min(available_for_output.max(min_output));
 
         let mut body = serde_json::json!({
@@ -1382,6 +1407,10 @@ impl ApiClient {
             if let Some(step) = apply_reasoning_step_down(&mut body, &self.config.model) {
                 debug!("reasoning step-down retry: {}", step.describe());
             }
+        }
+
+        if let Some(enable) = quota.enable_thinking {
+            set_enable_thinking(&mut body, enable);
         }
 
         if !self.effective_native_fc() {
@@ -2846,6 +2875,10 @@ fn lower_reasoning_effort(effort: &str, is_qwen: bool) -> Option<&'static str> {
 ///    `reasoning_effort = "low"` — the same request the non-streaming
 ///    client's own recovery sends for unpinned configs.
 ///
+/// A model whose built-in profile measured `reasoning_effort` as ignored
+/// (`reasoning_effort_honored = false`, e.g. qwen38) skips step 1: with a
+/// `chat_template_kwargs` map, thinking is switched off directly.
+///
 /// Returns `None` when nothing can be lowered or disabled (e.g. every pin is
 /// already `low` on an endpoint with no thinking toggle): retrying the
 /// identical request would only burn the budget again.
@@ -2855,6 +2888,20 @@ pub fn apply_reasoning_step_down(
 ) -> Option<ReasoningStepDown> {
     let is_qwen = model.to_ascii_lowercase().contains("qwen");
     let obj = body.as_object_mut()?;
+    // A model whose profile measured `reasoning_effort` as ignored: lowering
+    // an effort pin changes nothing, so a template thinking toggle is
+    // switched off straight away (effort pins are left as they were).
+    let effort_honored =
+        crate::config::match_profile(model).is_none_or(|p| p.reasoning_effort_honored);
+    if !effort_honored {
+        if let Some(serde_json::Value::Object(kwargs)) = obj.get_mut("chat_template_kwargs") {
+            if kwargs.get("enable_thinking") != Some(&serde_json::Value::Bool(false)) {
+                kwargs.insert("enable_thinking".into(), serde_json::Value::Bool(false));
+                return Some(ReasoningStepDown::ThinkingDisabled);
+            }
+            return None;
+        }
+    }
     let mut first: Option<ReasoningStepDown> = None;
     let mut any_pin = false;
     let note = |from: &str, to: &str, first: &mut Option<ReasoningStepDown>| {

@@ -1944,6 +1944,13 @@ impl Agent {
             super::tool_dispatch::tool_call_counts_as_state_change(name, args_str)
         });
         self.update_read_only_step_tracking(&tool_calls, has_write_tool);
+        // The turn that reads these results runs under this batch's workload
+        // quota (reads only → mechanical; anything else → edit).
+        self.pending_turn_workload = Some(super::turn_workload::workload_after_tool_batch(
+            tool_calls
+                .iter()
+                .map(|(name, args, _)| (name.as_str(), args.as_str())),
+        ));
 
         // The FILES: checklist guard exists to stop blind FILE EDITS. A shell
         // command can mutate plenty (mkdir, npm/pip installs, git ops, builds)
