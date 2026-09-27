@@ -219,5 +219,39 @@ Each phase is shippable alone:
 - The main run (`run_task`, `continue_execution`) is mirrored onto the task
   machine; the terminal event comes from the same `RunEnd` the run summary
   reports. Not mapped yet: `need_input`/`input_arrived`, `verify`/`verified`/
-  `reject`, `pause`, `cancel`, and the agent machine for the main agent.
+  `reject`, and the agent machine for the main agent (`pause`, `edit` and
+  `cancel` are mapped since phase 5, §12).
 - `selfware tasks [--limit N]` and `selfware task show <id>` read the log.
+
+## 12. Phase 5 as implemented (0.9.3)
+
+- **Model.** The task machine gained `edit` (paused → paused only). The Lean
+  model proves P9: an edit is accepted only while paused, keeps the task
+  paused, and the edited task can still resume, be cancelled or time out.
+  `task_table.json` has 40 transitions; the oracle checks P9 at runtime.
+- **Control.** `lifecycle::control::TaskControl` is shared by the agent and
+  an in-process UI. Requests are acted on at one safe point, the top of a
+  loop iteration (between steps), so a pause never interrupts a model or tool
+  call. Recorded as `pause`, `edit`, `resume`; a cancel request ends the run
+  `cancelled` (not `interrupted`). Time paused still counts toward
+  `max_wall_secs`.
+- **Edit of a live task** changes the description, max turns and token
+  budget (the API client is rebuilt so its own budget stop follows). It is
+  recorded with the measured usage, and the model receives
+  "Task updated: …" as a user message. An edit that would end the task on
+  the spot is refused. `allowed_paths` is shown read-only: the safety checker
+  reads it when the agent is built.
+- **Edit of a finished task** forks it: a new task id whose records carry
+  `parent`; the original's history is untouched.
+- **Usage in the log.** Terminal records and edits carry `usage`: total
+  tokens, the main-loop/side-call split when the task start was observed
+  (not for resumed segments), and the provider cost only when reported.
+- **TUI.** Ctrl+T opens the Tasks pane: breadcrumb, back stack, Enter/Esc,
+  and `[e] [p] [x] [r]`. Its view is a pure function of the log, the
+  resource registry (read-only listing), the live task and the journal.
+  The only agent is `main` until phase 6.
+- **CLI.** `tasks --tree`, `task show` (parent, usage, forks),
+  `task edit <id>` (fork; prints `selfware run --fork-of <id> …`),
+  `run --fork-of`. `task pause|resume|cancel`, and `edit` of a live task in
+  another process, say that cross-process control is not supported yet and
+  exit non-zero. No control channel between processes exists yet.
