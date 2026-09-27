@@ -1,12 +1,9 @@
 //! Token Budget Management for Code Introspection
 //!
-//! Tracks token usage and makes intelligent decisions about depth levels
-//! to maximize code coverage within budget constraints.
+//! Tracks token usage as a hard limit and chooses depth levels from
+//! measured renders (see `TokenBudget::suggest_depth`).
 
 use anyhow::Result;
-use std::path::Path;
-
-use crate::token_count::estimate_content_tokens;
 
 /// Manages token allocation for code introspection operations
 #[derive(Debug, Clone)]
@@ -16,24 +13,17 @@ pub struct TokenBudget {
     reserved: usize,
 }
 
-/// Estimated token cost for a file at different depths
-#[derive(Debug, Clone)]
-pub struct FileEstimate {
-    pub min_tokens: usize,
-    pub tokens: usize,
-    pub max_tokens: usize,
-}
-
 /// Depth levels for code introspection
 #[derive(Debug, Clone, PartialEq)]
 pub enum Depth {
-    /// File-level metadata only (~50 tokens/file)
+    /// Imports plus a one-line `Kind: name` entry per declared symbol
     Overview,
-    /// Public API signatures (~200 tokens/file)
+    /// One signature line per public / `pub(crate)` symbol
     Signatures,
-    /// Complete source code (~1000+ tokens/file)
+    /// One signature line per symbol, private ones included (the parser
+    /// extracts signatures, not bodies — this is not the file's source)
     Full,
-    /// Cross-file dependencies (~300 tokens/file)
+    /// Imports only
     Dependencies,
 }
 
@@ -65,16 +55,6 @@ impl std::fmt::Display for Depth {
 }
 
 impl Depth {
-    /// Default token cost per file at this depth
-    pub fn default_tokens(&self) -> usize {
-        match self {
-            Self::Overview => 50,
-            Self::Signatures => 200,
-            Self::Full => 1000,
-            Self::Dependencies => 300,
-        }
-    }
-
     /// Downgrade to next lower detail level
     pub fn downgrade(&self) -> Option<Self> {
         match self {
@@ -116,116 +96,56 @@ impl TokenBudget {
         self.used
     }
 
-    /// Allocate tokens from budget, returning actual amount granted
-    pub fn allocate(&mut self, requested: usize) -> usize {
-        let available = self.remaining();
-        let granted = requested.min(available);
-        self.used += granted;
-        granted
+    /// Allocate `requested` tokens as a HARD limit: the grant is all or
+    /// nothing. Returns `true` (and records the tokens as used) only when the
+    /// whole request fits in [`remaining`](Self::remaining); otherwise nothing
+    /// is recorded and `false` is returned.
+    ///
+    /// The old `allocate` granted `requested.min(available)` — a partial
+    /// grant its caller treated as success, so a file whose rendered symbols
+    /// did not fit was still rendered in full while the budget reported
+    /// exactly `total` used (2026-09 introspect review, finding 1).
+    pub fn try_allocate(&mut self, requested: usize) -> bool {
+        if requested > self.remaining() {
+            return false;
+        }
+        self.used += requested;
+        true
     }
 
-    /// Estimate tokens for a file at given depth
-    pub async fn estimate_file(&self, path: &Path, depth: &Depth) -> Result<FileEstimate> {
-        // Read file content for accurate estimation
-        let content = match tokio::fs::read_to_string(path).await {
-            Ok(c) => c,
-            Err(_) => {
-                // Fallback to default estimates if can't read
-                let base = depth.default_tokens();
-                return Ok(FileEstimate {
-                    min_tokens: base / 2,
-                    tokens: base,
-                    max_tokens: base * 2,
-                });
-            }
-        };
-
-        let total_tokens = estimate_content_tokens(&content);
-
-        let estimate = match depth {
-            Depth::Overview => {
-                // Overview is roughly 5% of file content (imports, module structure)
-                let tokens = (total_tokens / 20).clamp(20, 100);
-                FileEstimate {
-                    min_tokens: 10,
-                    tokens,
-                    max_tokens: tokens + 50,
-                }
-            }
-            Depth::Signatures => {
-                // Signatures are roughly 20% of file (function signatures without bodies)
-                let tokens = (total_tokens / 5).clamp(50, 500);
-                FileEstimate {
-                    min_tokens: 20,
-                    tokens,
-                    max_tokens: tokens + 200,
-                }
-            }
-            Depth::Full => {
-                // Full content
-                FileEstimate {
-                    min_tokens: total_tokens / 2,
-                    tokens: total_tokens,
-                    max_tokens: total_tokens + 100,
-                }
-            }
-            Depth::Dependencies => {
-                // Dependencies require parsing imports and calls
-                let tokens = (total_tokens / 10).clamp(50, 500);
-                FileEstimate {
-                    min_tokens: 30,
-                    tokens,
-                    max_tokens: tokens + 100,
-                }
-            }
-        };
-
-        Ok(estimate)
-    }
-
-    /// Suggest optimal depth level based on file count and budget
-    pub fn suggest_depth(&self, files: &[FileMeta]) -> Depth {
-        let available = self.remaining();
-
-        if files.is_empty() {
-            // Default to signatures when we don't know file count
-            return Depth::Signatures;
+    /// Choose the depth to use from MEASURED packings of the whole candidate
+    /// set, one per depth in preference order (most useful first).
+    ///
+    /// The first option that covers everything (every readable file, no
+    /// symbol dropped for budget) wins. When none does, the option that
+    /// covers the most files wins (ties broken by the larger fraction of its
+    /// own symbols rendered, then by preference order) — the depth that
+    /// reaches furthest is chosen, never one already measured not to fit.
+    ///
+    /// Replaces a `suggest_depth(&[FileMeta])` that ran before the files
+    /// were collected (so it always saw an empty list and returned
+    /// `Signatures`) and whose fallback branch recommended `Signatures` when
+    /// even `Overview` could not cover the set (finding 2). Returns `None`
+    /// only for an empty option list.
+    pub fn suggest_depth(options: &[MeasuredDepth]) -> Option<Depth> {
+        if let Some(complete) = options.iter().find(|o| o.complete) {
+            return Some(complete.depth.clone());
         }
-
-        // Calculate max coverage at each depth level
-        let overview_coverage = available / Depth::Overview.default_tokens();
-        let signatures_coverage = available / Depth::Signatures.default_tokens();
-        let full_coverage = available / Depth::Full.default_tokens();
-
-        let total_files = files.len();
-
-        // Prefer signatures if it gives good coverage
-        if signatures_coverage >= total_files {
-            Depth::Signatures
-        } else if overview_coverage >= total_files {
-            Depth::Overview
-        } else if full_coverage >= 1 {
-            // Can at least show full content of some files
-            Depth::Signatures
-        } else {
-            Depth::Overview
-        }
-    }
-
-    /// Suggest depth that fits remaining budget for a specific file
-    pub async fn suggest_depth_for_file(&self, path: &Path) -> Result<Depth> {
-        let remaining = self.remaining();
-
-        // Try each depth level from most detailed to least
-        for depth in [Depth::Full, Depth::Signatures, Depth::Overview] {
-            let estimate = self.estimate_file(path, &depth).await?;
-            if estimate.tokens <= remaining {
-                return Ok(depth);
+        let mut best: Option<&MeasuredDepth> = None;
+        for option in options {
+            let better = match best {
+                None => true,
+                Some(b) => {
+                    option.files_included > b.files_included
+                        || (option.files_included == b.files_included
+                            && option.symbol_fraction() > b.symbol_fraction())
+                }
+            };
+            if better {
+                best = Some(option);
             }
         }
-
-        // Fallback to overview
-        Ok(Depth::Overview)
+        best.map(|o| o.depth.clone())
     }
 
     /// Get budget utilization percentage
@@ -237,12 +157,28 @@ impl TokenBudget {
     }
 }
 
-/// Metadata about a file for depth suggestion
+/// One measured packing of the candidate set at a given depth, used by
+/// [`TokenBudget::suggest_depth`].
 #[derive(Debug, Clone)]
-pub struct FileMeta {
-    pub path: String,
-    pub size_bytes: u64,
-    pub language: Option<String>,
+pub struct MeasuredDepth {
+    pub depth: Depth,
+    /// Every readable file rendered with all of its symbols at this depth.
+    pub complete: bool,
+    /// Files that got an entry in the rendered output.
+    pub files_included: usize,
+    /// Symbols this depth would render across all candidate files.
+    pub symbols_total: usize,
+    /// Symbols actually rendered within the budget.
+    pub symbols_included: usize,
+}
+
+impl MeasuredDepth {
+    fn symbol_fraction(&self) -> f64 {
+        if self.symbols_total == 0 {
+            return 1.0;
+        }
+        self.symbols_included as f64 / self.symbols_total as f64
+    }
 }
 
 /// Budget for evolution planning

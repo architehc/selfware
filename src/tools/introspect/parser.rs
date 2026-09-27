@@ -119,6 +119,20 @@ pub enum Visibility {
     Private,
 }
 
+impl Visibility {
+    /// Source prefix for this visibility (`"pub "`, `"pub(crate) "`, … or
+    /// empty for private items).
+    pub fn prefix(&self) -> &'static str {
+        match self {
+            Visibility::Public => "pub ",
+            Visibility::PublicCrate => "pub(crate) ",
+            Visibility::PublicSuper => "pub(super) ",
+            Visibility::Restricted(_) => "pub(...) ",
+            Visibility::Private => "",
+        }
+    }
+}
+
 impl Symbol {
     /// Render the symbol as a string for output
     pub fn render(&self) -> String {
@@ -136,16 +150,7 @@ impl Symbol {
             result.push_str(&format!("{}\n", attr));
         }
 
-        // Visibility
-        let vis = match self.visibility {
-            Visibility::Public => "pub ",
-            Visibility::PublicCrate => "pub(crate) ",
-            Visibility::PublicSuper => "pub(super) ",
-            Visibility::Restricted(_) => "pub(...) ",
-            Visibility::Private => "",
-        };
-
-        result.push_str(&format!("{}{}\n", vis, self.signature));
+        result.push_str(&format!("{}{}\n", self.visibility.prefix(), self.signature));
 
         result
     }

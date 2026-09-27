@@ -35,28 +35,56 @@ use crate::tools::Tool;
 /// Result of a code introspection operation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntrospectResult {
-    /// The rendered content
+    /// The rendered content — the only budgeted text.
     pub content: String,
-    /// Tokens consumed
+    /// Tokens of `content`, measured with
+    /// `crate::token_count::estimate_content_tokens` on the final text
+    /// (never more than the requested `max_tokens`).
     pub tokens_used: usize,
-    /// Tokens remaining in budget
+    /// `max_tokens - tokens_used`.
     pub tokens_remaining: usize,
     /// Coverage statistics
     pub coverage: CoverageStats,
     /// Suggestions for better usage
     pub suggestions: Vec<String>,
-    /// Files included in result
+    /// Files included in result, in relevance order
     pub files_included: Vec<FileInfo>,
 }
 
-/// Coverage statistics for introspection
+/// Coverage statistics for introspection.
+///
+/// Coverage is of the OUTLINE (signatures / names at the chosen depth), not
+/// of file contents: nothing here — and nothing `code_introspect` returns —
+/// is a read of a file's body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoverageStats {
+    /// Source files found under the target.
     pub files_total: usize,
+    /// Files with an entry in `content` (fully or truncated).
     pub files_included: usize,
+    /// Included files whose symbol list was cut short by the budget.
+    #[serde(default)]
+    pub files_truncated: usize,
+    /// Files found but not readable as text (never included).
+    #[serde(default)]
+    pub files_unreadable: usize,
+    /// `files_included / files_total` as a percentage.
     pub coverage_pct: f64,
+    /// Symbols the chosen depth would render across ALL found files.
     pub symbols_total: usize,
+    /// Symbols actually rendered in `content`.
     pub symbols_included: usize,
+    /// `symbols_included / symbols_total` as a percentage (100 when there
+    /// are no symbols to render).
+    #[serde(default)]
+    pub symbols_coverage_pct: f64,
+}
+
+impl CoverageStats {
+    /// Whether anything found was left out of the output.
+    pub fn is_partial(&self) -> bool {
+        self.files_included < self.files_total || self.symbols_included < self.symbols_total
+    }
 }
 
 /// Information about an included file
@@ -64,8 +92,248 @@ pub struct CoverageStats {
 pub struct FileInfo {
     pub path: String,
     pub depth: String,
+    /// Tokens of this file's entry exactly as it appears in `content`.
     pub tokens: usize,
+    /// Names of the symbols rendered for this file (omitted ones excluded).
     pub symbols: Vec<String>,
+    /// Symbols of this file left out because the budget ran out.
+    #[serde(default)]
+    pub symbols_omitted: usize,
+    /// The rendered line per symbol. Not serialized: the lines are in
+    /// `content`, and repeating them here would double the tool output
+    /// outside the budget.
+    #[serde(skip)]
+    pub rendered_lines: Vec<String>,
+}
+
+/// A source file that was read and parsed.
+struct Candidate {
+    path: PathBuf,
+    parsed: parser::ParsedFile,
+}
+
+/// The result of packing candidates into the budget at one depth.
+struct Packed {
+    files: Vec<FileInfo>,
+    content: String,
+    tokens_used: usize,
+    coverage: CoverageStats,
+}
+
+/// Measure a file entry's tokens as rendered. The flat view prints the
+/// count inside the entry, so iterate to the fixed point (monotone, so a
+/// digit-boundary oscillation settles on the larger — never under-reported —
+/// value).
+fn measure_block(
+    renderer: &OutputRenderer,
+    info: &mut FileInfo,
+    index: usize,
+    last_in_group: bool,
+) -> usize {
+    info.tokens = 0;
+    for _ in 0..6 {
+        let measured = estimate_content_tokens(&renderer.file_block(info, index, last_in_group));
+        if measured <= info.tokens {
+            break;
+        }
+        info.tokens = measured;
+    }
+    info.tokens
+}
+
+/// Re-measure every included file's entry in its final position.
+fn finalize_blocks(renderer: &OutputRenderer, files: &mut [FileInfo]) {
+    let flags = renderer.last_in_group_flags(files);
+    for (i, file) in files.iter_mut().enumerate() {
+        measure_block(renderer, file, i, flags[i]);
+    }
+}
+
+fn coverage_of(
+    files: &[FileInfo],
+    files_total: usize,
+    files_unreadable: usize,
+    symbols_total: usize,
+) -> CoverageStats {
+    let symbols_included: usize = files.iter().map(|f| f.symbols.len()).sum();
+    CoverageStats {
+        files_total,
+        files_included: files.len(),
+        files_truncated: files.iter().filter(|f| f.symbols_omitted > 0).count(),
+        files_unreadable,
+        coverage_pct: (files.len() as f64 / files_total.max(1) as f64) * 100.0,
+        symbols_total,
+        symbols_included,
+        symbols_coverage_pct: if symbols_total == 0 {
+            100.0
+        } else {
+            (symbols_included as f64 / symbols_total as f64) * 100.0
+        },
+    }
+}
+
+/// The coverage line closing `content`. It states what the output is — an
+/// outline — so a reader (or a review ledger) never mistakes it for a read
+/// of the files.
+fn coverage_footer(stats: &CoverageStats, depth: &Depth) -> String {
+    let mut line = format!(
+        "Coverage: {}/{} files, {}/{} symbols at depth '{}'",
+        stats.files_included, stats.files_total, stats.symbols_included, stats.symbols_total, depth
+    );
+    if stats.files_truncated > 0 {
+        line.push_str(&format!(", {} files truncated", stats.files_truncated));
+    }
+    if stats.files_unreadable > 0 {
+        line.push_str(&format!(", {} unreadable", stats.files_unreadable));
+    }
+    line.push_str(
+        ".\nOutline only (signatures/names, no bodies): this is not a read of the files' contents.\n",
+    );
+    line
+}
+
+/// Pack `candidates` (in relevance order) into `limit` tokens at `depth`.
+///
+/// The budget is a hard limit on the returned `content`: a file is included
+/// whole if its entry fits, otherwise cut to the longest prefix of its
+/// symbols whose entry (with an "N more omitted" marker) fits, otherwise
+/// skipped. Every cost is measured with `estimate_content_tokens` on the
+/// rendered text, and the final `content` is measured again as a whole —
+/// token counts are not additive, so files are dropped from the tail until
+/// the measured total fits.
+fn pack(
+    candidates: &[Candidate],
+    depth: &Depth,
+    limit: usize,
+    renderer: &OutputRenderer,
+    files_total: usize,
+) -> Result<Packed> {
+    let files_unreadable = files_total - candidates.len();
+    let per_file: Vec<(Vec<String>, Vec<String>)> = candidates
+        .iter()
+        .map(|c| {
+            let symbols = parser::extract_at_depth(&c.parsed, depth);
+            let names = symbols.iter().map(|s| s.name.clone()).collect();
+            let lines = symbols
+                .iter()
+                .map(|s| render::symbol_line(s, depth))
+                .collect();
+            (names, lines)
+        })
+        .collect();
+    let symbols_total: usize = per_file.iter().map(|(n, _)| n.len()).sum();
+
+    // The fixed frame (headers, summary, coverage footer at its widest
+    // numbers) is paid first.
+    let mut budget = TokenBudget::new(limit);
+    let widest = coverage_of(&[], files_total, files_unreadable, symbols_total);
+    let widest = CoverageStats {
+        files_included: files_total,
+        files_truncated: files_total,
+        symbols_included: symbols_total,
+        ..widest
+    };
+    let frame =
+        estimate_content_tokens(&(renderer.render(&[])? + &coverage_footer(&widest, depth)));
+    if !budget.try_allocate(frame) {
+        anyhow::bail!(
+            "max_tokens {limit} is below the fixed cost of the result frame ({frame} tokens); \
+             raise max_tokens"
+        );
+    }
+
+    let mut included: Vec<FileInfo> = Vec::new();
+    let mut groups_opened = std::collections::HashSet::new();
+    for (cand, (names, lines)) in candidates.iter().zip(per_file) {
+        let index = included.len();
+        let mut info = FileInfo {
+            path: cand.path.to_string_lossy().to_string(),
+            depth: depth.as_str().to_string(),
+            tokens: 0,
+            symbols: names.clone(),
+            symbols_omitted: 0,
+            rendered_lines: lines.clone(),
+        };
+        // A file opening a new directory group (tree view) also pays for
+        // that group's header line.
+        let header = renderer
+            .group_header(&info)
+            .filter(|h| !groups_opened.contains(h));
+        let header_cost = header.as_deref().map_or(0, estimate_content_tokens);
+        if header_cost > budget.remaining() {
+            continue;
+        }
+        let full = measure_block(renderer, &mut info, index, true);
+        if budget.try_allocate(full + header_cost) {
+            groups_opened.extend(header);
+            included.push(info);
+            continue;
+        }
+
+        // Truncate: the longest prefix of symbols whose entry fits.
+        let n = lines.len();
+        let mut best = None;
+        if n >= 2 {
+            let (mut lo, mut hi) = (1usize, n - 1);
+            while lo <= hi {
+                let mid = lo + (hi - lo) / 2;
+                info.symbols = names[..mid].to_vec();
+                info.rendered_lines = lines[..mid].to_vec();
+                info.symbols_omitted = n - mid;
+                if measure_block(renderer, &mut info, index, true) + header_cost
+                    <= budget.remaining()
+                {
+                    best = Some(mid);
+                    lo = mid + 1;
+                } else {
+                    hi = mid - 1;
+                }
+            }
+        }
+        if let Some(k) = best {
+            info.symbols = names[..k].to_vec();
+            info.rendered_lines = lines[..k].to_vec();
+            info.symbols_omitted = n - k;
+            let cost = measure_block(renderer, &mut info, index, true);
+            if budget.try_allocate(cost + header_cost) {
+                groups_opened.extend(header);
+                included.push(info);
+            }
+        }
+    }
+
+    // Final measurement of the whole content; the hard limit is enforced
+    // on what is actually returned.
+    loop {
+        finalize_blocks(renderer, &mut included);
+        let coverage = coverage_of(&included, files_total, files_unreadable, symbols_total);
+        let content = renderer.render(&included)? + &coverage_footer(&coverage, depth);
+        let tokens_used = estimate_content_tokens(&content);
+        if tokens_used <= limit {
+            return Ok(Packed {
+                files: included,
+                content,
+                tokens_used,
+                coverage,
+            });
+        }
+        // Over by a few tokens (counts are not additive): shed the tail
+        // one symbol at a time, then whole files.
+        if let Some(last) = included.last_mut() {
+            if last.rendered_lines.len() >= 2 {
+                last.rendered_lines.pop();
+                last.symbols.pop();
+                last.symbols_omitted += 1;
+                continue;
+            }
+        }
+        if included.pop().is_none() {
+            anyhow::bail!(
+                "max_tokens {limit} is below the measured cost of an empty result \
+                 ({tokens_used} tokens); raise max_tokens"
+            );
+        }
+    }
 }
 
 // ============================================================================
@@ -121,108 +389,87 @@ impl CodeIntrospect {
         let safety = resolve_safety_config(self.safety_config.as_ref());
         validate_tool_path(&args.target, &safety)?;
 
-        // Initialize budget manager
-        let mut budget = TokenBudget::new(args.max_tokens);
-        // Reserve 20% for output formatting
-        budget.reserve(20);
+        let format = args.format.as_deref().unwrap_or("tree");
+        let renderer = OutputRenderer::new(format);
+        let limit = args.max_tokens;
 
-        // Determine depth - auto-select if not specified
-        let depth = if let Some(d) = args.depth {
-            Depth::parse(&d)?
+        // 1. Collect every candidate first (validated against the path
+        //    policy before it is read); sorted so the order without a query
+        //    is deterministic rather than directory-listing order.
+        let mut files = self.collect_files(&target_path, &safety).await?;
+        files.sort();
+        let files_total = files.len();
+
+        // 2. Rank by the query. `rank_files` recomputes a BM25 score per file
+        //    from the query terms against the parsed symbols (the passed
+        //    base score, a constant 1.0, is only a multiplier), so the query
+        //    does reorder. The index is built over the candidates first so
+        //    IDF and length normalisation reflect this corpus — without it
+        //    every term had the same IDF and raw byte length was divided by
+        //    an average of 1.
+        let ordered: Vec<PathBuf> = if let Some(ref query) = args.query {
+            let mut engine = CodeQueryEngine::new();
+            engine.build_index(&files).await?;
+            let with_score: Vec<(PathBuf, f64)> = files.into_iter().map(|f| (f, 1.0)).collect();
+            engine
+                .rank_files(&with_score, query)
+                .await
+                .into_iter()
+                .map(|(p, _)| p)
+                .collect()
         } else {
-            budget.suggest_depth(&[])
+            files
         };
 
-        // Collect target files (every discovered candidate is validated
-        // against the same path policy before it is read).
-        let files = self.collect_files(&target_path, &safety).await?;
-        let total_files = files.len();
-
-        // If we have a query, rank files by relevance
-        let ranked_files: Vec<(PathBuf, f64)> = if let Some(ref query) = args.query {
-            let files_with_score: Vec<(PathBuf, f64)> =
-                files.into_iter().map(|f| (f, 1.0)).collect();
-            let engine = CodeQueryEngine::new();
-            engine.rank_files(&files_with_score, query).await
-        } else {
-            files.into_iter().map(|f| (f, 1.0)).collect()
-        };
-
-        // Process files within budget
-        let mut files_included = Vec::new();
-        let mut all_symbols = Vec::new();
-
-        for (file_path, _relevance) in ranked_files {
-            if budget.exhausted() {
-                break;
-            }
-
-            // Check if we can afford this file at requested depth
-            let estimate = budget.estimate_file(&file_path, &depth).await?;
-
-            // Skip if can't afford even at minimum depth
-            if estimate.min_tokens > budget.remaining() {
-                continue;
-            }
-
-            // Downgrade depth if needed to fit budget
-            let actual_depth = if estimate.tokens > budget.remaining() {
-                budget.suggest_depth_for_file(&file_path).await?
-            } else {
-                depth.clone()
-            };
-
-            // Parse and extract content
-            let content = tokio::fs::read_to_string(&file_path).await.ok();
-            if let Some(content) = content {
-                let language = Language::detect(&file_path, args.language.as_deref());
+        // 3. Read and parse every candidate once.
+        let mut candidates = Vec::with_capacity(ordered.len());
+        for path in ordered {
+            if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                let language = Language::detect(&path, args.language.as_deref());
                 let parsed = parser::parse(&content, language);
-                let symbols = parser::extract_at_depth(&parsed, &actual_depth);
-
-                let symbol_tokens: usize = symbols
-                    .iter()
-                    .map(|s| estimate_content_tokens(&s.render()))
-                    .sum();
-
-                if budget.allocate(symbol_tokens) > 0 {
-                    files_included.push(FileInfo {
-                        path: file_path.to_string_lossy().to_string(),
-                        depth: actual_depth.as_str().to_string(),
-                        tokens: symbol_tokens,
-                        symbols: symbols.iter().map(|s| s.name.clone()).collect(),
-                    });
-                    all_symbols.extend(symbols);
-                }
+                candidates.push(Candidate { path, parsed });
             }
         }
 
-        // Generate suggestions
-        let suggestions = self.generate_suggestions(
-            total_files,
-            files_included.len(),
-            &depth,
-            args.query.is_some(),
-            budget.remaining(),
-        );
+        // 4. Depth: explicit, or chosen from measured packings of the
+        //    collected set (most detailed depth that covers everything, else
+        //    the one that reaches the most files).
+        let (depth, packed) = if let Some(d) = args.depth {
+            let depth = Depth::parse(&d)?;
+            let packed = pack(&candidates, &depth, limit, &renderer, files_total)?;
+            (depth, packed)
+        } else {
+            let mut options = Vec::new();
+            let mut packings = Vec::new();
+            for depth in [Depth::Signatures, Depth::Overview] {
+                let packed = pack(&candidates, &depth, limit, &renderer, files_total)?;
+                options.push(budget::MeasuredDepth {
+                    depth: depth.clone(),
+                    // Complete = every READABLE file with all its symbols
+                    // (unreadable files are partial at every depth).
+                    complete: packed.coverage.files_included
+                        == files_total - packed.coverage.files_unreadable
+                        && packed.coverage.symbols_included == packed.coverage.symbols_total,
+                    files_included: packed.coverage.files_included,
+                    symbols_total: packed.coverage.symbols_total,
+                    symbols_included: packed.coverage.symbols_included,
+                });
+                packings.push((depth, packed));
+            }
+            let chosen = TokenBudget::suggest_depth(&options).unwrap_or(Depth::Signatures);
+            let idx = packings.iter().position(|(d, _)| *d == chosen).unwrap_or(0);
+            packings.swap_remove(idx)
+        };
 
-        // Render output
-        let format = args.format.as_deref().unwrap_or("tree");
-        let renderer = OutputRenderer::new(format);
-        let rendered = renderer.render(&files_included, &all_symbols)?;
+        let suggestions = self.generate_suggestions(&packed.coverage, &depth, args.query.is_some());
 
         Ok(IntrospectResult {
-            content: rendered,
-            tokens_used: budget.used(),
-            tokens_remaining: budget.remaining(),
-            coverage: CoverageStats {
-                files_total: total_files,
-                files_included: files_included.len(),
-                coverage_pct: (files_included.len() as f64 / total_files.max(1) as f64) * 100.0,
-                symbols_total: all_symbols.len(),
-                symbols_included: all_symbols.len(),
-            },
+            content: packed.content,
+            tokens_used: packed.tokens_used,
+            tokens_remaining: limit - packed.tokens_used,
+            coverage: packed.coverage,
             suggestions,
-            files_included,
+            files_included: packed.files,
         })
     }
 
@@ -319,38 +566,60 @@ impl CodeIntrospect {
 
     fn generate_suggestions(
         &self,
-        total: usize,
-        included: usize,
+        coverage: &CoverageStats,
         depth: &Depth,
         has_query: bool,
-        remaining: usize,
     ) -> Vec<String> {
         let mut suggestions = Vec::new();
 
-        if included < total {
-            let coverage = (included as f64 / total as f64) * 100.0;
-
-            if coverage < 50.0 && !matches!(depth, Depth::Overview) {
-                suggestions.push(format!(
-                    "Only {:.0}% coverage. Use 'depth: overview' for broader coverage.",
-                    coverage
+        // Any partial coverage is named — how much, and what was left out —
+        // at every depth, overview included (the old gate warned only below
+        // 50% file coverage and never at overview).
+        if coverage.is_partial() {
+            let readable = coverage.files_total - coverage.files_unreadable;
+            let skipped = readable.saturating_sub(coverage.files_included);
+            let mut left_out = Vec::new();
+            if skipped > 0 {
+                left_out.push(format!("{skipped} files did not fit the budget"));
+            }
+            if coverage.files_truncated > 0 {
+                left_out.push(format!("{} files were truncated", coverage.files_truncated));
+            }
+            if coverage.files_unreadable > 0 {
+                left_out.push(format!(
+                    "{} files could not be read",
+                    coverage.files_unreadable
                 ));
             }
+            let omitted = coverage.symbols_total - coverage.symbols_included;
+            if omitted > 0 {
+                left_out.push(format!("{omitted} symbols omitted"));
+            }
+            let remedy = if matches!(depth, Depth::Overview) {
+                "Raise max_tokens or narrow the target."
+            } else {
+                "Raise max_tokens, narrow the target, or use 'depth: overview'."
+            };
+            suggestions.push(format!(
+                "Partial coverage: {}/{} files ({:.0}%), {}/{} symbols ({:.0}%) at depth '{}' — {}. {}",
+                coverage.files_included,
+                coverage.files_total,
+                coverage.coverage_pct,
+                coverage.symbols_included,
+                coverage.symbols_total,
+                coverage.symbols_coverage_pct,
+                depth,
+                left_out.join(", "),
+                remedy
+            ));
 
-            if !has_query && included > 20 {
+            if !has_query && coverage.files_included > 20 {
                 suggestions
                     .push("Add a 'query' parameter to prioritize most relevant files.".to_string());
             }
         }
 
-        if remaining > 2000 && included < total {
-            suggestions.push(format!(
-                "{} tokens remaining. Can include more files.",
-                remaining
-            ));
-        }
-
-        if matches!(depth, Depth::Full) && included > 5 {
+        if matches!(depth, Depth::Full) && coverage.files_included > 5 {
             suggestions.push(
                 "Using 'depth: full' on many files. Consider 'signatures' for better coverage."
                     .to_string(),
@@ -368,9 +637,11 @@ impl Tool for CodeIntrospect {
     }
 
     fn description(&self) -> &str {
-        "Smart code reading with budget-aware depth control. \
-         Depth levels: 'overview' (~50 tokens/file), 'signatures' (~200 tokens/file), \
-         'full' (complete source). Automatically adjusts to fit token budget."
+        "Budget-bounded code outline (signatures and symbol names, never function bodies). \
+         Depth levels: 'overview' (imports + one line per symbol), 'signatures' (public API \
+         signatures), 'full' (every symbol's signature, private included). max_tokens is a \
+         hard limit on the returned content; when it cannot hold everything the result \
+         reports partial coverage. Not a substitute for file_read."
     }
 
     fn schema(&self) -> Value {
@@ -384,7 +655,7 @@ impl Tool for CodeIntrospect {
                 "depth": {
                     "type": "string",
                     "enum": ["overview", "signatures", "full", "dependencies"],
-                    "description": "Level of detail: overview (metadata), signatures (API), full (complete)"
+                    "description": "Level of detail: overview (imports + symbol list), signatures (public API), full (all signatures). Omit to choose from measured sizes."
                 },
                 "query": {
                     "type": "string",
@@ -393,7 +664,7 @@ impl Tool for CodeIntrospect {
                 "max_tokens": {
                     "type": "integer",
                     "default": 8000,
-                    "description": "Maximum tokens to consume"
+                    "description": "Hard limit on the tokens of the returned content"
                 },
                 "format": {
                     "type": "string",
@@ -513,6 +784,8 @@ impl Tool for CodeQuery {
         // against the same path policy before it is read).
         let mut files = Vec::new();
         Self::collect_files(&scope_path, &mut files, &safety).await?;
+        // Deterministic tie order for equal relevance.
+        files.sort();
 
         // Build query engine and search
         let mut engine = CodeQueryEngine::new();
@@ -535,11 +808,17 @@ impl Tool for CodeQuery {
             }
         }
 
+        // `tokens_used` is measured on the results actually returned (after
+        // `max_results`), not on the packed set before it was cut.
+        let returned_files = results.results.len().min(args.max_results);
+        let tokens_used = estimate_content_tokens(&serde_json::to_string(&output)?);
+
         Ok(json!({
             "query": args.query,
             "results": output,
             "total_matches": results.total_matches,
-            "tokens_used": results.tokens_used,
+            "files_returned": returned_files,
+            "tokens_used": tokens_used,
         }))
     }
 }

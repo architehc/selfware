@@ -36,8 +36,10 @@ pub struct RankedResult {
 /// Query results with token budget awareness
 #[derive(Debug, Clone)]
 pub struct QueryResults {
+    /// Matching files packed into the budget, most relevant first.
     pub results: Vec<RankedResult>,
     pub tokens_used: usize,
+    /// Files with at least one matching symbol, packed or not.
     pub total_matches: usize,
 }
 
@@ -51,7 +53,14 @@ impl CodeQueryEngine {
         }
     }
 
-    /// Rank files by relevance to query
+    /// Rank files by relevance to query.
+    ///
+    /// The score is recomputed here: BM25 of the query terms against each
+    /// file's parsed symbols and module docs, multiplied by the caller's
+    /// `base_score` (pass 1.0 for none). The query therefore decides the
+    /// order even when every base score is equal. Call
+    /// [`build_index`](Self::build_index) over the same files first, or IDF
+    /// is flat and length normalisation divides by an average of 1.
     pub async fn rank_files(&self, files: &[(PathBuf, f64)], query: &str) -> Vec<(PathBuf, f64)> {
         let query_terms = tokenize(query);
         let mut ranked = Vec::new();
@@ -78,7 +87,15 @@ impl CodeQueryEngine {
         ranked
     }
 
-    /// Execute a query with token budget
+    /// Execute a query with token budget.
+    ///
+    /// Every file is scored first; matches are then packed into the budget
+    /// in RELEVANCE order (highest BM25 first), all or nothing per file. The
+    /// old loop packed in directory-listing order and never sorted, so the
+    /// computed relevance was discarded and `max_results` kept the first
+    /// files listed, not the best ones; `total_matches` counted only the
+    /// packed results, so it could never exceed them (2026-09 introspect
+    /// review sweep).
     pub async fn search(
         &self,
         query: &str,
@@ -86,14 +103,9 @@ impl CodeQueryEngine {
         budget: &TokenBudget,
     ) -> Result<QueryResults> {
         let query_terms = tokenize(query);
-        let mut results = Vec::new();
-        let mut tokens_used = 0;
+        let mut matches: Vec<(RankedResult, usize)> = Vec::new();
 
         for path in files {
-            if tokens_used >= budget.remaining() {
-                break;
-            }
-
             if let Ok(content) = tokio::fs::read_to_string(path).await {
                 let language = Language::detect(path, None);
                 let parsed = parse(&content, language);
@@ -109,25 +121,38 @@ impl CodeQueryEngine {
                     .collect();
 
                 if !matched.is_empty() {
-                    // Calculate token cost
                     let symbol_tokens: usize = matched
                         .iter()
                         .map(|s| estimate_content_tokens(&s.render()))
                         .sum();
-
-                    if tokens_used + symbol_tokens <= budget.remaining() {
-                        results.push(RankedResult {
+                    matches.push((
+                        RankedResult {
                             path: path.clone(),
                             relevance: score,
                             matched_symbols: matched,
-                        });
-                        tokens_used += symbol_tokens;
-                    }
+                        },
+                        symbol_tokens,
+                    ));
                 }
             }
         }
 
-        let total_matches = results.len();
+        let total_matches = matches.len();
+        // Stable sort: equal scores keep the input order.
+        matches.sort_by(|a, b| {
+            b.0.relevance
+                .partial_cmp(&a.0.relevance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mut results = Vec::new();
+        let mut tokens_used = 0;
+        for (result, symbol_tokens) in matches {
+            if tokens_used + symbol_tokens <= budget.remaining() {
+                results.push(result);
+                tokens_used += symbol_tokens;
+            }
+        }
 
         Ok(QueryResults {
             results,
@@ -273,7 +298,8 @@ pub async fn find_related_symbols(
         }
     }
 
-    // Sort by relevance (we could add more sophisticated ranking here)
+    // `search` returns results in relevance order, so this keeps the
+    // symbols of the most relevant files.
     all_symbols.truncate(max_results);
 
     Ok(all_symbols)
