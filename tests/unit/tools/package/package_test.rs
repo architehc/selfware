@@ -186,11 +186,12 @@ async fn npm_install_timeout_kills_child_process() {
     env.set("PATH", format!("{}:{}", dir.path().display(), old_path));
     let tool = NpmInstall::new();
     let start = std::time::Instant::now();
-    // 3s (not 1s): the stub must get far enough to record both pids before
-    // the timeout kills it; under a loaded full-suite run a 1s budget could
-    // expire before `sh` even started, leaving no pidfile to check.
+    // 6s (not 1s or 3s): the stub must get far enough to record both pids
+    // before the timeout kills it; under a loaded full-suite run (another
+    // cargo build on the machine) 3s expired before `sh` wrote the
+    // descendant's pid, leaving no pidfile to check.
     let result = tool
-        .execute(json!({"packages": ["express"], "timeout_secs": 3}))
+        .execute(json!({"packages": ["express"], "timeout_secs": 6}))
         .await;
     env.set("PATH", &old_path);
 
