@@ -127,8 +127,18 @@ impl Agent {
         context_usage_label(
             self.total_tokens_used(),
             self.memory.context_window(),
-            self.max_context_tokens,
+            self.compaction_threshold(),
         )
+    }
+
+    /// The history size (estimated tokens) at which compaction starts: the
+    /// compressor's own threshold, `max_context_tokens × context_content_ratio`.
+    /// The ONE number every "compaction at" display and the `/compact`
+    /// target read — the status bar used to show `max_context_tokens` (the
+    /// hard trim budget), which on a 1M window read "compaction at 796k"
+    /// while compaction actually started at 597k.
+    pub fn compaction_threshold(&self) -> usize {
+        self.compressor.compression_threshold()
     }
 
     /// Print the status line before the prompt:
@@ -258,7 +268,7 @@ impl Agent {
         let tokens = self.total_tokens_used();
         let window = self.memory.context_window();
         let used_pct = context_pct(tokens, window);
-        let compaction_at = self.max_context_tokens;
+        let compaction_at = self.compaction_threshold();
         let messages = self.messages.len();
         let memory_entries = self.memory.len();
         let available = window.saturating_sub(tokens);

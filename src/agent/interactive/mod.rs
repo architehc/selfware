@@ -3082,7 +3082,7 @@ impl Agent {
             // basic loop shares the cli render helpers, one routing table.
             if input == "/compact" {
                 let before = self.messages.len();
-                let target = self.max_context_tokens() * 3 / 4;
+                let target = self.compaction_threshold();
                 self.compress_to_structured_summary(target);
                 println!(
                     "/compact: context compression pass complete — {} → {} messages (target ~{} tokens)",

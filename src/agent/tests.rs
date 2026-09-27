@@ -2628,3 +2628,54 @@ async fn test_run_task_drains_task_owned_background_process() {
         Some("resources: 1 released, 0 leaked")
     );
 }
+
+/// The "compaction at N" every display shows IS the threshold compaction
+/// enforces: `compressor.should_compress` flips exactly when the history
+/// estimate crosses the displayed number. The status bar used to show the
+/// hard trim budget (`max_context_tokens`): "1000k context · compaction at
+/// 796k" on a 1M window whose compaction started at 597k (0.75 × 795,904).
+#[tokio::test]
+async fn test_displayed_compaction_threshold_is_the_enforced_one() {
+    use crate::agent::context_display::format_tokens_k;
+    for (context_length, max_tokens, ratio) in [
+        (163_840usize, 24_576usize, 0.80f32),
+        (1_000_000, 4_096, 0.75),
+    ] {
+        let mut config = Config {
+            endpoint: "http://localhost:0/v1".to_string(),
+            model: "mock-model".to_string(),
+            context_length,
+            max_tokens,
+            ..Default::default()
+        };
+        config.agent.context_content_ratio = ratio;
+        let agent = Agent::new(config).await.expect("agent");
+        let threshold = agent.compaction_threshold();
+        assert_eq!(
+            threshold,
+            (agent.max_context_tokens() as f32 * ratio) as usize,
+            "{context_length}"
+        );
+        assert!(threshold < agent.max_context_tokens());
+        let label = agent.context_usage_text();
+        assert!(
+            label.ends_with(&format!("compaction at {}", format_tokens_k(threshold))),
+            "{label}"
+        );
+        // Grow a history in large steps: compaction is due exactly once
+        // the estimate exceeds the displayed threshold.
+        let chunk = "word ".repeat(20_000);
+        let mut messages = vec![crate::api::types::Message::system("s")];
+        let mut crossed = false;
+        while !crossed {
+            let before = agent.compressor.estimate_tokens(&messages);
+            assert_eq!(
+                agent.compressor.should_compress(&messages),
+                before > threshold
+            );
+            messages.push(crate::api::types::Message::user(chunk.clone()));
+            crossed = agent.compressor.estimate_tokens(&messages) > threshold;
+        }
+        assert!(agent.compressor.should_compress(&messages));
+    }
+}

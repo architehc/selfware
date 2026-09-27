@@ -2746,7 +2746,7 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
                 }
                 if input == "/compact" {
                     let before = agent.message_count();
-                    let target = agent.max_context_tokens() * 3 / 4;
+                    let target = agent.compaction_threshold();
                     agent.compress_to_structured_summary(target);
                     log_line(format!(
                         "/compact: context compression pass complete — {} → {} messages (target ~{} tokens)",
