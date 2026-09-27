@@ -214,3 +214,194 @@ fn show_names_parent_usage_and_forks_and_says_when_cost_was_not_reported() {
     assert!(tokens.contains("split not measured"));
     assert!(cost.starts_with("≥ $0.5000"));
 }
+// ---- agents ----------------------------------------------------------------
+
+fn agent_rec(id: &str, ts: &str, to: &str, pid: u32) -> TransitionRecord {
+    let mut rec = TransitionRecord::now(Entity::Agent, id, None, to, None, "why");
+    rec.ts = ts.to_string();
+    rec.pid = Some(pid);
+    rec.agent_type = Some("main".into());
+    rec
+}
+
+fn task_rec(id: &str, ts: &str, to: &str, owner: &str, tokens: Option<u64>) -> TransitionRecord {
+    let mut rec = r(id, ts, None, to, None);
+    rec.owner = Some(owner.to_string());
+    rec.usage = tokens.map(|t| crate::lifecycle::RecordedUsage {
+        total_tokens: t as usize,
+        main_tokens: None,
+        side_tokens: None,
+        cost_usd: None,
+        cost_complete: false,
+    });
+    rec.task_type = Some(format!("type-of-{id}"));
+    rec
+}
+
+fn agent_sample() -> Vec<TransitionRecord> {
+    vec![
+        agent_rec("main-aaaa", "2026-09-26T10:00:00.000Z", "idle", 11),
+        task_rec(
+            "t1",
+            "2026-09-26T10:00:01.000Z",
+            "queued",
+            "main-aaaa",
+            None,
+        ),
+        agent_rec("main-aaaa", "2026-09-26T10:00:01.100Z", "working", 11),
+        task_rec(
+            "t1",
+            "2026-09-26T10:02:00.000Z",
+            "completed",
+            "main-aaaa",
+            Some(1200),
+        ),
+        agent_rec("main-aaaa", "2026-09-26T10:02:00.100Z", "idle", 11),
+        // Interrupted, then resumed by the same agent and failed: counted
+        // once, by its last segment, with the last terminal token total.
+        task_rec(
+            "t2",
+            "2026-09-26T10:03:00.000Z",
+            "interrupted",
+            "main-aaaa",
+            Some(50),
+        ),
+        task_rec(
+            "t2",
+            "2026-09-26T10:04:00.000Z",
+            "failed",
+            "main-aaaa",
+            Some(300),
+        ),
+        // A provider that reported no usage: not recorded, not zero.
+        task_rec(
+            "t3",
+            "2026-09-26T10:05:00.000Z",
+            "completed",
+            "main-aaaa",
+            None,
+        ),
+        agent_rec("main-aaaa", "2026-09-26T10:05:00.100Z", "idle", 11),
+        // Another agent whose process is gone while it was working.
+        agent_rec("main-bbbb", "2026-09-26T09:00:00.000Z", "idle", 22),
+        agent_rec("main-bbbb", "2026-09-26T09:00:01.000Z", "working", 22),
+        task_rec(
+            "t9",
+            "2026-09-26T09:00:00.500Z",
+            "planning",
+            "main-bbbb",
+            None,
+        ),
+    ]
+}
+
+#[test]
+fn agent_summaries_count_tasks_by_their_last_segment_and_sum_recorded_tokens() {
+    let s = agent_summaries(&agent_sample());
+    assert_eq!(s.len(), 2);
+    let a = &s[0];
+    assert_eq!(a.id, "main-aaaa", "most recently active first");
+    assert_eq!(a.agent_type.as_deref(), Some("main"));
+    assert_eq!(a.state, "idle");
+    assert_eq!(a.since.as_deref(), Some("2026-09-26T10:05:00.100Z"));
+    assert_eq!(
+        (a.tasks_completed, a.tasks_failed, a.tasks_stopped),
+        (2, 1, 0)
+    );
+    assert_eq!(a.tokens, Some(1500), "1200 + t2's last terminal 300");
+    assert_eq!(a.tasks_without_tokens, 1);
+    assert_eq!(a.last_task.as_deref(), Some("t3"));
+    assert_eq!(a.last_task_type.as_deref(), Some("type-of-t3"));
+    assert_eq!(a.last_task_state.as_deref(), Some("completed"));
+    assert_eq!(a.task_ids, vec!["t1", "t2", "t3"]);
+    let b = &s[1];
+    assert_eq!(b.state, "working");
+    assert_eq!(b.tokens, None);
+    assert_eq!((b.tasks_completed, b.tasks_failed), (0, 0));
+    assert_eq!(b.last_task.as_deref(), Some("t9"));
+}
+
+#[test]
+fn the_agent_table_shows_measured_numbers_and_says_what_was_not_recorded() {
+    let s = agent_summaries(&agent_sample());
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-26T10:08:30.100Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    // One resource attributed to the agent, one owned by its task t3, one
+    // owned by another agent's task.
+    let unreleased = vec![
+        ("session:x".to_string(), Some("main-aaaa".to_string())),
+        ("t3".to_string(), None),
+        ("t9".to_string(), None),
+    ];
+    let out = render_agent_list(&s, &unreleased, now, &|pid| pid == 11, 10);
+    let line_a = out.lines().find(|l| l.starts_with("main-aaaa")).unwrap();
+    assert!(line_a.contains("idle"), "{line_a}");
+    assert!(
+        line_a.contains("3m30s"),
+        "time in state from the record: {line_a}"
+    );
+    assert!(line_a.contains("1500 (+1 not recorded)"), "{line_a}");
+    assert!(line_a.contains("t3 (type-of-t3)"), "{line_a}");
+    assert!(line_a.trim_end().ends_with('2'), "resources held: {line_a}");
+    let line_b = out.lines().find(|l| l.starts_with("main-bbbb")).unwrap();
+    assert!(
+        line_b.contains("working (process ended)"),
+        "a live state recorded by a dead process is not shown as live: {line_b}"
+    );
+    assert!(line_b.contains("not recorded"), "{line_b}");
+    assert!(line_b.trim_end().ends_with('1'), "t9's resource: {line_b}");
+
+    let limited = render_agent_list(&s, &unreleased, now, &|_| true, 1);
+    assert!(limited.contains("(1 more; use --limit to show them)"));
+}
+
+#[test]
+fn agents_output_names_the_log_when_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = super::super::EventLog::at(dir.path().join("events.jsonl"));
+    let out = agents_command_output(&log, &[], &|_| true, 5);
+    assert!(
+        out.starts_with("No agent transitions recorded in "),
+        "{out}"
+    );
+}
+
+#[test]
+fn task_show_lists_the_resources_the_task_owned() {
+    let mut records = sample();
+    let mut res = r(
+        "res-1",
+        "2026-09-26T10:01:06.000Z",
+        Some("draining"),
+        "leaked",
+        Some("deadline_passed"),
+    );
+    res.entity = Entity::Resource;
+    res.owner = Some("aaaa-1".into());
+    res.cause = "teardown: still running after 10s".into();
+    records.push(res);
+    let out = render_task_resources(&records, "aaaa-1");
+    assert!(out.contains("Resources owned"), "{out}");
+    assert!(
+        out.contains("res-1") && out.contains("draining → leaked"),
+        "{out}"
+    );
+    assert!(
+        out.contains("[deadline_passed] teardown: still running"),
+        "{out}"
+    );
+    assert_eq!(render_task_resources(&records, "bbbb-2"), "");
+}
+
+#[test]
+fn tasks_recorded_without_an_owner_belong_to_the_legacy_main_agent() {
+    // `sample()` predates agent records: no owner on any task.
+    let s = agent_summaries(&sample());
+    assert_eq!(s.len(), 1);
+    assert_eq!(s[0].id, crate::lifecycle::control::MAIN_AGENT);
+    assert_eq!(s[0].state, "not recorded", "no agent record, no state");
+    assert_eq!(s[0].agent_type, None);
+    assert_eq!(s[0].tasks_failed, 1);
+    assert_eq!(s[0].tokens, None);
+}

@@ -670,6 +670,15 @@ pub(crate) enum Commands {
         tree: bool,
     },
 
+    /// List agents from the lifecycle event log: type, state, time in
+    /// state, tasks completed/failed, tokens, last task, resources held
+    #[command(display_order = 31)]
+    Agents {
+        /// How many agents to show, most recently active first
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+
     /// Inspect one task's recorded lifecycle
     #[command(display_order = 30)]
     Task {

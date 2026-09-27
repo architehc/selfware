@@ -979,7 +979,7 @@ impl Agent {
         // the run ends — success, failure, interrupt or cancel alike.
         // (Boxed: in debug builds every wrapper layer would otherwise hold
         // another stack copy of the very large task future.)
-        let owner = crate::resources::Owner::new();
+        let owner = crate::resources::Owner::new().with_agent(self.agent_id.clone());
         let result = crate::resources::context::scope(
             owner.clone(),
             Box::pin(crate::tools::workspace_root::scope(
@@ -1702,7 +1702,8 @@ impl Agent {
         let owner = match self.current_checkpoint.as_ref() {
             Some(cp) => crate::resources::Owner::for_task(cp.task_id.clone()),
             None => crate::resources::Owner::new(),
-        };
+        }
+        .with_agent(self.agent_id.clone());
         let result = crate::resources::context::scope(
             owner.clone(),
             Box::pin(self.continue_execution_segment()),

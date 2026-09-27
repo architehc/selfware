@@ -1521,6 +1521,21 @@ fn refresh_tasks_inputs(
         tasks_view::resource_rows_from_registry(crate::resources::ResourceRegistry::global());
     inputs.live = control.snapshot();
     inputs.this_pid = std::process::id();
+    // Which other processes that recorded agents still run (the agent list
+    // shows a live state from an ended process as such).
+    let mut pids: std::collections::HashSet<u32> = inputs
+        .records
+        .iter()
+        .filter(|r| r.entity == crate::lifecycle::Entity::Agent)
+        .filter_map(|r| r.pid)
+        .collect();
+    pids.remove(&inputs.this_pid);
+    inputs.live_pids = pids
+        .into_iter()
+        .filter(|&pid| {
+            crate::resources::driver::probe_pid(pid, None) != crate::resources::Probe::Gone
+        })
+        .collect();
     inputs.now = chrono::Utc::now();
     if journal {
         inputs.descriptions = crate::agent::Agent::list_tasks()

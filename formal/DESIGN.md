@@ -234,9 +234,10 @@ Each phase is shippable alone:
 - The main run (`run_task`, `continue_execution`) is mirrored onto the task
   machine; the terminal event comes from the same `RunEnd` the run summary
   reports. Not mapped yet: `need_input`/`input_arrived`, `verify`/`verified`/
-  `reject`, and the agent machine for the main agent (`pause`, `edit` and
-  `cancel` are mapped since phase 5, §12).
-- `selfware tasks [--limit N]` and `selfware task show <id>` read the log.
+  `reject`, (`pause`, `edit` and `cancel` are mapped since phase 5, §12; the
+  agent machine since §13).
+- `selfware tasks [--limit N]` and `selfware task show <id>` read the log;
+  `task show` also lists the resource transitions the task owned.
 
 ## 12. Phase 5 as implemented (0.9.3)
 
@@ -264,9 +265,30 @@ Each phase is shippable alone:
 - **TUI.** Ctrl+T opens the Tasks pane: breadcrumb, back stack, Enter/Esc,
   and `[e] [p] [x] [r]`. Its view is a pure function of the log, the
   resource registry (read-only listing), the live task and the journal.
-  The only agent is `main` until phase 6.
+  Its agent list is the `selfware agents` projection (§13).
 - **CLI.** `tasks --tree`, `task show` (parent, usage, forks),
   `task edit <id>` (fork; prints `selfware run --fork-of <id> …`),
   `run --fork-of`. `task pause|resume|cancel`, and `edit` of a live task in
   another process, say that cross-process control is not supported yet and
   exit non-zero. No control channel between processes exists yet.
+
+## 13. Agents on the lifecycle (0.9.3)
+
+- Resource teardown at run end is driven by the task's `TeardownOwned`
+  effect; without it (no tracker, already terminal, refused transition) the
+  drain still runs and a warning names why. A resource entering `leaked`
+  raises `LeakAlarm` (warning + the run-summary line + the headless
+  result's `resources` object).
+- The main agent is on `AgentMachine` (type `main`, id `main-<8 hex>`):
+  idle → working on `assign` at task/segment start, blocked while its task
+  is paused, `done` at its end, `stop` when dropped. Its tasks carry it as
+  `owner` (tasks recorded before this have no owner and list under `main`).
+- `selfware agents [--limit N]` and the Tasks pane's agent list project per
+  agent: type, state, time in state (from the recorded timestamp; a live
+  state recorded by a process that is gone is shown as such), tasks
+  completed / failed / stopped, token total (the sum of each task's
+  measured `usage.total_tokens` on its last terminal record — the one
+  source of per-task tokens — with the count of ended tasks carrying none),
+  last task and its type, and unreleased resources the registry attributes
+  to it. Sub-agents, swarm roles and multi-agent chat are not on the agent
+  machine yet.

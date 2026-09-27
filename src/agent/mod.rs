@@ -891,6 +891,11 @@ pub struct Agent {
     /// The finished task the next `run_task` forks (`run --fork-of`, or a
     /// fork queued from the Tasks pane).
     pending_fork_parent: Option<String>,
+    /// This agent's id in the event log (`main-<8 hex>`): the owner of its
+    /// tasks and of the resources they spawn.
+    pub(crate) agent_id: String,
+    /// This agent on the typed agent lifecycle; created with its first task.
+    agent_lifecycle: Option<crate::lifecycle::Tracked<crate::lifecycle::AgentMachine>>,
     /// Chat session store for save/resume/list/delete
     chat_store: ChatStore,
     /// Cancellation token set by Ctrl+C while a task is running
@@ -1913,6 +1918,8 @@ To call a tool, use this EXACT XML structure:
             task_control: crate::lifecycle::control::TaskControl::new(Arc::clone(&cancelled)),
             task_main_loop_base: None,
             pending_fork_parent: None,
+            agent_id: format!("main-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]),
+            agent_lifecycle: None,
             chat_store,
             cancelled,
             pending_messages: VecDeque::new(),

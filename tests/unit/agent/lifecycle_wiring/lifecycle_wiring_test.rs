@@ -136,10 +136,16 @@ async fn completed_run_logs_queued_planning_executing_completed() {
     );
     let id = checkpoint_id(&agent);
     assert!(
-        records.iter().all(|r| r.id == id),
+        records
+            .iter()
+            .filter(|r| r.entity == Entity::Task)
+            .all(|r| r.id == id),
         "task id = checkpoint task_id"
     );
-    assert!(records.iter().all(|r| r.task_type.is_some()));
+    assert!(records
+        .iter()
+        .filter(|r| r.entity == Entity::Task)
+        .all(|r| r.task_type.is_some()));
     assert_eq!(agent.task_lifecycle_state(), Some(TaskState::Completed));
     server.stop().await;
 }
@@ -181,7 +187,11 @@ async fn failed_run_logs_fail_from_the_state_it_failed_in() {
             step(Some("planning"), "failed", Some("fail")),
         ]
     );
-    let last = records.last().unwrap();
+    let last = records
+        .iter()
+        .rev()
+        .find(|r| r.entity == Entity::Task)
+        .unwrap();
     assert!(last.cause.starts_with("outcome failed: "), "{}", last.cause);
     server.stop().await;
 }
@@ -256,7 +266,10 @@ async fn interrupted_run_logs_interrupt_and_resumes_as_a_new_segment() {
     );
     assert!(result.is_ok(), "the resumed run completes: {result:?}");
     assert!(
-        records.iter().all(|r| r.id == id),
+        records
+            .iter()
+            .filter(|r| r.entity == Entity::Task)
+            .all(|r| r.id == id),
         "same task id across segments"
     );
     server.stop().await;
@@ -333,6 +346,15 @@ async fn a_live_task_left_behind_is_closed_honestly_by_the_next_task() {
 
 // ---- pause / edit / resume / cancel through the task control (phase 5) ----
 
+/// The task records of `log` (the log also holds the agent's records).
+fn task_records(log: &EventLog) -> Vec<TransitionRecord> {
+    log.read_all()
+        .0
+        .into_iter()
+        .filter(|r| r.entity == Entity::Task)
+        .collect()
+}
+
 async fn agent_with_live_task(log: &EventLog) -> Agent {
     let mut agent = Agent::new(config_for("http://127.0.0.1:9/v1".to_string()))
         .await
@@ -351,7 +373,8 @@ async fn an_edit_pauses_at_the_safe_point_applies_and_resumes() {
     let control = agent.task_control();
     let live = control.snapshot().expect("begin publishes the task");
     assert_eq!(live.id, "t-live");
-    assert_eq!(live.agent, "main");
+    assert_eq!(live.agent, agent.agent_id, "the live task names its agent");
+    assert!(live.agent.starts_with("main-"));
     assert_eq!(live.constraints.max_turns, 8);
 
     let mut edit = crate::lifecycle::control::TaskEdit::from_live(&live);
@@ -363,7 +386,7 @@ async fn an_edit_pauses_at_the_safe_point_applies_and_resumes() {
 
     agent.task_control_safe_point().await;
 
-    let (records, _) = log.read_all();
+    let records = task_records(&log);
     let tail: Vec<_> = steps(&records).into_iter().skip(2).collect();
     assert_eq!(
         tail,
@@ -408,7 +431,7 @@ async fn a_pause_waits_until_resumed_and_a_safe_point_without_requests_records_n
     let control = agent.task_control();
 
     agent.task_control_safe_point().await;
-    assert_eq!(log.read_all().0.len(), 2, "no request, no record");
+    assert_eq!(task_records(&log).len(), 2, "no request, no record");
 
     control.request_pause("t-live").unwrap();
     let resumer = control.clone();
@@ -424,10 +447,19 @@ async fn a_pause_waits_until_resumed_and_a_safe_point_without_requests_records_n
     });
     agent.task_control_safe_point().await;
     handle.await.unwrap();
-    let (records, _) = log.read_all();
+    let records = task_records(&log);
     let events: Vec<_> = records.iter().filter_map(|r| r.event.clone()).collect();
     assert_eq!(events, vec!["start", "pause", "resume"]);
     assert_eq!(records.last().unwrap().cause, "resumed by the user");
+    // The agent was blocked while its task was paused.
+    let agent_steps: Vec<_> = log
+        .read_all()
+        .0
+        .into_iter()
+        .filter(|r| r.entity == Entity::Agent)
+        .map(|r| r.to)
+        .collect();
+    assert_eq!(agent_steps, vec!["idle", "working", "blocked", "working"]);
 }
 
 #[tokio::test]
@@ -454,7 +486,7 @@ async fn cancel_from_the_pane_ends_the_task_cancelled_not_interrupted() {
 
     let result: anyhow::Result<()> = Err(AgentError::Cancelled.into());
     agent.lifecycle_finish(&result);
-    let (records, _) = log.read_all();
+    let records = task_records(&log);
     let last = records.last().unwrap();
     assert_eq!(last.from.as_deref(), Some("paused"));
     assert_eq!(last.to, "cancelled");
@@ -468,6 +500,11 @@ async fn cancel_from_the_pane_ends_the_task_cancelled_not_interrupted() {
     );
     assert_eq!(usage.cost_usd, None, "no cost reported → none recorded");
     assert_eq!(control.snapshot().unwrap().state, TaskState::Cancelled);
+    assert_eq!(
+        agent.agent_lifecycle_state(),
+        Some(&crate::lifecycle::AgentState::Idle),
+        "a cancelled (blocked) task still releases its agent"
+    );
     agent.reset_cancellation();
 }
 
@@ -482,7 +519,7 @@ async fn a_fork_is_a_new_task_whose_parent_is_the_original() {
     agent.event_log = log.clone();
     agent.set_fork_parent("orig-1");
     agent.lifecycle_begin_task("fork-2", "do it better");
-    let (records, _) = log.read_all();
+    let records = task_records(&log);
     assert!(records.iter().all(|r| r.id == "fork-2"));
     assert!(records
         .iter()
@@ -494,7 +531,7 @@ async fn a_fork_is_a_new_task_whose_parent_is_the_original() {
     );
     // Consumed: the next task is not a fork.
     agent.lifecycle_begin_task("next-3", "other");
-    let (records, _) = log.read_all();
+    let records = task_records(&log);
     assert!(records
         .iter()
         .filter(|r| r.id == "next-3")
@@ -627,4 +664,86 @@ async fn the_terminal_cause_names_what_the_task_owns_to_drain() {
     agent
         .teardown_after_run(&crate::resources::Owner::for_task(&task), &effects)
         .await;
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn the_agent_is_recorded_working_its_tasks_and_projects_into_selfware_agents() {
+    let _state = crate::test_support::ExecGuard::hold();
+    let server = MockLlmServer::builder()
+        .with_default_response(MockResponse::Text("Done.".to_string()))
+        .build()
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let log = EventLog::at(dir.path().join("events.jsonl"));
+    let mut agent = Agent::new(config_for(format!("{}/v1", server.url())))
+        .await
+        .unwrap();
+    agent.event_log = log.clone();
+    let agent_id = agent.agent_id.clone();
+    assert!(agent_id.starts_with("main-"), "{agent_id}");
+
+    agent.run_task("Summarize error handling").await.unwrap();
+    let first = checkpoint_id(&agent);
+    agent.run_task("Summarize the retry logic").await.unwrap();
+    let second = checkpoint_id(&agent);
+    assert_ne!(first, second);
+    assert_eq!(agent.agent_lifecycle_state(), Some(&AgentState::Idle));
+    drop(agent);
+
+    let (records, _) = log.read_all();
+    let agent_steps: Vec<(Option<&str>, &str)> = records
+        .iter()
+        .filter(|r| r.entity == Entity::Agent)
+        .map(|r| (r.event.as_deref(), r.to.as_str()))
+        .collect();
+    assert_eq!(
+        agent_steps,
+        vec![
+            (None, "idle"),
+            (Some("assign"), "working"),
+            (Some("done"), "idle"),
+            (Some("assign"), "working"),
+            (Some("done"), "idle"),
+            (Some("stop"), "stopped"),
+        ]
+    );
+    assert!(records
+        .iter()
+        .filter(|r| r.entity == Entity::Agent)
+        .all(|r| r.id == agent_id && r.agent_type.as_deref() == Some("main")));
+    // Its tasks name it as owner; the terminal record carries the measured
+    // usage (the mock reports usage) — the tokens the projection sums.
+    let tasks: Vec<_> = records
+        .iter()
+        .filter(|r| r.entity == Entity::Task)
+        .collect();
+    assert!(tasks.iter().all(|r| r.owner.as_deref() == Some(&agent_id)));
+    let terminal: Vec<_> = tasks.iter().filter(|r| r.to == "completed").collect();
+    assert_eq!(terminal.len(), 2);
+    assert!(terminal
+        .iter()
+        .all(|r| r.usage.is_some_and(|u| u.total_tokens > 0)));
+
+    let summaries = crate::lifecycle::projection::agent_summaries(&records);
+    assert_eq!(summaries.len(), 1);
+    let a = &summaries[0];
+    assert_eq!(a.id, agent_id);
+    assert_eq!(a.state, "stopped");
+    assert_eq!((a.tasks_completed, a.tasks_failed), (2, 0));
+    assert_eq!(
+        a.tokens,
+        Some(
+            terminal
+                .iter()
+                .map(|r| r.usage.unwrap().total_tokens as u64)
+                .sum()
+        )
+    );
+    assert_eq!(a.last_task.as_deref(), Some(second.as_str()));
+    assert!(a.last_task_type.is_some());
+    server.stop().await;
 }

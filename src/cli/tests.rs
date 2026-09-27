@@ -2907,6 +2907,10 @@ fn parses_the_lifecycle_views() {
             tree: true
         })
     ));
+    let cli = Cli::try_parse_from(["selfware", "agents", "--limit", "4"]).unwrap();
+    assert!(matches!(cli.command, Some(Commands::Agents { limit: 4 })));
+    let cli = Cli::try_parse_from(["selfware", "agents"]).unwrap();
+    assert!(matches!(cli.command, Some(Commands::Agents { limit: 20 })));
     let cli = Cli::try_parse_from(["selfware", "task", "show", "abc"]).unwrap();
     match cli.command {
         Some(Commands::Task {

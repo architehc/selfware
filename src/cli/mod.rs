@@ -1673,6 +1673,30 @@ pub async fn run() -> Result<()> {
             );
             return Ok(());
         }
+        Some(Commands::Agents { limit }) => {
+            let log = crate::lifecycle::EventLog::default_location();
+            let unreleased: Vec<(String, Option<String>)> =
+                crate::resources::ResourceRegistry::global()
+                    .snapshot()
+                    .resources
+                    .into_iter()
+                    .filter(|r| !r.state.is_released())
+                    .map(|r| (r.owner_task, r.owner_agent))
+                    .collect();
+            let alive = |pid: u32| {
+                crate::resources::driver::probe_pid(pid, None) != crate::resources::Probe::Gone
+            };
+            print!(
+                "{}",
+                crate::lifecycle::projection::agents_command_output(
+                    &log,
+                    &unreleased,
+                    &alive,
+                    *limit
+                )
+            );
+            return Ok(());
+        }
         Some(Commands::Task { command }) => {
             let log = crate::lifecycle::EventLog::default_location();
             let alive = |pid: u32| crate::supervision::run_registry::pid_alive(pid);
@@ -6524,7 +6548,7 @@ max_recovery_attempts = 3
             unreachable!("Resources command handled before Config::load");
         }
 
-        Commands::Tasks { .. } | Commands::Task { .. } => {
+        Commands::Tasks { .. } | Commands::Task { .. } | Commands::Agents { .. } => {
             unreachable!("lifecycle views are handled before Config::load");
         }
 

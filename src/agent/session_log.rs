@@ -876,6 +876,7 @@ pub(super) async fn new_test_session_logger(
 
 impl Drop for Agent {
     fn drop(&mut self) {
+        self.lifecycle_stop_agent();
         if let Some(logger) = &self.audit_logger {
             logger.log_session_end();
         }

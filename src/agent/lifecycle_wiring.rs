@@ -32,11 +32,22 @@
 //! Not mapped yet (no main-loop site owns them today): `need_input` /
 //! `input_arrived` (approval prompts), `verify` / `verified` / `reject`
 //! (the completion gate).
+//!
+//! The agent itself is mirrored onto [`crate::lifecycle::AgentMachine`]
+//! (type `main`, id `main-<8 hex>`): created idle with its first task,
+//! `assign` when a task (or a resumed segment) starts, `block` / `unblock`
+//! while its task is paused, `done` when the task ends, `stop` when the
+//! agent is dropped. Its tasks carry it as `owner` and their terminal
+//! records carry the measured `usage` — what `selfware agents` and the
+//! Tasks pane's agent list project.
 
 use super::Agent;
 use crate::errors::{AgentError, RunEnd, SelfwareError};
 use crate::lifecycle::control::{LiveTask, TaskConstraints, TaskControl, TaskEdit, MAIN_AGENT};
-use crate::lifecycle::{Effect, Entity, RecordedUsage, TaskEvent, TaskMachine, TaskState, Tracked};
+use crate::lifecycle::{
+    AgentEvent, AgentMachine, AgentState, Effect, Entity, RecordedUsage, TaskEvent, TaskMachine,
+    TaskState, Tracked,
+};
 use tracing::warn;
 
 /// The terminal task event for a finished run, and its cause.
@@ -134,6 +145,67 @@ impl Agent {
         }
     }
 
+    /// Apply `event` to this agent, logging (never failing on) a refusal.
+    fn agent_apply(&mut self, event: AgentEvent, cause: &str) {
+        let Some(agent) = self.agent_lifecycle.as_mut() else {
+            return;
+        };
+        if let Err(e) = agent.apply(event, cause) {
+            warn!("agent lifecycle ({}): {e}", agent.id());
+        }
+    }
+
+    /// The agent takes `task_id`: recorded idle on its first task, then
+    /// `assign`. A task it still holds that never reported an outcome is
+    /// closed with `done` first, in those words.
+    fn lifecycle_agent_assign(&mut self, task_id: &str) {
+        if self.agent_lifecycle.is_none() {
+            let tracked: Tracked<AgentMachine> = Tracked::new(
+                self.agent_id.clone(),
+                AgentState::Idle,
+                self.event_log.clone(),
+            )
+            .with_agent_type(MAIN_AGENT);
+            tracked.record_created("agent started");
+            self.agent_lifecycle = Some(tracked);
+        }
+        let held = self
+            .agent_lifecycle
+            .as_ref()
+            .and_then(|a| a.state().task().map(str::to_string));
+        if let Some(prev) = held {
+            if prev == task_id {
+                return;
+            }
+            self.agent_apply(
+                AgentEvent::Done,
+                &format!("task {prev} ended without reporting an outcome"),
+            );
+        }
+        self.agent_apply(
+            AgentEvent::Assign {
+                task: task_id.to_string(),
+            },
+            &format!("assigned task {task_id}"),
+        );
+    }
+
+    /// The agent is going away (dropped at session / process end).
+    pub(super) fn lifecycle_stop_agent(&mut self) {
+        if self
+            .agent_lifecycle
+            .as_ref()
+            .is_some_and(|a| !a.is_terminal())
+        {
+            self.agent_apply(AgentEvent::Stop, "agent ended (session or process end)");
+        }
+    }
+
+    /// This agent's lifecycle state, if it has worked on a task.
+    pub fn agent_lifecycle_state(&self) -> Option<&AgentState> {
+        self.agent_lifecycle.as_ref().map(|a| a.state())
+    }
+
     /// A tracker still live when a new one takes over belongs to a run whose
     /// future was dropped before it reported an outcome. Record that as an
     /// interruption, in those words, instead of leaving it live forever.
@@ -156,7 +228,8 @@ impl Agent {
         self.task_main_loop_base = Some(self.session_main_loop_tokens());
         let mut tracked: Tracked<TaskMachine> =
             Tracked::new(task_id, TaskState::Queued, self.event_log.clone())
-                .with_task_type(Self::infer_task_type(task));
+                .with_task_type(Self::infer_task_type(task))
+                .with_owner(self.agent_id.clone());
         let cause = match self.pending_fork_parent.take() {
             Some(parent) => {
                 let cause = format!("forked from task {parent}");
@@ -168,6 +241,7 @@ impl Agent {
         tracked.record_created(&cause);
         self.task_lifecycle = Some(tracked);
         self.lifecycle_apply(TaskEvent::Start, "run started");
+        self.lifecycle_agent_assign(task_id);
         self.publish_live_task();
     }
 
@@ -206,13 +280,19 @@ impl Agent {
         });
         let task_type = Self::infer_task_type(&task);
         let log = self.event_log.clone();
+        let agent = self.agent_id.clone();
+        let assigned = task_id.clone();
         if last == Some(TaskState::Interrupted) {
-            self.task_lifecycle =
-                Some(Tracked::new(task_id, TaskState::Interrupted, log).with_task_type(task_type));
+            self.task_lifecycle = Some(
+                Tracked::new(task_id, TaskState::Interrupted, log)
+                    .with_task_type(task_type)
+                    .with_owner(agent),
+            );
             self.lifecycle_apply(TaskEvent::Resume, "resumed");
         } else {
-            let tracked: Tracked<TaskMachine> =
-                Tracked::new(task_id, TaskState::Queued, log).with_task_type(task_type);
+            let tracked: Tracked<TaskMachine> = Tracked::new(task_id, TaskState::Queued, log)
+                .with_task_type(task_type)
+                .with_owner(agent);
             tracked.record_created(&match last {
                 Some(s) => format!("new segment: resumed after last recorded state `{s}`"),
                 None => "new segment: resumed with no earlier record".to_string(),
@@ -220,6 +300,7 @@ impl Agent {
             self.task_lifecycle = Some(tracked);
         }
         self.lifecycle_apply(TaskEvent::Start, "run resumed");
+        self.lifecycle_agent_assign(&assigned);
         self.publish_live_task();
     }
 
@@ -275,6 +356,14 @@ impl Agent {
             task.attach_usage(usage);
         }
         let effects = self.lifecycle_apply(event, &cause);
+        if let Some((id, end)) = self
+            .task_lifecycle
+            .as_ref()
+            .filter(|t| t.is_terminal())
+            .map(|t| (t.id().to_string(), *t.state()))
+        {
+            self.agent_apply(AgentEvent::Done, &format!("task {id} {end}"));
+        }
         self.publish_live_task();
         effects
     }
@@ -345,7 +434,7 @@ impl Agent {
         let usage = self.measured_task_usage();
         Some(LiveTask {
             id: task.id().to_string(),
-            agent: MAIN_AGENT.to_string(),
+            agent: self.agent_id.clone(),
             task_type: Some(Self::infer_task_type(&description).to_string()),
             description,
             state: *task.state(),
@@ -387,6 +476,12 @@ impl Agent {
             return;
         }
         self.lifecycle_apply(TaskEvent::Pause, "paused by the user between steps");
+        self.agent_apply(
+            AgentEvent::Block {
+                reason: "task paused".to_string(),
+            },
+            "its task was paused",
+        );
         self.publish_live_task();
         self.emit_event(super::AgentEvent::Status {
             message: "Task paused between steps — resume, edit or cancel it in the Tasks pane"
@@ -417,6 +512,7 @@ impl Agent {
             "resumed by the user"
         };
         self.lifecycle_apply(TaskEvent::Resume, cause);
+        self.agent_apply(AgentEvent::Unblock, cause);
         self.publish_live_task();
         self.emit_event(super::AgentEvent::Status {
             message: format!("Task {cause}"),

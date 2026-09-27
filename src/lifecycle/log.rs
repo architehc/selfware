@@ -2,8 +2,9 @@
 //!
 //! One JSON object per line, one line per transition:
 //! `{ts, entity, id, from, to, cause}` plus optional `event`, `owner`,
-//! `task_type`, `pid`, `parent` (a forked task's original) and `usage`
-//! (measured token/cost usage at that moment). `from` is `null` when an entity (or a new segment of
+//! `task_type`, `pid`, `parent` (a forked task's original), `usage`
+//! (measured token/cost usage at that moment) and `agent_type` (agent
+//! records). `from` is `null` when an entity (or a new segment of
 //! a task) is first recorded.
 //!
 //! Writing is best-effort and never fails the run: an I/O error is logged
@@ -64,6 +65,9 @@ pub struct TransitionRecord {
     /// transitions and edits carry it). Absent means not recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<RecordedUsage>,
+    /// What kind of agent (`main`, …), on agent records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
 }
 
 /// Token and cost usage as measured by the client (Rule 4): provider-reported
@@ -115,6 +119,7 @@ impl TransitionRecord {
             pid: Some(std::process::id()),
             parent: None,
             usage: None,
+            agent_type: None,
         }
     }
 }

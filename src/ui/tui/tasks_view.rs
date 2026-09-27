@@ -21,7 +21,10 @@
 //! loop to carry out.
 
 use crate::lifecycle::control::{LiveTask, TaskControl, TaskEdit, MAIN_AGENT};
-use crate::lifecycle::projection::{task_summaries, task_timeline, usage_line, TaskSummary};
+use crate::lifecycle::projection::{
+    agent_display, agent_summaries, resources_held, task_summaries, task_timeline, usage_line,
+    TaskSummary,
+};
 use crate::lifecycle::{Entity, TaskState, TransitionRecord};
 use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -48,6 +51,8 @@ pub struct ResourceRow {
     pub handle: String,
     pub port: Option<u16>,
     pub owner_task: String,
+    /// The agent the resource was spawned under, when recorded.
+    pub owner_agent: Option<String>,
     pub label: String,
     pub note: Option<String>,
     /// selfware can stop this kind itself (container, process, pty, browser).
@@ -76,6 +81,9 @@ pub struct TasksInputs {
     /// This process's pid (a non-terminal task recorded by another pid is
     /// not controllable here).
     pub this_pid: u32,
+    /// Pids (other than this one) that recorded agents and still run; an
+    /// agent's live state recorded by any other pid reads "(process ended)".
+    pub live_pids: std::collections::HashSet<u32>,
     /// Now.
     pub now: DateTime<Utc>,
 }
@@ -98,6 +106,7 @@ pub fn resource_rows_from_registry(
             kind: r.kind.as_str().to_string(),
             state: r.state.as_str().to_string(),
             owner_task: r.owner_task,
+            owner_agent: r.owner_agent,
             label: r.label,
             note: r.note,
             drainable: r.kind.is_drainable(),
@@ -105,58 +114,121 @@ pub fn resource_rows_from_registry(
         .collect()
 }
 
-/// One agent row. The main agent is the only agent the log records today
-/// (task records carry no owner, which means `main`); swarm and multi-chat
-/// agents join in phase 6. Kept as one small function so an agents
-/// projection can replace it.
+/// One agent row: the `selfware agents` projection
+/// ([`agent_summaries`]) of the event log, formatted by [`agent_display`],
+/// with the resources the registry attributes to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentRow {
     pub id: String,
+    /// Recorded agent type, or `not recorded`.
+    pub agent_type: String,
+    /// Recorded state (`(process ended)` when its process is gone).
+    pub state: String,
+    /// Time in that state, from the recorded timestamp.
+    pub in_state: String,
     /// Tasks recorded for this agent.
     pub tasks: usize,
+    pub completed: usize,
+    pub failed: usize,
+    /// Interrupted or cancelled.
+    pub stopped: usize,
+    /// Measured token total of its ended tasks, or `not recorded`.
+    pub tokens: String,
     /// The most recently active task.
     pub last_task: Option<String>,
     /// Its state.
     pub last_state: Option<String>,
     /// Its task type.
     pub last_task_type: Option<String>,
+    /// Unreleased resources it (or one of its tasks) owns.
+    pub resources: usize,
 }
 
-/// Agents derived from task records (owner, defaulting to `main`) and the
-/// live task.
-pub fn agents_from(summaries: &[TaskSummary], live: Option<&LiveTask>) -> Vec<AgentRow> {
-    let mut rows: Vec<AgentRow> = Vec::new();
-    for s in summaries {
-        let agent = s.owner.clone().unwrap_or_else(|| MAIN_AGENT.to_string());
-        match rows.iter_mut().find(|r| r.id == agent) {
-            Some(row) => row.tasks += 1,
+/// The session's agents: the agent projection of the event log, plus the
+/// live task's agent before the log shows it.
+pub fn agents_from(inputs: &TasksInputs) -> Vec<AgentRow> {
+    let alive = |pid: u32| pid == inputs.this_pid || inputs.live_pids.contains(&pid);
+    let unreleased: Vec<(&str, Option<&str>)> = inputs
+        .resources
+        .iter()
+        .filter(|r| r.state != "released")
+        .map(|r| (r.owner_task.as_str(), r.owner_agent.as_deref()))
+        .collect();
+    let mut rows: Vec<AgentRow> = agent_summaries(&inputs.records)
+        .iter()
+        .map(|a| {
+            let d = agent_display(a, inputs.now, &alive);
+            AgentRow {
+                id: a.id.clone(),
+                agent_type: a
+                    .agent_type
+                    .clone()
+                    .unwrap_or_else(|| "not recorded".into()),
+                state: d.state,
+                in_state: d.in_state,
+                tasks: a.task_ids.len(),
+                completed: a.tasks_completed,
+                failed: a.tasks_failed,
+                stopped: a.tasks_stopped,
+                tokens: d.tokens,
+                last_task: a.last_task.clone(),
+                last_state: a.last_task_state.clone(),
+                last_task_type: a.last_task_type.clone(),
+                resources: resources_held(a, unreleased.iter().copied()),
+            }
+        })
+        .collect();
+    if let Some(live) = inputs.live.as_ref() {
+        match rows.iter_mut().find(|r| r.id == live.agent) {
+            Some(row) => {
+                // The live task is this agent's current one, and its
+                // in-process state is at least as fresh as the log's.
+                let logged = inputs
+                    .records
+                    .iter()
+                    .any(|r| r.entity == Entity::Task && r.id == live.id);
+                if !logged {
+                    row.tasks += 1;
+                }
+                row.last_task = Some(live.id.clone());
+                row.last_state = Some(live.state.to_string());
+                row.last_task_type = live.task_type.clone();
+            }
             None => rows.push(AgentRow {
-                id: agent,
-                tasks: 1,
-                last_task: Some(s.id.clone()),
-                last_state: Some(s.state.clone()),
-                last_task_type: s.task_type.clone(),
-            }),
-        }
-    }
-    if let Some(live) = live {
-        if !rows.iter().any(|r| r.id == live.agent) {
-            rows.push(AgentRow {
                 id: live.agent.clone(),
+                agent_type: "not recorded".into(),
+                state: "not recorded".into(),
+                in_state: "-".into(),
                 tasks: 1,
+                completed: 0,
+                failed: 0,
+                stopped: 0,
+                tokens: "not recorded".into(),
                 last_task: Some(live.id.clone()),
                 last_state: Some(live.state.to_string()),
                 last_task_type: live.task_type.clone(),
-            });
+                resources: unreleased
+                    .iter()
+                    .filter(|(t, a)| *t == live.id || *a == Some(live.agent.as_str()))
+                    .count(),
+            }),
         }
     }
     if rows.is_empty() {
         rows.push(AgentRow {
             id: MAIN_AGENT.to_string(),
+            agent_type: MAIN_AGENT.to_string(),
+            state: "not recorded".into(),
+            in_state: "-".into(),
             tasks: 0,
+            completed: 0,
+            failed: 0,
+            stopped: 0,
+            tokens: "not recorded".into(),
             last_task: None,
             last_state: None,
             last_task_type: None,
+            resources: 0,
         });
     }
     rows
@@ -446,19 +518,27 @@ fn resource_label(r: &ResourceRow) -> String {
 /// The rows at `level` and where Enter goes from each.
 pub fn items_at(inputs: &TasksInputs, level: &Level) -> Vec<Item> {
     match level {
-        Level::Agents => agents_from(&task_summaries(&inputs.records), inputs.live.as_ref())
+        Level::Agents => agents_from(inputs)
             .into_iter()
             .map(|a| Item {
                 label: format!(
-                    "{:<10} {:>3} task(s)  last: {} {} {}",
+                    "{:<14} {:<5} {} {}  {} task(s): {} done, {} failed, {} stopped  tokens {}  last: {} {} {}  resources {}",
                     a.id,
+                    a.agent_type,
+                    a.state,
+                    a.in_state,
                     a.tasks,
+                    a.completed,
+                    a.failed,
+                    a.stopped,
+                    a.tokens,
                     a.last_task
                         .as_deref()
                         .map(short_id)
                         .unwrap_or_else(|| "-".into()),
                     a.last_state.as_deref().unwrap_or("-"),
-                    a.last_task_type.as_deref().unwrap_or("")
+                    a.last_task_type.as_deref().unwrap_or(""),
+                    a.resources
                 ),
                 target: Some(Level::Tasks { agent: a.id }),
             })

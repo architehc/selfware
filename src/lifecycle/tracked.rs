@@ -15,6 +15,7 @@ pub struct Tracked<M: Machine> {
     task_type: Option<String>,
     parent: Option<String>,
     usage: Option<RecordedUsage>,
+    agent_type: Option<String>,
     log: EventLog,
 }
 
@@ -30,6 +31,7 @@ impl<M: Machine> Tracked<M> {
             task_type: None,
             parent: None,
             usage: None,
+            agent_type: None,
             log,
         }
     }
@@ -62,6 +64,12 @@ impl<M: Machine> Tracked<M> {
     /// or an edit); later records carry none until set again.
     pub fn attach_usage(&mut self, usage: RecordedUsage) {
         self.usage = Some(usage);
+    }
+
+    /// Set the agent type written with every record (agent entities).
+    pub fn with_agent_type(mut self, agent_type: impl Into<String>) -> Self {
+        self.agent_type = Some(agent_type.into());
+        self
     }
 
     /// Record that the entity (or a new segment of it) now exists in its
@@ -138,6 +146,7 @@ impl<M: Machine> Tracked<M> {
         rec.task_type = self.task_type.clone();
         rec.parent = self.parent.clone();
         rec.usage = self.usage;
+        rec.agent_type = self.agent_type.clone();
         rec
     }
 }

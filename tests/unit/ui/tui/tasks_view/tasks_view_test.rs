@@ -116,6 +116,7 @@ fn inputs() -> TasksInputs {
             handle: "container 3f2a1b9c0d11".into(),
             port: None,
             owner_task: "01J9LIVETASK0001".into(),
+            owner_agent: None,
             label: "slugify-test".into(),
             note: None,
             drainable: true,
@@ -127,6 +128,7 @@ fn inputs() -> TasksInputs {
             handle: "port 5000".into(),
             port: Some(5000),
             owner_task: "01J9LIVETASK0001".into(),
+            owner_agent: None,
             label: String::new(),
             note: None,
             drainable: false,
@@ -138,6 +140,7 @@ fn inputs() -> TasksInputs {
             handle: "pid 777".into(),
             port: None,
             owner_task: "01J9DONETASK0002".into(),
+            owner_agent: None,
             label: "npm run dev".into(),
             note: Some("still running".into()),
             drainable: true,
@@ -151,6 +154,7 @@ fn inputs() -> TasksInputs {
         live: Some(live_task()),
         descriptions,
         this_pid: 4242,
+        live_pids: Default::default(),
         now: now(),
     }
 }
@@ -566,4 +570,74 @@ fn render_survives_tiny_terminals() {
             .draw(|f| render(f, f.area(), &view, Some(&editor), Some("s")))
             .unwrap_or_else(|e| panic!("{w}x{h}: {e}"));
     }
+}
+
+#[test]
+fn the_agent_list_is_the_agents_projection_with_state_time_tasks_tokens_and_resources() {
+    let mut inputs = inputs();
+    // This process's agent owns the live task; its records are in the log.
+    let agent_rec = |ts: &str, to: &str| {
+        let mut r = TransitionRecord::now(Entity::Agent, "main-0a1b2c3d", None, to, None, "why");
+        r.ts = ts.to_string();
+        r.pid = Some(4242);
+        r.agent_type = Some("main".into());
+        r
+    };
+    inputs
+        .records
+        .push(agent_rec("2026-09-26T10:05:59.000Z", "idle"));
+    inputs
+        .records
+        .push(agent_rec("2026-09-26T10:06:00.000Z", "working"));
+    for r in inputs
+        .records
+        .iter_mut()
+        .filter(|r| r.id == "01J9LIVETASK0001")
+    {
+        r.owner = Some("main-0a1b2c3d".into());
+    }
+    let mut live = live_task();
+    live.agent = "main-0a1b2c3d".into();
+    inputs.live = Some(live);
+
+    let rows = agents_from(&inputs);
+    let mine = rows.iter().find(|r| r.id == "main-0a1b2c3d").unwrap();
+    assert_eq!(mine.agent_type, "main");
+    assert_eq!(mine.state, "working");
+    assert_eq!(mine.in_state, "4m00s", "now − the recorded timestamp");
+    assert_eq!(mine.tasks, 1);
+    assert_eq!(mine.last_task.as_deref(), Some("01J9LIVETASK0001"));
+    assert_eq!(mine.last_state.as_deref(), Some("executing"));
+    assert_eq!(mine.tokens, "not recorded", "the live task has not ended");
+    assert_eq!(mine.resources, 2, "container + port of its live task");
+    // The earlier, owner-less task stays with the legacy `main` agent, with
+    // its measured usage.
+    let legacy = rows.iter().find(|r| r.id == "main").unwrap();
+    assert_eq!(legacy.state, "not recorded");
+    assert_eq!((legacy.tasks, legacy.completed), (1, 1));
+    assert_eq!(legacy.tokens, "900");
+    assert_eq!(legacy.resources, 1, "its leaked process");
+
+    let view = build_view(&inputs, &Nav::default());
+    let label = &view
+        .items
+        .iter()
+        .find(|i| i.label.starts_with("main-0a1b2c3d"))
+        .unwrap()
+        .label;
+    assert!(label.contains("working 4m00s"), "{label}");
+    assert!(label.contains("tokens not recorded"), "{label}");
+    assert!(label.contains("resources 2"), "{label}");
+
+    // A live state recorded by a process that is gone is not shown as live.
+    for r in inputs
+        .records
+        .iter_mut()
+        .filter(|r| r.entity == Entity::Agent)
+    {
+        r.pid = Some(999_999);
+    }
+    let rows = agents_from(&inputs);
+    let mine = rows.iter().find(|r| r.id == "main-0a1b2c3d").unwrap();
+    assert_eq!(mine.state, "working (process ended)");
 }
