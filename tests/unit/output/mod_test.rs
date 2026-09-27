@@ -1027,3 +1027,10 @@ fn cargo_test_summary_reports_failures_ignored_and_no_tests() {
         "Tests: failed (no test results reported)"
     );
 }
+
+#[test]
+fn final_answer_suppresses_markup_only_response() {
+    let markup = "<tool_call>\n<parameter=name>foo</parameter>\n</tool_call>";
+    let visible = crate::agent::visible_response_text(markup);
+    assert!(visible.trim().is_empty());
+}

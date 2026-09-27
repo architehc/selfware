@@ -2890,7 +2890,11 @@ To call a tool, use this EXACT XML structure:
     /// signal owner while every cancellation check in the agent, tools, and
     /// streaming paths observes the same unified state.
     pub(crate) fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Relaxed) || crate::is_shutdown_requested()
+        if crate::is_shutdown_requested() {
+            self.cancelled.store(true, Ordering::Relaxed);
+            return true;
+        }
+        self.cancelled.load(Ordering::Relaxed)
     }
 
     /// Clear cancellation state after handling an interrupt.

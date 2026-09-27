@@ -151,6 +151,16 @@ pub const SHELL_RULE_EXACT_ONLY_PROGRAMS: &[&str] = &[
     "chown",
     "chgrp",
     "mv",
+    // File writers and script-capable editors (`awk` runs `system()`): a
+    // prefix grant would allow every later rewrite (review, 0.9.2).
+    "cp",
+    "ln",
+    "touch",
+    "truncate",
+    "sed",
+    "awk",
+    "tee",
+    "patch",
     "curl",
     "wget",
     "ssh",
@@ -311,7 +321,10 @@ impl ShellAllowRule {
         }
         if SHELL_RULE_INTERPRETERS.contains(&program.as_str()) {
             return match (tokens.get(1), tokens.get(2)) {
-                (Some(&"-m"), Some(module)) if plain_prefix_token(module) => {
+                (Some(&"-m"), Some(module))
+                    if plain_prefix_token(module)
+                        && !matches!(*module, "pip" | "pip3" | "pipx" | "ensurepip" | "venv") =>
+                {
                     ShellAllowRule::Prefix(tokens[..3].iter().map(|t| t.to_string()).collect())
                 }
                 _ => exact(),

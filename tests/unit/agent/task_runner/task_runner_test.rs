@@ -1481,6 +1481,21 @@ async fn test_run_task_cancellation() {
 }
 
 #[tokio::test]
+async fn test_shutdown_request_latches_agent_cancellation() {
+    let server = MockLlmServer::builder().with_response("ok").build().await;
+    let config = mock_agent_config(format!("{}/v1", server.url()), false);
+    let agent = Agent::new(config).await.unwrap();
+    assert!(!agent.is_cancelled());
+    crate::request_shutdown();
+    assert!(agent.is_cancelled());
+    assert!(agent.cancelled.load(std::sync::atomic::Ordering::Relaxed));
+    crate::reset_shutdown_for_test();
+    agent.reset_cancellation();
+    assert!(!agent.is_cancelled());
+    server.stop().await;
+}
+
+#[tokio::test]
 #[cfg_attr(
     target_os = "windows",
     ignore = "mock TCP server unreliable on Windows CI"

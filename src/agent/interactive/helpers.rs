@@ -623,7 +623,10 @@ impl<S: InputEventSource> EscListenerLoop<S> {
         use std::sync::atomic::Ordering;
 
         loop {
-            if self.stop.load(Ordering::Relaxed) || self.cancel_token.load(Ordering::Relaxed) {
+            if self.stop.load(Ordering::Relaxed)
+                || self.cancel_token.load(Ordering::Relaxed)
+                || crate::is_shutdown_requested()
+            {
                 break;
             }
 

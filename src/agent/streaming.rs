@@ -812,10 +812,28 @@ impl Agent {
         let mut wait_ticker = super::llm_wait::LlmWaitTicker::start();
         // Boxed: keeps the large request future out of this (already deep)
         // async frame — inlining it overflowed the test-thread stack.
+        let cancel = self.cancel_token();
         let mut send_fut = Box::pin(self.client.chat_stream_with_meta(messages, tools, thinking));
         let (stream, request_meta) = loop {
             tokio::select! {
                 biased;
+                _ = async {
+                    loop {
+                        if cancel.load(std::sync::atomic::Ordering::Relaxed)
+                            || crate::is_shutdown_requested()
+                        {
+                            return;
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                    }
+                } => {
+                    if tui_active && tui_spinner_active {
+                        self.emit_event(AgentEvent::SpinnerStop);
+                    } else {
+                        drop(spinner.take());
+                    }
+                    return Err(crate::errors::AgentError::for_current_shutdown().into());
+                }
                 sent = &mut send_fut => break sent?,
                 _ = tokio::time::sleep_until(wait_ticker.next_due()) => {
                     // Headers not back yet: still queued / prefilling.
@@ -873,18 +891,18 @@ impl Agent {
         let mut stream_ended_with_done = false;
         let mut runaway_cut = false;
 
-        let cancel = self.cancel_token();
-
         loop {
             // Use select to check cancellation even when recv is waiting
             let chunk_result = tokio::select! {
                 biased;
                 _ = async {
                     loop {
-                        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                        if cancel.load(std::sync::atomic::Ordering::Relaxed)
+                            || crate::is_shutdown_requested()
+                        {
                             return;
                         }
-                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                     }
                 } => {
                     if tui_active && tui_spinner_active {
@@ -893,7 +911,7 @@ impl Agent {
                     } else {
                         drop(spinner.take());
                     }
-                    break;
+                    return Err(crate::errors::AgentError::for_current_shutdown().into());
                 }
                 step = super::llm_wait::recv_or_tick(&mut rx, &wait_ticker) => {
                     match step {
@@ -1327,9 +1345,13 @@ impl Agent {
             reasoning.is_empty(),
             tool_calls.is_empty(),
             provider_explained_itself,
-            cancel.load(std::sync::atomic::Ordering::Relaxed),
+            cancel.load(std::sync::atomic::Ordering::Relaxed) || crate::is_shutdown_requested(),
         ) {
             return Err(crate::errors::ApiError::EmptyStream.into());
+        }
+
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) || crate::is_shutdown_requested() {
+            return Err(crate::errors::AgentError::for_current_shutdown().into());
         }
 
         Ok((

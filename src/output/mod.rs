@@ -1131,7 +1131,11 @@ pub(crate) fn final_answer(content: &str) {
     if should_suppress_output() {
         return;
     }
-    let Some(part) = live::unshown_part(content) else {
+    let visible = crate::agent::visible_response_text(content);
+    if visible.trim().is_empty() {
+        return;
+    }
+    let Some(part) = live::unshown_part(&visible) else {
         return;
     };
     let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1157,7 +1161,7 @@ pub(crate) fn final_answer(content: &str) {
         }
     }
     io::stdout().flush().ok();
-    live::record_shown_prose(content, false);
+    live::record_shown_prose(&visible, false);
 }
 
 /// Display a color-coded diff for file edits/writes.

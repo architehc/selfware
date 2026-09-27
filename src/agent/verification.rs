@@ -2590,6 +2590,13 @@ impl Agent {
             );
         }
 
+        if super::recovery::looks_like_malformed_tool_xml(&self.last_assistant_response) {
+            return Some(
+                "Your response contains malformed tool call markup that could not be executed. Format your tool calls using proper syntax or provide a plain text answer."
+                    .to_string(),
+            );
+        }
+
         if let Some(target) = literal_target.as_deref() {
             if !matches_exact_response_target(&self.last_assistant_response, target) {
                 return Some(format!(

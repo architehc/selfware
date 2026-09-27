@@ -832,3 +832,11 @@ fn visible_response_text_drops_markup_and_reasoning() {
     assert_eq!(visible_response_text("Hi <tool_call>{\"a\":1"), "Hi");
     assert_eq!(visible_response_text("plain answer"), "plain answer");
 }
+
+#[test]
+fn visible_response_text_strips_parameter_tags_and_malformed_xml() {
+    let content = "<tool_call>\n<parameter=path>README.md</parameter>\n</tool_call>";
+    assert_eq!(visible_response_text(content), "");
+    let mixed = "Here is the summary.<tool_call><parameter=name>foo</parameter></tool_call>";
+    assert_eq!(visible_response_text(mixed), "Here is the summary.");
+}

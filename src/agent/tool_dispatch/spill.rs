@@ -25,7 +25,7 @@ where
 {
     use std::sync::atomic::Ordering;
     // Fast path: already cancelled before we start.
-    if cancel.load(Ordering::Relaxed) {
+    if cancel.load(Ordering::Relaxed) || crate::is_shutdown_requested() {
         return Err(ToolHalt::Cancelled);
     }
     let deadline = tokio::time::sleep(timeout);
@@ -37,7 +37,7 @@ where
             r = &mut fut => return Ok(r),
             _ = &mut deadline => return Err(ToolHalt::TimedOut),
             _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
-                if cancel.load(Ordering::Relaxed) {
+                if cancel.load(Ordering::Relaxed) || crate::is_shutdown_requested() {
                     return Err(ToolHalt::Cancelled);
                 }
             }

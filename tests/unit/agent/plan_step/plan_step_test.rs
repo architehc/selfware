@@ -1005,6 +1005,62 @@ async fn test_grounded_read_only_report_is_finalizable() {
     );
 }
 
+#[tokio::test]
+async fn test_markup_only_planning_response_is_rejected_from_finalization() {
+    let config = mock_agent_config("http://127.0.0.1:1/v1".to_string(), false);
+    let mut agent = Agent::new(config).await.unwrap();
+    let task = "Explain what this project does";
+    agent.start_learning_session("gate-markup", task);
+    agent.current_checkpoint = Some(TaskCheckpoint::new(
+        "gate-markup".to_string(),
+        task.to_string(),
+    ));
+    agent.task_is_read_only = true;
+    agent.total_tool_call_count = 1;
+    agent.messages.push(Message::user(task));
+    agent.messages.push(Message::assistant(
+        "<tool_call>\n<parameter=path>README.md</parameter>\n</tool_call>",
+    ));
+
+    let ready = agent.planning_answer_ready_to_finalize().await;
+    assert!(
+        ready.is_none(),
+        "a response containing raw tool call markup must never be finalized"
+    );
+}
+
+#[tokio::test]
+async fn test_workspace_query_without_reads_is_rejected_as_ungrounded() {
+    let config = mock_agent_config("http://127.0.0.1:1/v1".to_string(), false);
+    let mut agent = Agent::new(config).await.unwrap();
+    let task = "What does README.md in this workspace say?";
+    agent.start_learning_session("gate-query-ungrounded", task);
+    agent.current_checkpoint = Some(TaskCheckpoint::new(
+        "gate-query-ungrounded".to_string(),
+        task.to_string(),
+    ));
+    // Even if task_is_read_only was not explicitly set, a non-mutation query referencing README.md must ground
+    agent.task_is_read_only = false;
+    agent.total_tool_call_count = 0;
+    agent.messages.push(Message::user(task));
+    agent.messages.push(Message::assistant(
+        "README.md explains that this repository is a tool for building autonomous agents with Rust.",
+    ));
+
+    let ready = agent.planning_answer_ready_to_finalize().await;
+    assert!(
+        ready.is_none(),
+        "a workspace query with 0 tool reads must not finalize ungrounded"
+    );
+    assert!(
+        agent.messages.iter().any(|m| m
+            .content
+            .text()
+            .contains("read-only report without any read")),
+        "the harness must demand tool reads before answering"
+    );
+}
+
 // -----------------------------------------------------------------------
 // Planning request assembly: prefix-stable, same tail as execution
 // -----------------------------------------------------------------------
