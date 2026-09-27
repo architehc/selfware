@@ -770,3 +770,81 @@ async fn pass_with_outstanding_in_scope_failure_does_not_promote_the_snapshot() 
     );
     server.stop().await;
 }
+
+/// c24 (0.9.3): the run stopped at the cap on the verified tree itself, and
+/// the summary said two byte-identical files were "restored to best
+/// snapshot". A file already in the snapshot's state is left untouched (not
+/// even rewritten) and is not reported as restored; a file that did change
+/// still is.
+#[tokio::test]
+async fn failure_on_the_verified_state_restores_nothing_and_says_so() {
+    use crate::agent::failure_mode::{FailureKind, FailureMode};
+    use crate::agent::Agent;
+    use crate::checkpoint::{TaskCheckpoint, ToolCallLog};
+    use crate::config::Config;
+    use crate::testing::mock_api::MockLlmServer;
+    use chrono::Utc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let same = dir.path().join("same.py");
+    let changed = dir.path().join("changed.py");
+    std::fs::write(&same, "# verified\n").unwrap();
+    std::fs::write(&changed, "# verified too\n").unwrap();
+
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = Config {
+        endpoint: format!("{}/v1", server.url()),
+        ..Default::default()
+    };
+    let mut agent = Agent::new(config).await.unwrap();
+    let mut cp = TaskCheckpoint::new("t".to_string(), "implement it".to_string());
+    for path in [&same, &changed] {
+        cp.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "file_write".to_string(),
+            arguments: serde_json::json!({"path": path.to_string_lossy(), "content": "x"})
+                .to_string(),
+            result: Some("ok".to_string()),
+            success: true,
+            duration_ms: Some(10),
+        });
+    }
+    agent.current_checkpoint = Some(cp);
+    pass_in_scope_check(&mut agent, dir.path());
+    assert!(agent.best_snapshot.has_snapshot());
+
+    // Only one file moves on after the green verification.
+    write_as_agent(&mut agent.best_snapshot, &changed, "# broken\n");
+    assert!(agent.best_snapshot.already_matches(&same));
+    assert!(!agent.best_snapshot.already_matches(&changed));
+    let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(&same)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+
+    agent.last_run_failure_mode = Some(FailureMode {
+        restored_files: Vec::new(),
+        kind: FailureKind::MaxIterations,
+        evidence: "max_iterations reached".to_string(),
+        advice: String::new(),
+    });
+    agent.restore_best_snapshot_after_failure().await;
+
+    let restored = &agent.last_run_failure_mode.as_ref().unwrap().restored_files;
+    assert_eq!(restored.len(), 1, "{restored:?}");
+    assert!(restored[0].ends_with("changed.py"), "{restored:?}");
+    assert_eq!(
+        std::fs::read_to_string(&changed).unwrap(),
+        "# verified too\n"
+    );
+    assert_eq!(std::fs::read_to_string(&same).unwrap(), "# verified\n");
+    assert_eq!(
+        std::fs::metadata(&same).unwrap().modified().unwrap(),
+        old,
+        "a file already in the snapshot state is not rewritten"
+    );
+    server.stop().await;
+}

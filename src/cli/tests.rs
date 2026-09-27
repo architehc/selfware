@@ -1248,6 +1248,8 @@ fn sample_summary() -> crate::agent::RunSummary {
         resources: None,
         paused: None,
         edited_task: None,
+        finish_stall_outcome: None,
+        finish_stall_detail: None,
     }
 }
 
@@ -3127,4 +3129,39 @@ fn run_summary_names_resources_only_when_the_task_owned_some() {
     summary.resources = Some("resources: 2 released, 1 leaked (pid 9: still running)".into());
     let with = render_run_summary(&summary, None);
     assert!(with.contains("resources: 2 released, 1 leaked (pid 9: still running)"));
+}
+
+#[test]
+fn render_run_summary_says_a_capped_run_had_finished_verified_work() {
+    // c24: "outcome: failed — Max iterations exceeded" alone hid that the
+    // work was done and verified 13 turns earlier.
+    let mut summary = sample_summary();
+    summary.finish_stall_outcome = Some(
+        "the work was done and verified at turn 38 (cargo_check passed; nothing changed since) but no final answer was given"
+            .to_string(),
+    );
+    summary.finish_stall_detail = Some(
+        "finish stall: 11 of the 13 turn(s) after the verified state only re-read content already returned; iteration budget NOT extended at turn 40 (re-reading a verified, unchanged tree is not progress)"
+            .to_string(),
+    );
+    let rendered = render_run_summary(&summary, Some("Agent failed: Max iterations exceeded"));
+    assert!(
+        rendered.contains(
+            "outcome: failed — Agent failed: Max iterations exceeded; the work was done and verified at turn 38"
+        ) || rendered.contains(
+            "outcome: failed — Max iterations exceeded; the work was done and verified at turn 38"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("finish stall: 11 of the 13 turn(s)")
+            && rendered.contains("iteration budget NOT extended at turn 40"),
+        "{rendered}"
+    );
+    // Completed runs never carry the failure clause.
+    let rendered = render_run_summary(&summary, None);
+    assert!(
+        !rendered.contains("no final answer was given"),
+        "{rendered}"
+    );
 }

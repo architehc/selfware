@@ -1720,9 +1720,12 @@ impl Agent {
         // which is the forced mutation a "do NOT edit" task must be spared;
         // and a plain status/question query must be spared it too (review
         // finding: the read-only check was false there, so synthesis fired).
+        // Nor on a verified, unchanged tree: synthesis would auto-write
+        // extracted code over the verified deliverable (finish stall).
         if read_count >= 3
             && self.pending_synthesis.is_none()
             && self.current_task_requires_mutation()
+            && !self.finish_stall_tree_green()
         {
             info!(
                 "Triggering phase-2 synthesis after {} suppressed rereads",
@@ -4532,6 +4535,21 @@ impl Agent {
         // in effect so far; the call that just ran (enter_worktree,
         // exit_worktree) may have moved it for every later call.
         self.sync_path_key_root();
+        // Finish stall (see `finish_stall`): on a verified, unchanged tree a
+        // re-read that returns only content already given is refused once
+        // the directive went unanswered. Measured on what the model would
+        // receive: the first chunk of a whole read that does not fit.
+        let delivered = if success && tool_name == "file_read" && self.finish_stall.turn_open() {
+            self.chunk_whole_read_for_context(args_str, result)
+        } else {
+            None
+        };
+        let refusal =
+            self.finish_stall_screen(tool_name, args_str, success, result, delivered.as_deref());
+        let (success, result) = match refusal.as_deref() {
+            Some(refusal) => (false, refusal),
+            None => (success, result),
+        };
         self.push_tool_result_message_at_root(
             use_native_fc,
             call_id,

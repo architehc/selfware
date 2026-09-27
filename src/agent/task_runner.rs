@@ -588,6 +588,13 @@ pub struct RunSummary {
     /// The task description as edited mid-run, with the original; `None`
     /// when it was not edited.
     pub edited_task: Option<crate::lifecycle::control::EditedDescription>,
+    /// Outcome clause for a run that stopped without a final answer while
+    /// its work was verified and unchanged ("the work was done and verified
+    /// at turn N … but no final answer was given"); `None` otherwise.
+    pub finish_stall_outcome: Option<String>,
+    /// What the finish-stall handling did (directive, refusals, withheld
+    /// budget extension); `None` when it never engaged.
+    pub finish_stall_detail: Option<String>,
 }
 
 /// The hard run budgets in force, as configured (`None` = not set; a
@@ -651,6 +658,8 @@ impl Agent {
             resources: self.resource_teardown.as_ref().map(|o| o.summary.clone()),
             paused: (!self.task_paused().is_zero()).then(|| self.task_paused()),
             edited_task: self.edited_task_description(),
+            finish_stall_outcome: self.finish_stall.outcome_clause(),
+            finish_stall_detail: self.finish_stall.summary_detail(),
         }
     }
 
@@ -911,7 +920,7 @@ impl Agent {
     /// `TurnDecision { decision: "best_snapshot_restore" }` progress event,
     /// prints a line, and records the restored files on the run's verdict so
     /// the summary names them as restored.
-    async fn restore_best_snapshot_after_failure(&mut self) {
+    pub(super) async fn restore_best_snapshot_after_failure(&mut self) {
         let paths = self.written_paths();
         // Resolve identities BEFORE restoring: a restore can delete a file
         // the run created, and only tracked identities are ever restored.
@@ -927,8 +936,29 @@ impl Agent {
                     .then(|| (p.clone(), identity))
             })
             .collect();
+        // Files already byte-identical to the snapshot (the run failed on
+        // the verified state itself, e.g. a finish stall at the cap) are not
+        // "restored": nothing is written and the summary does not say so.
+        let (unchanged, candidates): (Vec<_>, Vec<_>) = candidates
+            .into_iter()
+            .partition(|(path, _)| self.best_snapshot.already_matches(path));
         let outcome = self.best_snapshot.restore_written(&paths);
         let error_text = outcome.as_ref().err().map(ToString::to_string);
+        if !unchanged.is_empty() {
+            let mut shown: Vec<String> = unchanged
+                .iter()
+                .map(|(path, _)| path.display().to_string())
+                .collect();
+            shown.sort();
+            shown.dedup();
+            let detail = format!(
+                "best (last-green) snapshot: nothing to restore for {} file(s) already in the verified state: {}",
+                shown.len(),
+                shown.join(", ")
+            );
+            info!("{detail}");
+            cli_println!("↩ {detail}");
+        }
         let mut restored: Vec<String> = Vec::new();
         for (path, identity) in candidates {
             let failed = error_text.as_deref().is_some_and(|text| {
@@ -1885,6 +1915,29 @@ impl Agent {
         }
     }
 
+    /// The finish stall withholds more budget: the tree is verified and
+    /// unchanged, and the latest turns only re-read content already returned
+    /// (c24: 40→50 was granted for exactly such turns). Said once, visibly,
+    /// and recorded for the run summary (AGENTS.md rule 3).
+    fn finish_stall_withholds_budget(&mut self) -> bool {
+        if !self.finish_stall.blocks_budget_extension() {
+            return false;
+        }
+        if !self.finish_stall.note_extension_withheld() {
+            return true;
+        }
+        let message = "Iteration budget NOT extended: the work is verified and unchanged, and the \
+                       last turns only re-read content already returned — that is not progress"
+            .to_string();
+        info!("{message}");
+        self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+            decision: "budget_extension_withheld".to_string(),
+            detail: message.clone(),
+        });
+        self.emit_event(AgentEvent::Status { message });
+        true
+    }
+
     /// Adaptive turn budget (loop 13, multi-fire since the TB4 diagnosis): the
     /// iteration cap just tripped. When the last turns each show real forward
     /// progress — a non-error tool result and no identical call repeated —
@@ -1896,6 +1949,9 @@ impl Agent {
     fn maybe_extend_iteration_budget(&mut self) -> Option<AgentState> {
         const PROGRESS_WINDOW: usize = 5;
         if !super::loop_control::productive_streak(&self.recent_turn_progress, PROGRESS_WINDOW) {
+            return None;
+        }
+        if self.finish_stall_withholds_budget() {
             return None;
         }
         let added = self.loop_control.extend_budget_once()?;
@@ -1947,6 +2003,9 @@ impl Agent {
         // existing MaxIterations failure for unproductive runs.
         const PROGRESS_WINDOW: usize = 5;
         if !super::loop_control::productive_streak(&self.recent_turn_progress, PROGRESS_WINDOW) {
+            return None;
+        }
+        if self.finish_stall_withholds_budget() {
             return None;
         }
         // Only chain after the cheaper in-place mechanism is spent: while any

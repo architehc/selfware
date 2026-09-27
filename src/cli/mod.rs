@@ -7333,10 +7333,15 @@ fn render_run_summary_for(
             Some(reason) => format!("outcome: {} — {reason}", end.as_str()),
             None => format!("outcome: {}", end.as_str()),
         }),
-        Some(reason) => lines.push(format!(
-            "outcome: failed — {}",
-            without_task_failed_prefix(reason)
-        )),
+        // A stop on a verified, unchanged tree says so: the work is not
+        // what failed, the missing final answer is.
+        Some(reason) => lines.push(match &summary.finish_stall_outcome {
+            Some(clause) => format!(
+                "outcome: failed — {}; {clause}",
+                without_task_failed_prefix(reason)
+            ),
+            None => format!("outcome: failed — {}", without_task_failed_prefix(reason)),
+        }),
         // Never print a bare "completed" over failed checks (AGENTS.md rule 3).
         None if matches!(summary.verification, Some((false, _))) => lines
             .push("outcome: finished — verification FAILED (not a verified result)".to_string()),
@@ -7403,6 +7408,9 @@ fn render_run_summary_for(
         "iterations: {}/{}{} · turns: {}",
         summary.iterations, summary.max_iterations, extension_note, summary.turns
     ));
+    if let Some(detail) = &summary.finish_stall_detail {
+        lines.push(detail.clone());
+    }
     if let Some(bounds) = run_bounds_line(summary, crate::output::is_verbose()) {
         lines.push(bounds);
     }

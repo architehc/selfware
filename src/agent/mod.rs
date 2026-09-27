@@ -106,6 +106,7 @@ pub mod deadline;
 pub mod evolution_events;
 mod execution;
 pub mod failure_mode;
+mod finish_stall;
 pub mod input_census;
 mod interactive;
 pub mod last_tool;
@@ -979,6 +980,9 @@ pub struct Agent {
     /// Outcomes of the last dispatched tool-call turns: stops a run whose
     /// calls keep failing at the protocol level (`TOOL_PROTOCOL_STALL`).
     protocol_stall: protocol_stall::ProtocolStallWindow,
+    /// Turns that only re-read a verified, unchanged tree without giving
+    /// the final answer: directive, then refusal (see `finish_stall`).
+    finish_stall: finish_stall::FinishStall,
     /// Malformed native tool calls dropped before the history push (their
     /// unpaired ids would 400 the next request). Reported to the model as
     /// rejected calls by the next dispatch instead of vanishing.
@@ -1960,6 +1964,7 @@ To call a tool, use this EXACT XML structure:
             readonly_best_answer: String::new(),
             length_truncation_retries: 0,
             protocol_stall: protocol_stall::ProtocolStallWindow::default(),
+            finish_stall: finish_stall::FinishStall::default(),
             pending_native_rejections: Vec::new(),
             mutation_gate_rejections: 0,
             consecutive_stale_verification: 0,
@@ -3627,6 +3632,7 @@ To call a tool, use this EXACT XML structure:
         self.readonly_best_answer.clear();
         self.length_truncation_retries = 0;
         self.protocol_stall.clear();
+        self.finish_stall.clear();
         self.pending_native_rejections.clear();
         self.consecutive_empty_responses = 0;
         self.pending_failure_hint = None;

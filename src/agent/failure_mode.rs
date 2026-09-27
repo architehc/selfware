@@ -98,6 +98,10 @@ pub enum FailureKind {
     Unknown,
 }
 
+/// Advice for a MAX_ITERATIONS stop on a verified, unchanged tree whose
+/// last turns only re-read it (see `agent::finish_stall`).
+pub(crate) const FINISH_STALL_ADVICE: &str = "the changes were made and verified, but the model kept re-reading instead of giving its final answer — more iterations will not help; ask for the summary alone, or use a model that stops when told the work is verified";
+
 /// Evidence suffix naming a failed verification on an otherwise honest
 /// `NoChange` completion; `cli_banner` keys its non-✅ header on it.
 pub(crate) const VERIFICATION_FAILED_NOTE: &str =
@@ -445,7 +449,7 @@ impl FailureMode {
                     return blocked_by_safety_failure(blocked, window);
                 }
                 if reason.contains("Max iterations") {
-                    return classify_max_iter_failure(
+                    let mut fm = classify_max_iter_failure(
                         mutating,
                         progress_guard,
                         no_action_consecutive,
@@ -455,6 +459,17 @@ impl FailureMode {
                         safety_blocked,
                         read_only,
                     );
+                    // Finish stall: the cap hit a verified, unchanged tree
+                    // after turns that only re-read it. "Raise
+                    // max_iterations" is exactly wrong there — more turns
+                    // bought more re-reads (c24: 40→50, no answer).
+                    if fm.kind == FailureKind::MaxIterations {
+                        if let Some(clause) = agent.finish_stall_outcome_clause() {
+                            fm.evidence = format!("{}; {clause}", fm.evidence);
+                            fm.advice = FINISH_STALL_ADVICE.to_string();
+                        }
+                    }
+                    return fm;
                 }
                 // Per-call cap (`agent.max_call_secs`): one call was aborted.
                 // Its message ("Per-call time cap exceeded") carries neither

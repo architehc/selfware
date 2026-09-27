@@ -215,6 +215,26 @@ impl AgentSnapshot {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 
+    /// Whether `path` is tracked and its on-disk state already equals the
+    /// snapshot's (restoring it would change nothing). `false` for an
+    /// untracked path or when a state cannot be read.
+    pub(crate) fn already_matches(&self, path: &Path) -> bool {
+        let Ok(identity) = Self::identity(path) else {
+            return false;
+        };
+        let Some(entry) = self.entries.get(&identity) else {
+            return false;
+        };
+        let snapshot = match &entry.saved {
+            Some(slot) => Self::state(slot),
+            None => Ok(FileState::Missing),
+        };
+        match (snapshot, Self::state(&identity)) {
+            (Ok(snapshot), Ok(current)) => snapshot == current,
+            _ => false,
+        }
+    }
+
     pub(crate) fn restore_written(&mut self, paths: &[PathBuf]) -> std::io::Result<()> {
         if !self.taken {
             return Ok(());
@@ -242,6 +262,10 @@ impl AgentSnapshot {
                 }
                 if let Some(slot) = &entry.saved {
                     let restored = Self::state(slot)?;
+                    // Already the snapshot's bytes: nothing to write.
+                    if Self::state(&path)? == restored {
+                        return Ok(restored);
+                    }
                     let parent = path
                         .parent()
                         .ok_or_else(|| std::io::Error::other("snapshot path has no parent"))?;

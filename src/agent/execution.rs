@@ -759,11 +759,17 @@ impl Agent {
             self.push_tool_result_message(false, &call_id, &name, "{}", false, &rejection.reason)
                 .await;
         }
+        // Finish-stall watch over the model's own calls (parse rejections
+        // above are protocol failures, not reads).
+        let green = self.finish_stall_tree_green();
+        self.finish_stall
+            .begin_turn(ctx.step, green, self.mutation_sequence);
         let batch_result = if tool_calls.is_empty() {
             Ok(())
         } else {
             self.execute_tool_batch(tool_calls).await
         };
+        self.finish_stall_end_turn();
         let journal = self.dispatch_journal.take().unwrap_or_default();
         let unanswered_reason = match &batch_result {
             Err(e) => format!("not dispatched: {}", e),
@@ -2248,6 +2254,18 @@ impl Agent {
                 return Ok(false);
             }
 
+            // A verified, unchanged tree has nothing to synthesize: forced
+            // synthesis auto-writes extracted code over the verified
+            // deliverable. The finish-stall directive/refusal owns that
+            // endgame (see `finish_stall`).
+            if self.finish_stall_tree_green() {
+                info!(
+                    "TERMINAL progress guard: {} read-only steps on a verified tree — no forced synthesis (finish stall handles it)",
+                    self.consecutive_read_only_steps
+                );
+                self.consecutive_read_only_steps = 0;
+                return Ok(false);
+            }
             info!(
                 "TERMINAL progress guard: {} read-only steps — forcing synthesis+write",
                 self.consecutive_read_only_steps
