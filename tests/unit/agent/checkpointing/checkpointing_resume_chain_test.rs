@@ -26,6 +26,8 @@ fn prior_segment_checkpoint(task_id: &str, task_description: &str) -> TaskCheckp
     cp.set_step(3);
     cp.set_iteration(12);
     cp.cumulative_iterations = 13;
+    // 14 step_started turns (the planning turn uses no iteration slot).
+    cp.cumulative_turns = 14;
     cp.effective_max_iterations = Some(15);
     cp.extensions_granted = 1;
     cp.set_messages(vec![Message::user(task_description.to_string())]);
@@ -126,6 +128,15 @@ async fn resume_restores_chain_wide_iterations_and_files_changed() {
     // The chain summary reports the accumulated count even before the
     // resumed segment runs a turn.
     assert_eq!(agent.chain_run_summary().iterations, 13);
+    // `num_turns` is a whole-task count, like `iterations`: a resumed
+    // segment continues from the prior segments' turns instead of
+    // restarting at 0 (0.9.2 reported only the final segment's turns).
+    assert_eq!(
+        agent.turns_run(),
+        14,
+        "the chain-wide turn count must restore from the checkpoint"
+    );
+    assert_eq!(agent.chain_run_summary().turns, 14);
 
     // Files-changed evidence accumulates across segments: the successful
     // write is restored, the failed one is not.
@@ -201,6 +212,17 @@ async fn resumed_run_emits_progress_events_and_accumulates_chain_totals() {
     );
     let summary = agent.chain_run_summary();
     assert_eq!(summary.iterations, agent.cumulative_iterations());
+    // Turns: the restored 14 plus exactly one per step_started event this
+    // segment emitted — the JSON `num_turns` and the summary agree.
+    let started = kinds.iter().filter(|k| **k == "step_started").count();
+    assert!(started > 0, "the resumed segment ran turns: {kinds:?}");
+    assert_eq!(agent.turns_run(), 14 + started);
+    assert_eq!(summary.turns, agent.turns_run());
+    // And the next checkpoint carries the whole-task count forward.
+    assert_eq!(
+        agent.to_checkpoint("chain-task", "x").cumulative_turns,
+        14 + started
+    );
     // Finding 3, end-to-end: the restored extension is what the summary
     // reports as the cap, and the grant shows as consumed.
     assert_eq!(summary.max_iterations, 15);

@@ -3010,3 +3010,34 @@ fn prune_counts_orphan_backups_toward_the_cap() {
     assert!(dir.path().join("trigger.json").exists());
     assert!(dir.path().join("first.json").exists());
 }
+
+#[test]
+fn delta_round_trip_carries_chain_wide_turn_count() {
+    // `num_turns` is a whole-task count; a turn recorded between two
+    // incremental saves must survive a delta-only save or the resumed run
+    // under-reports turns (base file keeps the stale count).
+    let mut base = TaskCheckpoint::new("delta-turns".to_string(), "d".to_string());
+    base.cumulative_turns = 3;
+
+    let mut step_only = base.clone();
+    step_only.set_step(1);
+    let delta = step_only.compute_delta(&base).expect("step change");
+    assert_eq!(delta.cumulative_turns, None);
+
+    let mut updated = base.clone();
+    updated.version += 1; // a save always bumps the version
+    updated.cumulative_turns = 5;
+    let delta = updated
+        .compute_delta(&base)
+        .expect("a turn-count change alone must produce a delta");
+    assert_eq!(delta.cumulative_turns, Some(5));
+    let mut hydrated = base.clone();
+    hydrated.apply_delta(&delta).unwrap();
+    assert_eq!(hydrated.cumulative_turns, 5);
+
+    // Legacy checkpoints (no field) deserialize as 0.
+    let mut json = serde_json::to_value(&base).unwrap();
+    json.as_object_mut().unwrap().remove("cumulative_turns");
+    let legacy: TaskCheckpoint = serde_json::from_value(json).unwrap();
+    assert_eq!(legacy.cumulative_turns, 0);
+}

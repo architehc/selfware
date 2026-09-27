@@ -340,6 +340,10 @@ impl Agent {
         // deserialize it as 0, which grants a fresh budget — acceptable for
         // old data, never for new checkpoints.
         restored_loop.set_auto_continue_count(checkpoint.auto_continue_count);
+        // `num_turns` / the summary's `turns` are whole-task counts like
+        // `cumulative_iterations`: without this a resumed run reported only
+        // the final segment's turns next to chain-wide iterations and cost.
+        restored_loop.set_prior_turns(checkpoint.cumulative_turns);
 
         let checkpoint_tool_calls = checkpoint.tool_calls.len();
 
@@ -638,6 +642,7 @@ impl Agent {
         checkpoint.effective_max_iterations = Some(self.loop_control.max_iterations());
         checkpoint.extensions_granted = self.loop_control.extensions_granted();
         checkpoint.cumulative_iterations = self.loop_control.accumulated_iterations();
+        checkpoint.cumulative_turns = self.loop_control.turns_run();
         checkpoint.set_messages(self.messages.clone());
         checkpoint.set_estimated_tokens(self.memory.total_tokens());
 
@@ -1017,6 +1022,7 @@ impl Agent {
             checkpoint.effective_max_iterations = Some(self.loop_control.max_iterations());
             checkpoint.extensions_granted = self.loop_control.extensions_granted();
             checkpoint.cumulative_iterations = self.loop_control.accumulated_iterations();
+            checkpoint.cumulative_turns = self.loop_control.turns_run();
             // Same sweep for the remaining fields `build_checkpoint` writes:
             // the chain count and the hard caps must not lag the terminal
             // record either.

@@ -558,6 +558,11 @@ pub struct CheckpointDelta {
     /// and re-earned continuations the task had already spent.
     #[serde(default)]
     pub auto_continue_count: Option<usize>,
+    /// Chain-wide agent-loop turn count (`TaskCheckpoint::cumulative_turns`).
+    /// Moves every turn, so without it a delta-only save followed by a
+    /// resume restored the base file's older count.
+    #[serde(default)]
+    pub cumulative_turns: Option<usize>,
     /// Turn-artifact sequence high-water mark. Without it a delta-only save
     /// followed by a resume restarted numbering from the base file's value
     /// and the resumed process overwrote `.selfware/turns/turn_NNNN.json`
@@ -676,6 +681,14 @@ pub struct TaskCheckpoint {
     /// work, not just the final segment.
     #[serde(default)]
     pub cumulative_iterations: usize,
+    /// Chain-wide agent-loop turn count: one per `step_started` progress
+    /// event across every segment of the task (initial run, auto-continue
+    /// chains, resumes). Restored on resume so the headless `num_turns` and
+    /// the run summary's `turns` report the whole task — the same scope as
+    /// `cumulative_iterations`, tokens and cost. `0` on checkpoints written
+    /// before the field existed (those resume counting from 0).
+    #[serde(default)]
+    pub cumulative_turns: usize,
 
     /// Hard budget caps themselves, carried across resume. `AgentConfig` marks
     /// these `#[serde(skip)]` (CLI-only), so without persisting them here a
@@ -781,6 +794,8 @@ impl TaskCheckpoint {
             .then_some(self.cumulative_iterations);
         let auto_continue_count = (self.auto_continue_count != base.auto_continue_count)
             .then_some(self.auto_continue_count);
+        let cumulative_turns =
+            (self.cumulative_turns != base.cumulative_turns).then_some(self.cumulative_turns);
         let turn_artifact_seq =
             (self.turn_artifact_seq != base.turn_artifact_seq).then_some(self.turn_artifact_seq);
         // Budget caps: a changed cap rides in the delta; a REMOVED cap (the
@@ -889,6 +904,7 @@ impl TaskCheckpoint {
             || extensions_granted.is_some()
             || cumulative_iterations.is_some()
             || auto_continue_count.is_some()
+            || cumulative_turns.is_some()
             || turn_artifact_seq.is_some()
             || max_budget_tokens.is_some()
             || max_wall_secs.is_some()
@@ -924,6 +940,7 @@ impl TaskCheckpoint {
             extensions_granted,
             cumulative_iterations,
             auto_continue_count,
+            cumulative_turns,
             turn_artifact_seq,
             max_budget_tokens,
             max_wall_secs,
@@ -1002,6 +1019,9 @@ impl TaskCheckpoint {
         if let Some(count) = delta.auto_continue_count {
             self.auto_continue_count = count;
         }
+        if let Some(turns) = delta.cumulative_turns {
+            self.cumulative_turns = turns;
+        }
         if let Some(seq) = delta.turn_artifact_seq {
             self.turn_artifact_seq = seq;
         }
@@ -1072,6 +1092,7 @@ impl TaskCheckpoint {
             effective_max_iterations: None,
             extensions_granted: 0,
             cumulative_iterations: 0,
+            cumulative_turns: 0,
             max_budget_tokens: None,
             max_wall_secs: None,
             max_cost_usd: None,

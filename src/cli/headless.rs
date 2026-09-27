@@ -52,7 +52,12 @@ pub struct SessionResult {
     /// Agent-loop turns this run executed: one per `step_started` event in
     /// `stream-json` (the planning turn's tool batch included), and the
     /// same number as `turns` in the text run summary. Counts the whole
-    /// task in this process, across in-process auto-continue segments.
+    /// task: in-process auto-continue segments and, on `--resume` /
+    /// `--continue`, the turns earlier processes recorded in the checkpoint
+    /// (`cumulative_turns`) — the same whole-task scope as the summary's
+    /// iterations, tokens and cost. A resumed segment's `stream-json` shows
+    /// only its own `step_started` events, so there `num_turns` is the prior
+    /// count plus those.
     pub num_turns: usize,
     /// Size of THIS run's patch: the diff between the working tree at task
     /// start and at the end (see `patch_baseline`), so edits that were

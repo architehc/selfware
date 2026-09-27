@@ -87,8 +87,9 @@ pub struct AgentLoop {
     /// Agent-loop turns executed this task: one per `StepStarted` progress
     /// event (the planning turn's tool batch included, which consumes no
     /// iteration slot). Unlike `iteration` it is not reset by in-process
-    /// continuations, so it is the task's whole turn count — the value the
-    /// headless result reports as `num_turns`.
+    /// continuations, and `Agent::resume` restores it from the checkpoint's
+    /// `cumulative_turns`, so it is the task's whole turn count across
+    /// every segment — the value the headless result reports as `num_turns`.
     turns_run: usize,
 }
 
@@ -199,6 +200,13 @@ impl AgentLoop {
     /// Agent-loop turns executed this task (see the `turns_run` field).
     pub fn turns_run(&self) -> usize {
         self.turns_run
+    }
+
+    /// Restore the turn count earlier segments of this task recorded (the
+    /// `Agent::resume` path reads it from the checkpoint's
+    /// `cumulative_turns`); later turns count on top of it.
+    pub fn set_prior_turns(&mut self, prior: usize) {
+        self.turns_run = prior;
     }
 
     /// Grant one adaptive budget extension: +25% of the ORIGINAL cap (at
