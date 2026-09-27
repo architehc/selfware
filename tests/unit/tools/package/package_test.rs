@@ -484,3 +484,194 @@ async fn npm_run_refuses_option_shaped_script() {
         assert_refused_as_option(&NpmRun::new(), json!({"script": script, "path": "."})).await;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Package SOURCE injection (review of 0.9.2): a spec that is not an option
+// can still name where code comes from, and a requirements file can switch
+// the index for every package. Refused before anything is spawned.
+// ---------------------------------------------------------------------------
+
+async fn assert_refused_as_source(tool: &dyn Tool, args: Value) {
+    let err = tool
+        .execute(args.clone())
+        .await
+        .expect_err("a non-registry source must be refused");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("installs only registry package names")
+            || msg.contains("are installed by this tool"),
+        "{} {args}: {msg}",
+        tool.name()
+    );
+}
+
+#[tokio::test]
+async fn pip_install_refuses_url_vcs_path_and_direct_reference_specs() {
+    for pkg in [
+        "evil @ https://evil.example/evil-1.0.tar.gz",
+        "evil@git+https://evil.example/evil.git",
+        "git+https://evil.example/evil.git#egg=evil",
+        "https://evil.example/evil-1.0-py3-none-any.whl",
+        "./local-pkg",
+        "../outside",
+        "/abs/pkg",
+        "evil-1.0-py3-none-any.whl",
+        "evil.tar.gz",
+        "file:///tmp/evil",
+    ] {
+        assert_refused_as_source(&PipInstall::new(), json!({"packages": ["requests", pkg]})).await;
+    }
+}
+
+#[test]
+fn pip_registry_specs_are_accepted() {
+    for spec in [
+        "requests",
+        "flask==2.0.0",
+        "Django>=4.2,<5",
+        "uvicorn[standard]>=0.20",
+        "pkg[a, b] ~= 1.4",
+        "zope.interface",
+        "numpy (>=1.24)",
+        "typing_extensions; python_version < \"3.11\"",
+        "torch==2.1.0+cpu",
+        "pkg===1.0.post1",
+        "pkg!=1.3.*",
+    ] {
+        assert!(
+            check_pip_registry_spec("pip_install", spec).is_ok(),
+            "{spec}: {:?}",
+            check_pip_registry_spec("pip_install", spec)
+        );
+    }
+}
+
+#[tokio::test]
+async fn npm_and_yarn_refuse_url_vcs_path_tarball_and_alias_specs() {
+    let specs = [
+        "github:evil/pkg",
+        "evil/pkg",
+        "git+https://evil.example/pkg.git",
+        "git+ssh://git@evil.example/pkg.git",
+        "git://evil.example/pkg.git",
+        "https://evil.example/pkg-1.0.0.tgz",
+        "file:../outside",
+        "link:../outside",
+        "./local",
+        "../outside",
+        "/abs/pkg",
+        "pkg.tgz",
+        "left-pad@https://evil.example/x.tgz",
+        "left-pad@github:evil/pkg",
+        "left-pad@file:../x",
+        "left-pad@npm:evil@1.0.0",
+        "@scope/pkg@git+https://evil.example/x.git",
+        "npm:evil",
+    ];
+    for pkg in specs {
+        assert_refused_as_source(
+            &NpmInstall::new(),
+            json!({"packages": ["left-pad", pkg], "path": "."}),
+        )
+        .await;
+        assert_refused_as_source(&YarnInstall::new(), json!({"packages": [pkg], "path": "."}))
+            .await;
+    }
+}
+
+#[test]
+fn npm_registry_specs_are_accepted() {
+    for spec in [
+        "express",
+        "lodash@4.17.21",
+        "@types/node",
+        "@types/node@^20.1.0",
+        "react@latest",
+        "typescript@~5.4",
+        "pkg@>=1.2.3 <2",
+        "pkg@1.x || 2.x",
+        "left-pad@1.3.0-beta.1",
+    ] {
+        assert!(
+            check_npm_registry_spec("npm_install", spec).is_ok(),
+            "{spec}: {:?}",
+            check_npm_registry_spec("npm_install", spec)
+        );
+    }
+}
+
+fn permissive_package_safety() -> SafetyConfig {
+    SafetyConfig {
+        allowed_paths: vec!["/**".to_string()],
+        ..SafetyConfig::default()
+    }
+}
+
+#[tokio::test]
+async fn pip_install_refuses_requirements_files_that_change_the_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let cases = [
+        "--index-url https://evil.example/simple\nrequests\n",
+        "-i https://evil.example/simple\nrequests\n",
+        "--extra-index-url=https://evil.example/simple\nrequests\n",
+        "-f https://evil.example/wheels/\nrequests\n",
+        "--find-links ./wheels\nrequests\n",
+        "--trusted-host evil.example\nrequests\n",
+        "--no-index\nrequests\n",
+        "-e git+https://evil.example/evil.git#egg=evil\n",
+        "--editable=https://evil.example/evil.tar.gz\n",
+        "-e .\n",
+        "requests\nevil @ https://evil.example/evil.whl\n",
+        "git+https://evil.example/evil.git\n",
+        "https://evil.example/evil-1.0.tar.gz\n",
+        "./vendored/pkg\n",
+        "requests --global-option=--evil\n",
+        "requests \\\n    --config-settings=x=y\n",
+        "${EVIL_URL}\n",
+        "-r https://evil.example/reqs.txt\n",
+    ];
+    for (i, content) in cases.iter().enumerate() {
+        let path = dir.path().join(format!("req{i}.txt"));
+        std::fs::write(&path, content).unwrap();
+        let tool = PipInstall::with_safety_config(permissive_package_safety());
+        assert_refused_as_source(&tool, json!({"requirements": path.to_string_lossy()})).await;
+    }
+}
+
+#[test]
+fn requirements_scan_follows_includes_and_accepts_registry_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let safety = permissive_package_safety();
+    std::fs::write(
+        dir.path().join("base.txt"),
+        "# pinned\nrequests==2.31.0 \\\n    --hash=sha256:abc --hash=sha256:def\n\
+         flask>=2  # web\n--prefer-binary\nuvicorn[standard]; python_version >= \"3.8\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("dev.txt"),
+        "-r base.txt\n-c constraints.txt\npytest\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("constraints.txt"), "urllib3<3\n").unwrap();
+    check_requirements_file("pip_install", &dir.path().join("dev.txt"), &safety, 0)
+        .expect("a registry-only requirements tree is accepted");
+
+    // A source change hidden in an INCLUDED file is still found.
+    std::fs::write(
+        dir.path().join("constraints.txt"),
+        "--extra-index-url https://evil.example/simple\n",
+    )
+    .unwrap();
+    let err = check_requirements_file("pip_install", &dir.path().join("dev.txt"), &safety, 0)
+        .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("--extra-index-url"),
+        "names the option: {err:#}"
+    );
+
+    // An include cycle terminates (depth bound) with a refusal, not a hang.
+    std::fs::write(dir.path().join("a.txt"), "-r b.txt\n").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "-r a.txt\n").unwrap();
+    assert!(check_requirements_file("pip_install", &dir.path().join("a.txt"), &safety, 0).is_err());
+}

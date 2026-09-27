@@ -65,7 +65,7 @@ impl Tool for NpmInstall {
                 "packages": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Package names to install (e.g., ['express', 'lodash@4.17.21']). If empty, installs from package.json"
+                    "description": "Registry package names to install, optionally with @version/range/tag (e.g., ['express', 'lodash@4.17.21', '@types/node@^20']). URLs, git/GitHub specs, file:/link: paths, tarballs and npm: aliases are refused. If empty, installs from package.json"
                 },
                 "path": {
                     "type": "string",
@@ -105,6 +105,11 @@ impl Tool for NpmInstall {
             "packages",
             packages.iter().map(String::as_str),
         )?;
+        // ...and a non-option spec can still name a source (`github:u/r`,
+        // `https://….tgz`, `file:../x`): registry names only.
+        for spec in &packages {
+            check_npm_registry_spec("npm_install", spec)?;
+        }
 
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
@@ -426,11 +431,11 @@ impl Tool for PipInstall {
                 "packages": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Package names to install (e.g., ['requests', 'flask==2.0.0'])"
+                    "description": "Registry package names to install, optionally with extras and version constraints (e.g., ['requests', 'flask==2.0.0', 'uvicorn[standard]>=0.20']). Direct references (name @ url), URLs, VCS specs, local paths and archives are refused"
                 },
                 "requirements": {
                     "type": "string",
-                    "description": "Path to requirements.txt file"
+                    "description": "Path to requirements.txt file. Refused if it (or a -r/-c include) sets an index, find-links, trusted host, editable install, or a URL/VCS/path requirement"
                 },
                 "upgrade": {
                     "type": "boolean",
@@ -469,6 +474,11 @@ impl Tool for PipInstall {
             packages.iter().map(String::as_str),
         )?;
         reject_flag_like_operand("pip_install", "requirements", requirements)?;
+        // A spec can name a source without being an option: `name @ url`,
+        // `git+https://…`, URLs, paths, wheels.
+        for spec in &packages {
+            check_pip_registry_spec("pip_install", spec)?;
+        }
         let upgrade = args
             .get("upgrade")
             .and_then(|v| v.as_bool())
@@ -486,6 +496,11 @@ impl Tool for PipInstall {
             if !req_file.is_empty() {
                 let safety = resolve_safety_config(self.safety_config.as_ref());
                 validate_tool_path(req_file, &safety)?;
+                // The file (and every `-r`/`-c` include) is scanned for
+                // index/find-links/trusted-host/editable/URL lines before
+                // pip reads it.
+                let anchored = crate::tools::workspace_root::anchor(req_file);
+                check_requirements_file("pip_install", Path::new(&anchored), &safety, 0)?;
             }
         }
 
@@ -746,7 +761,7 @@ impl Tool for YarnInstall {
                 "packages": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Package names to install. If empty, installs from package.json"
+                    "description": "Registry package names to install, optionally with @version/range/tag. URLs, git/GitHub specs, file:/link: paths and tarballs are refused. If empty, installs from package.json"
                 },
                 "path": {
                     "type": "string",
@@ -782,6 +797,9 @@ impl Tool for YarnInstall {
             "packages",
             packages.iter().map(String::as_str),
         )?;
+        for spec in &packages {
+            check_npm_registry_spec("yarn_install", spec)?;
+        }
 
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
@@ -838,6 +856,330 @@ impl Tool for YarnInstall {
             "exit_code": output.exit_code()
         }))
     }
+}
+
+// ============================================================================
+// Package source guards
+// ============================================================================
+//
+// `reject_flag_like_operands` (0.9.2) stops a spec from becoming a pip/npm/
+// yarn OPTION, but a spec can itself name where code comes from: PEP 508
+// direct references (`pkg @ https://…`), `git+https://…`, bare URLs, local
+// paths and wheels/archives for pip; `github:user/repo`, `user/repo`,
+// `https://….tgz`, `file:../x`, `git+ssh://…` and `npm:` aliases for npm and
+// yarn. A requirements file can switch the index for EVERY package
+// (`--index-url`, `--extra-index-url`, `-f/--find-links`, `--trusted-host`,
+// `--no-index`) or install from a URL (`-e <url>`). Yolo and Daemon run these
+// tools without confirmation, so the tools install only registry names with
+// optional extras and version constraints. There is no opt-in on these
+// tools: installing from another source is refused with a message naming
+// the spec, so the user can run it explicitly.
+
+/// The refusal for a non-registry package spec.
+fn source_refusal(tool: &str, spec: &str, why: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{tool} refuses {spec:?}: {why}. This tool installs only registry package names \
+         (with optional extras / version constraints); installing from a URL, VCS \
+         repository, local path, archive or custom index must be run by the user explicitly"
+    )
+}
+
+/// Why `spec` is not a registry spec, in words the model can act on.
+fn non_registry_reason(spec: &str) -> &'static str {
+    let lower = spec.to_ascii_lowercase();
+    if lower.contains("://")
+        || lower.starts_with("git+")
+        || lower.starts_with("git:")
+        || lower.starts_with("github:")
+        || lower.starts_with("gitlab:")
+        || lower.starts_with("bitbucket:")
+        || lower.starts_with("gist:")
+    {
+        "it names a URL or VCS repository"
+    } else if lower.starts_with("file:") || lower.starts_with("link:") {
+        "it names a local path"
+    } else if lower.starts_with("npm:") || lower.contains("@npm:") {
+        "it is a package alias"
+    } else if is_archive_name(&lower) {
+        "it names a package archive"
+    } else if lower.starts_with('.')
+        || lower.starts_with('/')
+        || lower.starts_with('~')
+        || lower.contains('\\')
+    {
+        "it names a local path"
+    } else {
+        "it is not a registry package name with an optional version constraint"
+    }
+}
+
+/// A file name pip/npm install as a local package archive.
+fn is_archive_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [
+        ".whl", ".tar.gz", ".tgz", ".tar", ".zip", ".tar.bz2", ".tar.xz", ".egg",
+    ]
+    .iter()
+    .any(|ext| lower.ends_with(ext))
+}
+
+fn is_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')
+}
+
+/// A PEP 508 name: alphanumerics with `.`, `_`, `-` inside.
+fn is_pip_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().all(is_name_char)
+        && name.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && name.ends_with(|c: char| c.is_ascii_alphanumeric())
+}
+
+/// One PEP 440 version clause (`>=1.2`, `==2.*`, `~=3.1`, `===x`).
+fn is_pip_version_clause(clause: &str) -> bool {
+    const OPS: [&str; 8] = ["===", "~=", "==", "!=", "<=", ">=", "<", ">"];
+    let clause = clause.trim();
+    let Some(op) = OPS.iter().find(|op| clause.starts_with(**op)) else {
+        return false;
+    };
+    let version = clause[op.len()..].trim();
+    !version.is_empty()
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '*' | '+' | '!' | '_' | '-'))
+}
+
+/// Refuse a pip requirement spec that is not `name[extras] <constraints>
+/// [; markers]` — i.e. any direct reference (`name @ url`), URL, VCS spec,
+/// local path or archive.
+pub(crate) fn check_pip_registry_spec(tool: &str, spec: &str) -> Result<()> {
+    // Environment markers select WHEN a requirement applies, never where it
+    // comes from; everything that can name a source sits before the `;`.
+    let body = spec.split(';').next().unwrap_or_default().trim();
+    let refuse = || Err(source_refusal(tool, spec, non_registry_reason(body)));
+    if body.contains('@') {
+        return Err(source_refusal(
+            tool,
+            spec,
+            "it is a direct reference (`name @ <url or path>`)",
+        ));
+    }
+    let name_end = body.find(|c: char| !is_name_char(c)).unwrap_or(body.len());
+    // `evil-1.0-py3-none-any.whl` / `evil.tar.gz` are made of name chars but
+    // pip installs them as local archive files.
+    let name = &body[..name_end];
+    if !is_pip_name(name) || is_archive_name(name) {
+        return refuse();
+    }
+    let mut rest = body[name_end..].trim_start();
+    if let Some(extras) = rest.strip_prefix('[') {
+        let Some(close) = extras.find(']') else {
+            return refuse();
+        };
+        let names_ok = extras[..close]
+            .split(',')
+            .map(str::trim)
+            .all(|e| e.is_empty() || is_pip_name(e));
+        if !names_ok {
+            return refuse();
+        }
+        rest = extras[close + 1..].trim_start();
+    }
+    // `name (>=1.0)` is legacy but valid.
+    let rest = rest
+        .strip_prefix('(')
+        .and_then(|r| r.strip_suffix(')'))
+        .unwrap_or(rest)
+        .trim();
+    if rest.is_empty() || rest.split(',').all(is_pip_version_clause) {
+        Ok(())
+    } else {
+        refuse()
+    }
+}
+
+/// An npm package name, optionally scoped (`@scope/name`).
+fn is_npm_name(name: &str) -> bool {
+    let seg_ok = |s: &str| {
+        !s.is_empty()
+            && s.starts_with(|c: char| c.is_ascii_alphanumeric())
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '~'))
+    };
+    match name.strip_prefix('@') {
+        Some(scoped) => {
+            matches!(scoped.split_once('/'), Some((scope, pkg)) if seg_ok(scope) && seg_ok(pkg))
+        }
+        None => seg_ok(name),
+    }
+}
+
+/// Refuse an npm/yarn spec that is not `name`, `@scope/name`, or either
+/// with `@<version, range or dist-tag>`: no URL, git/GitHub shorthand,
+/// `file:`/`link:` path, tarball or `npm:` alias.
+pub(crate) fn check_npm_registry_spec(tool: &str, spec: &str) -> Result<()> {
+    let s = spec.trim();
+    // The version separator is the first `@` after an optional scope `@`.
+    let split_at = match s.strip_prefix('@') {
+        Some(rest) => rest.find('@').map(|i| i + 1),
+        None => s.find('@'),
+    };
+    let (name, version) = match split_at {
+        Some(i) => (&s[..i], Some(&s[i + 1..])),
+        None => (s, None),
+    };
+    if !is_npm_name(name) || is_archive_name(name) {
+        return Err(source_refusal(tool, spec, non_registry_reason(s)));
+    }
+    if let Some(version) = version {
+        let ok = !version.trim().is_empty()
+            && version.chars().all(|c| {
+                c.is_ascii_alphanumeric()
+                    || matches!(
+                        c,
+                        '.' | '-' | '+' | '*' | '^' | '~' | '<' | '>' | '=' | '|' | ' ' | '_'
+                    )
+            });
+        if !ok {
+            return Err(source_refusal(tool, spec, non_registry_reason(version)));
+        }
+    }
+    Ok(())
+}
+
+/// Requirements-file options that only tune how registry packages are
+/// picked, never where they come from. `-r`/`-c` includes are followed and
+/// scanned; every other option (`--index-url`, `--extra-index-url`,
+/// `-f/--find-links`, `--trusted-host`, `--no-index`, `-e/--editable`,
+/// `--config-settings`, `--global-option`, ...) is refused.
+const HARMLESS_REQUIREMENT_OPTIONS: [&str; 5] = [
+    "--pre",
+    "--prefer-binary",
+    "--require-hashes",
+    "--only-binary",
+    "--no-binary",
+];
+
+/// Nested `-r`/`-c` include depth before the scan gives up (refuses).
+const MAX_REQUIREMENTS_DEPTH: usize = 8;
+
+/// The logical lines of a requirements file: `\`-continuations joined and
+/// comments (`#` at line start or after whitespace) removed, as pip reads it.
+fn requirement_lines(content: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for raw in content.lines() {
+        if let Some(head) = raw.strip_suffix('\\') {
+            current.push_str(head);
+            continue;
+        }
+        current.push_str(raw);
+        let line = std::mem::take(&mut current);
+        let without_comment = match line.find('#') {
+            Some(0) => "",
+            Some(i) if line[..i].ends_with(char::is_whitespace) => &line[..i],
+            _ => line.as_str(),
+        };
+        let trimmed = without_comment.trim();
+        if !trimmed.is_empty() {
+            lines.push(trimmed.to_string());
+        }
+    }
+    if !current.trim().is_empty() {
+        lines.push(current.trim().to_string());
+    }
+    lines
+}
+
+/// Scan a requirements file (and every `-r`/`-c` file it includes) for
+/// anything that changes where pip fetches code from, before pip runs.
+pub(crate) fn check_requirements_file(
+    tool: &str,
+    path: &Path,
+    safety: &SafetyConfig,
+    depth: usize,
+) -> Result<()> {
+    let shown = path.display().to_string();
+    if depth > MAX_REQUIREMENTS_DEPTH {
+        anyhow::bail!(
+            "{tool} refuses requirements file {shown:?}: `-r`/`-c` includes nest deeper \
+             than {MAX_REQUIREMENTS_DEPTH} levels"
+        );
+    }
+    let content = std::fs::read_to_string(path).with_context(|| {
+        format!("{tool} could not read requirements file {shown:?} to check its sources")
+    })?;
+    let refuse = |line: &str, why: &str| -> anyhow::Error {
+        anyhow::anyhow!(
+            "{tool} refuses requirements file {shown:?}: line {line:?} {why}. Only registry \
+             package names (with optional extras / version constraints / hashes) are \
+             installed by this tool; a custom index, find-links, trusted host, editable or \
+             URL/VCS/path install must be run by the user explicitly"
+        )
+    };
+    for line in requirement_lines(&content) {
+        if line.contains("${") {
+            return Err(refuse(&line, "uses environment-variable substitution"));
+        }
+        if line.starts_with('-') {
+            let (opt, value) = match line.split_once(|c: char| c == '=' || c.is_whitespace()) {
+                Some((o, v)) => (o, v.trim()),
+                None => (line.as_str(), ""),
+            };
+            // `-rfile` / `-cfile` short forms carry the value inline.
+            let (opt, value) = match opt {
+                o if o.len() > 2
+                    && (o.starts_with("-r") || o.starts_with("-c"))
+                    && !o.starts_with("--") =>
+                {
+                    (&o[..2], o[2..].trim())
+                }
+                o => (o, value),
+            };
+            match opt {
+                "-r" | "--requirement" | "-c" | "--constraint" => {
+                    if value.is_empty() || value.contains("://") {
+                        return Err(refuse(&line, "includes a file that is not a local path"));
+                    }
+                    let base = path.parent().unwrap_or_else(|| Path::new("."));
+                    let nested = base.join(value);
+                    validate_tool_path(&nested.to_string_lossy(), safety)?;
+                    check_requirements_file(tool, &nested, safety, depth + 1)?;
+                }
+                o if HARMLESS_REQUIREMENT_OPTIONS.contains(&o) => {}
+                o => {
+                    return Err(refuse(
+                        &line,
+                        &format!("sets `{o}`, which changes where packages come from"),
+                    ))
+                }
+            }
+            continue;
+        }
+        // `spec --hash=sha256:...` : per-requirement hashes only.
+        let mut tokens = line.split_whitespace().peekable();
+        let mut spec_tokens = Vec::new();
+        while let Some(t) = tokens.peek() {
+            if t.starts_with('-') {
+                break;
+            }
+            spec_tokens.push(*t);
+            tokens.next();
+        }
+        while let Some(t) = tokens.next() {
+            if t == "--hash" {
+                tokens.next();
+            } else if !t.starts_with("--hash=") {
+                return Err(refuse(
+                    &line,
+                    &format!("sets the per-requirement option `{t}`"),
+                ));
+            }
+        }
+        check_pip_registry_spec(tool, &spec_tokens.join(" "))
+            .map_err(|e| anyhow::anyhow!("requirements file {shown:?}: {e}"))?;
+    }
+    Ok(())
 }
 
 // ============================================================================
