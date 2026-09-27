@@ -370,6 +370,176 @@ async fn verification_check_names_add_up_to_the_counted_checks() {
     assert_eq!(named, count, "every counted check is named");
 }
 
+/// An edit whose post-edit `test` stage PASSES (the marker exists), then a
+/// shell mutation (`sed -i` — no post-edit check runs for it) that moves the
+/// tree past the passing report. When `breaks_tree`, the mutation makes the
+/// check fail on the final tree (the marker is removed).
+async fn agent_after_passed_post_edit_then_shell_mutation(
+    root: &std::path::Path,
+    breaks_tree: bool,
+) -> Agent {
+    let mut agent = Agent::new(crate::config::Config::default())
+        .await
+        .expect("agent should build");
+    agent.verification_gate = environment_dependent_post_edit_gate(root);
+    agent.task_verification_root = Some(root.to_path_buf());
+    std::fs::write(root.join("installed.marker"), "").unwrap();
+    agent.note_mutating_tool_call();
+    let mut cp = crate::checkpoint::TaskCheckpoint::new("t-stale-pass".into(), "task".into());
+    cp.log_tool_call(crate::checkpoint::ToolCallLog {
+        timestamp: Utc::now(),
+        tool_name: "file_write".into(),
+        arguments: r#"{"path":"lib.txt"}"#.into(),
+        result: Some("ok".into()),
+        success: true,
+        duration_ms: Some(1),
+    });
+    agent.current_checkpoint = Some(cp);
+    let nudge = agent
+        .maybe_verify_file_change("file_write", &json!({"path": "lib.txt"}))
+        .await;
+    assert!(
+        !nudge.is_some_and(|n| n.contains("verification_failed")),
+        "the post-edit test stage passes at the edit's revision"
+    );
+    assert_eq!(agent.credited_verification_summary(), Some((true, 1)));
+    let sed = json!({"command": "sed -i 's/a/b/' lib.txt"});
+    assert!(super::super::tool_dispatch::tool_call_is_mutating(
+        "shell_exec",
+        &sed
+    ));
+    agent
+        .current_checkpoint
+        .as_mut()
+        .unwrap()
+        .log_tool_call(crate::checkpoint::ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "shell_exec".into(),
+            arguments: sed.to_string(),
+            result: Some("ok".into()),
+            success: true,
+            duration_ms: Some(1),
+        });
+    agent.note_mutating_tool_call();
+    if breaks_tree {
+        std::fs::remove_file(root.join("installed.marker")).unwrap();
+    }
+    agent
+}
+
+#[tokio::test]
+async fn stale_post_edit_pass_is_not_credited_for_the_final_tree() {
+    // Mirror of the stale-failure case: a pass taken before a later mutation
+    // used to count as passed and render ✅ for a tree nothing had verified.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let agent = agent_after_passed_post_edit_then_shell_mutation(tmp.path(), false).await;
+    assert!(agent.gate_report_is_uncovered_stale_pass());
+    assert_eq!(
+        agent.credited_verification_summary(),
+        None,
+        "a pass about an earlier revision is not verification of the final tree"
+    );
+    assert!(agent.verification_check_names().is_empty());
+    let mode = natural_completion_verdict(&agent);
+    assert!(
+        mode.evidence
+            .contains(crate::agent::failure_mode::VERIFICATION_NOT_PERFORMED_NOTE),
+        "{}",
+        mode.evidence
+    );
+    assert!(!mode.is_clean_success(), "no ✅: {}", mode.cli_banner());
+}
+
+#[tokio::test]
+async fn stale_post_edit_pass_is_rechecked_on_the_final_tree() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut agent = agent_after_passed_post_edit_then_shell_mutation(tmp.path(), false).await;
+    assert_eq!(
+        agent.recheck_stale_post_edit_pass().await,
+        Some(true),
+        "the stale pass is re-run once on the final tree"
+    );
+    assert!(!agent.gate_report_is_uncovered_stale_pass());
+    assert_eq!(agent.credited_verification_summary(), Some((true, 1)));
+    let mode = natural_completion_verdict(&agent);
+    assert!(
+        mode.is_clean_success(),
+        "a final tree whose re-run passes earns ✅: {}",
+        mode.cli_banner()
+    );
+    assert_eq!(
+        agent.recheck_stale_post_edit_pass().await,
+        None,
+        "a pass taken at the current revision is not re-run again"
+    );
+}
+
+#[tokio::test]
+async fn stale_post_edit_pass_on_a_broken_final_tree_fails_after_the_recheck() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut agent = agent_after_passed_post_edit_then_shell_mutation(tmp.path(), true).await;
+    assert_eq!(agent.recheck_stale_post_edit_pass().await, Some(false));
+    assert_eq!(agent.credited_verification_summary(), Some((false, 1)));
+    assert_eq!(
+        natural_completion_verdict(&agent).kind,
+        crate::agent::failure_mode::FailureKind::VerificationFailed
+    );
+}
+
+#[tokio::test]
+async fn stale_post_edit_pass_whose_recheck_cannot_run_is_not_performed() {
+    // The final-tree re-run has nothing it can run (the post-edit command is
+    // gone, and a .txt file has no syntax check): the outcome is
+    // "verification NOT PERFORMED on the final tree", never ✅.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut agent = agent_after_passed_post_edit_then_shell_mutation(tmp.path(), false).await;
+    agent.verification_gate.set_post_edit_test_command(None);
+    assert_eq!(agent.recheck_stale_post_edit_pass().await, None);
+    assert_eq!(agent.credited_verification_summary(), None);
+    let mode = natural_completion_verdict(&agent);
+    assert_eq!(mode.kind, crate::agent::failure_mode::FailureKind::Success);
+    assert!(
+        mode.evidence
+            .contains(crate::agent::failure_mode::VERIFICATION_NOT_PERFORMED_NOTE),
+        "{}",
+        mode.evidence
+    );
+    assert!(!mode.is_clean_success(), "no ✅: {}", mode.cli_banner());
+}
+
+#[tokio::test]
+async fn fresh_post_edit_pass_is_not_rerun() {
+    // A pass taken at the final revision already describes the final tree:
+    // no re-run (no extra cost). The marker is removed afterwards, so a
+    // re-run would FAIL — the pass standing proves nothing re-ran.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut agent = Agent::new(crate::config::Config::default())
+        .await
+        .expect("agent should build");
+    agent.verification_gate = environment_dependent_post_edit_gate(tmp.path());
+    agent.task_verification_root = Some(tmp.path().to_path_buf());
+    std::fs::write(tmp.path().join("installed.marker"), "").unwrap();
+    agent.note_mutating_tool_call();
+    agent
+        .maybe_verify_file_change("file_write", &json!({"path": "a.txt"}))
+        .await;
+    std::fs::remove_file(tmp.path().join("installed.marker")).unwrap();
+    assert!(!agent.gate_report_is_uncovered_stale_pass());
+    assert_eq!(agent.recheck_stale_post_edit_pass().await, None);
+    assert_eq!(agent.credited_verification_summary(), Some((true, 1)));
+}
+
+#[tokio::test]
+async fn stale_gate_pass_covered_by_a_later_credited_pass_is_not_rerun() {
+    // A model-run check that passed at the final revision (recorded as the
+    // last successful verification) covers the final tree: no re-run.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut agent = agent_after_passed_post_edit_then_shell_mutation(tmp.path(), true).await;
+    agent.last_successful_verification_mutation_sequence = agent.mutation_sequence;
+    assert!(!agent.gate_report_is_uncovered_stale_pass());
+    assert_eq!(agent.recheck_stale_post_edit_pass().await, None);
+}
+
 #[tokio::test]
 async fn cargo_failure_in_python_only_workspace_is_no_runner_and_unittest_flow_completes() {
     // Finding 1 reproduction, driven through the REAL recording path

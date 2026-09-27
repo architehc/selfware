@@ -605,7 +605,12 @@ impl Agent {
     ///   current mutation sequence, and an outstanding in-scope failure
     ///   (`verification_failures.blocking`) makes the result failed.
     ///
-    /// Returns `None` ("not performed") only when no check ran at all. A pass
+    /// A gate report that PASSED at an earlier revision, with no later
+    /// credited pass covering the final tree, is not credited at all (it is
+    /// re-run on the final tree first: [`Agent::recheck_stale_post_edit_pass`]).
+    ///
+    /// Returns `None` ("not performed") when no creditable check ran (nothing
+    /// ran, or only an uncovered stale gate pass). A model-run pass
     /// that edits have since outdated is reported as NOT passed: rendering
     /// green for a check that does not cover the final tree would claim a
     /// verification that was not performed on it (AGENTS.md rule 3).
@@ -624,7 +629,7 @@ impl Agent {
             Some((_, times)) => *times += 1,
             None => counted.push((name, 1)),
         };
-        if let Some(report) = self.task_gate_report() {
+        if let Some(report) = self.credited_gate_report() {
             for check in report.checks.iter().filter(|c| !c.not_run) {
                 push(check.check_type.as_str().to_string());
             }
@@ -702,8 +707,11 @@ impl Agent {
                     })
             })
             .unwrap_or((0, 0));
+        // A gate PASS taken before the tree moved on, with nothing covering
+        // the final tree, is not credited (`credited_gate_report`): with no
+        // other check this reads "not performed", never "passed".
         let gate = self
-            .task_gate_report()
+            .credited_gate_report()
             .and_then(gate_verdict_from_checks_that_ran);
         credited_verification_verdict(
             gate,
@@ -711,8 +719,7 @@ impl Agent {
             tool_failures,
             // Same freshness the completion gate uses: a counter-fresh pass, or an
             // accepted-with-proof authoritative pass followed only by doc writes.
-            self.last_successful_verification_mutation_sequence >= self.mutation_sequence
-                || self.fresh_authoritative_pass().is_some(),
+            self.verification_pass_covers_current_tree(),
             self.verification_failures
                 .blocking(&self.verification_task_root(), self.mutation_sequence)
                 .is_some(),
@@ -3104,8 +3111,12 @@ impl Agent {
         // Boxed: the re-check embeds the whole post-edit verification
         // future, and inlining it into every caller of this function
         // overflowed the test thread's stack on the deepest run paths.
+        // The mirror case: a stale PASS with no later check covering the
+        // final tree is re-run too, so ✅ never rests on an earlier revision;
+        // a pass at the final revision is not re-run (no extra cost).
         if !matches!(outcome, RunOutcome::Failed { .. }) {
             Box::pin(self.recheck_stale_post_edit_failure()).await;
+            Box::pin(self.recheck_stale_post_edit_pass()).await;
         }
         let mode = FailureMode::classify(self, outcome);
         self.last_run_failure_mode = Some(mode.clone());

@@ -3564,12 +3564,112 @@ impl Agent {
         if paths.is_empty() {
             return None;
         }
-        let label = paths.join(", ");
         info!(
             "Post-edit verification of {} failed at mutation #{} but the tree moved on to #{} — \
              re-running it once on the final tree",
-            label, report_sequence, self.mutation_sequence
+            paths.join(", "),
+            report_sequence,
+            self.mutation_sequence
         );
+        self.rerun_post_edit_verification_on_final_tree(paths).await
+    }
+
+    /// True when a credited pass covers the CURRENT tree: a pass recorded at
+    /// the current mutation sequence, or an accepted-with-proof authoritative
+    /// pass followed only by doc writes. The same freshness the completion
+    /// gate and the run summary's tool-check credit use.
+    pub(super) fn verification_pass_covers_current_tree(&self) -> bool {
+        self.last_successful_verification_mutation_sequence >= self.mutation_sequence
+            || self.fresh_authoritative_pass().is_some()
+    }
+
+    /// True when the task's gate report is a PASS taken at an earlier
+    /// revision than the final tree, and no later credited pass covers the
+    /// final tree. Such a report says nothing about the tree the run
+    /// delivers (a shell mutation or an edit with no applicable checks came
+    /// after it), so it must not render as "verification: passed"
+    /// (AGENTS.md rule 3).
+    pub(super) fn gate_report_is_uncovered_stale_pass(&self) -> bool {
+        let Some(report_sequence) = self.post_edit_report_mutation_sequence else {
+            return false;
+        };
+        report_sequence < self.mutation_sequence
+            && self
+                .task_gate_report()
+                .and_then(super::task_runner::gate_verdict_from_checks_that_ran)
+                .is_some_and(|(passed, _)| passed)
+            && !self.verification_pass_covers_current_tree()
+    }
+
+    /// The gate report the run's verdict may credit: [`Self::task_gate_report`]
+    /// minus an uncovered stale PASS ([`Self::gate_report_is_uncovered_stale_pass`]).
+    /// A stale FAILING report still counts (it is re-run on the final tree
+    /// first by [`Self::recheck_stale_post_edit_failure`] when the run
+    /// finalizes).
+    pub(super) fn credited_gate_report(
+        &self,
+    ) -> Option<&crate::testing::verification::VerificationReport> {
+        if self.gate_report_is_uncovered_stale_pass() {
+            return None;
+        }
+        self.task_gate_report()
+    }
+
+    /// Re-run a STALE PASSING post-edit verification once on the final tree.
+    ///
+    /// The mirror of [`Self::recheck_stale_post_edit_failure`]: a pass taken
+    /// at an earlier revision, with mutations after it (a shell `sed -i`, a
+    /// `git` operation, an edit whose file has no applicable checks) and no
+    /// later check covering the final tree, used to count as passed and
+    /// render ✅ for a tree nothing had verified (AGENTS.md rule 3).
+    ///
+    /// Re-run only when it can change the verdict: the pass is stale and
+    /// uncovered ([`Self::gate_report_is_uncovered_stale_pass`]) and no
+    /// outstanding in-scope failure already fails the run. A pass at the
+    /// current revision is never re-run (no extra cost on the common path).
+    /// A re-run that passes credits the final tree; one that fails is a
+    /// current-revision failure; one that cannot run leaves the stale pass
+    /// uncredited, so the run reports verification NOT PERFORMED on the
+    /// final tree (⚠️), never ✅. Returns the re-run's verdict (`true` =
+    /// passed), `None` when nothing was re-run or no check could run.
+    pub(super) async fn recheck_stale_post_edit_pass(&mut self) -> Option<bool> {
+        if !self.gate_report_is_uncovered_stale_pass() {
+            return None;
+        }
+        if self
+            .verification_failures
+            .blocking(&self.verification_task_root(), self.mutation_sequence)
+            .is_some()
+        {
+            return None;
+        }
+        let report_sequence = self.post_edit_report_mutation_sequence?;
+        let paths = self
+            .verification_gate
+            .last_results()?
+            .affected_files
+            .clone();
+        if paths.is_empty() {
+            return None;
+        }
+        info!(
+            "Post-edit verification of {} passed at mutation #{} but the tree moved on to #{} \
+             with no later check — re-running it once on the final tree",
+            paths.join(", "),
+            report_sequence,
+            self.mutation_sequence
+        );
+        self.rerun_post_edit_verification_on_final_tree(paths).await
+    }
+
+    /// Re-run the post-edit verification of `paths` once on the current
+    /// tree, through the normal gate and ledger (`absorb_post_edit_report`).
+    /// Shared by the stale-failure and stale-pass re-checks.
+    async fn rerun_post_edit_verification_on_final_tree(
+        &mut self,
+        paths: Vec<String>,
+    ) -> Option<bool> {
+        let label = paths.join(", ");
         let spinner = crate::ui::spinner::TerminalSpinner::start(
             "Re-checking verification on the final tree...",
         );
@@ -3580,7 +3680,8 @@ impl Agent {
         {
             Ok(fresh) => fresh,
             Err(e) => {
-                // The stale failure stands: nothing proved the final tree.
+                // The stale report is not credited as a pass: nothing proved
+                // the final tree.
                 spinner.stop_error("Final-tree re-check could not run");
                 warn!("Final-tree verification re-check failed to run: {}", e);
                 return None;

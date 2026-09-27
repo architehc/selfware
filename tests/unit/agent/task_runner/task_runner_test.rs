@@ -4918,3 +4918,50 @@ async fn a_project_question_is_not_answered_from_the_prompt_in_planning() {
     );
     server.stop().await;
 }
+
+/// `finalize_failure_mode` re-runs a stale PASSING post-edit check (edits
+/// after it, no later check) before it classifies, so ✅ never rests on an
+/// earlier revision. Both directions: a passing re-run earns the clean
+/// success, a failing one fails the run.
+#[tokio::test]
+async fn finalize_rechecks_a_stale_post_edit_pass_before_classifying() {
+    for still_green in [true, false] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut agent = Agent::new(Config::default()).await.unwrap();
+        agent.verification_gate = crate::testing::verification::VerificationGate::new(
+            tmp.path(),
+            crate::testing::verification::VerificationConfig {
+                exclude_patterns: Vec::new(),
+                post_edit_test_command: Some("test -f installed.marker".to_string()),
+                ..Default::default()
+            },
+        );
+        agent.task_verification_root = Some(tmp.path().to_path_buf());
+        std::fs::write(tmp.path().join("installed.marker"), "").unwrap();
+        agent.note_mutating_tool_call();
+        agent
+            .maybe_verify_file_change("file_write", &serde_json::json!({"path": "a.txt"}))
+            .await;
+        assert_eq!(agent.credited_verification_summary(), Some((true, 1)));
+        // A later mutation no post-edit check covered.
+        agent.note_mutating_tool_call();
+        if !still_green {
+            std::fs::remove_file(tmp.path().join("installed.marker")).unwrap();
+        }
+        let mode = agent
+            .finalize_failure_mode(RunOutcome::NaturalCompletion)
+            .await;
+        assert_eq!(
+            mode.kind == FailureKind::VerificationFailed,
+            !still_green,
+            "still_green={still_green}: {} ({})",
+            mode.kind.tag(),
+            mode.evidence
+        );
+        assert_eq!(
+            agent.run_summary().verification,
+            Some((still_green, 1)),
+            "the summary reads the final tree's re-run, not the stale pass"
+        );
+    }
+}
