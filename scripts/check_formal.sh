@@ -14,7 +14,9 @@
 #
 # Needs Lean 4 (core only, no Mathlib) and python3. When `lean` is not on
 # PATH the check is skipped with exit 0 and a clear message: the Rust
-# conformance test still pins the committed table.
+# conformance test still pins the committed table. With
+# CHECK_FORMAL_REQUIRE_LEAN=1 (the CI `formal` job) a missing `lean` is a
+# failure instead, so the job can never go green without checking anything.
 
 set -euo pipefail
 
@@ -30,6 +32,10 @@ case "${1:-}" in
 esac
 
 if ! command -v lean >/dev/null 2>&1; then
+    if [ "${CHECK_FORMAL_REQUIRE_LEAN:-0}" = "1" ]; then
+        echo "check_formal: FAILED — 'lean' is not on PATH and CHECK_FORMAL_REQUIRE_LEAN=1." >&2
+        exit 1
+    fi
     echo "check_formal: SKIPPED — 'lean' is not on PATH (install Lean 4, e.g. via elan)."
     echo "check_formal: the committed formal/*_table.json files are still enforced by the Rust conformance test."
     exit 0

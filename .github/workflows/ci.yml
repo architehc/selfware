@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Manual runs (all jobs; the `formal` job runs unconditionally then).
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -280,6 +282,81 @@ jobs:
 
       - name: Compile benchmarks
         run: cargo bench --features extras --no-run
+
+  # Which paths a push/PR touched, so the Lean job runs only when the formal
+  # models, the Rust lifecycle they pin, or the checker itself changed. A
+  # skipped job reports success, so unrelated PRs are not blocked by it.
+  formal-changes:
+    name: Formal models changed?
+    # A manual run checks the models unconditionally (no diff to filter).
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      formal: ${{ steps.filter.outputs.formal }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Filter paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            formal:
+              - 'formal/**'
+              - 'src/lifecycle/**'
+              - 'scripts/check_formal.sh'
+              - '.github/workflows/ci.yml'
+
+  # Re-prove formal/*.lean and compare the exported transition tables with the
+  # committed formal/*_table.json (scripts/check_formal.sh), so Lean<->table
+  # drift cannot land. The Rust conformance tests (in `test`) pin
+  # src/lifecycle to the same tables.
+  formal:
+    name: Formal models (Lean)
+    needs: formal-changes
+    # `!cancelled()`: still runs when `formal-changes` was skipped (manual run).
+    if: >-
+      !cancelled() && (github.event_name == 'workflow_dispatch'
+      || needs.formal-changes.outputs.formal == 'true')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      # The toolchain formal/*.lean were checked with (`lean --version`:
+      # 4.34.1). Bump deliberately, together with any model changes.
+      LEAN_TOOLCHAIN: leanprover/lean4:v4.34.1
+      # Fail, never skip, when lean is missing.
+      CHECK_FORMAL_REQUIRE_LEAN: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Cache elan + Lean toolchain
+        uses: actions/cache@v5
+        with:
+          path: ~/.elan
+          key: elan-${{ runner.os }}-${{ env.LEAN_TOOLCHAIN }}
+
+      - name: Install Lean via elan
+        run: |
+          if [ ! -x "$HOME/.elan/bin/lean" ]; then
+            curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+              | sh -s -- -y --no-modify-path --default-toolchain "$LEAN_TOOLCHAIN"
+          fi
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Check toolchain pin
+        run: |
+          lean --version
+          lean --version | grep -F "version ${LEAN_TOOLCHAIN##*:v}," \
+            || { echo "lean is not ${LEAN_TOOLCHAIN}"; exit 1; }
+
+      - name: Check formal models and exported tables
+        run: scripts/check_formal.sh
 
   # Documentation build
   docs:
