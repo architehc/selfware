@@ -135,6 +135,62 @@ fn ledger_prints_only_an_appended_note() {
     assert_eq!(l.unshown(lead), Some("[NOTE: may be reasoning]\n\n"));
 }
 
+/// 0.9.2 review: "already shown" was substring containment, so a short
+/// final answer that merely occurred inside earlier streamed prose was
+/// swallowed entirely in -p mode.
+#[test]
+fn ledger_prints_a_short_answer_that_only_occurs_inside_earlier_prose() {
+    let mut l = AnswerLedger::new();
+    l.record("Let me check whether the build is done.", false);
+    l.record("OK, running the tests now; 42 of them.", false);
+    // Not streamed (cache hit / planning fast path): must print in full.
+    assert_eq!(l.unshown("done"), Some("done"));
+    assert_eq!(l.unshown("OK"), Some("OK"));
+    assert_eq!(l.unshown("42"), Some("42"));
+    // Also inside an earlier ANSWER block that is not the latest one.
+    let mut l = AnswerLedger::new();
+    l.record("The answer is 42 because of X.", true);
+    l.record("Now reading the file.", false);
+    assert_eq!(l.unshown("42"), Some("42"));
+}
+
+#[test]
+fn ledger_does_not_truncate_an_answer_that_starts_or_ends_with_old_narration() {
+    let mut l = AnswerLedger::new();
+    l.record("OK", false);
+    l.record("Done.", true);
+    l.record("Reading src/lib.rs next.", false);
+    // An earlier short block is not "the shown prefix" of a new answer.
+    assert_eq!(
+        l.unshown("OK, the fix is in src/lib.rs."),
+        Some("OK, the fix is in src/lib.rs.")
+    );
+    assert_eq!(
+        l.unshown("All tests pass. Done."),
+        Some("All tests pass. Done.")
+    );
+}
+
+#[test]
+fn ledger_treats_a_short_answer_as_shown_only_when_it_was_shown() {
+    // The short answer streamed as its own response: printed once only.
+    let mut l = AnswerLedger::new();
+    l.record("done", true);
+    assert_eq!(l.unshown("done"), None);
+    // The whole-block equality holds for an earlier block too (banked best
+    // answer re-emitted after later narration).
+    l.record("narration before a tool call", false);
+    assert_eq!(l.unshown("done"), None);
+    // The streamed answer ended with it (a lead was trimmed): shown.
+    let mut l = AnswerLedger::new();
+    l.record("Thinking it over.\n\n42", true);
+    assert_eq!(l.unshown("42"), None);
+    // ...but not when that block was tool-call narration.
+    let mut l = AnswerLedger::new();
+    l.record("Checking whether it is done", false);
+    assert_eq!(l.unshown("done"), Some("done"));
+}
+
 #[test]
 fn ledger_candidate_is_the_last_tool_free_response() {
     let mut l = AnswerLedger::new();

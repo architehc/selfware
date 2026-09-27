@@ -431,6 +431,9 @@ fn offset_before_squashed_suffix(text: &str, suffix: &str) -> Option<usize> {
 pub(crate) struct AnswerLedger {
     shown: Vec<String>,
     candidate: Option<String>,
+    /// The most recent `shown` block is a tool-free response (an answer),
+    /// not narration before a tool call.
+    last_is_answer: bool,
 }
 
 /// Bounded history: a task's final answer is one of its last few responses.
@@ -441,6 +444,7 @@ impl AnswerLedger {
         Self {
             shown: Vec::new(),
             candidate: None,
+            last_is_answer: false,
         }
     }
 
@@ -458,6 +462,7 @@ impl AnswerLedger {
             self.shown.remove(0);
         }
         self.shown.push(s);
+        self.last_is_answer = answer_candidate;
     }
 
     /// The last tool-free response shown (squashed), if any.
@@ -468,21 +473,37 @@ impl AnswerLedger {
     /// The part of `text` the user has NOT seen yet: `None` when all of it
     /// was shown, the tail after a shown prefix (e.g. an appended note),
     /// the head before a shown suffix, or the whole text.
+    ///
+    /// "Shown" is decided against whole shown BLOCKS, never substrings of
+    /// them: `text` is on screen when it equals a shown block (e.g. the
+    /// banked best answer of an earlier turn), or when it is the END of the
+    /// most recent block and that block was a tool-free response (the final
+    /// answer is the tail of the answer that just streamed, after
+    /// think-stripping trimmed its lead). Prefix/suffix note detection uses
+    /// only that same most recent tool-free block. The old
+    /// `seen.contains(text)` swallowed a short final answer ("done", "OK",
+    /// "42") that merely occurred somewhere inside earlier streamed prose,
+    /// and the old prefix/suffix loop over every block truncated an
+    /// unstreamed answer that started or ended with an earlier short block.
     pub(crate) fn unshown<'a>(&self, text: &'a str) -> Option<&'a str> {
         let s = squash(text);
-        if s.is_empty() || self.shown.iter().any(|seen| seen.contains(&s)) {
+        if s.is_empty() || self.shown.contains(&s) {
             return None;
         }
-        for seen in self.shown.iter().rev() {
-            if s.starts_with(seen.as_str()) {
-                if let Some(at) = offset_after_squashed_prefix(text, seen) {
-                    return Some(text[at..].trim_start_matches([' ', '\t']));
-                }
+        let Some(last) = self.shown.last().filter(|_| self.last_is_answer) else {
+            return Some(text);
+        };
+        if last.ends_with(s.as_str()) {
+            return None;
+        }
+        if s.starts_with(last.as_str()) {
+            if let Some(at) = offset_after_squashed_prefix(text, last) {
+                return Some(text[at..].trim_start_matches([' ', '\t']));
             }
-            if s.ends_with(seen.as_str()) {
-                if let Some(at) = offset_before_squashed_suffix(text, seen) {
-                    return Some(&text[..at]);
-                }
+        }
+        if s.ends_with(last.as_str()) {
+            if let Some(at) = offset_before_squashed_suffix(text, last) {
+                return Some(&text[..at]);
             }
         }
         Some(text)
