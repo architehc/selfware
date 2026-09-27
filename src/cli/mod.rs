@@ -7294,6 +7294,9 @@ fn earns_task_complete_banner(agent: &crate::agent::Agent) -> bool {
         .is_some_and(|fm| fm.is_clean_success())
 }
 
+/// The run summary for the TUI's session exit and outcome line (the text
+/// CLI renders a classified run end with [`render_run_summary_for`]).
+#[cfg(any(feature = "tui", test))]
 fn render_run_summary(summary: &crate::agent::RunSummary, failure: Option<&str>) -> String {
     let end = if failure.is_some() {
         crate::errors::RunEnd::Failed
