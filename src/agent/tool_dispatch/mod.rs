@@ -210,6 +210,18 @@ impl Agent {
                 name,
                 result_str.chars().take(300).collect::<String>()
             ),
+            // The full output's error lines and the exact call, so a failure
+            // can be compared with the same check on the pre-task tree.
+            diagnostics: if success {
+                Vec::new()
+            } else {
+                super::preexisting_failure::diagnostic_lines(result_str)
+            },
+            rerun: (!success).then(|| super::preexisting_failure::RerunSpec::Tool {
+                name: name.to_string(),
+                args: args_str.to_string(),
+            }),
+            attribution: None,
         };
 
         if success {
@@ -331,6 +343,16 @@ impl Agent {
                  exit status): {}",
                 result_str.chars().take(300).collect::<String>()
             ),
+            diagnostics: if passed {
+                Vec::new()
+            } else {
+                super::preexisting_failure::diagnostic_lines(result_str)
+            },
+            rerun: (!passed).then(|| super::preexisting_failure::RerunSpec::Tool {
+                name: name.to_string(),
+                args: args_str.to_string(),
+            }),
+            attribution: None,
         };
         if passed {
             self.probe_command_counts.clear();
@@ -1444,7 +1466,11 @@ impl Agent {
             .outstanding()
             .iter()
             .any(|failed| {
+                // A failure shown to pre-exist the task says nothing about
+                // what the task changed; it neither blocks completion nor
+                // keeps the tree from being the task's last-known-good.
                 !failed.passed
+                    && !failed.is_preexisting()
                     && !matches!(
                         failed.relevance_to(&task_root),
                         super::verification_scope::Relevance::OutOfScope

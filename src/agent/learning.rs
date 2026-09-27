@@ -240,9 +240,12 @@ impl Agent {
         // The gate's own report is also verification evidence: when it ran
         // but no verification-shaped tool call did, the first check the run
         // saw is unknown, yet the final verdict still exists.
+        // A check still failing with pre-existing errors is not a passed
+        // final verification, whatever it says about the change.
+        let preexisting = !self.preexisting_failure_notes().is_empty();
         let final_verification_passed = self
             .credited_verification_summary()
-            .map(|(passed, _)| passed);
+            .map(|(passed, _)| passed && !preexisting);
         crate::cognitive::metrics::TerminalRunStats {
             outcome,
             failure_mode,

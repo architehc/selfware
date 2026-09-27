@@ -1019,6 +1019,13 @@ impl Agent {
         parse_rejections.extend(std::mem::take(&mut self.pending_native_rejections));
         if !tool_calls.is_empty() {
             self.readonly_no_tool_streak = 0;
+        } else {
+            // A tool-less reply may be a completion claim the gate is about
+            // to judge: first establish whether each blocking failure was
+            // already there before the task (re-run once per check on the
+            // pre-task tree, cached). A pre-existing failure then does not
+            // block; a new one is named as new.
+            self.attribute_blocking_failures().await;
         }
 
         // Detect a FILES: checklist in the assistant response. Small models often
@@ -1612,6 +1619,10 @@ impl Agent {
                 // message and the info! log is suppressed in run mode, so
                 // without this a benchmark log cannot show the gate fired.
                 output::gate_blocked(&gate_msg);
+                // The same unchanged failure, not attributable to the task's
+                // change, may refuse only a bounded number of times; then the
+                // run ends as VERIFICATION_FAILED instead of MAX_ITERATIONS.
+                self.note_unattributed_failure_block()?;
                 // Early hard-stop for the fake-complete loop: on a mutation-required
                 // task with zero mutating calls, the model alternating {final answer →
                 // gate rejection → read-only tool} resets every consecutive counter and

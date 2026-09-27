@@ -117,6 +117,7 @@ mod phi_observation;
 pub mod plan_mode;
 mod plan_step;
 pub mod planning;
+pub(crate) mod preexisting_failure;
 pub mod progress;
 pub mod prompt_builder;
 mod protocol_stall;
@@ -1250,6 +1251,10 @@ pub struct Agent {
     /// overwrote the first, and the automatic post-edit path bypassed the
     /// scoped clearing rule entirely by assigning `None` on any pass.
     verification_failures: verification_scope::VerificationLedger,
+    /// Per-task pre-existing-failure state: the checkout of the task-start
+    /// tree, each check's result on it, and the unattributed-block tally
+    /// (see `preexisting_failure`).
+    baseline_state: preexisting_failure::BaselineState,
     /// Root the current task is working in; verification relevance is measured
     /// against it.
     task_verification_root: Option<std::path::PathBuf>,
@@ -2021,6 +2026,7 @@ To call a tool, use this EXACT XML structure:
             last_successful_verification_mutation_sequence: 0,
             last_failed_verification_summary: None,
             verification_failures: Default::default(),
+            baseline_state: Default::default(),
             // Pinned at construction: reading the process cwd live made verification
             // relevance depend on whatever else the process had chdir'd to.
             task_verification_root: Some(crate::tools::workspace_root::current_path()),
@@ -3568,6 +3574,8 @@ To call a tool, use this EXACT XML structure:
         self.last_successful_verification_mutation_sequence = 0;
         self.last_failed_verification_summary = None;
         self.verification_failures.clear();
+        // Drops the previous task's checkout (removing its directory).
+        self.baseline_state = Default::default();
         self.last_failed_verification_mutation_sequence = 0;
         self.last_not_run_verification_mutation_sequence = 0;
         self.post_edit_report_mutation_sequence = None;

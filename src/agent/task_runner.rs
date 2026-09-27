@@ -257,6 +257,10 @@ pub(super) fn is_fatal_loop_error(error: &anyhow::Error) -> bool {
         // their calls were malformed. Recovery would re-send the same step to
         // the same model (0.8.4 review run: 38 of 53 turns, until SIGTERM).
         || msg.contains(super::protocol_stall::PROTOCOL_STALL_MARKER)
+        // The same failure, not attributable to the task's change, kept
+        // blocking completion: recovery would only re-send the refused
+        // answer (c24: refused until MAX_ITERATIONS).
+        || msg.contains(super::preexisting_failure::UNATTRIBUTED_FAILURE_LOOP_MARKER)
 }
 
 /// Consecutive context-overflow recoveries (compress + retry) allowed before
@@ -537,6 +541,12 @@ pub struct RunSummary {
     /// and the verification commands the run executed), in order, deduped.
     /// A bare "passed (N checks)" named nothing (UX field test, 0.9.0).
     pub verification_checks: Vec<String>,
+    /// Checks that fail on the final tree with errors that were ALL already
+    /// reported on the tree the task started from — one line each
+    /// ("`cargo check`: failing before the task too (pre-existing: …) — not
+    /// caused by this change"). Non-empty means the result is NOT verified
+    /// green, whatever `verification` says about the change itself.
+    pub preexisting_failures: Vec<String>,
     /// Vision tool calls this run as (succeeded, failed); `None` when no
     /// vision tool ran. All-failed means no image was actually seen.
     pub vision_calls: Option<(usize, usize)>,
@@ -612,6 +622,7 @@ impl Agent {
             files_changed,
             verification: self.credited_verification_summary(),
             verification_checks: self.verification_check_names(),
+            preexisting_failures: self.preexisting_failure_notes(),
             vision_calls: self.vision_call_outcomes(),
             total_tokens: task_usage.total_tokens,
             cost_usd: task_usage.cost_usd,
@@ -810,20 +821,54 @@ impl Agent {
         // A gate PASS taken before the tree moved on, with nothing covering
         // the final tree, is not credited (`credited_gate_report`): with no
         // other check this reads "not performed", never "passed".
-        let gate = self
-            .credited_gate_report()
-            .and_then(gate_verdict_from_checks_that_ran);
-        credited_verification_verdict(
+        let task_root = self.verification_task_root();
+        let preexisting = self
+            .verification_failures
+            .preexisting(&task_root, self.mutation_sequence);
+        // A failing gate check whose errors were all already there before the
+        // task (its ledger record is attributed PreExisting) does not count
+        // against the change. It is reported as pre-existing
+        // (`preexisting_failure_notes`), never as a pass.
+        let gate = self.credited_gate_report().and_then(|report| {
+            gate_verdict_from_checks_that_ran(report).map(|(passed, n)| {
+                let only_preexisting_failed = report
+                    .checks
+                    .iter()
+                    .filter(|c| !c.not_run && !c.passed)
+                    .all(|c| {
+                        let id = format!("gate:{}", c.check_type.as_str());
+                        preexisting.iter().any(|r| r.check_id == id)
+                    });
+                (passed || only_preexisting_failed, n)
+            })
+        });
+        let blocking = self
+            .verification_failures
+            .blocking(&task_root, self.mutation_sequence)
+            .is_some();
+        let verdict = credited_verification_verdict(
             gate,
             tool_passes,
             tool_failures,
             // Same freshness the completion gate uses: a counter-fresh pass, or an
             // accepted-with-proof authoritative pass followed only by doc writes.
             self.verification_pass_covers_current_tree(),
-            self.verification_failures
-                .blocking(&self.verification_task_root(), self.mutation_sequence)
-                .is_some(),
-        )
+            blocking,
+        );
+        // A check that ran on the final tree and reported only errors that
+        // were already there covers that tree the way the completion gate
+        // accepts it: no failure is attributable to the change. The summary
+        // and banner still say "failing before the task too", never ✅.
+        match verdict {
+            Some((false, n))
+                if !preexisting.is_empty()
+                    && !blocking
+                    && gate.is_none_or(|(passed, _)| passed) =>
+            {
+                Some((true, n))
+            }
+            other => other,
+        }
     }
 
     /// True when the iteration cap tripped on a run whose edits are covered
@@ -1213,6 +1258,12 @@ impl Agent {
             // the task's. Captured before any tool runs.
             checkpoint.task_start_head =
                 crate::checkpoint::capture_head_sha(&crate::tools::workspace_root::current_path());
+            // The whole pre-task working tree, before any tool runs: what a
+            // failing check is compared against to tell a failure this task
+            // caused from one that was already there.
+            checkpoint.task_start_tree = super::preexisting_failure::capture_task_start_tree(
+                &crate::tools::workspace_root::current_path(),
+            );
             checkpoint.run_endpoint = Some(crate::session::checkpoint::endpoint_identity(
                 &self.config.endpoint,
             ));
@@ -2700,6 +2751,7 @@ impl Agent {
                                     info!("Synthesis produced an empty answer after stripping think blocks — continuing normal loop");
                                     continue;
                                 }
+                                Box::pin(self.attribute_blocking_failures()).await;
                                 if let Some(gate_msg) = self.check_completion_gate().await {
                                     info!(
                                         "Synthesis answer rejected by completion gate: {}",
@@ -3325,6 +3377,10 @@ impl Agent {
         if !matches!(outcome, RunOutcome::Failed { .. }) {
             Box::pin(self.recheck_stale_post_edit_failure()).await;
             Box::pin(self.recheck_stale_post_edit_pass()).await;
+            // A failure the re-checks just recorded on the final tree is
+            // judged like any other: pre-existing, new, or unknown — so the
+            // verdict reports a failure that was already there as such.
+            Box::pin(self.attribute_blocking_failures()).await;
         }
         let mode = FailureMode::classify(self, outcome);
         self.last_run_failure_mode = Some(mode.clone());

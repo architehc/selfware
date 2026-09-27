@@ -689,6 +689,33 @@ impl VerificationGate {
         }
     }
 
+    /// The project root this gate runs its checks in.
+    pub fn project_root(&self) -> &Path {
+        &self.project_root
+    }
+
+    /// The explicit working directory, when one was set.
+    pub fn working_dir(&self) -> Option<&Path> {
+        self.working_dir.as_deref()
+    }
+
+    /// The same gate (configuration, language hint, post-edit command) pointed
+    /// at another copy of the project, with fresh caches and no last report.
+    /// Used to run the SAME post-edit checks on the pre-task tree when
+    /// deciding whether a failure pre-existed the task.
+    pub fn rebased(&self, project_root: PathBuf, working_dir: Option<PathBuf>) -> Self {
+        Self {
+            config: self.config.clone(),
+            project_root,
+            last_results: None,
+            file_hash_cache: std::collections::HashMap::new(),
+            last_verification_time: None,
+            repo_language_hint: self.repo_language_hint.clone(),
+            inferred_language_cache: None,
+            working_dir,
+        }
+    }
+
     /// Set an explicit working directory for tool operations and path resolution.
     pub fn with_working_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.working_dir = Some(dir.into());

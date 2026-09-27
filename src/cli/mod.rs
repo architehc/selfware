@@ -7297,6 +7297,14 @@ fn render_run_summary_for(
         // Never print a bare "completed" over failed checks (AGENTS.md rule 3).
         None if matches!(summary.verification, Some((false, _))) => lines
             .push("outcome: finished — verification FAILED (not a verified result)".to_string()),
+        // Allowed with a warning: checks fail on the final tree, but only
+        // with errors the starting tree already had — not a verified result,
+        // and not a failure of this change (c24).
+        None if !summary.preexisting_failures.is_empty() => lines.push(
+            "outcome: completed — ⚠️ checks were already failing before the task \
+             (pre-existing, not caused by this change; not a verified result)"
+                .to_string(),
+        ),
         // Allowed with a warning: the audit infrastructure failed, so the
         // result was not audited — never a bare "completed" over it.
         None if summary
@@ -7401,6 +7409,13 @@ fn render_run_summary_for(
         format!("{checks} checks: {}{suffix}", shown.join(", "))
     };
     let verification = match summary.verification {
+        // Never "passed" over a check that still fails, however old its
+        // errors are (AGENTS.md rule 3).
+        Some((true, checks)) if !summary.preexisting_failures.is_empty() => format!(
+            "⚠️ failing before the task too — not caused by this change ({}): {}",
+            named(checks),
+            summary.preexisting_failures.join("; ")
+        ),
         Some((true, checks)) => format!("passed ({})", named(checks)),
         Some((false, checks)) => format!("failed ({})", named(checks)),
         None => "not performed".to_string(),

@@ -1766,8 +1766,17 @@ impl Agent {
                 let summary = &record.summary;
                 let check = &record.check_id;
                 let edits = self.describe_code_affecting_edits();
+                // Whether the task's change caused it, when that could be
+                // established by re-running the check on the pre-task tree
+                // (a failure shown to pre-exist never reaches here: it does
+                // not block). Unknown says so instead of blaming the edit.
+                let attribution = record
+                    .attribution
+                    .as_ref()
+                    .map(super::preexisting_failure::Attribution::gate_note)
+                    .unwrap_or_default();
                 return Some(format!(
-                    "FailingTestsAccepted: `{check}` failed at the current revision (after {edits}): {summary}. \
+                    "FailingTestsAccepted: `{check}` failed at the current revision (after {edits}): {summary}.{attribution} \
                      No passing `{check}` covers this revision, so the failure is unresolved. \
                      Fix it and rerun the verification to green before completing."
                 ));
@@ -1912,6 +1921,20 @@ impl Agent {
                      Fix the issue and rerun the verification to green before completing.",
                     self.last_successful_verification_mutation_sequence, self.mutation_sequence
                 ));
+            }
+            // A check DID run on this revision, and every error it reports
+            // was already reported on the tree the task started from
+            // (`preexisting_failure`): the change introduced no new error,
+            // and no edit the task may make can turn that check green.
+            // Demanding a pass would refuse forever (c24: a workspace whose
+            // declared test targets were missing). Accepted WITHOUT credit —
+            // the run reports the failure as pre-existing, never as passed.
+            if self.only_preexisting_failures_at_current_revision() {
+                info!(
+                    "Completion gate: checks fail at mutation #{} with only pre-existing errors; not demanding a pass",
+                    self.mutation_sequence
+                );
+                return None;
             }
             // No check can run here (every post-edit check at this revision
             // was not-run): demanding one cannot be satisfied. Accept without
@@ -2666,9 +2689,13 @@ impl Agent {
             && self.has_code_affecting_mutation()
             && !(self.current_task_is_read_only() && self.mutation_sequence == 0)
         {
+            // A check that ran on this revision and reported only errors the
+            // starting tree already had verified what it could: nothing the
+            // change did made it fail (`preexisting_failure`; no credit).
             let has_verification = (self.has_successful_verification_tool_call()
                 && self.has_fresh_successful_verification())
-                || self.only_unrunnable_verification_at_current_revision();
+                || self.only_unrunnable_verification_at_current_revision()
+                || self.only_preexisting_failures_at_current_revision();
             if !has_verification {
                 // Bootstrap exemption (W8b): with only scaffolding on disk
                 // there is nothing to verify yet — refuse completion with a
@@ -2773,7 +2800,8 @@ impl Agent {
             if !(all_calls_are_non_code_or_read_only
                 || (self.has_successful_verification_tool_call()
                     && self.has_fresh_successful_verification())
-                || self.only_unrunnable_verification_at_current_revision())
+                || self.only_unrunnable_verification_at_current_revision()
+                || self.only_preexisting_failures_at_current_revision())
             {
                 return Some(format!(
                     "You must run at least one verification tool that fits this project ({}) \
@@ -3511,6 +3539,11 @@ impl Agent {
                     summary: format!("verification could not run: {}", e),
                     passed: false,
                     mutation_sequence: self.mutation_sequence,
+                    // Nothing ran, so there is nothing to compare with the
+                    // pre-task tree: this failure stays unattributed.
+                    diagnostics: Vec::new(),
+                    rerun: None,
+                    attribution: None,
                     scope: super::verification_scope::VerificationScope {
                         working_dir: cwd.clone(),
                         project_root: Some(cwd),
@@ -3852,6 +3885,20 @@ impl Agent {
                 passed: check.passed,
                 mutation_sequence: self.mutation_sequence,
                 scope,
+                // Full error lines + the same post-edit check on the same
+                // paths, for the pre-existing-failure comparison.
+                diagnostics: if check.passed {
+                    Vec::new()
+                } else {
+                    super::preexisting_failure::check_result_diagnostic_lines(check)
+                },
+                rerun: (!check.passed).then(|| {
+                    super::preexisting_failure::RerunSpec::PostEditGate {
+                        paths: report.affected_files.clone(),
+                        check_type: kind.to_string(),
+                    }
+                }),
+                attribution: None,
             });
         }
     }

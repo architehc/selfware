@@ -573,6 +573,7 @@ impl Agent {
         // (incomplete-action / exact-target / capability-disclaimer checks),
         // so point it at the candidate answer before asking.
         self.last_assistant_response = clean.clone();
+        Box::pin(self.attribute_blocking_failures()).await;
         if self.check_completion_gate().await.is_some() {
             return None;
         }

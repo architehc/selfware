@@ -722,6 +722,15 @@ pub struct TaskCheckpoint {
     /// outside a git repository -- the gate then counts no committed paths.
     #[serde(default)]
     pub task_start_head: Option<String>,
+    /// The working tree at task start (tracked files as on disk plus
+    /// untracked, non-ignored ones) as a git TREE object id, written through
+    /// a temporary index before any tool ran. A failing check is re-run on a
+    /// checkout of it to tell a failure the task caused from one that was
+    /// already there (`agent::preexisting_failure`). Write-once, persisted
+    /// so a resumed task keeps it; `None` outside a git repository and on
+    /// older checkpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_start_tree: Option<String>,
     /// Which backend produced this task: the endpoint (scheme, host, port
     /// and path only; userinfo and query are never stored) and the model, set
     /// once at task creation. Resuming under a different endpoint or model
@@ -816,6 +825,7 @@ impl TaskCheckpoint {
             .then_some(self.max_cost_usd)
             .flatten();
         if self.task_start_head != base.task_start_head
+            || self.task_start_tree != base.task_start_tree
             || self.run_endpoint != base.run_endpoint
             || self.run_model != base.run_model
             || self.task_description != base.task_description
@@ -1104,6 +1114,7 @@ impl TaskCheckpoint {
                 .and_then(|cwd| cwd.canonicalize().ok())
                 .map(|cwd| cwd.to_string_lossy().into_owned()),
             task_start_head: None,
+            task_start_tree: None,
             run_endpoint: None,
             run_model: None,
         }

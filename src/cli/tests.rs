@@ -1233,6 +1233,7 @@ fn sample_summary() -> crate::agent::RunSummary {
         ],
         verification: Some((true, 4)),
         verification_checks: Vec::new(),
+        preexisting_failures: Vec::new(),
         vision_calls: None,
         total_tokens: 123_456,
         cost_usd: Some(0.0123),
@@ -1301,6 +1302,35 @@ fn render_run_summary_never_says_completed_over_failed_verification() {
     );
     assert!(
         rendered.contains("verification: failed (1 checks)"),
+        "{rendered}"
+    );
+}
+
+/// c24 (0.9.3): a check that still fails on the final tree, but only with
+/// errors the starting tree already had, is neither "passed" nor a failure of
+/// the change. The summary says so; it never renders "passed" (rule 3).
+#[test]
+fn render_run_summary_names_preexisting_failures_and_never_says_passed() {
+    let mut summary = sample_summary();
+    summary.verification = Some((true, 2));
+    summary.verification_checks = vec!["type_check".to_string(), "cargo_check".to_string()];
+    summary.preexisting_failures = vec![
+        "`cargo check`: failing before the task too (pre-existing: error: can't find \
+         integration-test `unit`…) — not caused by this change"
+            .to_string(),
+    ];
+    let rendered = render_run_summary(&summary, None);
+    assert!(!rendered.contains("passed ("), "{rendered}");
+    assert!(
+        rendered.contains("outcome: completed — ⚠️ checks were already failing before the task"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("verification: ⚠️ failing before the task too — not caused by this change (2 checks: type_check, cargo_check)"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("`cargo check`: failing before the task too"),
         "{rendered}"
     );
 }

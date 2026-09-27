@@ -109,6 +109,12 @@ pub(crate) const VERIFICATION_FAILED_NOTE: &str =
 pub(crate) const VERIFICATION_NOT_PERFORMED_NOTE: &str =
     "verification NOT PERFORMED — no check ran on the final tree";
 
+/// Evidence note for a completed run whose checks still fail on the final
+/// tree, but only with errors the tree the task started from already had
+/// (`agent::preexisting_failure`); `cli_banner` keys its non-✅ header on it.
+pub(crate) const PREEXISTING_FAILURE_NOTE: &str =
+    "checks failing before the task too (pre-existing, not caused by this change)";
+
 /// Evidence note for a completed run whose requirements audit could not run;
 /// `cli_banner` keys its non-clean header on it.
 pub(crate) const AUDIT_NOT_PERFORMED_NOTE: &str = "requirements audit NOT PERFORMED";
@@ -313,10 +319,13 @@ impl FailureMode {
                 })();
                 with_citation_status(
                     with_audit_status(
-                        with_verification_verdict(
-                            base,
-                            agent.credited_verification_summary(),
-                            read_only,
+                        with_preexisting_failures(
+                            with_verification_verdict(
+                                base,
+                                agent.credited_verification_summary(),
+                                read_only,
+                            ),
+                            &agent.preexisting_failure_notes(),
                         ),
                         agent.requirements_audit_status().as_ref(),
                     ),
@@ -354,6 +363,19 @@ impl FailureMode {
                             mutating
                         ),
                         advice: "the same kind of error kept recurring — read the recovered errors in the log and fix their cause (provider, tool, environment); do NOT raise max_iterations".to_string(),
+                    };
+                }
+                if reason.contains(super::preexisting_failure::UNATTRIBUTED_FAILURE_LOOP_MARKER) {
+                    return FailureMode {
+                        restored_files: Vec::new(),
+                        kind: FailureKind::VerificationFailed,
+                        evidence: format!(
+                            "stopped: {} ({} tool calls executed, {} mutating)",
+                            truncate(&reason, 700),
+                            total_calls,
+                            mutating
+                        ),
+                        advice: "a check kept failing unchanged and it could not be established whether it already failed before the task — run it on a clean checkout of the starting revision; if it fails there too, fix or exclude it first; do NOT raise max_iterations".to_string(),
                     };
                 }
                 if reason.contains("FAKE_COMPLETE_LOOP") {
@@ -586,6 +608,14 @@ impl FailureMode {
                 "⚠️ Task completed ({}) — {AUDIT_NOT_PERFORMED_NOTE}; the result was not audited",
                 self.kind.tag()
             )
+        } else if self.kind.is_nonfailure() && self.evidence.contains(PREEXISTING_FAILURE_NOTE) {
+            // The change broke nothing, but a check still fails on the final
+            // tree with errors the starting tree already had: not verified
+            // green, so no clean ✅ (c24).
+            format!(
+                "⚠️ Task completed ({}) — {PREEXISTING_FAILURE_NOTE}; not a verified result",
+                self.kind.tag()
+            )
         } else if self.kind.is_nonfailure()
             && self.evidence.contains(CITATIONS_UNVERIFIED_NOTE)
             && !self.evidence.contains(VERIFICATION_FAILED_NOTE)
@@ -749,6 +779,25 @@ pub(crate) fn with_verification_verdict(
             ..base
         },
         _ => base,
+    }
+}
+
+/// Fold checks that fail on the final tree only with pre-existing errors into
+/// a non-failure verdict's evidence. The kind (and exit status) is unchanged —
+/// the change caused no failure — but the banner is never a clean ✅ over a
+/// check that still fails (AGENTS.md rule 3), and the evidence names each
+/// one. Failure verdicts pass through unchanged.
+pub(crate) fn with_preexisting_failures(base: FailureMode, notes: &[String]) -> FailureMode {
+    if notes.is_empty() || !base.kind.is_nonfailure() {
+        return base;
+    }
+    FailureMode {
+        evidence: format!(
+            "{}; {PREEXISTING_FAILURE_NOTE}: {}",
+            base.evidence,
+            notes.join("; ")
+        ),
+        ..base
     }
 }
 

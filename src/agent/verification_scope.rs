@@ -152,6 +152,24 @@ pub struct VerificationRecord {
     /// makes it stale.
     pub mutation_sequence: usize,
     pub summary: String,
+    /// Error-shaped lines from the check's FULL output (not the 300-char
+    /// `summary`), un-normalised and bounded. What the pre-existing-failure
+    /// comparison diffs against the same check on the pre-task tree
+    /// ([`super::preexisting_failure`]). Empty on passes and old checkpoints.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<String>,
+    /// How to run this same check again on another tree (the pre-task
+    /// baseline). `None` when the check cannot be re-run (old checkpoints,
+    /// a verification that could not start).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rerun: Option<super::preexisting_failure::RerunSpec>,
+    /// Whether this failure already existed before the task's first edit,
+    /// once that has been determined. A failure attributed
+    /// [`super::preexisting_failure::Attribution::PreExisting`] does not block
+    /// completion (it was not caused by the task's change); every other
+    /// attribution, and `None`, leaves the blocking rules unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<super::preexisting_failure::Attribution>,
 }
 
 impl VerificationRecord {
@@ -191,14 +209,34 @@ impl VerificationRecord {
     /// Only a relevant, current failure blocks. An out-of-scope failure is
     /// reported and does not block; a `NoRunner` result is not a failure at
     /// all; an unknown one does, because it cannot be established as harmless.
+    ///
+    /// A failure shown to exist, with the same errors, on the tree the task
+    /// started from does not block either: the task's change did not cause
+    /// it, and no edit the task is allowed to make is required to fix it
+    /// (c24 live run: a workspace whose declared `[[test]]` targets were
+    /// missing blocked a comments-only edit until MAX_ITERATIONS). It is
+    /// still an outstanding failure — reported as pre-existing, never green.
     pub fn blocks_completion(&self, task_root: &Path, current_mutation_sequence: usize) -> bool {
         if self.passed || self.is_stale(current_mutation_sequence) {
+            return false;
+        }
+        if self.is_preexisting() {
             return false;
         }
         !matches!(
             self.relevance_to(task_root),
             Relevance::OutOfScope | Relevance::NoRunner
         )
+    }
+
+    /// Whether this failure was shown to exist, with the same errors, before
+    /// the task's first edit.
+    pub fn is_preexisting(&self) -> bool {
+        !self.passed
+            && self
+                .attribution
+                .as_ref()
+                .is_some_and(super::preexisting_failure::Attribution::is_preexisting)
     }
 
     /// Whether this record describes a runner that does not exist in (or
@@ -330,6 +368,9 @@ mod tests {
             },
             passed,
             mutation_sequence: seq,
+            diagnostics: Vec::new(),
+            rerun: None,
+            attribution: None,
             summary: format!("{command} result"),
         }
     }
@@ -492,6 +533,9 @@ mod tests {
             scope: scope_for_command("cargo_test", "", &sibling),
             passed: false,
             mutation_sequence: 1,
+            diagnostics: Vec::new(),
+            rerun: None,
+            attribution: None,
             summary: "cargo_test failed".to_string(),
         };
         assert_eq!(live.scope.runner_exists, Some(true));
@@ -532,6 +576,9 @@ mod tests {
             scope,
             passed: false,
             mutation_sequence: 2,
+            diagnostics: Vec::new(),
+            rerun: None,
+            attribution: None,
             summary: "cargo_test failed: could not find Cargo.toml".to_string(),
         };
         assert_eq!(record.relevance_to(&py), Relevance::NoRunner);
@@ -561,6 +608,9 @@ mod tests {
             scope: scope_for_command("shell_exec", "python3 -m unittest", &py),
             passed: false,
             mutation_sequence: 2,
+            diagnostics: Vec::new(),
+            rerun: None,
+            attribution: None,
             summary: "1 test failed".to_string(),
         });
         assert!(
@@ -573,6 +623,9 @@ mod tests {
             scope: scope_for_command("shell_exec", "python3 -m unittest", &py),
             passed: true,
             mutation_sequence: 2,
+            diagnostics: Vec::new(),
+            rerun: None,
+            attribution: None,
             summary: "OK".to_string(),
         });
         assert!(
@@ -1238,6 +1291,38 @@ impl VerificationLedger {
 
     pub fn outstanding(&self) -> &[VerificationRecord] {
         &self.outstanding
+    }
+
+    /// Record whether the outstanding failure at `index` pre-existed the
+    /// task. Only the attribution changes; the record stays outstanding.
+    pub fn set_attribution(
+        &mut self,
+        index: usize,
+        attribution: super::preexisting_failure::Attribution,
+    ) {
+        if let Some(record) = self.outstanding.get_mut(index) {
+            record.attribution = Some(attribution);
+        }
+    }
+
+    /// Current-revision failures shown to pre-exist the task, in scope for a
+    /// task rooted here: not blocking, and never to be reported as a pass.
+    pub fn preexisting(
+        &self,
+        task_root: &Path,
+        current_mutation_sequence: usize,
+    ) -> Vec<&VerificationRecord> {
+        self.outstanding
+            .iter()
+            .filter(|record| {
+                record.is_preexisting()
+                    && !record.is_stale(current_mutation_sequence)
+                    && !matches!(
+                        record.relevance_to(task_root),
+                        Relevance::OutOfScope | Relevance::NoRunner
+                    )
+            })
+            .collect()
     }
 
     pub fn is_empty(&self) -> bool {
