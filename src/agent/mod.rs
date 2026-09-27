@@ -1323,6 +1323,12 @@ pub struct Agent {
     /// `prior_elapsed_secs + task_start_time.elapsed()`, so resuming cannot
     /// reset it.
     prior_elapsed_secs: u64,
+    /// Time the current task spent paused between steps (Tasks pane) in
+    /// this process, measured at the safe point. Excluded from every wall
+    /// clock the run is held to (`task_start_time` and the API client's
+    /// wall-budget anchor are moved forward by each pause) and reported in
+    /// the run summary when nonzero.
+    task_paused: std::time::Duration,
     /// Set of repo paths that were already dirty (uncommitted relative to HEAD)
     /// when the current task started. The completion gate uses this to exclude
     /// pre-existing uncommitted changes from the agent's diff.
@@ -2047,6 +2053,7 @@ To call a tool, use this EXACT XML structure:
             last_run_failure_mode: None,
             task_start_time: Instant::now(),
             prior_elapsed_secs: 0,
+            task_paused: std::time::Duration::ZERO,
             baseline_dirty_paths: std::sync::Mutex::new(None),
             rigor_mode: false,
             rigor_directive_injected: false,
@@ -3282,9 +3289,33 @@ To call a tool, use this EXACT XML structure:
         &self.cumulative_token_usage
     }
 
+    /// Take `paused` (a pause at the loop's safe point, nothing in flight)
+    /// out of every wall clock the run is held to: the agent's own segment
+    /// clock (`enforce_hard_budgets`, the commit-mode bands, the wrap-up
+    /// forecast and the persisted `elapsed_wall_secs` all read
+    /// `budget_elapsed_secs`) and the API client's run-level wall-budget
+    /// anchor (`WallClockBudgetExceeded`, per-call stream deadlines derived
+    /// from it). Per-call caps (`max_call_secs`) need nothing: no call is in
+    /// flight while paused.
+    pub(crate) fn exclude_paused_time(&mut self, paused: std::time::Duration) {
+        let now = Instant::now();
+        self.task_start_time = self
+            .task_start_time
+            .checked_add(paused)
+            .map_or(now, |t| t.min(now));
+        self.client.exclude_paused_time(paused);
+        self.task_paused = self.task_paused.saturating_add(paused);
+    }
+
+    /// Time the current task spent paused in this run segment.
+    pub(crate) fn task_paused(&self) -> std::time::Duration {
+        self.task_paused
+    }
+
     /// Active wall-clock seconds consumed across ALL run segments of the
-    /// current task (prior segments + the current one). Used for the
-    /// wall-clock budget so resume/recovery cannot reset it.
+    /// current task (prior segments + the current one), excluding time
+    /// paused between steps. Used for the wall-clock budget so
+    /// resume/recovery cannot reset it.
     pub(crate) fn budget_elapsed_secs(&self) -> u64 {
         self.prior_elapsed_secs
             .saturating_add(self.task_start_time.elapsed().as_secs())

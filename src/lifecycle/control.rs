@@ -63,6 +63,10 @@ pub struct LiveTask {
     pub parent: Option<String>,
     /// A pause was requested and the agent has not reached its safe point.
     pub pause_pending: bool,
+    /// Measured time this run segment spent paused (closed pauses; the
+    /// current pause shows as time in state). Not counted against the
+    /// wall-clock budget.
+    pub paused: std::time::Duration,
 }
 
 /// A user edit of a live task: the full new description and constraints.

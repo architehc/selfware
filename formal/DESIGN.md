@@ -249,8 +249,12 @@ Each phase is shippable alone:
   an in-process UI. Requests are acted on at one safe point, the top of a
   loop iteration (between steps), so a pause never interrupts a model or tool
   call. Recorded as `pause`, `edit`, `resume`; a cancel request ends the run
-  `cancelled` (not `interrupted`). Time paused still counts toward
-  `max_wall_secs`.
+  `cancelled` (not `interrupted`). Time paused is measured and taken out
+  of every wall clock the run is held to (the agent's segment clock behind
+  `max_wall_secs`, the API client's wall-budget anchor, hence also the
+  deadline-based `timeout`); per-call caps need nothing, no call is in
+  flight. The run summary, the Tasks pane and `task show` report it when
+  nonzero.
 - **Edit of a live task** changes the description, max turns and token
   budget (the API client is rebuilt so its own budget stop follows). It is
   recorded with the measured usage, and the model receives

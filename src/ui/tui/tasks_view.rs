@@ -22,8 +22,8 @@
 
 use crate::lifecycle::control::{LiveTask, TaskControl, TaskEdit, MAIN_AGENT};
 use crate::lifecycle::projection::{
-    agent_display, agent_summaries, resources_held, task_summaries, task_timeline, usage_line,
-    TaskSummary,
+    agent_display, agent_summaries, fmt_paused, paused_total_ms, resources_held, task_summaries,
+    task_timeline, usage_line, TaskSummary,
 };
 use crate::lifecycle::{Entity, TaskState, TransitionRecord};
 use chrono::{DateTime, Utc};
@@ -639,6 +639,22 @@ fn task_fields(inputs: &TasksInputs, id: &str) -> Vec<(String, String)> {
         .or_else(|| summary.and_then(|s| s.parent.clone()))
     {
         fields.push(("forked from".into(), parent));
+    }
+    // Measured in-process for the live task; from the recorded pause/resume
+    // timestamps otherwise (another process, a finished task).
+    let paused_ms = live
+        .map(|l| i64::try_from(l.paused.as_millis()).unwrap_or(i64::MAX))
+        .filter(|&ms| ms > 0)
+        .or_else(|| paused_total_ms(&task_timeline(&inputs.records, id)))
+        .filter(|&ms| ms > 0);
+    if let Some(ms) = paused_ms {
+        fields.push((
+            "paused".into(),
+            format!(
+                "{} (not counted against the wall-clock budget)",
+                fmt_paused(ms)
+            ),
+        ));
     }
     if let Some(l) = live {
         let c = &l.constraints;

@@ -405,3 +405,77 @@ fn tasks_recorded_without_an_owner_belong_to_the_legacy_main_agent() {
     assert_eq!(s[0].tasks_failed, 1);
     assert_eq!(s[0].tokens, None);
 }
+
+#[test]
+fn paused_time_is_measured_from_pause_to_the_record_that_leaves_paused() {
+    let t = |ts: &str, from: Option<&str>, to: &str, ev: Option<&str>| r("p-1", ts, from, to, ev);
+    let records = vec![
+        t("2026-09-26T10:00:00.000Z", None, "queued", None),
+        t(
+            "2026-09-26T10:00:01.000Z",
+            Some("queued"),
+            "executing",
+            Some("start"),
+        ),
+        // First pause: 30s, closed by an edit + resume (the edit keeps it open).
+        t(
+            "2026-09-26T10:00:10.000Z",
+            Some("executing"),
+            "paused",
+            Some("pause"),
+        ),
+        t(
+            "2026-09-26T10:00:25.000Z",
+            Some("paused"),
+            "paused",
+            Some("edit"),
+        ),
+        t(
+            "2026-09-26T10:00:40.000Z",
+            Some("paused"),
+            "executing",
+            Some("resume"),
+        ),
+        // Second pause: 45s, ended by a cancel.
+        t(
+            "2026-09-26T10:01:00.000Z",
+            Some("executing"),
+            "paused",
+            Some("pause"),
+        ),
+        t(
+            "2026-09-26T10:01:45.000Z",
+            Some("paused"),
+            "cancelled",
+            Some("cancel"),
+        ),
+    ];
+    let timeline = task_timeline(&records, "p-1");
+    assert_eq!(paused_total_ms(&timeline), Some(75_000));
+    assert_eq!(fmt_paused(75_000), "1m15s");
+    let log_dir = tempfile::tempdir().unwrap();
+    let log = crate::lifecycle::EventLog::at(log_dir.path().join("events.jsonl"));
+    for rec in &records {
+        log.append(rec, false);
+    }
+    // A resource the task owned: `task show` lists it next to the paused total.
+    let mut res = r("res-1", "2026-09-26T10:00:05.000Z", None, "live", None);
+    res.entity = Entity::Resource;
+    res.owner = Some("p-1".into());
+    log.append(&res, false);
+    let shown = task_show_output(&log, "p-1").unwrap();
+    assert!(
+        shown.contains("paused: 1m15s (not counted against the wall-clock budget)"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("Resources owned") && shown.contains("res-1"),
+        "{shown}"
+    );
+
+    // Never paused, or a pause still open: nothing reported.
+    let never = task_timeline(&records[..2], "p-1");
+    assert_eq!(paused_total_ms(&never), None);
+    let open = task_timeline(&records[..4], "p-1");
+    assert_eq!(paused_total_ms(&open), None);
+}

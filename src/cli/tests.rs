@@ -1246,7 +1246,21 @@ fn sample_summary() -> crate::agent::RunSummary {
         budgets: crate::agent::RunBudgets::default(),
         hit_iteration_cap: false,
         resources: None,
+        paused: None,
     }
+}
+
+#[test]
+fn render_run_summary_reports_measured_paused_time_only_when_paused() {
+    let rendered = render_run_summary(&sample_summary(), None);
+    assert!(!rendered.contains("paused"), "{rendered}");
+    let mut summary = sample_summary();
+    summary.paused = Some(std::time::Duration::from_millis(75_400));
+    let rendered = render_run_summary(&summary, None);
+    assert!(
+        rendered.contains("paused: 1m15s (not counted against the wall-clock budget)"),
+        "{rendered}"
+    );
 }
 
 #[test]

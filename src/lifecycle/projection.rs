@@ -199,6 +199,42 @@ fn parse_ts(ts: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
     chrono::DateTime::parse_from_rfc3339(ts).ok()
 }
 
+/// Total time the task spent paused, measured from the recorded
+/// timestamps: each `pause` record up to the next record that leaves
+/// `paused` (resume, cancel, timeout, …). An edit keeps the task paused and
+/// does not close the interval; a pause still open is not counted (it shows
+/// as the current state's time). `None` when no pause was closed.
+pub fn paused_total_ms(timeline: &[&TransitionRecord]) -> Option<i64> {
+    let paused = "paused";
+    let mut since: Option<chrono::DateTime<chrono::FixedOffset>> = None;
+    let mut total: i64 = 0;
+    let mut closed = false;
+    for r in timeline {
+        let ts = parse_ts(&r.ts);
+        if r.to == paused && r.from.as_deref() != Some(paused) {
+            since = ts;
+        } else if r.from.as_deref() == Some(paused) && r.to != paused {
+            if let (Some(start), Some(end)) = (since.take(), ts) {
+                total += (end - start).num_milliseconds().max(0);
+                closed = true;
+            }
+        }
+    }
+    closed.then_some(total)
+}
+
+/// `12s`, `3m41s`, `1h02m` for a measured duration in milliseconds.
+pub fn fmt_paused(ms: i64) -> String {
+    let secs = (ms.max(0) + 500) / 1000;
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
 fn fmt_delta(ms: i64) -> String {
     if ms < 1000 {
         format!("+{ms}ms")
@@ -226,6 +262,12 @@ pub fn render_timeline(id: &str, timeline: &[&TransitionRecord]) -> String {
     if let Some(u) = timeline.iter().rev().find_map(|r| r.usage.as_ref()) {
         let (tokens, cost) = usage_line(Some(u));
         out.push_str(&format!("  tokens: {tokens}\n  cost: {cost}\n"));
+    }
+    if let Some(ms) = paused_total_ms(timeline).filter(|&ms| ms > 0) {
+        out.push_str(&format!(
+            "  paused: {} (not counted against the wall-clock budget)\n",
+            fmt_paused(ms)
+        ));
     }
     out.push('\n');
     let mut prev: Option<chrono::DateTime<chrono::FixedOffset>> = None;

@@ -7363,6 +7363,14 @@ fn render_run_summary_for(
     if let Some(bounds) = run_bounds_line(summary, crate::output::is_verbose()) {
         lines.push(bounds);
     }
+    if let Some(paused) = summary.paused {
+        lines.push(format!(
+            "paused: {} (not counted against the wall-clock budget)",
+            crate::lifecycle::projection::fmt_paused(
+                i64::try_from(paused.as_millis()).unwrap_or(i64::MAX)
+            )
+        ));
+    }
     if summary.files_changed.is_empty() {
         lines.push("files changed: none".to_string());
     } else {

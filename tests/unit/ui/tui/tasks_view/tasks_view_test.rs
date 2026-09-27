@@ -45,6 +45,7 @@ fn live_task() -> LiveTask {
         }),
         parent: None,
         pause_pending: false,
+        paused: std::time::Duration::ZERO,
     }
 }
 
@@ -276,6 +277,27 @@ fn live_task_detail_shows_measured_state_tokens_resources_and_timeline() {
         .starts_with("● container container 3f2a1b9c0d11 (live)")));
     assert!(view.items.iter().any(|i| i.label.contains("(live, :5000)")));
     assert_eq!(view.keys, KEYS);
+}
+
+#[test]
+fn task_detail_reports_measured_paused_time_only_when_paused() {
+    let mut inputs = inputs();
+    let mut nav = Nav::default();
+    nav.push(Level::Task {
+        agent: "main".into(),
+        id: "01J9LIVETASK0001".into(),
+    });
+    let view = build_view(&inputs, &nav);
+    assert!(
+        !view.fields.iter().any(|(k, _)| k == "paused"),
+        "never paused: no field"
+    );
+    inputs.live.as_mut().unwrap().paused = std::time::Duration::from_secs(42);
+    let view = build_view(&inputs, &nav);
+    assert_eq!(
+        field(&view, "paused"),
+        "42s (not counted against the wall-clock budget)"
+    );
 }
 
 #[test]

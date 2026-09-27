@@ -581,6 +581,10 @@ pub struct RunSummary {
     /// Resource teardown line ("resources: N released, M leaked (…)");
     /// `None` when the task owned no containers/processes/sessions.
     pub resources: Option<String>,
+    /// Measured time the task spent paused between steps in this run
+    /// segment (Tasks pane); not counted against the wall-clock budget.
+    /// `None` when it was never paused.
+    pub paused: Option<std::time::Duration>,
 }
 
 /// The hard run budgets in force, as configured (`None` = not set; a
@@ -642,6 +646,7 @@ impl Agent {
             hit_iteration_cap: self.loop_control.current_iteration()
                 >= self.loop_control.max_iterations(),
             resources: self.resource_teardown.as_ref().map(|o| o.summary.clone()),
+            paused: (!self.task_paused().is_zero()).then(|| self.task_paused()),
         }
     }
 
@@ -1197,6 +1202,7 @@ impl Agent {
         self.task_start_time = std::time::Instant::now();
         // Fresh task → no prior segments; the budget starts at zero.
         self.prior_elapsed_secs = 0;
+        self.task_paused = std::time::Duration::ZERO;
         // The shared API client must observe the task boundary too: its
         // wall-budget anchor is latched on the first billable request and
         // would otherwise keep measuring (and exhausting) the PREVIOUS
@@ -1782,6 +1788,8 @@ impl Agent {
         // resumed after any real pause could time out immediately (found by
         // GLM-5.2 reviewing task_runner.rs; verified + fixed by Claude).
         self.task_start_time = std::time::Instant::now();
+        // Pauses are measured per run segment (in this process).
+        self.task_paused = std::time::Duration::ZERO;
         // Arm the single-terminal-event guard for this resumed run.
         self.terminal_event_emitted = false;
         self.failure_mode_finalized = false;

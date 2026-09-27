@@ -747,3 +747,78 @@ async fn the_agent_is_recorded_working_its_tasks_and_projects_into_selfware_agen
     assert!(a.last_task_type.is_some());
     server.stop().await;
 }
+
+#[tokio::test]
+async fn time_paused_is_not_counted_against_the_wall_clock_budget() {
+    let _state = crate::test_support::ExecGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    let log = EventLog::at(dir.path().join("events.jsonl"));
+    let mut agent = agent_with_live_task(&log).await;
+    // A 1-second wall budget, with the client's run anchor latched now (as
+    // the first billable request would).
+    agent.config.agent.max_wall_secs = Some(1);
+    agent.client.restore_wall_budget(0);
+    let control = agent.task_control();
+    control.request_pause("t-live").unwrap();
+    let resumer = control.clone();
+    let pause = std::time::Duration::from_millis(1_300);
+    let handle = tokio::spawn(async move {
+        loop {
+            if resumer.snapshot().map(|l| l.state) == Some(TaskState::Paused) {
+                tokio::time::sleep(pause).await;
+                resumer.request_resume("t-live").unwrap();
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    });
+    agent.task_control_safe_point().await;
+    handle.await.unwrap();
+
+    // Measured, not estimated: at least the pause the resumer held.
+    assert!(agent.task_paused() >= pause, "{:?}", agent.task_paused());
+    // Neither wall clock counted it: the agent's segment clock (behind
+    // enforce_hard_budgets and the persisted elapsed_wall_secs) ...
+    assert_eq!(agent.budget_elapsed_secs(), 0);
+    agent
+        .enforce_hard_budgets("add max_words to slugify()")
+        .await
+        .expect("a 1.3s pause must not exhaust a 1s wall budget");
+    // ... nor the API client's run-level anchor (WallClockBudgetExceeded).
+    let client_elapsed = agent.client.wall_budget_elapsed().expect("anchor latched");
+    assert!(
+        client_elapsed < std::time::Duration::from_secs(1),
+        "{client_elapsed:?}"
+    );
+    // Reported: run summary and the live task the Tasks pane shows.
+    assert!(agent.run_summary().paused.is_some_and(|p| p >= pause));
+    assert!(control.snapshot().unwrap().paused >= pause);
+    // The agent machine agrees: blocked for exactly the paused interval,
+    // working again after it (block recorded no later than the pause
+    // started being measured, unblock no earlier than it ended).
+    let (records, _) = log.read_all();
+    let agent_events: Vec<(&str, &str)> = records
+        .iter()
+        .filter(|r| r.entity == Entity::Agent)
+        .filter_map(|r| r.event.as_deref().map(|e| (e, r.to.as_str())))
+        .collect();
+    assert!(
+        agent_events.ends_with(&[("block", "blocked"), ("unblock", "working")]),
+        "{agent_events:?}"
+    );
+    let ts = |event: &str, entity: Entity| {
+        chrono::DateTime::parse_from_rfc3339(
+            &records
+                .iter()
+                .rev()
+                .find(|r| r.entity == entity && r.event.as_deref() == Some(event))
+                .unwrap()
+                .ts,
+        )
+        .unwrap()
+    };
+    let blocked_for = (ts("unblock", Entity::Agent) - ts("block", Entity::Agent))
+        .to_std()
+        .unwrap();
+    assert!(blocked_for >= pause, "{blocked_for:?}");
+}

@@ -24,6 +24,7 @@ fn live(id: &str, state: TaskState) -> LiveTask {
         }),
         parent: None,
         pause_pending: false,
+        paused: std::time::Duration::ZERO,
     }
 }
 

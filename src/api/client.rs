@@ -843,6 +843,31 @@ impl ApiClient {
             .unwrap_or_else(|e| e.into_inner()) = None;
     }
 
+    /// Move the run-level wall-budget anchor forward by `paused`: time the
+    /// task spent paused between steps (no request in flight) does not count
+    /// against `agent.max_wall_secs`. No-op before the first billable
+    /// request latched the anchor (nothing has been measured yet). Shared by
+    /// every clone and rebuild, like the anchor itself.
+    pub fn exclude_paused_time(&self, paused: Duration) {
+        let mut anchor = self
+            .wall_budget_start
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(start) = anchor.as_mut() {
+            let now = Instant::now();
+            *start = start.checked_add(paused).map_or(now, |s| s.min(now));
+        }
+    }
+
+    /// Seconds the run-level wall budget has consumed, `None` before the
+    /// first billable request latched the anchor.
+    pub fn wall_budget_elapsed(&self) -> Option<Duration> {
+        self.wall_budget_start
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .map(|start| start.elapsed())
+    }
+
     /// Return a [`WallClockBudgetExceeded`] error when the run-level wall
     /// budget has already elapsed. Checked BEFORE every new billable request
     /// (and before every retry) so no request is issued after expiry — the

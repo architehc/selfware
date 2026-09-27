@@ -436,6 +436,7 @@ impl Agent {
             usage: (usage.total_tokens > 0 || usage.cost_usd.is_some()).then_some(usage),
             parent: task.parent().map(str::to_string),
             pause_pending: false,
+            paused: self.task_paused(),
         })
     }
 
@@ -452,8 +453,10 @@ impl Agent {
     /// until the user resumes or cancels. Nothing is in flight while
     /// paused: the previous step's model and tool calls have completed.
     ///
-    /// Time spent paused still counts against `max_wall_secs` (the wall
-    /// clock is not stopped).
+    /// Time spent paused is measured and taken out of every wall clock the
+    /// run is held to (`max_wall_secs` on both the agent and the API client
+    /// side, and the deadline-based lifecycle `timeout` that follows from
+    /// them); see `Agent::exclude_paused_time`.
     pub(super) async fn task_control_safe_point(&mut self) {
         self.publish_live_task();
         if !self.task_control.pause_requested() {
@@ -474,6 +477,7 @@ impl Agent {
             },
             "its task was paused",
         );
+        let paused_at = std::time::Instant::now();
         self.publish_live_task();
         self.emit_event(super::AgentEvent::Status {
             message: "Task paused between steps — resume, edit or cancel it in the Tasks pane"
@@ -482,6 +486,7 @@ impl Agent {
         let mut edited = false;
         loop {
             if self.is_cancelled() {
+                self.exclude_paused_time(paused_at.elapsed());
                 // The loop-top cancellation check ends the run next.
                 return;
             }
@@ -498,6 +503,7 @@ impl Agent {
             crate::supervision::health::record_heartbeat();
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
+        self.exclude_paused_time(paused_at.elapsed());
         let cause = if edited {
             "resumed after an edit"
         } else {
