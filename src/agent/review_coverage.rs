@@ -104,6 +104,11 @@ pub struct ReviewCoverageReport {
     /// Why reading stopped short, when it did.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stopped: Option<String>,
+    /// `path:line` citations in the latest judged answer that point into a
+    /// relevant file at a line no `file_read` ever delivered: claims about
+    /// code the run did not read (first 10).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cited_unread: Vec<String>,
     /// The summary line (`coverage: …`).
     pub line: String,
 }
@@ -139,6 +144,8 @@ pub(crate) struct ReviewSession {
     citation_nudged: bool,
     stopped: Option<String>,
     announced_phase: Option<ReviewPhase>,
+    /// See [`ReviewCoverageReport::cited_unread`].
+    cited_unread: Vec<String>,
 }
 
 static FINDING_LINE: Lazy<Regex> = Lazy::new(|| {
@@ -264,6 +271,7 @@ impl ReviewSession {
             citation_nudged: false,
             stopped: None,
             announced_phase: None,
+            cited_unread: Vec::new(),
         }
     }
 
@@ -378,6 +386,15 @@ impl ReviewSession {
                     .unwrap_or_default()
             )
         };
+        let line = if self.cited_unread.is_empty() {
+            line
+        } else {
+            format!(
+                "{line}; ⚠️ the answer cites {} line(s) it never read: {}",
+                self.cited_unread.len(),
+                self.cited_unread.join(", ")
+            )
+        };
         ReviewCoverageReport {
             scope: self.scope_label.clone(),
             inventory: self.inventory_line.clone(),
@@ -392,6 +409,7 @@ impl ReviewSession {
             not_read_count: unread.len(),
             findings_recorded: self.findings.len(),
             stopped: self.stopped.clone(),
+            cited_unread: self.cited_unread.clone(),
             line,
         }
     }
@@ -562,8 +580,39 @@ impl ReviewSession {
         result
     }
 
+    /// Citations of `answer` into relevant files at lines never delivered.
+    fn unread_citations(&self, answer: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for m in CITATION.find_iter(answer) {
+            let Some((path, line)) = m.as_str().rsplit_once(':') else {
+                continue;
+            };
+            let Ok(line) = line.parse::<usize>() else {
+                continue;
+            };
+            let path = path.trim_start_matches("./");
+            let Some(entry) = self
+                .plan
+                .iter()
+                .find(|e| e.path == path || e.path.ends_with(&format!("/{path}")))
+            else {
+                continue;
+            };
+            let read = self
+                .coverage
+                .get(&entry.path)
+                .is_some_and(|r| r.iter().any(|&(a, b)| a <= line && line <= b));
+            let cite = format!("{}:{line}", entry.path);
+            if !read && !out.contains(&cite) && out.len() < 10 {
+                out.push(cite);
+            }
+        }
+        out
+    }
+
     fn decide(&mut self, answer: &str, limit: Option<String>) -> Option<String> {
         self.absorb_text(answer, true);
+        self.cited_unread = self.unread_citations(answer);
         if let Some(why) = limit {
             // The budget always wins: no further round, of any kind.
             if !self.complete() && self.stopped.is_none() {
@@ -1164,6 +1213,63 @@ mod tests {
             estimate_content_tokens(&tight)
         );
         assert!(tight.contains("earlier findings not shown"), "{tight}");
+    }
+
+    /// "Claims about a module require a recorded read of that module": a
+    /// review of src/agent that read mod.rs and context.rs but not
+    /// execution.rs is refused, naming execution.rs — even though the answer
+    /// talks about (and cites) it.
+    #[test]
+    fn a_module_review_is_refused_until_every_file_of_the_module_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        std::fs::create_dir_all(r.join("src/agent")).unwrap();
+        std::fs::write(
+            r.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(r.join("src/lib.rs"), "pub mod agent;\n").unwrap();
+        std::fs::write(
+            r.join("src/agent/mod.rs"),
+            "pub mod context;\npub mod execution;\n",
+        )
+        .unwrap();
+        std::fs::write(r.join("src/agent/context.rs"), "pub fn ctx() {}\n").unwrap();
+        std::fs::write(
+            r.join("src/agent/execution.rs"),
+            "use super::context::ctx;\npub fn run() {\n    ctx();\n}\n",
+        )
+        .unwrap();
+        let inventory = RepoInventory::scan(r).unwrap();
+        let scope = crate::analysis::repo_inventory::resolve_review_scope(
+            "review src/agent for bugs",
+            &inventory,
+        );
+        assert_eq!(scope.prefixes, vec!["src/agent".to_string()]);
+        let mut s = ReviewSession::new(&inventory, inventory.review_plan(scope));
+        s.record("src/agent/mod.rs", (1, 2));
+        s.record("src/agent/context.rs", (1, 1));
+        let answer =
+            "src/agent is sound; src/agent/execution.rs:3 calls ctx() without error handling.";
+        let refusal = s.gate(1, answer, None).expect("refused");
+        assert!(
+            refusal.contains("src/agent/execution.rs (4 lines)"),
+            "{refusal}"
+        );
+        assert_eq!(s.report().cited_unread, vec!["src/agent/execution.rs:3"]);
+        // Budget exhausted: accepted, but the report names the unread claim.
+        assert_eq!(s.gate(2, answer, Some("deadline: 10s left".into())), None);
+        let r = s.report();
+        assert!(
+            r.line
+                .contains("cites 1 line(s) it never read: src/agent/execution.rs:3"),
+            "{}",
+            r.line
+        );
+        s.record("src/agent/execution.rs", (1, 4));
+        assert_eq!(s.gate(3, answer, None), None);
+        assert!(s.report().cited_unread.is_empty());
     }
 
     fn xml_read(path: &str) -> String {
