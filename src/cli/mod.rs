@@ -2604,6 +2604,7 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
     // Shared task control: the Tasks pane pauses, edits and cancels the
     // running task through it (acted on between steps).
     let task_control = agent.task_control();
+    let tui_task_control = task_control.clone();
 
     let shared_state = crate::ui::tui::SharedDashboardState::default();
     let model = config.model.clone();
@@ -2621,6 +2622,7 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
             user_input_tx,
             permission_tx,
             cancel_token,
+            tui_task_control,
         )
     });
 

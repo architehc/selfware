@@ -635,6 +635,7 @@ pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
         ("Ctrl+D", "Toggle dashboard view"),
         ("Ctrl+G", "Toggle garden view"),
         ("Ctrl+L", "Toggle log view"),
+        ("Ctrl+T", "Tasks: open, edit, pause, cancel"),
         ("Tab", "Cycle focus between panes"),
         ("Space", "Hold display updates"),
         ("z", "Toggle zoom on focused pane"),

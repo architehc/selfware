@@ -13,6 +13,7 @@ mod markdown;
 pub mod multichat;
 pub mod palette;
 pub mod status_line;
+pub mod tasks_view;
 mod widgets;
 
 pub use app::{App, AppState, ChatMessage, MessageRole, TaskProgress};
@@ -578,7 +579,9 @@ pub(crate) fn permission_view_key(
 ///
 /// `cancel_token` is shared with the agent run (see `run_live_agent_tui`):
 /// Esc latches it to request cancellation of the in-flight task; the bridge
-/// resets it before each new task.
+/// resets it before each new task. `task_control` is the agent's shared
+/// task control, which the Tasks pane (Ctrl+T) pauses, edits and cancels
+/// through.
 pub fn run_tui_dashboard_with_events(
     model: &str,
     shared_state: SharedDashboardState,
@@ -586,6 +589,7 @@ pub fn run_tui_dashboard_with_events(
     user_input_tx: std::sync::mpsc::Sender<String>,
     permission_response_tx: std::sync::mpsc::Sender<crate::safety::confirm_view::PermissionAnswer>,
     cancel_token: std::sync::Arc<AtomicBool>,
+    task_control: crate::lifecycle::control::TaskControl,
 ) -> Result<()> {
     let mut terminal = TuiTerminal::new()?;
     let mut app = App::new(model);
@@ -601,6 +605,12 @@ pub fn run_tui_dashboard_with_events(
     // resume (permission prompts are never held — see the drain loop).
     let mut held_events: Vec<TuiEvent> = Vec::new();
     let mut quit_armed_at: Option<Instant> = None;
+    // The Tasks pane (Ctrl+T): navigation state, and the inputs it shows,
+    // refreshed about once a second while it is open.
+    let mut tasks_pane: Option<tasks_view::TasksPane> = None;
+    let mut tasks_inputs = tasks_view::TasksInputs::default();
+    let mut tasks_refreshed = Instant::now();
+    let (reap_tx, reap_rx) = std::sync::mpsc::channel::<String>();
 
     // Discover user skills
     let skill_registry = crate::skills::SkillRegistry::discover();
@@ -668,6 +678,21 @@ pub fn run_tui_dashboard_with_events(
         // Drain background git command results (non-blocking)
         while let Ok(msg) = git_cmd_rx.try_recv() {
             app.add_system_message(&msg);
+            needs_redraw = true;
+        }
+
+        // Tasks pane: reap results, and a periodic refresh while open.
+        while let Ok(msg) = reap_rx.try_recv() {
+            with_dashboard_state(&shared_state, |state| state.log(LogLevel::Info, &msg));
+            if let Some(pane) = tasks_pane.as_mut() {
+                pane.status = Some(msg);
+            }
+            tasks_refreshed = Instant::now() - Duration::from_secs(5);
+            needs_redraw = true;
+        }
+        if tasks_pane.is_some() && tasks_refreshed.elapsed() >= Duration::from_secs(1) {
+            refresh_tasks_inputs(&mut tasks_inputs, &task_control, false);
+            tasks_refreshed = Instant::now();
             needs_redraw = true;
         }
 
@@ -765,6 +790,17 @@ pub fn run_tui_dashboard_with_events(
                     render_pause_indicator(frame, area);
                 }
 
+                if let Some(pane) = &tasks_pane {
+                    let view = tasks_view::build_view(&tasks_inputs, &pane.nav);
+                    tasks_view::render(
+                        frame,
+                        area,
+                        &view,
+                        pane.editor.as_ref(),
+                        pane.status.as_deref(),
+                    );
+                }
+
                 if let Some(prompt) = &pending_permission {
                     render_permission_overlay(frame, area, prompt);
                 }
@@ -810,6 +846,44 @@ pub fn run_tui_dashboard_with_events(
                     }
                 }
                 continue;
+            }
+
+            // Ctrl+T opens / closes the Tasks pane.
+            if key.code == KeyCode::Char('t') && key.modifiers == KeyModifiers::CONTROL {
+                if tasks_pane.take().is_none() {
+                    refresh_tasks_inputs(&mut tasks_inputs, &task_control, true);
+                    tasks_refreshed = Instant::now();
+                    tasks_pane = Some(tasks_view::TasksPane::default());
+                }
+                continue;
+            }
+            // While the Tasks pane is open it owns the keyboard (Ctrl+C
+            // still quits).
+            if let Some(pane) = tasks_pane.as_mut() {
+                let ctrl_c =
+                    key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL;
+                if !ctrl_c {
+                    match pane.on_key(key, &tasks_inputs, &task_control) {
+                        Some(tasks_view::PaneAction::Close) => tasks_pane = None,
+                        Some(tasks_view::PaneAction::SubmitTask(task)) => {
+                            app.add_user_message(&task);
+                            let _ = user_input_tx.send(task.clone());
+                            with_dashboard_state(&shared_state, |state| {
+                                state.log(
+                                    LogLevel::Info,
+                                    &format!("Fork queued: {}", truncate_for_display(&task, 50)),
+                                );
+                            });
+                        }
+                        Some(tasks_view::PaneAction::Reap(ids)) => {
+                            spawn_pane_reap(ids, reap_tx.clone());
+                        }
+                        None => {}
+                    }
+                    // A request may have changed what the pane shows.
+                    tasks_refreshed = Instant::now() - Duration::from_secs(5);
+                    continue;
+                }
             }
 
             let in_input_mode = app.state == AppState::Chatting && !show_help;
@@ -1029,7 +1103,7 @@ pub fn run_tui_dashboard_with_events(
                                                /skills         -- List available skills\n  \
                                                /<skill>        -- Activate a skill\n\
                                              \n\
-                                             Keyboard: q (quit), ? (help), Esc (cancel task), Space (hold display), Ctrl+D (dashboard), Tab (cycle panes)"
+                                             Keyboard: q (quit), ? (help), Esc (cancel task), Space (hold display), Ctrl+D (dashboard), Ctrl+T (tasks: open/edit/pause/cancel), Tab (cycle panes)"
                                         );
                                     with_dashboard_state(&shared_state, |state| {
                                         state.log(LogLevel::Info, "Displayed help text");
@@ -1432,6 +1506,67 @@ pub fn run_tui_dashboard_with_events(
 
     terminal.restore()?;
     Ok(())
+}
+
+/// Reload what the Tasks pane shows: the event log, the resource registry
+/// (read-only listing), the in-process live task and, when `journal`, the
+/// task descriptions from the checkpoint journal (slower; on open only).
+fn refresh_tasks_inputs(
+    inputs: &mut tasks_view::TasksInputs,
+    control: &crate::lifecycle::control::TaskControl,
+    journal: bool,
+) {
+    inputs.records = crate::lifecycle::EventLog::default_location().read_all().0;
+    inputs.resources =
+        tasks_view::resource_rows_from_registry(crate::resources::ResourceRegistry::global());
+    inputs.live = control.snapshot();
+    inputs.this_pid = std::process::id();
+    inputs.now = chrono::Utc::now();
+    if journal {
+        inputs.descriptions = crate::agent::Agent::list_tasks()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| (t.task_id, t.task_description))
+            .collect();
+    }
+}
+
+/// Drain the resources the Tasks pane asked to reap through the teardown
+/// engine (the same path as `selfware resources reap`), off the UI thread,
+/// and report the outcome on `done`.
+fn spawn_pane_reap(ids: Vec<String>, done: std::sync::mpsc::Sender<String>) {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        let _ = done.send("reap not started: no async runtime in this thread".into());
+        return;
+    };
+    handle.spawn(async move {
+        let registry = crate::resources::ResourceRegistry::global();
+        let targets: Vec<_> = ids.iter().filter_map(|id| registry.get(id)).collect();
+        let driver = crate::resources::SystemDriver::default();
+        let report = crate::resources::teardown::drain(
+            registry,
+            &driver,
+            targets,
+            crate::resources::TeardownPolicy::default(),
+        )
+        .await;
+        let mut msg = format!(
+            "reap: {} released, {} still not confirmed gone",
+            report.released.len(),
+            report.leaked.len()
+        );
+        if let Some(r) = report.leaked.first() {
+            msg.push_str(&format!(
+                " ({}{})",
+                r.describe(),
+                r.note
+                    .as_deref()
+                    .map(|n| format!(": {n}"))
+                    .unwrap_or_default()
+            ));
+        }
+        let _ = done.send(msg);
+    });
 }
 
 /// Create a channel pair for sending events to the TUI dashboard
