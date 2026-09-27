@@ -20,6 +20,12 @@ use tokio::sync::RwLock;
 static PROCESS_MANAGER: Lazy<Arc<RwLock<ProcessManager>>> =
     Lazy::new(|| Arc::new(RwLock::new(ProcessManager::new())));
 
+/// Test builds only: pruning inactive entries from the global manager (every
+/// `Agent::new` does it) waits while a test that inspects an inactive entry
+/// holds this, so a parallel agent test cannot prune the entry mid-test.
+#[cfg(test)]
+pub(crate) static PRUNE_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub struct ProcessStart;
 pub struct ProcessStop;
 pub struct ProcessList;
@@ -599,6 +605,8 @@ pub(crate) async fn signal_managed(id: &str, force: bool) -> Result<bool> {
 ///
 /// Call this when the interactive loop exits to ensure cleanup.
 pub async fn cleanup_all_processes() {
+    #[cfg(test)]
+    let _prune = PRUNE_GUARD.lock().await;
     let manager = PROCESS_MANAGER.read().await;
     let reconcile_before = manager.reconcile(false).await;
     let stopped = manager.stop_all().await;
@@ -637,6 +645,12 @@ pub async fn cleanup_all_processes() {
 }
 
 pub async fn reconcile_managed_processes(prune_inactive: bool) -> ProcessReconcileReport {
+    #[cfg(test)]
+    let _prune = if prune_inactive {
+        Some(PRUNE_GUARD.lock().await)
+    } else {
+        None
+    };
     let manager = PROCESS_MANAGER.read().await;
     manager.reconcile(prune_inactive).await
 }

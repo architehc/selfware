@@ -464,6 +464,9 @@ async fn test_process_start_immediate_exit_returns_error() {
 #[tokio::test]
 #[cfg(not(target_os = "windows"))]
 async fn test_process_start_health_check_timeout_returns_error() {
+    // The entry is inactive (HealthCheckFailed) once the start returns; hold
+    // off the global prune a parallel `Agent::new` runs until it is checked.
+    let _prune = PRUNE_GUARD.lock().await;
     let tool = ProcessStart;
     let result = tool
         .execute(serde_json::json!({
